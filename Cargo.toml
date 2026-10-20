@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/contracts",
+    "crates/core",
+    "crates/core-protocol",
     "crates/media-broker",
     "crates/media-decoder",
     "crates/media-protocol",

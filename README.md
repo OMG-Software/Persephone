@@ -4,7 +4,7 @@ Persephone is a planned Rust desktop Matrix client for Windows, Linux, and macOS
 
 Project page: <https://omg-software.github.io/Persephone/> (source in [`site/`](site)).
 
-The project remains in the P0 feasibility phase. Current status, recorded evidence, and open acceptance gates are in the [feasibility workbench](docs/planning/feasibility.md). The repository contains shared Rust building blocks, integration and security test programs, a contained media worker prototype, and a first desktop shell slice (`src-tauri/`, one allowlisted command); no Matrix functionality is wired into the app and no production security controls exist yet.
+The project remains in the P0 feasibility phase. Current status, recorded evidence, and open acceptance gates are in the [feasibility workbench](docs/planning/feasibility.md). The repository contains shared Rust building blocks, integration and security test programs, a contained media worker prototype, and a first desktop slice: a key-holding core process (`crates/core`) that starts a keyless Tauri UI (`src-tauri/`) and answers its one allowlisted command; no Matrix functionality is wired into the app and no production security controls exist yet.
 
 Tauri is the accepted desktop framework. See the [ADR index](docs/adr/index.md), [project plan](docs/planning/project-plan.md), and [architecture and security plans](docs/README.md#plans). The framework choice and Sliding Sync preference are accepted; other architecture details remain proposals pending implementation evidence.
 

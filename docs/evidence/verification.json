@@ -818,6 +818,84 @@
     {
       "name": "progressive_444_jpeg_policy",
       "decision": "owner, 2026-10-20: accept preview unavailable; revisit with slower hardware"
+    },
+    {
+      "name": "webview_ipc_payload_allocation",
+      "checked_on": "2026-10-20",
+      "wry": "0.57.0",
+      "tauri": "2.12.4",
+      "paths": [
+        "custom-protocol POST http://ipc.localhost (no invoke key)",
+        "window.chrome.webview.postMessage"
+      ],
+      "peak_commit_growth_mib": {
+        "postMessage": {
+          "1": 8.8,
+          "16": 144.1,
+          "64": 577.0,
+          "128": 1154.1,
+          "256": 2308.4
+        },
+        "ipc_fetch": {
+          "1": 9.7,
+          "16": 152.1,
+          "64": 608.9,
+          "128": 1218.1,
+          "256": 2436.6
+        }
+      },
+      "amplification": "about 9x",
+      "host_alive_all_cases": true,
+      "cap_observed": "renderer string/request limits only (512 MiB failed in the page)",
+      "status": "open_architecture_decision",
+      "evidence": "ipc-transport.md"
+    },
+    {
+      "name": "core_ui_split_end_to_end",
+      "checked_on": "2026-10-20",
+      "adr": "ADR-0004",
+      "status_relayed_by_core": true,
+      "ui_parent_is_core": true,
+      "ui_tree_processes": 7,
+      "core_killed_ui_tree_ended": true,
+      "standalone_ui_exit": 2,
+      "flood_core_peak_growth_mib": {
+        "64": 0.0,
+        "128": 0.0,
+        "256": 0.0
+      },
+      "flood_ui_peak_growth_mib": {
+        "64": 577.0,
+        "128": 897.6,
+        "256": 0.0
+      },
+      "ui_job": {
+        "job_memory_limit_gib": 2,
+        "process_memory_limit_gib": 1,
+        "kill_on_close": true
+      },
+      "evidence": "ipc-transport.md"
+    },
+    {
+      "name": "core_protocol_and_serve_tests",
+      "command": "cargo test --locked --offline -p persephone-core -p persephone-core-protocol",
+      "exit_code": 0,
+      "tests_passed": 7
+    },
+    {
+      "name": "historical_serde_unit_variant_unknown_fields",
+      "cause": "deny_unknown_fields not applied to unit variants of internally tagged enums",
+      "resolved_by": "empty struct variants (AppStatus {})"
+    },
+    {
+      "name": "workspace_check_after_core_ui_split",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 142,
+      "frontend_tests_passed": 5,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 162
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

@@ -2,14 +2,16 @@
 
 ## Repository layout
 
-The repository groups files by their role. The root Cargo workspace and lockfile cover the shared crates and Rust integration/security test programs. `src-tauri/` holds the first desktop shell slice: a thin Tauri host with one allowlisted command.
+The repository groups files by their role. The root Cargo workspace and lockfile cover the shared crates and Rust integration/security test programs. The application starts as `persephone` (the core, `crates/core`), which launches the keyless UI `persephone-ui` (`src-tauri/`) and serves its requests (ADR-0004). Run the app with `.local/build/rust/debug/persephone.exe` after a build; `persephone-ui` refuses to start on its own.
 
 ```text
 Cargo.toml                         # Rust workspace
 Cargo.lock                         # One committed Rust dependency resolution
 .cargo/config.toml                 # Cargo output under .local/build/rust
-src-tauri/                         # Thin Tauri host, capabilities and window policy
+src-tauri/                         # Keyless Tauri UI (persephone-ui), capabilities, window policy
 crates/
+  core/                            # Key-holding core; entry binary `persephone`
+  core-protocol/                   # UI-to-core messages (bounded frames)
   contracts/                       # Shared DTO and contract-generation code
   media-broker/                    # Launches the contained media worker (Windows)
   media-decoder/                   # PNG/JPEG decoder built as a wasm32 guest
@@ -65,7 +67,7 @@ python tools/dev.py sandbox --offline
 
 The Windows containment run is deliberately separate. On Windows it currently exits 1 because the zero-capability AppContainer worker is not network-denied: an endpoint-observed differential shows its packets reach the local TCP stack. The run also prints a comparative LPAC result, which does not change the gate. On other operating systems the command exits 2 because this program requires Windows; equivalent Linux and macOS coverage remains open. The unresolved gate is recorded in the [feasibility workbench](planning/feasibility.md) and [Windows sandbox evidence](evidence/windows-sandbox.md).
 
-For focused Rust work, use `cargo test --locked -p <package>` from the root. Current package names are `persephone-contracts`, `persephone-media-protocol`, `persephone-media-decoder`, `persephone-media-sandbox`, `persephone-media-worker`, `persephone-media-broker`, `persephone-desktop`, `persephone-test-matrix`, `persephone-test-storage`, and `persephone-test-windows`. All resolve through the root lockfile and use `.local/build/rust` for output.
+For focused Rust work, use `cargo test --locked -p <package>` from the root. Current package names are `persephone-contracts`, `persephone-media-protocol`, `persephone-media-decoder`, `persephone-media-sandbox`, `persephone-media-worker`, `persephone-media-broker`, `persephone-core`, `persephone-core-protocol`, `persephone-desktop`, `persephone-test-matrix`, `persephone-test-storage`, and `persephone-test-windows`. All resolve through the root lockfile and use `.local/build/rust` for output.
 
 Run the controlled lifecycle tests with `cargo test --locked -p persephone-test-matrix --test lifecycle_owner --test lifecycle_sdk`. They use synthetic loopback HTTP and memory stores. The Rust prototype tracks registered work; it cannot certify full SDK shutdown or production lock/logout.
 
@@ -84,6 +86,8 @@ The harness in [`tools/servers`](../tools/servers) runs only disposable local Me
 Merovingian must run as a non-root UID with empty effective and bounding capability sets and `no_new_privs`. Synapse alone does not need that setup. The recorded live smoke passed for both servers, but it only establishes those harness scenarios. A hard kill can leave synthetic state; cleanup is not secure erasure. The loopback HTTP profile does not approve HTTP or trust bypasses in the product.
 
 ## Recorded verification
+
+After separating the core from the UI, `python tools/dev.py check --offline` passed all 162 tests (142 Rust, 5 frontend, 2 server-registration and 13 development-controller tests). See the [IPC transport evidence](evidence/ipc-transport.md#after-the-coreui-split) for the end-to-end and flood measurements.
 
 After adding the Tauri shell, `python tools/dev.py check --offline` passed all 154 tests (134 Rust, 5 frontend, 2 server-registration and 13 development-controller tests). `check` and `rust` now build the frontend first, because the shell embeds it at compile time. The Tauri dependency graph made `aws-lc-sys` rebuild; that run needed the `AR_x86_64_pc_windows_msvc` workaround below. See the [Tauri shell evidence](evidence/tauri-shell.md).
 

@@ -2,6 +2,7 @@
 
 Checked 20 October 2026 on Windows 11 Pro x64 (build 26200), rustc 1.99.1,
 WebView2. First P1 slice: a thin desktop host with one allowlisted command.
+Since [ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md) this shell is the keyless `persephone-ui` process and relays `app_status` to the core.
 **Result: the shell builds and runs; the web view can call only `app_status`,
 from the bundled origin only, under a strict CSP, and cannot navigate away or
 open windows.** No Matrix, storage or media functionality is wired in yet, and
@@ -93,7 +94,8 @@ check.
 
 ## Limits
 
-Not done: a pre-allocation bound on IPC bodies (the plan's open transport
-item), Isolation pattern evaluation, accessibility and keyboard checks,
+The [IPC transport measurement](ipc-transport.md) found that a page can make
+the host allocate about 9× any payload up to 256 MiB, so a pre-allocation bound
+needs an architecture decision. Not done: Isolation pattern evaluation, accessibility and keyboard checks,
 release-build and packaged runs, signing, three-OS CI, and Linux/macOS builds.
 The real web view check is a manual DevTools probe, not an automated test.

@@ -1,17 +1,44 @@
 //! IPC permission tests against the shell's real configuration and compiled
 //! capabilities, using Tauri's mock runtime (no window or web view).
 
-use persephone_desktop::{MAIN_WINDOW, configure, context, create_main_window};
+use persephone_core_protocol::Call;
+use persephone_desktop::{
+    MAIN_WINDOW, configure, context,
+    core_link::{CoreError, CoreLink, CoreTransport},
+    create_main_window,
+};
+use std::sync::Arc;
 use tauri::{
     ipc::{CallbackFn, InvokeBody},
     test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder},
     webview::InvokeRequest,
 };
 
-fn app() -> tauri::App<MockRuntime> {
-    configure(mock_builder())
+/// Stands in for the core process: answers `app_status` with a fixed status,
+/// or reports the core as unavailable.
+struct FakeCore {
+    available: bool,
+}
+
+impl CoreTransport for FakeCore {
+    fn call(&self, call: Call) -> Result<serde_json::Value, CoreError> {
+        match (self.available, call) {
+            (true, Call::AppStatus {}) => {
+                Ok(serde_json::json!({"version": "9.9.9", "milestone": "P1"}))
+            }
+            (false, _) => Err(CoreError::Unavailable),
+        }
+    }
+}
+
+fn app_with(core: CoreLink) -> tauri::App<MockRuntime> {
+    configure(mock_builder(), core)
         .build(context())
         .expect("shell builds on the mock runtime")
+}
+
+fn app() -> tauri::App<MockRuntime> {
+    app_with(Arc::new(FakeCore { available: true }))
 }
 
 fn app_origin() -> &'static str {
@@ -49,9 +76,10 @@ fn call(
 #[test]
 fn given_allowed_command_from_app_origin_then_typed_status_is_returned() {
     let reply = call("app_status", app_origin(), serde_json::json!({})).unwrap();
+    // The reply is the core's answer, relayed and shape-checked by the UI.
     assert_eq!(
         reply,
-        serde_json::json!({"version": env!("CARGO_PKG_VERSION"), "milestone": "P1"})
+        serde_json::json!({"version": "9.9.9", "milestone": "P1"})
     );
 }
 
@@ -189,4 +217,15 @@ fn given_shell_config_then_security_settings_are_restrictive() {
         serde_json::json!(["allow-app-status"])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
+}
+
+#[test]
+fn given_unreachable_core_then_the_page_gets_only_a_generic_error() {
+    let app = app_with(Arc::new(FakeCore { available: false }));
+    let window = create_main_window(&app).unwrap();
+    let reply = get_ipc_response(
+        &window,
+        request("app_status", app_origin(), serde_json::json!({})),
+    );
+    assert_eq!(reply.unwrap_err(), serde_json::json!("core_unavailable"));
 }

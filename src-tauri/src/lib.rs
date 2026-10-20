@@ -1,23 +1,40 @@
-//! Persephone desktop shell.
+//! Persephone UI process (ADR-0004).
 //!
-//! A thin Tauri host. The web view is only the interface: it may call the
-//! commands registered here, subject to the capabilities in `capabilities/`,
-//! and nothing else. The main window can navigate only within the bundled app
-//! and cannot open new windows.
+//! A thin, keyless Tauri host. The web view may call the commands registered
+//! here, subject to the capabilities in `capabilities/`, and nothing else. Each
+//! command is relayed to the key-holding core as one bounded frame; the UI holds
+//! no sessions, keys or stores. The main window can navigate only within the
+//! bundled app and cannot open new windows.
 
+pub mod core_link;
+
+use core_link::{CoreError, CoreLink};
 use persephone_contracts::AppStatus;
-use tauri::{Manager, Runtime, Url, WebviewUrl, WebviewWindowBuilder, webview::NewWindowResponse};
+use persephone_core_protocol::Call;
+use tauri::{
+    Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder, webview::NewWindowResponse,
+};
 
 /// The label the `main` capability is bound to.
 pub const MAIN_WINDOW: &str = "main";
 
-/// Reports the shell's version and milestone. Carries no system or user data.
+/// Argument the core passes when it starts the UI.
+pub const STARTED_BY_CORE: &str = "--started-by-core";
+
+/// The error the web view sees for any failed call. Details stay in Rust.
+const UNAVAILABLE: &str = "core_unavailable";
+
+/// Relays to the core, off the UI thread, and checks the reply's shape.
 #[tauri::command]
-fn app_status() -> AppStatus {
-    AppStatus {
-        version: env!("CARGO_PKG_VERSION").into(),
-        milestone: "P1".into(),
-    }
+async fn app_status(core: State<'_, CoreLink>) -> Result<AppStatus, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = core.call(Call::AppStatus {})?;
+        serde_json::from_value::<AppStatus>(value).map_err(|_| CoreError::BadReply)
+    })
+    .await
+    .map_err(|_| UNAVAILABLE.to_string())?
+    .map_err(|_| UNAVAILABLE.to_string())
 }
 
 /// True only for the bundled app's own origin. Tauri serves embedded assets
@@ -30,10 +47,11 @@ pub fn is_app_url(url: &Url) -> bool {
     }
 }
 
-/// Applies the shell's command handler and window setup to a builder; used by
-/// both the real runtime and the mock runtime in tests.
-pub fn configure<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+/// Applies the shell's core link, command handler and window setup to a
+/// builder; used by both the real runtime and the mock runtime in tests.
+pub fn configure<R: Runtime>(builder: tauri::Builder<R>, core: CoreLink) -> tauri::Builder<R> {
     builder
+        .manage(core)
         .invoke_handler(tauri::generate_handler![app_status])
         .setup(|app| {
             create_main_window(app.handle())?;
@@ -64,10 +82,23 @@ pub fn context<R: Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
+/// Runs the UI. Refuses unless the core started it, because without the core
+/// channel the UI has nothing to relay to.
 pub fn run() {
-    configure(tauri::Builder::default())
+    if !std::env::args().any(|arg| arg == STARTED_BY_CORE) {
+        eprintln!("persephone-ui is started by persephone; run persephone instead");
+        std::process::exit(2);
+    }
+    let core = match core_link::PipeTransport::from_stdio() {
+        Ok(link) => std::sync::Arc::new(link) as CoreLink,
+        Err(error) => {
+            eprintln!("persephone-ui: no core channel: {error}");
+            std::process::exit(2);
+        }
+    };
+    configure(tauri::Builder::default(), core)
         .run(context())
-        .expect("Persephone failed to start");
+        .expect("Persephone UI failed to start");
 }
 
 #[cfg(test)]

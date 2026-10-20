@@ -1,7 +1,7 @@
 [package]
 name = "persephone-desktop"
 version = "0.0.0"
-description = "Persephone desktop shell: thin Tauri host with an explicit command allowlist"
+description = "Persephone UI process: keyless Tauri host relaying an explicit command allowlist to the core"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,14 @@ build = "build.rs"
 name = "persephone_desktop"
 
 [[bin]]
-name = "persephone"
+name = "persephone-ui"
 path = "src/main.rs"
 
 [dependencies]
 persephone-contracts = { path = "../crates/contracts" }
+persephone-core-protocol = { path = "../crates/core-protocol" }
+persephone-media-protocol = { path = "../crates/media-protocol" }
+serde_json = "=1.0.154"
 # Explicit features only. `custom-protocol` makes every build, debug included,
 # serve the embedded frontend; there is no development server. Off: devtools in
 # release, dynamic ACL changes, tracing (which records IPC payloads),
@@ -25,6 +28,15 @@ tauri = { version = "=2.12.4", default-features = false, features = [
   "wry",
   "common-controls-v6",
   "custom-protocol",
+] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_Threading",
 ] }
 
 [build-dependencies]
@@ -38,4 +50,3 @@ tauri = { version = "=2.12.4", default-features = false, features = [
   "custom-protocol",
   "test",
 ] }
-serde_json = "=1.0.154"

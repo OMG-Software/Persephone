@@ -3562,13 +3562,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "persephone-core"
+version = "0.0.0"
+dependencies = [
+ "persephone-contracts",
+ "persephone-core-protocol",
+ "persephone-media-protocol",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "persephone-core-protocol"
+version = "0.0.0"
+dependencies = [
+ "persephone-media-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "persephone-desktop"
 version = "0.0.0"
 dependencies = [
  "persephone-contracts",
+ "persephone-core-protocol",
+ "persephone-media-protocol",
  "serde_json",
  "tauri",
  "tauri-build",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
