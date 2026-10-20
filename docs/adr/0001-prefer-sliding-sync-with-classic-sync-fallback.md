@@ -52,7 +52,11 @@ account state.
 Test Merovingian and Synapse with Sliding Sync, and a classic-only/controlled
 unsupported-capability deployment for fallback. Both paths must support the
 first-release encrypted messaging, device verification, and history behavior.
-This decision defines intended behavior, not current runtime compatibility.
+The [capability evidence](../evidence/capability-fallback.md) now records initial
+native/classic selection, real classic-only Synapse and failure controls in the
+Rust integration fixture. Runtime renegotiation, unsupported-endpoint
+reclassification, full task drain and the production coordinator remain open.
+This decision does not establish production readiness.
 
 ### Positive Consequences
 
@@ -68,7 +72,7 @@ This decision defines intended behavior, not current runtime compatibility.
 
 ## Links
 
-* [Architecture and development plan](../architecture-plan.md)
+* [Architecture and development plan](../architecture/development-plan.md)
 * [Tauri decision](0000-use-tauri-for-the-desktop-client.md)
 * [SDK Sliding Sync service](https://matrix-org.github.io/matrix-rust-sdk/matrix_sdk_ui/sync_service/struct.SyncService.html)
 * [SDK Sliding Sync version discovery](https://matrix-org.github.io/matrix-rust-sdk/matrix_sdk/sliding_sync/enum.VersionBuilder.html)

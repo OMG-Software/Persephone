@@ -1,0 +1,12 @@
+{
+  "checkout_head": "61815ce8e173f9681bc4fc028d8916b85911278f",
+  "build_sources_sha256": "f1bf5fbb4890d4811f6d1c84e77425c7bd0df271c5e7f90a09f2e75986d1df07",
+  "binary_sha256": "485aebfaa07afde9e3b8abbb65a084034c1aeb560257a3274c2d7d71cd800c70",
+  "version": "merovingian-server 0.12.29",
+  "buildtype": "release",
+  "optimization": "3",
+  "hardening": true,
+  "fortify_source": 3,
+  "tests_built": false,
+  "compile_command": "clang++ -Isrc/platform/libmerovingian-platform.a.p -Isrc/platform -I../../../../Merovingian/src/platform -I../../../../Merovingian/include -fdiagnostics-color=always -D_FILE_OFFSET_BITS=64 -Wall -Winvalid-pch -Wextra -Wpedantic -Werror -std=c++26 -O3 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-align -Wunused -Woverloaded-virtual -Wnull-dereference -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough -fstack-protector-strong -fPIE -fvisibility=hidden -ftrivial-auto-var-init=zero -fstack-clash-protection -fcf-protection=full -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 '-DMEROVINGIAN_VERSION=\"0.12.29\"' '-DMEROVINGIAN_SYSCONFDIR=\"/usr/local/etc\"' '-DMEROVINGIAN_LIBEXECDIR=\"/usr/local/libexec\"' -fPIC -MD -MQ src/platform/libmerovingian-platform.a.p/hardening_self_check.cpp.o -MF src/platform/libmerovingian-platform.a.p/hardening_self_check.cpp.o.d -o src/platform/libmerovingian-platform.a.p/hardening_self_check.cpp.o -c ../../../../Merovingian/src/platform/hardening_self_check.cpp"
+}

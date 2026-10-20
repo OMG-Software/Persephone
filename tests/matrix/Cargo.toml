@@ -1,0 +1,25 @@
+[package]
+name = "persephone-test-matrix"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+license = "GPL-3.0-only"
+
+[dependencies]
+anyhow = "=1.0.104"
+matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "rustls-aws-lc-rs"] }
+matrix-sdk-sqlite = { version = "=0.19.1", features = ["bundled", "crypto-store"] }
+matrix-sdk-crypto = "=0.19.1"
+getrandom = "=0.4.3"
+reqwest = { version = "=0.13.5", default-features = false }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+socket2 = "=0.6.5"
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "time"] }
+url = "=2.5.8"
+zeroize = "=1.9.1"
+
+[dev-dependencies]
+wiremock = "=0.6.5"
+tempfile = "=3.27.0"

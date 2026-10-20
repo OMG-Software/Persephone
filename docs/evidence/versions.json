@@ -1,0 +1,96 @@
+{
+  "checked_on": "2026-10-19",
+  "registry_candidates": {
+    "matrix-sdk": {
+      "version": "0.19.1",
+      "rust_version": "1.96",
+      "license": "Apache-2.0",
+      "created_at": "2026-09-18T12:48:02.919920Z",
+      "source": "https://crates.io/api/v1/crates/matrix-sdk"
+    },
+    "matrix-sdk-ui": {
+      "version": "0.19.1",
+      "rust_version": "1.96",
+      "license": "Apache-2.0",
+      "created_at": "2026-09-18T12:48:08.331736Z",
+      "source": "https://crates.io/api/v1/crates/matrix-sdk-ui"
+    },
+    "matrix-sdk-sqlite": {
+      "version": "0.19.1",
+      "rust_version": "1.96",
+      "license": "Apache-2.0",
+      "created_at": "2026-09-18T12:47:58.904083Z",
+      "source": "https://crates.io/api/v1/crates/matrix-sdk-sqlite"
+    },
+    "tauri": {
+      "version": "2.12.4",
+      "rust_version": "1.90",
+      "license": "Apache-2.0 OR MIT",
+      "created_at": "2026-10-14T18:52:10.735395Z",
+      "source": "https://crates.io/api/v1/crates/tauri"
+    },
+    "tauri-build": {
+      "version": "2.7.3",
+      "rust_version": "1.90",
+      "license": "Apache-2.0 OR MIT",
+      "created_at": "2026-10-14T18:51:08.630528Z",
+      "source": "https://crates.io/api/v1/crates/tauri-build"
+    },
+    "ts-rs": {
+      "version": "12.0.1",
+      "rust_version": "1.78.0",
+      "license": "MIT",
+      "created_at": "2026-01-31T19:05:25.017774Z",
+      "source": "https://crates.io/api/v1/crates/ts-rs"
+    },
+    "tokio": {
+      "version": "1.53.3",
+      "rust_version": "1.71",
+      "license": "MIT",
+      "created_at": "2026-10-13T20:51:46.498182Z",
+      "source": "https://crates.io/api/v1/crates/tokio"
+    },
+    "wiremock": {
+      "version": "0.6.5",
+      "rust_version": null,
+      "license": "MIT/Apache-2.0",
+      "created_at": "2025-08-24T11:50:14.017097Z",
+      "source": "https://crates.io/api/v1/crates/wiremock"
+    },
+    "anyhow": {
+      "version": "1.0.104",
+      "rust_version": "1.68",
+      "license": "MIT OR Apache-2.0",
+      "created_at": "2026-07-18T20:59:37.656167Z",
+      "source": "https://crates.io/api/v1/crates/anyhow"
+    },
+    "serde": {
+      "version": "1.0.229",
+      "rust_version": "1.56",
+      "license": "MIT OR Apache-2.0",
+      "created_at": "2026-07-18T23:05:13.266456Z",
+      "source": "https://crates.io/api/v1/crates/serde"
+    },
+    "serde_json": {
+      "version": "1.0.154",
+      "rust_version": "1.71",
+      "license": "MIT OR Apache-2.0",
+      "created_at": "2026-10-11T15:31:46.076577Z",
+      "source": "https://crates.io/api/v1/crates/serde_json"
+    },
+    "url": {
+      "version": "2.5.8",
+      "rust_version": "1.63",
+      "license": "MIT OR Apache-2.0",
+      "created_at": "2026-01-05T22:14:31.414927Z",
+      "source": "https://crates.io/api/v1/crates/url"
+    },
+    "futures-util": {
+      "version": "0.3.34",
+      "rust_version": "1.71",
+      "license": "MIT OR Apache-2.0",
+      "created_at": "2026-08-11T12:13:19.272525Z",
+      "source": "https://crates.io/api/v1/crates/futures-util"
+    }
+  }
+}

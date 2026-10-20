@@ -1,0 +1,16 @@
+{
+  "roomId": "!example:server.invalid",
+  "items": [
+    {
+      "kind": "message",
+      "event_id": "$event",
+      "sender": "@alice:server.invalid",
+      "body": "hostile <img src=x onerror=alert(1)>"
+    },
+    {
+      "kind": "gap",
+      "next_cursor": null
+    }
+  ],
+  "nextCursor": "cursor-2"
+}

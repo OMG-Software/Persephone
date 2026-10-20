@@ -1,0 +1,748 @@
+{
+  "schema_version": 1,
+  "checked_on": "2026-10-19",
+  "sdk_version": "0.19.1",
+  "application_implemented": false,
+  "p0_accepted": false,
+  "execution": "Windows Rust worker and test-only Python loopback gateway; disposable WSL Ubuntu 24.04 Merovingian0.12.29 and Synapse1.163.0. No production homeserver.",
+  "controlled_capability_run": {
+    "run": "capability-fallback-01/gateway-cases-02",
+    "exit_code": 0,
+    "scenarios_passed": 30,
+    "result": {
+      "passed": true,
+      "servers": [
+        {
+          "scenarios": [
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "identity_keys_and_peer_verification_preserved": true,
+                "mutual_sas_and_exact_bidirectional_decrypted_sync_receipts": true,
+                "native_rounds": 18
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 36,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "advertised",
+              "passed": true,
+              "scenario": "discover-sync",
+              "selected_mode": "sliding",
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 15,
+                "identity_keys_and_peer_verification_preserved": true,
+                "mutual_sas_and_exact_bidirectional_decrypted_sync_receipts": true,
+                "native_rounds": 0
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 30,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "absent",
+              "passed": true,
+              "scenario": "discover-sync",
+              "selected_mode": "classic",
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 15,
+                "identity_keys_and_peer_verification_preserved": true,
+                "mutual_sas_and_exact_bidirectional_decrypted_sync_receipts": true,
+                "native_rounds": 0
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 30,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "disabled",
+              "passed": true,
+              "scenario": "discover-sync",
+              "selected_mode": "classic",
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-401",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-403",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-404",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-429",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-503",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-malformed",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-wrong-type",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-timeout",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "failed_engine_refused_second_cycle": true,
+                "native_rounds": 0,
+                "sync_failed_without_changing_mode": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 1,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "native-http-401",
+              "passed": true,
+              "scenario": "expect-native-error",
+              "selected_mode": "sliding",
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "failed_engine_refused_second_cycle": true,
+                "native_rounds": 0,
+                "sync_failed_without_changing_mode": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 1,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "native-http-404",
+              "passed": true,
+              "scenario": "expect-native-error",
+              "selected_mode": "sliding",
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "failed_engine_refused_second_cycle": true,
+                "native_rounds": 0,
+                "sync_failed_without_changing_mode": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 1,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "native-http-503",
+              "passed": true,
+              "scenario": "expect-native-error",
+              "selected_mode": "sliding",
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "failed_engine_refused_second_cycle": true,
+                "native_rounds": 0,
+                "sync_failed_without_changing_mode": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 1,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "native-unknown-pos",
+              "passed": true,
+              "scenario": "expect-native-error",
+              "selected_mode": "sliding",
+              "server": "merovingian",
+              "version": "merovingian-server 0.12.29"
+            }
+          ],
+          "server": "merovingian",
+          "version": "merovingian-server 0.12.29"
+        },
+        {
+          "scenarios": [
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "identity_keys_and_peer_verification_preserved": true,
+                "mutual_sas_and_exact_bidirectional_decrypted_sync_receipts": true,
+                "native_rounds": 18
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 36,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "advertised",
+              "passed": true,
+              "scenario": "discover-sync",
+              "selected_mode": "sliding",
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 15,
+                "identity_keys_and_peer_verification_preserved": true,
+                "mutual_sas_and_exact_bidirectional_decrypted_sync_receipts": true,
+                "native_rounds": 0
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 30,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "absent",
+              "passed": true,
+              "scenario": "discover-sync",
+              "selected_mode": "classic",
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 15,
+                "identity_keys_and_peer_verification_preserved": true,
+                "mutual_sas_and_exact_bidirectional_decrypted_sync_receipts": true,
+                "native_rounds": 0
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 30,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "disabled",
+              "passed": true,
+              "scenario": "discover-sync",
+              "selected_mode": "classic",
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-401",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-403",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-404",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-429",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-http-503",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-malformed",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-wrong-type",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": false,
+              "checks": {
+                "discovery_failed_before_engine_creation": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 0,
+                "upstream_forward_failures": 0,
+                "versions": 1
+              },
+              "gateway_scenario": "discovery-timeout",
+              "passed": true,
+              "scenario": "expect-discovery-error",
+              "selected_mode": null,
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "failed_engine_refused_second_cycle": true,
+                "native_rounds": 0,
+                "sync_failed_without_changing_mode": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 1,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "native-http-401",
+              "passed": true,
+              "scenario": "expect-native-error",
+              "selected_mode": "sliding",
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "failed_engine_refused_second_cycle": true,
+                "native_rounds": 0,
+                "sync_failed_without_changing_mode": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 1,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "native-http-404",
+              "passed": true,
+              "scenario": "expect-native-error",
+              "selected_mode": "sliding",
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "failed_engine_refused_second_cycle": true,
+                "native_rounds": 0,
+                "sync_failed_without_changing_mode": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 1,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "native-http-503",
+              "passed": true,
+              "scenario": "expect-native-error",
+              "selected_mode": "sliding",
+              "server": "synapse",
+              "version": "1.163.0"
+            },
+            {
+              "both_logouts_confirmed": true,
+              "checks": {
+                "classic_rounds": 0,
+                "failed_engine_refused_second_cycle": true,
+                "native_rounds": 0,
+                "sync_failed_without_changing_mode": true
+              },
+              "gateway": {
+                "blocked_native": 0,
+                "classic_sync": 0,
+                "native_sync": 1,
+                "upstream_forward_failures": 0,
+                "versions": 4
+              },
+              "gateway_scenario": "native-unknown-pos",
+              "passed": true,
+              "scenario": "expect-native-error",
+              "selected_mode": "sliding",
+              "server": "synapse",
+              "version": "1.163.0"
+            }
+          ],
+          "server": "synapse",
+          "version": "1.163.0"
+        }
+      ]
+    }
+  },
+  "actual_classic_only_synapse": {
+    "run": "classic-only-synapse-02",
+    "command_exit_code": 0,
+    "configuration": {
+      "experimental_features": {
+        "msc3575_enabled": false
+      }
+    },
+    "versions_native_flag": false,
+    "result": {
+      "server": "synapse",
+      "version": "1.163.0",
+      "scenario": "discover-classic-only",
+      "passed": true,
+      "selected_mode": "classic",
+      "checks": {
+        "authenticated_native_endpoint_unrecognized": true,
+        "classic_rounds": 15,
+        "identity_keys_and_peer_verification_preserved": true,
+        "mutual_sas_and_exact_bidirectional_decrypted_sync_receipts": true,
+        "native_rounds": 0
+      },
+      "both_logouts_confirmed": true
+    }
+  },
+  "execution_inputs": {
+    "text_sha256_crlf_normalized": {
+      "Cargo.toml": "6dafcb3fd4b5e0ef3f95ac1b55bc5140988573dde0d984b890a71af6c034537a",
+      "Cargo.lock": "599ee5f02822ed64432ea91f0b2771c8084abc1bf7b828fd8a794597b247d830",
+      "tests/matrix/Cargo.toml": "3bda44b7cf687c0938a3cc69bbe0e7834554b8f36dc22f3ec308ea7abd6170ff",
+      "tests/matrix/src/lib.rs": "491ed40cec642426d55d22886fcefa5b16aaac36a6632e0e0bbadd6063270cd2",
+      "tests/matrix/src/sync_fixture.rs": "d97e34954495cf763582c0c20ce2bc2ed15162e7a7af8a17a1280f43a1c2e4f9",
+      "tests/matrix/src/capability_fixture.rs": "22c94dac3ca3099ac464de8f8a56faffd409ce425b2bfd3c9c889c41c1ee9014",
+      "tests/matrix/src/bin/verified_recipients.rs": "faf667f2b9563ac09e8d8c804d753653e0143b4f7202f9a86612d973c5400397",
+      "tests/matrix/tests/capability_selection.rs": "80fc76177cd1ac90d5cfd418949d0b3592cd7b2a802cb8f79e7fec6e06d10e98",
+      "tools/matrix_capabilities.py": "d3518b4fae2963104990c03eaca01d099347de1915a937c833c6adebbc93b902",
+      "tests/tools/test_matrix_capabilities.py": "7f685008ea343cba85604031ab9a3c027130f5c48dd0e0baaadafa7686ed2ae7",
+      "tools/servers/run.py": "e814eb8e2d9c3fb4a3213015a826ed45a86d45512de21889ffb89fdc2fe72b4c"
+    },
+    "binary_sha256": "b6308759b4d111b90726b23d8e6922c4ec2ce6a83e2c24c31a5e45916fbd86ec"
+  },
+  "commands": [
+    {
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests": 55,
+      "frontend_tests": 3,
+      "server_registration_tests": 2,
+      "development_controller_tests": 13,
+      "total_tests": 73,
+      "format_clippy_frontend_build_contract_typescript": "passed"
+    },
+    {
+      "command": "python tools/matrix_capabilities.py <native-capable-disposable-profiles> <new-ignored-run-directory>",
+      "exit_code": 0
+    },
+    {
+      "command": "verified_recipients <one-classic-only-synapse-profile> <new-ignored-report> --discover-classic-only",
+      "exit_code": 0
+    }
+  ],
+  "dependency_resolution": {
+    "root_lock_byte_identical_to_pre_task": true,
+    "new_dependencies_or_feature_changes": false,
+    "advisory_queries_rerun": false
+  },
+  "historical_failures": [
+    {
+      "kind": "initial_controlled_run",
+      "run": "capability-fallback-01/gateway-cases-01",
+      "exit_code": 1,
+      "merovingian_scenarios_passed": 15,
+      "synapse_failed_at": "advertised",
+      "cause": "Original Synapse loopback port timed out from Windows while the same endpoint returned HTTP200 and native=true inside WSL. A new disposable listener was reachable from Windows and final suite passed. Root cause of that port reachability mismatch was not determined.",
+      "expected_disconnect_tracebacks": "First gateway version did not catch Windows ConnectionAbortedError on late writes. Final version handles connection errors quietly and joins handlers before recording final counters."
+    },
+    {
+      "kind": "initial_focused_rust_tests",
+      "exit_code": 1,
+      "passed": 1,
+      "failed": 2,
+      "cause": "Assertions forbade legitimate SDK background E2EE metadata requests and required exact discovery request counts. Corrected to assert discovery/no sync and count only sync requests."
+    },
+    {
+      "kind": "initial_workspace_check",
+      "exit_code": 101,
+      "rust_tests_passed": 55,
+      "failed_stage": "Clippy -D warnings",
+      "cause": "Useless String.into in new synthetic-session test; removed, final aggregate check exited0."
+    }
+  ],
+  "cleanup": {
+    "all_four_disposable_runners_exit_code": 0,
+    "all_six_homeserver_listeners_connection_refused_from_wsl": true,
+    "gateway_handlers_joined_before_final_counters": true
+  },
+  "limits": [
+    "Test-fixture initial selection only; no production Tauri host, core coordinator or UI integration. UI choices retained.",
+    "Merovingian native support was not disabled in the server. A controlled loopback origin removed or disabled capability flags and blocked native endpoints; Synapse also passed a separate real server-side disable test.",
+    "New client per scenario; no stale capability-cache provenance, runtime capability change, positively classified unsupported-endpoint transition, automatic renegotiation or refresh-token recovery proof.",
+    "Native 401/404/503 and injected M_UNKNOWN_POS errors do not change mode; failed driver refuses another cycle. This is not a full SDK task-drain or position-recovery proof.",
+    "Normal in-memory clients for these scenarios. Prior encrypted-store restart evidence remains separate; this work does not establish persistence through a fallback transition or crash recovery.",
+    "SAS comparison is simulated by a trusted test controller; cross-signing, human verification UI, device replacement, federation and production sharing policy remain open.",
+    "Loopback HTTP and gateway credential forwarding are test-only for explicitly disposable profiles; no third-party sync proxy, production HTTP allowance or TLS-bypass policy is introduced.",
+    "Only Windows client and WSL-hosted servers tested. No native Linux/macOS desktop, packaging, Windows media containment or application resource-limit claim."
+  ]
+}

@@ -1,0 +1,687 @@
+{
+  "schema_version": 1,
+  "checked_on": "2026-10-20",
+  "host": "Windows 11 Pro 10.0.26200 x64; WSL Ubuntu 24.04 for both disposable homeservers",
+  "p0_accepted": false,
+  "application_implemented": false,
+  "manifest_and_lock_sha256": {
+    "Cargo.toml": "6dafcb3fd4b5e0ef3f95ac1b55bc5140988573dde0d984b890a71af6c034537a",
+    "Cargo.lock": "599ee5f02822ed64432ea91f0b2771c8084abc1bf7b828fd8a794597b247d830",
+    ".cargo/config.toml": "f52f6cc8996220eeca6bca1fbaae043d8e4337598552dd70c98f6da2a2730a6e",
+    "crates/contracts/Cargo.toml": "023a016278bb335b101d14aa92215744f00942b89254cec55086c8b52952eff0",
+    "crates/media-protocol/Cargo.toml": "2ea66d5635a905d88c683d21a361d4e7717bd6b581aab23dfc36c3e27f56d7ef",
+    "tests/matrix/Cargo.toml": "3bda44b7cf687c0938a3cc69bbe0e7834554b8f36dc22f3ec308ea7abd6170ff",
+    "tests/storage/Cargo.toml": "ae82bc6afedfb13081a38291882201db5601463a8949d847646bfbad19e168a1",
+    "tests/platform/windows/Cargo.toml": "886974ed7c09aa85f5a288ea87f2c5aaea4057dc4e813c6fe2cb82a0e4fe30e0",
+    "frontend/package.json": "096a0ca861f6c3b614fadf0f999db4ef840349a8933ad49271f3438dbfee758e",
+    "frontend/package-lock.json": "a9db2526df4800e741d6934763c6d1bffc44c5ccddab057953903a4045b8e48b"
+  },
+  "notes": [
+    "Passing tests do not establish a secure product.",
+    "Historical failures are retained; the hardened Merovingian build and live checks subsequently passed.",
+    "Windows environment admission is fixed and current restriction checks ran. An endpoint-observed network differential, run under three worker policies, shows the zero-capability AppContainer worker is not network-denied (closed ports refuse it; listener-side filtering only). A comparative LPAC run breaks Winsock initialization but still opens the AFD socket device. A third policy, an AppContainer whose base is a write-restricted, untrusted-integrity restricted token launched with CreateProcessAsUserW, cannot initialize (STATUS_DLL_INIT_FAILED) and yields no running worker. No tested policy denies the kernel socket; the full gate fails.",
+    "Normal-process encrypted-store restart and initial capability-selected native/classic sync now pass; real classic-only Synapse and controlled origins for both servers were tested. Runtime renegotiation, crash/corruption recovery, cross-signing, SDK-wide drain, transport containment and packaged cross-platform controls remain open.",
+    "No production homeserver contacted; disposable runners stopped after checks.",
+    "Current checks and hashes describe the component-based layout; historical_checks and pre_reorganization hashes retain earlier run provenance. Reorganization does not complete P0.",
+    "Retained task ownership and controlled real-SDK lifecycle barriers pass 12 new tests. SDK initialization waits and pause are not global drain barriers; the SDK completion contract remains unresolved. See sdk-lifecycle.json. No live homeserver scenarios were rerun for this step."
+  ],
+  "hash_normalization": "Text manifest and lock hashes normalize CRLF to LF, matching repository attributes.",
+  "pre_reorganization_manifest_and_lock_sha256": {
+    "probes/p0/matrix/Cargo.toml": "b844e6ac032adc258bbc50a2745d9534e0e295a6fa49b855d50ecadd4583e86e",
+    "probes/p0/matrix/Cargo.lock": "d2749574b1db71a2244417c6b6243892d76b62a72991c1fd6ca7629a40e6c4e5",
+    "probes/p0/storage/Cargo.toml": "dea2f71115d45162ff096556504fa0ebe4848273063740a444ea99e324792b6f",
+    "probes/p0/storage/Cargo.lock": "41d962e3f505b5504efffeb9a3ba121cc404da18ae02e1cca2775124374a56ef",
+    "probes/p0/resources/Cargo.toml": "78cf9384042e349243160110b5e6002c34d705b8679a2f57cb0dab1c8270493a",
+    "probes/p0/resources/Cargo.lock": "b1112353fbea1fc22c6c739d3499f3c0fbbc300435f2645c4854332a7cc04e33",
+    "probes/p0/platform/windows-sandbox-probe/Cargo.toml": "7519c3ad69adfe95a71d4f78ea3334228e7019abf1391336105d1e5da8e81c58",
+    "probes/p0/platform/windows-sandbox-probe/Cargo.lock": "a4d89202e5f52713ce5c6a50a2da6e7430e2fd90b031b1f4c618788c7378cb29",
+    "probes/p0/frontend/package.json": "4f754eedd04ed10a9afba272cee57761a026b1945c52dce128b2d95f76c3192b",
+    "probes/p0/frontend/package-lock.json": "346b8741d09eac80452c922b444c102e121678b7a2d9bbb8ee866659c331516b",
+    "probes/p0/contracts/Cargo.toml": "b8f917767331f987cc1baff222bef606aeacf5d5c5c7cca6f3545004a70a26dc",
+    "probes/p0/contracts/Cargo.lock": "a5b5683f3ffef98854277f713ee61143ac438e54079852c8c6dd1e4bdde7ad03"
+  },
+  "historical_checks": [
+    {
+      "name": "matrix_sdk_unit_tests",
+      "exit_code": 0,
+      "passed": 9,
+      "failed": 0
+    },
+    {
+      "name": "matrix_sdk_cooperative_drain_fixture",
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "scope": "One real SDK handler and retained request; replacement task is admission-only; full SDK drain unproven"
+    },
+    {
+      "name": "storage_unit_tests",
+      "exit_code": 0,
+      "passed": 7,
+      "failed": 0
+    },
+    {
+      "name": "resource_unit_tests",
+      "exit_code": 0,
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "name": "dto_contract_generation_tests",
+      "exit_code": 0,
+      "passed": 4,
+      "failed": 0,
+      "typescript_check_exit": 0,
+      "generator_drift_check": "passed"
+    },
+    {
+      "name": "frontend_render_and_build_tests",
+      "exit_code": 0,
+      "passed": 3,
+      "failed": 0
+    },
+    {
+      "name": "sdk_storage_resource_platform_format_and_clippy",
+      "exit_code": 0
+    },
+    {
+      "name": "disposable_synapse_live_smoke",
+      "exit_code": 0,
+      "version": "1.163.0"
+    },
+    {
+      "name": "windows_synthetic_vault_roundtrip_and_cleanup",
+      "exit_code": 0
+    },
+    {
+      "name": "historical_merovingian_debug_binary_startup",
+      "exit_code": 80,
+      "status": "failed_hardening_self_check",
+      "version": "0.12.28"
+    },
+    {
+      "name": "merovingian_release_build_and_startup",
+      "exit_code": 0,
+      "version": "0.12.29",
+      "fortify_source": 3,
+      "hardening_readiness": "ready=true blockers=0",
+      "identity": "merovingian-build.json"
+    },
+    {
+      "name": "disposable_merovingian_live_smoke",
+      "exit_code": 0,
+      "version": "0.12.29",
+      "evidence": "live-results.json"
+    },
+    {
+      "name": "windows_sandbox_gate_before_stricter_error_checks",
+      "exit_code": 1,
+      "status": "failed_gate",
+      "network_denial": "equivocal",
+      "cpu_time_limit": "not_demonstrated",
+      "broker_deadline": "confirmed"
+    },
+    {
+      "name": "rust_osv_query_execution",
+      "exit_code": 0,
+      "queried": 418,
+      "unmaintained_advisories": 2
+    },
+    {
+      "name": "signed_packaged_sandbox_all_three_operating_systems",
+      "status": "not_run"
+    },
+    {
+      "name": "product_tauri_webview_csp_ipc_and_accessibility",
+      "status": "not_run"
+    },
+    {
+      "name": "tauri_ipc_transport_and_payload_logging_review",
+      "status": "source_inspected_runtime_not_run",
+      "version": "2.12.4",
+      "evidence": "tauri-ipc.md"
+    },
+    {
+      "name": "historical_windows_strict_environment_gate_before_input_fix",
+      "exit_code": 1,
+      "status": "failed_worker_environment_admission",
+      "unexpected_runtime_names": [
+        "TEMP",
+        "TMP"
+      ],
+      "appcontainer_storage_comparisons": "not_matched",
+      "parent_secret_canary": "absent",
+      "worker_restrictions": "not_run",
+      "broker_deadline": "confirmed",
+      "evidence": "windows-sandbox.md",
+      "resolved_by": "windows_current_sandbox_gate"
+    },
+    {
+      "name": "disposable_merovingian_encrypted_two_device_smoke",
+      "exit_code": 0,
+      "version": "0.12.29",
+      "sync": "classic",
+      "encrypted_wire_event": true,
+      "exact_event_decrypted_by_second_device": true,
+      "both_logouts_confirmed": true,
+      "device_verification_exercised": false,
+      "evidence": "encrypted-messaging.md"
+    },
+    {
+      "name": "disposable_synapse_encrypted_two_device_smoke",
+      "exit_code": 0,
+      "version": "1.163.0",
+      "sync": "classic",
+      "encrypted_wire_event": true,
+      "exact_event_decrypted_by_second_device": true,
+      "both_logouts_confirmed": true,
+      "device_verification_exercised": false,
+      "evidence": "encrypted-messaging.md"
+    },
+    {
+      "name": "disposable_server_runner_cleanup",
+      "exit_code": 0,
+      "both_loopback_ports_closed": true
+    },
+    {
+      "name": "windows_launcher_regression_tests",
+      "exit_code": 0,
+      "passed": 8,
+      "failed": 0,
+      "scope": "Native argument parser, UTF-16 path comparison and worker exit protocol"
+    },
+    {
+      "name": "windows_current_sandbox_gate",
+      "exit_code": 1,
+      "status": "failed_network_denial_inconclusive",
+      "environment": "verified",
+      "file_denials": "ERROR_ACCESS_DENIED(5)",
+      "child_denial": "ERROR_NOT_ENOUGH_QUOTA(1816)",
+      "allocation_limit": "observed",
+      "broker_deadline": "confirmed",
+      "network_connect": "timeout_without_raw_os_error",
+      "network_policy_diagnosis": "missing_capability=NONE in broker and worker for loopback; not a socket-denial proof",
+      "cpu_time_limit": "not_demonstrated",
+      "evidence": "windows-results.json"
+    }
+  ],
+  "checks": [
+    {
+      "name": "component_layout_check",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 39,
+      "frontend_tests_passed": 3,
+      "includes": [
+        "cargo fmt",
+        "workspace all-targets tests",
+        "Clippy -D warnings",
+        "Svelte check",
+        "frontend build",
+        "generated contract drift",
+        "TypeScript"
+      ]
+    },
+    {
+      "name": "frontend_locked_bootstrap_and_recheck",
+      "exit_code": 0
+    },
+    {
+      "name": "root_dependency_resolution",
+      "registry_packages": 418,
+      "existing_registry_versions_preserved": true,
+      "critical_sdk_crypto_http_tls_feature_union_unchanged": true,
+      "scope": "Compared with the union of the prior isolated dependency graphs; not a security approval."
+    },
+    {
+      "name": "rust_osv_query_execution",
+      "exit_code": 0,
+      "queried": 418,
+      "unmaintained_advisories": 2,
+      "evidence": "rust-advisories.json"
+    },
+    {
+      "name": "relocated_disposable_homeservers",
+      "exit_code": 0,
+      "merovingian_version": "0.12.29",
+      "synapse_version": "1.163.0",
+      "synapse_frozen_packages_preserved": 59,
+      "merovingian_binary_bytes_preserved": true
+    },
+    {
+      "name": "relocated_matrix_sync_and_encrypted_messages",
+      "exit_code": 0,
+      "servers": [
+        "merovingian",
+        "synapse"
+      ],
+      "scope": "Sliding sync, classic transition, concurrent history/key query and identity continuity; separate classic-sync same-account two-device encrypted message and both logouts. No recipient verification or full SDK drain proof."
+    },
+    {
+      "name": "relocated_disposable_server_cleanup",
+      "exit_code": 0,
+      "runner_exit_code": 0,
+      "both_loopback_ports_closed": true
+    },
+    {
+      "name": "windows_current_sandbox_gate",
+      "command": "python tools/dev.py sandbox --offline",
+      "checked_on": "2026-10-20",
+      "exit_code": 1,
+      "status": "failed_network_not_denied",
+      "network_denial_appcontainer": "not_established_decisive_negative",
+      "closed_port_worker_result": "WSAECONNREFUSED(10061)",
+      "endpoint_worker_observations": 0,
+      "afd_device_open_appcontainer": "opened",
+      "lpac_comparison": "WSAStartup 10107; AFD device opened; not a denial pass",
+      "restricted_token_comparison": "AppContainer + write-restricted, untrusted-integrity token via CreateProcessAsUserW; LowBox worker fails DLL initialization (STATUS_DLL_INIT_FAILED 0xC0000142), no running worker, no socket verdict; full gate not re-run under it",
+      "policies_tested": 3,
+      "cpu_time_limit": "not_demonstrated",
+      "binary_sha256": "c4871917d194cc6d176e8d9ada1767cb4ffaabcdcad0475d12ae9abf2a648466",
+      "evidence": "windows-results.json",
+      "superseded_status": "failed_network_denial_inconclusive"
+    },
+    {
+      "name": "independent_recipients_mutual_sas_and_bidirectional_encrypted_messages",
+      "exit_code": 0,
+      "fresh_runs_passed": 2,
+      "servers": [
+        "merovingian",
+        "synapse"
+      ],
+      "verification": "SDK m.sas.v1; simulated trusted out-of-band comparison; no manual trust setter",
+      "scope": "Classic sync and in-memory stores; no cross-signing/recovery or human UI",
+      "evidence": "verified-recipients.json"
+    },
+    {
+      "name": "workspace_check_after_verified_recipients",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 41,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2
+    },
+    {
+      "name": "verified_recipient_runner_cleanup",
+      "exit_code": 0,
+      "all_four_runners_stopped": true,
+      "all_eight_loopback_listeners_closed": true
+    },
+    {
+      "name": "native_encrypted_sliding_sync_and_completed_operation_classic_transition",
+      "exit_code": 0,
+      "servers": [
+        "merovingian",
+        "synapse"
+      ],
+      "classic_driver_rounds_before_transition": 0,
+      "exact_decrypted_sync_receipts_before_history_fetch": true,
+      "identity_keys_and_peer_verification_preserved": true,
+      "old_and_new_message_decryption_after_transition": true,
+      "both_logouts_confirmed": true,
+      "scope": "In-memory clients; simulated out-of-band SAS; no forced cancellation, restart/recovery or automatic fallback proof.",
+      "evidence": "encrypted-sliding-sync.json"
+    },
+    {
+      "name": "classic_only_verified_recipient_regression_after_native_extension",
+      "exit_code": 0,
+      "servers": [
+        "merovingian",
+        "synapse"
+      ],
+      "evidence": "encrypted-sliding-sync.json"
+    },
+    {
+      "name": "workspace_check_after_encrypted_sliding_sync",
+      "exit_code": 0,
+      "rust_tests_passed": 48,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2
+    },
+    {
+      "name": "encrypted_sliding_runner_cleanup",
+      "exit_code": 0,
+      "both_loopback_listeners_closed": true
+    },
+    {
+      "name": "encrypted_store_normal_process_restart",
+      "exit_code": 0,
+      "servers": [
+        "merovingian",
+        "synapse"
+      ],
+      "five_distinct_worker_processes_per_server": true,
+      "wrong_and_missing_keys_rejected": true,
+      "offline_decryption_before_sync": true,
+      "same_identities_keys_and_mutual_verification": true,
+      "new_native_decrypted_sync_receipts_both_directions": true,
+      "password_login_or_sas_repeated_on_restore": false,
+      "both_restored_logouts_confirmed": true,
+      "evidence": "encrypted-restart.json"
+    },
+    {
+      "name": "native_transition_and_classic_only_regressions_after_encrypted_restart",
+      "exit_code": 0,
+      "servers": [
+        "merovingian",
+        "synapse"
+      ],
+      "evidence": "encrypted-restart.json"
+    },
+    {
+      "name": "historical_workspace_check_concurrent_windows_executable_lock",
+      "exit_code": 101,
+      "cause": "Cargo attempted replacing verified_recipients.exe while regression used it",
+      "resolved_by": "workspace_check_after_encrypted_restart"
+    },
+    {
+      "name": "workspace_check_after_encrypted_restart",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 52,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2,
+      "restart_controller_tests_passed": 5
+    },
+    {
+      "name": "encrypted_restart_runner_cleanup",
+      "runner_exit_code": 0,
+      "both_wsl_ports_connection_refused": true
+    },
+    {
+      "name": "capability_selected_sync_and_no_error_downgrade",
+      "exit_code": 0,
+      "controlled_scenarios_passed": 30,
+      "servers": [
+        "merovingian",
+        "synapse"
+      ],
+      "gateway_counters_match_selected_mode": true,
+      "no_classic_requests_on_discovery_or_native_failure": true,
+      "evidence": "capability-fallback.json"
+    },
+    {
+      "name": "actual_classic_only_synapse",
+      "exit_code": 0,
+      "version": "1.163.0",
+      "native_capability_false": true,
+      "authenticated_native_endpoint_404_M_UNRECOGNIZED": true,
+      "classic_rounds": 15,
+      "native_driver_rounds": 0,
+      "mutual_sas_and_bidirectional_e2ee": true,
+      "evidence": "capability-fallback.json"
+    },
+    {
+      "name": "workspace_check_after_capability_fallback",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 55,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "evidence": "capability-fallback.json"
+    },
+    {
+      "name": "capability_fallback_dependency_resolution",
+      "root_lock_byte_identical_to_previous_run": true,
+      "dependencies_or_features_changed": false
+    },
+    {
+      "name": "capability_fallback_disposable_cleanup",
+      "all_four_runners_exit_code": 0,
+      "all_six_homeserver_listeners_refused_from_wsl": true,
+      "gateway_handlers_joined": true
+    },
+    {
+      "name": "sdk_task_inventory_and_tracked_cooperative_stop",
+      "exit_code": 0,
+      "new_rust_tests_passed": 12,
+      "scope": "Windows; synthetic loopback HTTP, real classic/native SDK calls and memory stores. Registered application work only.",
+      "evidence": "sdk-lifecycle.json"
+    },
+    {
+      "name": "sdk_initialization_wait_and_pause_negative_controls",
+      "exit_code": 0,
+      "second_init_wait_returns_while_first_pending": true,
+      "pause_returns_while_initialization_pending": true,
+      "scope": "Memory stores; controlled HTTP503 on release. Completion does not establish healthy encryption initialization.",
+      "evidence": "sdk-lifecycle.json"
+    },
+    {
+      "name": "complete_sdk_lock_logout_and_store_handoff",
+      "status": "unresolved_sdk_completion_api_gap",
+      "application_implemented": false,
+      "evidence": "sdk-lifecycle.json"
+    },
+    {
+      "name": "historical_workspace_check_incomplete_stop_signal_edit",
+      "exit_code": 101,
+      "stage": "Clippy -D warnings",
+      "resolved_by": "workspace_check_after_sdk_lifecycle",
+      "evidence": "sdk-lifecycle.json"
+    },
+    {
+      "name": "workspace_check_after_sdk_lifecycle",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 67,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 85,
+      "evidence": "sdk-lifecycle.json"
+    },
+    {
+      "name": "sdk_lifecycle_scope",
+      "dependencies_or_features_changed": false,
+      "ui_changes": false,
+      "live_homeservers_started": false
+    },
+    {
+      "name": "windows_network_differential_unit_tests",
+      "command": "cargo test --locked --offline -p persephone-test-windows",
+      "exit_code": 0,
+      "tests_passed": 26,
+      "new_tests_passed": 5,
+      "scope": "Probe exit encodings, endpoint/device classifiers, the factored worker-gate assertion and the unexpected-exit (NTSTATUS) decoder; native behavior is recorded by windows_current_sandbox_gate. The five new tests cover the restricted-token policy's gate assertion and STATUS_DLL_INIT_FAILED decoding."
+    },
+    {
+      "name": "workspace_check_after_windows_network_differential",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 85,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 103,
+      "evidence": "windows-results.json"
+    },
+    {
+      "name": "windows_network_differential_scope",
+      "dependencies_changed": false,
+      "root_lock_unchanged": true,
+      "windows_sys_features_added": [
+        "Win32_Networking_WinSock",
+        "Win32_Storage_FileSystem"
+      ],
+      "restricted_token_policy_features_added": "none; CreateRestrictedToken, CreateProcessAsUserW, SetTokenInformation and CreateWellKnownSid are in the already-enabled Win32_Security and Win32_System_Threading features, so tests/platform/windows/Cargo.toml and the root lock are unchanged",
+      "firewall_policy_or_loopback_exemption_changed": false,
+      "non_loopback_listener_opened": false,
+      "external_network_contacted": false,
+      "ui_changes": false,
+      "live_homeservers_started": false
+    },
+    {
+      "name": "dependency_maintenance_disposition",
+      "checked_on": "2026-10-20",
+      "graph": "Cargo feature resolver, x86_64-pc-windows-msvc, offline",
+      "root_lock_sha256": "599ee5f02822ed64432ea91f0b2771c8084abc1bf7b828fd8a794597b247d830",
+      "derivative_2_2_0": "not_compiled; only via optional matrix-sdk-indexeddb (matrix-sdk 'indexeddb' feature not selected)",
+      "anymap2_0_13_0": "compiled via matrix-sdk 0.19.1; retained pending matrix-sdk release containing merged upstream PR matrix-org/matrix-rust-sdk#7185 (anymap3)",
+      "other_targets": "unresolved offline; no crate sources downloaded",
+      "evidence": "dependencies.md"
+    },
+    {
+      "name": "dependency_contract_regression_tests",
+      "command": "cargo test --locked --offline -p persephone-test-matrix --test dependency_contracts",
+      "exit_code": 0,
+      "tests_passed": 2,
+      "scope": "TypeId single-u64 hashing contract on rustc 1.99.1; matrix-sdk event-handler context insertion against a mock server with zero requests"
+    },
+    {
+      "name": "compiled_graph_license_and_native_review",
+      "third_party_packages_normal_build": 284,
+      "test_only_packages": 9,
+      "native_packages": [
+        "aws-lc-sys",
+        "aws-lc-rs",
+        "libsqlite3-sys"
+      ],
+      "absent": [
+        "ring",
+        "openssl",
+        "openssl-sys",
+        "native-tls",
+        "quinn",
+        "h3",
+        "wasm-bindgen"
+      ],
+      "mpl_2_0_crates": 7,
+      "mpl_exhibit_b_notices_in_source": 0,
+      "rustls_tls12_enabled": true,
+      "scope": "Declared license metadata and MPL notice search; not file-level native license review or legal opinion",
+      "evidence": "dependencies.md"
+    },
+    {
+      "name": "workspace_check_after_dependency_disposition",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 87,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 105
+    },
+    {
+      "name": "dependency_disposition_scope",
+      "dependencies_or_features_changed": false,
+      "root_lock_unchanged": true,
+      "network_queries": "public GitHub issue/PR/release metadata only"
+    },
+    {
+      "name": "tls_1_3_only_policy",
+      "decision": "owner, 2026-10-20",
+      "enforcement": "policy_http_client_builder(): reqwest tls_version_min(TLS_1_3); all Matrix fixture HTTP clients built from it",
+      "compile_time_removal": "not possible without patching reqwest 0.13.5, which enables rustls/tls12 itself",
+      "command": "cargo test --locked --offline -p persephone-test-matrix --test tls_policy",
+      "exit_code": 0,
+      "tests_passed": 5,
+      "client_hello_supported_versions": [
+        "0x0304"
+      ],
+      "tls_1_2_server_hello_result": "fatal protocol_version alert (70)",
+      "controls": "unrestricted client offers 0x0303 and sends no protocol_version alert",
+      "residual": "rustls 0.23.46 still lists TLS 1.2 cipher suites in the ClientHello (fingerprint only; not negotiable)"
+    },
+    {
+      "name": "workspace_check_after_tls_policy",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 92,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 110
+    },
+    {
+      "name": "historical_workspace_check_tls_policy_clippy",
+      "exit_code": 101,
+      "stage": "Clippy -D warnings",
+      "cause": "manual is_multiple_of and constant chunks_exact in tls_policy.rs parser",
+      "resolved_by": "workspace_check_after_tls_policy"
+    },
+    {
+      "name": "wasm_decoder_guest_interface",
+      "target": "wasm32-unknown-unknown",
+      "guest_bytes": 315016,
+      "imports": [
+        "persephone.input_len",
+        "persephone.read_input",
+        "persephone.write_output"
+      ],
+      "exports": [
+        "memory",
+        "decode"
+      ],
+      "wasi": false
+    },
+    {
+      "name": "wasm_decoder_sandbox_tests",
+      "command": "cargo test --locked --offline -p persephone-media-decoder -p persephone-media-sandbox",
+      "exit_code": 0,
+      "tests_passed": 22,
+      "profiles": [
+        "debug",
+        "release"
+      ],
+      "runtime": "wasmi 2.0.0 (std, validate, portable-dispatch)",
+      "evidence": "wasm-decoder.md"
+    },
+    {
+      "name": "historical_wasm_sandbox_host_stack_overflow",
+      "exit_code": "0xc00000fd",
+      "cause": "wasmi tail-call dispatch without optimization (auto-dispatch omitted with default features off); guest loop exhausted host stack, also at 8 MiB",
+      "resolved_by": "portable-dispatch feature"
+    },
+    {
+      "name": "wasm_decoder_benchmark_16mp",
+      "profile": "release",
+      "host": "Windows 11 Pro x64",
+      "byte_identical_to_native": true,
+      "portable_dispatch_ms": {
+        "baseline_jpeg": 4474,
+        "progressive_jpeg": 7156,
+        "png": 6075
+      },
+      "tail_call_dispatch_ms": {
+        "baseline_jpeg": 1488,
+        "progressive_jpeg": 2117,
+        "png": 1896
+      },
+      "native_ms": {
+        "baseline_jpeg": 70,
+        "progressive_jpeg": 181,
+        "png": 135
+      },
+      "fuel": {
+        "baseline_jpeg": 9229021196,
+        "progressive_jpeg": 40238211956,
+        "png": 13771514472
+      },
+      "default_fuel": 64000000000,
+      "runs_per_configuration": 1
+    },
+    {
+      "name": "workspace_check_after_wasm_decoder",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 114,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 132
+    },
+    {
+      "name": "wasm_decoder_dependency_scope",
+      "new_third_party_packages": 21,
+      "existing_versions_changed": false,
+      "licenses": "MIT, Apache-2.0, Zlib, 0BSD combinations",
+      "downloads": "wasm32-unknown-unknown rust-std via rustup; crates from crates.io (owner approved)"
+    }
+  ],
+  "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",
+  "pre_encrypted_restart_manifest_and_lock_sha256": {
+    "Cargo.lock": "223306c90e903c16fb9b62b81e6b14ed619e9b6e71c514bccde2e445aba57b17",
+    "tests/matrix/Cargo.toml": "4c5395ceb69fc10cff2aa2e2c18c3afd095b816e1cf577024c217a9c109a26e8"
+  }
+}

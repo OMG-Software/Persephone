@@ -2,13 +2,13 @@
 
 19 October 2026. Planning only: no controls have been implemented or tested. The high-risk-user objective and Tauri framework choice are confirmed; the ADR's security constraints apply, while detailed mechanisms and defaults remain proposals.
 
-The framework choice is now accepted: [ADR-0000](adr/0000-use-tauri-for-the-desktop-client.md)
+The framework choice is now accepted: [ADR-0000](../adr/0000-use-tauri-for-the-desktop-client.md)
 selects Tauri with a Rust core and locally bundled web UI. The record's security
 constraints govern implementation; detailed mechanisms and verification remain outstanding.
 
-Follow the [architecture and development plan](architecture-plan.md) for runtime
+Follow the [architecture and development plan](development-plan.md) for runtime
 ownership, IPC, storage, media handling, implementation order, and test gates.
-[ADR-0001](adr/0001-prefer-sliding-sync-with-classic-sync-fallback.md) selects
+[ADR-0001](../adr/0001-prefer-sliding-sync-with-classic-sync-fallback.md) selects
 Sliding Sync by default with classic `/sync` fallback when unavailable.
 
 ## Objective and limits
@@ -75,9 +75,9 @@ This split is a design candidate. Prove it works with the selected toolkit, SDK,
 
 The comparison concerns architecture and feasibility, not a measured security ranking. Frameworks do not by themselves provide the application's required sandbox.
 
-The [GTK/Tauri security-model comparison](gtk-tauri-security-model.md) informed the accepted Tauri decision: bundled web UI can be separated from Rust authority, while permissions, content rendering, and platform containment require deliberate configuration and tests. Avoiding a webview alone is not a sufficient security argument. No GTK/Tauri dependency or application test has yet run.
+The [GTK/Tauri security-model comparison](../research/gtk-tauri-security-model.md) informed the accepted Tauri decision: bundled web UI can be separated from Rust authority, while permissions, content rendering, and platform containment require deliberate configuration and tests. Avoiding a webview alone is not a sufficient security argument. No GTK/Tauri dependency or application test has yet run.
 
-Follow-up [Slint/iced security research](slint-iced-security-research.md) inspected pinned releases and resolved reduced-feature dependency probes. It found meaningful reservations for both: Slint's native Winit path retains image/SVG parsers and Linux maintenance warnings; iced's software path can omit codecs, while its GPU path selects an advised `lru` version. Slint's explicit security policy and accessibility path support keeping it on the shortlist, without an overall security ranking or release approval.
+Follow-up [Slint/iced security research](../research/slint-iced-security-research.md) inspected pinned releases and reviewed reduced-feature dependency graphs. It found meaningful reservations for both: Slint's native Winit path retains image/SVG parsers and Linux maintenance warnings; iced's software path can omit codecs, while its GPU path selects an advised `lru` version. Slint's explicit security policy and accessibility path support keeping it on the shortlist, without an overall security ranking or release approval.
 
 | Choice | Programming model | Security/design considerations | Initial position |
 | --- | --- | --- | --- |

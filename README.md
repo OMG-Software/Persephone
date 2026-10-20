@@ -1,35 +1,13 @@
 # Persephone
 
-A planned Rust desktop Matrix chat client for Windows, Linux, and macOS, with Merovingian as a primary integration target.
+Persephone is a planned Rust desktop Matrix client for Windows, Linux, and macOS, with Merovingian as a primary integration target. Its first release is intended to support one account, rooms, message history, text and image messaging, and end-to-end encrypted chats for high-risk users.
 
-The first release targets one account, login, rooms, message history, text and image messaging, and end-to-end encrypted chats. The product must be designed for high-risk users, including targeted attacks, metadata exposure, and hostile media.
+The project remains in the P0 feasibility phase. Current status, recorded evidence, and open acceptance gates are in the [feasibility workbench](docs/planning/feasibility.md). The repository contains shared Rust building blocks, integration and security test programs, and a static frontend; no Tauri application scaffold or production security controls exist yet.
 
-The project is in initial requirements and architecture planning. No application or runnable scaffold exists yet.
+Tauri is the accepted desktop framework. See the [ADR index](docs/adr/index.md), [project plan](docs/planning/project-plan.md), and [architecture and security plans](docs/README.md#plans). The framework choice and Sliding Sync preference are accepted; other architecture details remain proposals pending implementation evidence.
 
-The desktop framework is **Tauri**, with a Rust core and locally bundled web UI.
-The accepted [decision record](docs/adr/0000-use-tauri-for-the-desktop-client.md)
-records the rationale, alternatives, and required security boundaries. See the
-[ADR index](docs/adr/index.md) for architectural decisions.
+## Development
 
-See [the project plan](docs/project-plan.md) for confirmed requirements, open decisions, and proposed milestones.
+The root Cargo workspace uses one committed `Cargo.lock`. Run `python tools/dev.py bootstrap` once to install the locked frontend dependencies, then `python tools/dev.py check` for Rust, frontend, and contract checks. The Windows containment check is separate: `python tools/dev.py sandbox --offline` currently exits 1 on Windows because network denial is unresolved, and exits 2 as unsupported elsewhere. The OSV dependency audit is separate and needs network access: `python tools/dev.py audit`. See [Development](docs/development.md) for prerequisites, local output paths, and the component layout.
 
-Follow the [architecture and development plan](docs/architecture-plan.md) for
-component boundaries, sync negotiation, security controls, repository layout,
-and milestone acceptance checks. Sliding Sync is the default, with classic
-`/sync` as the fallback when compatible Sliding Sync is unavailable.
-
-See [the security design](docs/security-design.md) for the proposed threat model, architecture, UI comparison, and release gates. These are design requirements and proposals, not implemented protections.
-
-The [Slint/iced security research](docs/slint-iced-security-research.md) compares pinned releases, dependency graphs, published advisories, and remaining adoption gates.
-
-The [GTK/Tauri security-model comparison](docs/gtk-tauri-security-model.md) explains untrusted message rendering, webview/core separation, native-toolkit risks, and the required controls.
-
-## Development environment
-
-Rust and Cargo are required. The initial development machine has the stable `x86_64-pc-windows-msvc` toolchain installed.
-
-Build commands, platform dependencies, and supported OS versions will be documented when the Tauri application is scaffolded and its remaining dependencies are selected.
-
-## License
-
-GNU General Public License v3.0. See [LICENSE](LICENSE).
+GNU General Public License v3.0 applies; see [LICENSE](LICENSE).

@@ -1,0 +1,105 @@
+{
+  "checked_on": "2026-10-20",
+  "gate_exit_code": 1,
+  "p0_accepted": false,
+  "checks": {
+    "environment_verified": true,
+    "parent_secret_absent": true,
+    "appcontainer_token": true,
+    "file_access_denied": true,
+    "child_creation_denied": true,
+    "allocation_limit_observed": true,
+    "broker_deadline_confirmed": true,
+    "host_challenges_only": true,
+    "canary_cleanup": true
+  },
+  "network_denial": {
+    "status": "not_established_decisive_negative",
+    "method": "Endpoint-observed differential run under three worker policies (zero-capability AppContainer, LPAC, AppContainer + restricted token): one contained worker per controlled endpoint, host positive controls before and after each attempt, endpoint-side accept/datagram counts, a closed-port discriminator, and an AFD socket-device open validated by the AppContainer socket control.",
+    "appcontainer_zero_capabilities": {
+      "loopback_tcp_v4_open": "worker connect timed out; listener observed 0 worker connections",
+      "loopback_tcp_v6_open": "worker connect timed out; listener observed 0 worker connections",
+      "loopback_udp_v4": "worker send succeeded locally; receiver observed 0 worker datagrams",
+      "loopback_tcp_v4_closed": "worker received WSAECONNREFUSED(10061) in ~2000 ms, matching host control (~2045 ms)",
+      "local_interface_tcp_v4_closed": "worker received WSAECONNREFUSED(10061), matching host control",
+      "afd_device_open": "opened with GENERIC_READ|GENERIC_WRITE|SYNCHRONIZE",
+      "interpretation": "Worker packets reach the local TCP stack. Listener-side filtering prevented every observed connection and datagram, but closed-port refusals expose loopback and local-interface port state to the worker."
+    },
+    "lpac_comparison": {
+      "winsock_startup": "WSASYSCALLFAILURE(10107) on every endpoint",
+      "afd_device_open": "opened with GENERIC_READ|GENERIC_WRITE|SYNCHRONIZE",
+      "interpretation": "User-mode Winsock initialization fails, but the kernel socket device remains openable, so direct device I/O is not excluded. Not a denial pass.",
+      "gate_role": "Comparative only; the other sandbox checks did not run under LPAC."
+    },
+    "restricted_token_comparison": {
+      "policy": "AppContainer SECURITY_CAPABILITIES launch whose base is a restricted version of the broker's own primary token: CreateRestrictedToken with WRITE_RESTRICTED | DISABLE_MAX_PRIVILEGE and the sole restricting SID RESTRICTED (S-1-5-12), integrity lowered to Untrusted (S-1-16-0), launched via CreateProcessAsUserW with the existing Job limits.",
+      "launch": "CreateProcessAsUserW succeeds, but the LowBox worker exits with STATUS_DLL_INIT_FAILED (0xC0000142) during DLL initialization before reaching any probe.",
+      "afd_device_open": "no result: the worker never runs, so no AFD open is attempted.",
+      "network_denial": "not_established (no running worker under restricted token).",
+      "full_gate": "not run: the restricted-token policy did not establish network denial, so the combined env/file/child/memory/deadline checks were not re-run under it.",
+      "integrity_variants": "The identical STATUS_DLL_INIT_FAILED occurs both with and without the Untrusted integrity drop, so the restricting-SID set alone is the decisive cause: a set tight enough to deny \\Device\\Afd (RESTRICTED only, absent from any DACL granting the worker write) is also too tight for the loader to open \\KnownDlls and the process's own objects, which are granted to the logon/user SIDs; a set loose enough to boot would also grant the device.",
+      "gate_role": "Comparative only; it produced no running worker, so no sandbox check ran under it."
+    },
+    "superseded_probe": "A first AFD probe through \\\\.\\GLOBALROOT\\Device\\Afd reported ERROR_ACCESS_DENIED for both policies, including the AppContainer worker that demonstrably created sockets. It was replaced by the native NT path and a required AppContainer positive control.",
+    "not_tested": [
+      "non-local internet egress",
+      "broker-owned listener/WFP egress control or kernel-level socket filter",
+      "raw AFD socket IOCTLs"
+    ]
+  },
+  "network_policy_diagnosis": {
+    "broker_missing_capability": "NONE",
+    "worker_missing_capability": "NONE"
+  },
+  "cpu_time_limit": "not_demonstrated",
+  "binary_sha256": "c4871917d194cc6d176e8d9ada1767cb4ffaabcdcad0475d12ae9abf2a648466",
+  "source_sha256": {
+    "tests/platform/windows/src/main.rs": "db4765a9cce5bf5bb5b9d7402f37c4fbee82259da0c6ea58a5e53dec27081ab8",
+    "tests/platform/windows/src/windows.rs": "bf8fe2bb65adacc71d94313bf0e2fe1e3dfcd4a3d6c58653a1e0edb18ba86552",
+    "tests/platform/windows/src/command_line.rs": "fe2a96e8dbf7a7c1f08bb3997389b166aa6ae35125f6f1c7c69d6618bdd1a56e",
+    "tests/platform/windows/Cargo.toml": "886974ed7c09aa85f5a288ea87f2c5aaea4057dc4e813c6fe2cb82a0e4fe30e0",
+    "Cargo.lock": "599ee5f02822ed64432ea91f0b2771c8084abc1bf7b828fd8a794597b247d830"
+  },
+  "hash_normalization": "Source text hashes normalize CRLF to LF; binary hash is exact bytes.",
+  "output": [
+    "Windows AppContainer probe (synthetic data only)",
+    "positive_controls: read_canary=true, read_store_canary=true, loopback_challenge_before=true, loopback_challenge_after_same_listener=true, accepts=2, completed_challenges=2, child_process=true",
+    "worker_report: token_appcontainer=true,parent_secret_env=ABSENT,appcontainer_storage_env=VERIFIED(localappdata_matches_expected=true,temp_and_tmp_match_expected=true,all_differ_from_broker=true),canary_read=DENIED_ACCESS(5),store_read=DENIED_ACCESS(5),loopback=EQUIVOCAL,connect=NO_RAW_OS_ERROR(kind=TimedOut),timeout_setup=NOT_ATTEMPTED,write=NOT_ATTEMPTED,read=NOT_ATTEMPTED,child=DENIED,child_error=ERROR_NOT_ENOUGH_QUOTA(1816),memory_limit=ENFORCED,worker_exit=1744827520",
+    "broker_network_policy: api_status=0,missing_capability=NONE",
+    "worker_network_policy: api_status=0,missing_capability=NONE",
+    "socket_device[appcontainer]: host_opened=true,host_error=0,worker_appcontainer=true,worker_opened=true,worker_error=0,access=Opened,probe_validated_by_appcontainer_socket_control=true,effective=Opened",
+    "network_endpoint[appcontainer]: name=loopback_tcp_v4_open,required=true,host_challenge_before=true,host_challenge_after=true,endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=1,worker_error=NO_RAW_OS_ERROR(kind=TimedOut),worker_elapsed_ms~3000,verdict=Dropped",
+    "network_endpoint[appcontainer]: name=loopback_tcp_v4_closed,required=true,host_refused_before=true(2066ms),host_refused_after=true(2044ms),endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=1,worker_error=OS_ERROR(10061,kind=Other),worker_elapsed_ms~2000,verdict=Reached",
+    "network_endpoint[appcontainer]: name=loopback_udp_v4,required=true,host_datagram_before=true,host_datagram_after=true,endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=6,worker_error=NO_ERROR,worker_elapsed_ms~0,verdict=Dropped",
+    "network_endpoint[appcontainer]: name=loopback_tcp_v6_open,required=false,host_challenge_before=true,host_challenge_after=true,endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=1,worker_error=NO_RAW_OS_ERROR(kind=TimedOut),worker_elapsed_ms~3000,verdict=Dropped",
+    "network_endpoint[appcontainer]: name=local_interface_tcp_v4_closed,required=false,host_refused_before=true(2038ms),host_refused_after=true(2043ms),endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=1,worker_error=OS_ERROR(10061,kind=Other),worker_elapsed_ms~2000,verdict=Reached",
+    "network_denial[appcontainer]: NOT_ESTABLISHED",
+    "socket_device[lpac]: host_opened=true,host_error=0,worker_appcontainer=true,worker_opened=true,worker_error=0,access=Opened,probe_validated_by_appcontainer_socket_control=true,effective=Opened",
+    "network_endpoint[lpac]: name=loopback_tcp_v4_open,required=true,host_challenge_before=true,host_challenge_after=true,endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=8,worker_error=OS_ERROR(10107,kind=Other),worker_elapsed_ms~0,verdict=Equivocal",
+    "network_endpoint[lpac]: name=loopback_tcp_v4_closed,required=true,host_refused_before=true(2040ms),host_refused_after=true(2043ms),endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=8,worker_error=OS_ERROR(10107,kind=Other),worker_elapsed_ms~0,verdict=Equivocal",
+    "network_endpoint[lpac]: name=loopback_udp_v4,required=true,host_datagram_before=true,host_datagram_after=true,endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=8,worker_error=OS_ERROR(10107,kind=Other),worker_elapsed_ms~0,verdict=Equivocal",
+    "network_endpoint[lpac]: name=loopback_tcp_v6_open,required=false,host_challenge_before=true,host_challenge_after=true,endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=8,worker_error=OS_ERROR(10107,kind=Other),worker_elapsed_ms~0,verdict=Equivocal",
+    "network_endpoint[lpac]: name=local_interface_tcp_v4_closed,required=false,host_refused_before=true(2030ms),host_refused_after=true(2058ms),endpoint_worker_observations=0,worker_appcontainer=true,worker_stage=8,worker_error=OS_ERROR(10107,kind=Other),worker_elapsed_ms~0,verdict=Equivocal",
+    "network_denial[lpac]: NOT_ESTABLISHED",
+    "socket_device[restricted_token]: POLICY_NO_WORKER_RESULT(AFD probe marker missing: exit=3221225794 (0xc0000142 STATUS_DLL_INIT_FAILED; worker process failed to initialize))",
+    "network_denial[restricted_token]: NOT_ESTABLISHED(no_running_worker_under_restricted_token)",
+    "job_cpu_time_limit: job_cpu_time_limit=NOT_DEMONSTRATED,broker_wall_deadline=ENFORCED,job_termination_confirmed=true,exit=3758096385",
+    "listener_after_deadline_probe: accepts=2,completed_challenges=2",
+    "restricted_token_full_gate: NOT_RUN(network_denial_not_established_under_restricted_token)",
+    "probe error: one or more sandbox assertions failed; see worker_report"
+  ],
+  "binary_path": ".local/build/rust/release/persephone-test-windows.exe",
+  "previous_run": {
+    "checked_on": "2026-10-19",
+    "network_connect": "timeout_without_raw_os_error",
+    "binary_sha256": "5a17e517f573088aedbd87991eb65c1e48ab9427a652cc317c87784827a3d34f",
+    "source_sha256": {
+      "tests/platform/windows/src/main.rs": "db4765a9cce5bf5bb5b9d7402f37c4fbee82259da0c6ea58a5e53dec27081ab8",
+      "tests/platform/windows/src/windows.rs": "66ceca5baa7a358fd9ead107ccec7d4ab7604bfa37f5261d146a628ab0423aa9",
+      "tests/platform/windows/src/command_line.rs": "fe2a96e8dbf7a7c1f08bb3997389b166aa6ae35125f6f1c7c69d6618bdd1a56e",
+      "tests/platform/windows/Cargo.toml": "12603f8cdea5c8fd045c1dc9704455dc36f6618ffbfbf9e23a52e379d336530e",
+      "Cargo.lock": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2"
+    },
+    "layout_verification": "Rerun after component-based reorganization on 2026-10-19; native gate exited 1."
+  }
+}

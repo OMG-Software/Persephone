@@ -1,0 +1,27 @@
+[package]
+name = "persephone-media-sandbox"
+version = "0.0.0"
+description = "Host that runs the media decoder guest in wasmi with an exact import allowlist and resource limits"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `validate` is required: without it wasmi skips wasmparser validation of the
+# module. `portable-dispatch` selects the loop-based interpreter dispatch in
+# every build. The default tail-call dispatch keeps native stack bounded only
+# when LLVM emits tail calls; without them a guest loop exhausts the host
+# stack, and tested debug builds would run a different dispatcher than release.
+# memory64, simd and the bundled `wat` parser stay disabled.
+wasmi = { version = "=2.0.0", default-features = false, features = [
+  "std",
+  "validate",
+  "portable-dispatch",
+] }
+
+[dev-dependencies]
+# Native reference decoder for the benchmark only; never a runtime dependency.
+persephone-media-decoder = { path = "../media-decoder" }
+png = { version = "=0.18.1", default-features = false }
+wat = "=1.261.0"

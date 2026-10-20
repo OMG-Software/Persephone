@@ -1,0 +1,17 @@
+[package]
+name = "persephone-media-decoder"
+version = "0.0.0"
+description = "Untrusted image decoder compiled to a WebAssembly guest with no host capabilities beyond its I/O imports"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# cdylib is the wasm32-unknown-unknown guest; rlib lets host tests exercise the
+# same decoding logic natively.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+png = { version = "=0.18.1", default-features = false }
+zune-jpeg = { version = "=0.5.15", default-features = false, features = ["std"] }

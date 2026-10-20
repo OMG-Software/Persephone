@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "checked_on": "2026-10-19",
+  "sdk_version": "0.19.1",
+  "native_variant": "MSC4186 through SDK Version::Native; capability discovery required",
+  "execution": "Windows test executable and disposable WSL homeservers outside the tool sandbox",
+  "driver_stack_bytes": 8388608,
+  "native_transition_run": {
+    "run": "encrypted-sliding-01",
+    "exit_code": 0,
+    "results": [
+      {
+        "server": "merovingian",
+        "version": "merovingian-server 0.12.29",
+        "passed": true,
+        "mode": "sliding_then_classic",
+        "checks": {
+          "distinct_user_ids": true,
+          "initially_unverified": true,
+          "cancelled_request_did_not_verify": true,
+          "sas_bound_to_expected_users_and_devices": true,
+          "out_of_band_sas_matched": true,
+          "both_sas_flows_done": true,
+          "mutually_verified_before_sending": true,
+          "alice_to_bob_exact_encrypted_and_decrypted_event": true,
+          "bob_to_alice_exact_encrypted_and_decrypted_event": true,
+          "sync_handler_decrypted_both_directions": true
+        },
+        "sliding_sync": {
+          "native_rounds_completed": 18,
+          "classic_driver_rounds_before_transition": 0,
+          "sas_verified_using_native_sync": true,
+          "native_bidirectional_decrypted_sync_receipts": true,
+          "completed_operation_transition": true,
+          "both_identities_keys_and_peer_verification_preserved": true,
+          "native_messages_decrypt_after_classic_transition": true,
+          "classic_bidirectional_decrypted_sync_receipts": true,
+          "classic_rounds_completed": 3
+        },
+        "both_logouts_confirmed": true,
+        "error": null
+      },
+      {
+        "server": "synapse",
+        "version": "1.163.0",
+        "passed": true,
+        "mode": "sliding_then_classic",
+        "checks": {
+          "distinct_user_ids": true,
+          "initially_unverified": true,
+          "cancelled_request_did_not_verify": true,
+          "sas_bound_to_expected_users_and_devices": true,
+          "out_of_band_sas_matched": true,
+          "both_sas_flows_done": true,
+          "mutually_verified_before_sending": true,
+          "alice_to_bob_exact_encrypted_and_decrypted_event": true,
+          "bob_to_alice_exact_encrypted_and_decrypted_event": true,
+          "sync_handler_decrypted_both_directions": true
+        },
+        "sliding_sync": {
+          "native_rounds_completed": 18,
+          "classic_driver_rounds_before_transition": 0,
+          "sas_verified_using_native_sync": true,
+          "native_bidirectional_decrypted_sync_receipts": true,
+          "completed_operation_transition": true,
+          "both_identities_keys_and_peer_verification_preserved": true,
+          "native_messages_decrypt_after_classic_transition": true,
+          "classic_bidirectional_decrypted_sync_receipts": true,
+          "classic_rounds_completed": 3
+        },
+        "both_logouts_confirmed": true,
+        "error": null
+      }
+    ]
+  },
+  "classic_regression_run": {
+    "exit_code": 0,
+    "results": [
+      {
+        "server": "merovingian",
+        "version": "merovingian-server 0.12.29",
+        "passed": true,
+        "mode": "classic_only",
+        "checks": {
+          "distinct_user_ids": true,
+          "initially_unverified": true,
+          "cancelled_request_did_not_verify": true,
+          "sas_bound_to_expected_users_and_devices": true,
+          "out_of_band_sas_matched": true,
+          "both_sas_flows_done": true,
+          "mutually_verified_before_sending": true,
+          "alice_to_bob_exact_encrypted_and_decrypted_event": true,
+          "bob_to_alice_exact_encrypted_and_decrypted_event": true,
+          "sync_handler_decrypted_both_directions": true
+        },
+        "sliding_sync": null,
+        "both_logouts_confirmed": true,
+        "error": null
+      },
+      {
+        "server": "synapse",
+        "version": "1.163.0",
+        "passed": true,
+        "mode": "classic_only",
+        "checks": {
+          "distinct_user_ids": true,
+          "initially_unverified": true,
+          "cancelled_request_did_not_verify": true,
+          "sas_bound_to_expected_users_and_devices": true,
+          "out_of_band_sas_matched": true,
+          "both_sas_flows_done": true,
+          "mutually_verified_before_sending": true,
+          "alice_to_bob_exact_encrypted_and_decrypted_event": true,
+          "bob_to_alice_exact_encrypted_and_decrypted_event": true,
+          "sync_handler_decrypted_both_directions": true
+        },
+        "sliding_sync": null,
+        "both_logouts_confirmed": true,
+        "error": null
+      }
+    ]
+  },
+  "commands": [
+    {
+      "command": "cargo build --offline --locked -p persephone-test-matrix --bin verified_recipients",
+      "exit_code": 0
+    },
+    {
+      "command": "verified_recipients <disposable-profile> <new-local-results> --sliding-sync",
+      "exit_code": 0
+    },
+    {
+      "command": "verified_recipients <disposable-profile> <new-local-results>",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test --offline --locked -p persephone-test-matrix --all-targets",
+      "exit_code": 0,
+      "passed": 19
+    },
+    {
+      "command": "cargo clippy --offline --locked -p persephone-test-matrix --all-targets -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 48,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2
+    }
+  ],
+  "round_counter_scope": "Fixture pair rounds: both selected client sync_once calls completed sequentially. Not wire-request telemetry.",
+  "cleanup": {
+    "runner_exit_code": 0,
+    "listeners_from_wsl": {
+      "merovingian": "connection_refused",
+      "synapse": "connection_refused"
+    }
+  },
+  "binary_sha256": "6241874156087d07466f7eaecd88ac3bc496c19559a613ca630cb1336476a86f",
+  "merovingian_binary_sha256": "485aebfaa07afde9e3b8abbb65a084034c1aeb560257a3274c2d7d71cd800c70",
+  "source_manifest_lock_sha256": {
+    "tests/matrix/src/bin/verified_recipients.rs": "7c364aa0dea82a1608e17c0119aae40ea5110aaafd909602ce187a72169ce714",
+    "tests/matrix/src/sync_fixture.rs": "0e3cabc7ac62ba9d384a90e86941cd3ed6411ca2b1b276dd45951eb9e1e92ea7",
+    "tests/matrix/src/sync_receipts.rs": "6df3c440222118f82395f0a524f4d34527366fd0cb78827db4a7739c74122490",
+    "tests/matrix/src/lib.rs": "4e290a15599889eecc817243486ba92e91f7bda38fecfec184c2d9a33cc520b8",
+    "tests/matrix/Cargo.toml": "4c5395ceb69fc10cff2aa2e2c18c3afd095b816e1cf577024c217a9c109a26e8",
+    "tools/servers/run.py": "a7fc74b83d28c4f13d0d8b46a1e94f1fffdd2c4c02da27025740bca80d2916ab",
+    "tools/dev.py": "17a71cba9cee6cf3545ae104e91d1884db1ab8256df3f599bf0d1c2937bd1171",
+    "tests/servers/test_run.py": "89659a6e9b8cb738fc4a6ce8b777d6b17cc743fd396c81cf40d706d70fef4073",
+    "Cargo.toml": "6dafcb3fd4b5e0ef3f95ac1b55bc5140988573dde0d984b890a71af6c034537a",
+    "Cargo.lock": "223306c90e903c16fb9b62b81e6b14ed619e9b6e71c514bccde2e445aba57b17",
+    ".cargo/config.toml": "f52f6cc8996220eeca6bca1fbaae043d8e4337598552dd70c98f6da2a2730a6e"
+  },
+  "hash_normalization": "Text hashes normalize CRLF to LF; binary hashes use exact bytes.",
+  "limits": [
+    "Trusted controller simulates out-of-band SAS comparison; no human verification UI or cross-signing/recovery.",
+    "In-memory stores; no encrypted-store restart or persistent session continuity.",
+    "One successful completed-operation switch on capable servers, not automatic unsupported-feature fallback.",
+    "Test-driver guards are not an SDK-wide cancellation/drain proof; no high-level sync-service or production coordinator tested.",
+    "Native encryption uploads/query use standard SDK HTTP APIs; only the selected native driver processes sync before transition.",
+    "Receipt bounds do not cap earlier SDK/network allocations; no product memory or media sandbox claim.",
+    "Classic regression reused the disposable accounts after native scenario logouts; native scenario used fresh server state.",
+    "No production homeserver contacted; platform containment not rerun or resolved."
+  ],
+  "dependency_continuity": {
+    "registry_name_version_source_checksum_tuples_preserved": 418,
+    "critical_sdk_crypto_http_tls_feature_union_unchanged": true,
+    "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",
+    "current_root_lock_sha256": "223306c90e903c16fb9b62b81e6b14ed619e9b6e71c514bccde2e445aba57b17",
+    "lock_text_change_cause": "Not established; no byte-identity claim. Current lockfile predates this run build and is hashed as an input."
+  }
+}

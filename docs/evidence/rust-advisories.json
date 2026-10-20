@@ -1,0 +1,3477 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-10-19T16:36:04+00:00",
+  "source": {
+    "service": "OSV",
+    "endpoint": "https://api.osv.dev/v1/querybatch",
+    "ecosystem": "crates.io",
+    "matching": "exact lockfile name and version"
+  },
+  "scope": {
+    "lockfiles": [
+      "Cargo.lock"
+    ],
+    "registry_package_versions": 418,
+    "batch_size": 100
+  },
+  "status": "complete",
+  "query_batches": 5,
+  "advisory_detail_queries": 2,
+  "query_failures": [],
+  "advisory_count": 2,
+  "packages": [
+    {
+      "name": "accessory",
+      "version": "2.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "adler2",
+      "version": "2.0.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "aead",
+      "version": "0.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "aes",
+      "version": "0.9.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "aho-corasick",
+      "version": "1.1.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "android_system_properties",
+      "version": "0.1.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "anyhow",
+      "version": "1.0.104",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "anymap2",
+      "version": "0.13.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "RUSTSEC-2026-0319",
+          "aliases": [],
+          "summary": "anymap2 is unmaintained",
+          "details": "The `anymap2` crate is not maintained. `anymap3` is the recommended replacement.",
+          "published": "2026-10-02T12:00:00Z",
+          "modified": "2026-10-02T09:00:02.606950167Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/anymap2",
+            "https://rustsec.org/advisories/RUSTSEC-2026-0319.html",
+            "https://github.com/rustsec/advisory-db/issues/3300#issuecomment-5939722190"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "anymap2",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/anymap2"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.0.0-0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affects": {
+                  "arch": [],
+                  "os": [],
+                  "functions": []
+                },
+                "affected_functions": null
+              },
+              "database_specific": {
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0319.json",
+                "categories": [],
+                "cvss": null,
+                "informational": "unmaintained"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "archery",
+      "version": "1.2.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "arrayvec",
+      "version": "0.7.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "as_variant",
+      "version": "1.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "assert-json-diff",
+      "version": "2.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "assign",
+      "version": "1.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-compression",
+      "version": "0.4.51",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-stream",
+      "version": "0.3.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-stream-impl",
+      "version": "0.3.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-trait",
+      "version": "0.1.92",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "atomic-waker",
+      "version": "1.1.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "autocfg",
+      "version": "1.5.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "aws-lc-rs",
+      "version": "1.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "aws-lc-sys",
+      "version": "0.46.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "backon",
+      "version": "1.6.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "base16ct",
+      "version": "1.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "base64",
+      "version": "0.22.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "base64",
+      "version": "0.23.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "base64ct",
+      "version": "1.8.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bitflags",
+      "version": "2.13.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "blake3",
+      "version": "1.8.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "block-buffer",
+      "version": "0.10.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "block-buffer",
+      "version": "0.12.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "block-padding",
+      "version": "0.4.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bs58",
+      "version": "0.5.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bumpalo",
+      "version": "3.20.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bytemuck",
+      "version": "1.25.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "byteorder",
+      "version": "1.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bytes",
+      "version": "1.12.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bytesize",
+      "version": "2.7.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cbc",
+      "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cc",
+      "version": "1.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cfg-if",
+      "version": "1.0.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cfg_aliases",
+      "version": "0.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "chacha20",
+      "version": "0.10.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "chacha20poly1305",
+      "version": "0.11.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "chrono",
+      "version": "0.4.45",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cipher",
+      "version": "0.5.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cmake",
+      "version": "0.1.58",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cmov",
+      "version": "0.5.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "combine",
+      "version": "4.6.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "compression-codecs",
+      "version": "0.4.46",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "compression-core",
+      "version": "0.4.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "const-oid",
+      "version": "0.10.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "const_panic",
+      "version": "0.2.17",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "constant_time_eq",
+      "version": "0.4.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "core-foundation",
+      "version": "0.10.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "core-foundation-sys",
+      "version": "0.8.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cpubits",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cpufeatures",
+      "version": "0.2.17",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cpufeatures",
+      "version": "0.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "crc32fast",
+      "version": "1.5.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "crypto-common",
+      "version": "0.1.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "crypto-common",
+      "version": "0.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ctr",
+      "version": "0.10.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ctutils",
+      "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "curve25519-dalek",
+      "version": "5.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "curve25519-dalek-derive",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "date_header",
+      "version": "1.0.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "deadpool",
+      "version": "0.12.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "deadpool",
+      "version": "0.13.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "deadpool-runtime",
+      "version": "0.1.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "deadpool-runtime",
+      "version": "0.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "deadpool-sync",
+      "version": "0.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "decancer",
+      "version": "3.3.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "delegate-display",
+      "version": "3.0.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "der",
+      "version": "0.8.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "deranged",
+      "version": "0.5.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "derivative",
+      "version": "2.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "RUSTSEC-2024-0388",
+          "aliases": [],
+          "summary": "`derivative` is unmaintained; consider using an alternative",
+          "details": "The [`derivative`](https://crates.io/crates/derivative) crate is no longer maintained.\nConsider using any alternative, for instance:\n- [derive_more](https://crates.io/crates/derive_more)\n- [derive-where](https://crates.io/crates/derive-where)\n- [educe](https://crates.io/crates/educe)",
+          "published": "2024-06-26T12:00:00Z",
+          "modified": "2024-11-10T13:34:40Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/derivative",
+            "https://rustsec.org/advisories/RUSTSEC-2024-0388.html",
+            "https://github.com/mcarton/rust-derivative/issues/117"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "derivative",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/derivative"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.0.0-0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affected_functions": null,
+                "affects": {
+                  "arch": [],
+                  "functions": [],
+                  "os": []
+                }
+              },
+              "database_specific": {
+                "categories": [],
+                "cvss": null,
+                "informational": "unmaintained",
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2024-0388.json"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "derive_more",
+      "version": "1.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "derive_more",
+      "version": "2.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "derive_more-impl",
+      "version": "1.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "derive_more-impl",
+      "version": "2.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "digest",
+      "version": "0.10.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "digest",
+      "version": "0.11.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "displaydoc",
+      "version": "0.2.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dunce",
+      "version": "1.0.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ed25519",
+      "version": "3.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ed25519-dalek",
+      "version": "3.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "either",
+      "version": "1.19.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "equivalent",
+      "version": "1.0.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "errno",
+      "version": "0.3.14",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "event-listener",
+      "version": "5.4.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "eyeball",
+      "version": "0.8.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "eyeball-im",
+      "version": "0.9.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fallible-iterator",
+      "version": "0.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fallible-streaming-iterator",
+      "version": "0.1.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fancy_constructor",
+      "version": "2.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fastrand",
+      "version": "2.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fiat-crypto",
+      "version": "0.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "find-msvc-tools",
+      "version": "0.1.15",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "flate2",
+      "version": "1.1.10",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fnv",
+      "version": "1.0.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "foldhash",
+      "version": "0.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "form_urlencoded",
+      "version": "1.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fs_extra",
+      "version": "1.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures-channel",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures-core",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures-executor",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures-io",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures-macro",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures-sink",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures-task",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "futures-util",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "generic-array",
+      "version": "0.14.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "getrandom",
+      "version": "0.2.17",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "getrandom",
+      "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gloo-timers",
+      "version": "0.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gloo-timers",
+      "version": "0.4.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gloo-utils",
+      "version": "0.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "growable-bloom-filter",
+      "version": "2.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "h2",
+      "version": "0.4.20",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.16.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.17.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hashlink",
+      "version": "0.12.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hermit-abi",
+      "version": "0.5.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hex",
+      "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hkdf",
+      "version": "0.13.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hmac",
+      "version": "0.13.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hpke",
+      "version": "0.14.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "html5ever",
+      "version": "0.39.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "http",
+      "version": "1.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "http-auth",
+      "version": "0.1.10",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "http-body",
+      "version": "1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "http-body-util",
+      "version": "0.1.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "httparse",
+      "version": "1.10.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "httpdate",
+      "version": "1.0.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hybrid-array",
+      "version": "0.4.15",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hyper",
+      "version": "1.12.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hyper-rustls",
+      "version": "0.27.10",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hyper-util",
+      "version": "0.1.21",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "iana-time-zone",
+      "version": "0.1.65",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "iana-time-zone-haiku",
+      "version": "0.1.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "icu_collections",
+      "version": "2.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "icu_locale_core",
+      "version": "2.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "icu_normalizer",
+      "version": "2.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "icu_normalizer_data",
+      "version": "2.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "icu_properties",
+      "version": "2.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "icu_properties_data",
+      "version": "2.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "icu_provider",
+      "version": "2.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "idna",
+      "version": "1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "idna_adapter",
+      "version": "1.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "imbl",
+      "version": "7.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "imbl-sized-chunks",
+      "version": "0.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "impartial-ord",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "indexmap",
+      "version": "2.14.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "inout",
+      "version": "0.2.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ipnet",
+      "version": "2.12.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "itertools",
+      "version": "0.14.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "itertools",
+      "version": "0.15.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "itoa",
+      "version": "1.0.18",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jni",
+      "version": "0.22.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jni-macros",
+      "version": "0.22.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jni-sys",
+      "version": "0.4.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jni-sys-macros",
+      "version": "0.4.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jobserver",
+      "version": "0.1.35",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "js-sys",
+      "version": "0.3.106",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "js_int",
+      "version": "0.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "js_option",
+      "version": "0.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "konst",
+      "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "language-tags",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "lazy_static",
+      "version": "1.5.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libc",
+      "version": "0.2.191",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libsqlite3-sys",
+      "version": "0.38.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "linux-raw-sys",
+      "version": "0.12.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "litemap",
+      "version": "0.8.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "lock_api",
+      "version": "0.4.14",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "log",
+      "version": "0.4.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "lru-slab",
+      "version": "0.1.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "macroific",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "macroific",
+      "version": "3.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "macroific_attr_parse",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "macroific_attr_parse",
+      "version": "3.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "macroific_core",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "macroific_core",
+      "version": "3.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "macroific_macro",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "macroific_macro",
+      "version": "3.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "maplit",
+      "version": "1.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "markup5ever",
+      "version": "0.39.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-pickle",
+      "version": "0.2.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-pickle-derive",
+      "version": "0.2.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-sdk",
+      "version": "0.19.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-sdk-base",
+      "version": "0.19.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-sdk-common",
+      "version": "0.19.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-sdk-crypto",
+      "version": "0.19.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-sdk-indexeddb",
+      "version": "0.19.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-sdk-sqlite",
+      "version": "0.19.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix-sdk-store-encryption",
+      "version": "0.19.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix_indexed_db_futures",
+      "version": "0.7.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "matrix_indexed_db_futures_macros_internal",
+      "version": "1.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "memchr",
+      "version": "2.8.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "mime",
+      "version": "0.3.17",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "mime2ext",
+      "version": "0.1.54",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "miniz_oxide",
+      "version": "0.9.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "mio",
+      "version": "1.2.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "new_debug_unreachable",
+      "version": "1.0.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "nu-ansi-term",
+      "version": "0.50.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "num-conv",
+      "version": "0.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "num-traits",
+      "version": "0.2.19",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "num_cpus",
+      "version": "1.17.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "oauth2",
+      "version": "5.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "oauth2-reqwest",
+      "version": "0.1.0-alpha.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "once_cell",
+      "version": "1.21.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "openssl-probe",
+      "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "parking",
+      "version": "2.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "parking_lot",
+      "version": "0.12.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "parking_lot_core",
+      "version": "0.9.12",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pbkdf2",
+      "version": "0.13.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "percent-encoding",
+      "version": "2.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "phf",
+      "version": "0.13.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "phf_codegen",
+      "version": "0.13.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "phf_generator",
+      "version": "0.13.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "phf_shared",
+      "version": "0.13.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pin-project-lite",
+      "version": "0.2.17",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pkcs8",
+      "version": "0.11.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pkg-config",
+      "version": "0.3.34",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "poly1305",
+      "version": "0.9.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "potential_utf",
+      "version": "0.1.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "powerfmt",
+      "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ppv-lite86",
+      "version": "0.2.21",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "precomputed-hash",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "proc-macro-crate",
+      "version": "3.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "proc-macro2",
+      "version": "1.0.107",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "prost",
+      "version": "0.14.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "prost-derive",
+      "version": "0.14.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "quinn",
+      "version": "0.11.12",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "quinn-proto",
+      "version": "0.11.19",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "quinn-udp",
+      "version": "0.5.16",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "quote",
+      "version": "1.0.47",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "r-efi",
+      "version": "6.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand",
+      "version": "0.10.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand",
+      "version": "0.8.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand_chacha",
+      "version": "0.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand_core",
+      "version": "0.10.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand_core",
+      "version": "0.6.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand_core",
+      "version": "0.9.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand_pcg",
+      "version": "0.10.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand_xoshiro",
+      "version": "0.7.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "readlock",
+      "version": "0.1.11",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "readlock-tokio",
+      "version": "0.1.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "redox_syscall",
+      "version": "0.5.18",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "regex",
+      "version": "1.13.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "regex-automata",
+      "version": "0.4.18",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "regex-syntax",
+      "version": "0.8.11",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "reqwest",
+      "version": "0.13.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ring",
+      "version": "0.17.14",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rmp",
+      "version": "0.8.15",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rmp-serde",
+      "version": "1.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rsqlite-vfs",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma",
+      "version": "0.17.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma-client-api",
+      "version": "0.25.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma-common",
+      "version": "0.20.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma-events",
+      "version": "0.35.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma-federation-api",
+      "version": "0.16.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma-html",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma-identifiers-validation",
+      "version": "0.13.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma-macros",
+      "version": "0.20.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ruma-signatures",
+      "version": "0.22.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rusqlite",
+      "version": "0.40.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustc-hash",
+      "version": "2.1.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustc_version",
+      "version": "0.4.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustix",
+      "version": "1.1.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustls",
+      "version": "0.23.46",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustls-native-certs",
+      "version": "0.8.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustls-pki-types",
+      "version": "1.15.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustls-platform-verifier",
+      "version": "0.7.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustls-platform-verifier-android",
+      "version": "0.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustls-webpki",
+      "version": "0.103.15",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rustversion",
+      "version": "1.0.23",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "safe_arch",
+      "version": "0.7.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "same-file",
+      "version": "1.0.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "schannel",
+      "version": "0.1.30",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "scopeguard",
+      "version": "1.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "sealed",
+      "version": "0.6.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "sealed",
+      "version": "0.7.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "security-framework",
+      "version": "3.7.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "security-framework-sys",
+      "version": "2.17.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "semver",
+      "version": "1.0.28",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde",
+      "version": "1.0.229",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde-wasm-bindgen",
+      "version": "0.6.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_bytes",
+      "version": "0.11.19",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_core",
+      "version": "1.0.229",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_derive",
+      "version": "1.0.229",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_html_form",
+      "version": "0.4.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_json",
+      "version": "1.0.154",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_path_to_error",
+      "version": "0.1.20",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_spanned",
+      "version": "1.1.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serdect",
+      "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "sha2",
+      "version": "0.10.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "sha2",
+      "version": "0.11.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "sharded-slab",
+      "version": "0.1.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "shlex",
+      "version": "2.0.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "signature",
+      "version": "3.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "simd-adler32",
+      "version": "0.3.10",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "simd_cesu8",
+      "version": "1.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "simdutf8",
+      "version": "0.1.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "siphasher",
+      "version": "1.0.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "slab",
+      "version": "0.4.12",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "smallvec",
+      "version": "1.16.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "socket2",
+      "version": "0.6.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "spki",
+      "version": "0.8.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "sqlite-wasm-rs",
+      "version": "0.5.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "stable_deref_trait",
+      "version": "1.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "string_cache",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "string_cache_codegen",
+      "version": "0.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "subtle",
+      "version": "2.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "syn",
+      "version": "1.0.109",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "syn",
+      "version": "2.0.119",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "syn",
+      "version": "3.0.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "sync_wrapper",
+      "version": "1.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "synstructure",
+      "version": "0.14.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tempfile",
+      "version": "3.27.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tendril",
+      "version": "0.5.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "termcolor",
+      "version": "1.4.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "thiserror",
+      "version": "1.0.69",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "thiserror",
+      "version": "2.0.21",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "thiserror-impl",
+      "version": "1.0.69",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "thiserror-impl",
+      "version": "2.0.21",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "thread_local",
+      "version": "1.1.10",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "time",
+      "version": "0.3.55",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "time-core",
+      "version": "0.1.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "time-macros",
+      "version": "0.2.32",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tinystr",
+      "version": "0.8.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tinyvec",
+      "version": "1.13.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tokio",
+      "version": "1.53.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tokio-macros",
+      "version": "2.7.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tokio-rustls",
+      "version": "0.26.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tokio-stream",
+      "version": "0.1.19",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tokio-util",
+      "version": "0.7.20",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml",
+      "version": "1.1.8+spec-1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml_datetime",
+      "version": "1.1.2+spec-1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml_edit",
+      "version": "0.25.17+spec-1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml_parser",
+      "version": "1.1.5+spec-1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tower",
+      "version": "0.5.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tower-http",
+      "version": "0.6.11",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tower-layer",
+      "version": "0.3.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tower-service",
+      "version": "0.3.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tracing",
+      "version": "0.1.44",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tracing-attributes",
+      "version": "0.1.31",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tracing-core",
+      "version": "0.1.36",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tracing-subscriber",
+      "version": "0.3.23",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "try-lock",
+      "version": "0.2.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ts-rs",
+      "version": "12.0.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ts-rs-macros",
+      "version": "12.0.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "typenum",
+      "version": "1.20.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "typewit",
+      "version": "1.15.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ulid",
+      "version": "3.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "unicode-ident",
+      "version": "1.0.27",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "unicode-normalization",
+      "version": "0.1.26",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "unicode-xid",
+      "version": "0.2.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "universal-hash",
+      "version": "0.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "untrusted",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "url",
+      "version": "2.5.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "utf8_iter",
+      "version": "1.0.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "uuid",
+      "version": "1.28.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "vcpkg",
+      "version": "0.2.15",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "version_check",
+      "version": "0.9.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "vodozemac",
+      "version": "0.11.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "walkdir",
+      "version": "2.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "want",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasi",
+      "version": "0.11.1+wasi-snapshot-preview1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasm-bindgen",
+      "version": "0.2.129",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasm-bindgen-futures",
+      "version": "0.4.79",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasm-bindgen-macro",
+      "version": "0.2.129",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasm-bindgen-macro-support",
+      "version": "0.2.129",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasm-bindgen-shared",
+      "version": "0.2.129",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasm-streams",
+      "version": "0.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasm_evt_listener",
+      "version": "0.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "web-sys",
+      "version": "0.3.106",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "web-time",
+      "version": "1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "web_atoms",
+      "version": "0.2.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "webpki-root-certs",
+      "version": "1.0.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wide",
+      "version": "0.7.33",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wildmatch",
+      "version": "2.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "winapi-util",
+      "version": "0.1.11",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-core",
+      "version": "0.62.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-implement",
+      "version": "0.60.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-interface",
+      "version": "0.59.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-link",
+      "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-result",
+      "version": "0.4.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-strings",
+      "version": "0.5.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.52.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.61.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-targets",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_aarch64_gnullvm",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_aarch64_msvc",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_i686_gnu",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_i686_gnullvm",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_i686_msvc",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_x86_64_gnu",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_x86_64_gnullvm",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_x86_64_msvc",
+      "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "winnow",
+      "version": "1.0.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wiremock",
+      "version": "0.6.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "writeable",
+      "version": "0.6.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "x25519-dalek",
+      "version": "3.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "xxhash-rust",
+      "version": "0.8.19",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "yoke",
+      "version": "0.8.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "yoke-derive",
+      "version": "0.8.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zerocopy",
+      "version": "0.8.63",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zerocopy-derive",
+      "version": "0.8.63",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zerofrom",
+      "version": "0.1.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zerofrom-derive",
+      "version": "0.1.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zeroize",
+      "version": "1.9.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zeroize_derive",
+      "version": "1.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zerotrie",
+      "version": "0.2.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zerovec",
+      "version": "0.11.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zerovec-derive",
+      "version": "0.11.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zlib-rs",
+      "version": "0.6.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zmij",
+      "version": "1.0.23",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    }
+  ],
+  "cargo_audit": {
+    "executed": false,
+    "availability_checked": true,
+    "installed": false
+  },
+  "queried_package_versions": 418,
+  "advisories_found": true
+}

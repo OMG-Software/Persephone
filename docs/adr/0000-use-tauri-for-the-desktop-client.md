@@ -26,6 +26,13 @@ operations.
 * iced with a Rust-authored UI.
 * GTK4 with gtk-rs bindings.
 
+`winit` was considered indirectly through Slint's window backend, rather than
+as a standalone toolkit. It supplies window creation and an event loop, but
+does not draw controls. A complete alternative would also need a renderer,
+widgets, text/layout, accessibility, and an isolation design. We have not
+evaluated such a custom stack or established a security ranking for it.
+See the [winit documentation](https://docs.rs/winit/0.30.13/winit/).
+
 ## Decision Outcome
 
 Chosen option: **Tauri with a Rust core and locally bundled web UI**, because
@@ -104,10 +111,10 @@ separate decisions.
 
 ## Links
 
-* [Security design](../security-design.md)
-* [GTK/Tauri security-model comparison](../gtk-tauri-security-model.md)
-* [Slint/iced release and dependency research](../slint-iced-security-research.md)
-* [Project plan](../project-plan.md)
+* [Security design](../architecture/security-design.md)
+* [GTK/Tauri security-model comparison](../research/gtk-tauri-security-model.md)
+* [Slint/iced release and dependency research](../research/slint-iced-security-research.md)
+* [Project plan](../planning/project-plan.md)
 * [Tauri process model](https://v2.tauri.app/concept/process-model/)
 * [Tauri capabilities and command defaults](https://v2.tauri.app/security/capabilities/)
 * Format reference: [Merovingian ADR-0001, MADR 2.1.2](https://github.com/OMG-Software/Merovingian/blob/4c56ea521b4f8df699676a811e13660800f98537/docs/adr/0001-use-markdown-architectural-decision-records.md)

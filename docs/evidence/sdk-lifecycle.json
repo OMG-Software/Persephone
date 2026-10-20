@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "checked_on": "2026-10-20",
+  "sdk_version": "0.19.1",
+  "tokio_version": "1.53.3",
+  "scope": "Bounded Rust prototype for application-admitted work plus controlled real SDK calls. Windows host, synthetic loopback HTTP and memory stores; no production/disposable homeserver instances started.",
+  "status": "tracked-work-drain-tested-global-sdk-drain-unresolved",
+  "p0_accepted": false,
+  "application_implemented": false,
+  "complete_sdk_lock_logout_store_handoff_authorized": false,
+  "source_inventory": [
+    {
+      "operation": "Client state",
+      "source": "matrix-sdk-0.19.1/src/client/mod.rs",
+      "source_sha256": "1ce41dc51c9f6eb98e0f7464490fbe72bfb80d1ed558e3ddcc657e72e753d675",
+      "anchor_pattern": "pub struct Client",
+      "matching_lines": [
+        205
+      ],
+      "contract": "Clone over Arc<ClientInner>; no public global stop-and-join API."
+    },
+    {
+      "operation": "Native response processing",
+      "source": "matrix-sdk-0.19.1/src/sliding_sync/mod.rs",
+      "source_sha256": "2291d7c740cfbea9763b458f502df8413c6caabc706a98f9469f286566f33ff9",
+      "anchor_pattern": "let future = async move",
+      "matching_lines": [
+        680
+      ],
+      "contract": "Spawned response processor joined on normal return; cancellation of outer call can detach it."
+    },
+    {
+      "operation": "Native crypto uploads",
+      "source": "matrix-sdk-0.19.1/src/sliding_sync/mod.rs",
+      "source_sha256": "2291d7c740cfbea9763b458f502df8413c6caabc706a98f9469f286566f33ff9",
+      "anchor_pattern": "let e2ee_uploads = spawn",
+      "matching_lines": [
+        631
+      ],
+      "contract": "Wrapper aborts on drop and joins on HTTP success; abort is not a completion acknowledgement."
+    },
+    {
+      "operation": "Classic sync",
+      "source": "matrix-sdk-0.19.1/src/client/mod.rs",
+      "source_sha256": "1ce41dc51c9f6eb98e0f7464490fbe72bfb80d1ed558e3ddcc657e72e753d675",
+      "anchor_pattern": "pub async fn sync_once",
+      "matching_lines": [
+        3182
+      ],
+      "contract": "Caller awaits response processing, handlers and outgoing requests on normal return."
+    },
+    {
+      "operation": "Event callbacks",
+      "source": "matrix-sdk-0.19.1/src/event_handler/mod.rs",
+      "source_sha256": "0c29f6941bb97fc5cc115df745888b2e36022f78c346e01cb8c74b635d1835e4",
+      "anchor_pattern": "async fn call_event_handlers",
+      "matching_lines": [
+        501
+      ],
+      "contract": "Handler futures awaited inline; dropping registration does not join an active callback."
+    },
+    {
+      "operation": "Encryption setup",
+      "source": "matrix-sdk-0.19.1/src/encryption/mod.rs",
+      "source_sha256": "0531e13d1b08acf9b6a2706c4ca1784408e109486c8b9b87bb99b57b463d41fb",
+      "anchor_pattern": "pub async fn wait_for_e2ee_initialization_tasks",
+      "matching_lines": [
+        2176
+      ],
+      "contract": "Takes one setup_e2ee handle; cancelling waiter can detach it; errors logged, unit returned."
+    },
+    {
+      "operation": "Backup upload",
+      "source": "matrix-sdk-0.19.1/src/encryption/tasks.rs",
+      "source_sha256": "0417116f4bea9fdcbcfdc5eb3c505a15d55dbbee94051c3b5f2f1bfa6432637f",
+      "anchor_pattern": "impl Drop for BackupUploadingTask",
+      "matching_lines": [
+        59
+      ],
+      "contract": "Listener initialized on client construction; Drop aborts without join; no public complete stop API."
+    },
+    {
+      "operation": "Backup downloads",
+      "source": "matrix-sdk-0.19.1/src/encryption/tasks.rs",
+      "source_sha256": "0417116f4bea9fdcbcfdc5eb3c505a15d55dbbee94051c3b5f2f1bfa6432637f",
+      "anchor_pattern": "impl Drop for BackupDownloadTask",
+      "matching_lines": [
+        139
+      ],
+      "contract": "AfterDecryptionFailure only, not default Manual; listener abort does not recursively join child tasks."
+    },
+    {
+      "operation": "Recovery observer",
+      "source": "matrix-sdk-0.19.1/src/encryption/recovery/mod.rs",
+      "source_sha256": "5835f5f9a6fab814245a31b6061140116fa85956de4fa7a6843b36ea9bd2cb61",
+      "anchor_pattern": "update_state_after_backup_state_change",
+      "matching_lines": [
+        725
+      ],
+      "contract": "Separate observer after recovery setup; not joined by setup waiter."
+    },
+    {
+      "operation": "Historic key bundles",
+      "source": "matrix-sdk-0.19.1/src/encryption/tasks.rs",
+      "source_sha256": "0417116f4bea9fdcbcfdc5eb3c505a15d55dbbee94051c3b5f2f1bfa6432637f",
+      "anchor_pattern": "struct BundleReceiverTask",
+      "matching_lines": [
+        433
+      ],
+      "contract": "Startup/listener tasks; release build has no public join; history-on-invite enabled by builder default."
+    },
+    {
+      "operation": "Event cache",
+      "source": "matrix-sdk-0.19.1/src/event_cache/mod.rs",
+      "source_sha256": "e0e12f6a59e6ae5912c3aefe067ac048471f65dc6e10237fbdd1a75e793581b2",
+      "anchor_pattern": "pub fn subscribe",
+      "matching_lines": [
+        294,
+        303,
+        499
+      ],
+      "contract": "Background subscriber work opt-in; existing Matrix fixtures do not subscribe."
+    },
+    {
+      "operation": "Send queue",
+      "source": "matrix-sdk-0.19.1/src/send_queue/mod.rs",
+      "source_sha256": "fd2db66a256da5bed37895177ba1e33882234abb43641de737d0097f3b439840",
+      "anchor_pattern": "impl Drop for SendQueueData",
+      "matching_lines": [
+        436
+      ],
+      "contract": "Globally enabled, per-room worker lazy; disabling does not join in-flight sends; fixtures send directly."
+    },
+    {
+      "operation": "Pause",
+      "source": "matrix-sdk-0.19.1/src/client/mod.rs",
+      "source_sha256": "1ce41dc51c9f6eb98e0f7464490fbe72bfb80d1ed558e3ddcc657e72e753d675",
+      "anchor_pattern": "pub async fn pause",
+      "matching_lines": [
+        3813
+      ],
+      "contract": "Disables queues/closes stores; requires prior sync stop; not an encryption task drain."
+    },
+    {
+      "operation": "Outgoing request health",
+      "source": "matrix-sdk-0.19.1/src/encryption/mod.rs",
+      "source_sha256": "0531e13d1b08acf9b6a2706c4ca1784408e109486c8b9b87bb99b57b463d41fb",
+      "anchor_pattern": "async fn send_outgoing_requests",
+      "matching_lines": [
+        857
+      ],
+      "contract": "Concurrent requests log individual failures; wrapper success alone is not proof of key delivery."
+    },
+    {
+      "operation": "Task monitor",
+      "source": "matrix-sdk-common-0.19.1/src/task_monitor.rs",
+      "source_sha256": "a8edf17ff5adfe0b67579e7537f5d46c97008cdc72b6023295d96ba578fff25b",
+      "anchor_pattern": "pub fn is_finished",
+      "matching_lines": [
+        485
+      ],
+      "contract": "Monitored handles expose abort and status; no recursive joined shutdown of SDK task groups."
+    },
+    {
+      "operation": "Tokio runtime shutdown",
+      "source": "tokio-1.53.3/src/runtime/runtime.rs",
+      "source_sha256": "67b4fae038519f2cfb85e57d8a3b0dbcfbb38a1b0875d67742854039ade1b0d7",
+      "anchor_pattern": "pub fn shutdown_timeout",
+      "matching_lines": [
+        452
+      ],
+      "contract": "Timeout/background shutdown may leak blocking work; not a completion acknowledgement."
+    },
+    {
+      "operation": "Tokio retained join",
+      "source": "tokio-1.53.3/src/runtime/task/join.rs",
+      "source_sha256": "e1c5c5730743d901ce375f0c46eb3050a9d69b5c28ebe275fb2a585a3e22debb",
+      "anchor_pattern": "Awaiting a `&mut JoinHandle<T>` is cancel safe",
+      "matching_lines": [
+        31
+      ],
+      "contract": "Borrowed JoinHandle wait is cancellation-safe; dropping the owned JoinHandle detaches its task."
+    }
+  ],
+  "new_tests": {
+    "count": 12,
+    "names": [
+      "canceled_stop_keeps_admission_closed_and_can_be_retried",
+      "deadline_fences_stale_callback_and_later_retry_drains",
+      "task_error_and_panic_fail_closed_after_all_jobs_finish",
+      "dropping_owner_closes_admission_without_claiming_drain",
+      "admission_is_bounded_and_sdk_drain_is_never_claimed",
+      "completed_jobs_still_count_toward_bounded_retained_handles",
+      "panicking_commit_poison_latches_failure_and_closes_admission",
+      "failed_job_closes_admission_and_fences_other_work_before_stop",
+      "stop_signals_cooperative_job_without_aborting_it",
+      "classic_sync_is_retained_until_handler_finishes_and_stale_update_is_fenced",
+      "native_sync_and_e2ee_frame_are_retained_until_handler_finishes_and_stale_update_is_fenced",
+      "retained_init_wait_survives_stop_cancellation_and_pause_is_not_sdk_drain"
+    ],
+    "full_check_exit_code": 0
+  },
+  "workspace_check": {
+    "command": "python tools/dev.py check --offline",
+    "exit_code": 0,
+    "rust_tests_passed": 67,
+    "frontend_tests_passed": 3,
+    "server_registration_tests_passed": 2,
+    "development_controller_tests_passed": 13,
+    "total_tests_passed": 85,
+    "format_clippy_frontend_build_contract_typescript": "passed"
+  },
+  "implementation": {
+    "retained_handle_cap": 8,
+    "active_lease_cap": 8,
+    "cooperative_stop_signal": true,
+    "borrowed_handles_retained_across_waiter_cancellation_and_timeouts": true,
+    "late_synchronous_updates_rejected_after_stop": true,
+    "task_error_panic_or_poison_closes_admission": true,
+    "observes_all_owned_task_results_before_tracked_success": true,
+    "sdk_completion_proof": "No proof issued: TrackedDrain.require_full_sdk_drain always rejects."
+  },
+  "real_sdk_observations": {
+    "classic_frame_awaits_paused_callback": true,
+    "native_e2ee_enabled_frame_awaits_paused_callback": true,
+    "stop_signal_checked_between_complete_sdk_frames": true,
+    "exactly_one_sync_request_per_controlled_loop": true,
+    "encryption_init_wait_retained_after_cancelling_stop": true,
+    "second_sdk_init_wait_returns_while_first_still_pending": true,
+    "client_pause_returns_while_encryption_init_still_blocked": true,
+    "init_http_response": "Controlled HTTP503 released via Notify; joining initialization is not proof of healthy initialization."
+  },
+  "failures_and_rechecks": [
+    {
+      "command": "python tools/dev.py check --offline (intermediate cooperative-signal edit)",
+      "exit_code": 101,
+      "stage": "Clippy -D warnings",
+      "cause": "A mechanical edit added the stop handle without updating the two SDK loops. Fixed loops to consult signal only after full SDK calls; final check passed."
+    }
+  ],
+  "source_sha256_crlf_normalized": {
+    "tests/matrix/src/lib.rs": "dd339548ce7cc4f37eb82163049fa54e4c2cc6d39af60e4db9765e36255861fb",
+    "tests/matrix/src/lifecycle_fixture.rs": "16ee75324872aaee29c74a03e1b9b8a7a68ef8b830cbb5c361f42a7a0aa27cf9",
+    "tests/matrix/tests/lifecycle_owner.rs": "cd0efab011293e5fdba817140bc86fc03c45b59f42ebc64ced9cdf262e4eff46",
+    "tests/matrix/tests/lifecycle_sdk.rs": "7b0c413e6721408be6ffca5d001ae1d702c5a7f3f0e7ebe91a09467818cbf51d",
+    "tests/matrix/tests/common/lifecycle_server.rs": "5987cc662cd8749ff66ded2e9bdcc9adda4f1f9641505d749bb017584349acd6",
+    "Cargo.toml": "6dafcb3fd4b5e0ef3f95ac1b55bc5140988573dde0d984b890a71af6c034537a",
+    "Cargo.lock": "599ee5f02822ed64432ea91f0b2771c8084abc1bf7b828fd8a794597b247d830",
+    "tests/matrix/Cargo.toml": "3bda44b7cf687c0938a3cc69bbe0e7834554b8f36dc22f3ec308ea7abd6170ff"
+  },
+  "dependency_changes": false,
+  "ui_changes": false,
+  "limits": [
+    "No public SDK API joins all backup, recovery, historic bundle, cache and queue tasks. Task inventory is for the pinned minimal profile; new features need renewed inventory.",
+    "This prototype tracks only tasks and callback leases registered with it. Drop closes admission but detached work may continue; it never certifies completion.",
+    "Client::pause uses memory stores in the negative control. No persistent store handoff, filesystem lock release, remote logout/revocation, runtime/process isolation or memory/key erasure proof.",
+    "Plain synthetic timeline callbacks exercise actual classic/native SDK processing; this turn did not rerun real-homeserver SAS/Megolm messaging or encrypted restart scenarios. Native E2EE extensions are enabled, but no claim of exhaustive outgoing crypto failure/child-task coverage.",
+    "SDK initialization waiter returns unit and logs errors; wrapper completion alone cannot establish encryption health. send_outgoing_requests also logs individual failures.",
+    "Only Windows tests executed; no native Linux/macOS desktop or packaged controls tested."
+  ],
+  "required_next_contract": [
+    "Close admission and unregister future producers for every activated SDK task group.",
+    "Expose retained completion handles for initialization, response processing, backup listeners and children, recovery, bundles and activated cache/queue tasks.",
+    "Keep pending shutdown ownership after deadline or caller cancellation; no completion token on timeout, task failure or unknown work.",
+    "Cooperatively finish non-cancellable response/store processing before closing any store or starting a new owner.",
+    "Propagate initialization and task outcomes and keep remote logout result separate from local shutdown.",
+    "Test real encrypted stores, delayed backup children, queued sends, callbacks, repeated lock/unlock, logout then different account, and all supported desktop platforms."
+  ]
+}

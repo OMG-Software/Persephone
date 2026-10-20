@@ -1,0 +1,34 @@
+[
+  {
+    "account_device_and_own_keys_preserved": true,
+    "classic_after_sliding": "passed",
+    "concurrent_history_and_key_query": "passed",
+    "history_events": 7,
+    "limits": [
+      "in-memory SDK store",
+      "completed operations before switch",
+      "no forced-cancellation/drain proof",
+      "not encrypted-message interoperability"
+    ],
+    "native_sliding": "passed",
+    "reported_version": "merovingian-server 0.12.29",
+    "sdk": "0.19.1",
+    "server": "merovingian"
+  },
+  {
+    "account_device_and_own_keys_preserved": true,
+    "classic_after_sliding": "passed",
+    "concurrent_history_and_key_query": "passed",
+    "history_events": 6,
+    "limits": [
+      "in-memory SDK store",
+      "completed operations before switch",
+      "no forced-cancellation/drain proof",
+      "not encrypted-message interoperability"
+    ],
+    "native_sliding": "passed",
+    "reported_version": "1.163.0",
+    "sdk": "0.19.1",
+    "server": "synapse"
+  }
+]

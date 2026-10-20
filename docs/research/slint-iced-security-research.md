@@ -2,7 +2,7 @@
 
 Research date: 19 October 2026. Target: a Rust Matrix desktop client for high-risk users on Windows, Linux, and macOS.
 
-Decision update: accepted [ADR-0000](adr/0000-use-tauri-for-the-desktop-client.md)
+Decision update: accepted [ADR-0000](../adr/0000-use-tauri-for-the-desktop-client.md)
 selects Tauri. The provisional recommendation below is retained as research
 history and does not override the accepted framework decision.
 
@@ -26,7 +26,7 @@ I inspected primary documentation, tagged manifests/source, security policies an
 
 OSV version queries covered **574 distinct public crate/version pairs** across the two fresh lockfiles. Lockfiles include optional, build, and other-target packages; a match is not automatically a shipped dependency. Dependency graphs establish selection, not final binary contents or exploitability. These probes pin the top-level framework; compatible transitive releases may be newer than the tagged upstream lockfiles.
 
-The [evidence bundle](research/slint-iced-evidence.zip) includes probe manifests, locks, graphs, advisory-query requests/results, source snapshots with hashes, and command-result records. Its third-party source files are research evidence, not dependencies vendored for the application.
+The [evidence bundle](slint-iced-evidence.zip) includes probe manifests, locks, graphs, advisory-query requests/results, source snapshots with hashes, and command-result records. Its third-party source files are research evidence, not dependencies vendored for the application.
 
 ## Comparison
 

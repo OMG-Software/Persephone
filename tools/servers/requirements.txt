@@ -1,0 +1,2 @@
+# Disposable test server only. Transitive Python graph is not a production lock.
+matrix-synapse==1.163.0

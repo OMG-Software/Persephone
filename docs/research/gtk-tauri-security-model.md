@@ -3,7 +3,7 @@
 19 October 2026. Documentation-based comparison and proposed design. No GTK/Tauri dependency probe, packaged application, sandbox verification, or security test was performed in this pass.
 
 Decision update: the project owner has selected Tauri in accepted
-[ADR-0000](adr/0000-use-tauri-for-the-desktop-client.md). The recommendation below
+[ADR-0000](../adr/0000-use-tauri-for-the-desktop-client.md). The recommendation below
 records the preceding research; the ADR is authoritative for the framework choice.
 
 ## Answer and recommendation

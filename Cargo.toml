@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/contracts",
+    "crates/media-decoder",
+    "crates/media-protocol",
+    "crates/media-sandbox",
+    "tests/matrix",
+    "tests/storage",
+    "tests/platform/windows",
+]
+
+# Shared components and integration test programs. The desktop host follows
+# after its security and compatibility gates pass.
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.96"
+publish = false
+
+# Keep SDK development builds useful without duplicating full debug/incremental
+# artifacts across each package. Release settings are unchanged.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.test]
+debug = 1
+incremental = false

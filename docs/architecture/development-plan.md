@@ -6,6 +6,10 @@ budgets, and other implementation choices below are recommendations to validate
 in the first development milestones. No application has been scaffolded or
 security-tested yet.
 
+P0 has started: the [feasibility workbench](../planning/feasibility.md) records isolated
+shared components, completed checks and open gates. These results do not establish
+production protection or complete P0.
+
 ## Requirements and scope
 
 Build a Rust Matrix desktop client for Windows, Linux, and macOS. Use Tauri with
@@ -23,8 +27,9 @@ initial implementation scope; later inclusion needs an explicit decision.
 
 Accepted decisions take precedence over recommendations here:
 
-* [ADR-0000: Tauri](adr/0000-use-tauri-for-the-desktop-client.md).
-* [ADR-0001: Sliding Sync with classic fallback](adr/0001-prefer-sliding-sync-with-classic-sync-fallback.md).
+* [ADR-0000: Tauri](../adr/0000-use-tauri-for-the-desktop-client.md).
+* [ADR-0001: Sliding Sync with classic fallback](../adr/0001-prefer-sliding-sync-with-classic-sync-fallback.md).
+* [ADR-0002: SDK-owned Matrix cryptography and explicit features](../adr/0002-use-sdk-owned-matrix-cryptography-and-explicit-features.md).
 
 ## System structure
 
@@ -65,13 +70,59 @@ additional processes only for a demonstrated security or operational need.
 | Media broker | SDK media retrieval, file selection handles, budgets, sandbox startup, output validation | Decoding hostile formats in the key-holding process |
 | Media worker | Allowlisted decoding/processing in a constrained process | Tokens, key material, arbitrary paths, inherited secrets, network access |
 
-## Proposed repository layout
+## Current repository layout
+
+The repository currently contains two shared Rust building blocks, integration
+and platform test programs, a static frontend, and the development tools. These
+components remain feasibility work; no desktop application has been scaffolded.
 
 ```text
-Cargo.toml                         # Workspace and shared dependency policy
-Cargo.lock                         # Committed application resolution
-package.json                       # Frontend/build/check commands
-<frontend lockfile>                # One package manager, frozen in CI
+Cargo.toml                         # Workspace for shared crates and test programs
+Cargo.lock                         # Single committed Cargo resolution
+.cargo/config.toml                 # Rust build output under .local/build/rust
+crates/
+  contracts/                       # Shared DTO and contract-generation code
+  media-protocol/                  # Shared byte-budget and framed protocol code
+tests/
+  matrix/                          # Matrix sync and encrypted-messaging integration tests
+  storage/                         # Encrypted-store and credential API tests
+  platform/windows/                # Windows containment test program
+frontend/                           # Svelte static UI feasibility implementation
+tools/
+  dev.py                           # Repository checks and run entry point
+  matrix_restart.py                # Disposable Rust worker restart controller
+  matrix_capabilities.py           # Controlled sync-capability integration runner
+  audit_dependencies.py            # OSV Rust dependency audit
+  servers/                         # Disposable Merovingian/Synapse harness
+docs/
+  adr/                             # Accepted and proposed decisions
+  architecture/                    # Architecture and security plans
+  evidence/                        # Run records and verification artifacts
+  planning/                         # Project plan and feasibility status
+  research/                         # Framework security research
+.local/
+  cache/cargo/                      # Cargo download cache
+  cache/npm/                        # npm cache
+  build/rust/                       # Cargo build output
+  build/frontend/                   # Frontend build output
+  runs/                             # New synthetic test profiles and output
+  servers/merovingian/              # Local Merovingian helper binary
+  servers/synapse/                  # Isolated Synapse virtual environment
+```
+
+`contracts` and `media-protocol` are shared building blocks, but remain
+provisional and are not security-approved application components. The test
+programs exercise bounded scenarios; their results do not establish production
+protections or close the P0 phase. The frontend builds static assets and is not
+wired to a Tauri application. See the [development guide](../development.md) for
+current commands and toolchain details.
+
+## Planned application layout
+
+Extend the existing frontend and shared crates toward the layout below in P1
+and later. The Tauri host, application core and media worker do not exist yet:
+
+```text
 frontend/
   src/components/                  # Room list, timeline, composer, security flows
   src/features/                    # Auth, rooms, verification, recovery, settings
@@ -83,16 +134,15 @@ src-tauri/
   permissions/                     # Application command permissions
   tauri.conf.json
 crates/
-  persephone-contracts/             # Explicit public DTOs and bounded worker protocol
-  persephone-core/                  # Session owner, services, Matrix/storage adapters
-  persephone-media-worker/          # Independently constrained binary
+  contracts/                       # Explicit public DTOs
+  media-protocol/                  # Bounded worker protocol
+  core/                            # Session owner, services, Matrix/storage adapters
+  media-worker/                    # Independently constrained binary
 tests/
   fixtures/                        # Synthetic malicious events/media, no real chats
-  integration/                     # Real SDK / disposable homeserver checks
+  matrix/                          # Real SDK / disposable homeserver checks
+  storage/                         # Store and credential integration checks
   platform/                        # Sandbox, storage, webview and packaging checks
-docs/
-  adr/                             # Durable accepted/proposed decisions
-  evidence/                        # Small verification summaries and artifact references
 ```
 
 Dependency direction: frontend consumes generated contracts through its bridge;
@@ -142,9 +192,15 @@ work and before publishing results; stale tasks cannot update another session,
 write to its store, or reuse media/file handles. A frontend-supplied generation
 is a freshness check, not an authorization credential.
 
-On lock/logout: reject new protected work, invalidate subscriptions, cancel sync
-and jobs, terminate workers, close/release SDK resources in a bounded order,
-and clear frontend state/canvases. Never report remote token revocation as
+On lock/logout: reject new protected work, invalidate subscriptions and clear
+frontend state/canvases immediately. Signal cooperative stop between complete
+SDK operations and retain all admitted response/store processing until joined.
+Stop media workers through their separate containment lifecycle. Close/release
+SDK resources only after relevant writers have completed. A deadline or cancelled
+shutdown waiter leaves a protected partial failure: it cannot authorize a new
+store owner or successful lock status. The [SDK completion contract](sdk-lifecycle.md)
+defines the required task coverage; the current fixture proves partial ownership
+only. Never report remote token revocation as
 successful if its request failed. Distinguish local sign-out from remote
 revocation failure, and warn about unrecovered encryption keys before destructive
 logout/reset. Dropping objects is not proof that all key copies were zeroized.
@@ -205,6 +261,20 @@ There must never be two competing owners advancing sync/key-processing state.
 Validate actual SDK task/cache behavior rather than assuming shared-client
 construction makes switching safe.
 
+The pinned P0 SDK source spawns response-processing work that survives caller
+cancellation. Aborting and awaiting an outer sync task therefore does not prove
+drain. A production stop must retain and await admitted SDK processing before
+starting the next mode or store owner; drain timeout leaves a protected failure.
+The P0 [encrypted native-to-classic completed-operation switch](../evidence/encrypted-sliding-sync.md)
+passed, while in-flight drain remains an open gate. See also
+[the SDK investigation](../evidence/matrix-sync.md) and
+[the current task inventory and controlled barrier tests](../evidence/sdk-lifecycle.md).
+The public encryption-initialization waiter consumes one join handle; a second
+wait can return while the first remains pending. `Client::pause()` can also
+return while initialization is still pending. Neither is a full SDK shutdown
+acknowledgement. Retain application-owned waiters across deadlines and obtain
+the missing SDK worker joins before relying on lock/logout or store handoff.
+
 Both adapters must deliver room membership/state, history, to-device messages,
 device-list changes, key counts/requests, and other E2EE-relevant updates needed
 by the selected SDK. Optional features can differ, but encrypted messaging and
@@ -213,7 +283,7 @@ initialization, retry, and unsupported-feature state explicitly; avoid user-
 visible success while key synchronization has failed.
 
 Merovingian and Synapse are the named integration targets for default Sliding
-Sync. Record exact server versions/configurations and SDK lockfiles in results.
+Sync. Record exact server versions/configurations and the root Cargo resolution in results.
 Also exercise a real classic-only/controlled capability deployment and
 deterministic unsupported/error fixtures; a forced classic test alone does not
 prove automatic negotiation works. No current server runtime compatibility is
@@ -384,7 +454,13 @@ Launch only the expected bundled worker, with explicit inherited handles and a
 minimal environment. Restrict filesystem access to required runtime resources,
 disable network/process creation, prevent core/store access, and enforce process
 lifetime and resource limits. A separate process, restricted working directory,
-or crate with no networking imports is not sufficient containment.
+or native crate with no networking imports is not sufficient containment.
+
+Per [ADR-0003](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md),
+the decoder itself runs as a `wasm32-unknown-unknown` module inside the worker,
+with an exact allowlist of host imports and no socket, file, clock or process
+capability, plus runtime memory and fuel/epoch limits. The OS mechanisms below
+remain as the outer layer against runtime escapes.
 
 | Platform | Candidate mechanism to investigate in P0 | Required proof |
 | --- | --- | --- |
@@ -415,6 +491,13 @@ copies and parser allocations in measurements: checking size only after Tauri
 or a worker has fully deserialized an enormous payload is insufficient. Define
 and test the earliest enforceable transport limits in P0/P1; no unbounded queue,
 pixel allocation, retries, cache, or subscription is acceptable.
+
+The [pinned Tauri IPC review](../evidence/tauri-ipc.md) found that ordinary
+command handlers receive bodies after transport allocation, and JSON requests
+are parsed by the framework before application dispatch. A raw-body command
+can enforce an application parse limit, but cannot by itself bound that earlier
+allocation. Keep this transport gate open until the selected runtime and all
+alternate IPC paths have an enforceable, measured containment strategy.
 
 P0 must also set an aggregate admission/memory budget across the host, admitted
 requests, transfers, worker, retained pixel buffers, and webview copies. For
@@ -451,12 +534,13 @@ support requires actual OS runs, not cross-compilation alone.
 
 ## Development milestones and acceptance gates
 
-Every milestone starts **not implemented / not verified**. Work can be developed
+Milestones require explicit acceptance evidence. P0 is currently **in progress**;
+the application milestones remain **not implemented / not verified**. Work can be developed
 in parallel where independent, but feature acceptance follows its gates.
 
 | Milestone | Deliverables | Exit evidence |
 | --- | --- | --- |
-| P0 — Feasibility and decisions | Frontend/SDK/version candidates; sync negotiation and concurrency proof; credential/store audit; signed sandbox-launch probes on all OSes; aggregate resource/IPC design | Versioned notes and ADRs; real Sliding Sync against Merovingian/Synapse, fallback/error distinction, safe concurrent SDK operations, denied worker operations, storage coverage findings; unresolved blockers named |
+| P0 — Feasibility and decisions | Frontend/SDK/version candidates; sync negotiation and concurrency proof; credential/store audit; signed sandbox-launch tests on all OSes; aggregate resource/IPC design | Versioned notes and ADRs; real Sliding Sync against Merovingian/Synapse, fallback/error distinction, safe concurrent SDK operations, denied worker operations, storage coverage findings; unresolved blockers named |
 | P1 — Scaffold and safe UI boundary | Proposed workspace, Tauri shell, typed contracts, mock bounded views, explicit permissions/CSP, production asset build; three-OS CI | Each OS builds/launches; denied IPC/navigation tests; hostile text stays inert; no unexpected network/file access; generated contracts checked |
 | P2 — Protected lifecycle and media foundation | Session owner, vault/storage adapters, task cancellation, worker broker, pixel transport, baseline limits | Lock/logout/stale-result races and interrupted storage operations tested; sandbox denied-access/crash/limit tests per OS; no required data leakage in artifact inspection |
 | P3 — Login, rooms, history and both sync modes | SDK integration, auth/discovery/restore, Sliding default, classic fallback, shared room/timeline projection | Disposable Merovingian/Synapse runs and classic-only profile; pagination/gaps/dedup/restart; mode-switch task cleanup and E2EE-state preservation |
@@ -465,7 +549,7 @@ in parallel where independent, but feature acceptance follows its gates.
 | P6 — Product and operational hardening | Keyboard/screen readers, scaling/IME, offline/reconnect behavior, privacy defaults, bounded-load testing, packaging | Actual packaged runs on all targets; hostile-content/IPC fuzz corpus and privacy captures; reviewed dependency and storage evidence |
 | P7 — Release readiness | Signed installers/update plan, support/security reporting, independent security review, compatibility report | Completed checks with exit statuses and artifacts; addressed findings; explicit remaining limitations; no high-risk-use claim from a green build alone |
 
-P0 probes are investigation artifacts, not permission to ship unverified controls.
+Feasibility checks do not grant permission to ship unverified controls.
 P3 can use disposable test fixtures while P4 is underway, but an unencrypted
 prototype does not meet the first usable release requirement. The release needs
 P0–P7 evidence; no delivery date is inferred before platform feasibility is known.
@@ -473,7 +557,7 @@ P0–P7 evidence; no delivery date is inferred before platform feasibility is kn
 ### Initial implementation backlog
 
 1. Resolve the working frontend/SDK versions and public contract-generation approach; record dependency features and licenses.
-2. Create isolated Sliding/default and classic/fallback SDK probes against disposable targets; verify required E2EE extensions and switching cleanup.
+2. Implement Sliding-default and classic-fallback SDK integration tests against disposable targets; verify required E2EE extensions and switching cleanup.
 3. Prototype per-OS credential unlock, SDK store protection, and denied-access media workers before building chat screens.
 4. Write threat-to-test cases for IPC escalation, unsafe content, key exposure, storage artifacts, stale sessions, and unsupported sync.
 5. Scaffold the conventional Tauri host and thin crates, with one harmless allowlisted command and denied-command tests.
@@ -519,13 +603,14 @@ artifact is not a pass.
 | --- | --- |
 | Tauri and locally bundled UI | Accepted, ADR-0000 |
 | Sliding default, classic fallback | Accepted, ADR-0001 |
+| SDK-owned Matrix cryptography and explicit features | Accepted direction, ADR-0002; production resolution conditional |
 | Frontend, SDK release/features, contracts | Proposed above; settle in P0/P1 and record durable decisions |
 | Local unlock/storage coverage and retention | Required P0 evidence before using real account data |
 | OS sandbox and resource enforcement | Required P0/P2 evidence; no silent insecure fallback |
 | Unverified-device policy and recovery UX | Required before P4 acceptance |
 | Minimum OS/CPU matrix, Linux packaging/display targets | Set in P0; test every claimed target |
-| Project repository and license | OMG-Software/Persephone; existing GPLv3 [LICENSE](../LICENSE) preserved |
-| Signing/distribution ownership and contribution policy | Owner input before release; does not block local planning/probes |
+| Project repository and license | OMG-Software/Persephone; existing GPLv3 [LICENSE](../../LICENSE) preserved |
+| Signing/distribution ownership and contribution policy | Owner input before release; does not block local planning or component development |
 
 The plan itself is complete as a development guide. Product code, exact package
 resolutions, interoperability, storage guarantees, and sandbox enforcement remain
@@ -542,3 +627,4 @@ substitute for testing the exact release selected in P0.
 * [SDK store configuration](https://matrix-org.github.io/matrix-rust-sdk/matrix_sdk/struct.ClientBuilder.html), [store encryption](https://matrix-org.github.io/matrix-rust-sdk/matrix_sdk_store_encryption/index.html), [recovery](https://matrix-org.github.io/matrix-rust-sdk/matrix_sdk/encryption/recovery/struct.Recovery.html).
 * [Svelte text bindings](https://svelte.dev/docs/svelte/basic-markup), [raw HTML warning](https://svelte.dev/docs/svelte/@html), [Tauri frontend integration](https://v2.tauri.app/start/frontend/).
 * [Windows AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation), [bubblewrap policy responsibility](https://github.com/containers/bubblewrap), [Apple App Sandbox](https://developer.apple.com/documentation/security/app-sandbox).
+

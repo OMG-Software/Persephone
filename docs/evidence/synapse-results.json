@@ -1,0 +1,20 @@
+[
+  {
+    "account_device_and_own_keys_preserved": true,
+    "classic_after_sliding": "passed",
+    "concurrent_history_and_key_query": "passed",
+    "history_events": 6,
+    "limits": [
+      "in-memory SDK store",
+      "completed operations before switch",
+      "no forced-cancellation/drain proof",
+      "not encrypted-message interoperability"
+    ],
+    "native_sliding": "passed",
+    "reported_version": "1.163.0 (b=main,fc8120a)",
+    "sdk": "0.19.1",
+    "server": "synapse",
+    "distribution_version": "1.163.0",
+    "version_note": "Synapse display decoration reflects surrounding checkout; package version verified through distribution metadata."
+  }
+]

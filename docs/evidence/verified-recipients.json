@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "checked_on": "2026-10-19",
+  "item_completed": "Two independent users with mutually SAS-verified devices",
+  "scope": "Classic sync on each disposable homeserver independently; trusted fixture controller simulates the out-of-band SAS comparison.",
+  "execution": "Windows Rust executable outside the tool sandbox; fresh non-root capability-restricted WSL homeservers.",
+  "sdk_version": "0.19.1",
+  "driver_stack_bytes": 8388608,
+  "verification_method": "m.sas.v1",
+  "manual_local_trust_setter_used": false,
+  "live_runs": [
+    {
+      "run": "verified-recipients-03",
+      "exit_code": 0,
+      "results": [
+        {
+          "server": "merovingian",
+          "version": "merovingian-server 0.12.29",
+          "passed": true,
+          "checks": {
+            "distinct_user_ids": true,
+            "initially_unverified": true,
+            "cancelled_request_did_not_verify": true,
+            "sas_bound_to_expected_users_and_devices": true,
+            "out_of_band_sas_matched": true,
+            "both_sas_flows_done": true,
+            "mutually_verified_before_sending": true,
+            "alice_to_bob_exact_encrypted_and_decrypted_event": true,
+            "bob_to_alice_exact_encrypted_and_decrypted_event": true
+          },
+          "both_logouts_confirmed": true,
+          "error": null
+        },
+        {
+          "server": "synapse",
+          "version": "1.163.0",
+          "passed": true,
+          "checks": {
+            "distinct_user_ids": true,
+            "initially_unverified": true,
+            "cancelled_request_did_not_verify": true,
+            "sas_bound_to_expected_users_and_devices": true,
+            "out_of_band_sas_matched": true,
+            "both_sas_flows_done": true,
+            "mutually_verified_before_sending": true,
+            "alice_to_bob_exact_encrypted_and_decrypted_event": true,
+            "bob_to_alice_exact_encrypted_and_decrypted_event": true
+          },
+          "both_logouts_confirmed": true,
+          "error": null
+        }
+      ]
+    },
+    {
+      "run": "verified-recipients-04",
+      "exit_code": 0,
+      "results": [
+        {
+          "server": "merovingian",
+          "version": "merovingian-server 0.12.29",
+          "passed": true,
+          "checks": {
+            "distinct_user_ids": true,
+            "initially_unverified": true,
+            "cancelled_request_did_not_verify": true,
+            "sas_bound_to_expected_users_and_devices": true,
+            "out_of_band_sas_matched": true,
+            "both_sas_flows_done": true,
+            "mutually_verified_before_sending": true,
+            "alice_to_bob_exact_encrypted_and_decrypted_event": true,
+            "bob_to_alice_exact_encrypted_and_decrypted_event": true
+          },
+          "both_logouts_confirmed": true,
+          "error": null
+        },
+        {
+          "server": "synapse",
+          "version": "1.163.0",
+          "passed": true,
+          "checks": {
+            "distinct_user_ids": true,
+            "initially_unverified": true,
+            "cancelled_request_did_not_verify": true,
+            "sas_bound_to_expected_users_and_devices": true,
+            "out_of_band_sas_matched": true,
+            "both_sas_flows_done": true,
+            "mutually_verified_before_sending": true,
+            "alice_to_bob_exact_encrypted_and_decrypted_event": true,
+            "bob_to_alice_exact_encrypted_and_decrypted_event": true
+          },
+          "both_logouts_confirmed": true,
+          "error": null
+        }
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "command": "cargo build --offline --locked -p persephone-test-matrix --bin verified_recipients",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test --offline --locked -p persephone-test-matrix --all-targets",
+      "exit_code": 0,
+      "passed": 12
+    },
+    {
+      "command": "cargo clippy --offline --locked -p persephone-test-matrix --all-targets -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 41,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2
+    }
+  ],
+  "failed_attempts": [
+    {
+      "run": "verified-recipients-01",
+      "exit_code": -1073741571,
+      "status": "STATUS_STACK_OVERFLOW",
+      "scope": "Original debug driver; Merovingian joined before process abort; no completed verification result."
+    },
+    {
+      "run": "verified-recipients-02",
+      "exit_code": -1073741571,
+      "status": "STATUS_STACK_OVERFLOW",
+      "scope": "Boxing outer futures alone was insufficient. Merovingian also reported login failure with no underlying cause captured; Synapse joined before abort. Not a pass."
+    }
+  ],
+  "cleanup": {
+    "runner_exit_codes": {
+      "verified-recipients-01": 0,
+      "verified-recipients-02": 0,
+      "verified-recipients-03": 0,
+      "verified-recipients-04": 0
+    },
+    "loopback_listeners_closed_from_wsl": {
+      "verified-recipients-01": {
+        "merovingian": true,
+        "synapse": true
+      },
+      "verified-recipients-02": {
+        "merovingian": true,
+        "synapse": true
+      },
+      "verified-recipients-03": {
+        "merovingian": true,
+        "synapse": true
+      },
+      "verified-recipients-04": {
+        "merovingian": true,
+        "synapse": true
+      }
+    }
+  },
+  "binary_sha256": "446dff8d9cb0a20e2b3e481113268f3d7a3d9706d750f246d9217f175246cdcf",
+  "merovingian_binary_sha256": "485aebfaa07afde9e3b8abbb65a084034c1aeb560257a3274c2d7d71cd800c70",
+  "source_manifest_lock_sha256": {
+    "tests/matrix/src/bin/verified_recipients.rs": "bff2037bde4da419a17b79fa7df68c9c36dd30337e08f8edff285122147b3a16",
+    "tests/matrix/Cargo.toml": "4c5395ceb69fc10cff2aa2e2c18c3afd095b816e1cf577024c217a9c109a26e8",
+    "tools/servers/run.py": "a7fc74b83d28c4f13d0d8b46a1e94f1fffdd2c4c02da27025740bca80d2916ab",
+    "tests/servers/test_run.py": "89659a6e9b8cb738fc4a6ce8b777d6b17cc743fd396c81cf40d706d70fef4073",
+    "tools/dev.py": "17a71cba9cee6cf3545ae104e91d1884db1ab8256df3f599bf0d1c2937bd1171",
+    "Cargo.toml": "6dafcb3fd4b5e0ef3f95ac1b55bc5140988573dde0d984b890a71af6c034537a",
+    "Cargo.lock": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",
+    ".cargo/config.toml": "f52f6cc8996220eeca6bca1fbaae043d8e4337598552dd70c98f6da2a2730a6e"
+  },
+  "hash_normalization": "Text hashes normalize CRLF to LF; binary hashes use exact bytes.",
+  "limits": [
+    "Automated trusted out-of-band comparison; no human verification UI.",
+    "Mutual local device trust from completed SDK SAS; no cross-signed user identity or persistence proof.",
+    "In-memory stores and classic sync only; no restart/recovery, encrypted Sliding Sync, federation, or device replacement.",
+    "Existing SDK key-sharing settings; denied-sharing/product policy untested.",
+    "Timeouts bound caller waits and do not establish SDK-wide task drain.",
+    "Fixed 8 MiB debug driver stack is not an application resource-budget result.",
+    "No production homeserver contacted. Windows sandbox gate not rerun or resolved by this work."
+  ],
+  "record_kind": "historical_classic_only_before_sliding_extension",
+  "current_source_evidence": "encrypted-sliding-sync.json"
+}
