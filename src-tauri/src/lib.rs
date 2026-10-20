@@ -9,8 +9,9 @@
 pub mod core_link;
 
 use core_link::{CoreError, CoreLink};
-use persephone_contracts::AppStatus;
-use persephone_core_protocol::Call;
+use persephone_contracts::{AppStatus, RoomList, TimelinePage};
+use persephone_core_protocol::{Call, ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
+use serde::de::DeserializeOwned;
 use tauri::{
     Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder, webview::NewWindowResponse,
 };
@@ -21,20 +22,60 @@ pub const MAIN_WINDOW: &str = "main";
 /// Argument the core passes when it starts the UI.
 pub const STARTED_BY_CORE: &str = "--started-by-core";
 
-/// The error the web view sees for any failed call. Details stay in Rust.
+/// Error strings the web view may see. Anything else stays in Rust.
 const UNAVAILABLE: &str = "core_unavailable";
+const INVALID_ARGUMENT: &str = "invalid_argument";
+const NOT_FOUND: &str = "not_found";
 
-/// Relays to the core, off the UI thread, and checks the reply's shape.
-#[tauri::command]
-async fn app_status(core: State<'_, CoreLink>) -> Result<AppStatus, String> {
-    let core = core.inner().clone();
+fn page_error(error: CoreError) -> String {
+    match error {
+        CoreError::Core(ErrorCode::InvalidArgument) => INVALID_ARGUMENT,
+        CoreError::Core(ErrorCode::NotFound) => NOT_FOUND,
+        _ => UNAVAILABLE,
+    }
+    .to_string()
+}
+
+/// Sends one call to the core off the UI thread and checks the reply against
+/// the expected contract type, which rejects unknown fields.
+async fn relay<T: DeserializeOwned + Send + 'static>(
+    core: &CoreLink,
+    call: Call,
+) -> Result<T, String> {
+    let core = core.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let value = core.call(Call::AppStatus {})?;
-        serde_json::from_value::<AppStatus>(value).map_err(|_| CoreError::BadReply)
+        let value = core.call(call)?;
+        serde_json::from_value::<T>(value).map_err(|_| CoreError::BadReply)
     })
     .await
     .map_err(|_| UNAVAILABLE.to_string())?
-    .map_err(|_| UNAVAILABLE.to_string())
+    .map_err(page_error)
+}
+
+#[tauri::command]
+async fn app_status(core: State<'_, CoreLink>) -> Result<AppStatus, String> {
+    relay(core.inner(), Call::AppStatus {}).await
+}
+
+#[tauri::command]
+async fn room_list(core: State<'_, CoreLink>) -> Result<RoomList, String> {
+    relay(core.inner(), Call::RoomList {}).await
+}
+
+/// Length checks here keep obviously bad input off the core channel; the core
+/// validates authoritatively.
+#[tauri::command]
+async fn timeline_page(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    cursor: Option<String>,
+) -> Result<TimelinePage, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || cursor.as_ref().is_some_and(|c| c.len() > MAX_CURSOR_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::TimelinePage { room_id, cursor }).await
 }
 
 /// True only for the bundled app's own origin. Tauri serves embedded assets
@@ -52,7 +93,11 @@ pub fn is_app_url(url: &Url) -> bool {
 pub fn configure<R: Runtime>(builder: tauri::Builder<R>, core: CoreLink) -> tauri::Builder<R> {
     builder
         .manage(core)
-        .invoke_handler(tauri::generate_handler![app_status])
+        .invoke_handler(tauri::generate_handler![
+            app_status,
+            room_list,
+            timeline_page
+        ])
         .setup(|app| {
             create_main_window(app.handle())?;
             Ok(())

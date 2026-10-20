@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "The main window may call app_status and nothing else: no core plugin, event, window, path or webview permissions.",
+  "description": "The main window may call the app's three read-only commands and nothing else: no core plugin, event, window, path or webview permissions.",
   "windows": ["main"],
-  "permissions": ["allow-app-status"]
+  "permissions": ["allow-app-status", "allow-room-list", "allow-timeline-page"]
 }

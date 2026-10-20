@@ -103,3 +103,74 @@ fn given_truncated_frame_then_it_counts_as_the_ui_closing() {
     assert_eq!(serve(Cursor::new(input), &mut output), ServeEnd::UiClosed);
     assert_eq!(replies(output).len(), 1);
 }
+
+/// Walks a room of large messages through the real frame writer and reader:
+/// every page must fit one control frame. Invalid arguments get error replies
+/// and the session continues.
+#[test]
+fn given_large_history_then_every_page_fits_a_control_frame_and_bad_arguments_get_errors() {
+    use persephone_contracts::TimelinePage;
+    use persephone_core_protocol::ErrorCode;
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut input = Vec::new();
+        send(
+            &mut input,
+            &Request {
+                id: pages,
+                call: Call::TimelinePage {
+                    room_id: "!long:example.invalid".into(),
+                    cursor: cursor.clone(),
+                },
+            },
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        assert_eq!(serve(Cursor::new(input), &mut output), ServeEnd::UiClosed);
+        assert!(
+            output.len() <= 17 + 128 * 1024,
+            "reply frame {} bytes",
+            output.len()
+        );
+        let reply = replies(output).pop().expect("a page reply");
+        let Outcome::Ok(value) = reply.outcome else {
+            panic!("{reply:?}");
+        };
+        let page: TimelinePage = serde_json::from_value(value).unwrap();
+        pages += 1;
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert!(
+        pages >= 4,
+        "60 messages of 8 KiB need several pages, got {pages}"
+    );
+
+    let mut input = Vec::new();
+    for (id, room, cursor) in [
+        (1, "!missing:example.invalid", None),
+        (2, "!planning:example.invalid", Some("t1.0".to_string())),
+    ] {
+        send(
+            &mut input,
+            &Request {
+                id,
+                call: Call::TimelinePage {
+                    room_id: room.into(),
+                    cursor,
+                },
+            },
+        )
+        .unwrap();
+    }
+    input.extend(requests(&[3]));
+    let mut output = Vec::new();
+    assert_eq!(serve(Cursor::new(input), &mut output), ServeEnd::UiClosed);
+    let outcomes: Vec<Outcome> = replies(output).into_iter().map(|r| r.outcome).collect();
+    assert_eq!(outcomes[0], Outcome::Error(ErrorCode::NotFound));
+    assert_eq!(outcomes[1], Outcome::Error(ErrorCode::InvalidArgument));
+    assert!(matches!(outcomes[2], Outcome::Ok(_)), "session continued");
+}

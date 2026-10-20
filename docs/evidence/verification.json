@@ -896,6 +896,42 @@
       "server_registration_tests_passed": 2,
       "development_controller_tests_passed": 13,
       "total_tests_passed": 162
+    },
+    {
+      "name": "bounded_views_walkthrough",
+      "checked_on": "2026-10-20",
+      "data": "synthetic",
+      "paging": {
+        "room_messages": 250,
+        "cumulative_items": [
+          100,
+          200,
+          250
+        ],
+        "complete_in_order": true
+      },
+      "byte_bounded_first_page_items": 13,
+      "body_cap_chars": 16385,
+      "timeline_injected_elements": 0,
+      "names_projected": true,
+      "unread_cap": "999+",
+      "keyboard": "Tab reaches first room button; Enter not reliably drivable via DevTools",
+      "evidence": "mock-views.md"
+    },
+    {
+      "name": "historical_devtools_endpoint_flakiness",
+      "finding": "intermittent DevTools endpoint failures were first misread as WebView2 process death and attributed to DIE_ON_UNHANDLED_EXCEPTION",
+      "resolution": "10 trials counting WebView2 processes showed no exits in either Job configuration; committed flag kept"
+    },
+    {
+      "name": "workspace_check_after_bounded_views",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 152,
+      "frontend_tests_passed": 8,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 175
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

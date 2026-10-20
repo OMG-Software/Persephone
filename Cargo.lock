@@ -3568,6 +3568,7 @@ dependencies = [
  "persephone-contracts",
  "persephone-core-protocol",
  "persephone-media-protocol",
+ "serde",
  "serde_json",
  "windows-sys 0.61.2",
 ]
@@ -3588,6 +3589,7 @@ dependencies = [
  "persephone-contracts",
  "persephone-core-protocol",
  "persephone-media-protocol",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",

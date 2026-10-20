@@ -28,6 +28,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Encrypted-store restart](evidence/encrypted-restart.md): separate-process session, device-trust and room-key recovery, offline decryption and resumed native encrypted delivery.
 
 - [Capability-selected sync and classic fallback](evidence/capability-fallback.md): real classic-only Synapse, controlled capability origins for both servers, and failure controls with independent request counters.
+- [Bounded room and timeline views](evidence/mock-views.md): synthetic data through the core; hostile names and bodies, byte-bounded paging, real-app walkthrough.
 - [Web view to host IPC size](evidence/ipc-transport.md): measured 9× host allocation for page payloads up to 256 MiB; decision pending.
 - [Tauri shell and IPC permissions](evidence/tauri-shell.md): one allowlisted command, strict CSP, navigation and window policy; mock-runtime and real web view checks.
 - [Contained media worker](evidence/media-worker.md): self-checking worker under AppContainer, Job and mitigations; memory and deadline results.

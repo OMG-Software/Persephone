@@ -11,9 +11,14 @@
 //! command or field) ends the session instead of being answered: the core
 //! stops serving and the UI is shut down.
 
+pub mod views;
+
 use persephone_contracts::AppStatus;
-use persephone_core_protocol::{Call, Outcome, ReceiveError, Reply, Request, receive, send};
+use persephone_core_protocol::{
+    Call, ErrorCode, Outcome, ReceiveError, Reply, Request, receive, send,
+};
 use persephone_media_protocol::ResourceBudgets;
+use serde::Serialize;
 use std::io::{Read, Write};
 
 pub const MILESTONE: &str = "P1";
@@ -29,17 +34,24 @@ pub enum ServeEnd {
     ReplyFailed,
 }
 
-/// Answers one request.
-pub fn handle(request: &Request) -> Reply {
-    let outcome = match request.call {
-        Call::AppStatus {} => serde_json::to_value(AppStatus {
+fn ok<T: Serialize>(value: &T) -> Outcome {
+    serde_json::to_value(value).map_or(Outcome::Error(ErrorCode::Internal), Outcome::Ok)
+}
+
+/// Answers one request from the given view data.
+pub fn handle(views: &views::Fixtures, request: &Request) -> Reply {
+    let outcome = match &request.call {
+        Call::AppStatus {} => ok(&AppStatus {
             version: env!("CARGO_PKG_VERSION").into(),
             milestone: MILESTONE.into(),
-        })
-        .map_or(
-            Outcome::Error(persephone_core_protocol::ErrorCode::Internal),
-            Outcome::Ok,
-        ),
+        }),
+        Call::RoomList {} => ok(&views.room_list()),
+        Call::TimelinePage { room_id, cursor } => {
+            match views.timeline_page(room_id, cursor.as_deref()) {
+                Ok(page) => ok(&page),
+                Err(code) => Outcome::Error(code),
+            }
+        }
     };
     Reply {
         id: request.id,
@@ -51,10 +63,11 @@ pub fn handle(request: &Request) -> Reply {
 /// protocol. Requests are handled one at a time, in order.
 pub fn serve<R: Read, W: Write>(mut input: R, mut output: W) -> ServeEnd {
     let budgets = ResourceBudgets::default();
+    let views = views::Fixtures::default();
     loop {
         match receive::<_, Request>(&mut input, &budgets) {
             Ok(request) => {
-                if send(&mut output, &handle(&request)).is_err() {
+                if send(&mut output, &handle(&views, &request)).is_err() {
                     return ServeEnd::ReplyFailed;
                 }
             }

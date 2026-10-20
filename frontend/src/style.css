@@ -64,3 +64,102 @@ article p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Room list and timeline (P1 mock views) */
+main {
+  width: min(100% - 2rem, 64rem);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(12rem, 16rem) 1fr;
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+}
+
+nav ul,
+.timeline ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+nav button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+nav button[aria-current='true'] {
+  border-color: #7ba2f7;
+  background: #1a2433;
+}
+
+nav button:focus-visible,
+.timeline button:focus-visible {
+  outline: 2px solid #7ba2f7;
+  outline-offset: 2px;
+}
+
+.room-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex: none;
+  min-width: 1.5rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: #7ba2f7;
+  color: #101722;
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.timeline {
+  margin-top: 0;
+  min-width: 0;
+}
+
+.timeline > button {
+  margin: 0.75rem 0;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid #354154;
+  border-radius: 0.5rem;
+  background: #1a2433;
+  color: inherit;
+  font: inherit;
+}
+
+.timeline p[dir='auto'] {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.gap,
+.note {
+  color: #b9c4d6;
+  font-style: italic;
+}
+
+.error {
+  color: #ffb4a9;
+}
+
+@media (max-width: 40rem) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}

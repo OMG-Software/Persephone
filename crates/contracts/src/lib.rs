@@ -33,6 +33,15 @@ pub struct TimelinePage {
     pub next_cursor: Option<String>,
 }
 
+/// Reply of the `room_list` command. The core caps the number of rooms;
+/// `truncated` says whether more exist than were sent.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomList {
+    pub rooms: Vec<RoomSummary>,
+    pub truncated: bool,
+}
+
 /// Reply of the `app_status` command, the shell's only command. It carries no
 /// system, account or user data.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -72,6 +81,7 @@ pub fn generated_typescript() -> String {
     let mut output = [
         format!("export {}", AppStatus::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
+        format!("export {}", RoomList::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),
     ]

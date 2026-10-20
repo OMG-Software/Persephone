@@ -1,5 +1,5 @@
 use persephone_contracts::{
-    AppStatus, generated_typescript, sample_room_summary, sample_timeline_page,
+    AppStatus, RoomList, generated_typescript, sample_room_summary, sample_timeline_page,
 };
 
 #[test]
@@ -86,5 +86,13 @@ fn app_status_serializes_camel_case_and_rejects_unknown_fields() {
     );
     assert!(
         serde_json::from_str::<AppStatus>(r#"{"version":"0","milestone":"P1","extra":1}"#).is_err()
+    );
+}
+
+#[test]
+fn room_list_rejects_unknown_fields() {
+    assert!(serde_json::from_str::<RoomList>(r#"{"rooms":[],"truncated":false}"#).is_ok());
+    assert!(
+        serde_json::from_str::<RoomList>(r#"{"rooms":[],"truncated":false,"cursor":"x"}"#).is_err()
     );
 }

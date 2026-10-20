@@ -9,8 +9,12 @@
 //! The same manifest is embedded here in every artifact this crate links.
 
 fn main() {
-    let mut attributes = tauri_build::Attributes::new()
-        .app_manifest(tauri_build::AppManifest::new().commands(&["app_status"]));
+    let mut attributes =
+        tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
+            "app_status",
+            "room_list",
+            "timeline_page",
+        ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes
             .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());

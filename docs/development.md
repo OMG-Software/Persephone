@@ -87,6 +87,8 @@ Merovingian must run as a non-root UID with empty effective and bounding capabil
 
 ## Recorded verification
 
+After adding the bounded room and timeline views, `python tools/dev.py check --offline` passed all 175 tests (152 Rust, 8 frontend, 2 server-registration and 13 development-controller tests). See the [views evidence](evidence/mock-views.md).
+
 After separating the core from the UI, `python tools/dev.py check --offline` passed all 162 tests (142 Rust, 5 frontend, 2 server-registration and 13 development-controller tests). See the [IPC transport evidence](evidence/ipc-transport.md#after-the-coreui-split) for the end-to-end and flood measurements.
 
 After adding the Tauri shell, `python tools/dev.py check --offline` passed all 154 tests (134 Rust, 5 frontend, 2 server-registration and 13 development-controller tests). `check` and `rust` now build the frontend first, because the shell embeds it at compile time. The Tauri dependency graph made `aws-lc-sys` rebuild; that run needed the `AR_x86_64_pc_windows_msvc` workaround below. See the [Tauri shell evidence](evidence/tauri-shell.md).

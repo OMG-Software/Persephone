@@ -14,6 +14,8 @@ export type RoomSummary = { roomId: string, displayName: string | null,
  */
 unreadCount: number, };
 
+export type RoomList = { rooms: Array<RoomSummary>, truncated: boolean, };
+
 export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, } | { "kind": "gap", next_cursor: string | null, };
 
 export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, };

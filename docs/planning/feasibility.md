@@ -7,7 +7,7 @@ scaffold and must not handle real chats.
 
 The [verification ledger](../evidence/verification.json) records passing,
 failing and unrun checks with source hashes. The current root workspace check
-passed 162 tests (142 Rust, 5 frontend, 2 server-registration and 13 controller tests), along with formatting, Clippy,
+passed 175 tests (152 Rust, 8 frontend, 2 server-registration and 13 controller tests), along with formatting, Clippy,
 TypeScript, generated-contract drift, and frontend build checks. The dependency
 audit completed against the single root lockfile. The recorded live smoke passed
 on both disposable homeservers; the native sandbox gate remains a failure, now
@@ -27,6 +27,7 @@ commands and paths.
 | --- | --- | --- |
 | Versioned frontend/SDK candidates | [Registry candidates](../evidence/versions.json), [frontend](../evidence/frontend.md), [dependencies](../evidence/dependencies.md) | Exact candidate pins exist; production adoption conditional |
 | Inert local UI | Svelte static build/type checks and 5 frontend tests pass, including bridge-only host access and no raw HTML; npm audit reports 0 advisories. [Tauri shell](../evidence/tauri-shell.md) runs in WebView2 under a strict CSP (no inline script, no string eval, no external fetch, navigation and new windows blocked) | Accessibility, keyboard and release/packaged runs pending |
+| Bounded views | [Synthetic room list and timeline](../evidence/mock-views.md) served by the core: names projected (bidi/controls replaced, 128 chars), bodies capped at 16 KiB and direction-isolated, pages bounded by 100 items and 112 KiB; complete back-paging verified in the real app | Real Matrix data, core→UI events, keyboard/screen-reader verification pending |
 | Sliding default and classic fallback | [Initial SDK/live sync checks](../evidence/matrix-sync.md) and [native encrypted sync with a completed-operation classic switch](../evidence/encrypted-sliding-sync.md) pass on both servers | [Initial capability selection](../evidence/capability-fallback.md) passes on both controlled origins and real classic-only Synapse; runtime renegotiation, cache freshness and crash recovery pending |
 | Encrypted message capability | [Native Sliding Sync and classic regression](../evidence/encrypted-sliding-sync.md): independent users, mutual SAS device verification, exact decrypted sync callbacks in both directions, key/identity/trust continuity after transition and both logouts pass on both servers | Simulated trusted out-of-band comparison; [normal-process restart](../evidence/encrypted-restart.md) passes; human UI, cross-signing, crash recovery and product sharing policy pending |
 | SDK concurrency/lifecycle | Both servers pass sync/history/key-query scheduling and completed-operation switch; [retained task ownership and SDK barrier tests](../evidence/sdk-lifecycle.md) cover timeout, cancelled waits, stale callbacks and cooperative frame completion | Pinned task inventory exposes gaps in public SDK completion APIs; full lock/logout/store handoff remains blocked. Tracked completion, pause and outer cancellation do not establish SDK-wide drain |

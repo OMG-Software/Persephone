@@ -1,32 +1,63 @@
 //! IPC permission tests against the shell's real configuration and compiled
 //! capabilities, using Tauri's mock runtime (no window or web view).
 
-use persephone_core_protocol::Call;
+use persephone_core_protocol::{Call, ErrorCode};
 use persephone_desktop::{
     MAIN_WINDOW, configure, context,
     core_link::{CoreError, CoreLink, CoreTransport},
     create_main_window,
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tauri::{
     ipc::{CallbackFn, InvokeBody},
     test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder},
     webview::InvokeRequest,
 };
 
-/// Stands in for the core process: answers `app_status` with a fixed status,
-/// or reports the core as unavailable.
+/// Stands in for the core process. Counts calls so tests can show which
+/// requests never reached it.
 struct FakeCore {
     available: bool,
+    calls: AtomicUsize,
+}
+
+impl FakeCore {
+    fn new(available: bool) -> Arc<Self> {
+        Arc::new(Self {
+            available,
+            calls: AtomicUsize::new(0),
+        })
+    }
 }
 
 impl CoreTransport for FakeCore {
     fn call(&self, call: Call) -> Result<serde_json::Value, CoreError> {
-        match (self.available, call) {
-            (true, Call::AppStatus {}) => {
-                Ok(serde_json::json!({"version": "9.9.9", "milestone": "P1"}))
-            }
-            (false, _) => Err(CoreError::Unavailable),
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.available {
+            return Err(CoreError::Unavailable);
+        }
+        match call {
+            Call::AppStatus {} => Ok(serde_json::json!({"version": "9.9.9", "milestone": "P1"})),
+            Call::RoomList {} => Ok(serde_json::json!({
+                "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2}],
+                "truncated": false
+            })),
+            Call::TimelinePage { room_id, cursor } => match (room_id.as_str(), cursor.as_deref()) {
+                ("!r:example.invalid", None) => Ok(serde_json::json!({
+                    "roomId": room_id,
+                    "items": [{"kind": "message", "event_id": "$1", "sender": "@a:example.invalid", "body": "hi"}],
+                    "nextCursor": null
+                })),
+                // A reply with a field the contract does not have.
+                ("!bad-reply:example.invalid", _) => Ok(serde_json::json!({
+                    "roomId": room_id, "items": [], "nextCursor": null, "accessToken": "x"
+                })),
+                (_, Some(_)) => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
         }
     }
 }
@@ -38,7 +69,7 @@ fn app_with(core: CoreLink) -> tauri::App<MockRuntime> {
 }
 
 fn app() -> tauri::App<MockRuntime> {
-    app_with(Arc::new(FakeCore { available: true }))
+    app_with(FakeCore::new(true))
 }
 
 fn app_origin() -> &'static str {
@@ -214,18 +245,61 @@ fn given_shell_config_then_security_settings_are_restrictive() {
     assert_eq!(capability["windows"], serde_json::json!([MAIN_WINDOW]));
     assert_eq!(
         capability["permissions"],
-        serde_json::json!(["allow-app-status"])
+        serde_json::json!(["allow-app-status", "allow-room-list", "allow-timeline-page"])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
 }
 
 #[test]
 fn given_unreachable_core_then_the_page_gets_only_a_generic_error() {
-    let app = app_with(Arc::new(FakeCore { available: false }));
+    let app = app_with(FakeCore::new(false));
     let window = create_main_window(&app).unwrap();
     let reply = get_ipc_response(
         &window,
         request("app_status", app_origin(), serde_json::json!({})),
     );
     assert_eq!(reply.unwrap_err(), serde_json::json!("core_unavailable"));
+}
+
+#[test]
+fn given_view_commands_then_replies_are_relayed_and_checked_against_contracts() {
+    let rooms = call("room_list", app_origin(), serde_json::json!({})).unwrap();
+    assert_eq!(rooms["rooms"][0]["displayName"], "<b>x</b>");
+    let page = call(
+        "timeline_page",
+        app_origin(),
+        serde_json::json!({"roomId": "!r:example.invalid", "cursor": null}),
+    )
+    .unwrap();
+    assert_eq!(page["items"][0]["body"], "hi");
+
+    let error = |args| call("timeline_page", app_origin(), args).unwrap_err();
+    assert_eq!(
+        error(serde_json::json!({"roomId": "!missing:example.invalid", "cursor": null})),
+        "not_found"
+    );
+    assert_eq!(
+        error(serde_json::json!({"roomId": "!r:example.invalid", "cursor": "t1.0"})),
+        "invalid_argument"
+    );
+    // The UI refuses a reply carrying a field outside the contract.
+    assert_eq!(
+        error(serde_json::json!({"roomId": "!bad-reply:example.invalid", "cursor": null})),
+        "core_unavailable"
+    );
+}
+
+#[test]
+fn given_oversized_arguments_then_the_ui_refuses_without_calling_the_core() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    for args in [
+        serde_json::json!({"roomId": format!("!{}", "r".repeat(300)), "cursor": null}),
+        serde_json::json!({"roomId": "!r:example.invalid", "cursor": "c".repeat(65)}),
+    ] {
+        let reply = get_ipc_response(&window, request("timeline_page", app_origin(), args));
+        assert_eq!(reply.unwrap_err(), serde_json::json!("invalid_argument"));
+    }
+    assert_eq!(core.calls.load(Ordering::SeqCst), 0);
 }

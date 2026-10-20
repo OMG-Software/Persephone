@@ -20,11 +20,25 @@ use std::io::{self, Read, Write};
 /// Every variant is a struct variant, even without arguments: serde does not
 /// apply `deny_unknown_fields` to unit variants of an internally tagged enum,
 /// so `AppStatus` as a unit variant silently accepted extra fields.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
     AppStatus {},
+    RoomList {},
+    /// A page of a room's history, older than `cursor` (or the newest page).
+    TimelinePage {
+        room_id: String,
+        /// Required, though it may be null: serde would otherwise treat a
+        /// missing field as `None`.
+        #[serde(deserialize_with = "Option::deserialize")]
+        cursor: Option<String>,
+    },
 }
+
+/// Longest room ID either side accepts in a call (Matrix limits IDs to 255 bytes).
+pub const MAX_ROOM_ID_BYTES: usize = 255;
+/// Longest opaque timeline cursor either side accepts in a call.
+pub const MAX_CURSOR_BYTES: usize = 64;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +54,10 @@ pub struct Request {
 pub enum ErrorCode {
     Unavailable,
     Internal,
+    /// An argument failed validation.
+    InvalidArgument,
+    /// The named room or cursor does not exist.
+    NotFound,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -153,6 +171,9 @@ mod tests {
             br#"{"id":1,"call":{"command":"app_status"},"extra":true}"#,
             br#"{"id":1,"call":{"command":"app_status","arg":1}}"#,
             br#"{"id":-1,"call":{"command":"app_status"}}"#,
+            br#"{"id":1,"call":{"command":"room_list","limit":5}}"#,
+            br#"{"id":1,"call":{"command":"timeline_page","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"timeline_page","room_id":"!r:s","cursor":null,"x":1}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

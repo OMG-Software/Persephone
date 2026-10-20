@@ -19,6 +19,7 @@ path = "src/main.rs"
 persephone-contracts = { path = "../crates/contracts" }
 persephone-core-protocol = { path = "../crates/core-protocol" }
 persephone-media-protocol = { path = "../crates/media-protocol" }
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 # Explicit features only. `custom-protocol` makes every build, debug included,
 # serve the embedded frontend; there is no development server. Off: devtools in
