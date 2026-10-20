@@ -1,3 +1,13 @@
+export type AppStatus = { 
+/**
+ * The application version, from the desktop crate's manifest.
+ */
+version: string, 
+/**
+ * The current development milestone, e.g. "P1".
+ */
+milestone: string, };
+
 export type RoomSummary = { roomId: string, displayName: string | null, 
 /**
  * u32 caps this count below JavaScript's exact-integer limit.

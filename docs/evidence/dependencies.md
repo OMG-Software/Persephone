@@ -94,6 +94,8 @@ lockfile also records optional and other-target dependencies.
 
 Later the same day the WebAssembly decoder added 21 third-party packages (`wasmi` 2.0.0 and its 7 crates in the host; `png` 0.18.1, `zune-jpeg` 0.5.15 and their dependencies in the guest; `wat`/`wast`/`wasm-encoder` for tests only), all MIT, Apache-2.0, Zlib or 0BSD. No existing version changed. The 284-package count above predates them. See the [WebAssembly decoder evidence](wasm-decoder.md).
 
+The Tauri shell then added 202 package versions to the lockfile (Tauri 2.12.4, tauri-build 2.7.3, wry, tao, webview2-com and their dependencies) and `@tauri-apps/api` 2.12.4 to the frontend (no dependencies; `npm audit` reports 0 advisories). No existing version changed. The pinned Tauri releases were six days old when adopted; see the [Tauri shell evidence](tauri-shell.md). Their licence review is pending.
+
 This is a metadata and source-notice review, not a legal opinion. It does not
 cover file-level licenses inside `aws-lc-sys` or bundled SQLite, npm packages,
 system libraries or packaged artifacts. Those, an SBOM, and the Linux/macOS

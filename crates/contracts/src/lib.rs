@@ -33,6 +33,17 @@ pub struct TimelinePage {
     pub next_cursor: Option<String>,
 }
 
+/// Reply of the `app_status` command, the shell's only command. It carries no
+/// system, account or user data.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AppStatus {
+    /// The application version, from the desktop crate's manifest.
+    pub version: String,
+    /// The current development milestone, e.g. "P1".
+    pub milestone: String,
+}
+
 pub fn sample_room_summary() -> RoomSummary {
     RoomSummary {
         room_id: "!example:server.invalid".into(),
@@ -59,6 +70,7 @@ pub fn sample_timeline_page() -> TimelinePage {
 pub fn generated_typescript() -> String {
     let config = Config::default();
     let mut output = [
+        format!("export {}", AppStatus::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),

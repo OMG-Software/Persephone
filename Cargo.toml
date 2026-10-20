@@ -7,6 +7,7 @@ members = [
     "crates/media-protocol",
     "crates/media-sandbox",
     "crates/media-worker",
+    "src-tauri",
     "tests/matrix",
     "tests/storage",
     "tests/platform/windows",

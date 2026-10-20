@@ -1,0 +1,41 @@
+[package]
+name = "persephone-desktop"
+version = "0.0.0"
+description = "Persephone desktop shell: thin Tauri host with an explicit command allowlist"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+name = "persephone_desktop"
+
+[[bin]]
+name = "persephone"
+path = "src/main.rs"
+
+[dependencies]
+persephone-contracts = { path = "../crates/contracts" }
+# Explicit features only. `custom-protocol` makes every build, debug included,
+# serve the embedded frontend; there is no development server. Off: devtools in
+# release, dynamic ACL changes, tracing (which records IPC payloads),
+# compression, isolation, and the Linux-only x11/dbus until Linux is built.
+tauri = { version = "=2.12.4", default-features = false, features = [
+  "wry",
+  "common-controls-v6",
+  "custom-protocol",
+] }
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3" }
+
+[dev-dependencies]
+# The mock runtime used by the IPC permission tests.
+tauri = { version = "=2.12.4", default-features = false, features = [
+  "wry",
+  "common-controls-v6",
+  "custom-protocol",
+  "test",
+] }
+serde_json = "=1.0.154"

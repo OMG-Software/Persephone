@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "The main window may call app_status and nothing else: no core plugin, event, window, path or webview permissions.",
+  "windows": ["main"],
+  "permissions": ["allow-app-status"]
+}

@@ -1,4 +1,6 @@
-use persephone_contracts::{generated_typescript, sample_room_summary, sample_timeline_page};
+use persephone_contracts::{
+    AppStatus, generated_typescript, sample_room_summary, sample_timeline_page,
+};
 
 #[test]
 fn checked_in_types_match_generator_without_mutating_files() {
@@ -70,4 +72,19 @@ fn serde_enforces_u32_integer_range_for_json_count() {
             "{invalid}"
         );
     }
+}
+
+#[test]
+fn app_status_serializes_camel_case_and_rejects_unknown_fields() {
+    let status = AppStatus {
+        version: "0.0.0".into(),
+        milestone: "P1".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&status).unwrap(),
+        serde_json::json!({"version": "0.0.0", "milestone": "P1"})
+    );
+    assert!(
+        serde_json::from_str::<AppStatus>(r#"{"version":"0","milestone":"P1","extra":1}"#).is_err()
+    );
 }
