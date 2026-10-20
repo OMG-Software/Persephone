@@ -11,10 +11,11 @@ use std::io::Cursor;
 
 /// Largest encoded input the guest accepts (ADR-0003 starting budget).
 pub const MAX_INPUT_BYTES: usize = 20 * 1024 * 1024;
-/// Largest width or height accepted.
-pub const MAX_DIMENSION: u32 = 8192;
-/// Largest pixel count accepted (16 megapixels, 64 MiB of RGBA output).
-pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
+/// Largest width or height accepted, shared with the worker frame protocol.
+pub use persephone_media_protocol::MAX_DIMENSION;
+/// Largest pixel count accepted (16,000,000), shared with the worker frame
+/// protocol so every decodable image also fits one RGBA pixel frame.
+pub use persephone_media_protocol::MAX_PIXELS;
 /// Allocation ceiling handed to the PNG decoder for its internal buffers.
 const PNG_INTERNAL_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -86,32 +87,65 @@ fn decode_png(input: &[u8]) -> Result<Rgba, Status> {
     if frame_len > rgba_len {
         return Err(Status::Malformed);
     }
-    let mut frame = vec![0; frame_len];
+    // Reserve the full RGBA size now so widening below never reallocates,
+    // which would briefly hold two frame-sized buffers.
+    let mut frame = Vec::with_capacity(rgba_len);
+    frame.resize(frame_len, 0);
     let output = reader.next_frame(&mut frame).map_err(png_status)?;
     if (output.width, output.height) != (width, height) || output.bit_depth != png::BitDepth::Eight
     {
         return Err(Status::Malformed);
     }
-    let samples = &frame[..output.line_size * height as usize];
-    let pixels = match output.color_type {
-        png::ColorType::Rgba => samples.to_vec(),
-        png::ColorType::Rgb => samples
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 0xff])
-            .collect(),
-        png::ColorType::GrayscaleAlpha => samples
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .flat_map(|ga| [ga[0], ga[0], ga[0], ga[1]])
-            .collect(),
-        png::ColorType::Grayscale => samples.iter().flat_map(|&g| [g, g, g, 0xff]).collect(),
+    let channels = match output.color_type {
+        png::ColorType::Rgba => 4,
+        png::ColorType::Rgb => 3,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Grayscale => 1,
         // normalize_to_color8 expands palettes; anything else is unexpected.
         png::ColorType::Indexed => return Err(Status::Malformed),
     };
+    frame.truncate(output.line_size * height as usize);
+    let pixels = widen_to_rgba(frame, channels, rgba_len)?;
     finish(width, height, pixels, rgba_len)
+}
+
+/// Expands 8-bit samples with `channels` per pixel to RGBA in place. Pixels
+/// are rewritten from the last to the first, so each destination lies at or
+/// after its source and no unread sample is overwritten.
+fn widen_to_rgba(
+    mut samples: Vec<u8>,
+    channels: usize,
+    rgba_len: usize,
+) -> Result<Vec<u8>, Status> {
+    let pixels = rgba_len / 4;
+    if samples.len() != pixels * channels {
+        return Err(Status::Malformed);
+    }
+    if channels == 4 {
+        return Ok(samples);
+    }
+    samples.resize(rgba_len, 0);
+    for pixel in (0..pixels).rev() {
+        let source = pixel * channels;
+        let rgba = match channels {
+            3 => [
+                samples[source],
+                samples[source + 1],
+                samples[source + 2],
+                0xff,
+            ],
+            2 => {
+                let gray = samples[source];
+                [gray, gray, gray, samples[source + 1]]
+            }
+            _ => {
+                let gray = samples[source];
+                [gray, gray, gray, 0xff]
+            }
+        };
+        samples[pixel * 4..pixel * 4 + 4].copy_from_slice(&rgba);
+    }
+    Ok(samples)
 }
 
 fn png_status(error: png::DecodingError) -> Status {
@@ -193,6 +227,11 @@ mod guest {
         if written != 0 {
             return Err(Status::HostRejectedOutput);
         }
+        // The host reads these pixels from guest memory after `decode`
+        // returns. Freeing them would let the allocator write its bookkeeping
+        // into the region first, so the buffer is deliberately leaked; each
+        // instance performs one decode and is then discarded.
+        std::mem::forget(image);
         Ok(Status::Ok)
     }
 }
@@ -230,6 +269,29 @@ mod tests {
     }
 
     #[test]
+    fn given_every_channel_count_when_widened_in_place_then_rgba_is_exact() {
+        assert_eq!(
+            widen_to_rgba(vec![1, 2, 3, 4, 5, 6], 3, 8).unwrap(),
+            [1, 2, 3, 255, 4, 5, 6, 255]
+        );
+        assert_eq!(
+            widen_to_rgba(vec![7, 8, 9, 10], 2, 8).unwrap(),
+            [7, 7, 7, 8, 9, 9, 9, 10]
+        );
+        assert_eq!(
+            widen_to_rgba(vec![11, 12], 1, 8).unwrap(),
+            [11, 11, 11, 255, 12, 12, 12, 255]
+        );
+        assert_eq!(widen_to_rgba(vec![1, 2, 3, 4], 4, 4).unwrap(), [1, 2, 3, 4]);
+        assert_eq!(widen_to_rgba(vec![1, 2, 3], 2, 8), Err(Status::Malformed));
+        let gray = png_bytes(3, 1, png::ColorType::Grayscale, &[20, 40, 60]);
+        assert_eq!(
+            decode(&gray).unwrap().pixels,
+            [20, 20, 20, 255, 40, 40, 40, 255, 60, 60, 60, 255]
+        );
+    }
+
+    #[test]
     fn given_unknown_truncated_or_oversized_input_then_decode_refuses() {
         assert_eq!(decode(b"GIF89a"), Err(Status::UnsupportedFormat));
         let png = png_bytes(2, 2, png::ColorType::Rgba, &[0; 16]);
@@ -251,7 +313,8 @@ mod tests {
             check_dimensions(MAX_DIMENSION, MAX_DIMENSION),
             Err(Status::TooLarge)
         );
-        assert_eq!(check_dimensions(4096, 4096), Ok(4096 * 4096 * 4));
+        assert_eq!(check_dimensions(4000, 4000), Ok(4000 * 4000 * 4));
+        assert_eq!(check_dimensions(4001, 4000), Err(Status::TooLarge));
     }
 
     /// A PNG header that claims 100000 x 100000 pixels with almost no data

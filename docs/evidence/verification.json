@@ -677,6 +677,75 @@
       "existing_versions_changed": false,
       "licenses": "MIT, Apache-2.0, Zlib, 0BSD combinations",
       "downloads": "wasm32-unknown-unknown rust-std via rustup; crates from crates.io (owner approved)"
+    },
+    {
+      "name": "contained_media_worker_end_to_end",
+      "command": "cargo test --locked --offline -p persephone-media-broker (after building persephone-media-worker)",
+      "exit_code": 0,
+      "tests_passed": 8,
+      "containment": [
+        "AppContainer, no capabilities",
+        "handle list: two pipes",
+        "prohibit dynamic code",
+        "Win32k system calls disabled",
+        "image-load and font hardening",
+        "Job: 1 process, 256 MiB, 10 s CPU, kill on close",
+        "broker 10 s wall deadline"
+      ],
+      "uncontained_self_check_mask": "0b1111",
+      "evidence": "media-worker.md"
+    },
+    {
+      "name": "historical_contained_worker_rgba_png_trap",
+      "exit": "Worker(Trap) after 59 ms",
+      "cause": "wasmi Vec-backed memory growth reallocation plus host input/output copies exceeded the 256 MiB Job limit",
+      "resolved_by": "borrowed input, zero-copy output, in-place widening, fixed 176 MiB guest memory"
+    },
+    {
+      "name": "contained_worker_benchmark_4000",
+      "profile": "release",
+      "peak_memory_mib_range": [
+        177.9,
+        193.7
+      ],
+      "memory_limit_mib": 256,
+      "decoded": [
+        "png_rgb",
+        "png_rgba",
+        "jpeg_baseline_420",
+        "jpeg_baseline_444",
+        "jpeg_progressive_420",
+        "png_48"
+      ],
+      "deadline_exceeded": [
+        "jpeg_progressive_444"
+      ],
+      "wall_ms": {
+        "png_rgb": 6468,
+        "png_rgba": 7093,
+        "jpeg_baseline_420": 5315,
+        "jpeg_baseline_444": 6230,
+        "jpeg_progressive_420": 7820,
+        "jpeg_progressive_444": 10010,
+        "png_48": 42
+      },
+      "runs_per_image": 1
+    },
+    {
+      "name": "pixel_limit_alignment",
+      "decoder_and_sandbox_max_pixels": 16000000,
+      "previous": 16777216,
+      "source": "persephone-media-protocol MAX_PIXELS"
+    },
+    {
+      "name": "workspace_check_after_media_worker",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 126,
+      "frontend_tests_passed": 3,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 144
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 # cdylib is the wasm32-unknown-unknown guest; rlib lets host tests exercise the
 # same decoding logic natively.
@@ -13,5 +14,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# Shared pixel limits; dependency-free, so it compiles to wasm32 unchanged.
+persephone-media-protocol = { path = "../media-protocol" }
 png = { version = "=0.18.1", default-features = false }
 zune-jpeg = { version = "=0.5.15", default-features = false, features = ["std"] }

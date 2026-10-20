@@ -10,9 +10,11 @@ Cargo.lock                         # One committed Rust dependency resolution
 .cargo/config.toml                 # Cargo output under .local/build/rust
 crates/
   contracts/                       # Shared DTO and contract-generation code
+  media-broker/                    # Launches the contained media worker (Windows)
   media-decoder/                   # PNG/JPEG decoder built as a wasm32 guest
   media-protocol/                  # Shared byte-budget and framed protocol code
   media-sandbox/                   # wasmi host: import allowlist and resource limits
+  media-worker/                    # Contained worker binary; embeds the decoder guest
 tests/
   matrix/                          # Matrix sync and encrypted-message integration tests
   storage/                         # Encrypted-store and credential API tests
@@ -62,7 +64,7 @@ python tools/dev.py sandbox --offline
 
 The Windows containment run is deliberately separate. On Windows it currently exits 1 because the zero-capability AppContainer worker is not network-denied: an endpoint-observed differential shows its packets reach the local TCP stack. The run also prints a comparative LPAC result, which does not change the gate. On other operating systems the command exits 2 because this program requires Windows; equivalent Linux and macOS coverage remains open. The unresolved gate is recorded in the [feasibility workbench](planning/feasibility.md) and [Windows sandbox evidence](evidence/windows-sandbox.md).
 
-For focused Rust work, use `cargo test --locked -p <package>` from the root. Current package names are `persephone-contracts`, `persephone-media-protocol`, `persephone-test-matrix`, `persephone-test-storage`, and `persephone-test-windows`. All resolve through the root lockfile and use `.local/build/rust` for output.
+For focused Rust work, use `cargo test --locked -p <package>` from the root. Current package names are `persephone-contracts`, `persephone-media-protocol`, `persephone-media-decoder`, `persephone-media-sandbox`, `persephone-media-worker`, `persephone-media-broker`, `persephone-test-matrix`, `persephone-test-storage`, and `persephone-test-windows`. All resolve through the root lockfile and use `.local/build/rust` for output.
 
 Run the controlled lifecycle tests with `cargo test --locked -p persephone-test-matrix --test lifecycle_owner --test lifecycle_sdk`. They use synthetic loopback HTTP and memory stores. The Rust prototype tracks registered work; it cannot certify full SDK shutdown or production lock/logout.
 
@@ -81,6 +83,8 @@ The harness in [`tools/servers`](../tools/servers) runs only disposable local Me
 Merovingian must run as a non-root UID with empty effective and bounding capability sets and `no_new_privs`. Synapse alone does not need that setup. The recorded live smoke passed for both servers, but it only establishes those harness scenarios. A hard kill can leave synthetic state; cleanup is not secure erasure. The loopback HTTP profile does not approve HTTP or trust bypasses in the product.
 
 ## Recorded verification
+
+After adding the contained media worker and broker, `python tools/dev.py check --offline` passed all 144 tests (126 Rust, 3 frontend, 2 server-registration and 13 development-controller tests). The broker's end-to-end tests launch the real worker under AppContainer, Job and process mitigations; they need the workspace build, because `cargo test -p persephone-media-broker` alone does not build the worker binary. See the [media worker evidence](evidence/media-worker.md).
 
 After adding the WebAssembly decoder sandbox, `python tools/dev.py check --offline` passed all 132 tests (114 Rust, 3 frontend, 2 server-registration and 13 development-controller tests). `check` now builds and lints the `wasm32-unknown-unknown` guest first. Twenty-two new tests cover the decoder and the sandbox; see the [WebAssembly decoder evidence](evidence/wasm-decoder.md). Intermediate runs failed on a host stack overflow (fixed by selecting `portable-dispatch`) and two Clippy lints.
 

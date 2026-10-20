@@ -144,6 +144,18 @@ fn given_input_over_host_limit_then_it_is_refused_before_the_guest_runs() {
     );
 }
 
+#[test]
+fn given_built_guest_then_its_linear_memory_is_fixed_at_the_sandbox_cap() {
+    let engine = wasmi::Engine::default();
+    let module = wasmi::Module::new(&engine, guest_wasm()).unwrap();
+    let Some(wasmi::ExternType::Memory(memory)) = module.get_export("memory") else {
+        panic!("guest exports no memory");
+    };
+    let cap_pages = (Limits::default().max_memory_bytes / 65_536) as u64;
+    assert_eq!(memory.minimum(), cap_pages, "initial memory");
+    assert_eq!(memory.maximum(), Some(cap_pages), "maximum memory");
+}
+
 // --- Import allowlist -------------------------------------------------------
 
 const VALID_EXPORTS: &str =

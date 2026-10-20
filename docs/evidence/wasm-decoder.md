@@ -83,11 +83,16 @@ input fits the 10-second deadline on this machine, but the progressive JPEG uses
 72% of it; slower CPUs may not fit. Tail-call dispatch is about 3× faster with
 identical fuel. One measurement run per configuration; no variance was measured.
 
+**Decision (owner, 20 October 2026): keep portable dispatch.** Speed is
+revisited only if measurements on slower supported hardware exceed the deadline;
+switching would require release-mode test coverage of the tail-call dispatcher.
+
 ## Limits
 
-Not yet done: running the sandbox inside the AppContainer/Job worker, enforcing
-the wall deadline in the worker loop, prohibiting dynamic code in the worker
-(compatible with an interpreter, untested), Linux/macOS runs, fuzzing the
+Running inside the contained worker, the wall deadline, the dynamic-code
+prohibition and the memory budget are now covered by the
+[media worker evidence](media-worker.md), which also lowers the pixel limit to
+the protocol's 16,000,000 and fixes guest memory at 176 MiB. Not yet done: Linux/macOS runs, fuzzing the
 decoders and the host, and wiring decode into Tauri and the Matrix media flow.
 Peak process memory was not measured. The guest's memory cap and the 64 MiB
 output copy together exceed the plan's 256 MiB worker budget at the limits, so

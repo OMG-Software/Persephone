@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -363,6 +363,99 @@ pub fn read_frame<R: Read>(
     })
 }
 
+/// Writes one frame. The body length must match the header, and the header
+/// must pass the same validation a receiver applies.
+pub fn write_frame<W: Write>(writer: &mut W, header: FrameHeader, body: &[u8]) -> io::Result<()> {
+    let wire = header.encode();
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
+    if u64::try_from(body.len()).ok() != Some(header.length) {
+        return Err(invalid("frame body length does not match header"));
+    }
+    FrameHeader::decode(wire).map_err(|_| invalid("frame header fails receiver validation"))?;
+    writer.write_all(&wire)?;
+    writer.write_all(body)?;
+    writer.flush()
+}
+
+/// Version byte of the worker failure message.
+pub const WORKER_FAILURE_VERSION: u8 = 1;
+const WORKER_FAILURE_LEN: usize = 6;
+
+/// Why a media worker returned no pixels. Sent as a 6-byte control frame body:
+/// version, tag and a big-endian 32-bit detail. There is deliberately no free
+/// text, so nothing derived from the untrusted input can travel back as a
+/// message string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerFailure {
+    /// The worker did not observe its required containment; the detail is a
+    /// bitmask of the checks that failed. No input was read.
+    ContainmentCheck(u32),
+    BadRequest,
+    ModuleRejected,
+    InputTooLarge,
+    Instantiation,
+    FuelExhausted,
+    Trap,
+    /// The guest decoder refused the input with this status.
+    GuestRejected(i32),
+    NoOutput,
+    InvalidOutput,
+}
+
+impl WorkerFailure {
+    pub fn encode(self) -> [u8; WORKER_FAILURE_LEN] {
+        let (tag, detail): (u8, u32) = match self {
+            Self::ContainmentCheck(mask) => (1, mask),
+            Self::BadRequest => (2, 0),
+            Self::ModuleRejected => (3, 0),
+            Self::InputTooLarge => (4, 0),
+            Self::Instantiation => (5, 0),
+            Self::FuelExhausted => (6, 0),
+            Self::Trap => (7, 0),
+            Self::GuestRejected(status) => (8, status as u32),
+            Self::NoOutput => (9, 0),
+            Self::InvalidOutput => (10, 0),
+        };
+        let mut bytes = [0; WORKER_FAILURE_LEN];
+        bytes[0] = WORKER_FAILURE_VERSION;
+        bytes[1] = tag;
+        bytes[2..6].copy_from_slice(&detail.to_be_bytes());
+        bytes
+    }
+
+    pub fn decode(body: &[u8]) -> Option<Self> {
+        let bytes: [u8; WORKER_FAILURE_LEN] = body.try_into().ok()?;
+        if bytes[0] != WORKER_FAILURE_VERSION {
+            return None;
+        }
+        let detail = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+        let no_detail = |failure| (detail == 0).then_some(failure);
+        match bytes[1] {
+            1 => Some(Self::ContainmentCheck(detail)),
+            2 => no_detail(Self::BadRequest),
+            3 => no_detail(Self::ModuleRejected),
+            4 => no_detail(Self::InputTooLarge),
+            5 => no_detail(Self::Instantiation),
+            6 => no_detail(Self::FuelExhausted),
+            7 => no_detail(Self::Trap),
+            8 => Some(Self::GuestRejected(detail as i32)),
+            9 => no_detail(Self::NoOutput),
+            10 => no_detail(Self::InvalidOutput),
+            _ => None,
+        }
+    }
+
+    /// The control frame header for this message.
+    pub fn header() -> FrameHeader {
+        FrameHeader {
+            kind: FrameKind::Control,
+            length: WORKER_FAILURE_LEN as u64,
+            width: 0,
+            height: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +680,74 @@ mod tests {
         assert_eq!(budgets.aggregate_used(), 4);
         drop(frame);
         assert_eq!(budgets.aggregate_used(), 0);
+    }
+
+    #[test]
+    fn given_worker_failures_when_encoded_then_decode_round_trips_strictly() {
+        for failure in [
+            WorkerFailure::ContainmentCheck(0b1011),
+            WorkerFailure::BadRequest,
+            WorkerFailure::ModuleRejected,
+            WorkerFailure::InputTooLarge,
+            WorkerFailure::Instantiation,
+            WorkerFailure::FuelExhausted,
+            WorkerFailure::Trap,
+            WorkerFailure::GuestRejected(-3),
+            WorkerFailure::NoOutput,
+            WorkerFailure::InvalidOutput,
+        ] {
+            assert_eq!(WorkerFailure::decode(&failure.encode()), Some(failure));
+        }
+        let mut wrong_version = WorkerFailure::Trap.encode();
+        wrong_version[0] = 2;
+        let mut stray_detail = WorkerFailure::Trap.encode();
+        stray_detail[5] = 1;
+        let mut unknown_tag = WorkerFailure::Trap.encode();
+        unknown_tag[1] = 99;
+        for body in [
+            &wrong_version[..],
+            &stray_detail,
+            &unknown_tag,
+            &[1, 7, 0, 0, 0],
+            &[],
+        ] {
+            assert_eq!(WorkerFailure::decode(body), None);
+        }
+    }
+
+    #[test]
+    fn given_frames_when_written_then_reader_accepts_them_and_mismatches_are_refused() {
+        let budgets = ResourceBudgets::default();
+        let mut wire = Vec::new();
+        write_frame(
+            &mut wire,
+            WorkerFailure::header(),
+            &WorkerFailure::NoOutput.encode(),
+        )
+        .unwrap();
+        let pixels = FrameHeader {
+            kind: FrameKind::RgbaPixels,
+            length: 8,
+            width: 1,
+            height: 2,
+        };
+        write_frame(&mut wire, pixels, &[9; 8]).unwrap();
+        let mut reader = Cursor::new(wire);
+        let control = read_frame(&mut reader, &budgets).unwrap();
+        assert_eq!(
+            WorkerFailure::decode(control.body()),
+            Some(WorkerFailure::NoOutput)
+        );
+        let frame = read_frame(&mut reader, &budgets).unwrap();
+        assert_eq!(
+            (frame.header().width, frame.header().height, frame.body()),
+            (1, 2, &[9u8; 8][..])
+        );
+
+        let mut sink = Vec::new();
+        assert!(write_frame(&mut sink, pixels, &[0; 7]).is_err());
+        let bad_dims = FrameHeader { width: 3, ..pixels };
+        assert!(write_frame(&mut sink, bad_dims, &[0; 8]).is_err());
+        assert!(sink.is_empty(), "nothing is written for a refused frame");
     }
 }

@@ -27,6 +27,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Encrypted-store restart](evidence/encrypted-restart.md): separate-process session, device-trust and room-key recovery, offline decryption and resumed native encrypted delivery.
 
 - [Capability-selected sync and classic fallback](evidence/capability-fallback.md): real classic-only Synapse, controlled capability origins for both servers, and failure controls with independent request counters.
+- [Contained media worker](evidence/media-worker.md): self-checking worker under AppContainer, Job and mitigations; memory and deadline results.
 - [WebAssembly decoder sandbox](evidence/wasm-decoder.md): import allowlist, memory/fuel limits, hostile-module tests and 16-megapixel benchmark.
 - [SDK task ownership and cooperative stop](evidence/sdk-lifecycle.md): retained Rust task ownership, controlled SDK barriers and the unresolved full SDK shutdown contract.
 

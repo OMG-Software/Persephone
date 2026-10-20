@@ -2318,9 +2318,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "persephone-media-broker"
+version = "0.0.0"
+dependencies = [
+ "persephone-media-protocol",
+ "png",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "persephone-media-decoder"
 version = "0.0.0"
 dependencies = [
+ "persephone-media-protocol",
  "png",
  "zune-jpeg",
 ]
@@ -2334,9 +2344,19 @@ name = "persephone-media-sandbox"
 version = "0.0.0"
 dependencies = [
  "persephone-media-decoder",
+ "persephone-media-protocol",
  "png",
  "wasmi",
  "wat",
+]
+
+[[package]]
+name = "persephone-media-worker"
+version = "0.0.0"
+dependencies = [
+ "persephone-media-protocol",
+ "persephone-media-sandbox",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

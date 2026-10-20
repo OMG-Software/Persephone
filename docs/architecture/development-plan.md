@@ -82,7 +82,11 @@ Cargo.lock                         # Single committed Cargo resolution
 .cargo/config.toml                 # Rust build output under .local/build/rust
 crates/
   contracts/                       # Shared DTO and contract-generation code
+  media-broker/                    # Contained-worker launcher (Windows prototype)
+  media-decoder/                   # PNG/JPEG decoder, wasm32 guest
   media-protocol/                  # Shared byte-budget and framed protocol code
+  media-sandbox/                   # wasmi host for the decoder guest
+  media-worker/                    # Contained worker binary
 tests/
   matrix/                          # Matrix sync and encrypted-messaging integration tests
   storage/                         # Encrypted-store and credential API tests

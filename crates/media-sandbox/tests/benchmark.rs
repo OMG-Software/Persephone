@@ -40,19 +40,21 @@ fn benchmark_largest_budgeted_images() {
         let reference = persephone_media_decoder::decode(&input).unwrap();
         let native_ms = native.elapsed().as_millis();
         let sandboxed = Instant::now();
-        let (image, fuel) = sandbox.decode_measured(&input, &limits).unwrap();
+        let (image, stats) = sandbox.decode_measured(&input, &limits).unwrap();
         let sandbox_ms = sandboxed.elapsed().as_millis();
         assert_eq!(
             image.rgba, reference.pixels,
             "sandbox output differs from native"
         );
         println!(
-            "{}: {} MiB in, {}x{}, native {native_ms} ms, sandbox {sandbox_ms} ms ({:.1}x), fuel {fuel}",
+            "{}: {} MiB in, {}x{}, native {native_ms} ms, sandbox {sandbox_ms} ms ({:.1}x), fuel {}, guest memory {:.1} MiB",
             path.file_name().unwrap().to_string_lossy(),
             input.len() / 1_048_576,
             image.width,
             image.height,
             sandbox_ms as f64 / native_ms.max(1) as f64,
+            stats.fuel_used,
+            stats.guest_memory_bytes as f64 / 1_048_576.0,
         );
     }
 }

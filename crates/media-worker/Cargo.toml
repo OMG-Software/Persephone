@@ -1,0 +1,23 @@
+[package]
+name = "persephone-media-worker"
+version = "0.0.0"
+description = "Contained media worker process: verifies its own containment, then decodes one image in the WebAssembly sandbox"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+persephone-media-protocol = { path = "../media-protocol" }
+persephone-media-sandbox = { path = "../media-sandbox" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Memory",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }

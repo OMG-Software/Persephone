@@ -46,10 +46,11 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             max_input_bytes: 20 * 1024 * 1024,
-            max_memory_bytes: 192 * 1024 * 1024,
+            // Equal to the guest's fixed linear memory (crates/media-decoder/build.rs).
+            max_memory_bytes: 176 * 1024 * 1024,
             fuel: 64_000_000_000,
-            max_dimension: 8192,
-            max_pixels: 16 * 1024 * 1024,
+            max_dimension: persephone_media_protocol::MAX_DIMENSION,
+            max_pixels: persephone_media_protocol::MAX_PIXELS,
         }
     }
 }
@@ -136,12 +137,30 @@ impl fmt::Debug for Sandbox {
     }
 }
 
-struct HostState {
-    input: Vec<u8>,
+/// Per-decode host state. The input is borrowed, not copied, and the output
+/// is recorded as a validated region of guest memory rather than copied out.
+struct HostState<'a> {
+    input: &'a [u8],
     limits: Limits,
     store_limits: StoreLimits,
-    output: Option<Image>,
+    output: Option<OutputRegion>,
     violation: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct OutputRegion {
+    width: u32,
+    height: u32,
+    offset: usize,
+    length: usize,
+}
+
+/// Measurements from one decode.
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeStats {
+    pub fuel_used: u64,
+    /// Final size of the guest's linear memory, which only grows.
+    pub guest_memory_bytes: usize,
 }
 
 impl Sandbox {
@@ -159,17 +178,33 @@ impl Sandbox {
         self.decode_measured(input, limits).map(|(image, _)| image)
     }
 
-    /// Like [`Sandbox::decode`], also returning the fuel the guest consumed.
+    /// Like [`Sandbox::decode`], also returning decode measurements.
     pub fn decode_measured(
         &self,
         input: &[u8],
         limits: &Limits,
-    ) -> Result<(Image, u64), SandboxError> {
+    ) -> Result<(Image, DecodeStats), SandboxError> {
+        self.decode_with(input, limits, |width, height, rgba| Image {
+            width,
+            height,
+            rgba: rgba.to_vec(),
+        })
+    }
+
+    /// Decodes and passes the validated RGBA pixels to `sink` as a borrowed
+    /// slice of guest memory, so the host makes no copy of the output. `sink`
+    /// runs only when the guest succeeded and its output passed validation.
+    pub fn decode_with<R>(
+        &self,
+        input: &[u8],
+        limits: &Limits,
+        sink: impl FnOnce(u32, u32, &[u8]) -> R,
+    ) -> Result<(R, DecodeStats), SandboxError> {
         if input.len() > limits.max_input_bytes {
             return Err(SandboxError::InputTooLarge);
         }
         let state = HostState {
-            input: input.to_vec(),
+            input,
             limits: *limits,
             store_limits: StoreLimitsBuilder::new()
                 .memory_size(limits.max_memory_bytes)
@@ -186,7 +221,7 @@ impl Sandbox {
             .set_fuel(limits.fuel)
             .map_err(|e| SandboxError::Instantiation(e.to_string()))?;
 
-        let mut linker = Linker::<HostState>::new(&self.engine);
+        let mut linker = Linker::<HostState<'_>>::new(&self.engine);
         link_host_functions(&mut linker)?;
         let instance = linker
             .instantiate_and_start(&mut store, &self.module)
@@ -202,50 +237,63 @@ impl Sandbox {
                 SandboxError::Trap(error.to_string())
             }
         })?;
-        let fuel_used = limits.fuel - store.get_fuel().unwrap_or(0);
-        let state = store.into_data();
-        if let Some(violation) = state.violation {
-            return Err(SandboxError::InvalidOutput(violation));
+        let memory = instance
+            .get_memory(&store, "memory")
+            .ok_or_else(|| SandboxError::InvalidExports("missing memory export".into()))?;
+        let stats = DecodeStats {
+            fuel_used: limits.fuel - store.get_fuel().unwrap_or(0),
+            guest_memory_bytes: memory.data_size(&store),
+        };
+        let state = store.data();
+        if let Some(violation) = &state.violation {
+            return Err(SandboxError::InvalidOutput(violation.clone()));
         }
         if status != 0 {
             return Err(SandboxError::GuestRejected(status));
         }
-        state
-            .output
-            .map(|image| (image, fuel_used))
-            .ok_or(SandboxError::NoOutput)
+        let region = state.output.ok_or(SandboxError::NoOutput)?;
+        // The region was bounds-checked when recorded; memory only grows, so
+        // it is still in range. The guest is no longer running.
+        let rgba = memory
+            .data(&store)
+            .get(region.offset..region.offset + region.length)
+            .ok_or_else(|| {
+                SandboxError::InvalidOutput("output range outside guest memory".into())
+            })?;
+        Ok((sink(region.width, region.height, rgba), stats))
     }
 }
 
-fn guest_memory(caller: &Caller<'_, HostState>) -> Option<wasmi::Memory> {
+fn guest_memory(caller: &Caller<'_, HostState<'_>>) -> Option<wasmi::Memory> {
     caller.get_export("memory").and_then(Extern::into_memory)
 }
 
-fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), SandboxError> {
+fn link_host_functions(linker: &mut Linker<HostState<'_>>) -> Result<(), SandboxError> {
     let link_error = |e: wasmi::errors::LinkerError| SandboxError::Instantiation(e.to_string());
     linker
         .func_wrap(
             IMPORT_MODULE,
             "input_len",
-            |caller: Caller<'_, HostState>| caller.data().input.len() as u32,
+            |caller: Caller<'_, HostState<'_>>| caller.data().input.len() as u32,
         )
         .map_err(link_error)?;
     linker
         .func_wrap(
             IMPORT_MODULE,
             "read_input",
-            |mut caller: Caller<'_, HostState>, destination: u32, length: u32| -> i32 {
+            |mut caller: Caller<'_, HostState<'_>>, destination: u32, length: u32| -> i32 {
                 let Some(memory) = guest_memory(&caller) else {
                     return 1;
                 };
-                if length as usize != caller.data().input.len() {
+                let input = caller.data().input;
+                if length as usize != input.len() {
                     return 2;
                 }
-                let input = std::mem::take(&mut caller.data_mut().input);
                 // Bounds-checked copy into guest memory; a bad pointer fails.
-                let result = memory.write(&mut caller, destination as usize, &input);
-                caller.data_mut().input = input;
-                if result.is_ok() { 0 } else { 3 }
+                match memory.write(&mut caller, destination as usize, input) {
+                    Ok(()) => 0,
+                    Err(_) => 3,
+                }
             },
         )
         .map_err(link_error)?;
@@ -253,15 +301,15 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), SandboxErro
         .func_wrap(
             IMPORT_MODULE,
             "write_output",
-            |mut caller: Caller<'_, HostState>,
+            |mut caller: Caller<'_, HostState<'_>>,
              width: u32,
              height: u32,
              source: u32,
              length: u32|
              -> i32 {
-                match read_output(&caller, width, height, source, length) {
-                    Ok(image) => {
-                        caller.data_mut().output = Some(image);
+                match validate_output(&caller, width, height, source, length) {
+                    Ok(region) => {
+                        caller.data_mut().output = Some(region);
                         0
                     }
                     Err(violation) => {
@@ -277,13 +325,13 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), SandboxErro
     Ok(())
 }
 
-fn read_output(
-    caller: &Caller<'_, HostState>,
+fn validate_output(
+    caller: &Caller<'_, HostState<'_>>,
     width: u32,
     height: u32,
     source: u32,
     length: u32,
-) -> Result<Image, String> {
+) -> Result<OutputRegion, String> {
     let state = caller.data();
     if state.output.is_some() {
         return Err("output written more than once".into());
@@ -305,13 +353,17 @@ fn read_output(
         ));
     }
     let memory = guest_memory(caller).ok_or("guest memory missing")?;
-    let mut rgba = vec![0; length as usize];
-    memory
-        .read(caller, source as usize, &mut rgba)
-        .map_err(|_| "output range outside guest memory".to_string())?;
-    Ok(Image {
+    let (offset, length) = (source as usize, length as usize);
+    if offset
+        .checked_add(length)
+        .is_none_or(|end| end > memory.data_size(caller))
+    {
+        return Err("output range outside guest memory".into());
+    }
+    Ok(OutputRegion {
         width,
         height,
-        rgba,
+        offset,
+        length,
     })
 }

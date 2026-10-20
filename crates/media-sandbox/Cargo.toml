@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+persephone-media-protocol = { path = "../media-protocol" }
 # `validate` is required: without it wasmi skips wasmparser validation of the
 # module. `portable-dispatch` selects the loop-based interpreter dispatch in
 # every build. The default tail-call dispatch keeps native stack bounded only

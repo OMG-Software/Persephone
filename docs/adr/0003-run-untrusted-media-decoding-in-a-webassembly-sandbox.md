@@ -62,7 +62,10 @@ The owner selected **`wasmi`**, an interpreter with no code generation, over
 `wasmtime` (Cranelift compilation, or its Pulley interpreter). An interpreter
 has a smaller attack surface and is compatible with prohibiting dynamic code in
 the worker, but decodes more slowly. The prototype pins `wasmi 2.0.0` with
-`std`, `validate` and `portable-dispatch`; the
+`std`, `validate` and `portable-dispatch`. The owner chose portable (loop)
+dispatch over the roughly 3× faster tail-call dispatch on 20 October 2026, so
+tested and shipped builds run the same dispatcher and native stack use stays
+bounded without relying on compiler tail-call optimization; the
 [evidence report](../evidence/wasm-decoder.md) records the controls, tests and
 16-megapixel benchmark against the 10-second deadline.
 
@@ -97,6 +100,7 @@ imports the host chose to provide.
 ## Links
 
 * [WebAssembly decoder sandbox evidence](../evidence/wasm-decoder.md)
+* [Contained media worker evidence](../evidence/media-worker.md)
 * [Windows network denial differential](../evidence/windows-sandbox.md#network-denial-differential)
 * [Media containment and starting budgets](../architecture/development-plan.md#media-containment-and-starting-budgets)
 * [P0 feasibility workbench](../planning/feasibility.md)
