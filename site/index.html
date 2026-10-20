@@ -23,7 +23,7 @@
         <a href="#security">Security</a>
         <a href="#architecture">Architecture</a>
         <a href="#roadmap">Roadmap</a>
-        <a href="#evidence">Evidence</a>
+        <a href="#progress">Progress</a>
         <a href="https://github.com/OMG-Software/Persephone">Source</a>
       </nav>
     </div>
@@ -33,11 +33,13 @@
     <section class="hero">
       <div class="wrap">
         <p class="eyebrow">Matrix desktop client · Rust · GPL-3.0</p>
-        <h1>A Matrix client for people who can't afford to be careless.</h1>
+        <h1>A Matrix client designed to withstand targeted attacks.</h1>
         <p class="lede">
           Persephone is a desktop chat client for the <a href="https://matrix.org">Matrix</a> network,
-          written in Rust for Windows, Linux and macOS. It is designed for high-risk users from the
-          start: every message, name, link and image is treated as hostile, even after decryption.
+          written in Rust for Windows, Linux and macOS. It is being built for people who may be
+          deliberately targeted, and is designed from the ground up to resist attacks aimed at a
+          specific person, not just everyday threats. Every message, name, link and image is treated
+          as hostile, even after decryption.
         </p>
         <div class="status" role="note" aria-label="Project status">
           <strong>Not ready for use.</strong>
@@ -47,7 +49,6 @@
         </div>
         <p class="actions">
           <a class="button" href="https://github.com/OMG-Software/Persephone">View the source</a>
-          <a class="button secondary" href="https://github.com/OMG-Software/Persephone/blob/main/docs/planning/feasibility.md">Read the feasibility workbench</a>
         </p>
       </div>
     </section>
@@ -71,7 +72,7 @@
     <section id="security">
       <div class="wrap">
         <h2>Security approach</h2>
-        <p class="section-lede">These are design decisions, not finished features. A control counts only once there is evidence for it.</p>
+        <p class="section-lede">The design assumes a capable adversary who may target one user directly. These are design decisions, not finished features.</p>
         <div class="grid two">
           <article>
             <h3>All content is untrusted</h3>
@@ -94,8 +95,7 @@
           </article>
           <article>
             <h3>TLS 1.3 only</h3>
-            <p>Every connection will require TLS 1.3. Tests already capture the real handshake and
-            confirm the client refuses a server that tries to downgrade to TLS 1.2.</p>
+            <p>Every connection will require TLS 1.3. Older protocol versions will be refused.</p>
           </article>
           <article>
             <h3>Rust owns the logic</h3>
@@ -103,9 +103,9 @@
             planned to live in the Rust core, behind a narrow, validated command boundary.</p>
           </article>
           <article>
-            <h3>Failures stay visible</h3>
-            <p>A check that fails, times out or is skipped is never reported as a pass. Negative
-            results are recorded alongside positive ones.</p>
+            <h3>Defence in depth</h3>
+            <p>No single bug should be enough. Hostile content has to get past several independent
+            layers before it could reach keys, the network or the rest of the system.</p>
           </article>
         </div>
       </div>
@@ -163,43 +163,27 @@
     <section id="roadmap">
       <div class="wrap">
         <h2>Roadmap</h2>
-        <p class="section-lede">Each milestone has an acceptance gate that must pass with recorded evidence.
-          No dates are given before platform feasibility is known.</p>
+        <p class=\"section-lede\">Each milestone must meet its security and compatibility goals before the next begins. No dates yet.</p>
         <ol class="roadmap">
-          <li class="current"><span class="phase">P0</span><div><h3>Feasibility and decisions</h3><p>In progress. Versions, sync, storage, containment and transport checks.</p></div></li>
-          <li><span class="phase">P1</span><div><h3>Scaffold and safe UI boundary</h3><p>Tauri shell, typed contracts, denied-IPC tests, CI on all three systems.</p></div></li>
-          <li><span class="phase">P2</span><div><h3>Protected lifecycle and media foundation</h3><p>Session owner, encrypted storage, cancellation, sandboxed media worker.</p></div></li>
-          <li><span class="phase">P3</span><div><h3>Login, rooms, history, both sync modes</h3><p>Against disposable Merovingian and Synapse servers.</p></div></li>
-          <li><span class="phase">P4</span><div><h3>Complete encrypted text</h3><p>Verification, identity changes, recovery, no plaintext fallback.</p></div></li>
-          <li><span class="phase">P5</span><div><h3>Image messaging</h3><p>Encrypted attachments and hostile-image handling.</p></div></li>
-          <li><span class="phase">P6</span><div><h3>Hardening</h3><p>Accessibility, offline behaviour, privacy defaults, packaging.</p></div></li>
-          <li><span class="phase">P7</span><div><h3>Release readiness</h3><p>Signed installers and an independent security review.</p></div></li>
+          <li class="current"><span class="phase">P0</span><div><h3>Feasibility and key decisions</h3><p>In progress.</p></div></li>
+          <li><span class="phase">P1</span><div><h3>Application scaffold</h3></div></li>
+          <li><span class="phase">P2</span><div><h3>Protected storage and media handling</h3></div></li>
+          <li><span class="phase">P3</span><div><h3>Login, rooms and history</h3></div></li>
+          <li><span class="phase">P4</span><div><h3>Encrypted messaging</h3></div></li>
+          <li><span class="phase">P5</span><div><h3>Image messaging</h3></div></li>
+          <li><span class="phase">P6</span><div><h3>Hardening and accessibility</h3></div></li>
+          <li><span class="phase">P7</span><div><h3>Release readiness</h3><p>Including an independent security review.</p></div></li>
         </ol>
       </div>
     </section>
 
-    <section id="evidence">
+    <section id="progress">
       <div class="wrap">
-        <h2>Evidence so far</h2>
-        <p class="section-lede">Selected results from P0, all against disposable servers and synthetic
-          accounts. None of them is a production security claim.</p>
-        <table>
-          <caption class="visually-hidden">Selected P0 results</caption>
-          <thead><tr><th scope="col">Check</th><th scope="col">Result</th></tr></thead>
-          <tbody>
-            <tr><td>Encrypted messaging between independent, SAS-verified users on Merovingian and Synapse</td><td><span class="tag pass">Passes</span></td></tr>
-            <tr><td>Sliding Sync by default, with classic fallback on a classic-only server</td><td><span class="tag pass">Passes</span></td></tr>
-            <tr><td>Encrypted stores survive a process restart with keys and trust intact</td><td><span class="tag pass">Passes</span></td></tr>
-            <tr><td>WebAssembly decoder refuses WASI and all other unlisted imports</td><td><span class="tag pass">Passes</span></td></tr>
-            <tr><td>Client refuses a TLS 1.2 downgrade</td><td><span class="tag pass">Passes</span></td></tr>
-            <tr><td>Windows AppContainer worker is denied network access</td><td><span class="tag fail">Fails</span> Packets reach the local TCP stack; this led to the WebAssembly decoder.</td></tr>
-            <tr><td>SDK can stop and join all background work before lock or logout</td><td><span class="tag open">Open</span> The pinned SDK has no complete stop-and-join API.</td></tr>
-            <tr><td>Linux and macOS containment</td><td><span class="tag open">Not run</span></td></tr>
-          </tbody>
-        </table>
-        <p class="note">The full record, including failed and unrun checks, is in the
-          <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/planning/feasibility.md">feasibility workbench</a>
-          and the <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/evidence/verification.json">verification ledger</a>.</p>
+        <h2>Progress</h2>
+        <div class="placeholder">
+          <p><strong>Coming soon.</strong> Progress updates will be published here as milestones are
+          reached.</p>
+        </div>
       </div>
     </section>
 
@@ -208,10 +192,9 @@
         <h2>Source and licence</h2>
         <div class="grid two">
           <article>
-            <h3>Read the code</h3>
-            <p>The repository holds shared Rust crates, integration and security test programs, a
-            static interface prototype and the decision records. The desktop application itself does
-            not exist yet.</p>
+            <h3>Source code</h3>
+            <p>Development happens in the open. The repository holds early building blocks and the
+            design records; the desktop application itself does not exist yet.</p>
             <p><a href="https://github.com/OMG-Software/Persephone">github.com/OMG-Software/Persephone</a></p>
           </article>
           <article>

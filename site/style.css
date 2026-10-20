@@ -189,3 +189,9 @@ td:last-child { color: var(--muted); }
 
 .site-footer { padding-block: 28px; color: var(--muted); font-size: 0.9rem; }
 .site-footer p { margin: 0; }
+
+.placeholder {
+  background: var(--surface); border: 1px dashed var(--border);
+  border-radius: var(--radius); padding: 24px; color: var(--muted); max-width: 70ch;
+}
+.placeholder p { margin: 0; }
