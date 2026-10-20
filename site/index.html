@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Persephone</title>
+  <meta name="description" content="Persephone is a security-first desktop Matrix client in early development, written in Rust for Windows, Linux and macOS.">
+  <!-- No external requests: no web fonts, scripts, analytics or embeds. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" href="mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-row">
+      <a class="brand" href="./" aria-label="Persephone home">
+        <img src="mark.svg" alt="" width="28" height="28">
+        <span>Persephone</span>
+      </a>
+      <nav aria-label="Sections">
+        <a href="#security">Security</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#roadmap">Roadmap</a>
+        <a href="#evidence">Evidence</a>
+        <a href="https://github.com/OMG-Software/Persephone">Source</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="wrap">
+        <p class="eyebrow">Matrix desktop client · Rust · GPL-3.0</p>
+        <h1>A Matrix client for people who can't afford to be careless.</h1>
+        <p class="lede">
+          Persephone is a desktop chat client for the <a href="https://matrix.org">Matrix</a> network,
+          written in Rust for Windows, Linux and macOS. It is designed for high-risk users from the
+          start: every message, name, link and image is treated as hostile, even after decryption.
+        </p>
+        <div class="status" role="note" aria-label="Project status">
+          <strong>Not ready for use.</strong>
+          Persephone is in its first phase, feasibility (P0). There is no application to download,
+          and none of its security controls are production-ready. Do not use any part of it for real
+          conversations.
+        </div>
+        <p class="actions">
+          <a class="button" href="https://github.com/OMG-Software/Persephone">View the source</a>
+          <a class="button secondary" href="https://github.com/OMG-Software/Persephone/blob/main/docs/planning/feasibility.md">Read the feasibility workbench</a>
+        </p>
+      </div>
+    </section>
+
+    <section id="scope">
+      <div class="wrap">
+        <h2>What the first release is meant to do</h2>
+        <ul class="grid four">
+          <li><h3>One account</h3><p>Sign-in to a single Matrix account. Login methods are still being decided.</p></li>
+          <li><h3>Rooms and history</h3><p>Room list and message history, using Sliding Sync with a classic sync fallback.</p></li>
+          <li><h3>Text and images</h3><p>Sending and receiving text and images, with stricter media handling.</p></li>
+          <li><h3>Encrypted chats</h3><p>End-to-end encrypted rooms. Verification and recovery behaviour is still being specified.</p></li>
+        </ul>
+        <p class="note">
+          Interoperability with the <strong>Merovingian</strong> homeserver is a primary acceptance criterion;
+          Synapse and other standard Matrix servers are also targets.
+        </p>
+      </div>
+    </section>
+
+    <section id="security">
+      <div class="wrap">
+        <h2>Security approach</h2>
+        <p class="section-lede">These are design decisions, not finished features. A control counts only once there is evidence for it.</p>
+        <div class="grid two">
+          <article>
+            <h3>All content is untrusted</h3>
+            <p>Message text, display names, links, avatars and attachments are hostile input, before
+            and after decryption. The interface is designed to render them as inert text: no HTML,
+            scripts or automatic link previews.</p>
+          </article>
+          <article>
+            <h3>Cryptography stays in the SDK</h3>
+            <p>Matrix encryption is handled by the maintained Matrix Rust SDK with explicitly selected
+            features, never reimplemented by the client and never moved into the web view.
+            <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/adr/0002-use-sdk-owned-matrix-cryptography-and-explicit-features.md">ADR-0002</a></p>
+          </article>
+          <article>
+            <h3>Images decode in a sandbox with no network</h3>
+            <p>Image decoders run as WebAssembly, planned to sit inside a separately contained process. The module can
+            call only three host functions for its input and output, so it cannot reach sockets,
+            files, clocks or other processes, whatever the operating system allows.
+            <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md">ADR-0003</a></p>
+          </article>
+          <article>
+            <h3>TLS 1.3 only</h3>
+            <p>Every connection will require TLS 1.3. Tests already capture the real handshake and
+            confirm the client refuses a server that tries to downgrade to TLS 1.2.</p>
+          </article>
+          <article>
+            <h3>Rust owns the logic</h3>
+            <p>The web view is only the interface. Sessions, keys, storage and Matrix traffic are
+            planned to live in the Rust core, behind a narrow, validated command boundary.</p>
+          </article>
+          <article>
+            <h3>Failures stay visible</h3>
+            <p>A check that fails, times out or is skipped is never reported as a pass. Negative
+            results are recorded alongside positive ones.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <div class="wrap">
+        <h2>Planned architecture</h2>
+        <p class="section-lede">Three trust zones. Arrows are the only paths data takes.</p>
+        <figure class="diagram">
+          <svg viewBox="0 0 760 300" role="img" aria-labelledby="arch-title arch-desc">
+            <title id="arch-title">Planned Persephone architecture</title>
+            <desc id="arch-desc">The interface web view sends bounded, validated commands to the Rust
+              core, which holds the session, keys and stores and talks to the Matrix homeserver. The
+              core sends bounded image bytes to a media worker, an OS-contained process with no keys,
+              inside which a WebAssembly decoder with no network capability returns validated pixels.</desc>
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0 0L10 5L0 10z" class="arrowhead"/>
+              </marker>
+            </defs>
+            <rect class="zone" x="10" y="40" width="200" height="200" rx="14"/>
+            <text class="zone-title" x="110" y="72">Interface</text>
+            <text class="zone-text" x="110" y="98">Tauri web view</text>
+            <text class="zone-text" x="110" y="140">Renders inert text</text>
+            <text class="zone-text" x="110" y="162">No keys, no network</text>
+            <text class="zone-text" x="110" y="184">Locally bundled</text>
+
+            <rect class="zone core" x="280" y="40" width="200" height="200" rx="14"/>
+            <text class="zone-title" x="380" y="72">Rust core</text>
+            <text class="zone-text" x="380" y="98">Session owner</text>
+            <text class="zone-text" x="380" y="140">Matrix Rust SDK</text>
+            <text class="zone-text" x="380" y="162">Encrypted stores</text>
+            <text class="zone-text" x="380" y="184">TLS 1.3 only</text>
+
+            <rect class="zone" x="550" y="40" width="200" height="200" rx="14"/>
+            <text class="zone-title" x="650" y="72">Media worker</text>
+            <text class="zone-text" x="650" y="98">OS-contained process</text>
+            <rect class="inner" x="570" y="128" width="160" height="84" rx="10"/>
+            <text class="zone-text" x="650" y="156">WebAssembly decoder</text>
+            <text class="zone-text small" x="650" y="178">3 host functions</text>
+            <text class="zone-text small" x="650" y="196">no network capability</text>
+
+            <line class="flow" x1="212" y1="130" x2="276" y2="130" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+            <text class="flow-label" x="244" y="118">commands</text>
+            <line class="flow" x1="482" y1="130" x2="546" y2="130" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+            <text class="flow-label" x="514" y="118">bytes / pixels</text>
+            <line class="flow" x1="380" y1="242" x2="380" y2="286" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+            <text class="flow-label start" x="392" y="272">Matrix homeserver</text>
+          </svg>
+        </figure>
+      </div>
+    </section>
+
+    <section id="roadmap">
+      <div class="wrap">
+        <h2>Roadmap</h2>
+        <p class="section-lede">Each milestone has an acceptance gate that must pass with recorded evidence.
+          No dates are given before platform feasibility is known.</p>
+        <ol class="roadmap">
+          <li class="current"><span class="phase">P0</span><div><h3>Feasibility and decisions</h3><p>In progress. Versions, sync, storage, containment and transport checks.</p></div></li>
+          <li><span class="phase">P1</span><div><h3>Scaffold and safe UI boundary</h3><p>Tauri shell, typed contracts, denied-IPC tests, CI on all three systems.</p></div></li>
+          <li><span class="phase">P2</span><div><h3>Protected lifecycle and media foundation</h3><p>Session owner, encrypted storage, cancellation, sandboxed media worker.</p></div></li>
+          <li><span class="phase">P3</span><div><h3>Login, rooms, history, both sync modes</h3><p>Against disposable Merovingian and Synapse servers.</p></div></li>
+          <li><span class="phase">P4</span><div><h3>Complete encrypted text</h3><p>Verification, identity changes, recovery, no plaintext fallback.</p></div></li>
+          <li><span class="phase">P5</span><div><h3>Image messaging</h3><p>Encrypted attachments and hostile-image handling.</p></div></li>
+          <li><span class="phase">P6</span><div><h3>Hardening</h3><p>Accessibility, offline behaviour, privacy defaults, packaging.</p></div></li>
+          <li><span class="phase">P7</span><div><h3>Release readiness</h3><p>Signed installers and an independent security review.</p></div></li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <div class="wrap">
+        <h2>Evidence so far</h2>
+        <p class="section-lede">Selected results from P0, all against disposable servers and synthetic
+          accounts. None of them is a production security claim.</p>
+        <table>
+          <caption class="visually-hidden">Selected P0 results</caption>
+          <thead><tr><th scope="col">Check</th><th scope="col">Result</th></tr></thead>
+          <tbody>
+            <tr><td>Encrypted messaging between independent, SAS-verified users on Merovingian and Synapse</td><td><span class="tag pass">Passes</span></td></tr>
+            <tr><td>Sliding Sync by default, with classic fallback on a classic-only server</td><td><span class="tag pass">Passes</span></td></tr>
+            <tr><td>Encrypted stores survive a process restart with keys and trust intact</td><td><span class="tag pass">Passes</span></td></tr>
+            <tr><td>WebAssembly decoder refuses WASI and all other unlisted imports</td><td><span class="tag pass">Passes</span></td></tr>
+            <tr><td>Client refuses a TLS 1.2 downgrade</td><td><span class="tag pass">Passes</span></td></tr>
+            <tr><td>Windows AppContainer worker is denied network access</td><td><span class="tag fail">Fails</span> Packets reach the local TCP stack; this led to the WebAssembly decoder.</td></tr>
+            <tr><td>SDK can stop and join all background work before lock or logout</td><td><span class="tag open">Open</span> The pinned SDK has no complete stop-and-join API.</td></tr>
+            <tr><td>Linux and macOS containment</td><td><span class="tag open">Not run</span></td></tr>
+          </tbody>
+        </table>
+        <p class="note">The full record, including failed and unrun checks, is in the
+          <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/planning/feasibility.md">feasibility workbench</a>
+          and the <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/evidence/verification.json">verification ledger</a>.</p>
+      </div>
+    </section>
+
+    <section id="source">
+      <div class="wrap">
+        <h2>Source and licence</h2>
+        <div class="grid two">
+          <article>
+            <h3>Read the code</h3>
+            <p>The repository holds shared Rust crates, integration and security test programs, a
+            static interface prototype and the decision records. The desktop application itself does
+            not exist yet.</p>
+            <p><a href="https://github.com/OMG-Software/Persephone">github.com/OMG-Software/Persephone</a></p>
+          </article>
+          <article>
+            <h3>Licence</h3>
+            <p>Persephone is free software under the
+            <a href="https://github.com/OMG-Software/Persephone/blob/main/LICENSE">GNU General Public License v3.0</a>.</p>
+            <p>Architecture decisions are recorded in the
+            <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/adr/index.md">ADR index</a>.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>Persephone · GPL-3.0 · This page loads nothing from third parties.</p>
+    </div>
+  </footer>
+</body>
+</html>
