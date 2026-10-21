@@ -73,7 +73,18 @@ fn main() -> ExitCode {
         // A code only: no path or vault detail.
         eprintln!("persephone: local store locked: {state:?}");
     }
-    let core = Core::default().with_session(session);
+    let core = Core::default();
+    #[cfg(feature = "dev-disposable-servers")]
+    let core = match env::var_os("PERSEPHONE_DEV_PROFILE") {
+        Some(path) => {
+            eprintln!("persephone: DEVELOPMENT BUILD: credentials come from the harness profile");
+            core.with_credentials(std::sync::Arc::new(
+                persephone_core::credentials::dev::HarnessProfile::new(path.into()),
+            ))
+        }
+        None => core,
+    };
+    let core = core.with_session(session);
     let code = run_ui(&core, options.demo_live);
     // Exit locks through the same path as a requested lock: admission closes,
     // admitted work finishes, then the stores close.

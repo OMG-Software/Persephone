@@ -1,6 +1,6 @@
 use persephone_contracts::{
-    AppStatus, RoomList, StoreState, generated_typescript, sample_room_summary,
-    sample_timeline_page,
+    AccountState, AccountStatus, AppStatus, RoomList, SignInError, StoreState,
+    generated_typescript, sample_room_summary, sample_timeline_page,
 };
 
 #[test]
@@ -81,18 +81,29 @@ fn app_status_serializes_camel_case_and_rejects_unknown_fields() {
         version: "0.0.0".into(),
         milestone: "P1".into(),
         store: StoreState::KeyMissing,
+        account: AccountStatus {
+            state: AccountState::SignInFailed,
+            user_id: None,
+            error: Some(SignInError::InvalidCredentials),
+        },
     };
     assert_eq!(
         serde_json::to_value(&status).unwrap(),
-        serde_json::json!({"version": "0.0.0", "milestone": "P1", "store": "key_missing"})
+        serde_json::json!({
+            "version": "0.0.0", "milestone": "P1", "store": "key_missing",
+            "account": {"state": "sign_in_failed", "userId": null, "error": "invalid_credentials"}
+        })
     );
+    let account = r#""account":{"state":"signed_out","userId":null,"error":null}"#;
     for invalid in [
-        r#"{"version":"0","milestone":"P1","store":"protected","extra":1}"#,
-        r#"{"version":"0","milestone":"P1"}"#,
-        r#"{"version":"0","milestone":"P1","store":"plaintext"}"#,
+        format!(r#"{{"version":"0","milestone":"P1","store":"protected",{account},"extra":1}}"#),
+        r#"{"version":"0","milestone":"P1","store":"protected"}"#.to_string(),
+        format!(r#"{{"version":"0","milestone":"P1","store":"plaintext",{account}}}"#),
+        r#"{"version":"0","milestone":"P1","store":"protected","account":{"state":"signed_in","userId":"@a:s","error":null,"accessToken":"x"}}"#.to_string(),
+        r#"{"version":"0","milestone":"P1","store":"protected","account":{"state":"logged_in","userId":null,"error":null}}"#.to_string(),
     ] {
         assert!(
-            serde_json::from_str::<AppStatus>(invalid).is_err(),
+            serde_json::from_str::<AppStatus>(&invalid).is_err(),
             "{invalid}"
         );
     }

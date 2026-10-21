@@ -343,7 +343,7 @@ mod tests {
                 .iter()
                 .map(|item| match item {
                     TimelineItem::Message { event_id, .. } => event_id.clone(),
-                    TimelineItem::Gap { .. } => unreachable!(),
+                    TimelineItem::Gap { .. } | TimelineItem::Notice { .. } => unreachable!(),
                 })
                 .collect();
             seen.splice(0..0, ids);

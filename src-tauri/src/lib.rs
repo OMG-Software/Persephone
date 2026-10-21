@@ -11,13 +11,16 @@
 //! on the page's channel for that room, and the page fetches what it needs.
 //! When the core's session locks or unlocks, every room channel is dropped
 //! (the core drops those subscriptions too) and the page's session channel
-//! gets an empty message, so the page clears what it shows.
+//! gets `"session"`, so the page clears what it shows. When rooms are added or
+//! change, the session channel gets `"rooms"` and the page fetches the list.
 
 pub mod core_link;
 
 use core_link::{CoreError, CoreLink};
-use persephone_contracts::{AppStatus, RoomList, StoreState, TimelinePage};
-use persephone_core_protocol::{Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
+use persephone_contracts::{AccountStatus, AppStatus, RoomList, StoreState, TimelinePage};
+use persephone_core_protocol::{
+    Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_ROOM_ID_BYTES,
+};
 use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
@@ -102,7 +105,7 @@ async fn timeline_page(
 #[derive(Default)]
 pub struct Subscriptions {
     channels: Mutex<HashMap<String, Channel<()>>>,
-    session: Mutex<Option<Channel<()>>>,
+    session: Mutex<Option<Channel<&'static str>>>,
 }
 
 impl Subscriptions {
@@ -112,7 +115,7 @@ impl Subscriptions {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn session(&self) -> MutexGuard<'_, Option<Channel<()>>> {
+    fn session(&self) -> MutexGuard<'_, Option<Channel<&'static str>>> {
         self.session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -130,7 +133,12 @@ impl Subscriptions {
             Event::SessionChanged {} => {
                 self.channels().clear();
                 if let Some(channel) = self.session().as_ref() {
-                    let _ = channel.send(());
+                    let _ = channel.send("session");
+                }
+            }
+            Event::RoomListChanged {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("rooms");
                 }
             }
         }
@@ -183,7 +191,7 @@ async fn unsubscribe_room(
 
 /// Registers the page's session channel, replacing any earlier one.
 #[tauri::command]
-fn watch_session(subscriptions: State<'_, Arc<Subscriptions>>, on_change: Channel<()>) {
+fn watch_session(subscriptions: State<'_, Arc<Subscriptions>>, on_change: Channel<&'static str>) {
     *subscriptions.session() = Some(on_change);
 }
 
@@ -197,6 +205,17 @@ async fn lock_session(core: State<'_, CoreLink>) -> Result<StoreState, String> {
 #[tauri::command]
 async fn unlock_session(core: State<'_, CoreLink>) -> Result<StoreState, String> {
     relay(core.inner(), Call::UnlockSession {}).await
+}
+
+/// Starts signing in. Only the homeserver URL crosses: the core asks for the
+/// username and password itself, in a native prompt. The core validates the
+/// URL; this length check keeps oversized input off the channel.
+#[tauri::command]
+async fn sign_in(core: State<'_, CoreLink>, homeserver: String) -> Result<AccountStatus, String> {
+    if homeserver.len() > MAX_HOMESERVER_URL_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SignIn { homeserver }).await
 }
 
 /// Drops every subscription when the page (re)loads: the new page holds none
@@ -247,7 +266,8 @@ pub fn configure<R: Runtime>(
             unsubscribe_room,
             watch_session,
             lock_session,
-            unlock_session
+            unlock_session,
+            sign_in
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

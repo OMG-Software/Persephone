@@ -25,9 +25,15 @@ The core's [`Session`](../../crates/core/src/session.rs) implements the
 application side of this ownership for the protected stores: bounded leases,
 generation-fenced commits, announcement before waiting, retained ownership
 after a lock timeout, and store close only after the wait completes. Its drain
-proof refuses to stand for a full SDK drain. No SDK client exists yet, so the
-SDK completion surface below is still missing. See the
+proof refuses to stand for a full SDK drain. See the
 [session owner evidence](../evidence/session-owner.md).
+
+The core now runs an SDK client over those stores
+([sign-in evidence](../evidence/matrix-sign-in.md)). Its sync loop and sign-in
+take a lease per complete operation, but the SDK's own background tasks do not.
+Because the completion surface below is still missing, a session whose client
+ran locks to `restart_required`: the stores close and are never reopened in that
+process.
 
 ## Required SDK completion surface
 

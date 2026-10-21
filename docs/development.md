@@ -89,7 +89,22 @@ The harness in [`tools/servers`](../tools/servers) runs only disposable local Me
 
 Merovingian must run as a non-root UID with empty effective and bounding capability sets and `no_new_privs`. Synapse alone does not need that setup. The recorded live smoke passed for both servers, but it only establishes those harness scenarios. A hard kill can leave synthetic state; cleanup is not secure erasure. The loopback HTTP profile does not approve HTTP or trust bypasses in the product.
 
+### Signing the app in to a disposable server
+
+Default builds accept only `https://` homeservers and ask for credentials in the native Windows prompt. To use the disposable servers, build the core with the development feature, which also accepts `http://127.0.0.1:<port>` and `http://[::1]:<port>`:
+
+```powershell
+cargo build --locked -p persephone-desktop
+cargo build --locked -p persephone-core --features dev-disposable-servers --bin persephone
+```
+
+Run `.local/build/rust/debug/persephone.exe --profile <new directory under .local>` and enter the server's `base_url` from the harness profile in the page. Windows then asks for the username and password (`username` and `password` in the profile). To skip the prompt for automated runs, set `PERSEPHONE_DEV_PROFILE` to the harness `profile.json`; the core then prints `DEVELOPMENT BUILD` and answers the prompt from that file for the matching host. Never ship or distribute a build with this feature. See the [sign-in evidence](evidence/matrix-sign-in.md).
+
 ## Recorded verification
+
+After the sign-in review fixes (commit `a1a1b83`, clean tree), `python tools/dev.py check --offline` passed all 249 tests (218 Rust, 16 frontend, 2 server-registration and 13 development-controller tests); the core's unit tests now also run with the development feature.
+
+After adding native sign-in and real rooms, `python tools/dev.py check --offline` passed all 227 tests (197 Rust, 15 frontend, 2 server-registration and 13 development-controller tests), including the mock-homeserver account tests with the development feature. See the [sign-in evidence](evidence/matrix-sign-in.md) for the live runs.
 
 After adding the session owner and its review fixes (commit `089443e`), `python tools/dev.py check --offline` passed all 205 tests (178 Rust, 12 frontend, 2 server-registration and 13 development-controller tests); the first version passed 204 (177 Rust, 12 frontend, 2 server-registration and 13 development-controller tests). See the [session owner evidence](evidence/session-owner.md).
 

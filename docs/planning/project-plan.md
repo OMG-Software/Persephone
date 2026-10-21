@@ -1,7 +1,8 @@
 # Project plan
 
-Status: P0 feasibility in progress, 19 October 2026. See the
-[P0 feasibility workbench](feasibility.md) for completed checks and open gates.
+Status: see the [milestone status](../architecture/development-plan.md#milestone-status)
+(no milestone has passed its exit gate; P0 to P2 in progress, P3 started). The
+[P0 feasibility workbench](feasibility.md) records completed checks and open gates.
 Only the confirmed-requirements section records approved requirements; the remaining design is proposed.
 
 The [architecture and development plan](../architecture/development-plan.md) is the working
@@ -75,5 +76,5 @@ Encrypted chats are required for the first release, so identity verification, re
 - [Slint/iced research](../research/slint-iced-security-research.md) inspected pinned release sources, generated research lockfiles, traced dependency graphs for three representative targets, and checked OSV/RustSec advisories. Neither framework is approved; no GUI was built or tested.
 - The project directory was empty at the initial inspection and was not a Git repository.
 - Local toolchain: rustc 1.99.1, Cargo 1.99.1, stable Windows MSVC target.
-- Tauri is the accepted desktop framework; its exact version and frontend dependencies remain undecided. Slint/iced dependencies were downloaded for isolated framework research; those files are not an application scaffold.
-- The current Rust test programs exercise SDK behavior, local stores, aggregate resources, and a Windows sandbox candidate; the frontend checks escaping and builds static assets. Disposable Merovingian 0.12.29 and Synapse 1.163.0 smoke tests passed. The initial Merovingian FORTIFY failure was resolved with a separately built optimized/hardened binary and a capability-restricted launch. See the workbench for exact results and limitations. The application itself has not been built or tested.
+- Tauri is the accepted desktop framework; the shell pins Tauri 2.12.4 with a Svelte frontend (see the [Tauri shell evidence](../evidence/tauri-shell.md) and [frontend evidence](../evidence/frontend.md)). Slint/iced dependencies were downloaded for isolated framework research; those files are not an application scaffold.
+- The current Rust test programs exercise SDK behavior, local stores, aggregate resources, and a Windows sandbox candidate; the frontend checks escaping and builds static assets. Disposable Merovingian 0.12.29 and Synapse 1.163.0 smoke tests passed. The initial Merovingian FORTIFY failure was resolved with a separately built optimized/hardened binary and a capability-restricted launch. See the workbench for exact results and limitations. The application has since been built and tested on Windows only, in debug builds: the core and UI processes, protected store, native sign-in, sync and real rooms (see the [milestone status](../architecture/development-plan.md#milestone-status)). No milestone has passed its exit gate, and Linux, macOS and release builds are untested.

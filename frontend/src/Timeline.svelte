@@ -20,7 +20,7 @@
 
   const startsWithGap = $derived(items[0]?.kind === 'gap');
   const key = (item: TimelineItem, index: number) =>
-    item.kind === 'message' ? item.event_id : 'gap-' + index;
+    item.kind === 'gap' ? 'gap-' + index : item.event_id;
 </script>
 
 <section class="timeline" aria-labelledby="timeline-heading">
@@ -42,6 +42,13 @@
       <li>
         {#if item.kind === 'message'}
           <Message name={item.sender} body={item.body} />
+        {:else if item.kind === 'notice'}
+          <p class="notice">
+            <bdi>{item.sender}</bdi>:
+            {item.notice === 'undecryptable'
+              ? 'Encrypted message. This device has no key for it.'
+              : 'A kind of message Persephone does not show yet.'}
+          </p>
         {:else}
           <p class="gap">Some messages are not shown here.</p>
         {/if}

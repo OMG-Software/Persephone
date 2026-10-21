@@ -23,6 +23,21 @@ pub enum TimelineItem {
     Gap {
         next_cursor: Option<String>,
     },
+    /// An event that is shown but not as message text.
+    Notice {
+        event_id: String,
+        sender: String,
+        notice: NoticeKind,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    /// Encrypted, and this device has no key for it.
+    Undecryptable,
+    /// A kind of event this client does not display yet.
+    Unsupported,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -59,6 +74,9 @@ pub enum StoreState {
     /// The stores did not close cleanly while locking. The session stays
     /// locked until the application restarts.
     LockFailed,
+    /// Locked after a Matrix client ran. The SDK cannot yet prove all its
+    /// background work stopped, so the stores reopen only after a restart.
+    RestartRequired,
     /// A store exists but its key does not; the store was left untouched.
     KeyMissing,
     /// The key exists but the OS vault could not unwrap it.
@@ -83,6 +101,56 @@ pub struct AppStatus {
     /// The current development milestone, e.g. "P1".
     pub milestone: String,
     pub store: StoreState,
+    pub account: AccountStatus,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountState {
+    SignedOut,
+    /// The core is asking for credentials or talking to the homeserver.
+    SigningIn,
+    SignedIn,
+    SignInFailed,
+}
+
+/// Why signing in or syncing failed. Codes only.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInError {
+    /// The user closed the credential prompt.
+    Cancelled,
+    /// The homeserver refused the username or password.
+    InvalidCredentials,
+    /// The homeserver could not be reached or did not answer as Matrix.
+    Unreachable,
+    /// The URL is not one this client accepts (for example plain HTTP).
+    HomeserverRefused,
+    /// No native credential prompt on this platform.
+    Unsupported,
+    /// Signed in, but syncing failed.
+    SyncFailed,
+    /// Anything else.
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AccountStatus {
+    pub state: AccountState,
+    /// The signed-in Matrix user ID, at most 255 bytes.
+    pub user_id: Option<String>,
+    pub error: Option<SignInError>,
+}
+
+impl AccountStatus {
+    pub fn signed_out() -> Self {
+        Self {
+            state: AccountState::SignedOut,
+            user_id: None,
+            error: None,
+        }
+    }
 }
 
 pub fn sample_room_summary() -> RoomSummary {
@@ -102,6 +170,11 @@ pub fn sample_timeline_page() -> TimelinePage {
                 sender: "@alice:server.invalid".into(),
                 body: "hostile <img src=x onerror=alert(1)>".into(),
             },
+            TimelineItem::Notice {
+                event_id: "$encrypted".into(),
+                sender: "@bob:server.invalid".into(),
+                notice: NoticeKind::Undecryptable,
+            },
             TimelineItem::Gap { next_cursor: None },
         ],
         next_cursor: Some("cursor-2".into()),
@@ -112,9 +185,13 @@ pub fn generated_typescript() -> String {
     let config = Config::default();
     let mut output = [
         format!("export {}", StoreState::decl(&config)),
+        format!("export {}", AccountState::decl(&config)),
+        format!("export {}", SignInError::decl(&config)),
+        format!("export {}", AccountStatus::decl(&config)),
         format!("export {}", AppStatus::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
         format!("export {}", RoomList::decl(&config)),
+        format!("export {}", NoticeKind::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),
     ]

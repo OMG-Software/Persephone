@@ -4,14 +4,16 @@
 // do not validate it; the Rust side checks reply shapes and owns authorization.
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
+  AccountStatus,
   AppStatus,
+  SignInError,
   RoomList,
   StoreState,
   TimelineItem,
   TimelinePage
 } from '../../../crates/contracts/generated/contracts';
 
-export type { AppStatus, RoomList, StoreState, TimelineItem, TimelinePage };
+export type { AccountStatus, AppStatus, RoomList, SignInError, StoreState, TimelineItem, TimelinePage };
 
 export function appStatus(): Promise<AppStatus> {
   return invoke<AppStatus>('app_status');
@@ -41,12 +43,14 @@ export async function subscribeRoom(
 }
 
 /**
- * Calls `onChange` whenever the core's session locks, unlocks or changes
- * state. Everything shown from the session must be dropped then; the host has
- * already ended every room subscription.
+ * Calls `onSession` whenever the core's session locks, unlocks or changes
+ * state: everything shown from the session must be dropped then, and the host
+ * has already ended every room subscription. Calls `onRooms` when rooms were
+ * added or changed, so the room list should be fetched again. Anything else
+ * counts as a session change, which clears the page.
  */
-export async function watchSession(onChange: () => void): Promise<void> {
-  const channel = new Channel<null>(() => onChange());
+export async function watchSession(onSession: () => void, onRooms: () => void): Promise<void> {
+  const channel = new Channel<string>((message) => (message === 'rooms' ? onRooms() : onSession()));
   await invoke<null>('watch_session', { onChange: channel });
 }
 
@@ -57,4 +61,13 @@ export function lockSession(): Promise<StoreState> {
 
 export function unlockSession(): Promise<StoreState> {
   return invoke<StoreState>('unlock_session');
+}
+
+/**
+ * Starts signing in to `homeserver`. Only the URL is sent: the core asks for
+ * the username and password itself, in a Windows sign-in window. The outcome
+ * arrives as a session change.
+ */
+export function signIn(homeserver: string): Promise<AccountStatus> {
+  return invoke<AccountStatus>('sign_in', { homeserver });
 }

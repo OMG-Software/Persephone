@@ -111,6 +111,29 @@ does not replay it, and a failed registration would leave the page showing
 content it would never be told to clear. The page now waits for the channel
 and loads nothing from the session if registration fails.
 
+### Correction after the sign-in slice (21 October 2026)
+
+Two observations above were later explained by a session test that
+intermittently failed and, in one full check, hung:
+
+* The test checked that `locking` was visible and then, at once, that the
+  announcement had run. The lock makes `locking` visible just before it runs
+  the announcement, so the check could fail; the announcement still came
+  before the wait, as specified. The failure then hung the test, because a
+  channel the helper thread waited on was created outside the thread scope
+  and was never dropped. Both are fixed in the test (it waits for the
+  announcement; the channel lives inside the scope).
+* The same test sometimes found SQLite `-wal`/`-shm` files after a lock, like
+  the unexplained walkthrough observation above. This is consistent with two
+  pool connections closing at once, each seeing the other open, so neither
+  removes the files; the data is kept and reopening works. Their absence is
+  therefore not evidence that the stores closed, and the test now checks that
+  another owner can open the profile instead.
+
+After the fix, 150 serial and 100 parallel runs of the session tests passed
+(slowest 7.5 s). In the first 150 parallel runs after the fix, two runs
+exceeded a 30 s limit; that was not reproduced and is not explained.
+
 ## Tests
 
 **Final run, commit `089443e` (all review fixes):**
