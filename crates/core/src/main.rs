@@ -13,7 +13,7 @@
 //!   integrated.
 
 use persephone_contracts::StoreState;
-use persephone_core::{Core, ServeEnd, serve, store, vault};
+use persephone_core::{Core, ServeEnd, serve, session::Session, vault};
 use std::{
     env,
     ffi::OsString,
@@ -32,6 +32,8 @@ const STARTED_BY_CORE: &str = "--started-by-core";
 const DEMO_ROOM: &str = "!planning:example.invalid";
 /// The demo stops after this many messages so memory stays bounded.
 const DEMO_MESSAGES: u32 = 1000;
+/// How long exit waits for admitted work before giving up on a clean close.
+const EXIT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Options {
@@ -62,28 +64,30 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let opened = options
-        .profile
-        .as_deref()
-        .map(|dir| store::open(dir, &*vault::platform()));
-    let state = match &opened {
-        None => StoreState::NotConfigured,
-        Some(Ok(_)) => StoreState::Protected,
-        Some(Err(state)) => {
-            // A code only: no path or vault detail.
-            eprintln!("persephone: local store locked: {state:?}");
-            *state
-        }
+    let session = match options.profile {
+        Some(dir) => Session::open(dir, vault::platform()),
+        None => Session::not_configured(),
     };
-    let core = Core::default().with_store(state);
-    let code = run_ui(&core, options.demo_live);
-    if let Some(Ok(stores)) = opened
-        && !stores.close()
-    {
-        eprintln!("persephone: a store did not close cleanly");
-        return ExitCode::from(1);
+    let state = session.state();
+    if !matches!(state, StoreState::Protected | StoreState::NotConfigured) {
+        // A code only: no path or vault detail.
+        eprintln!("persephone: local store locked: {state:?}");
     }
-    code
+    let core = Core::default().with_session(session);
+    let code = run_ui(&core, options.demo_live);
+    // Exit locks through the same path as a requested lock: admission closes,
+    // admitted work finishes, then the stores close.
+    match core.session().lock(EXIT_LOCK_TIMEOUT, || {}).0 {
+        StoreState::LockFailed => {
+            eprintln!("persephone: a store did not close cleanly");
+            ExitCode::from(1)
+        }
+        StoreState::Locking => {
+            eprintln!("persephone: admitted work did not finish; stores were not closed cleanly");
+            ExitCode::from(1)
+        }
+        _ => code,
+    }
 }
 
 fn run_ui(core: &Core, demo_live: bool) -> ExitCode {

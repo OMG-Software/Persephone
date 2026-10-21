@@ -91,6 +91,8 @@ Merovingian must run as a non-root UID with empty effective and bounding capabil
 
 ## Recorded verification
 
+After adding the session owner, `python tools/dev.py check --offline` passed all 204 tests (177 Rust, 12 frontend, 2 server-registration and 13 development-controller tests). See the [session owner evidence](evidence/session-owner.md).
+
 After adding the protected local store, `python tools/dev.py check --offline` passed all 196 tests (169 Rust, 12 frontend, 2 server-registration and 13 development-controller tests). See the [protected store evidence](evidence/protected-store.md).
 
 After adding live room updates, `python tools/dev.py check --offline` passed all 186 tests (159 Rust, 12 frontend, 2 server-registration and 13 development-controller tests). See the [live updates evidence](evidence/live-updates.md); `persephone --demo-live` posts synthetic messages to the planning room.

@@ -19,6 +19,16 @@ The new fixture tests these pieces, but they do not account for private SDK
 workers. A caller-supplied flag must never promote partial coverage to a full
 SDK completion proof.
 
+## Current implementation
+
+The core's [`Session`](../../crates/core/src/session.rs) implements the
+application side of this ownership for the protected stores: bounded leases,
+generation-fenced commits, announcement before waiting, retained ownership
+after a lock timeout, and store close only after the wait completes. Its drain
+proof refuses to stand for a full SDK drain. No SDK client exists yet, so the
+SDK completion surface below is still missing. See the
+[session owner evidence](../evidence/session-owner.md).
+
 ## Required SDK completion surface
 
 The preferred resolution preserves SDK-owned cryptography and adds or obtains

@@ -43,6 +43,10 @@ header p {
   color: #b9c4d6;
 }
 
+header .session {
+  margin-left: auto;
+}
+
 section {
   margin-top: 2rem;
 }

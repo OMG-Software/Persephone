@@ -39,3 +39,22 @@ export async function subscribeRoom(
   await invoke<null>('subscribe_room', { roomId, onChange: channel });
   return () => invoke<void>('unsubscribe_room', { roomId });
 }
+
+/**
+ * Calls `onChange` whenever the core's session locks, unlocks or changes
+ * state. Everything shown from the session must be dropped then; the host has
+ * already ended every room subscription.
+ */
+export async function watchSession(onChange: () => void): Promise<void> {
+  const channel = new Channel<null>(() => onChange());
+  await invoke<null>('watch_session', { onChange: channel });
+}
+
+/** Locks the session; `locking` means work is still finishing (call again). */
+export function lockSession(): Promise<StoreState> {
+  return invoke<StoreState>('lock_session');
+}
+
+export function unlockSession(): Promise<StoreState> {
+  return invoke<StoreState>('unlock_session');
+}

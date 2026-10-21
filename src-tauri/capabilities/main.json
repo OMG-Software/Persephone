@@ -1,12 +1,15 @@
 {
   "identifier": "main",
-  "description": "The main window may call the app's read-only view and subscription commands and nothing else: no core plugin, event, window, path or webview permissions.",
+  "description": "The main window may call the app's view, subscription and session lock commands and nothing else: no core plugin, event, window, path or webview permissions.",
   "windows": ["main"],
   "permissions": [
     "allow-app-status",
     "allow-room-list",
     "allow-timeline-page",
     "allow-subscribe-room",
-    "allow-unsubscribe-room"
+    "allow-unsubscribe-room",
+    "allow-watch-session",
+    "allow-lock-session",
+    "allow-unlock-session"
   ]
 }

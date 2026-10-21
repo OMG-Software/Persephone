@@ -6,9 +6,12 @@
   import { mergeNewest } from './timeline';
   import {
     appStatus,
+    lockSession,
     roomList,
     subscribeRoom,
     timelinePage,
+    unlockSession,
+    watchSession,
     type AppStatus,
     type RoomList as Rooms,
     type StoreState,
@@ -23,6 +26,7 @@
   let nextCursor = $state<string | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  let switching = $state(false);
 
   // The one room with live updates, and a queue that keeps subscribe and
   // unsubscribe calls in order: the host runs commands concurrently.
@@ -37,6 +41,9 @@
   const storeText: Record<StoreState, string> = {
     not_configured: 'No local profile: nothing is stored',
     protected: 'Local store protected',
+    locked: 'Local store locked',
+    locking: 'Locking: work in progress is finishing',
+    lock_failed: 'Local store did not close cleanly; restart Persephone',
     key_missing: 'Local store locked: its key is missing',
     key_unreadable: 'Local store locked: its key cannot be unlocked',
     key_rejected: 'Local store locked: the key does not match',
@@ -45,24 +52,76 @@
     unsupported: 'Local store unavailable on this system'
   };
 
+  // States the core can try to unlock from; the others need a restart or
+  // have nothing to unlock.
+  const unlockable: StoreState[] = [
+    'locked',
+    'key_missing',
+    'key_unreadable',
+    'key_rejected',
+    'profile_in_use',
+    'store_unavailable'
+  ];
+
   const selectedRoom = $derived(rooms?.rooms.find((room) => room.roomId === selected) ?? null);
 
   // Error codes from the host map to fixed messages; nothing else is shown.
   const messages: Record<string, string> = {
     not_found: 'That room or page no longer exists.',
     limit_exceeded: 'Too many rooms are open for live updates.',
-    invalid_argument: 'That request was not valid.'
+    invalid_argument: 'That request was not valid.',
+    locked: 'The session is locked.'
   };
   const describe = (reason: unknown) =>
     messages[String(reason)] ?? 'The Persephone core is unavailable.';
 
+  async function load() {
+    try {
+      status = await appStatus();
+    } catch {
+      unavailable = true;
+      return;
+    }
+    if (status.store !== 'protected' && status.store !== 'not_configured') return;
+    try {
+      rooms = await roomList();
+    } catch (reason) {
+      error = describe(reason);
+    }
+  }
+
+  // The session changed: drop everything shown from it. Pending fetches see
+  // the cleared selection and discard their results.
+  function reset() {
+    selected = null;
+    rooms = null;
+    items = [];
+    nextCursor = null;
+    error = null;
+    // The host already ended the room subscription.
+    live = null;
+    changedAgain = false;
+    load();
+  }
+
+  async function toggleLock() {
+    if (!status || switching) return;
+    switching = true;
+    try {
+      const store = status.store === 'protected' || status.store === 'locking'
+        ? await lockSession()
+        : await unlockSession();
+      status = { ...status, store };
+    } catch (reason) {
+      error = describe(reason);
+    } finally {
+      switching = false;
+    }
+  }
+
   onMount(() => {
-    appStatus()
-      .then((reply) => (status = reply))
-      .catch(() => (unavailable = true));
-    roomList()
-      .then((reply) => (rooms = reply))
-      .catch((reason) => (error = describe(reason)));
+    watchSession(reset).catch(() => {});
+    load();
   });
 
   function follow(roomId: string): Promise<unknown> {
@@ -167,6 +226,15 @@
         {/if}
       </p>
     </div>
+    {#if status && (status.store === 'protected' || status.store === 'locking')}
+      <button type="button" class="session" disabled={switching} onclick={toggleLock}>
+        {switching ? 'Locking…' : 'Lock'}
+      </button>
+    {:else if status && unlockable.includes(status.store)}
+      <button type="button" class="session" disabled={switching} onclick={toggleLock}>
+        {switching ? 'Unlocking…' : 'Unlock'}
+      </button>
+    {/if}
   </header>
 
   <div class="layout">
@@ -184,7 +252,11 @@
       />
     {:else}
       <section class="timeline" aria-label="No room selected">
-        <p>Select a room. All rooms and messages here are synthetic test data.</p>
+        {#if status && status.store !== 'protected' && status.store !== 'not_configured'}
+          <p>The session is locked. Nothing from it is shown.</p>
+        {:else}
+          <p>Select a room. All rooms and messages here are synthetic test data.</p>
+        {/if}
         {#if error}
           <p role="alert" class="error">{error}</p>
         {/if}

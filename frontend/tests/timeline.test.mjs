@@ -9,7 +9,7 @@ let MAX_RETAINED_ITEMS;
 before(async () => {
   vite = await createServer({
     configFile: './vite.config.js',
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, ws: false },
     appType: 'custom'
   });
   ({ mergeNewest, MAX_RETAINED_ITEMS } = await vite.ssrLoadModule('/src/timeline.ts'));

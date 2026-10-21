@@ -16,6 +16,9 @@ fn main() {
             "timeline_page",
             "subscribe_room",
             "unsubscribe_room",
+            "watch_session",
+            "lock_session",
+            "unlock_session",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

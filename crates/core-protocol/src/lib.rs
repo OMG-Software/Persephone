@@ -40,6 +40,12 @@ pub enum Call {
     Unsubscribe {
         room_id: String,
     },
+    /// Close the protected session: refuse new work, wait for admitted work,
+    /// then close the stores. Replies with the resulting store state.
+    LockSession {},
+    /// Reopen the protected session with the key from the OS vault. Replies
+    /// with the resulting store state.
+    UnlockSession {},
 }
 
 /// Most rooms the UI may subscribe to at once.
@@ -52,7 +58,13 @@ pub const MAX_SUBSCRIPTIONS: usize = 16;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
-    RoomChanged { room_id: String },
+    RoomChanged {
+        room_id: String,
+    },
+    /// The session locked, unlocked or changed state: drop everything shown
+    /// from it and ask for `app_status`. Sent before the lock waits for
+    /// admitted work, so the UI clears first.
+    SessionChanged {},
 }
 
 /// Every frame from the core to the UI: a reply to a call, or an event.
@@ -88,6 +100,8 @@ pub enum ErrorCode {
     NotFound,
     /// A limit such as [`MAX_SUBSCRIPTIONS`] would be exceeded.
     LimitExceeded,
+    /// The session is locked (or locking); protected views are unavailable.
+    Locked,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -203,22 +217,28 @@ mod tests {
         let event = CoreMessage::Event(Event::RoomChanged {
             room_id: "!r:example.invalid".into(),
         });
+        let session = CoreMessage::Event(Event::SessionChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
+        send(&mut wire, &session).unwrap();
+        assert!(
+            String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"session_changed":{}}}"#),
+            "wire form of the session event"
+        );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        assert_eq!(
-            receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
-            reply
-        );
-        assert_eq!(
-            receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
-            event
-        );
+        for expected in [reply, event, session] {
+            assert_eq!(
+                receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
+                expected
+            );
+        }
         for body in [
             &br#"{"event":{"room_changed":{"room_id":"!r","body":"x"}}}"#[..],
             br#"{"event":{"message_added":{"room_id":"!r"}}}"#,
             br#"{"reply":{"id":1,"outcome":{"ok":null}},"event":null}"#,
+            br#"{"event":{"session_changed":{"state":"locked"}}}"#,
+            br#"{"event":"session_changed"}"#,
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));
             assert!(
@@ -243,6 +263,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"room_list","limit":5}}"#,
             br#"{"id":1,"call":{"command":"timeline_page","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"timeline_page","room_id":"!r:s","cursor":null,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"lock_session","force":true}}"#,
+            br#"{"id":1,"call":{"command":"unlock_session","key":"00"}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

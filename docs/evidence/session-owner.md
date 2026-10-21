@@ -1,0 +1,120 @@
+# Session owner: lock and unlock while running
+
+Checked 21 October 2026 on Windows 11 Pro x64 (build 26200), debug builds,
+Matrix SDK SQLite stores 0.19.1. P2 "session owner", first slice: the core's
+[`Session`](../../crates/core/src/session.rs) is the single authority over the
+[protected store](protected-store.md), and the user can lock and unlock it while
+the application runs. **Result: locking refuses new work and late results at
+once, clears the page, waits for admitted work and only then closes the stores;
+a timeout keeps everything owned; no view or room event reaches the page while
+locked.** No Matrix SDK client exists yet, so this does not exercise SDK
+background tasks.
+
+## Design
+
+Follows the [lifecycle contract](../architecture/sdk-lifecycle.md) and the P0
+[ownership fixture](sdk-lifecycle.md), moved into the core:
+
+* **Admission:** all store work holds a `Lease` (at most 8 at once). A lease
+  keeps the stores open; its result is published only through
+  `Lease::commit`, which refuses once a lock has begun (the generation
+  advanced).
+* **Lock:** admission closes and the generation advances; the core drops every
+  room subscription and pending room event and sends `session_changed` to the
+  UI **before** waiting; then it waits for leases to end and closes the four
+  stores, and only then releases the profile lock. A wait longer than 5 s
+  replies `locking` with the stores still open and owned; locking again
+  resumes the wait without announcing again. A failed close gives
+  `lock_failed`, which refuses unlock until restart.
+* **Drain proof:** a completed lock returns a `TrackedDrain`, whose
+  `require_full_sdk_drain()` always refuses: leased work is not an SDK-wide
+  drain.
+* **Unlock:** reopens through the vault with the same fail-closed rules as at
+  start; `key_missing` and the other open failures may retry, `locking` and
+  `lock_failed` may not.
+* **Views while locked:** `room_list`, `timeline_page` and `subscribe` reply
+  `locked`, and demo changes queue no room events. Without `--profile`, the
+  core serves synthetic data as before; there is nothing to protect.
+* **Exit:** the core locks through the same path after the UI closes (30 s
+  wait) and exits 1 if the wait or the close fails.
+* **Protocol and UI:** new calls `lock_session` and `unlock_session` (reply: a
+  store state), event `session_changed {}`, error `locked`; contract states
+  `locked`, `locking` and `lock_failed`. The UI forwards the event on the page's
+  one session channel (`watch_session`) and drops every room channel; the page
+  clears its rooms and timeline and refetches status. All three commands are in
+  the allowlist and capability.
+
+## Fixed along the way
+
+The first session tests aborted the test process (`0xc0000409`). Dropping open
+`Stores` without `close()` ran the SQLite pool's destructor, which calls
+`tokio::spawn_blocking`, outside a Tokio runtime; the panic recurred during
+unwinding and the process aborted. The core's own paths always closed
+explicitly, but any panic while unlocked would have aborted the process.
+`Stores` now drops the SDK stores inside its runtime, and `close()` drops them
+inside the runtime too. A regression test drops open stores, then reopens the
+profile and reads back the marker.
+
+## Tests
+
+`python tools/dev.py check --offline` passed 204 tests (177 Rust, 12 frontend,
+2 server-registration and 13 controller tests), with formatting, Clippy and
+contract checks. New:
+
+* Session (5, real SDK stores, stand-in key protector):
+  * A lease running on another thread keeps a lock waiting: the announcement
+    has already run, new admission is refused, another owner gets
+    `profile_in_use`, and the lease's later commit is refused. The lock then
+    returns `locked` with a drain proof that refuses `require_full_sdk_drain`;
+    no WAL/SHM sidecars remain. Unlocking reads back the lease's marker, and a
+    new lease commits.
+  * A 50 ms timeout returns `locking`, keeps the profile held and refuses
+    unlock; after the lease ends, locking again completes without a second
+    announcement; locking a locked session changes nothing.
+  * Unlocking with the key file removed gives `key_missing` and makes no key;
+    restoring it unlocks.
+  * The ninth concurrent lease is refused.
+  * Without a profile, nothing is admitted and lock/unlock change nothing.
+* Store (1): open stores dropped without closing shut down without panicking
+  and keep their data.
+* Serving loop (1, real pipes): lock replies `locked` and sends one
+  `session_changed`; views and subscribing then reply `locked` and a change
+  queues no event; unlock replies `protected` with one more `session_changed`;
+  views return.
+* UI (1, mock runtime): a session change drops room channels and reaches the
+  session channel as `null`; no room message follows; `lock_session` relays
+  the state and a state outside the contract is refused.
+* Protocol: the event's wire form, and extra fields on the new calls and event
+  are refused.
+
+## Real application walkthrough
+
+`persephone --profile <scratch dir> --demo-live`, driven over DevTools; the
+profile lock was probed with a non-blocking lock on `profile.lock`:
+
+| Step | Page | Profile |
+| --- | --- | --- |
+| Start, open the planning room | "Local store protected", **Lock** button, 101 items including a live message | Lock held |
+| Press **Lock** | "Local store locked", no rooms, no timeline items, "The session is locked. Nothing from it is shown.", **Unlock** button | Lock released, no WAL/SHM sidecars |
+| Wait 7 s (the demo keeps posting) | Still no rooms or items | — |
+| Press **Unlock** | "Local store protected", 6 rooms, **Lock** button | Lock held |
+| Reopen the planning room | Live messages arrive again ("Live demo message 2" → "3") | — |
+| Close the window | — | Exit 0, no stderr, no sidecars, lock released |
+
+The lock probe reads "held" before locking and "released" after, so it can
+tell the two states apart.
+
+## Limits
+
+* No SDK client: once one runs over these stores, its private tasks are not
+  leases, and a completed lock must not be reported as a full drain (the drain
+  proof already refuses). See the [lifecycle contract](../architecture/sdk-lifecycle.md).
+* Nothing in the application takes a lease yet besides the tests; views still
+  come from synthetic fixtures, not the stores.
+* Unlock needs no user action: DPAPI unwraps the key for the same Windows user
+  (see the [store limits](protected-store.md#limits)). Lock protects against
+  use of the open session, not against that user's other processes.
+* Logout, account switching and store handoff are not built. A `locking`
+  session that never drains stays locked until the application exits; exit then
+  reports failure without closing the stores cleanly.
+* Debug builds on one Windows host only.

@@ -15,17 +15,19 @@
 //! before the UI reads has one pending notification. Pending state is
 //! therefore bounded by the number of subscriptions, whatever the UI's speed.
 
+pub mod session;
 pub mod store;
 pub mod vault;
 pub mod views;
 
-use persephone_contracts::{AppStatus, StoreState};
+use persephone_contracts::AppStatus;
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, Outcome,
     ReceiveError, Reply, Request, receive, send,
 };
 use persephone_media_protocol::ResourceBudgets;
 use serde::Serialize;
+use session::Session;
 use std::{
     collections::BTreeSet,
     io::{Read, Write},
@@ -34,6 +36,10 @@ use std::{
 };
 
 pub const MILESTONE: &str = "P1";
+
+/// Longest a `lock_session` call waits for admitted work before replying
+/// `locking`; the UI may call again to resume the wait.
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Why the core stopped serving a UI connection.
 #[derive(Debug, PartialEq, Eq)]
@@ -51,13 +57,15 @@ struct Notifications {
     subscribed: BTreeSet<String>,
     /// Subscribed rooms changed since their last notification.
     pending: BTreeSet<String>,
+    /// The session changed state since the last notification.
+    session_changed: bool,
     closed: bool,
 }
 
 /// Core state shared by the request loop and the notification writer. One
 /// `Core` serves one UI connection; once [`serve`] returns it stays closed.
 pub struct Core {
-    store: StoreState,
+    session: Session,
     views: Mutex<views::Fixtures>,
     notifications: Mutex<Notifications>,
     changed: Condvar,
@@ -83,17 +91,38 @@ fn ok<T: Serialize>(value: &T) -> Outcome {
 impl Core {
     pub fn new(views: views::Fixtures) -> Self {
         Self {
-            store: StoreState::NotConfigured,
+            session: Session::not_configured(),
             views: Mutex::new(views),
             notifications: Mutex::new(Notifications::default()),
             changed: Condvar::new(),
         }
     }
 
-    /// Records the local store's state for `app_status`.
-    pub fn with_store(mut self, store: StoreState) -> Self {
-        self.store = store;
+    /// Gives the core its session owner.
+    pub fn with_session(mut self, session: Session) -> Self {
+        self.session = session;
         self
+    }
+
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// Views are refused while a configured session is not open. Without a
+    /// profile the core serves only synthetic data, so nothing is withheld.
+    fn views_allowed(&self) -> bool {
+        !self.session.is_configured()
+            || self.session.state() == persephone_contracts::StoreState::Protected
+    }
+
+    /// Drops every subscription and pending room event, and queues a
+    /// `session_changed` event, so the UI clears what it shows.
+    fn announce_session_change(&self) {
+        let mut notifications = lock(&self.notifications);
+        notifications.subscribed.clear();
+        notifications.pending.clear();
+        notifications.session_changed = true;
+        self.changed.notify_all();
     }
 
     /// Answers one request.
@@ -102,8 +131,13 @@ impl Core {
             Call::AppStatus {} => ok(&AppStatus {
                 version: env!("CARGO_PKG_VERSION").into(),
                 milestone: MILESTONE.into(),
-                store: self.store,
+                store: self.session.state(),
             }),
+            Call::RoomList {} | Call::TimelinePage { .. } | Call::Subscribe { .. }
+                if !self.views_allowed() =>
+            {
+                Outcome::Error(ErrorCode::Locked)
+            }
             Call::RoomList {} => ok(&lock(&self.views).room_list()),
             Call::TimelinePage { room_id, cursor } => {
                 match lock(&self.views).timeline_page(room_id, cursor.as_deref()) {
@@ -117,6 +151,20 @@ impl Core {
                 notifications.subscribed.remove(room_id);
                 notifications.pending.remove(room_id);
                 Outcome::Ok(serde_json::Value::Null)
+            }
+            Call::LockSession {} => {
+                let (state, _drain) = self
+                    .session
+                    .lock(LOCK_TIMEOUT, || self.announce_session_change());
+                ok(&state)
+            }
+            Call::UnlockSession {} => {
+                let before = self.session.state();
+                let state = self.session.unlock();
+                if state != before {
+                    self.announce_session_change();
+                }
+                ok(&state)
             }
         };
         Reply {
@@ -149,7 +197,7 @@ impl Core {
             return false;
         }
         let mut notifications = lock(&self.notifications);
-        if notifications.subscribed.contains(room_id) {
+        if notifications.subscribed.contains(room_id) && self.views_allowed() {
             notifications.pending.insert(room_id.to_owned());
             self.changed.notify_all();
         }
@@ -165,7 +213,10 @@ impl Core {
     /// once the connection is closed.
     fn take_events(&self) -> Option<Vec<Event>> {
         let mut notifications = lock(&self.notifications);
-        while notifications.pending.is_empty() && !notifications.closed {
+        while notifications.pending.is_empty()
+            && !notifications.session_changed
+            && !notifications.closed
+        {
             notifications = self
                 .changed
                 .wait(notifications)
@@ -174,11 +225,17 @@ impl Core {
         if notifications.closed {
             return None;
         }
+        let session =
+            std::mem::take(&mut notifications.session_changed).then_some(Event::SessionChanged {});
         let rooms = std::mem::take(&mut notifications.pending);
         Some(
-            rooms
+            session
                 .into_iter()
-                .map(|room_id| Event::RoomChanged { room_id })
+                .chain(
+                    rooms
+                        .into_iter()
+                        .map(|room_id| Event::RoomChanged { room_id }),
+                )
                 .collect(),
         )
     }

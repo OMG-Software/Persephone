@@ -6,7 +6,7 @@ use matrix_sdk_crypto::store::CryptoStore;
 use persephone_contracts::StoreState;
 use persephone_core::{
     store::{self, KEY_FILE, MAX_KEY_FILE_BYTES, STORE_DIR},
-    vault::{KEY_BYTES, KeyProtector, StoreKey, Unsupported, VaultError},
+    vault::{KEY_BYTES, KeyProtector, Unsupported, VaultError},
 };
 use std::{
     collections::BTreeMap,
@@ -14,35 +14,12 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
-use zeroize::Zeroizing;
+
+mod common;
+use common::Tagged;
 
 const MARKER: &[u8] = b"PERSEPHONE_SYNTHETIC_CORE_STORE_MARKER_7C1D";
 const MARKER_KEY: &str = "synthetic-marker";
-
-/// Reversible but keyed by a tag, so a blob from another "context" fails like
-/// DPAPI's would. Test only; not protection.
-struct Tagged(u8);
-
-impl KeyProtector for Tagged {
-    fn protect(&self, key: &StoreKey) -> Result<Vec<u8>, VaultError> {
-        let mut blob = vec![self.0];
-        blob.extend(key.iter().map(|b| b ^ 0xA5));
-        Ok(blob)
-    }
-
-    fn unprotect(&self, blob: &[u8]) -> Result<StoreKey, VaultError> {
-        match blob.split_first() {
-            Some((&tag, rest)) if tag == self.0 && rest.len() == KEY_BYTES => {
-                let mut key = Zeroizing::new([0u8; KEY_BYTES]);
-                for (out, b) in key.iter_mut().zip(rest) {
-                    *out = b ^ 0xA5;
-                }
-                Ok(key)
-            }
-            _ => Err(VaultError::Failed),
-        }
-    }
-}
 
 fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
@@ -73,7 +50,11 @@ fn seeded(protector: &dyn KeyProtector) -> TempDir {
     let dir = TempDir::new().unwrap();
     let stores = store::open(dir.path(), protector).expect("new profile opens");
     stores
-        .block_on(stores.crypto.set_custom_value(MARKER_KEY, MARKER.to_vec()))
+        .block_on(
+            stores
+                .crypto()
+                .set_custom_value(MARKER_KEY, MARKER.to_vec()),
+        )
         .unwrap();
     assert!(stores.close(), "stores close cleanly");
     dir
@@ -82,7 +63,7 @@ fn seeded(protector: &dyn KeyProtector) -> TempDir {
 fn read_marker(dir: &Path, protector: &dyn KeyProtector) -> Option<Vec<u8>> {
     let stores = store::open(dir, protector).expect("profile reopens");
     let value = stores
-        .block_on(stores.crypto.get_custom_value(MARKER_KEY))
+        .block_on(stores.crypto().get_custom_value(MARKER_KEY))
         .unwrap();
     assert!(stores.close());
     value
@@ -209,6 +190,25 @@ fn given_an_interrupted_first_run_then_opening_completes_it() {
     let key_only = seeded(&protector);
     fs::remove_dir_all(key_only.path().join(STORE_DIR)).unwrap();
     assert_eq!(read_marker(key_only.path(), &protector), None);
+}
+
+/// Dropping open stores without closing them (as while a panic unwinds) must
+/// not panic: the SQLite pool's destructor needs a Tokio runtime. The profile
+/// lock is released and the data kept.
+#[test]
+fn given_open_stores_dropped_without_close_then_they_shut_down_and_keep_their_data() {
+    let protector = Tagged(1);
+    let dir = TempDir::new().unwrap();
+    let stores = store::open(dir.path(), &protector).unwrap();
+    stores
+        .block_on(
+            stores
+                .crypto()
+                .set_custom_value(MARKER_KEY, MARKER.to_vec()),
+        )
+        .unwrap();
+    drop(stores);
+    assert_eq!(read_marker(dir.path(), &protector).as_deref(), Some(MARKER));
 }
 
 #[cfg(windows)]

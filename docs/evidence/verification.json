@@ -977,6 +977,29 @@
       "server_registration_tests_passed": 2,
       "development_controller_tests_passed": 13,
       "total_tests_passed": 196
+    },
+    {
+      "name": "session_owner_walkthrough",
+      "checked_on": "2026-10-21",
+      "platform": "Windows 11 Pro x64 26200, debug",
+      "command": "persephone --profile <scratch> --demo-live",
+      "lock": "page cleared (0 rooms, 0 items); profile lock released; 0 sidecars",
+      "locked_7s_live_items_reaching_page": 0,
+      "unlock": "6 rooms; profile lock held; live updates resumed",
+      "exit": 0,
+      "profile_lock_probe_distinguishes_states": true,
+      "fixed_defect": "dropping open Stores outside a Tokio runtime aborted the process",
+      "evidence": "session-owner.md"
+    },
+    {
+      "name": "workspace_check_after_session_owner",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 177,
+      "frontend_tests_passed": 12,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 204
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",
