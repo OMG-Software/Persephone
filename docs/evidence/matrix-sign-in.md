@@ -112,8 +112,9 @@ the uncommitted working tree later committed as `a89a891` (which adds only
 these counts to the docs), Rust and Cargo 1.99.1, Node.js 24.15.0, npm 11.13.0
 and Python 3.14.4, `--offline` with cached dependencies; `Cargo.lock` SHA-256
 `946730d6…2c35`, `frontend/package-lock.json` `a22d978b…f3e2`; its raw log
-was not retained. A rerun after review fixes is recorded in the
-[ledger](verification.json). New:
+was not retained. After review fixes, a rerun on the clean commit `ff48dc6`
+passed 248 tests (217 Rust, 16 frontend, 2 and 13; the core's unit tests now
+also run with the development feature); see the [ledger](verification.json). New:
 
 * Homeserver policy (4): accepted URLs and their shown host (including
   punycode); 16 rejected forms; plain HTTP refused without the feature and

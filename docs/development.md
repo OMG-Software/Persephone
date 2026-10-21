@@ -102,6 +102,8 @@ Run `.local/build/rust/debug/persephone.exe --profile <new directory under .loca
 
 ## Recorded verification
 
+After the sign-in review fixes (commit `ff48dc6`, clean tree), `python tools/dev.py check --offline` passed all 248 tests (217 Rust, 16 frontend, 2 server-registration and 13 development-controller tests); the core's unit tests now also run with the development feature.
+
 After adding native sign-in and real rooms, `python tools/dev.py check --offline` passed all 227 tests (197 Rust, 15 frontend, 2 server-registration and 13 development-controller tests), including the mock-homeserver account tests with the development feature. See the [sign-in evidence](evidence/matrix-sign-in.md) for the live runs.
 
 After adding the session owner and its review fixes (commit `089443e`), `python tools/dev.py check --offline` passed all 205 tests (178 Rust, 12 frontend, 2 server-registration and 13 development-controller tests); the first version passed 204 (177 Rust, 12 frontend, 2 server-registration and 13 development-controller tests). See the [session owner evidence](evidence/session-owner.md).
