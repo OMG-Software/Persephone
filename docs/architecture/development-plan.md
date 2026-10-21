@@ -591,7 +591,7 @@ above passes; none has.
 | P3 | Room and timeline projection | Partial | Room list, history paging, notices and live events; gap and dedup coverage incomplete |
 | P4 | Encrypted text experience | Not started | No sending, verification, recovery or key sharing; other devices' messages are undecryptable notices |
 | P5 | Image messaging | Not started | The decoder and worker exist (P0, P2) but there is no image flow |
-| P6 | Product and operational hardening | Not started | Keyboard and screen-reader checks not done; WebView2 start failures unexplained ([sign-in limits](../evidence/matrix-sign-in.md#limits)) |
+| P6 | Product and operational hardening | Partial | Keyboard and screen-reader checks not done; failed windows detected and retried on Windows; this host's WebView2 crashes come from a third-party overlay hook ([window retry](../evidence/window-retry.md)) |
 | P7 | Release readiness | Not started | None |
 
 Feasibility checks do not grant permission to ship unverified controls.

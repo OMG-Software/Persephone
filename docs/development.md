@@ -102,6 +102,8 @@ Run `.local/build/rust/debug/persephone.exe --profile <new directory under .loca
 
 ## Recorded verification
 
+After adding failed-window detection and retry, `python tools/dev.py check --offline` passed all 256 tests (225 Rust, 16 frontend, 2 server-registration and 13 development-controller tests). See the [window retry evidence](evidence/window-retry.md).
+
 After the sign-in review fixes (commit `a1a1b83`, clean tree), `python tools/dev.py check --offline` passed all 249 tests (218 Rust, 16 frontend, 2 server-registration and 13 development-controller tests); the core's unit tests now also run with the development feature.
 
 After adding native sign-in and real rooms, `python tools/dev.py check --offline` passed all 227 tests (197 Rust, 15 frontend, 2 server-registration and 13 development-controller tests), including the mock-homeserver account tests with the development feature. See the [sign-in evidence](evidence/matrix-sign-in.md) for the live runs.

@@ -72,6 +72,8 @@ struct Notifications {
     session_changed: bool,
     /// The room list changed since the last notification.
     room_list_changed: bool,
+    /// The UI sent a valid request on this connection, so its page runs.
+    ready: bool,
     closed: bool,
 }
 
@@ -140,8 +142,9 @@ enum Source {
     Matrix(session::Lease, matrix_sdk::Client),
 }
 
-/// Core state shared by the request loop and the notification writer. One
-/// `Core` serves one UI connection; once [`serve`] returns it stays closed.
+/// Core state shared by the request loop and the notification writer. A
+/// `Core` serves one UI connection at a time; once [`serve`] returns it stays
+/// closed until [`Core::reopen`] prepares it for a new UI.
 pub struct Core {
     session: Session,
     credentials: Arc<dyn CredentialSource>,
@@ -380,6 +383,21 @@ impl Core {
         !notifications.closed
     }
 
+    /// Whether the current UI connection has sent a valid request: its page
+    /// loaded and reached the core.
+    pub fn ui_ready(&self) -> bool {
+        lock(&self.hub.notifications).ready
+    }
+
+    /// Prepares a closed core for a new UI connection, after a UI was
+    /// replaced. Nothing from the old connection carries over: its
+    /// subscriptions, pending events and readiness are dropped, and the new
+    /// page loads everything itself. The session is untouched.
+    pub fn reopen(&self) {
+        *lock(&self.hub.notifications) = Notifications::default();
+        self.hub.changed.notify_all();
+    }
+
     fn close(&self) {
         lock(&self.hub.notifications).closed = true;
         self.hub.changed.notify_all();
@@ -403,9 +421,14 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                 }
             }
         });
+        let mut ready = false;
         let end = loop {
             match receive::<_, Request>(&mut input, &budgets) {
                 Ok(request) => {
+                    if !ready {
+                        ready = true;
+                        lock(&core.hub.notifications).ready = true;
+                    }
                     let reply = CoreMessage::Reply(core.handle(&request));
                     if send(&mut *lock(&output), &reply).is_err() {
                         break ServeEnd::WriteFailed;

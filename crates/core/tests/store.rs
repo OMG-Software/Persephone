@@ -40,6 +40,17 @@ fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     out
 }
 
+/// Drops SQLite's shared-memory index and empty write-ahead logs. Whether
+/// they remain after a close depends on when the last connection ends, and
+/// they hold no data; a write-ahead log with content is kept.
+fn durable(mut files: BTreeMap<PathBuf, Vec<u8>>) -> BTreeMap<PathBuf, Vec<u8>> {
+    files.retain(|path, bytes| {
+        let name = path.to_string_lossy();
+        !(name.ends_with("-shm") || (name.ends_with("-wal") && bytes.is_empty()))
+    });
+    files
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
@@ -149,9 +160,13 @@ fn given_another_profiles_key_then_the_stores_refuse_it_and_keep_their_data() {
     let key_path = first.path().join(KEY_FILE);
     let original = fs::read(&key_path).unwrap();
     fs::copy(second.path().join(KEY_FILE), &key_path).unwrap();
-    let before = files(first.path());
+    let before = durable(files(first.path()));
     assert_eq!(refused(first.path(), &protector), StoreState::KeyRejected);
-    assert_eq!(files(first.path()), before, "a refused key changes nothing");
+    assert_eq!(
+        durable(files(first.path())),
+        before,
+        "a refused key changes nothing"
+    );
     fs::write(&key_path, original).unwrap();
     assert_eq!(
         read_marker(first.path(), &protector).as_deref(),

@@ -191,9 +191,9 @@ raising `room_list_changed`; the Matrix path the live runs used is unchanged.
   nothing on stderr and no error report (the UI's Job disables error reporting
   for its processes). It happened with and without `--disable-gpu`, from two
   launch paths, and a relaunch usually worked; the owner sees similar
-  behaviour in other WebView2 applications on this host. The cause is not
-  established; the UI shows a blank window rather than an error when it
-  happens.
+  behaviour in other WebView2 applications on this host. Later work found the
+  cause (a third-party overlay hook crashing the WebView2 browser process) and
+  added detection and a retry; see the [window retry evidence](window-retry.md).
 * Sending messages, media, room-list ordering by activity and read markers are
   not built.
 * Debug builds on one Windows host only; Linux and macOS have no prompt.
