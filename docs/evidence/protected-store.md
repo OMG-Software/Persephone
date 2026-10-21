@@ -108,7 +108,8 @@ checkpointing them.
   between accounts are not exercised. Closing four idle stores is not
   evidence of an SDK-wide drain.
 * Lock and logout while the app runs, key rotation, corruption recovery,
-  backups and secure deletion are not built.
+  backups and secure deletion are not built. (Later: lock and unlock while
+  running were added; see the [session owner evidence](session-owner.md).)
 * Linux Secret Service and macOS Keychain adapters are not built; those
   platforms report `unsupported`.
 * Debug builds on one Windows host only.

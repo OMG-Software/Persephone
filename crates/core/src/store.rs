@@ -40,15 +40,22 @@ const KEY_MAGIC: &[u8] = b"PERSEPHONE-STORE-KEY-1\n";
 /// not a key file.
 pub const MAX_KEY_FILE_BYTES: u64 = 4096;
 
-/// The open stores. Dropping this without [`Stores::close`] leaves the SDK to
-/// close them implicitly; the core always closes explicitly.
-pub struct Stores {
-    runtime: Runtime,
+/// The SDK's four encrypted stores.
+pub struct SdkStores {
     pub state: SqliteStateStore,
     pub event_cache: SqliteEventCacheStore,
     pub media: SqliteMediaStore,
     pub crypto: SqliteCryptoStore,
-    // Held until the stores are closed and this value is dropped.
+}
+
+/// The open stores. The core closes them explicitly with [`Stores::close`];
+/// dropping them otherwise (for example while a panic unwinds) still closes
+/// them inside their runtime, because the SQLite pool's destructor spawns
+/// blocking work and panics outside a Tokio runtime.
+pub struct Stores {
+    runtime: Runtime,
+    sdk: Option<SdkStores>,
+    // Held until the stores are closed or dropped.
     _lock: File,
 }
 
@@ -58,26 +65,42 @@ impl Stores {
         self.runtime.block_on(future)
     }
 
+    pub fn sdk(&self) -> &SdkStores {
+        self.sdk
+            .as_ref()
+            .expect("stores are open until closed or dropped")
+    }
+
+    pub fn crypto(&self) -> &SqliteCryptoStore {
+        &self.sdk().crypto
+    }
+
     /// Closes every store, crypto last, and reports whether all closed
     /// cleanly. The profile lock is released only after this returns.
-    pub fn close(self) -> bool {
-        let Stores {
-            runtime,
-            state,
-            event_cache,
-            media,
-            crypto,
-            _lock,
-        } = self;
-        runtime.block_on(async {
+    pub fn close(mut self) -> bool {
+        let Some(sdk) = self.sdk.take() else {
+            return false;
+        };
+        self.runtime.block_on(async move {
             let results = [
-                state.close().await.is_ok(),
-                event_cache.close().await.is_ok(),
-                media.close().await.is_ok(),
-                crypto.close().await.is_ok(),
+                sdk.state.close().await.is_ok(),
+                sdk.event_cache.close().await.is_ok(),
+                sdk.media.close().await.is_ok(),
+                sdk.crypto.close().await.is_ok(),
             ];
+            // Dropped here, inside the runtime.
+            drop(sdk);
             results.iter().all(|ok| *ok)
         })
+    }
+}
+
+impl Drop for Stores {
+    fn drop(&mut self) {
+        if let Some(sdk) = self.sdk.take() {
+            let _context = self.runtime.enter();
+            drop(sdk);
+        }
     }
 }
 
@@ -210,10 +233,12 @@ pub fn open(dir: &Path, protector: &dyn KeyProtector) -> Result<Stores, StoreSta
     let (state, event_cache, media, crypto) = opened?;
     Ok(Stores {
         runtime,
-        state,
-        event_cache,
-        media,
-        crypto,
+        sdk: Some(SdkStores {
+            state,
+            event_cache,
+            media,
+            crypto,
+        }),
         _lock: lock,
     })
 }

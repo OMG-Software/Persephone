@@ -51,6 +51,14 @@ pub enum StoreState {
     NotConfigured,
     /// The store is open with its key from the OS vault.
     Protected,
+    /// Locked on request; the stores are closed.
+    Locked,
+    /// A lock was requested and new work is refused, but admitted work has not
+    /// finished yet; the stores are still open. Locking again resumes the wait.
+    Locking,
+    /// The stores did not close cleanly while locking. The session stays
+    /// locked until the application restarts.
+    LockFailed,
     /// A store exists but its key does not; the store was left untouched.
     KeyMissing,
     /// The key exists but the OS vault could not unwrap it.

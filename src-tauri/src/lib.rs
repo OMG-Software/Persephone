@@ -9,11 +9,14 @@
 //! The page may subscribe to changes in a room. The core sends a content-free
 //! event when a subscribed room changes; the UI forwards it as an empty message
 //! on the page's channel for that room, and the page fetches what it needs.
+//! When the core's session locks or unlocks, every room channel is dropped
+//! (the core drops those subscriptions too) and the page's session channel
+//! gets an empty message, so the page clears what it shows.
 
 pub mod core_link;
 
 use core_link::{CoreError, CoreLink};
-use persephone_contracts::{AppStatus, RoomList, TimelinePage};
+use persephone_contracts::{AppStatus, RoomList, StoreState, TimelinePage};
 use persephone_core_protocol::{Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use serde::de::DeserializeOwned;
 use std::{
@@ -37,12 +40,14 @@ const UNAVAILABLE: &str = "core_unavailable";
 const INVALID_ARGUMENT: &str = "invalid_argument";
 const NOT_FOUND: &str = "not_found";
 const LIMIT_EXCEEDED: &str = "limit_exceeded";
+const LOCKED: &str = "locked";
 
 fn page_error(error: CoreError) -> String {
     match error {
         CoreError::Core(ErrorCode::InvalidArgument) => INVALID_ARGUMENT,
         CoreError::Core(ErrorCode::NotFound) => NOT_FOUND,
         CoreError::Core(ErrorCode::LimitExceeded) => LIMIT_EXCEEDED,
+        CoreError::Core(ErrorCode::Locked) => LOCKED,
         _ => UNAVAILABLE,
     }
     .to_string()
@@ -90,12 +95,14 @@ async fn timeline_page(
     relay(core.inner(), Call::TimelinePage { room_id, cursor }).await
 }
 
-/// The page's channel for each room it subscribed to. The core accepts at
-/// most `MAX_SUBSCRIPTIONS` rooms, and a channel is kept only after the core
-/// accepted the room, so this map is bounded the same way.
+/// The page's channel for each room it subscribed to, and its one session
+/// channel. The core accepts at most `MAX_SUBSCRIPTIONS` rooms, and a room
+/// channel is kept only after the core accepted the room, so this map is
+/// bounded the same way.
 #[derive(Default)]
 pub struct Subscriptions {
     channels: Mutex<HashMap<String, Channel<()>>>,
+    session: Mutex<Option<Channel<()>>>,
 }
 
 impl Subscriptions {
@@ -105,12 +112,24 @@ impl Subscriptions {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn session(&self) -> MutexGuard<'_, Option<Channel<()>>> {
+        self.session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Forwards a core event to the page. Called on the core reader thread.
+    /// A page that has gone away simply misses the message.
     pub fn dispatch(&self, event: Event) {
         match event {
             Event::RoomChanged { room_id } => {
                 if let Some(channel) = self.channels().get(&room_id) {
-                    // A page that has gone away simply misses the message.
+                    let _ = channel.send(());
+                }
+            }
+            Event::SessionChanged {} => {
+                self.channels().clear();
+                if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send(());
                 }
             }
@@ -162,9 +181,28 @@ async fn unsubscribe_room(
     relay::<()>(core.inner(), Call::Unsubscribe { room_id }).await
 }
 
+/// Registers the page's session channel, replacing any earlier one.
+#[tauri::command]
+fn watch_session(subscriptions: State<'_, Arc<Subscriptions>>, on_change: Channel<()>) {
+    *subscriptions.session() = Some(on_change);
+}
+
+/// Locks the core's session. Replies with the resulting state; `locking`
+/// means admitted work is still finishing, and calling again resumes the wait.
+#[tauri::command]
+async fn lock_session(core: State<'_, CoreLink>) -> Result<StoreState, String> {
+    relay(core.inner(), Call::LockSession {}).await
+}
+
+#[tauri::command]
+async fn unlock_session(core: State<'_, CoreLink>) -> Result<StoreState, String> {
+    relay(core.inner(), Call::UnlockSession {}).await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
+    subscriptions.session().take();
     let rooms: Vec<String> = subscriptions
         .channels()
         .drain()
@@ -206,7 +244,10 @@ pub fn configure<R: Runtime>(
             room_list,
             timeline_page,
             subscribe_room,
-            unsubscribe_room
+            unsubscribe_room,
+            watch_session,
+            lock_session,
+            unlock_session
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

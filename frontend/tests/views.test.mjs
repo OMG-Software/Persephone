@@ -10,7 +10,7 @@ let render;
 before(async () => {
   vite = await createServer({
     configFile: './vite.config.js',
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, ws: false },
     appType: 'custom'
   });
   ({ default: RoomList } = await vite.ssrLoadModule('/src/RoomList.svelte'));

@@ -53,6 +53,9 @@ impl CoreTransport for FakeCore {
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },
             Call::Unsubscribe { .. } => Ok(serde_json::Value::Null),
+            Call::LockSession {} => Ok(serde_json::json!("locked")),
+            // A state outside the contract must not reach the page.
+            Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
             Call::TimelinePage { room_id, cursor } => match (room_id.as_str(), cursor.as_deref()) {
                 ("!r:example.invalid", None) => Ok(serde_json::json!({
                     "roomId": room_id,
@@ -258,7 +261,10 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-room-list",
             "allow-timeline-page",
             "allow-subscribe-room",
-            "allow-unsubscribe-room"
+            "allow-unsubscribe-room",
+            "allow-watch-session",
+            "allow-lock-session",
+            "allow-unlock-session"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -416,4 +422,71 @@ fn given_subscriptions_then_core_events_reach_only_the_subscribed_rooms_channel(
     delivered.lock().unwrap().clear();
     subscriptions.dispatch(changed("!r:example.invalid"));
     assert!(delivered.lock().unwrap().is_empty());
+}
+
+/// A session change drops every room channel and reaches the page's session
+/// channel as an empty message; lock and unlock relay the core's state and
+/// refuse one outside the contract.
+#[test]
+fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_told() {
+    use std::sync::Mutex;
+    let delivered: Arc<Mutex<Vec<(u32, String)>>> = Arc::default();
+    let record = delivered.clone();
+    let subscriptions = Arc::new(Subscriptions::default());
+    let app = configure(
+        mock_builder().channel_interceptor(move |_, callback, _, body| {
+            let body = match body {
+                tauri::ipc::InvokeResponseBody::Json(json) => json.clone(),
+                tauri::ipc::InvokeResponseBody::Raw(_) => "raw".into(),
+            };
+            record.lock().unwrap().push((callback.0, body));
+            true
+        }),
+        FakeCore::new(true),
+        subscriptions.clone(),
+    )
+    .build(context())
+    .unwrap();
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    assert!(
+        invoke(
+            "watch_session",
+            serde_json::json!({"onChange": "__CHANNEL__:3"})
+        )
+        .is_ok()
+    );
+    assert!(
+        invoke(
+            "subscribe_room",
+            serde_json::json!({"roomId": "!r:example.invalid", "onChange": "__CHANNEL__:7"})
+        )
+        .is_ok()
+    );
+
+    subscriptions.dispatch(Event::SessionChanged {});
+    assert!(subscriptions.rooms().is_empty(), "room channels dropped");
+    subscriptions.dispatch(Event::RoomChanged {
+        room_id: "!r:example.invalid".into(),
+    });
+    let delivered = delivered.lock().unwrap().clone();
+    assert!(delivered.contains(&(3, "null".into())), "{delivered:?}");
+    assert!(
+        !delivered
+            .iter()
+            .any(|(id, body)| *id == 7 && body == "null"),
+        "no room message after the session changed: {delivered:?}"
+    );
+
+    assert_eq!(
+        invoke("lock_session", serde_json::json!({})),
+        Ok(serde_json::json!("locked"))
+    );
+    assert_eq!(
+        invoke("unlock_session", serde_json::json!({})).unwrap_err(),
+        "core_unavailable"
+    );
 }

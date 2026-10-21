@@ -1,4 +1,4 @@
-export type StoreState = "not_configured" | "protected" | "key_missing" | "key_unreadable" | "key_rejected" | "profile_in_use" | "store_unavailable" | "unsupported";
+export type StoreState = "not_configured" | "protected" | "locked" | "locking" | "lock_failed" | "key_missing" | "key_unreadable" | "key_rejected" | "profile_in_use" | "store_unavailable" | "unsupported";
 
 export type AppStatus = { 
 /**

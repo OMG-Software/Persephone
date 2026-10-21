@@ -8,6 +8,8 @@ use persephone_core_protocol::{
 use persephone_media_protocol::{FrameHeader, FrameKind, ResourceBudgets};
 use std::io::Cursor;
 
+mod common;
+
 fn requests(ids: &[u32]) -> Vec<u8> {
     let mut wire = Vec::new();
     for &id in ids {
@@ -334,4 +336,97 @@ fn given_a_subscribed_room_changes_while_serving_then_the_ui_gets_an_event_and_t
         !core.wait_running(std::time::Duration::from_secs(5)),
         "closed after serving"
     );
+}
+
+/// Over real pipes: locking tells the UI, drops subscriptions and refuses
+/// protected views; unlocking tells the UI again and views return.
+#[test]
+fn given_a_profile_when_the_ui_locks_and_unlocks_then_views_follow_the_session() {
+    use persephone_contracts::StoreState;
+    use persephone_core::session::Session;
+    use std::io::{PipeReader, PipeWriter};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let core = Core::default().with_session(Session::open(
+        dir.path().to_path_buf(),
+        Box::new(common::Tagged(1)),
+    ));
+    let (from_ui, mut to_core): (PipeReader, PipeWriter) = std::io::pipe().unwrap();
+    let (mut from_core, to_ui) = std::io::pipe().unwrap();
+    let budgets = ResourceBudgets::default();
+    // Sends one call and returns its outcome and any events read before it.
+    let mut ask = move |id: u32, call: Call| -> (Outcome, Vec<Event>) {
+        send(&mut to_core, &self::call(id, call)).unwrap();
+        let mut events = Vec::new();
+        loop {
+            match receive::<_, CoreMessage>(&mut from_core, &budgets).unwrap() {
+                CoreMessage::Event(event) => events.push(event),
+                CoreMessage::Reply(reply) => {
+                    assert_eq!(reply.id, id);
+                    return (reply.outcome, events);
+                }
+            }
+        }
+    };
+    let state = |outcome: Outcome| match outcome {
+        Outcome::Ok(value) => serde_json::from_value::<StoreState>(value).unwrap(),
+        other => panic!("{other:?}"),
+    };
+
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| persephone_core::serve(&core, from_ui, to_ui));
+        assert!(matches!(ask(1, Call::RoomList {}).0, Outcome::Ok(_)));
+        assert_eq!(
+            ask(2, subscribe("!planning:example.invalid")).0,
+            Outcome::Ok(serde_json::Value::Null)
+        );
+
+        let (outcome, mut events) = ask(3, Call::LockSession {});
+        assert_eq!(state(outcome), StoreState::Locked);
+        // The event may be written just before or just after the reply.
+        events.extend(match ask(4, Call::AppStatus {}) {
+            (Outcome::Ok(value), more) => {
+                let status: AppStatus = serde_json::from_value(value).unwrap();
+                assert_eq!(status.store, StoreState::Locked);
+                more
+            }
+            other => panic!("{other:?}"),
+        });
+        assert_eq!(events, [Event::SessionChanged {}]);
+
+        for (id, call) in [
+            (5, Call::RoomList {}),
+            (
+                6,
+                Call::TimelinePage {
+                    room_id: "!planning:example.invalid".into(),
+                    cursor: None,
+                },
+            ),
+            (7, subscribe("!planning:example.invalid")),
+        ] {
+            assert_eq!(ask(id, call).0, Outcome::Error(ErrorCode::Locked));
+        }
+        // The subscription was dropped: a change queues nothing.
+        core.post_message(
+            "!planning:example.invalid",
+            "@a:example.invalid",
+            "x".into(),
+        );
+        assert_eq!(core.pending_notifications(), 0);
+
+        let (outcome, mut events) = ask(8, Call::UnlockSession {});
+        assert_eq!(state(outcome), StoreState::Protected);
+        events.extend(ask(9, Call::AppStatus {}).1);
+        assert_eq!(events, [Event::SessionChanged {}]);
+        assert!(matches!(ask(10, Call::RoomList {}).0, Outcome::Ok(_)));
+
+        // Closes the UI's ends of both pipes.
+        drop(ask);
+        assert_eq!(server.join().unwrap(), ServeEnd::UiClosed);
+    });
+    let (state, _) = core
+        .session()
+        .lock(std::time::Duration::from_secs(30), || {});
+    assert_eq!(state, StoreState::Locked);
 }
