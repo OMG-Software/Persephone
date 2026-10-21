@@ -103,29 +103,42 @@ graphs remain release work.
 
 ## Advisory after the Tauri shell: `glib`
 
-Checked 21 October 2026 against the root lockfile at `f6094cc`. GitHub
-Dependabot raised alert 1, [GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g)
-(medium): unsound `Iterator` and `DoubleEndedIterator` implementations for
-`glib::VariantStrIter`, affecting `glib` 0.15.0 up to 0.20.0. GitHub lists no
-other identifier for it. The lockfile holds `glib 0.18.5`, added with the Tauri
-shell after the OSV audit above, which therefore did not cover it. OSV has not
-been re-queried for this entry.
+Checked 21 October 2026 against the root lockfile at `f6094cc` (SHA-256
+`ae58ec4f…5eca`). GitHub Dependabot raised alert 1,
+[GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g)
+(medium), which the advisory links to
+[RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html):
+unsound `Iterator` and `DoubleEndedIterator` implementations for
+`glib::VariantStrIter`. Affected versions are `>= 0.15.0, < 0.20.0`; 0.20.0 is
+the first patched release. The lockfile holds `glib 0.18.5`, added with the
+Tauri shell after the OSV audit above, which therefore did not cover it. OSV
+has not been re-queried for this entry.
 
 | Crate | Compiled for our features? | Path | Disposition |
 | --- | --- | --- | --- |
-| `glib 0.18.5` | **Linux only**; not compiled for Windows x64 (`cargo tree -i glib --target x86_64-pc-windows-msvc` prints nothing) | `persephone-desktop` → `tauri 2.12.4` → `gtk`/`webkit2gtk`/`muda`/`tao` → `glib` (Tauri's GTK 0.18 stack) | **Retain at the current pin; adopt a fixed GTK binding through a Tauri release.** Recheck before any Linux build is distributed. |
+| `glib 0.18.5` | **Linux only**; not compiled for Windows x64 | `persephone-desktop` → `tauri 2.12.4` → `gtk`/`webkit2gtk`/`muda`/`tao` → `glib` (Tauri's GTK 0.18 stack) | **Retain at the current pin; adopt a fixed GTK binding through a Tauri release.** Recheck before any Linux build is distributed. |
 
-The Linux graph (`cargo tree -i glib@0.18.5 --target x86_64-unknown-linux-gnu
--e normal`) has 17 crates that depend on `glib` directly or transitively: `atk`, `cairo-rs`, `gdk`,
-`gdk-pixbuf`, `gio`, `gtk`, `javascriptcore-rs`, `muda`, `pango`, `soup3`,
-`tao`, `tauri`, `tauri-runtime`, `tauri-runtime-wry`, `webkit2gtk`, `wry` and
-`persephone-desktop`. A source search of the cached sources of those exact versions found
-no use of `VariantStrIter`, `str_iter` or `array_iter_str`; only `glib`'s own
-definitions match, and `src-tauri` does not use `glib` directly. This is a
-textual search, not proof that no caller reaches the iterator through another
-API, and no Linux build has been run. Moving to `glib` 0.20 needs GTK bindings
-that Tauri 2.12.4 does not use; patching or forking the GTK stack is out of
-scope.
+Run from the repository root on Windows 11 Pro x64 (build 26200) with Cargo
+1.99.1, `CARGO_HOME=.local/cache/cargo`, cached sources and no network. These
+commands resolve the dependency graph only; no build of any type was run, and
+no output was retained beyond the results below.
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `cargo tree --locked --offline -i glib@0.18.5 --target x86_64-pc-windows-msvc -e normal` | 0 | Nothing to print: `glib` is not in the Windows x64 graph |
+| `cargo tree --locked --offline -i glib@0.18.5 --target x86_64-unknown-linux-gnu -e normal --prefix none` | 0 | 18 distinct packages: `glib` and 17 that depend on it directly or transitively |
+| `grep -rlE 'VariantStrIter\|str_iter\(\|array_iter_str' <source> --include=*.rs`, for each of the 17 | 0 matches | Sources are `.local/cache/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/<name>-<version>` for registry crates and `src-tauri` for `persephone-desktop` |
+| `grep -rqw glib src-tauri/src src-tauri/Cargo.toml` | 1 (no match) | `src-tauri` does not use `glib` directly |
+
+The 17 dependents are `atk` 0.18.2, `cairo-rs` 0.18.5, `gdk` 0.18.2,
+`gdk-pixbuf` 0.18.5, `gio` 0.18.4, `gtk` 0.18.2, `javascriptcore-rs` 1.1.2,
+`muda` 0.20.0, `pango` 0.18.3, `soup3` 0.5.0, `tao` 0.37.1, `tauri` 2.12.4,
+`tauri-runtime` 2.12.2, `tauri-runtime-wry` 2.12.2, `webkit2gtk` 2.0.2,
+`wry` 0.57.0 and `persephone-desktop` 0.0.0. Only `glib`'s own definitions
+match the search. This is a textual search, not proof that no caller reaches
+the iterator through another API, and no Linux build or Linux test has been
+run. Moving to `glib` 0.20 needs GTK bindings that Tauri 2.12.4 does not use;
+patching or forking the GTK stack is out of scope.
 
 ## Historical per-package inventory
 
