@@ -42,6 +42,10 @@ def main():
         wasm_guest = ["-p", "persephone-media-decoder", "--target", "wasm32-unknown-unknown"]
         run(["cargo", "build", *cargo_flags, "--release", *wasm_guest], environment)
         run(["cargo", "clippy", *cargo_flags, "--release", *wasm_guest, "--", "-D", "warnings"], environment)
+        # The broker's end-to-end tests launch this executable, which embeds the
+        # guest. `cargo test` does not build another package's binary, so a
+        # missing or stale worker would otherwise be used.
+        run(["cargo", "build", *cargo_flags, "-p", "persephone-media-worker"], environment)
         run(["cargo", "test", *cargo_flags, "--workspace", "--all-targets"], environment)
         run(["cargo", "clippy", *cargo_flags, "--workspace", "--all-targets", "--", "-D", "warnings"], environment)
     if args.command in ("check", "frontend", "bootstrap"):
