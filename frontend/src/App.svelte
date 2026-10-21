@@ -133,8 +133,17 @@
     }
   }
 
-  onMount(() => {
-    watchSession(reset).catch(() => {});
+  onMount(async () => {
+    // Register for session changes before loading anything from the session:
+    // the host does not replay a change the page was not yet listening for.
+    // Without the channel the page could keep showing a locked session, so it
+    // loads nothing.
+    try {
+      await watchSession(reset);
+    } catch {
+      unavailable = true;
+      return;
+    }
     load();
   });
 
