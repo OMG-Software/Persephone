@@ -116,8 +116,13 @@ and loads nothing from the session if registration fails.
 **Final run, commit `089443e` (all review fixes):**
 `python tools/dev.py check --offline` exited 0 with a clean working tree and
 passed 205 tests (178 Rust, 12 frontend, 2 server-registration and 13
-controller tests), with formatting, Clippy and contract checks. The
-walkthrough below was repeated on that build with the same results (no rooms
+controller tests), with formatting, Clippy and contract checks. Toolchain:
+Rust and Cargo 1.99.1, Node.js 24.15.0, npm 11.13.0, Python 3.14.4, on the
+host above, debug builds, `--offline` with dependencies cached under
+`.local/cache`. Lockfiles at that commit: `Cargo.lock` SHA-256
+`ae58ec4f…5eca`, `frontend/package-lock.json` SHA-256 `a22d978b…f3e2`. The raw
+log was written to the session's scratch directory outside the repository and
+is not retained. The walkthrough below was repeated on that build with the same results (no rooms
 or items while locked, none 7 s later, profile released and no sidecars right
 after the lock or 2 s later, live updates after unlock, exit 0); two earlier
 attempts lost their DevTools connection.
@@ -126,8 +131,9 @@ attempts lost their DevTools connection.
 
 `python tools/dev.py check --offline` passed 204 tests (177 Rust, 12 frontend,
 2 server-registration and 13 controller tests), with formatting, Clippy and
-contract checks. The review fixes added the lease stress test. New at that
-commit:
+contract checks. These 204 tests do not include the lease stress test, which
+commit `6be3366` added and the 205-test run at `089443e` includes. New at
+`3017d2e`:
 
 * Session (5, real SDK stores, stand-in key protector):
   * A lease running on another thread keeps a lock waiting: the announcement
