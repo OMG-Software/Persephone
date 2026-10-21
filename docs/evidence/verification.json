@@ -999,7 +999,22 @@
       "frontend_tests_passed": 12,
       "server_registration_tests_passed": 2,
       "development_controller_tests_passed": 13,
-      "total_tests_passed": 204
+      "total_tests_passed": 204,
+      "commit": "3017d2e"
+    },
+    {
+      "name": "workspace_check_after_session_owner_review_fixes",
+      "command": "python tools/dev.py check --offline",
+      "commit": "089443e",
+      "working_tree_clean": true,
+      "exit_code": 0,
+      "rust_tests_passed": 178,
+      "frontend_tests_passed": 12,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 205,
+      "walkthrough_repeated": "same results; 0 sidecars right after lock and 2 s later; 2 earlier attempts lost the DevTools connection",
+      "evidence": "session-owner.md"
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

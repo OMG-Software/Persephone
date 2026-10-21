@@ -99,14 +99,35 @@ the profile lock released and the state `locked`. Four further runs, checking
 right after the lock and again 2 s later, found none. The cause is not
 established. Each probe attempt starts by deleting the scratch profile with
 errors ignored, so files from an interrupted earlier attempt may have
-survived; this was not confirmed. The WAL holds the same encrypted values as
+survived; this was not confirmed, and the final walkthrough below, which also
+followed two lost-connection attempts, found none. The WAL holds the same encrypted values as
 the database ([P0 storage evidence](storage.md)).
+
+### Review fix: session channel before session content
+
+The page started `watchSession` and its first load at the same time. A session
+change before the channel was registered would be missed, because the host
+does not replay it, and a failed registration would leave the page showing
+content it would never be told to clear. The page now waits for the channel
+and loads nothing from the session if registration fails.
 
 ## Tests
 
+**Final run, commit `089443e` (all review fixes):**
+`python tools/dev.py check --offline` exited 0 with a clean working tree and
+passed 205 tests (178 Rust, 12 frontend, 2 server-registration and 13
+controller tests), with formatting, Clippy and contract checks. The
+walkthrough below was repeated on that build with the same results (no rooms
+or items while locked, none 7 s later, profile released and no sidecars right
+after the lock or 2 s later, live updates after unlock, exit 0); two earlier
+attempts lost their DevTools connection.
+
+**Original run, commit `3017d2e` (before the review fixes):**
+
 `python tools/dev.py check --offline` passed 204 tests (177 Rust, 12 frontend,
 2 server-registration and 13 controller tests), with formatting, Clippy and
-contract checks. New:
+contract checks. The review fixes added the lease stress test. New at that
+commit:
 
 * Session (5, real SDK stores, stand-in key protector):
   * A lease running on another thread keeps a lock waiting: the announcement
@@ -135,6 +156,8 @@ contract checks. New:
   are refused.
 
 ## Real application walkthrough
+
+Recorded on the original commit; repeated on the final commit as noted above.
 
 `persephone --profile <scratch dir> --demo-live`, driven over DevTools; the
 profile lock was probed with a non-blocking lock on `profile.lock`:
