@@ -543,9 +543,10 @@ support requires actual OS runs, not cross-compilation alone.
 
 ## Development milestones and acceptance gates
 
-Milestones require explicit acceptance evidence. P0 is currently **in progress**;
-the application milestones remain **not implemented / not verified**. Work can be developed
-in parallel where independent, but feature acceptance follows its gates.
+Milestones require explicit acceptance evidence. **No milestone has passed its exit
+gate.** P0, P1 and P2 are in progress and P3 has started; the
+[milestone status](#milestone-status) below lists each deliverable. Work can be
+developed in parallel where independent, but feature acceptance follows its gates.
 
 | Milestone | Deliverables | Exit evidence |
 | --- | --- | --- |
@@ -557,6 +558,41 @@ in parallel where independent, but feature acceptance follows its gates.
 | P5 — Image messaging | Incoming/outgoing image flows, encrypted attachments, native selection, metadata/cache policy, accessible pixel display | Malformed/oversized/cancelled media; both sync modes; encrypted upload; no arbitrary paths or unsafe decode fallback; user originals unchanged |
 | P6 — Product and operational hardening | Keyboard/screen readers, scaling/IME, offline/reconnect behavior, privacy defaults, bounded-load testing, packaging | Actual packaged runs on all targets; hostile-content/IPC fuzz corpus and privacy captures; reviewed dependency and storage evidence |
 | P7 — Release readiness | Signed installers/update plan, support/security reporting, independent security review, compatibility report | Completed checks with exit statuses and artifacts; addressed findings; explicit remaining limitations; no high-risk-use claim from a green build alone |
+
+### Milestone status
+
+21 October 2026. This is the single progress summary; other pages link here. A
+deliverable is **done** when it is built and its own evidence passes, **partial**
+when only part is built or only some platforms or cases pass, and **not
+started** otherwise. A milestone's exit gate is met only when its exit evidence
+above passes; none has.
+
+| Milestone | Deliverable | State | Evidence and remaining work |
+| --- | --- | --- | --- |
+| P0 | Frontend, SDK and version candidates | Done | [Versions](../evidence/versions.json), [frontend](../evidence/frontend.md), [dependencies](../evidence/dependencies.md) |
+| P0 | Sync negotiation and concurrency proof | Partial | Sliding/classic selection passes on both servers ([capability fallback](../evidence/capability-fallback.md)); SDK stop-and-join is missing ([lifecycle contract](sdk-lifecycle.md)) |
+| P0 | Credential and store audit | Partial | [Storage](../evidence/storage.md), [protected store](../evidence/protected-store.md) on Windows; Linux/macOS vaults not tested |
+| P0 | Sandbox-launch tests on all OSes | Partial | Windows [contained worker](../evidence/media-worker.md); no OS policy denies sockets, so decoding runs in a [no-network WebAssembly guest](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md); signing and Linux/macOS not started |
+| P0 | Aggregate resource and IPC design | Done | [Frame protocol](../evidence/media-protocol.md), [IPC measurements and core/UI split](../evidence/ipc-transport.md) ([ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)) |
+| P1 | Workspace, Tauri shell, typed contracts | Done (Windows) | [Tauri shell](../evidence/tauri-shell.md), [contracts](../evidence/contracts.md) |
+| P1 | Bounded views | Done | [Synthetic views](../evidence/mock-views.md), [live updates](../evidence/live-updates.md) |
+| P1 | Explicit permissions and CSP | Done | [Tauri shell](../evidence/tauri-shell.md): allowlist, capability, CSP, navigation and IPC denial tests |
+| P1 | Production asset build | Partial | Frontend build checked; no release or packaged app run |
+| P1 | Three-OS CI | Partial | Windows CI ([development guide](../development.md#continuous-integration)); Linux and macOS not built |
+| P2 | Session owner | Partial | [Session owner](../evidence/session-owner.md): leases, lock and unlock; logout not built |
+| P2 | Vault and storage adapters | Partial | [Protected store](../evidence/protected-store.md): Windows DPAPI only |
+| P2 | Task cancellation | Partial | Cooperative stop between complete operations; SDK tasks not joined, so lock ends `restart_required` once a client ran |
+| P2 | Worker broker | Done (Windows) | [Media worker](../evidence/media-worker.md); Linux/macOS not started |
+| P2 | Pixel transport | Not started | Decoded pixels do not reach the UI yet |
+| P2 | Baseline limits | Partial | Frame and page budgets, UI Job limits; no aggregate memory admission across features |
+| P3 | SDK integration | Partial | [Sign-in evidence](../evidence/matrix-sign-in.md): one client in the core over the encrypted stores |
+| P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; no SSO, sign-out or `.well-known` discovery |
+| P3 | Sliding default, classic fallback | Partial | Initial selection passes live on Merovingian, Synapse and classic-only Synapse; no runtime mode switch |
+| P3 | Room and timeline projection | Partial | Room list, history paging, notices and live events; gap and dedup coverage incomplete |
+| P4 | Encrypted text experience | Not started | No sending, verification, recovery or key sharing; other devices' messages are undecryptable notices |
+| P5 | Image messaging | Not started | The decoder and worker exist (P0, P2) but there is no image flow |
+| P6 | Product and operational hardening | Not started | Keyboard and screen-reader checks not done; WebView2 start failures unexplained ([sign-in limits](../evidence/matrix-sign-in.md#limits)) |
+| P7 | Release readiness | Not started | None |
 
 Feasibility checks do not grant permission to ship unverified controls.
 P3 can use disposable test fixtures while P4 is underway, but an unencrypted

@@ -1,7 +1,8 @@
 # Project plan
 
-Status: P0 feasibility in progress, 19 October 2026. See the
-[P0 feasibility workbench](feasibility.md) for completed checks and open gates.
+Status: see the [milestone status](../architecture/development-plan.md#milestone-status)
+(no milestone has passed its exit gate; P0 to P2 in progress, P3 started). The
+[P0 feasibility workbench](feasibility.md) records completed checks and open gates.
 Only the confirmed-requirements section records approved requirements; the remaining design is proposed.
 
 The [architecture and development plan](../architecture/development-plan.md) is the working

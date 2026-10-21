@@ -82,30 +82,25 @@ Minimum supported OS/CPU versions remain undecided until packaged tests exist.
    both servers. Runtime unsupported-endpoint reclassification and replacement
    still require reviewed failure policy and safe lifecycle ownership.
 2. [Decisive Windows network evidence](../evidence/windows-sandbox.md#network-denial-differential)
-   now exists and is negative across three worker policies: neither AppContainer
-   nor LPAC denies the kernel socket device, and an AppContainer combined with a
-   restricted token (write-restricted to the RESTRICTED SID, untrusted integrity)
-   cannot initialize — the LowBox worker fails DLL initialization
-   (`STATUS_DLL_INIT_FAILED`) before any probe runs, so it yields no socket
-   verdict. The restricting-SID set tight enough to deny the AFD device is also
-   too tight for the loader to boot; a set loose enough to boot grants the
-   device. The remaining options are a different socket-denying mechanism (for
-   example a listener/WFP-based egress control owned by the broker, or a
-   kernel-level filter) or an owner-approved residual-risk decision for
-   listener-side filtering plus the port-state oracle. Verify CPU accounting and
-   packaged behavior; establish signed helper policies and equivalent
-   denial/resource tests on Linux/macOS.
+   is negative across three worker policies: no tested Windows policy denies
+   the kernel socket device. Owner decision
+   ([ADR-0003](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md)):
+   untrusted decoding runs as a WebAssembly module with no network capability,
+   inside the OS-contained worker, with the OS-level residual risk documented.
+   Remaining: CPU accounting, packaged behavior, signed helper policies and
+   equivalent denial and resource tests on Linux/macOS.
 3. [Maintenance disposition](../evidence/dependencies.md#maintenance-disposition-and-compiled-graph-review)
    is recorded: `derivative` is unreachable for our features, and `anymap2` is
    retained until the next matrix-sdk release adopts upstream's merged anymap3
    switch. TLS 1.3 only is decided and tested. Resolve the Linux/macOS graphs,
    review file-level licenses in `aws-lc-sys` and bundled SQLite, and produce
    an SBOM.
-4. Carry the standalone DTO generator into real Tauri command wiring and establish
-   transport containment before application deserialization. Keep the current UI
-   choices; settle remaining SDK/OS-baseline decisions with evidence, then begin
-   the P1 shell. Production unlock, cross-signing, human verification and
-   crash/corruption recovery remain separate requirements.
+4. Done: the DTOs are wired into the Tauri commands, transport containment is
+   the core/UI split ([ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)),
+   and the P1 shell and later slices are built; see the
+   [milestone status](../architecture/development-plan.md#milestone-status).
+   Production unlock, cross-signing, human verification and crash/corruption
+   recovery remain separate requirements.
 
 ## Reproduction and artifact policy
 
