@@ -5,7 +5,7 @@ use matrix_sdk_crypto::store::CryptoStore;
 use persephone_contracts::StoreState;
 use persephone_core::{
     session::{AdmissionError, MAX_LEASES, Session},
-    store::{self, KEY_FILE, STORE_DIR},
+    store::{self, KEY_FILE},
 };
 use std::{
     fs,
@@ -30,14 +30,6 @@ fn open(dir: &Path) -> Session {
     session
 }
 
-fn sidecars(dir: &Path) -> Vec<String> {
-    fs::read_dir(dir.join(STORE_DIR))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with("-wal") || name.ends_with("-shm"))
-        .collect()
-}
-
 /// A lease held on another thread keeps the lock waiting: new work and the
 /// old lease's results are refused at once, and the stores close only after
 /// the lease ends.
@@ -47,10 +39,13 @@ fn given_admitted_work_when_locking_then_it_finishes_before_the_stores_close() {
     let session = open(dir.path());
     let announced = AtomicUsize::new(0);
     let (started, lease_started) = mpsc::channel();
-    let (finish, lease_finish) = mpsc::channel::<()>();
     let (committed, commit_result) = mpsc::channel();
 
     std::thread::scope(|scope| {
+        // Created inside the scope: if an assertion below fails, unwinding
+        // drops it, the lease thread's `recv` fails, and the test ends instead
+        // of every thread waiting on another.
+        let (finish, lease_finish) = mpsc::channel::<()>();
         let lease = session.admit().unwrap();
         scope.spawn(move || {
             lease
@@ -74,13 +69,15 @@ fn given_admitted_work_when_locking_then_it_finishes_before_the_stores_close() {
                 announced.fetch_add(1, Ordering::SeqCst);
             })
         });
-        while session.state() != StoreState::Locking {
+        // The state turns `locking` just before the announcement runs; the
+        // announcement must come while the lease still holds the lock waiting.
+        while session.state() != StoreState::Locking || announced.load(Ordering::SeqCst) == 0 {
             std::thread::yield_now();
         }
         assert_eq!(
             announced.load(Ordering::SeqCst),
             1,
-            "announced before waiting"
+            "announced once, before waiting"
         );
         assert_eq!(session.admit().err(), Some(AdmissionError::Locked));
         // Still open: another owner cannot take the profile.
@@ -98,7 +95,10 @@ fn given_admitted_work_when_locking_then_it_finishes_before_the_stores_close() {
         );
     });
     assert_eq!(commit_result.recv().unwrap(), Err(AdmissionError::Locked));
-    assert!(sidecars(dir.path()).is_empty(), "stores closed");
+    // The stores are closed and the profile released: another owner can open
+    // it (and closes it again). SQLite's WAL files are not proof either way:
+    // when two pool connections close at once, neither may remove them.
+    assert!(store::open(dir.path(), &Tagged(1)).unwrap().close());
     assert_eq!(session.admit().err(), Some(AdmissionError::Locked));
 
     assert_eq!(session.unlock(), StoreState::Protected);

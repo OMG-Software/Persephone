@@ -46,7 +46,17 @@ pub enum Call {
     /// Reopen the protected session with the key from the OS vault. Replies
     /// with the resulting store state.
     UnlockSession {},
+    /// Sign in to this homeserver. The core asks for the username and password
+    /// itself, in a native prompt; nothing secret crosses this channel. Replies
+    /// at once with the account status; the outcome arrives as
+    /// [`Event::SessionChanged`].
+    SignIn {
+        homeserver: String,
+    },
 }
+
+/// Longest homeserver URL either side accepts in a call.
+pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
 
 /// Most rooms the UI may subscribe to at once.
 pub const MAX_SUBSCRIPTIONS: usize = 16;
@@ -65,6 +75,9 @@ pub enum Event {
     /// from it and ask for `app_status`. Sent before the lock waits for
     /// admitted work, so the UI clears first.
     SessionChanged {},
+    /// Rooms were added, removed or changed: fetch the room list again.
+    /// Coalesced like room events.
+    RoomListChanged {},
 }
 
 /// Every frame from the core to the UI: a reply to a call, or an event.
@@ -218,6 +231,7 @@ mod tests {
             room_id: "!r:example.invalid".into(),
         });
         let session = CoreMessage::Event(Event::SessionChanged {});
+        let list = CoreMessage::Event(Event::RoomListChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
         send(&mut wire, &session).unwrap();
@@ -225,9 +239,10 @@ mod tests {
             String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"session_changed":{}}}"#),
             "wire form of the session event"
         );
+        send(&mut wire, &list).unwrap();
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session] {
+        for expected in [reply, event, session, list] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -239,6 +254,7 @@ mod tests {
             br#"{"reply":{"id":1,"outcome":{"ok":null}},"event":null}"#,
             br#"{"event":{"session_changed":{"state":"locked"}}}"#,
             br#"{"event":"session_changed"}"#,
+            br#"{"event":{"room_list_changed":{"rooms":[]}}}"#,
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));
             assert!(
@@ -265,6 +281,9 @@ mod tests {
             br#"{"id":1,"call":{"command":"timeline_page","room_id":"!r:s","cursor":null,"x":1}}"#,
             br#"{"id":1,"call":{"command":"lock_session","force":true}}"#,
             br#"{"id":1,"call":{"command":"unlock_session","key":"00"}}"#,
+            br#"{"id":1,"call":{"command":"sign_in"}}"#,
+            br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

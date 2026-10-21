@@ -167,3 +167,33 @@ nav button:focus-visible,
     grid-template-columns: 1fr;
   }
 }
+
+.sign-in form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.sign-in input {
+  flex: 1 1 18rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #354154;
+  border-radius: 0.5rem;
+  background: #0f1722;
+  color: inherit;
+}
+
+.sign-in button {
+  padding: 0.4rem 0.8rem;
+  border: 1px solid #354154;
+  border-radius: 0.5rem;
+  background: #1a2433;
+  color: inherit;
+}
+
+.notice {
+  color: #b9c4d6;
+  font-style: italic;
+}

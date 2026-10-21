@@ -1022,6 +1022,34 @@
       "total_tests_passed": 205,
       "walkthrough_repeated": "same results; 0 sidecars right after lock and 2 s later; 2 earlier attempts lost the DevTools connection",
       "evidence": "session-owner.md"
+    },
+    {
+      "name": "matrix_sign_in_live_runs",
+      "checked_on": "2026-10-21",
+      "platform": "Windows 11 Pro x64 26200, debug, core with dev-disposable-servers",
+      "servers": {"merovingian": "0.12.29", "synapse": "1.163.0", "synapse_classic_only": "1.163.0"},
+      "credentials": "development source from the harness profile; real Windows dialog checked by hand separately",
+      "password_fields_in_page": 0,
+      "live_message_seconds": {"merovingian": 0.4, "synapse": 0.2, "synapse_classic_only": 0.4},
+      "sync_mode": {"merovingian": "sliding (advertised; log has no request paths)", "synapse": "sliding: 10 sliding, 0 classic requests", "synapse_classic_only": "classic: 0 sliding, 12 classic requests"},
+      "lock": "restart_required on all three",
+      "restore_after_restart_without_dev_source": "signed in, no credential dialog, no form, on all three",
+      "fixed_during_runs": ["room list not refreshed after first sync", "sliding list requested no room state"],
+      "devtools_connection_lost_attempts": 4,
+      "evidence": "matrix-sign-in.md"
+    },
+    {
+      "name": "workspace_check_after_matrix_sign_in",
+      "command": "python tools/dev.py check --offline",
+      "checked_on": "2026-10-21",
+      "exit_code": 0,
+      "rust_tests_passed": 197,
+      "frontend_tests_passed": 15,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 227,
+      "includes": "account tests and Clippy with dev-disposable-servers",
+      "evidence": "matrix-sign-in.md"
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

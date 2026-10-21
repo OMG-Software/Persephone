@@ -23,7 +23,7 @@ export function mergeNewest(
   let last: string | null = null;
   for (let index = items.length - 1; index >= 0; index--) {
     const item = items[index];
-    if (item.kind === 'message') {
+    if (item.kind !== 'gap') {
       last = item.event_id;
       break;
     }
@@ -32,7 +32,7 @@ export function mergeNewest(
   if (last === null) {
     merged = [...items, ...newest];
   } else {
-    const at = newest.findIndex((item) => item.kind === 'message' && item.event_id === last);
+    const at = newest.findIndex((item) => item.kind !== 'gap' && item.event_id === last);
     merged = at >= 0 ? [...items, ...newest.slice(at + 1)] : [...items, gap, ...newest];
   }
   if (merged.length <= max) return merged;

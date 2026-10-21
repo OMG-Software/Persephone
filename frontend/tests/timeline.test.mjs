@@ -51,3 +51,13 @@ test('the timeline is capped, with one leading gap in place of the oldest', () =
   assert.equal(items.at(-1).event_id, '$1999');
   assert.equal(items[1].event_id, `$${2000 - (MAX_RETAINED_ITEMS - 1)}`);
 });
+
+test('notices count as known events when merging', () => {
+  const notice = { kind: 'notice', event_id: '$n', sender: '@a:example.invalid', notice: 'undecryptable' };
+  const merged = mergeNewest([...range(0, 3), notice], [...range(1, 3), notice, message(3)]);
+  assert.deepEqual(
+    merged.map((item) => (item.kind === 'gap' ? 'gap' : item.event_id)),
+    ['$0', '$1', '$2', '$n', '$3']
+  );
+});
+

@@ -65,6 +65,11 @@ impl Stores {
         self.runtime.block_on(future)
     }
 
+    /// The runtime the stores (and any SDK client over them) run on.
+    pub fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+
     pub fn sdk(&self) -> &SdkStores {
         self.sdk
             .as_ref()

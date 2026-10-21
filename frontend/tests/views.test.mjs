@@ -5,6 +5,7 @@ import { createServer } from 'vite';
 let vite;
 let RoomList;
 let Timeline;
+let SignIn;
 let render;
 
 before(async () => {
@@ -15,6 +16,7 @@ before(async () => {
   });
   ({ default: RoomList } = await vite.ssrLoadModule('/src/RoomList.svelte'));
   ({ default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte'));
+  ({ default: SignIn } = await vite.ssrLoadModule('/src/SignIn.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -87,3 +89,52 @@ test('timeline controls reflect loading, end of history and errors', () => {
   assert.match(html, /<button type="button" disabled[^>]*>Start of history/);
   assert.match(html, /role="alert"/);
 });
+
+test('notices render as fixed text with an isolated sender, never as content', () => {
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [
+        { kind: 'notice', event_id: '$1', sender: hostileName, notice: 'undecryptable' },
+        { kind: 'notice', event_id: '$2', sender: '@b:example.invalid', notice: 'unsupported' }
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  });
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /<bdi>&lt;img/);
+  assert.match(html, /Encrypted message\. This device has no key for it\./);
+  assert.match(html, /A kind of message Persephone does not show yet\./);
+});
+
+test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
+  const signedOut = { state: 'signed_out', userId: null, error: null };
+  const { body: html } = render(SignIn, {
+    props: { account: signedOut, busy: false, onsignin: () => {} }
+  });
+  assert.match(html, /<label for="homeserver">Homeserver address<\/label>/);
+  assert.match(html, /type="url"/);
+  assert.doesNotMatch(html, /type="password"/i, 'no password field in the page');
+  assert.equal((html.match(/<input/g) ?? []).length, 1, 'one field: the homeserver');
+  assert.match(html, /This page never sees your password/);
+
+  const failed = render(SignIn, {
+    props: {
+      account: { state: 'sign_in_failed', userId: null, error: 'invalid_credentials' },
+      busy: false,
+      onsignin: () => {}
+    }
+  }).body;
+  assert.match(failed, /role="alert"/);
+  assert.match(failed, /did not accept that username and password/);
+
+  const waiting = render(SignIn, {
+    props: { account: { state: 'signing_in', userId: null, error: null }, busy: false, onsignin: () => {} }
+  }).body;
+  assert.match(waiting, /Waiting for the Windows sign-in window/);
+  assert.match(waiting, /<button type="submit" disabled/);
+});
+

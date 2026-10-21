@@ -19,6 +19,7 @@ fn main() {
             "watch_session",
             "lock_session",
             "unlock_session",
+            "sign_in",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

@@ -3566,17 +3566,21 @@ name = "persephone-core"
 version = "0.0.0"
 dependencies = [
  "getrandom 0.4.3",
+ "matrix-sdk",
  "matrix-sdk-base",
  "matrix-sdk-crypto",
  "matrix-sdk-sqlite",
  "persephone-contracts",
  "persephone-core-protocol",
  "persephone-media-protocol",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
  "windows-sys 0.61.2",
+ "wiremock",
  "zeroize",
 ]
 

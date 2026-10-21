@@ -2,12 +2,14 @@
   import { onMount } from 'svelte';
   import markUrl from './assets/mark.svg';
   import RoomList from './RoomList.svelte';
+  import SignIn from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
   import { mergeNewest } from './timeline';
   import {
     appStatus,
     lockSession,
     roomList,
+    signIn,
     subscribeRoom,
     timelinePage,
     unlockSession,
@@ -27,6 +29,7 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let switching = $state(false);
+  let signingIn = $state(false);
   // Advanced on every session change. Replies to calls made before the change
   // are discarded, so nothing from a locked session is shown again.
   let sessionGeneration = 0;
@@ -47,6 +50,7 @@
     locked: 'Local store locked',
     locking: 'Locking: work in progress is finishing',
     lock_failed: 'Local store did not close cleanly; restart Persephone',
+    restart_required: 'Locked: restart Persephone to unlock',
     key_missing: 'Local store locked: its key is missing',
     key_unreadable: 'Local store locked: its key cannot be unlocked',
     key_rejected: 'Local store locked: the key does not match',
@@ -65,6 +69,10 @@
     'profile_in_use',
     'store_unavailable'
   ];
+
+  // Signed in, signed out, or no profile (synthetic data only).
+  const profileOpen = $derived(status?.store === 'protected');
+  const signedIn = $derived(profileOpen && status?.account.state === 'signed_in');
 
   const selectedRoom = $derived(rooms?.rooms.find((room) => room.roomId === selected) ?? null);
 
@@ -116,6 +124,37 @@
     load();
   }
 
+  // Rooms were added or changed: fetch the list again, keeping the selection.
+  async function refreshRooms() {
+    if (!status || (status.store !== 'protected' && status.store !== 'not_configured')) return;
+    const generation = sessionGeneration;
+    try {
+      const list = await roomList();
+      if (generation === sessionGeneration) rooms = list;
+    } catch {
+      // The next change or session event tries again.
+    }
+  }
+
+  async function startSignIn(homeserver: string) {
+    if (signingIn) return;
+    signingIn = true;
+    const generation = sessionGeneration;
+    try {
+      const account = await signIn(homeserver);
+      if (generation === sessionGeneration && status) status = { ...status, account };
+    } catch (reason) {
+      if (generation === sessionGeneration) {
+        error =
+          String(reason) === 'invalid_argument'
+            ? 'Use a homeserver address that starts with https://.'
+            : describe(reason);
+      }
+    } finally {
+      signingIn = false;
+    }
+  }
+
   async function toggleLock() {
     if (!status || switching) return;
     switching = true;
@@ -139,7 +178,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset);
+      await watchSession(reset, refreshRooms);
     } catch {
       unavailable = true;
       return;
@@ -255,6 +294,9 @@
         {#if status}
           Rust host {status.version} · {status.milestone} · {storeText[status.store] ??
             'Local store state unknown'}
+          {#if signedIn && status.account.userId}
+            · Signed in as <bdi>{status.account.userId}</bdi>
+          {/if}
         {:else if unavailable}
           Rust host unavailable
         {:else}
@@ -274,10 +316,16 @@
   </header>
 
   <div class="layout">
-    {#if rooms}
+    {#if profileOpen && !signedIn}
+      <SignIn account={status!.account} busy={signingIn} onsignin={startSignIn} />
+    {:else if rooms}
       <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} onselect={open} />
     {/if}
-    {#if selectedRoom}
+    {#if profileOpen && !signedIn}
+      {#if error}
+        <p role="alert" class="error">{error}</p>
+      {/if}
+    {:else if selectedRoom}
       <Timeline
         title={selectedRoom.displayName ?? selectedRoom.roomId}
         {items}
@@ -288,8 +336,12 @@
       />
     {:else}
       <section class="timeline" aria-label="No room selected">
-        {#if status && status.store !== 'protected' && status.store !== 'not_configured'}
+        {#if status?.store === 'restart_required'}
+          <p>The session is locked. Restart Persephone to unlock it.</p>
+        {:else if status && status.store !== 'protected' && status.store !== 'not_configured'}
           <p>The session is locked. Nothing from it is shown.</p>
+        {:else if signedIn}
+          <p>Select a room.</p>
         {:else}
           <p>Select a room. All rooms and messages here are synthetic test data.</p>
         {/if}

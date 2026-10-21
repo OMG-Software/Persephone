@@ -1,4 +1,5 @@
-//! The session owner: the core's single authority over the protected stores.
+//! The session owner: the core's single authority over the protected stores
+//! and the Matrix account that uses them.
 //!
 //! All work that touches the stores is admitted through a [`Lease`]. Locking
 //! follows `docs/architecture/sdk-lifecycle.md`:
@@ -9,26 +10,40 @@
 //! 3. Wait for every admitted lease to finish. A timeout leaves the session in
 //!    `locking` with the stores still open and owned; locking again resumes
 //!    the wait. Nothing is released early.
-//! 4. Close the stores, then release the profile. A failed close leaves
-//!    `lock_failed`, which refuses unlocking until the application restarts.
+//! 4. Join the sync thread, drop the SDK client, close the stores, then
+//!    release the profile. A failed close leaves `lock_failed`.
 //!
-//! No Matrix SDK client exists yet, so every user of the stores holds a lease
-//! and a completed wait covers all of them. Once an SDK client runs its own
-//! tasks over these stores, a completed wait proves only that leased work
-//! finished: [`TrackedDrain::require_full_sdk_drain`] always refuses until the
-//! SDK provides a stop-and-join contract.
+//! The sync loop and sign-in take one lease per unit of work and check for a
+//! lock only between complete SDK operations. The SDK's own background tasks
+//! are not leases: once a client has run, a completed wait does not prove they
+//! stopped, so the session ends `restart_required` and will not reopen the
+//! stores in this process. [`TrackedDrain::require_full_sdk_drain`] always
+//! refuses until the SDK provides a stop-and-join contract.
 
+use crate::account;
+use crate::credentials::{CredentialSource, PromptError};
+use crate::homeserver::Homeserver;
 use crate::store::{self, Stores};
 use crate::vault::KeyProtector;
-use persephone_contracts::StoreState;
+use matrix_sdk::Client;
+use persephone_contracts::{AccountState, AccountStatus, SignInError, StoreState};
 use std::{
     path::PathBuf,
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 /// Most leases outstanding at once.
 pub const MAX_LEASES: usize = 8;
+/// Longest wait between sync attempts after a failure.
+const MAX_SYNC_BACKOFF: Duration = Duration::from_secs(30);
+/// Shortest time between the starts of two sync rounds. A homeserver should
+/// long-poll; one that answers at once must not make the core spin.
+const MIN_SYNC_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionError {
@@ -55,6 +70,14 @@ impl TrackedDrain {
     }
 }
 
+/// Receives the session's changes. Called outside the session's own locks.
+pub trait SessionListener: Send + Sync {
+    /// A sync round touched these rooms.
+    fn rooms_changed(&self, rooms: &[String]);
+    /// The account's status changed.
+    fn session_changed(&self);
+}
+
 struct Inner {
     state: StoreState,
     stores: Option<Arc<Stores>>,
@@ -62,16 +85,74 @@ struct Inner {
     active: usize,
 }
 
+struct ActiveAccount {
+    client: Client,
+    sync: Option<JoinHandle<()>>,
+}
+
 struct Shared {
     inner: Mutex<Inner>,
+    /// Notified when a lease ends or a lock begins.
     drained: Condvar,
+    status: Mutex<AccountStatus>,
+    account: Mutex<Option<ActiveAccount>>,
+    listener: Mutex<Option<Arc<dyn SessionListener>>>,
+    /// Set once any SDK client was built over these stores.
+    client_ran: AtomicBool,
+}
+
+fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn lock(shared: &Shared) -> MutexGuard<'_, Inner> {
-    shared
-        .inner
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    guard(&shared.inner)
+}
+
+impl Shared {
+    fn admit(self: &Arc<Self>) -> Result<Lease, AdmissionError> {
+        let mut inner = lock(self);
+        let Some(stores) = inner
+            .stores
+            .clone()
+            .filter(|_| inner.state == StoreState::Protected)
+        else {
+            return Err(AdmissionError::Locked);
+        };
+        if inner.active >= MAX_LEASES {
+            return Err(AdmissionError::Saturated);
+        }
+        inner.active += 1;
+        Ok(Lease {
+            shared: self.clone(),
+            generation: inner.generation,
+            stores: Some(stores),
+        })
+    }
+
+    fn listener(&self) -> Option<Arc<dyn SessionListener>> {
+        guard(&self.listener).clone()
+    }
+
+    fn set_status(&self, status: AccountStatus) {
+        *guard(&self.status) = status;
+        if let Some(listener) = self.listener() {
+            listener.session_changed();
+        }
+    }
+
+    /// Waits up to `period`; returns `false` early once the session is no
+    /// longer open.
+    fn wait_open(&self, period: Duration) -> bool {
+        let inner = lock(self);
+        let (inner, _) = self
+            .drained
+            .wait_timeout_while(inner, period, |inner| inner.state == StoreState::Protected)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.state == StoreState::Protected
+    }
 }
 
 pub struct Session {
@@ -121,6 +202,127 @@ impl Drop for Lease {
     }
 }
 
+fn failed(error: SignInError) -> AccountStatus {
+    AccountStatus {
+        state: AccountState::SignInFailed,
+        user_id: None,
+        error: Some(error),
+    }
+}
+
+fn signed_in(user_id: &str, error: Option<SignInError>) -> AccountStatus {
+    AccountStatus {
+        state: AccountState::SignedIn,
+        // Matrix user IDs are at most 255 bytes; anything else is not shown.
+        user_id: (user_id.len() <= 255 && !user_id.chars().any(char::is_control))
+            .then(|| user_id.to_owned()),
+        error,
+    }
+}
+
+/// Starts the account: records it, then runs its sync loop on a thread.
+/// Refused (and the client dropped) if a lock began since `lease`.
+fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) {
+    let installed = lease.commit(|| {
+        *guard(&shared.account) = Some(ActiveAccount {
+            client: client.clone(),
+            sync: None,
+        });
+    });
+    if installed.is_err() {
+        let _context = lease.stores().runtime().enter();
+        drop(client);
+        return;
+    }
+    let runtime = lease.stores().runtime().handle().clone();
+    drop(lease);
+    {
+        // Spawn under the account entry, so a lock that takes the entry also
+        // gets the handle to join. If a lock already took it, do not start.
+        let mut account = guard(&shared.account);
+        let Some(entry) = account.as_mut() else {
+            let _context = runtime.enter();
+            drop(client);
+            return;
+        };
+        let thread_shared = shared.clone();
+        let thread_user = user_id.clone();
+        let thread_runtime = runtime.clone();
+        entry.sync = std::thread::Builder::new()
+            .name("core-sync".into())
+            .spawn(move || run_sync(&thread_shared, client, thread_user, thread_runtime))
+            .ok();
+    }
+    shared.set_status(signed_in(&user_id, None));
+}
+
+/// The sync loop: one lease per complete round; a lock is noticed between
+/// rounds. Drops its SDK values inside the stores' runtime.
+fn run_sync(
+    shared: &Arc<Shared>,
+    client: Client,
+    user_id: String,
+    runtime: tokio::runtime::Handle,
+) {
+    let mut backoff = Duration::from_secs(1);
+    let mut engine = None;
+    loop {
+        let lease = match shared.admit() {
+            Ok(lease) => lease,
+            Err(AdmissionError::Locked) => break,
+            Err(AdmissionError::Saturated) => {
+                if !shared.wait_open(Duration::from_millis(100)) {
+                    break;
+                }
+                continue;
+            }
+        };
+        let started = Instant::now();
+        let outcome = lease.stores().block_on(async {
+            if engine.is_none() {
+                engine = Some(account::select_engine(&client).await?);
+            }
+            account::sync_round(&client, engine.as_ref().expect("selected above")).await
+        });
+        let committed = lease.commit(|| ()).is_ok();
+        drop(lease);
+        if !committed {
+            break;
+        }
+        match outcome {
+            Ok(rooms) => {
+                backoff = Duration::from_secs(1);
+                if guard(&shared.status).error.is_some() {
+                    shared.set_status(signed_in(&user_id, None));
+                }
+                if !rooms.is_empty()
+                    && let Some(listener) = shared.listener()
+                {
+                    listener.rooms_changed(&rooms);
+                }
+                let elapsed = started.elapsed();
+                if elapsed < MIN_SYNC_INTERVAL && !shared.wait_open(MIN_SYNC_INTERVAL - elapsed) {
+                    break;
+                }
+            }
+            Err(error) => {
+                // A discovery or sync failure is reported and retried; it
+                // never switches the sync mode.
+                if guard(&shared.status).error != Some(error) {
+                    shared.set_status(signed_in(&user_id, Some(error)));
+                }
+                if !shared.wait_open(backoff) {
+                    break;
+                }
+                backoff = (backoff * 2).min(MAX_SYNC_BACKOFF);
+            }
+        }
+    }
+    let _context = runtime.enter();
+    drop(engine);
+    drop(client);
+}
+
 impl Session {
     /// A session with no profile: nothing is stored and nothing can unlock.
     pub fn not_configured() -> Self {
@@ -133,7 +335,8 @@ impl Session {
     }
 
     /// Opens the profile in `dir`; on failure the session starts locked with
-    /// the reason as its state.
+    /// the reason as its state. A saved account is restored by
+    /// [`Session::restore_account`], once a listener is set.
     pub fn open(dir: PathBuf, protector: Box<dyn KeyProtector>) -> Self {
         let (state, stores) = match store::open(&dir, &*protector) {
             Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
@@ -159,6 +362,10 @@ impl Session {
                     active: 0,
                 }),
                 drained: Condvar::new(),
+                status: Mutex::new(AccountStatus::signed_out()),
+                account: Mutex::new(None),
+                listener: Mutex::new(None),
+                client_ran: AtomicBool::new(false),
             }),
             transition: Mutex::new(()),
         }
@@ -168,30 +375,130 @@ impl Session {
         lock(&self.shared).state
     }
 
+    pub fn account_status(&self) -> AccountStatus {
+        guard(&self.shared.status).clone()
+    }
+
     /// Whether a profile was given at all. Without one, the core serves only
     /// synthetic data and there is nothing to protect.
     pub fn is_configured(&self) -> bool {
         self.profile.is_some()
     }
 
+    pub fn set_listener(&self, listener: Arc<dyn SessionListener>) {
+        *guard(&self.shared.listener) = Some(listener);
+    }
+
     pub fn admit(&self) -> Result<Lease, AdmissionError> {
-        let mut inner = lock(&self.shared);
-        let Some(stores) = inner
-            .stores
-            .clone()
-            .filter(|_| inner.state == StoreState::Protected)
-        else {
-            return Err(AdmissionError::Locked);
-        };
-        if inner.active >= MAX_LEASES {
-            return Err(AdmissionError::Saturated);
+        self.shared.admit()
+    }
+
+    /// A lease together with the signed-in client, for reading views.
+    pub fn with_client(&self) -> Result<Option<(Lease, Client)>, AdmissionError> {
+        let lease = self.admit()?;
+        let client = guard(&self.shared.account)
+            .as_ref()
+            .map(|account| account.client.clone());
+        Ok(client.map(|client| (lease, client)))
+    }
+
+    /// Restores a saved account without a prompt and starts syncing. Does
+    /// nothing when no account was saved or one is already running.
+    pub fn restore_account(&self) {
+        if guard(&self.shared.account).is_some() {
+            return;
         }
-        inner.active += 1;
-        Ok(Lease {
-            shared: self.shared.clone(),
-            generation: inner.generation,
-            stores: Some(stores),
-        })
+        let Ok(lease) = self.admit() else {
+            return;
+        };
+        let restored = lease.stores().block_on(async {
+            let result = account::restore(lease.stores()).await;
+            if !matches!(result, Ok(None)) {
+                self.shared.client_ran.store(true, Ordering::SeqCst);
+            }
+            result
+        });
+        match restored {
+            Ok(Some((client, user_id))) => install(&self.shared, lease, client, user_id),
+            Ok(None) => {}
+            Err(error) => self.shared.set_status(failed(error)),
+        }
+    }
+
+    /// Starts signing in to `homeserver` on a worker thread and returns the
+    /// status at once. The prompt runs without a lease (it may stay open for
+    /// minutes); the network work holds one.
+    pub fn sign_in(
+        &self,
+        homeserver: Homeserver,
+        source: Arc<dyn CredentialSource>,
+    ) -> Result<AccountStatus, AdmissionError> {
+        if self.state() != StoreState::Protected {
+            return Err(AdmissionError::Locked);
+        }
+        {
+            let mut status = guard(&self.shared.status);
+            if matches!(
+                status.state,
+                AccountState::SigningIn | AccountState::SignedIn
+            ) {
+                return Ok(status.clone());
+            }
+            *status = AccountStatus {
+                state: AccountState::SigningIn,
+                user_id: None,
+                error: None,
+            };
+        }
+        if let Some(listener) = self.shared.listener() {
+            listener.session_changed();
+        }
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-sign-in".into())
+            .spawn(move || {
+                let credentials = match source.ask(&homeserver.display_host()) {
+                    Ok(credentials) => credentials,
+                    Err(error) => {
+                        shared.set_status(failed(match error {
+                            PromptError::Cancelled => SignInError::Cancelled,
+                            PromptError::Unsupported => SignInError::Unsupported,
+                            PromptError::Invalid | PromptError::Failed => SignInError::Failed,
+                        }));
+                        return;
+                    }
+                };
+                let Ok(lease) = shared.admit() else {
+                    // Locked while the prompt was open.
+                    return;
+                };
+                shared.client_ran.store(true, Ordering::SeqCst);
+                let result = lease.stores().block_on(async {
+                    let client = account::build_client(&homeserver, lease.stores()).await?;
+                    match account::sign_in(&client, &homeserver, &credentials, lease.stores()).await
+                    {
+                        Ok(user_id) => Ok((client, user_id)),
+                        Err(error) => {
+                            drop(client);
+                            Err(error)
+                        }
+                    }
+                });
+                drop(credentials);
+                match result {
+                    Ok((client, user_id)) => install(&shared, lease, client, user_id),
+                    Err(error) => {
+                        if lease.commit(|| ()).is_ok() {
+                            drop(lease);
+                            shared.set_status(failed(error));
+                        }
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.shared.set_status(failed(SignInError::Failed));
+        }
+        Ok(self.account_status())
     }
 
     /// Locks the session (see the module documentation). `announce` runs once,
@@ -218,6 +525,7 @@ impl Session {
                     }
                     None => StoreState::LockFailed,
                 };
+                self.shared.drained.notify_all();
                 drop(inner);
                 announce();
                 inner = lock(&self.shared);
@@ -242,6 +550,21 @@ impl Session {
         }
         let stores = inner.stores.take();
         drop(inner);
+        // No lease remains, so the sync loop is between rounds and will see
+        // the lock at its next admission; join it, then drop the client inside
+        // the stores' runtime before closing them.
+        if let Some(account) = guard(&self.shared.account).take() {
+            if let Some(sync) = account.sync {
+                let _ = sync.join();
+            }
+            match &stores {
+                Some(stores) => {
+                    let _context = stores.runtime().enter();
+                    drop(account.client);
+                }
+                None => drop(account.client),
+            }
+        }
         // Each lease releases its reference before it is counted out, so with
         // no lease left the session holds the only one.
         let closed = match stores.map(Arc::try_unwrap) {
@@ -254,41 +577,50 @@ impl Session {
             }
             None => false,
         };
-        let state = if closed {
-            StoreState::Locked
-        } else {
+        let state = if !closed {
             StoreState::LockFailed
+        } else if self.shared.client_ran.load(Ordering::SeqCst) {
+            StoreState::RestartRequired
+        } else {
+            StoreState::Locked
         };
         lock(&self.shared).state = state;
         (state, closed.then_some(TrackedDrain { _private: () }))
     }
 
-    /// Reopens a locked session with the key from the vault. A session that
-    /// failed to open may retry; `lock_failed`, `locking` and an unconfigured
-    /// session cannot unlock.
+    /// Reopens a locked session with the key from the vault and restores a
+    /// saved account. A session that failed to open may retry; `lock_failed`,
+    /// `restart_required`, `locking` and an unconfigured session cannot unlock.
     pub fn unlock(&self) -> StoreState {
-        let _transition = self
-            .transition
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let current = self.state();
-        let Some(dir) = &self.profile else {
-            return current;
+        let state = {
+            let _transition = self
+                .transition
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let current = self.state();
+            let Some(dir) = &self.profile else {
+                return current;
+            };
+            match current {
+                StoreState::Protected
+                | StoreState::Locking
+                | StoreState::LockFailed
+                | StoreState::RestartRequired
+                | StoreState::NotConfigured => return current,
+                _ => {}
+            }
+            let (state, stores) = match store::open(dir, &*self.protector) {
+                Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
+                Err(state) => (state, None),
+            };
+            let mut inner = lock(&self.shared);
+            inner.state = state;
+            inner.stores = stores;
+            state
         };
-        match current {
-            StoreState::Protected
-            | StoreState::Locking
-            | StoreState::LockFailed
-            | StoreState::NotConfigured => return current,
-            _ => {}
+        if state == StoreState::Protected {
+            self.restore_account();
         }
-        let (state, stores) = match store::open(dir, &*self.protector) {
-            Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
-            Err(state) => (state, None),
-        };
-        let mut inner = lock(&self.shared);
-        inner.state = state;
-        inner.stores = stores;
         state
     }
 }

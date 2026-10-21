@@ -101,6 +101,17 @@ cover file-level licenses inside `aws-lc-sys` or bundled SQLite, npm packages,
 system libraries or packaged artifacts. Those, an SBOM, and the Linux/macOS
 graphs remain release work.
 
+## Matrix SDK in the core (21 October 2026)
+
+The sign-in slice makes `persephone-core`, the application binary, depend
+directly on `matrix-sdk` 0.19.1 (`e2e-encryption`, `rustls-aws-lc-rs`, default
+features off, as in the Matrix test programs), `reqwest` 0.13.5 (default
+features off) and `url` 2.5.8, with `wiremock` 0.6.5 for tests. All were already
+in the root lockfile at these versions; only the core's dependency list
+changed. `anymap2` (above) is therefore now compiled into the shipped core, not
+only the test programs; the disposition and its regression tests are unchanged.
+The UI process gains none of these.
+
 ## Advisory after the Tauri shell: `glib`
 
 Checked 21 October 2026 against the root lockfile at `f6094cc` (SHA-256

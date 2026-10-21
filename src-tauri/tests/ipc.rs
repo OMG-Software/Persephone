@@ -41,7 +41,7 @@ impl CoreTransport for FakeCore {
         }
         match call {
             Call::AppStatus {} => Ok(
-                serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing"}),
+                serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}}),
             ),
             Call::RoomList {} => Ok(serde_json::json!({
                 "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2}],
@@ -56,6 +56,15 @@ impl CoreTransport for FakeCore {
             Call::LockSession {} => Ok(serde_json::json!("locked")),
             // A state outside the contract must not reach the page.
             Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
+            Call::SignIn { homeserver } => match homeserver.as_str() {
+                "https://matrix.example.org" => {
+                    Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
+                }
+                // A reply carrying a secret is refused by the contract.
+                _ => Ok(
+                    serde_json::json!({"state": "signed_in", "userId": "@a:s", "error": null, "accessToken": "x"}),
+                ),
+            },
             Call::TimelinePage { room_id, cursor } => match (room_id.as_str(), cursor.as_deref()) {
                 ("!r:example.invalid", None) => Ok(serde_json::json!({
                     "roomId": room_id,
@@ -121,7 +130,7 @@ fn given_allowed_command_from_app_origin_then_typed_status_is_returned() {
     // The reply is the core's answer, relayed and shape-checked by the UI.
     assert_eq!(
         reply,
-        serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing"})
+        serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}})
     );
 }
 
@@ -264,7 +273,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-unsubscribe-room",
             "allow-watch-session",
             "allow-lock-session",
-            "allow-unlock-session"
+            "allow-unlock-session",
+            "allow-sign-in"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -425,7 +435,7 @@ fn given_subscriptions_then_core_events_reach_only_the_subscribed_rooms_channel(
 }
 
 /// A session change drops every room channel and reaches the page's session
-/// channel as an empty message; lock and unlock relay the core's state and
+/// channel as `"session"`, a room-list change as `"rooms"`; lock and unlock relay the core's state and
 /// refuse one outside the contract.
 #[test]
 fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_told() {
@@ -472,8 +482,16 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     subscriptions.dispatch(Event::RoomChanged {
         room_id: "!r:example.invalid".into(),
     });
+    subscriptions.dispatch(Event::RoomListChanged {});
     let delivered = delivered.lock().unwrap().clone();
-    assert!(delivered.contains(&(3, "null".into())), "{delivered:?}");
+    assert!(
+        delivered.contains(&(3, r#""session""#.into())),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&(3, r#""rooms""#.into())),
+        "{delivered:?}"
+    );
     assert!(
         !delivered
             .iter()
@@ -488,5 +506,36 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     assert_eq!(
         invoke("unlock_session", serde_json::json!({})).unwrap_err(),
         "core_unavailable"
+    );
+}
+
+/// Sign-in relays only the homeserver URL, refuses oversized input before the
+/// core, and checks the reply against the contract.
+#[test]
+fn given_sign_in_then_only_the_homeserver_crosses_and_replies_are_checked() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |args: serde_json::Value| {
+        get_ipc_response(&window, request("sign_in", app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    assert_eq!(
+        invoke(serde_json::json!({"homeserver": "https://matrix.example.org"})),
+        Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
+    );
+    assert_eq!(
+        invoke(serde_json::json!({"homeserver": "https://evil.example"})).unwrap_err(),
+        "core_unavailable"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(serde_json::json!({"homeserver": "h".repeat(3000)})).unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized URL never reached the core"
     );
 }
