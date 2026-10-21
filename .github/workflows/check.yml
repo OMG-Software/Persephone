@@ -1,0 +1,65 @@
+# Runs the repository's development check (python tools/dev.py check) on
+# Windows, the only platform the code is currently verified on. It does not
+# run live homeservers, the native sandbox probe or the dependency audit.
+# Actions are pinned to full commit SHAs; the tag each SHA was taken from is
+# noted alongside. Toolchains are pinned to the versions the recorded
+# evidence used.
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_TOOLCHAIN: "1.99.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+          "RUSTUP_TOOLCHAIN=$env:RUST_TOOLCHAIN" >> $env:GITHUB_ENV
+
+      # tools/dev.py keeps Cargo and npm caches under .local/cache. Only
+      # downloaded sources are cached; build output is too large to keep.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .local/cache/cargo/registry/index
+            .local/cache/cargo/registry/cache
+            .local/cache/cargo/git/db
+            .local/cache/npm
+          key: deps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: deps-${{ runner.os }}-
+
+      - name: Install frontend dependencies
+        run: python tools/dev.py bootstrap
+
+      - name: Check
+        run: python tools/dev.py check
