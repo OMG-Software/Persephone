@@ -101,6 +101,32 @@ cover file-level licenses inside `aws-lc-sys` or bundled SQLite, npm packages,
 system libraries or packaged artifacts. Those, an SBOM, and the Linux/macOS
 graphs remain release work.
 
+## Advisory after the Tauri shell: `glib`
+
+Checked 21 October 2026 against the root lockfile at `f6094cc`. GitHub
+Dependabot raised alert 1, [GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g)
+(medium): unsound `Iterator` and `DoubleEndedIterator` implementations for
+`glib::VariantStrIter`, affecting `glib` 0.15.0 up to 0.20.0. GitHub lists no
+other identifier for it. The lockfile holds `glib 0.18.5`, added with the Tauri
+shell after the OSV audit above, which therefore did not cover it. OSV has not
+been re-queried for this entry.
+
+| Crate | Compiled for our features? | Path | Disposition |
+| --- | --- | --- | --- |
+| `glib 0.18.5` | **Linux only**; not compiled for Windows x64 (`cargo tree -i glib --target x86_64-pc-windows-msvc` prints nothing) | `persephone-desktop` → `tauri 2.12.4` → `gtk`/`webkit2gtk`/`muda`/`tao` → `glib` (Tauri's GTK 0.18 stack) | **Retain at the current pin; adopt a fixed GTK binding through a Tauri release.** Recheck before any Linux build is distributed. |
+
+The Linux graph (`cargo tree -i glib@0.18.5 --target x86_64-unknown-linux-gnu
+-e normal`) has 17 crates that depend on `glib` directly or transitively: `atk`, `cairo-rs`, `gdk`,
+`gdk-pixbuf`, `gio`, `gtk`, `javascriptcore-rs`, `muda`, `pango`, `soup3`,
+`tao`, `tauri`, `tauri-runtime`, `tauri-runtime-wry`, `webkit2gtk`, `wry` and
+`persephone-desktop`. A source search of the cached sources of those exact versions found
+no use of `VariantStrIter`, `str_iter` or `array_iter_str`; only `glib`'s own
+definitions match, and `src-tauri` does not use `glib` directly. This is a
+textual search, not proof that no caller reaches the iterator through another
+API, and no Linux build has been run. Moving to `glib` 0.20 needs GTK bindings
+that Tauri 2.12.4 does not use; patching or forking the GTK stack is out of
+scope.
+
 ## Historical per-package inventory
 
 Before the repository restructure, five separate Rust lockfiles were audited: matrix (412 registry entries), storage (260), resources (0), Windows sandbox (2), and contracts (20), for 418 distinct crate/version pairs after deduplication. Those counts and package-specific notes describe that earlier workspace shape. They are not the scope of the current single-lockfile result above, and the current JSON must not be interpreted as five separate lockfile reports.
