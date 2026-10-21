@@ -746,6 +746,237 @@
       "server_registration_tests_passed": 2,
       "development_controller_tests_passed": 13,
       "total_tests_passed": 144
+    },
+    {
+      "name": "tauri_shell_ipc_permissions",
+      "command": "cargo test --locked --offline -p persephone-desktop",
+      "exit_code": 0,
+      "tests_passed": 7,
+      "allowed": [
+        "app_status (bundled origin)"
+      ],
+      "denied": [
+        "14 core plugin commands",
+        "unregistered commands",
+        "remote origins",
+        "forged invoke key (dropped unanswered)"
+      ],
+      "tauri": "2.12.4",
+      "tauri_build": "2.7.3",
+      "features": [
+        "wry",
+        "common-controls-v6",
+        "custom-protocol"
+      ],
+      "evidence": "tauri-shell.md"
+    },
+    {
+      "name": "tauri_shell_real_webview_probe",
+      "method": "WebView2 remote debugging via environment variable; DevTools protocol",
+      "results": {
+        "ipc_status_rendered": true,
+        "global_tauri_absent": true,
+        "core_plugin_denied": true,
+        "external_fetch_blocked": true,
+        "inline_script_blocked": true,
+        "page_eval_blocked": true,
+        "navigation_blocked": true,
+        "window_open_blocked": true
+      },
+      "note": "Debugger-evaluated code is exempt from CSP; eval tested from page-scheduled code",
+      "evidence": "tauri-shell.md"
+    },
+    {
+      "name": "historical_tauri_test_entrypoint_not_found",
+      "exit_code": "0xc0000139",
+      "cause": "common-controls-v6 needs the Common Controls 6 manifest, which tauri-build embedded only in the app binary",
+      "resolved_by": "MSVC /MANIFEST:EMBED for every artifact in src-tauri/build.rs"
+    },
+    {
+      "name": "historical_aws_lc_sys_lnk1114_after_tauri",
+      "exit_code": 101,
+      "cause": "aws-lc-sys rebuilt; MSVC lib.exe LNK1114",
+      "resolved_by": "documented AR_x86_64_pc_windows_msvc=llvm-lib.exe shell workaround"
+    },
+    {
+      "name": "workspace_check_after_tauri_shell",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 134,
+      "frontend_tests_passed": 5,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 154
+    },
+    {
+      "name": "tauri_dependency_scope",
+      "new_lockfile_package_versions": 202,
+      "existing_versions_changed": false,
+      "npm_added": "@tauri-apps/api 2.12.4 (0 advisories)",
+      "downloads": "owner approved"
+    },
+    {
+      "name": "progressive_444_jpeg_policy",
+      "decision": "owner, 2026-10-20: accept preview unavailable; revisit with slower hardware"
+    },
+    {
+      "name": "webview_ipc_payload_allocation",
+      "checked_on": "2026-10-20",
+      "wry": "0.57.0",
+      "tauri": "2.12.4",
+      "paths": [
+        "custom-protocol POST http://ipc.localhost (no invoke key)",
+        "window.chrome.webview.postMessage"
+      ],
+      "peak_commit_growth_mib": {
+        "postMessage": {
+          "1": 8.8,
+          "16": 144.1,
+          "64": 577.0,
+          "128": 1154.1,
+          "256": 2308.4
+        },
+        "ipc_fetch": {
+          "1": 9.7,
+          "16": 152.1,
+          "64": 608.9,
+          "128": 1218.1,
+          "256": 2436.6
+        }
+      },
+      "amplification": "about 9x",
+      "host_alive_all_cases": true,
+      "cap_observed": "renderer string/request limits only (512 MiB failed in the page)",
+      "status": "open_architecture_decision",
+      "evidence": "ipc-transport.md"
+    },
+    {
+      "name": "core_ui_split_end_to_end",
+      "checked_on": "2026-10-20",
+      "adr": "ADR-0004",
+      "status_relayed_by_core": true,
+      "ui_parent_is_core": true,
+      "ui_tree_processes": 7,
+      "core_killed_ui_tree_ended": true,
+      "standalone_ui_exit": 2,
+      "flood_core_peak_growth_mib": {
+        "64": 0.0,
+        "128": 0.0,
+        "256": 0.0
+      },
+      "flood_ui_peak_growth_mib": {
+        "64": 577.0,
+        "128": 897.6,
+        "256": 0.0
+      },
+      "ui_job": {
+        "job_memory_limit_gib": 2,
+        "process_memory_limit_gib": 1,
+        "kill_on_close": true
+      },
+      "evidence": "ipc-transport.md"
+    },
+    {
+      "name": "core_protocol_and_serve_tests",
+      "command": "cargo test --locked --offline -p persephone-core -p persephone-core-protocol",
+      "exit_code": 0,
+      "tests_passed": 7
+    },
+    {
+      "name": "historical_serde_unit_variant_unknown_fields",
+      "cause": "deny_unknown_fields not applied to unit variants of internally tagged enums",
+      "resolved_by": "empty struct variants (AppStatus {})"
+    },
+    {
+      "name": "workspace_check_after_core_ui_split",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 142,
+      "frontend_tests_passed": 5,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 162
+    },
+    {
+      "name": "bounded_views_walkthrough",
+      "checked_on": "2026-10-20",
+      "data": "synthetic",
+      "paging": {
+        "room_messages": 250,
+        "cumulative_items": [
+          100,
+          200,
+          250
+        ],
+        "complete_in_order": true
+      },
+      "byte_bounded_first_page_items": 13,
+      "body_cap_chars": 16385,
+      "timeline_injected_elements": 0,
+      "names_projected": true,
+      "unread_cap": "999+",
+      "keyboard": "Tab reaches first room button; Enter not reliably drivable via DevTools",
+      "evidence": "mock-views.md"
+    },
+    {
+      "name": "historical_devtools_endpoint_flakiness",
+      "finding": "intermittent DevTools endpoint failures were first misread as WebView2 process death and attributed to DIE_ON_UNHANDLED_EXCEPTION",
+      "resolution": "10 trials counting WebView2 processes showed no exits in either Job configuration; committed flag kept"
+    },
+    {
+      "name": "workspace_check_after_bounded_views",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 152,
+      "frontend_tests_passed": 8,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 175
+    },
+    {
+      "name": "live_updates_walkthrough",
+      "checked_on": "2026-10-21",
+      "data": "synthetic, persephone --demo-live",
+      "first_live_message_seconds_after_opening": 1.0,
+      "live_messages_seen": 3,
+      "duplicates": 0,
+      "unsubscribed_room_live_items": 0,
+      "reload_without_reopening_stale_channel_messages": 0,
+      "stale_channel_check_positive_control": true,
+      "devtools_connection_lost_attempts": 3,
+      "evidence": "live-updates.md"
+    },
+    {
+      "name": "workspace_check_after_live_updates",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 159,
+      "frontend_tests_passed": 12,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 186
+    },
+    {
+      "name": "protected_store_walkthrough",
+      "checked_on": "2026-10-21",
+      "platform": "Windows 11 Pro x64 26200, debug",
+      "vault": "DPAPI current user, application entropy",
+      "first_run": "protected, exit 0",
+      "reopen": "protected, exit 0",
+      "second_instance": "profile_in_use; first instance protected",
+      "key_deleted": "key_missing; profile files unchanged; no new key",
+      "sidecars_after_normal_close": 0,
+      "evidence": "protected-store.md"
+    },
+    {
+      "name": "workspace_check_after_protected_store",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 169,
+      "frontend_tests_passed": 12,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 196
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

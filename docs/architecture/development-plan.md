@@ -149,6 +149,11 @@ tests/
   platform/                        # Sandbox, storage, webview and packaging checks
 ```
 
+Process structure ([ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)):
+the core is the entry process and holds sessions, keys, stores and the media
+broker; it starts the Tauri UI process, which holds no secrets and relays each
+allowed command to the core as one bounded frame.
+
 Dependency direction: frontend consumes generated contracts through its bridge;
 the Tauri host depends on contracts/core; core depends on contracts and the SDK;
 the worker depends on its protocol and chosen decoders, never core or Tauri.

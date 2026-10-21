@@ -1,4 +1,4 @@
-import type { RoomSummary, TimelineItem } from "../generated/contracts.js";
+import type { AppStatus, RoomSummary, TimelineItem } from "../generated/contracts.js";
 
 const invalidTag: TimelineItem = {
   // @ts-expect-error only serialized snake-case enum tags are valid
@@ -15,5 +15,17 @@ const invalidName: RoomSummary = {
   unreadCount: 0,
 };
 
+const unknownStore: AppStatus = {
+  version: "0",
+  milestone: "P1",
+  // @ts-expect-error only the core's store codes are valid
+  store: "plaintext",
+};
+
+// @ts-expect-error the store state is required
+const missingStore: AppStatus = { version: "0", milestone: "P1" };
+
 void invalidTag;
 void invalidName;
+void unknownStore;
+void missingStore;

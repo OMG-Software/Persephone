@@ -47,6 +47,7 @@ The high-risk threat model requires evaluating process and OS-enforced security 
 - Application state coordinates sessions and room operations without blocking the UI thread.
 - Matrix integration owns SDK calls, synchronization, and protocol errors.
 - Platform services own local paths, credential storage, notifications, and OS integration, with explicit permissions and failure behavior.
+- The key-holding core runs in its own process; the Tauri web view process is a keyless UI relay (accepted [ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)).
 - Untrusted media decoding runs outside the process holding long-lived keys, as a WebAssembly module with no networking capability (accepted [ADR-0003](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md)), inside a verified OS sandbox with resource limits.
 
 Use SDK-owned Matrix protocol and cryptography with explicit features, as recorded in [ADR-0002](../adr/0002-use-sdk-owned-matrix-cryptography-and-explicit-features.md). The exact production dependency version, unified features, and complete compatibility/license review remain conditional on P0 evidence.

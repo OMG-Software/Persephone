@@ -1,4 +1,7 @@
-use persephone_contracts::{generated_typescript, sample_room_summary, sample_timeline_page};
+use persephone_contracts::{
+    AppStatus, RoomList, StoreState, generated_typescript, sample_room_summary,
+    sample_timeline_page,
+};
 
 #[test]
 fn checked_in_types_match_generator_without_mutating_files() {
@@ -70,4 +73,35 @@ fn serde_enforces_u32_integer_range_for_json_count() {
             "{invalid}"
         );
     }
+}
+
+#[test]
+fn app_status_serializes_camel_case_and_rejects_unknown_fields() {
+    let status = AppStatus {
+        version: "0.0.0".into(),
+        milestone: "P1".into(),
+        store: StoreState::KeyMissing,
+    };
+    assert_eq!(
+        serde_json::to_value(&status).unwrap(),
+        serde_json::json!({"version": "0.0.0", "milestone": "P1", "store": "key_missing"})
+    );
+    for invalid in [
+        r#"{"version":"0","milestone":"P1","store":"protected","extra":1}"#,
+        r#"{"version":"0","milestone":"P1"}"#,
+        r#"{"version":"0","milestone":"P1","store":"plaintext"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<AppStatus>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn room_list_rejects_unknown_fields() {
+    assert!(serde_json::from_str::<RoomList>(r#"{"rooms":[],"truncated":false}"#).is_ok());
+    assert!(
+        serde_json::from_str::<RoomList>(r#"{"rooms":[],"truncated":false,"cursor":"x"}"#).is_err()
+    );
 }

@@ -98,6 +98,10 @@ progressive 4:4:4 JPEG, a valid file, cannot be previewed within the 10 s
 deadline on this host. In the sandbox alone it took 11.6 s and 65 × 10⁹ fuel,
 above the 64 × 10⁹ default.
 
+**Decision (owner, 20 October 2026): accept.** Such images show "preview
+unavailable"; the limits are revisited with measurements from slower supported
+hardware.
+
 ## Tests
 
 `python tools/dev.py check --offline` passed 144 tests (126 Rust, 3 frontend, 2

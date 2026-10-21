@@ -32,6 +32,11 @@ def main():
     cargo_flags = ["--locked"] + (["--offline"] if args.offline else [])
 
     if args.command in ("check", "rust"):
+        # The desktop shell embeds the built frontend at compile time
+        # (tauri::generate_context!), so the frontend is built first.
+        if not npm:
+            parser.error("npm is required to build the frontend the desktop shell embeds")
+        run([npm, "run", "build"], environment, cwd=FRONTEND)
         run(["cargo", "fmt", "--all", "--", "--check"], environment)
         # The sandbox tests load this guest module; its wasm-only code is linted here.
         wasm_guest = ["-p", "persephone-media-decoder", "--target", "wasm32-unknown-unknown"]

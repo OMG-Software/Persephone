@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-room-list"
+description = "Enables the room_list command without any pre-configured scope."
+commands.allow = ["room_list"]
+
+[[permission]]
+identifier = "deny-room-list"
+description = "Denies the room_list command without any pre-configured scope."
+commands.deny = ["room_list"]

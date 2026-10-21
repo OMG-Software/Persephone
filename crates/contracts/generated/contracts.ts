@@ -1,8 +1,22 @@
+export type StoreState = "not_configured" | "protected" | "key_missing" | "key_unreadable" | "key_rejected" | "profile_in_use" | "store_unavailable" | "unsupported";
+
+export type AppStatus = { 
+/**
+ * The application version, from the desktop crate's manifest.
+ */
+version: string, 
+/**
+ * The current development milestone, e.g. "P1".
+ */
+milestone: string, store: StoreState, };
+
 export type RoomSummary = { roomId: string, displayName: string | null, 
 /**
  * u32 caps this count below JavaScript's exact-integer limit.
  */
 unreadCount: number, };
+
+export type RoomList = { rooms: Array<RoomSummary>, truncated: boolean, };
 
 export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, } | { "kind": "gap", next_cursor: string | null, };
 

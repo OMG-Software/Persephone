@@ -2,11 +2,14 @@
 resolver = "3"
 members = [
     "crates/contracts",
+    "crates/core",
+    "crates/core-protocol",
     "crates/media-broker",
     "crates/media-decoder",
     "crates/media-protocol",
     "crates/media-sandbox",
     "crates/media-worker",
+    "src-tauri",
     "tests/matrix",
     "tests/storage",
     "tests/platform/windows",
