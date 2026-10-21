@@ -127,18 +127,20 @@ no output was retained beyond the results below.
 | --- | --- | --- |
 | `cargo tree --locked --offline -i glib@0.18.5 --target x86_64-pc-windows-msvc -e normal` | 0 | Nothing to print: `glib` is not in the Windows x64 graph |
 | `cargo tree --locked --offline -i glib@0.18.5 --target x86_64-unknown-linux-gnu -e normal --prefix none` | 0 | 18 distinct packages: `glib` and 17 that depend on it directly or transitively |
-| `grep -rlE 'VariantStrIter\|str_iter\(\|array_iter_str' <source> --include=*.rs`, for each of the 17 | 0 matches | Sources are `.local/cache/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/<name>-<version>` for registry crates and `src-tauri` for `persephone-desktop` |
+| `grep -rlE 'VariantStrIter\|str_iter\(\|array_iter_str' <source> --include=*.rs`, once for each of the 17 dependents | 1 for each (no match) | 0 matches. Sources are `.local/cache/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/<name>-<version>` for registry crates and `src-tauri` for `persephone-desktop` |
+| The same `grep` on `.local/cache/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/glib-0.18.5` | 0 | 3 files: `variant_iter.rs` (the type, its `Iterator` and `DoubleEndedIterator` impls and tests), `variant.rs` (`Variant::array_iter_str`, which creates it, with a doc example and tests) and `lib.rs` (its re-export) |
 | `grep -rqw glib src-tauri/src src-tauri/Cargo.toml` | 1 (no match) | `src-tauri` does not use `glib` directly |
 
 The 17 dependents are `atk` 0.18.2, `cairo-rs` 0.18.5, `gdk` 0.18.2,
 `gdk-pixbuf` 0.18.5, `gio` 0.18.4, `gtk` 0.18.2, `javascriptcore-rs` 1.1.2,
 `muda` 0.20.0, `pango` 0.18.3, `soup3` 0.5.0, `tao` 0.37.1, `tauri` 2.12.4,
-`tauri-runtime` 2.12.2, `tauri-runtime-wry` 2.12.2, `webkit2gtk` 2.0.2,
-`wry` 0.57.0 and `persephone-desktop` 0.0.0. Only `glib`'s own definitions
-match the search. This is a textual search, not proof that no caller reaches
-the iterator through another API, and no Linux build or Linux test has been
-run. Moving to `glib` 0.20 needs GTK bindings that Tauri 2.12.4 does not use;
-patching or forking the GTK stack is out of scope.
+`tauri-runtime` 2.12.2, `tauri-runtime-wry` 2.12.2, `webkit2gtk` 2.0.2, `wry`
+0.57.0 and `persephone-desktop` 0.0.0. None of the 17 dependents matches; in
+`glib` itself only the API's definition, re-export, tests and doc example
+match. This is a textual search, not proof that no caller reaches the iterator
+through another API, and no Linux build or Linux test has been run. Moving to
+`glib` 0.20 needs GTK bindings that Tauri 2.12.4 does not use; patching or
+forking the GTK stack is out of scope.
 
 ## Historical per-package inventory
 
