@@ -2,7 +2,7 @@ export type StoreState = "not_configured" | "protected" | "locked" | "locking" |
 
 export type AccountState = "signed_out" | "signing_in" | "signed_in" | "sign_in_failed";
 
-export type SignInError = "cancelled" | "invalid_credentials" | "unreachable" | "homeserver_refused" | "unsupported" | "sync_failed" | "failed";
+export type SignInError = "cancelled" | "invalid_credentials" | "unreachable" | "homeserver_refused" | "unsupported" | "sync_failed" | "session_not_revoked" | "failed";
 
 export type AccountStatus = { state: AccountState, 
 /**

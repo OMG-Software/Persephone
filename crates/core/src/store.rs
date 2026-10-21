@@ -16,6 +16,12 @@
 //!
 //! Layout: `profile.lock`, `store-key.v1` (magic plus the vault's blob) and
 //! `store/` (state, event-cache, media and crypto databases).
+//!
+//! Signing out writes `signed-out` and deletes the key at once, so the
+//! encrypted files are unreadable from then on; the files themselves are
+//! deleted after the stores close, and whatever remains is wiped the next time
+//! the profile opens, before anything else. A crash at any point repeats the
+//! wipe rather than leaving a profile half-deleted.
 
 use crate::vault::{KeyProtector, StoreKey, VaultError, generate_key};
 use matrix_sdk_base::store::StateStore;
@@ -35,6 +41,41 @@ use tokio::runtime::Runtime;
 pub const LOCK_FILE: &str = "profile.lock";
 pub const KEY_FILE: &str = "store-key.v1";
 pub const STORE_DIR: &str = "store";
+/// Present from sign-out until the profile has been wiped.
+pub const SIGNED_OUT_FILE: &str = "signed-out";
+
+/// Starts signing out the profile in `dir`: records the sign-out durably,
+/// then deletes the store key, so the encrypted stores become unreadable.
+/// The open stores keep working until they close. The key is deleted even if
+/// the marker cannot be written: a store without its key opens as
+/// `key_missing`, never as a new or signed-in profile.
+pub fn mark_signed_out(dir: &Path) -> std::io::Result<()> {
+    let marked = File::create(dir.join(SIGNED_OUT_FILE)).and_then(|marker| marker.sync_all());
+    let removed = match fs::remove_file(dir.join(KEY_FILE)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    };
+    marked.and(removed)
+}
+
+/// Deletes a signed-out profile's store files and key, then the marker.
+/// The marker goes last, so an interrupted wipe is repeated.
+pub fn wipe_signed_out(dir: &Path) -> std::io::Result<()> {
+    if fs::symlink_metadata(dir.join(SIGNED_OUT_FILE)).is_err() {
+        return Ok(());
+    }
+    match fs::remove_dir_all(dir.join(STORE_DIR)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    for file in [KEY_FILE, &format!("{KEY_FILE}.tmp")] {
+        match fs::remove_file(dir.join(file)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    fs::remove_file(dir.join(SIGNED_OUT_FILE))
+}
 const KEY_MAGIC: &[u8] = b"PERSEPHONE-STORE-KEY-1\n";
 /// A DPAPI blob for 32 bytes is a few hundred bytes; anything far larger is
 /// not a key file.
@@ -182,6 +223,9 @@ pub fn open(dir: &Path, protector: &dyn KeyProtector) -> Result<Stores, StoreSta
         Err(TryLockError::WouldBlock) => return Err(StoreState::ProfileInUse),
         Err(TryLockError::Error(_)) => return Err(StoreState::StoreUnavailable),
     }
+    // A profile signed out earlier is wiped before anything else; it then
+    // opens as a new profile.
+    wipe_signed_out(dir).map_err(|_| StoreState::StoreUnavailable)?;
 
     let store_dir = dir.join(STORE_DIR);
     let key = match fs::symlink_metadata(dir.join(KEY_FILE)) {

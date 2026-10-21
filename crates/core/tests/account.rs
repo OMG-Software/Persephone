@@ -132,6 +132,11 @@ impl Homeserver {
                 .mount(&server)
                 .await;
             Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/logout"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
                 .and(path("/_matrix/client/v3/login"))
                 .respond_with(ResponseTemplate::new(login.0).set_body_json(login.1))
                 .mount(&server)
@@ -181,6 +186,20 @@ impl Homeserver {
             false,
             true,
         )
+    }
+
+    /// Makes logout fail from now on (the server cannot revoke).
+    fn fail_logout(&self) {
+        self.runtime.block_on(
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/logout"))
+                .respond_with(
+                    ResponseTemplate::new(500)
+                        .set_body_json(json!({"errcode":"M_UNKNOWN","error":"down"})),
+                )
+                .with_priority(1)
+                .mount(&self.server),
+        );
     }
 
     fn uri(&self) -> String {
@@ -643,4 +662,90 @@ fn given_a_lock_and_unlock_while_the_prompt_is_open_then_the_old_attempt_never_s
     );
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::Locked, "no client ever ran");
+}
+
+fn signed_in_core(server: &Homeserver, dir: &Path) -> Core {
+    let core = make_core(dir, Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    core
+}
+
+/// Sign-out revokes the session, deletes the key at once and the profile
+/// after the stores close, and a restart opens a fresh, signed-out profile
+/// with nothing of the old account left.
+#[test]
+fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    {
+        let core = signed_in_core(&server, dir.path());
+        let state: StoreState = value(call(&core, Call::SignOut {}));
+        assert_eq!(state, StoreState::RestartRequired);
+        assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
+        let status = core.session().account_status();
+        assert_eq!(
+            (status.state, status.error),
+            (AccountState::SignedOut, None)
+        );
+        assert!(!dir.path().join("store-key.v1").exists(), "key deleted");
+        assert_eq!(
+            call(&core, Call::RoomList {}),
+            Outcome::Error(ErrorCode::Locked)
+        );
+        let state: StoreState = value(call(&core, Call::UnlockSession {}));
+        assert_eq!(state, StoreState::RestartRequired);
+    }
+    assert!(files_contain(dir.path(), TOKEN.as_bytes()).is_empty());
+
+    let never = Fixed::new(Err(PromptError::Failed));
+    let core = make_core(dir.path(), never.clone());
+    assert_eq!(
+        core.session().state(),
+        StoreState::Protected,
+        "fresh profile"
+    );
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedOut
+    );
+    assert!(!dir.path().join("signed-out").exists(), "wipe finished");
+    assert_eq!(never.asked.load(Ordering::SeqCst), 0);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(
+        state,
+        StoreState::Locked,
+        "no account restored, no client ran"
+    );
+}
+
+/// When the server cannot revoke, sign-out still completes locally and says
+/// the server session may remain.
+#[test]
+fn given_the_server_cannot_revoke_then_sign_out_still_wipes_and_warns() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    server.fail_logout();
+    let state: StoreState = value(call(&core, Call::SignOut {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    assert_eq!(
+        core.session().account_status().error,
+        Some(SignInError::SessionNotRevoked)
+    );
+    assert!(
+        !dir.path().join("store-key.v1").exists(),
+        "key deleted anyway"
+    );
+}
+
+#[test]
+fn given_no_account_then_sign_out_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let state: StoreState = value(call(&core, Call::SignOut {}));
+    assert_eq!(state, StoreState::Protected);
+    assert!(dir.path().join("store-key.v1").exists());
 }

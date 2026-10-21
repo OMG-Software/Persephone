@@ -21,6 +21,7 @@
     homeserver_refused: 'Persephone does not accept that homeserver address.',
     unsupported: 'Signing in is not available on this system yet.',
     sync_failed: 'Signed in, but syncing with the homeserver failed.',
+    session_not_revoked: 'Signed out on this device, but the homeserver could not be reached.',
     failed: 'Signing in failed.'
   };
 

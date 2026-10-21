@@ -8,6 +8,7 @@
   import {
     appStatus,
     lockSession,
+    signOut,
     roomList,
     signIn,
     subscribeRoom,
@@ -29,6 +30,8 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let switching = $state(false);
+  // Sign-out deletes this device's keys, so it asks once more first.
+  let confirmingSignOut = $state(false);
   // A room-list reply replaces the list only if it is newer than the one
   // shown: an older reply that finishes last cannot bring back a stale list,
   // and a failed newer request leaves the newest successful one in place.
@@ -167,6 +170,21 @@
       }
     } finally {
       signingIn = false;
+    }
+  }
+
+  async function confirmSignOut() {
+    if (switching) return;
+    confirmingSignOut = false;
+    switching = true;
+    const generation = sessionGeneration;
+    try {
+      const store = await signOut();
+      if (generation === sessionGeneration && status) status = { ...status, store };
+    } catch (reason) {
+      if (generation === sessionGeneration) error = describe(reason);
+    } finally {
+      switching = false;
     }
   }
 
@@ -319,9 +337,31 @@
         {/if}
       </p>
     </div>
+    {#if signedIn && !confirmingSignOut}
+      <button
+        type="button"
+        class="session"
+        disabled={switching}
+        onclick={() => (confirmingSignOut = true)}
+      >
+        Sign out
+      </button>
+    {/if}
+    {#if confirmingSignOut}
+      <div class="confirm" role="alertdialog" aria-labelledby="sign-out-question">
+        <p id="sign-out-question">
+          Sign out and delete this device's keys and local data? Encrypted history this device
+          could read may not be readable again.
+        </p>
+        <button type="button" disabled={switching} onclick={confirmSignOut}>Sign out</button>
+        <button type="button" disabled={switching} onclick={() => (confirmingSignOut = false)}>
+          Cancel
+        </button>
+      </div>
+    {/if}
     {#if status && (status.store === 'protected' || status.store === 'locking')}
       <button type="button" class="session" disabled={switching} onclick={toggleLock}>
-        {switching ? 'Locking…' : 'Lock'}
+        {switching ? 'Working…' : 'Lock'}
       </button>
     {:else if status && unlockable.includes(status.store)}
       <button type="button" class="session" disabled={switching} onclick={toggleLock}>
@@ -351,7 +391,20 @@
       />
     {:else}
       <section class="timeline" aria-label="No room selected">
-        {#if status?.store === 'restart_required'}
+        {#if status?.store === 'restart_required' && status.account.state === 'signed_out' && status.account.error === 'failed'}
+          <p role="alert" class="error">
+            Signing out did not finish: this device's local data could not be deleted. Restart
+            Persephone and sign out again.
+          </p>
+        {:else if status?.store === 'restart_required' && status.account.state === 'signed_out'}
+          <p>Signed out, and this device's local data was deleted. Restart Persephone to sign in again.</p>
+          {#if status.account.error === 'session_not_revoked'}
+            <p role="alert" class="error">
+              The homeserver could not be reached, so the session may stay active there until it
+              expires. Revoke it from another device if you need to.
+            </p>
+          {/if}
+        {:else if status?.store === 'restart_required'}
           <p>The session is locked. Restart Persephone to unlock it.</p>
         {:else if status && status.store !== 'protected' && status.store !== 'not_configured'}
           <p>The session is locked. Nothing from it is shown.</p>

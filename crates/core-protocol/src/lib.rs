@@ -53,6 +53,10 @@ pub enum Call {
     SignIn {
         homeserver: String,
     },
+    /// Sign out: revoke the session on the homeserver if it can be reached,
+    /// then delete this device's local profile (keys first). Replies with the
+    /// resulting store state.
+    SignOut {},
 }
 
 /// Longest homeserver URL either side accepts in a call.
@@ -284,6 +288,7 @@ mod tests {
             br#"{"id":1,"call":{"command":"sign_in"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,
+            br#"{"id":1,"call":{"command":"sign_out","keep_data":true}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

@@ -269,6 +269,12 @@ impl Core {
                 ok(&state)
             }
             Call::SignIn { homeserver } => self.sign_in(homeserver),
+            Call::SignOut {} => {
+                let state = self
+                    .session
+                    .sign_out(LOCK_TIMEOUT, || self.hub.announce_session_change());
+                ok(&state)
+            }
         };
         Reply {
             id: request.id,

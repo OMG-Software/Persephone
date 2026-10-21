@@ -211,6 +211,56 @@ fn given_open_stores_dropped_without_close_then_they_shut_down_and_keep_their_da
     assert_eq!(read_marker(dir.path(), &protector).as_deref(), Some(MARKER));
 }
 
+/// A signed-out profile is wiped the next time it opens: the key is already
+/// gone, the old files are deleted, and the profile opens as a new one
+/// without the old data. An interrupted wipe (marker still present) repeats.
+#[test]
+fn given_a_signed_out_profile_then_opening_wipes_it_and_starts_fresh() {
+    let protector = Tagged(1);
+    let dir = seeded(&protector);
+    store::mark_signed_out(dir.path()).unwrap();
+    assert!(
+        !dir.path().join(KEY_FILE).exists(),
+        "key deleted at sign-out"
+    );
+    assert!(dir.path().join(store::SIGNED_OUT_FILE).exists());
+    assert_eq!(read_marker(dir.path(), &protector), None, "old data gone");
+    assert!(
+        !dir.path().join(store::SIGNED_OUT_FILE).exists(),
+        "wipe finished"
+    );
+    assert!(dir.path().join(KEY_FILE).exists(), "a new key");
+
+    // A wipe that stopped after the files went but before the marker did
+    // completes on the next open.
+    let again = seeded(&protector);
+    store::mark_signed_out(again.path()).unwrap();
+    fs::remove_dir_all(again.path().join(STORE_DIR)).unwrap();
+    assert_eq!(read_marker(again.path(), &protector), None);
+    assert!(!again.path().join(store::SIGNED_OUT_FILE).exists());
+}
+
+/// GIVEN a profile whose sign-out marker cannot be written (a directory is
+/// in its place) WHEN signing out THEN the failure is reported, the key is
+/// still deleted, and the old stores never open again.
+#[test]
+fn given_the_sign_out_marker_cannot_be_written_then_the_key_still_goes_and_the_profile_stays_closed()
+ {
+    let protector = Tagged(1);
+    let dir = seeded(&protector);
+    fs::create_dir(dir.path().join(store::SIGNED_OUT_FILE)).unwrap();
+    assert!(
+        store::mark_signed_out(dir.path()).is_err(),
+        "failure reported"
+    );
+    assert!(!dir.path().join(KEY_FILE).exists(), "key deleted anyway");
+    assert_ne!(refused(dir.path(), &protector), StoreState::Protected);
+    assert!(
+        !dir.path().join(KEY_FILE).exists(),
+        "no new key over the old data"
+    );
+}
+
 #[cfg(windows)]
 mod dpapi {
     use super::*;

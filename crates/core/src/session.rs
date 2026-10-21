@@ -616,6 +616,46 @@ impl Session {
         (state, closed.then_some(TrackedDrain { _private: () }))
     }
 
+    /// Signs out (owner decisions, 21 October 2026): revokes the session on
+    /// the homeserver if it can be reached, then deletes this device's local
+    /// profile. The key goes first, so the encrypted stores are unreadable at
+    /// once; then the session locks as usual (ending `restart_required`, since
+    /// a client ran) and the store files are deleted, with anything left
+    /// wiped on the next start. A failed revocation still signs out locally
+    /// and is reported as `session_not_revoked`. Returns the resulting state;
+    /// without a signed-in account nothing changes.
+    pub fn sign_out(&self, timeout: Duration, announce: impl FnOnce()) -> StoreState {
+        let Some(dir) = self.profile.clone() else {
+            return self.state();
+        };
+        let revoked = match self.with_client() {
+            Ok(Some((lease, client))) => lease
+                .stores()
+                .block_on(client.matrix_auth().logout())
+                .is_ok(),
+            _ => return self.state(),
+        };
+        let marked = store::mark_signed_out(&dir).is_ok();
+        let (state, _) = self.lock(timeout, announce);
+        // The sync loop has been joined, so this status is not overwritten.
+        self.shared.set_status(AccountStatus {
+            state: AccountState::SignedOut,
+            user_id: None,
+            error: if !marked {
+                Some(SignInError::Failed)
+            } else if !revoked {
+                Some(SignInError::SessionNotRevoked)
+            } else {
+                None
+            },
+        });
+        if matches!(state, StoreState::RestartRequired | StoreState::Locked) {
+            // Best effort: files still in use are wiped on the next start.
+            let _ = store::wipe_signed_out(&dir);
+        }
+        state
+    }
+
     /// Reopens a locked session with the key from the vault and restores a
     /// saved account. A session that failed to open may retry; `lock_failed`,
     /// `restart_required`, `locking` and an unconfigured session cannot unlock.
