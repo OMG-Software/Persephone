@@ -109,6 +109,9 @@
     error = null;
     // The host already ended the room subscription.
     live = null;
+    // Operations from the old session no longer update these.
+    loading = false;
+    opening = false;
     changedAgain = false;
     load();
   }
@@ -135,19 +138,30 @@
     load();
   });
 
-  function follow(roomId: string): Promise<unknown> {
+  // A room operation's results apply only to the same room in the same
+  // session: the room ID alone matches again when a room is reopened after a
+  // lock and unlock.
+  const current = (roomId: string, generation: number) =>
+    selected === roomId && generation === sessionGeneration;
+
+  function follow(roomId: string, generation: number): Promise<unknown> {
     const task = async () => {
       if (live) {
         const previous = live;
         live = null;
         await previous.stop().catch(() => {});
       }
-      if (selected !== roomId) return;
+      if (!current(roomId, generation)) return;
       try {
-        live = { roomId, stop: await subscribeRoom(roomId, () => refresh(roomId)) };
+        const stop = await subscribeRoom(roomId, () => refresh(roomId, generation));
+        if (current(roomId, generation)) {
+          live = { roomId, stop };
+        } else {
+          await stop().catch(() => {});
+        }
       } catch (reason) {
         // The room still opens; it just will not update by itself.
-        error = describe(reason);
+        if (current(roomId, generation)) error = describe(reason);
       }
     };
     subscriptions = subscriptions.then(task, task);
@@ -155,6 +169,7 @@
   }
 
   async function open(roomId: string) {
+    const generation = sessionGeneration;
     selected = roomId;
     items = [];
     nextCursor = null;
@@ -164,25 +179,25 @@
     changedAgain = false;
     try {
       // Subscribe first, so a change after this fetch is not missed.
-      await follow(roomId);
-      if (selected !== roomId) return;
+      await follow(roomId, generation);
+      if (!current(roomId, generation)) return;
       const page = await timelinePage(roomId, null);
-      if (selected !== roomId) return;
+      if (!current(roomId, generation)) return;
       items = page.items;
       nextCursor = page.nextCursor;
     } catch (reason) {
-      error = describe(reason);
+      if (current(roomId, generation)) error = describe(reason);
     } finally {
-      if (selected === roomId) {
+      if (current(roomId, generation)) {
         loading = false;
         opening = false;
-        if (changedAgain) refresh(roomId);
+        if (changedAgain) refresh(roomId, generation);
       }
     }
   }
 
-  async function refresh(roomId: string) {
-    if (selected !== roomId) return;
+  async function refresh(roomId: string, generation: number) {
+    if (!current(roomId, generation)) return;
     if (opening || refreshing) {
       changedAgain = true;
       return;
@@ -192,31 +207,32 @@
       do {
         changedAgain = false;
         const page = await timelinePage(roomId, null);
-        if (selected !== roomId) return;
+        if (!current(roomId, generation)) return;
         items = mergeNewest(items, page.items);
       } while (changedAgain);
     } catch (reason) {
-      error = describe(reason);
+      if (current(roomId, generation)) error = describe(reason);
     } finally {
       refreshing = false;
       // A change in a room opened while this fetch ran.
-      if (changedAgain && selected && !opening) refresh(selected);
+      if (changedAgain && selected && !opening) refresh(selected, sessionGeneration);
     }
   }
 
   async function older() {
     if (!selected || !nextCursor) return;
     const roomId = selected;
+    const generation = sessionGeneration;
     loading = true;
     try {
       const page = await timelinePage(roomId, nextCursor);
-      if (selected !== roomId) return;
+      if (!current(roomId, generation)) return;
       items = [...page.items, ...items];
       nextCursor = page.nextCursor;
     } catch (reason) {
-      error = describe(reason);
+      if (current(roomId, generation)) error = describe(reason);
     } finally {
-      loading = false;
+      if (current(roomId, generation)) loading = false;
     }
   }
 </script>

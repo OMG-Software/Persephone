@@ -82,6 +82,26 @@ passed, and the real-app walkthrough below was repeated after rebuilding with
 the same results; the first repeat lost its DevTools connection before
 locking.
 
+### Review fix: room operations across a session change
+
+A further review found that room operations checked only the room ID. After
+a lock and unlock, reopening the same room matched again, so an older
+`timelinePage` or `subscribeRoom` reply could update the new timeline or set
+up a subscription. `open`, `follow`, `refresh` and `older` now require both
+the room and the session generation they started under, a subscription that
+resolves too late is ended at once, and a session change also clears the
+loading flags. `python tools/dev.py frontend` passed and the walkthrough was
+repeated after rebuilding.
+
+One repeat (after two attempts that lost their DevTools connection) found the
+crypto store's `-wal` and `-shm` files present right after the lock, with
+the profile lock released and the state `locked`. Four further runs, checking
+right after the lock and again 2 s later, found none. The cause is not
+established. Each probe attempt starts by deleting the scratch profile with
+errors ignored, so files from an interrupted earlier attempt may have
+survived; this was not confirmed. The WAL holds the same encrypted values as
+the database ([P0 storage evidence](storage.md)).
+
 ## Tests
 
 `python tools/dev.py check --offline` passed 204 tests (177 Rust, 12 frontend,
