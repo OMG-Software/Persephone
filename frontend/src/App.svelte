@@ -27,6 +27,9 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let switching = $state(false);
+  // Advanced on every session change. Replies to calls made before the change
+  // are discarded, so nothing from a locked session is shown again.
+  let sessionGeneration = 0;
 
   // The one room with live updates, and a queue that keeps subscribe and
   // unsubscribe calls in order: the host runs commands concurrently.
@@ -76,23 +79,29 @@
     messages[String(reason)] ?? 'The Persephone core is unavailable.';
 
   async function load() {
+    const generation = sessionGeneration;
+    let reply: AppStatus;
     try {
-      status = await appStatus();
+      reply = await appStatus();
     } catch {
-      unavailable = true;
+      if (generation === sessionGeneration) unavailable = true;
       return;
     }
-    if (status.store !== 'protected' && status.store !== 'not_configured') return;
+    if (generation !== sessionGeneration) return;
+    status = reply;
+    if (reply.store !== 'protected' && reply.store !== 'not_configured') return;
     try {
-      rooms = await roomList();
+      const list = await roomList();
+      if (generation === sessionGeneration) rooms = list;
     } catch (reason) {
-      error = describe(reason);
+      if (generation === sessionGeneration) error = describe(reason);
     }
   }
 
   // The session changed: drop everything shown from it. Pending fetches see
   // the cleared selection and discard their results.
   function reset() {
+    sessionGeneration += 1;
     selected = null;
     rooms = null;
     items = [];
@@ -107,13 +116,15 @@
   async function toggleLock() {
     if (!status || switching) return;
     switching = true;
+    const generation = sessionGeneration;
     try {
       const store = status.store === 'protected' || status.store === 'locking'
         ? await lockSession()
         : await unlockSession();
-      status = { ...status, store };
+      // A session change during the call already reloaded the status.
+      if (generation === sessionGeneration && status) status = { ...status, store };
     } catch (reason) {
-      error = describe(reason);
+      if (generation === sessionGeneration) error = describe(reason);
     } finally {
       switching = false;
     }

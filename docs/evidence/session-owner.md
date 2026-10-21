@@ -70,6 +70,18 @@ so the fix rests on the drop order, not on that test. After the fix,
 `cargo test --locked -p persephone-core` passed all 32 core tests and Clippy
 passed; the full workspace check below was not rerun locally.
 
+### Review fix: stale replies after a session change
+
+Review also found that the page could show a room list again after locking:
+a `room_list` or `app_status` reply to a call made before the lock could
+arrive after the page cleared itself, because the host completes commands
+concurrently. The page now advances a generation on every session change and
+discards replies to calls made under an earlier one (the timeline already
+discarded them through the selected room). `python tools/dev.py frontend`
+passed, and the real-app walkthrough below was repeated after rebuilding with
+the same results; the first repeat lost its DevTools connection before
+locking.
+
 ## Tests
 
 `python tools/dev.py check --offline` passed 204 tests (177 Rust, 12 frontend,
