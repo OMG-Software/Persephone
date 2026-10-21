@@ -230,8 +230,13 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
         });
     });
     if installed.is_err() {
-        let _context = lease.stores().runtime().enter();
-        drop(client);
+        // A lock began first: the account never starts.
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        shared.set_status(AccountStatus::signed_out());
         return;
     }
     let runtime = lease.stores().runtime().handle().clone();
@@ -469,7 +474,9 @@ impl Session {
                     }
                 };
                 let Ok(lease) = shared.admit() else {
-                    // Locked while the prompt was open.
+                    // Locked while the prompt was open: abandon the attempt,
+                    // so a later sign-in is not refused as still running.
+                    shared.set_status(AccountStatus::signed_out());
                     return;
                 };
                 shared.client_ran.store(true, Ordering::SeqCst);
@@ -488,10 +495,15 @@ impl Session {
                 match result {
                     Ok((client, user_id)) => install(&shared, lease, client, user_id),
                     Err(error) => {
-                        if lease.commit(|| ()).is_ok() {
-                            drop(lease);
-                            shared.set_status(failed(error));
-                        }
+                        let current = lease.commit(|| ()).is_ok();
+                        drop(lease);
+                        // After a lock the failure belongs to an abandoned
+                        // attempt; report it only while the session is current.
+                        shared.set_status(if current {
+                            failed(error)
+                        } else {
+                            AccountStatus::signed_out()
+                        });
                     }
                 }
             });

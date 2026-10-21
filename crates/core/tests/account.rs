@@ -545,3 +545,60 @@ fn given_capability_discovery_fails_then_sign_in_fails_without_any_sync() {
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
 }
+
+/// Holds the prompt open until released, like a user still typing.
+struct Held {
+    released: std::sync::Mutex<bool>,
+    wake: std::sync::Condvar,
+    asked: AtomicUsize,
+}
+
+impl CredentialSource for Held {
+    fn ask(&self, _host: &str) -> Result<Credentials, PromptError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.wake.wait(released).unwrap();
+        }
+        Ok(Credentials {
+            username: Zeroizing::new("alice".into()),
+            password: Zeroizing::new(PASSWORD.into()),
+        })
+    }
+}
+
+/// A lock while the prompt is open abandons that sign-in: the status returns
+/// to signed out, no login is sent, and after unlocking a new sign-in prompts
+/// again instead of reporting the old attempt as still running.
+#[test]
+fn given_a_lock_while_the_prompt_is_open_then_the_attempt_is_abandoned_cleanly() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let held = Arc::new(Held {
+        released: std::sync::Mutex::new(false),
+        wake: std::sync::Condvar::new(),
+        asked: AtomicUsize::new(0),
+    });
+    let core = make_core(dir.path(), held.clone());
+    assert_eq!(sign_in(&core, &server.uri()).state, AccountState::SigningIn);
+    wait_for("the prompt", || held.asked.load(Ordering::SeqCst) == 1);
+
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::Locked, "no client ran yet");
+    *held.released.lock().unwrap() = true;
+    held.wake.notify_all();
+    wait_for("the attempt to end", || {
+        core.session().account_status().state == AccountState::SignedOut
+    });
+    assert_eq!(server.requests_to("/_matrix/client/v3/login"), 0);
+
+    let state: StoreState = value(call(&core, Call::UnlockSession {}));
+    assert_eq!(state, StoreState::Protected);
+    assert_eq!(sign_in(&core, &server.uri()).state, AccountState::SigningIn);
+    wait_for("a new prompt", || held.asked.load(Ordering::SeqCst) == 2);
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}

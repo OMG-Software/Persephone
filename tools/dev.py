@@ -51,7 +51,7 @@ def main():
         # Mock-homeserver account tests need plain HTTP to loopback, which only
         # the development feature accepts. The default build above is what ships.
         dev_core = ["-p", "persephone-core", "--features", "dev-disposable-servers"]
-        run(["cargo", "test", *cargo_flags, *dev_core, "--test", "account"], environment)
+        run(["cargo", "test", *cargo_flags, *dev_core, "--lib", "--test", "account"], environment)
         run(["cargo", "clippy", *cargo_flags, *dev_core, "--all-targets", "--", "-D", "warnings"], environment)
     if args.command in ("check", "frontend", "bootstrap"):
         if not npm:

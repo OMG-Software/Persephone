@@ -14,6 +14,9 @@ const gap: TimelineItem = { kind: 'gap', next_cursor: null };
  * marks the messages in between. When more than `max` items would be kept, the
  * oldest are replaced by one leading gap. The caller's older-page cursor stays
  * valid: older pages still come before the oldest message it fetched.
+ *
+ * An event already shown is replaced by its form in `newest`, so a notice that
+ * becomes readable (for example once its key arrives) is updated in place.
  */
 export function mergeNewest(
   items: TimelineItem[],
@@ -28,6 +31,11 @@ export function mergeNewest(
       break;
     }
   }
+  const fresh = new Map<string, TimelineItem>();
+  for (const item of newest) {
+    if (item.kind !== 'gap') fresh.set(item.event_id, item);
+  }
+  items = items.map((item) => (item.kind === 'gap' ? item : (fresh.get(item.event_id) ?? item)));
   let merged: TimelineItem[];
   if (last === null) {
     merged = [...items, ...newest];

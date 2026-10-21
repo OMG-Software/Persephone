@@ -61,3 +61,12 @@ test('notices count as known events when merging', () => {
   );
 });
 
+test('a shown notice is replaced when the same event comes back readable', () => {
+  const notice = { kind: 'notice', event_id: '$1', sender: '@a:example.invalid', notice: 'undecryptable' };
+  const merged = mergeNewest([message(0), notice], [message(0), message(1), message(2)]);
+  assert.deepEqual(
+    merged.map((item) => `${item.event_id}:${item.kind}`),
+    ['$0:message', '$1:message', '$2:message']
+  );
+});
+

@@ -107,7 +107,13 @@ either, affected the first attempts is not established.
 `python tools/dev.py check --offline` exited 0 and passed 227 tests (197 Rust,
 15 frontend, 2 server-registration and 13 controller tests), with formatting,
 Clippy for default and development features, and contract checks. It now also
-runs the mock-homeserver tests with the development feature. New:
+runs the mock-homeserver tests with the development feature. That run used
+the uncommitted working tree later committed as `a89a891` (which adds only
+these counts to the docs), Rust and Cargo 1.99.1, Node.js 24.15.0, npm 11.13.0
+and Python 3.14.4, `--offline` with cached dependencies; `Cargo.lock` SHA-256
+`946730d6…2c35`, `frontend/package-lock.json` `a22d978b…f3e2`; its raw log
+was not retained. A rerun after review fixes is recorded in the
+[ledger](verification.json). New:
 
 * Homeserver policy (4): accepted URLs and their shown host (including
   punycode); 16 rejected forms; plain HTTP refused without the feature and
@@ -145,6 +151,9 @@ A script seeded each server over the Matrix API: a plain room with three text
 messages and an `m.image`, and an encrypted room with a ciphertext this device
 has no key for. The real core and UI were then driven over DevTools; the
 second account posted a message with a unique text while the room was open.
+The runs used the uncommitted working tree before `a89a891` (exact tree not
+recorded), the same lockfiles as that commit and a debug core built with
+`dev-disposable-servers`; server logs stay under the ignored `.local/runs`.
 
 | Check | Merovingian 0.12.29 | Synapse 1.163.0 | Synapse classic-only |
 | --- | --- | --- | --- |

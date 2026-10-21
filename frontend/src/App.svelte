@@ -29,6 +29,9 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let switching = $state(false);
+  // Only the newest room-list request may replace the list: an older reply
+  // that finishes last must not bring back a stale list.
+  let roomsRequest = 0;
   let signingIn = $state(false);
   // Advanced on every session change. Replies to calls made before the change
   // are discarded, so nothing from a locked session is shown again.
@@ -98,9 +101,10 @@
     if (generation !== sessionGeneration) return;
     status = reply;
     if (reply.store !== 'protected' && reply.store !== 'not_configured') return;
+    const request = ++roomsRequest;
     try {
       const list = await roomList();
-      if (generation === sessionGeneration) rooms = list;
+      if (generation === sessionGeneration && request === roomsRequest) rooms = list;
     } catch (reason) {
       if (generation === sessionGeneration) error = describe(reason);
     }
@@ -128,9 +132,10 @@
   async function refreshRooms() {
     if (!status || (status.store !== 'protected' && status.store !== 'not_configured')) return;
     const generation = sessionGeneration;
+    const request = ++roomsRequest;
     try {
       const list = await roomList();
-      if (generation === sessionGeneration) rooms = list;
+      if (generation === sessionGeneration && request === roomsRequest) rooms = list;
     } catch {
       // The next change or session event tries again.
     }
@@ -147,7 +152,7 @@
       if (generation === sessionGeneration) {
         error =
           String(reason) === 'invalid_argument'
-            ? 'Use a homeserver address that starts with https://.'
+            ? 'Use the homeserver\'s base address, such as https://matrix.example.org, with no path, query or fragment.'
             : describe(reason);
       }
     } finally {
