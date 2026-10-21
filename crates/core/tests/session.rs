@@ -180,3 +180,27 @@ fn given_no_profile_then_nothing_is_admitted_and_lock_or_unlock_change_nothing()
     );
     assert_eq!(session.unlock(), StoreState::NotConfigured);
 }
+
+/// A lease that ends while a lock waits must never make the lock fail. The
+/// lease used to wake the locker before releasing its reference to the
+/// stores, so the locker could find them still shared and report
+/// `lock_failed`. Repeats the race; it is timing-dependent, not a proof.
+#[test]
+fn given_a_lease_ending_during_a_lock_then_the_lock_completes() {
+    let dir = TempDir::new().unwrap();
+    let session = open(dir.path());
+    for round in 0..200 {
+        let lease = session.admit().unwrap();
+        std::thread::scope(|scope| {
+            let locker = scope.spawn(|| session.lock(LONG, || {}));
+            while session.state() != StoreState::Locking {
+                std::thread::yield_now();
+            }
+            drop(lease);
+            let (state, drain) = locker.join().unwrap();
+            assert_eq!(state, StoreState::Locked, "round {round}");
+            assert!(drain.is_some());
+        });
+        assert_eq!(session.unlock(), StoreState::Protected, "round {round}");
+    }
+}

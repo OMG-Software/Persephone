@@ -55,6 +55,21 @@ explicitly, but any panic while unlocked would have aborted the process.
 inside the runtime too. A regression test drops open stores, then reopens the
 profile and reads back the marker.
 
+### Review fix: lease release order
+
+Review found that `Lease::drop` counted the lease out and woke the locker
+before releasing its reference to the stores (Rust drops fields only after
+the `drop` body). A locker woken in that window saw no leases, failed to take
+sole ownership of the stores and reported a permanent `lock_failed` for a
+normal lock. The lease now releases its reference first. If the stores are
+ever still shared when a lock tries to close them, the session stays
+`locking`, keeps them, and a later lock retries. A new test ends a lease
+during a waiting lock 200 times and requires `locked` each time; it did not
+reproduce the failure before the fix (the window is a few instructions wide),
+so the fix rests on the drop order, not on that test. After the fix,
+`cargo test --locked -p persephone-core` passed all 32 core tests and Clippy
+passed; the full workspace check below was not rerun locally.
+
 ## Tests
 
 `python tools/dev.py check --offline` passed 204 tests (177 Rust, 12 frontend,

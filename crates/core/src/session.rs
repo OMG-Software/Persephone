@@ -88,12 +88,13 @@ pub struct Session {
 pub struct Lease {
     shared: Arc<Shared>,
     generation: u64,
-    stores: Arc<Stores>,
+    /// `Some` for the lease's whole life; taken only in `drop`.
+    stores: Option<Arc<Stores>>,
 }
 
 impl Lease {
     pub fn stores(&self) -> &Stores {
-        &self.stores
+        self.stores.as_ref().expect("held until the lease drops")
     }
 
     /// Runs a short update only if the session has not begun to lock since
@@ -110,6 +111,10 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
+        // Release the stores before counting this lease out: a locker woken
+        // by the count must find the session holding the only reference.
+        // (Fields drop only after this body, so it cannot be left to them.)
+        drop(self.stores.take());
         let mut inner = lock(&self.shared);
         inner.active = inner.active.saturating_sub(1);
         self.shared.drained.notify_all();
@@ -185,7 +190,7 @@ impl Session {
         Ok(Lease {
             shared: self.shared.clone(),
             generation: inner.generation,
-            stores,
+            stores: Some(stores),
         })
     }
 
@@ -237,14 +242,15 @@ impl Session {
         }
         let stores = inner.stores.take();
         drop(inner);
-        // No lease remains, so the session holds the only reference.
+        // Each lease releases its reference before it is counted out, so with
+        // no lease left the session holds the only one.
         let closed = match stores.map(Arc::try_unwrap) {
             Some(Ok(stores)) => stores.close(),
             Some(Err(still_shared)) => {
-                // Unreachable while leases are the only holders; refuse to
-                // release a store something else still holds.
+                // Something else still holds the stores: keep them, stay
+                // locking, and let a later lock retry rather than failing.
                 lock(&self.shared).stores = Some(still_shared);
-                false
+                return (StoreState::Locking, None);
             }
             None => false,
         };
