@@ -86,7 +86,9 @@ Minimum supported OS/CPU versions remain undecided until packaged tests exist.
    the kernel socket device. Owner decision
    ([ADR-0003](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md)):
    untrusted decoding runs as a WebAssembly module with no network capability,
-   inside the OS-contained worker, with the OS-level residual risk documented.
+   inside the OS-contained worker prototype, with the OS-level residual risk
+   documented. The worker is not yet wired into the app or the Matrix media
+   flow.
    Remaining: CPU accounting, packaged behavior, signed helper policies and
    equivalent denial and resource tests on Linux/macOS.
 3. [Maintenance disposition](../evidence/dependencies.md#maintenance-disposition-and-compiled-graph-review)

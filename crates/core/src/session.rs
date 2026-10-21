@@ -459,25 +459,41 @@ impl Session {
             listener.session_changed();
         }
         let shared = self.shared.clone();
+        // The attempt belongs to this generation. A lock while the prompt is
+        // open advances it, so the attempt is abandoned even if the session
+        // was unlocked again before the prompt returned.
+        let started = lock(&self.shared).generation;
         let spawned = std::thread::Builder::new()
             .name("core-sign-in".into())
             .spawn(move || {
+                let still_current = || {
+                    let inner = lock(&shared);
+                    inner.generation == started && inner.state == StoreState::Protected
+                };
                 let credentials = match source.ask(&homeserver.display_host()) {
                     Ok(credentials) => credentials,
                     Err(error) => {
-                        shared.set_status(failed(match error {
-                            PromptError::Cancelled => SignInError::Cancelled,
-                            PromptError::Unsupported => SignInError::Unsupported,
-                            PromptError::Invalid | PromptError::Failed => SignInError::Failed,
-                        }));
+                        shared.set_status(if still_current() {
+                            failed(match error {
+                                PromptError::Cancelled => SignInError::Cancelled,
+                                PromptError::Unsupported => SignInError::Unsupported,
+                                PromptError::Invalid | PromptError::Failed => SignInError::Failed,
+                            })
+                        } else {
+                            AccountStatus::signed_out()
+                        });
                         return;
                     }
                 };
-                let Ok(lease) = shared.admit() else {
-                    // Locked while the prompt was open: abandon the attempt,
-                    // so a later sign-in is not refused as still running.
-                    shared.set_status(AccountStatus::signed_out());
-                    return;
+                let lease = match shared.admit() {
+                    Ok(lease) if lease.generation == started => lease,
+                    _ => {
+                        // Locked while the prompt was open (and perhaps
+                        // unlocked since): abandon the attempt, so a later
+                        // sign-in prompts again instead of reusing this one.
+                        shared.set_status(AccountStatus::signed_out());
+                        return;
+                    }
                 };
                 shared.client_ran.store(true, Ordering::SeqCst);
                 let result = lease.stores().block_on(async {

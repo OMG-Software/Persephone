@@ -29,9 +29,11 @@
   let loading = $state(false);
   let error = $state<string | null>(null);
   let switching = $state(false);
-  // Only the newest room-list request may replace the list: an older reply
-  // that finishes last must not bring back a stale list.
+  // A room-list reply replaces the list only if it is newer than the one
+  // shown: an older reply that finishes last cannot bring back a stale list,
+  // and a failed newer request leaves the newest successful one in place.
   let roomsRequest = 0;
+  let roomsShown = 0;
   let signingIn = $state(false);
   // Advanced on every session change. Replies to calls made before the change
   // are discarded, so nothing from a locked session is shown again.
@@ -104,7 +106,10 @@
     const request = ++roomsRequest;
     try {
       const list = await roomList();
-      if (generation === sessionGeneration && request === roomsRequest) rooms = list;
+      if (generation === sessionGeneration && request > roomsShown) {
+        rooms = list;
+        roomsShown = request;
+      }
     } catch (reason) {
       if (generation === sessionGeneration) error = describe(reason);
     }
@@ -114,6 +119,8 @@
   // the cleared selection and discard their results.
   function reset() {
     sessionGeneration += 1;
+    // Nothing from the old session stays in the header while the new status loads.
+    status = null;
     selected = null;
     rooms = null;
     items = [];
@@ -135,7 +142,10 @@
     const request = ++roomsRequest;
     try {
       const list = await roomList();
-      if (generation === sessionGeneration && request === roomsRequest) rooms = list;
+      if (generation === sessionGeneration && request > roomsShown) {
+        rooms = list;
+        roomsShown = request;
+      }
     } catch {
       // The next change or session event tries again.
     }

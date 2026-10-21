@@ -602,3 +602,45 @@ fn given_a_lock_while_the_prompt_is_open_then_the_attempt_is_abandoned_cleanly()
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
 }
+
+/// A lock and unlock while the prompt is open still abandon that attempt:
+/// credentials typed into a prompt opened before the lock are never used.
+#[test]
+fn given_a_lock_and_unlock_while_the_prompt_is_open_then_the_old_attempt_never_signs_in() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let held = Arc::new(Held {
+        released: std::sync::Mutex::new(false),
+        wake: std::sync::Condvar::new(),
+        asked: AtomicUsize::new(0),
+    });
+    let core = make_core(dir.path(), held.clone());
+    assert_eq!(sign_in(&core, &server.uri()).state, AccountState::SigningIn);
+    wait_for("the prompt", || held.asked.load(Ordering::SeqCst) == 1);
+
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::Locked);
+    let state: StoreState = value(call(&core, Call::UnlockSession {}));
+    assert_eq!(
+        state,
+        StoreState::Protected,
+        "unlocked before the prompt returns"
+    );
+    *held.released.lock().unwrap() = true;
+    held.wake.notify_all();
+    wait_for("the attempt to end", || {
+        core.session().account_status().state == AccountState::SignedOut
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        server.requests_to("/_matrix/client/v3/login"),
+        0,
+        "old attempt never logs in"
+    );
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedOut
+    );
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::Locked, "no client ever ran");
+}
