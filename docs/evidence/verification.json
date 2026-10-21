@@ -932,6 +932,51 @@
       "server_registration_tests_passed": 2,
       "development_controller_tests_passed": 13,
       "total_tests_passed": 175
+    },
+    {
+      "name": "live_updates_walkthrough",
+      "checked_on": "2026-10-21",
+      "data": "synthetic, persephone --demo-live",
+      "first_live_message_seconds_after_opening": 1.0,
+      "live_messages_seen": 3,
+      "duplicates": 0,
+      "unsubscribed_room_live_items": 0,
+      "reload_without_reopening_stale_channel_messages": 0,
+      "stale_channel_check_positive_control": true,
+      "devtools_connection_lost_attempts": 3,
+      "evidence": "live-updates.md"
+    },
+    {
+      "name": "workspace_check_after_live_updates",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 159,
+      "frontend_tests_passed": 12,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 186
+    },
+    {
+      "name": "protected_store_walkthrough",
+      "checked_on": "2026-10-21",
+      "platform": "Windows 11 Pro x64 26200, debug",
+      "vault": "DPAPI current user, application entropy",
+      "first_run": "protected, exit 0",
+      "reopen": "protected, exit 0",
+      "second_instance": "profile_in_use; first instance protected",
+      "key_deleted": "key_missing; profile files unchanged; no new key",
+      "sidecars_after_normal_close": 0,
+      "evidence": "protected-store.md"
+    },
+    {
+      "name": "workspace_check_after_protected_store",
+      "command": "python tools/dev.py check --offline",
+      "exit_code": 0,
+      "rust_tests_passed": 169,
+      "frontend_tests_passed": 12,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 196
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

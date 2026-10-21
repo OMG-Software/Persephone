@@ -33,6 +33,34 @@ pub enum Call {
         #[serde(deserialize_with = "Option::deserialize")]
         cursor: Option<String>,
     },
+    /// Start sending [`Event::RoomChanged`] for this room.
+    Subscribe {
+        room_id: String,
+    },
+    Unsubscribe {
+        room_id: String,
+    },
+}
+
+/// Most rooms the UI may subscribe to at once.
+pub const MAX_SUBSCRIPTIONS: usize = 16;
+
+/// A notification from the core. Events carry no message content: the UI
+/// fetches content through bounded calls. A burst of changes to one room
+/// coalesces into one pending event, so the core's queue is bounded by the
+/// number of subscriptions.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Event {
+    RoomChanged { room_id: String },
+}
+
+/// Every frame from the core to the UI: a reply to a call, or an event.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum CoreMessage {
+    Reply(Reply),
+    Event(Event),
 }
 
 /// Longest room ID either side accepts in a call (Matrix limits IDs to 255 bytes).
@@ -58,6 +86,8 @@ pub enum ErrorCode {
     InvalidArgument,
     /// The named room or cursor does not exist.
     NotFound,
+    /// A limit such as [`MAX_SUBSCRIPTIONS`] would be exceeded.
+    LimitExceeded,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -161,6 +191,45 @@ mod tests {
             receive::<_, Reply>(&mut reader, &budgets),
             Err(ReceiveError::Closed)
         ));
+    }
+
+    #[test]
+    fn given_core_messages_when_sent_then_replies_and_events_are_distinguished() {
+        let mut wire = Vec::new();
+        let reply = CoreMessage::Reply(Reply {
+            id: 3,
+            outcome: Outcome::Error(ErrorCode::LimitExceeded),
+        });
+        let event = CoreMessage::Event(Event::RoomChanged {
+            room_id: "!r:example.invalid".into(),
+        });
+        send(&mut wire, &reply).unwrap();
+        send(&mut wire, &event).unwrap();
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(wire);
+        assert_eq!(
+            receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
+            reply
+        );
+        assert_eq!(
+            receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
+            event
+        );
+        for body in [
+            &br#"{"event":{"room_changed":{"room_id":"!r","body":"x"}}}"#[..],
+            br#"{"event":{"message_added":{"room_id":"!r"}}}"#,
+            br#"{"reply":{"id":1,"outcome":{"ok":null}},"event":null}"#,
+        ] {
+            let mut reader = Cursor::new(frame(FrameKind::Control, body));
+            assert!(
+                matches!(
+                    receive::<_, CoreMessage>(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]

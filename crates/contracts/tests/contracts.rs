@@ -1,5 +1,6 @@
 use persephone_contracts::{
-    AppStatus, RoomList, generated_typescript, sample_room_summary, sample_timeline_page,
+    AppStatus, RoomList, StoreState, generated_typescript, sample_room_summary,
+    sample_timeline_page,
 };
 
 #[test]
@@ -79,14 +80,22 @@ fn app_status_serializes_camel_case_and_rejects_unknown_fields() {
     let status = AppStatus {
         version: "0.0.0".into(),
         milestone: "P1".into(),
+        store: StoreState::KeyMissing,
     };
     assert_eq!(
         serde_json::to_value(&status).unwrap(),
-        serde_json::json!({"version": "0.0.0", "milestone": "P1"})
+        serde_json::json!({"version": "0.0.0", "milestone": "P1", "store": "key_missing"})
     );
-    assert!(
-        serde_json::from_str::<AppStatus>(r#"{"version":"0","milestone":"P1","extra":1}"#).is_err()
-    );
+    for invalid in [
+        r#"{"version":"0","milestone":"P1","store":"protected","extra":1}"#,
+        r#"{"version":"0","milestone":"P1"}"#,
+        r#"{"version":"0","milestone":"P1","store":"plaintext"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<AppStatus>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
 }
 
 #[test]

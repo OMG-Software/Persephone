@@ -2,7 +2,7 @@
 
 ## Repository layout
 
-The repository groups files by their role. The root Cargo workspace and lockfile cover the shared crates and Rust integration/security test programs. The application starts as `persephone` (the core, `crates/core`), which launches the keyless UI `persephone-ui` (`src-tauri/`) and serves its requests (ADR-0004). Run the app with `.local/build/rust/debug/persephone.exe` after a build; `persephone-ui` refuses to start on its own.
+The repository groups files by their role. The root Cargo workspace and lockfile cover the shared crates and Rust integration/security test programs. The application starts as `persephone` (the core, `crates/core`), which launches the keyless UI `persephone-ui` (`src-tauri/`) and serves its requests (ADR-0004). Run the app with `.local/build/rust/debug/persephone.exe` after a build; `persephone-ui` refuses to start on its own. Add `--profile <dir>` to open (or create) an encrypted local profile there; without it nothing is stored. Use a disposable directory under `.local/` for development profiles.
 
 ```text
 Cargo.toml                         # Rust workspace
@@ -86,6 +86,10 @@ The harness in [`tools/servers`](../tools/servers) runs only disposable local Me
 Merovingian must run as a non-root UID with empty effective and bounding capability sets and `no_new_privs`. Synapse alone does not need that setup. The recorded live smoke passed for both servers, but it only establishes those harness scenarios. A hard kill can leave synthetic state; cleanup is not secure erasure. The loopback HTTP profile does not approve HTTP or trust bypasses in the product.
 
 ## Recorded verification
+
+After adding the protected local store, `python tools/dev.py check --offline` passed all 196 tests (169 Rust, 12 frontend, 2 server-registration and 13 development-controller tests). See the [protected store evidence](evidence/protected-store.md).
+
+After adding live room updates, `python tools/dev.py check --offline` passed all 186 tests (159 Rust, 12 frontend, 2 server-registration and 13 development-controller tests). See the [live updates evidence](evidence/live-updates.md); `persephone --demo-live` posts synthetic messages to the planning room.
 
 After adding the bounded room and timeline views, `python tools/dev.py check --offline` passed all 175 tests (152 Rust, 8 frontend, 2 server-registration and 13 development-controller tests). See the [views evidence](evidence/mock-views.md).
 

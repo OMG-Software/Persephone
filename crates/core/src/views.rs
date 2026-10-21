@@ -80,7 +80,7 @@ struct Message {
 }
 
 struct Room {
-    room_id: &'static str,
+    room_id: String,
     raw_name: Option<String>,
     unread: u32,
     messages: Vec<Message>,
@@ -141,37 +141,37 @@ impl Default for Fixtures {
         Self {
             rooms: vec![
                 Room {
-                    room_id: "!planning:example.invalid",
+                    room_id: "!planning:example.invalid".into(),
                     raw_name: Some("Project planning".into()),
                     unread: 3,
                     messages: planning,
                 },
                 Room {
-                    room_id: "!hostile:example.invalid",
+                    room_id: "!hostile:example.invalid".into(),
                     raw_name: Some("<img src=x onerror=alert(1)>".into()),
                     unread: u32::MAX,
                     messages: hostile,
                 },
                 Room {
-                    room_id: "!bidi:example.invalid",
+                    room_id: "!bidi:example.invalid".into(),
                     raw_name: Some("Admin\u{202E}gnp.exe".into()),
                     unread: 0,
                     messages: vec![],
                 },
                 Room {
-                    room_id: "!long:example.invalid",
+                    room_id: "!long:example.invalid".into(),
                     raw_name: Some("L".repeat(500)),
                     unread: 1,
                     messages: large,
                 },
                 Room {
-                    room_id: "!control:example.invalid",
+                    room_id: "!control:example.invalid".into(),
                     raw_name: Some("Line one\nLine two\u{0007}\t  spaced".into()),
                     unread: 0,
                     messages: vec![],
                 },
                 Room {
-                    room_id: "!unnamed:example.invalid",
+                    room_id: "!unnamed:example.invalid".into(),
                     raw_name: None,
                     unread: 0,
                     messages: vec![],
@@ -182,13 +182,42 @@ impl Default for Fixtures {
 }
 
 impl Fixtures {
+    /// Adds `count` empty, unnamed rooms, for tests of room limits.
+    pub fn with_empty_rooms(mut self, count: usize) -> Self {
+        self.rooms.extend((0..count).map(|n| Room {
+            room_id: format!("!empty-{n}:example.invalid"),
+            raw_name: None,
+            unread: 0,
+            messages: vec![],
+        }));
+        self
+    }
+
+    pub fn has_room(&self, room_id: &str) -> bool {
+        self.rooms.iter().any(|room| room.room_id == room_id)
+    }
+
+    /// Appends a synthetic message; returns false for an unknown room.
+    pub fn append_message(&mut self, room_id: &str, sender: &str, body: String) -> bool {
+        let Some(room) = self.rooms.iter_mut().find(|room| room.room_id == room_id) else {
+            return false;
+        };
+        let n = room.messages.len();
+        room.messages.push(Message {
+            event_id: format!("$live-{n}"),
+            sender: sender.into(),
+            body,
+        });
+        true
+    }
+
     pub fn room_list(&self) -> RoomList {
         let rooms = self
             .rooms
             .iter()
             .take(MAX_ROOMS)
             .map(|room| RoomSummary {
-                room_id: room.room_id.into(),
+                room_id: room.room_id.clone(),
                 display_name: room.raw_name.as_deref().map(project_name),
                 unread_count: room.unread,
             })

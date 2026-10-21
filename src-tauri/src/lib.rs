@@ -5,15 +5,25 @@
 //! command is relayed to the key-holding core as one bounded frame; the UI holds
 //! no sessions, keys or stores. The main window can navigate only within the
 //! bundled app and cannot open new windows.
+//!
+//! The page may subscribe to changes in a room. The core sends a content-free
+//! event when a subscribed room changes; the UI forwards it as an empty message
+//! on the page's channel for that room, and the page fetches what it needs.
 
 pub mod core_link;
 
 use core_link::{CoreError, CoreLink};
 use persephone_contracts::{AppStatus, RoomList, TimelinePage};
-use persephone_core_protocol::{Call, ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
+use persephone_core_protocol::{Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use serde::de::DeserializeOwned;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
 use tauri::{
-    Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder, webview::NewWindowResponse,
+    Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder,
+    ipc::Channel,
+    webview::{NewWindowResponse, PageLoadEvent},
 };
 
 /// The label the `main` capability is bound to.
@@ -26,11 +36,13 @@ pub const STARTED_BY_CORE: &str = "--started-by-core";
 const UNAVAILABLE: &str = "core_unavailable";
 const INVALID_ARGUMENT: &str = "invalid_argument";
 const NOT_FOUND: &str = "not_found";
+const LIMIT_EXCEEDED: &str = "limit_exceeded";
 
 fn page_error(error: CoreError) -> String {
     match error {
         CoreError::Core(ErrorCode::InvalidArgument) => INVALID_ARGUMENT,
         CoreError::Core(ErrorCode::NotFound) => NOT_FOUND,
+        CoreError::Core(ErrorCode::LimitExceeded) => LIMIT_EXCEEDED,
         _ => UNAVAILABLE,
     }
     .to_string()
@@ -78,6 +90,97 @@ async fn timeline_page(
     relay(core.inner(), Call::TimelinePage { room_id, cursor }).await
 }
 
+/// The page's channel for each room it subscribed to. The core accepts at
+/// most `MAX_SUBSCRIPTIONS` rooms, and a channel is kept only after the core
+/// accepted the room, so this map is bounded the same way.
+#[derive(Default)]
+pub struct Subscriptions {
+    channels: Mutex<HashMap<String, Channel<()>>>,
+}
+
+impl Subscriptions {
+    fn channels(&self) -> MutexGuard<'_, HashMap<String, Channel<()>>> {
+        self.channels
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Forwards a core event to the page. Called on the core reader thread.
+    pub fn dispatch(&self, event: Event) {
+        match event {
+            Event::RoomChanged { room_id } => {
+                if let Some(channel) = self.channels().get(&room_id) {
+                    // A page that has gone away simply misses the message.
+                    let _ = channel.send(());
+                }
+            }
+        }
+    }
+
+    /// Rooms the page is currently subscribed to (for tests).
+    pub fn rooms(&self) -> Vec<String> {
+        let mut rooms: Vec<String> = self.channels().keys().cloned().collect();
+        rooms.sort();
+        rooms
+    }
+}
+
+/// Subscribes the page to changes in a room. The page should fetch the
+/// newest page after this returns; a change between the core accepting the
+/// subscription and the channel being stored is covered by that fetch.
+#[tauri::command]
+async fn subscribe_room(
+    core: State<'_, CoreLink>,
+    subscriptions: State<'_, Arc<Subscriptions>>,
+    room_id: String,
+    on_change: Channel<()>,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(
+        core.inner(),
+        Call::Subscribe {
+            room_id: room_id.clone(),
+        },
+    )
+    .await?;
+    subscriptions.channels().insert(room_id, on_change);
+    Ok(())
+}
+
+#[tauri::command]
+async fn unsubscribe_room(
+    core: State<'_, CoreLink>,
+    subscriptions: State<'_, Arc<Subscriptions>>,
+    room_id: String,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    subscriptions.channels().remove(&room_id);
+    relay::<()>(core.inner(), Call::Unsubscribe { room_id }).await
+}
+
+/// Drops every subscription when the page (re)loads: the new page holds none
+/// of the old channels, and the core's slots would otherwise stay taken.
+fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
+    let rooms: Vec<String> = subscriptions
+        .channels()
+        .drain()
+        .map(|(room, _)| room)
+        .collect();
+    if rooms.is_empty() {
+        return;
+    }
+    let core = core.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        for room_id in rooms {
+            let _ = core.call(Call::Unsubscribe { room_id });
+        }
+    });
+}
+
 /// True only for the bundled app's own origin. Tauri serves embedded assets
 /// from `http://tauri.localhost` on Windows and `tauri://localhost` elsewhere.
 pub fn is_app_url(url: &Url) -> bool {
@@ -90,14 +193,29 @@ pub fn is_app_url(url: &Url) -> bool {
 
 /// Applies the shell's core link, command handler and window setup to a
 /// builder; used by both the real runtime and the mock runtime in tests.
-pub fn configure<R: Runtime>(builder: tauri::Builder<R>, core: CoreLink) -> tauri::Builder<R> {
+pub fn configure<R: Runtime>(
+    builder: tauri::Builder<R>,
+    core: CoreLink,
+    subscriptions: Arc<Subscriptions>,
+) -> tauri::Builder<R> {
     builder
         .manage(core)
+        .manage(subscriptions)
         .invoke_handler(tauri::generate_handler![
             app_status,
             room_list,
-            timeline_page
+            timeline_page,
+            subscribe_room,
+            unsubscribe_room
         ])
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started {
+                reset_subscriptions(
+                    webview.state::<CoreLink>().inner(),
+                    webview.state::<Arc<Subscriptions>>().inner(),
+                );
+            }
+        })
         .setup(|app| {
             create_main_window(app.handle())?;
             Ok(())
@@ -134,14 +252,19 @@ pub fn run() {
         eprintln!("persephone-ui is started by persephone; run persephone instead");
         std::process::exit(2);
     }
-    let core = match core_link::PipeTransport::from_stdio() {
-        Ok(link) => std::sync::Arc::new(link) as CoreLink,
+    let subscriptions = Arc::new(Subscriptions::default());
+    let sink = {
+        let subscriptions = subscriptions.clone();
+        Box::new(move |event| subscriptions.dispatch(event))
+    };
+    let core = match core_link::PipeTransport::from_stdio(sink) {
+        Ok(link) => Arc::new(link) as CoreLink,
         Err(error) => {
             eprintln!("persephone-ui: no core channel: {error}");
             std::process::exit(2);
         }
     };
-    configure(tauri::Builder::default(), core)
+    configure(tauri::Builder::default(), core, subscriptions)
         .run(context())
         .expect("Persephone UI failed to start");
 }

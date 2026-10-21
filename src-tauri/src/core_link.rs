@@ -4,23 +4,30 @@
 //! takes both ends at startup as non-inheritable handles and points its
 //! standard handles at `NUL`, so nothing printed later and no web view child
 //! process can reach the core channel. Each call is one bounded request frame
-//! and one bounded reply frame.
+//! answered by one bounded reply frame; between replies the core may send
+//! content-free change events. One reader thread routes both.
 
-use persephone_core_protocol::{Call, ErrorCode, Outcome, Reply, Request, receive, send};
+use persephone_core_protocol::{
+    Call, CoreMessage, ErrorCode, Event, Outcome, Request, receive, send,
+};
 use persephone_media_protocol::ResourceBudgets;
 use std::{
+    collections::HashMap,
     fs::File,
-    io,
-    sync::{Arc, Mutex},
+    io::{self, Read, Write},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        mpsc::{SyncSender, sync_channel},
+    },
 };
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CoreError {
-    /// The channel is closed or a previous call broke it.
+    /// The channel is closed or broken.
     Unavailable,
     /// The core answered with an error code.
     Core(ErrorCode),
-    /// The core's reply did not match the request.
+    /// The core's reply did not match the expected contract.
     BadReply,
 }
 
@@ -32,63 +39,111 @@ pub trait CoreTransport: Send + Sync {
 
 pub type CoreLink = Arc<dyn CoreTransport>;
 
-struct PipeState {
-    from_core: File,
-    to_core: File,
-    next_id: u32,
+/// Receives the core's events on the reader thread.
+pub type EventSink = Box<dyn Fn(Event) + Send>;
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Default)]
+struct Waiting {
+    replies: HashMap<u32, SyncSender<Outcome>>,
     broken: bool,
 }
 
-/// One request at a time over the pipe the core created.
+impl Waiting {
+    /// Marks the channel unusable; dropping the senders wakes every caller.
+    fn break_channel(&mut self) {
+        self.broken = true;
+        self.replies.clear();
+    }
+}
+
+struct Writer {
+    to_core: Box<dyn Write + Send>,
+    next_id: u32,
+}
+
+/// Calls from any thread over the pipe the core created. Each caller waits for
+/// the reply with its request ID; any failure, or a reply nobody asked for,
+/// breaks the channel for every caller.
 pub struct PipeTransport {
-    state: Mutex<PipeState>,
-    budgets: ResourceBudgets,
+    writer: Mutex<Writer>,
+    waiting: Arc<Mutex<Waiting>>,
 }
 
 impl PipeTransport {
-    pub fn new(from_core: File, to_core: File) -> Self {
-        Self {
-            state: Mutex::new(PipeState {
-                from_core,
-                to_core,
+    /// Starts the reader thread on `from_core`.
+    pub fn start(
+        mut from_core: impl Read + Send + 'static,
+        to_core: impl Write + Send + 'static,
+        on_event: EventSink,
+    ) -> io::Result<Self> {
+        let waiting = Arc::new(Mutex::new(Waiting::default()));
+        let reader_waiting = waiting.clone();
+        std::thread::Builder::new()
+            .name("core-reader".into())
+            .spawn(move || {
+                let budgets = ResourceBudgets::default();
+                loop {
+                    match receive::<_, CoreMessage>(&mut from_core, &budgets) {
+                        Ok(CoreMessage::Reply(reply)) => {
+                            let Some(caller) = lock(&reader_waiting).replies.remove(&reply.id)
+                            else {
+                                break;
+                            };
+                            let _ = caller.send(reply.outcome);
+                        }
+                        Ok(CoreMessage::Event(event)) => on_event(event),
+                        Err(_) => break,
+                    }
+                }
+                lock(&reader_waiting).break_channel();
+            })?;
+        Ok(Self {
+            writer: Mutex::new(Writer {
+                to_core: Box::new(to_core),
                 next_id: 1,
-                broken: false,
             }),
-            budgets: ResourceBudgets::default(),
-        }
+            waiting,
+        })
     }
 
     /// Takes the core channel from this process's stdin and stdout.
-    pub fn from_stdio() -> io::Result<Self> {
+    pub fn from_stdio(on_event: EventSink) -> io::Result<Self> {
         let (from_core, to_core) = take_stdio()?;
-        Ok(Self::new(from_core, to_core))
+        Self::start(from_core, to_core, on_event)
     }
 }
 
 impl CoreTransport for PipeTransport {
     fn call(&self, call: Call) -> Result<serde_json::Value, CoreError> {
-        let mut state = self.state.lock().map_err(|_| CoreError::Unavailable)?;
-        if state.broken {
-            return Err(CoreError::Unavailable);
+        let (reply_to, reply) = sync_channel(1);
+        {
+            let mut writer = lock(&self.writer);
+            let id = writer.next_id;
+            writer.next_id = writer.next_id.wrapping_add(1);
+            {
+                let mut waiting = lock(&self.waiting);
+                if waiting.broken || waiting.replies.contains_key(&id) {
+                    return Err(CoreError::Unavailable);
+                }
+                waiting.replies.insert(id, reply_to);
+            }
+            // A failed write leaves the stream position unknown, so the
+            // channel is not reused.
+            if send(&mut writer.to_core, &Request { id, call }).is_err() {
+                lock(&self.waiting).break_channel();
+                return Err(CoreError::Unavailable);
+            }
         }
-        let id = state.next_id;
-        state.next_id = state.next_id.wrapping_add(1);
-        // Any failure leaves the stream position unknown, so the channel is
-        // not reused.
-        let reply = send(&mut state.to_core, &Request { id, call })
-            .ok()
-            .and_then(|()| receive::<_, Reply>(&mut state.from_core, &self.budgets).ok());
-        let Some(reply) = reply else {
-            state.broken = true;
-            return Err(CoreError::Unavailable);
-        };
-        if reply.id != id {
-            state.broken = true;
-            return Err(CoreError::BadReply);
-        }
-        match reply.outcome {
-            Outcome::Ok(value) => Ok(value),
-            Outcome::Error(code) => Err(CoreError::Core(code)),
+        match reply.recv() {
+            Ok(Outcome::Ok(value)) => Ok(value),
+            Ok(Outcome::Error(code)) => Err(CoreError::Core(code)),
+            Err(_) => Err(CoreError::Unavailable),
         }
     }
 }
@@ -177,4 +232,93 @@ fn take_stdio() -> io::Result<(File, File)> {
     Err(io::Error::other(
         "the core channel is implemented for Windows only",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use persephone_core_protocol::Reply;
+    use std::sync::mpsc::channel;
+
+    fn reply(to_ui: &mut impl Write, id: u32, outcome: Outcome) {
+        send(to_ui, &CoreMessage::Reply(Reply { id, outcome })).unwrap();
+    }
+
+    /// A scripted core answers two requests in reverse order with an event
+    /// between them, so routing by ID is exercised, then sends a reply nobody
+    /// asked for, which breaks the channel.
+    #[test]
+    fn given_replies_out_of_order_and_events_between_then_each_caller_gets_its_own() {
+        let (mut from_ui, to_core) = io::pipe().unwrap();
+        let (from_core, mut to_ui) = io::pipe().unwrap();
+        let (events_to, events) = channel();
+        let link = Arc::new(
+            PipeTransport::start(
+                from_core,
+                to_core,
+                Box::new(move |event| events_to.send(event).unwrap()),
+            )
+            .unwrap(),
+        );
+        let status = {
+            let link = link.clone();
+            std::thread::spawn(move || link.call(Call::AppStatus {}))
+        };
+        let budgets = ResourceBudgets::default();
+        let first: Request = receive(&mut from_ui, &budgets).unwrap();
+        let page = {
+            let link = link.clone();
+            std::thread::spawn(move || {
+                link.call(Call::TimelinePage {
+                    room_id: "!r:example.invalid".into(),
+                    cursor: None,
+                })
+            })
+        };
+        let second: Request = receive(&mut from_ui, &budgets).unwrap();
+        assert_eq!(first.call, Call::AppStatus {});
+
+        let room_id = "!r:example.invalid".to_string();
+        send(
+            &mut to_ui,
+            &CoreMessage::Event(Event::RoomChanged {
+                room_id: room_id.clone(),
+            }),
+        )
+        .unwrap();
+        reply(&mut to_ui, second.id, Outcome::Error(ErrorCode::NotFound));
+        reply(
+            &mut to_ui,
+            first.id,
+            Outcome::Ok(serde_json::json!("status")),
+        );
+
+        assert_eq!(
+            page.join().unwrap(),
+            Err(CoreError::Core(ErrorCode::NotFound))
+        );
+        assert_eq!(status.join().unwrap(), Ok(serde_json::json!("status")));
+        assert_eq!(events.recv().unwrap(), Event::RoomChanged { room_id });
+
+        reply(&mut to_ui, 999, Outcome::Ok(serde_json::Value::Null));
+        while !lock(&link.waiting).broken {
+            std::thread::yield_now();
+        }
+        assert_eq!(link.call(Call::AppStatus {}), Err(CoreError::Unavailable));
+    }
+
+    #[test]
+    fn given_the_core_closes_then_waiting_and_later_calls_are_unavailable() {
+        let (mut from_ui, to_core) = io::pipe().unwrap();
+        let (from_core, to_ui) = io::pipe().unwrap();
+        let link = Arc::new(PipeTransport::start(from_core, to_core, Box::new(|_| {})).unwrap());
+        let waiting = {
+            let link = link.clone();
+            std::thread::spawn(move || link.call(Call::AppStatus {}))
+        };
+        let _: Request = receive(&mut from_ui, &ResourceBudgets::default()).unwrap();
+        drop(to_ui);
+        assert_eq!(waiting.join().unwrap(), Err(CoreError::Unavailable));
+        assert_eq!(link.call(Call::AppStatus {}), Err(CoreError::Unavailable));
+    }
 }

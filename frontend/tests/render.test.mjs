@@ -9,7 +9,7 @@ let render;
 before(async () => {
   vite = await createServer({
     configFile: './vite.config.js',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
     appType: 'custom'
   });
   ({ default: Message } = await vite.ssrLoadModule('/src/Message.svelte'));

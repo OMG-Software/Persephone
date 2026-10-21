@@ -1,3 +1,5 @@
+export type StoreState = "not_configured" | "protected" | "key_missing" | "key_unreadable" | "key_rejected" | "profile_in_use" | "store_unavailable" | "unsupported";
+
 export type AppStatus = { 
 /**
  * The application version, from the desktop crate's manifest.
@@ -6,7 +8,7 @@ version: string,
 /**
  * The current development milestone, e.g. "P1".
  */
-milestone: string, };
+milestone: string, store: StoreState, };
 
 export type RoomSummary = { roomId: string, displayName: string | null, 
 /**

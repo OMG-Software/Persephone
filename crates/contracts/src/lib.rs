@@ -42,8 +42,31 @@ pub struct RoomList {
     pub truncated: bool,
 }
 
-/// Reply of the `app_status` command, the shell's only command. It carries no
-/// system, account or user data.
+/// State of the local encrypted store. Codes only: no paths, key material or
+/// error text reach the UI.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreState {
+    /// No profile was given; nothing is stored.
+    NotConfigured,
+    /// The store is open with its key from the OS vault.
+    Protected,
+    /// A store exists but its key does not; the store was left untouched.
+    KeyMissing,
+    /// The key exists but the OS vault could not unwrap it.
+    KeyUnreadable,
+    /// The store refused the key.
+    KeyRejected,
+    /// Another process holds the profile.
+    ProfileInUse,
+    /// The store could not be opened for another reason.
+    StoreUnavailable,
+    /// This platform has no supported vault yet.
+    Unsupported,
+}
+
+/// Reply of the `app_status` command. It carries no system, account or user
+/// data.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppStatus {
@@ -51,6 +74,7 @@ pub struct AppStatus {
     pub version: String,
     /// The current development milestone, e.g. "P1".
     pub milestone: String,
+    pub store: StoreState,
 }
 
 pub fn sample_room_summary() -> RoomSummary {
@@ -79,6 +103,7 @@ pub fn sample_timeline_page() -> TimelinePage {
 pub fn generated_typescript() -> String {
     let config = Config::default();
     let mut output = [
+        format!("export {}", StoreState::decl(&config)),
         format!("export {}", AppStatus::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
         format!("export {}", RoomList::decl(&config)),

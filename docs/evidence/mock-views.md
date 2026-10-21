@@ -75,6 +75,5 @@ debugging channel, not the application.
 ## Limits
 
 Synthetic data only. Keyboard activation, screen readers, scaling and IME are
-not verified here (P6). Release builds and Linux/macOS are not covered. Core
-events (new messages arriving) are not implemented; views are fetched on
-demand.
+not verified here (P6). Release builds and Linux/macOS are not covered. New
+messages arriving are covered by [live updates](live-updates.md).

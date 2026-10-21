@@ -10,7 +10,7 @@ let render;
 before(async () => {
   vite = await createServer({
     configFile: './vite.config.js',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, hmr: false },
     appType: 'custom'
   });
   ({ default: RoomList } = await vite.ssrLoadModule('/src/RoomList.svelte'));
@@ -68,7 +68,7 @@ test('timeline bodies keep their text, are direction-isolated and never parsed a
   assert.match(html, /&lt;script>alert\(2\)&lt;\/script>/);
   assert.equal((html.match(/<p dir="auto">/g) ?? []).length, 2);
   assert.match(html, /‮gnp\.exe/, 'bidi text is kept, isolated by dir=auto');
-  assert.match(html, /Some messages could not be loaded/);
+  assert.match(html, /Some messages are not shown here/);
   assert.match(html, /Load older messages/);
   assert.match(html, /<h2 id="timeline-heading"><bdi>&lt;img/);
 });

@@ -1,9 +1,9 @@
 //! IPC permission tests against the shell's real configuration and compiled
 //! capabilities, using Tauri's mock runtime (no window or web view).
 
-use persephone_core_protocol::{Call, ErrorCode};
+use persephone_core_protocol::{Call, ErrorCode, Event};
 use persephone_desktop::{
-    MAIN_WINDOW, configure, context,
+    MAIN_WINDOW, Subscriptions, configure, context,
     core_link::{CoreError, CoreLink, CoreTransport},
     create_main_window,
 };
@@ -40,11 +40,19 @@ impl CoreTransport for FakeCore {
             return Err(CoreError::Unavailable);
         }
         match call {
-            Call::AppStatus {} => Ok(serde_json::json!({"version": "9.9.9", "milestone": "P1"})),
+            Call::AppStatus {} => Ok(
+                serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing"}),
+            ),
             Call::RoomList {} => Ok(serde_json::json!({
                 "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2}],
                 "truncated": false
             })),
+            Call::Subscribe { room_id } => match room_id.as_str() {
+                "!r:example.invalid" | "!s:example.invalid" => Ok(serde_json::Value::Null),
+                "!full:example.invalid" => Err(CoreError::Core(ErrorCode::LimitExceeded)),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
+            Call::Unsubscribe { .. } => Ok(serde_json::Value::Null),
             Call::TimelinePage { room_id, cursor } => match (room_id.as_str(), cursor.as_deref()) {
                 ("!r:example.invalid", None) => Ok(serde_json::json!({
                     "roomId": room_id,
@@ -63,7 +71,7 @@ impl CoreTransport for FakeCore {
 }
 
 fn app_with(core: CoreLink) -> tauri::App<MockRuntime> {
-    configure(mock_builder(), core)
+    configure(mock_builder(), core, Arc::default())
         .build(context())
         .expect("shell builds on the mock runtime")
 }
@@ -110,7 +118,7 @@ fn given_allowed_command_from_app_origin_then_typed_status_is_returned() {
     // The reply is the core's answer, relayed and shape-checked by the UI.
     assert_eq!(
         reply,
-        serde_json::json!({"version": "9.9.9", "milestone": "P1"})
+        serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing"})
     );
 }
 
@@ -245,7 +253,13 @@ fn given_shell_config_then_security_settings_are_restrictive() {
     assert_eq!(capability["windows"], serde_json::json!([MAIN_WINDOW]));
     assert_eq!(
         capability["permissions"],
-        serde_json::json!(["allow-app-status", "allow-room-list", "allow-timeline-page"])
+        serde_json::json!([
+            "allow-app-status",
+            "allow-room-list",
+            "allow-timeline-page",
+            "allow-subscribe-room",
+            "allow-unsubscribe-room"
+        ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
 }
@@ -302,4 +316,104 @@ fn given_oversized_arguments_then_the_ui_refuses_without_calling_the_core() {
         assert_eq!(reply.unwrap_err(), serde_json::json!("invalid_argument"));
     }
     assert_eq!(core.calls.load(Ordering::SeqCst), 0);
+}
+
+/// Subscribing stores the page's channel only once the core accepts the room;
+/// core events reach exactly that channel, as an empty message; unsubscribing
+/// stops them.
+#[test]
+fn given_subscriptions_then_core_events_reach_only_the_subscribed_rooms_channel() {
+    use std::sync::Mutex;
+    let delivered: Arc<Mutex<Vec<(u32, String)>>> = Arc::default();
+    let record = delivered.clone();
+    let subscriptions = Arc::new(Subscriptions::default());
+    let core = FakeCore::new(true);
+    let app = configure(
+        mock_builder().channel_interceptor(move |_, callback, _, body| {
+            let body = match body {
+                tauri::ipc::InvokeResponseBody::Json(json) => json.clone(),
+                tauri::ipc::InvokeResponseBody::Raw(_) => "raw".into(),
+            };
+            record.lock().unwrap().push((callback.0, body));
+            true
+        }),
+        core.clone(),
+        subscriptions.clone(),
+    )
+    .build(context())
+    .unwrap();
+    let window = create_main_window(&app).unwrap();
+    let subscribe = |room: &str, channel: u32| {
+        get_ipc_response(
+            &window,
+            request(
+                "subscribe_room",
+                app_origin(),
+                serde_json::json!({"roomId": room, "onChange": format!("__CHANNEL__:{channel}")}),
+            ),
+        )
+        .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    assert_eq!(
+        subscribe("!r:example.invalid", 7),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        subscribe("!s:example.invalid", 8),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        subscribe("!missing:example.invalid", 9).unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        subscribe("!full:example.invalid", 10).unwrap_err(),
+        "limit_exceeded"
+    );
+    assert_eq!(
+        subscribe(&format!("!{}", "r".repeat(300)), 11).unwrap_err(),
+        "invalid_argument"
+    );
+    // A channel value that is not a page channel is refused by Tauri.
+    assert!(
+        get_ipc_response(
+            &window,
+            request(
+                "subscribe_room",
+                app_origin(),
+                serde_json::json!({"roomId": "!r:example.invalid", "onChange": "javascript:alert(1)"}),
+            ),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        subscriptions.rooms(),
+        ["!r:example.invalid", "!s:example.invalid"]
+    );
+
+    let changed = |room: &str| Event::RoomChanged {
+        room_id: room.into(),
+    };
+    subscriptions.dispatch(changed("!r:example.invalid"));
+    subscriptions.dispatch(changed("!missing:example.invalid"));
+    subscriptions.dispatch(changed("!s:example.invalid"));
+    subscriptions.dispatch(changed("!r:example.invalid"));
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [(7, "null".into()), (8, "null".into()), (7, "null".into())]
+    );
+
+    let reply = get_ipc_response(
+        &window,
+        request(
+            "unsubscribe_room",
+            app_origin(),
+            serde_json::json!({"roomId": "!r:example.invalid"}),
+        ),
+    );
+    assert!(reply.is_ok());
+    assert_eq!(subscriptions.rooms(), ["!s:example.invalid"]);
+    delivered.lock().unwrap().clear();
+    subscriptions.dispatch(changed("!r:example.invalid"));
+    assert!(delivered.lock().unwrap().is_empty());
 }

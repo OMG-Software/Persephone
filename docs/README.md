@@ -29,6 +29,8 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 
 - [Capability-selected sync and classic fallback](evidence/capability-fallback.md): real classic-only Synapse, controlled capability origins for both servers, and failure controls with independent request counters.
 - [Bounded room and timeline views](evidence/mock-views.md): synthetic data through the core; hostile names and bodies, byte-bounded paging, real-app walkthrough.
+- [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.
+- [Live room updates](evidence/live-updates.md): content-free, coalescing core events for subscribed rooms; reply routing; real-app walkthrough including page reloads.
 - [Web view to host IPC size](evidence/ipc-transport.md): measured 9× host allocation for page payloads up to 256 MiB; decision pending.
 - [Tauri shell and IPC permissions](evidence/tauri-shell.md): one allowlisted command, strict CSP, navigation and window policy; mock-runtime and real web view checks.
 - [Contained media worker](evidence/media-worker.md): self-checking worker under AppContainer, Job and mitigations; memory and deadline results.
