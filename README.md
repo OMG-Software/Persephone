@@ -1,6 +1,6 @@
 # Persephone
 
-Persephone is a planned Rust desktop Matrix client for Windows, Linux, and macOS, with Merovingian as a primary integration target. Its first release is intended to support one account, rooms, message history, text and image messaging, and end-to-end encrypted chats for high-risk users.
+Persephone is a planned Rust desktop Matrix client for Windows, Linux, and macOS, with Merovingian as a primary integration target. Its first release is intended to support one account, rooms, message history, text and image messaging, and end-to-end encrypted chats. It's made for everyone, but engineered to withstand a targeted attack, not just everyday threats.
 
 Project page: <https://omg-software.github.io/Persephone/> (source in [`site/`](site)).
 
