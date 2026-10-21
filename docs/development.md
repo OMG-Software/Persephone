@@ -79,6 +79,10 @@ $env:AR_x86_64_pc_windows_msvc = (Get-Command llvm-lib.exe).Source
 
 This is a local toolchain workaround. Do not add a machine-specific LLVM path to repository configuration.
 
+### Continuous integration
+
+[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` on a GitHub-hosted Windows runner for every pull request, every push to `main` and on demand. It pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target), Node.js 24.15.0 and Python 3.14, and caches only downloaded Cargo and npm sources. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit. Linux and macOS jobs are not set up yet.
+
 ## Disposable homeservers
 
 The harness in [`tools/servers`](../tools/servers) runs only disposable local Merovingian and Synapse instances. Use Linux/WSL and Python 3.12. The current path-bound prerequisites are `.local/servers/merovingian` and `.local/servers/synapse`; fresh synthetic profiles and logs belong under `.local/runs`. The harness rejects production configuration, databases, accounts, and URLs.
