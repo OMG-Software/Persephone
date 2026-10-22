@@ -100,11 +100,11 @@ cargo build --locked -p persephone-core --features dev-disposable-servers --bin 
 
 Run `.local/build/rust/debug/persephone.exe --profile <new directory under .local>` and enter the server's `base_url` from the harness profile in the page. Windows then asks for the username and password (`username` and `password` in the profile). To skip the prompt for automated runs, set `PERSEPHONE_DEV_PROFILE` to the harness `profile.json`; the core then prints `DEVELOPMENT BUILD` and answers the prompt from that file for the matching host. Never ship or distribute a build with this feature. See the [sign-in evidence](evidence/matrix-sign-in.md).
 
-"Sign out" in the header revokes the session on the homeserver and deletes the profile's key; the next start deletes the store files. Restart Persephone to sign in again. See the [sign-out evidence](evidence/sign-out.md).
+"Sign out" in the header attempts to revoke the session on the homeserver and deletes the profile's key; the next start deletes the store files. Restart Persephone to sign in again. See the [sign-out evidence](evidence/sign-out.md).
 
 ## Recorded verification
 
-After the sign-out review fixes, `python tools/dev.py check --offline` passed all 255 tests (224 Rust, 16 frontend, 2 server-registration and 13 development-controller tests); the first version passed 254 (223 Rust, 16 frontend, 2 server-registration and 13 development-controller tests). See the [sign-out evidence](evidence/sign-out.md).
+After the second round of sign-out review fixes, `python tools/dev.py check --offline` passed all 258 tests (227 Rust, 16 frontend, 2 server-registration and 13 development-controller tests); the first round passed 255 (224 Rust, 16 frontend, 2 server-registration and 13 development-controller tests); the first version passed 254 (223 Rust, 16 frontend, 2 server-registration and 13 development-controller tests). See the [sign-out evidence](evidence/sign-out.md).
 
 After the sign-in review fixes (commit `a1a1b83`, clean tree), `python tools/dev.py check --offline` passed all 249 tests (218 Rust, 16 frontend, 2 server-registration and 13 development-controller tests); the core's unit tests now also run with the development feature.
 

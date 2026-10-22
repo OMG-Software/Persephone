@@ -218,7 +218,7 @@ fn given_open_stores_dropped_without_close_then_they_shut_down_and_keep_their_da
 fn given_a_signed_out_profile_then_opening_wipes_it_and_starts_fresh() {
     let protector = Tagged(1);
     let dir = seeded(&protector);
-    store::mark_signed_out(dir.path()).unwrap();
+    store::mark_signed_out(dir.path(), true).unwrap();
     assert!(
         !dir.path().join(KEY_FILE).exists(),
         "key deleted at sign-out"
@@ -230,11 +230,14 @@ fn given_a_signed_out_profile_then_opening_wipes_it_and_starts_fresh() {
         "wipe finished"
     );
     assert!(dir.path().join(KEY_FILE).exists(), "a new key");
+    let stores = store::open(dir.path(), &protector).unwrap();
+    assert!(!stores.unconfirmed_sign_out(), "nothing wiped this time");
+    assert!(stores.close());
 
     // A wipe that stopped after the files went but before the marker did
     // completes on the next open.
     let again = seeded(&protector);
-    store::mark_signed_out(again.path()).unwrap();
+    store::mark_signed_out(again.path(), true).unwrap();
     fs::remove_dir_all(again.path().join(STORE_DIR)).unwrap();
     assert_eq!(read_marker(again.path(), &protector), None);
     assert!(!again.path().join(store::SIGNED_OUT_FILE).exists());
@@ -250,7 +253,7 @@ fn given_the_sign_out_marker_cannot_be_written_then_the_key_still_goes_and_the_p
     let dir = seeded(&protector);
     fs::create_dir(dir.path().join(store::SIGNED_OUT_FILE)).unwrap();
     assert!(
-        store::mark_signed_out(dir.path()).is_err(),
+        store::mark_signed_out(dir.path(), true).is_err(),
         "failure reported"
     );
     assert!(!dir.path().join(KEY_FILE).exists(), "key deleted anyway");
@@ -310,5 +313,44 @@ mod dpapi {
         let middle = tampered.len() / 2;
         tampered[middle] ^= 1;
         assert_eq!(protector.unprotect(&tampered), Err(VaultError::Failed));
+    }
+}
+
+/// GIVEN a sign-out that stopped after recording its intent (the homeserver
+/// request never finished, the key is still there) WHEN the profile opens
+/// THEN it is wiped rather than restored, and the open says the revocation
+/// was not confirmed; a failed revocation says the same, and a confirmed one
+/// does not.
+#[test]
+fn given_an_interrupted_or_unrevoked_sign_out_then_opening_wipes_and_reports_it() {
+    let protector = Tagged(1);
+    let interrupted = seeded(&protector);
+    store::begin_sign_out(interrupted.path()).unwrap();
+    assert!(
+        interrupted.path().join(KEY_FILE).exists(),
+        "key not yet deleted"
+    );
+    let stores = store::open(interrupted.path(), &protector).unwrap();
+    assert!(stores.unconfirmed_sign_out());
+    assert_eq!(
+        stores
+            .block_on(stores.crypto().get_custom_value(MARKER_KEY))
+            .unwrap(),
+        None,
+        "old data gone although its key was still there"
+    );
+    assert!(stores.close());
+
+    for (revoked, unconfirmed) in [(false, true), (true, false)] {
+        let dir = seeded(&protector);
+        store::begin_sign_out(dir.path()).unwrap();
+        store::mark_signed_out(dir.path(), revoked).unwrap();
+        let stores = store::open(dir.path(), &protector).unwrap();
+        assert_eq!(
+            stores.unconfirmed_sign_out(),
+            unconfirmed,
+            "revoked: {revoked}"
+        );
+        assert!(stores.close());
     }
 }

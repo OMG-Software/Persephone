@@ -13,12 +13,16 @@ Owner decisions (21 October 2026): sign-out deletes this device's local profile,
 and a failed revocation still signs out locally, with a warning.
 
 * **Order** ([`session.rs`](../../crates/core/src/session.rs) `sign_out`):
-  1. Revoke the session on the homeserver (`POST /logout`) under a lease. The
-     result is kept; a failure does not stop the sign-out. If all leases are
-     in use, sign-out waits for one for up to 15 s; after that nothing has
-     changed and the call fails with `limit_exceeded`, which the page reports.
-  2. Write the `signed-out` marker durably, then delete `store-key.v1`. From
-     here the encrypted stores cannot be read again, even if the process stops.
+  1. Under a lease, write the `signed-out` marker durably as an intent
+     (`revoking`), then ask the homeserver to revoke the session
+     (`POST /logout`). From here an ended process cannot restore the account:
+     the next start wipes the profile. The result is kept; a failure does not
+     stop the sign-out. If all leases are in use, sign-out waits for one for
+     up to 15 s; after that nothing has changed and the call fails with
+     `limit_exceeded`, which the page reports.
+  2. Record the result in the marker (`revoked` or `not-revoked`), then delete
+     `store-key.v1`. From here the encrypted stores cannot be read again, even
+     if the process stops.
   3. Lock as usual: close admission, join the sync loop, drop the client inside
      the runtime and close the stores. The state ends `restart_required`,
      because an SDK client ran.
@@ -34,26 +38,36 @@ and a failed revocation still signs out locally, with a warning.
   written, the key is still deleted: a store without its key opens as
   `key_missing`, never as a new or signed-in profile.
 * **Reporting**: the account becomes `signed_out`. `session_not_revoked` means
-  the homeserver was not told; `failed` means the local deletion did not
-  finish. The page shows each case in fixed text and never reports revocation
-  when the request failed.
+  the homeserver may not have been told; `failed` means the local deletion did
+  not finish. A start that wipes a profile whose marker does not record a
+  confirmed revocation (an interrupted sign-out, a failed request, or an
+  unreadable marker) also reports `session_not_revoked`, on the sign-in page.
+  The page shows each case in fixed text and never reports revocation when the
+  request failed or its outcome is unknown.
 * **UI**: the header's "Sign out" button asks once more ("Sign out and delete
   this device's keys and local data? …") before the call. The command takes no
   arguments; the IPC schema refuses extra fields such as `keep_data`.
 
 ## Tests
 
-New, all passing (the full check passed 255 tests after the review fixes; see the [ledger](verification.json)):
+New, all passing (the full check passed 258 tests after the review fixes; see the [ledger](verification.json)):
 
 * Store: a signed-out profile is wiped on open and starts fresh, including a
   wipe that stopped before the marker went; a marker that cannot be written
-  still deletes the key, and the profile stays closed.
+  still deletes the key, and the profile stays closed; an interrupted sign-out
+  (intent only, key still present) is wiped rather than opened, and the open
+  reports an unconfirmed revocation, as it does for a failed one but not for a
+  confirmed one.
 * Account (mock homeserver, development feature): sign-out revokes the session,
   deletes the key, leaves the store files and ends `restart_required`, and the
   next start wipes them and opens a fresh profile; a logout that fails with 500
   still signs out and reports `session_not_revoked`; with every lease in use,
   sign-out reports that it did not start, and completes once a lease frees;
-  without an account, sign-out changes nothing.
+  with a slow logout, the intent is on disk (and the key still present) while
+  the request is in flight, which fails if the intent is written after the
+  request; a sign-out interrupted after its intent is not restored on the next
+  start, asks for nothing and reports `session_not_revoked`; without an
+  account, sign-out changes nothing.
 * IPC: the `sign_out` command is allowlisted and relayed, and its capability
   is listed. Protocol: `sign_out` with an extra field is refused.
 
@@ -94,7 +108,10 @@ start:
 | After restart | marker gone, new key and store, sign-in form, `Local store protected` | same |
 | Exit codes | 0 and 0 | 0 and 0 |
 
-Each server passed on the first attempt.
+Each server passed on the first attempt. A later review fix records the
+intent before the logout request and reports an unconfirmed revocation after an
+interrupted sign-out; the account and store tests cover it, and it was not run
+live.
 
 ## Limits
 

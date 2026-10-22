@@ -202,6 +202,22 @@ impl Homeserver {
         );
     }
 
+    /// Makes logout answer only after `delay`, so a test can look at the
+    /// profile while the request is in flight.
+    fn slow_logout(&self, delay: Duration) {
+        self.runtime.block_on(
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/logout"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({}))
+                        .set_delay(delay),
+                )
+                .with_priority(1)
+                .mount(&self.server),
+        );
+    }
+
     fn uri(&self) -> String {
         self.server.uri()
     }
@@ -796,5 +812,72 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
         );
     });
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
+    assert!(!dir.path().join("store-key.v1").exists());
+}
+
+/// GIVEN a signed-in profile whose sign-out stopped after recording its
+/// intent (as if the process ended during the logout request) WHEN
+/// Persephone starts again THEN the account is not restored: the profile is
+/// wiped, nothing asks for credentials, and the page is told the homeserver
+/// may still hold the session.
+#[test]
+fn given_a_sign_out_interrupted_during_logout_then_the_next_start_wipes_and_warns() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    {
+        let core = signed_in_core(&server, dir.path());
+        persephone_core::store::begin_sign_out(dir.path()).unwrap();
+        let state: StoreState = value(call(&core, Call::LockSession {}));
+        assert_eq!(state, StoreState::RestartRequired);
+    }
+    let never = Fixed::new(Err(PromptError::Failed));
+    let core = make_core(dir.path(), never.clone());
+    assert_eq!(
+        core.session().state(),
+        StoreState::Protected,
+        "fresh profile"
+    );
+    let status = core.session().account_status();
+    assert_eq!(
+        (status.state, status.error),
+        (
+            AccountState::SignedOut,
+            Some(SignInError::SessionNotRevoked)
+        )
+    );
+    assert_eq!(never.asked.load(Ordering::SeqCst), 0);
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(
+        state,
+        StoreState::Locked,
+        "no account restored, no client ran"
+    );
+}
+
+/// GIVEN a homeserver that is slow to answer logout WHEN signing out THEN the
+/// sign-out intent is on disk while the request is still in flight (with the
+/// key not yet deleted), so ending the process then cannot restore the account.
+#[test]
+fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_ends() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    server.slow_logout(Duration::from_secs(2));
+    std::thread::scope(|scope| {
+        let signing_out = scope.spawn(|| core.session().sign_out(Duration::from_secs(10), || {}));
+        wait_for("the logout request", || {
+            server.requests_to("/_matrix/client/v3/logout") == 1
+        });
+        assert!(
+            dir.path().join("signed-out").exists(),
+            "intent recorded before the answer"
+        );
+        assert!(
+            dir.path().join("store-key.v1").exists(),
+            "key deleted only after the answer"
+        );
+        assert_eq!(signing_out.join().unwrap(), Ok(StoreState::RestartRequired));
+    });
     assert!(!dir.path().join("store-key.v1").exists());
 }

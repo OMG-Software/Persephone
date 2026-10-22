@@ -21,7 +21,8 @@
     homeserver_refused: 'Persephone does not accept that homeserver address.',
     unsupported: 'Signing in is not available on this system yet.',
     sync_failed: 'Signed in, but syncing with the homeserver failed.',
-    session_not_revoked: 'Signed out on this device, but the homeserver could not be reached.',
+    session_not_revoked:
+      'Signed out on this device, but the homeserver may not have been told. Revoke the session from another device if you need to.',
     failed: 'Signing in failed.'
   };
 
@@ -57,5 +58,7 @@
     <p role="status">Waiting for the Windows sign-in window…</p>
   {:else if account.state === 'sign_in_failed' && account.error}
     <p role="alert" class="error">{errors[account.error] ?? errors.failed}</p>
+  {:else if account.error === 'session_not_revoked'}
+    <p role="alert" class="error">{errors.session_not_revoked}</p>
   {/if}
 </section>

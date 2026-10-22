@@ -347,7 +347,12 @@ impl Session {
             Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
             Err(state) => (state, None),
         };
-        Self::with_state(Some(dir), protector, state, stores)
+        let unconfirmed = stores.as_ref().is_some_and(|s| s.unconfirmed_sign_out());
+        let session = Self::with_state(Some(dir), protector, state, stores);
+        if unconfirmed {
+            session.shared.set_status(not_revoked());
+        }
+        session
     }
 
     fn with_state(
@@ -639,13 +644,17 @@ impl Session {
             return Ok(self.state());
         };
         let deadline = Instant::now() + timeout;
-        let revoked = loop {
+        let (began, revoked) = loop {
             match self.with_client() {
                 Ok(Some((lease, client))) => {
-                    break lease
+                    // Before the request: an interrupted sign-out must never
+                    // restore this account on the next start.
+                    let began = store::begin_sign_out(&dir).is_ok();
+                    let revoked = lease
                         .stores()
                         .block_on(client.matrix_auth().logout())
                         .is_ok();
+                    break (began, revoked);
                 }
                 Ok(None) | Err(AdmissionError::Locked) => return Ok(self.state()),
                 Err(AdmissionError::Saturated) if Instant::now() < deadline => {
@@ -654,7 +663,7 @@ impl Session {
                 Err(error) => return Err(error),
             }
         };
-        let marked = store::mark_signed_out(&dir).is_ok();
+        let marked = store::mark_signed_out(&dir, revoked).is_ok() && began;
         let (state, _) = self.lock(timeout, announce);
         // The sync loop has been joined, so this status is not overwritten.
         self.shared.set_status(AccountStatus {
@@ -696,6 +705,9 @@ impl Session {
                 Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
                 Err(state) => (state, None),
             };
+            if stores.as_ref().is_some_and(|s| s.unconfirmed_sign_out()) {
+                self.shared.set_status(not_revoked());
+            }
             let mut inner = lock(&self.shared);
             inner.state = state;
             inner.stores = stores;
@@ -705,5 +717,14 @@ impl Session {
             self.restore_account();
         }
         state
+    }
+}
+
+/// The account after a sign-out whose revocation was not confirmed.
+fn not_revoked() -> AccountStatus {
+    AccountStatus {
+        state: AccountState::SignedOut,
+        user_id: None,
+        error: Some(SignInError::SessionNotRevoked),
     }
 }
