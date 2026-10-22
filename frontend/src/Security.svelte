@@ -91,9 +91,13 @@
     {/if}
   {/if}
   {#if flow}
-    <div class="verification" role={flow.phase === 'compare' || flow.phase === 'incoming' ? 'alertdialog' : null}>
+    <div
+      class="verification"
+      role={flow.phase === 'compare' || flow.phase === 'incoming' ? 'alertdialog' : null}
+      aria-labelledby={flow.phase === 'compare' || flow.phase === 'incoming' ? 'verification-question' : null}
+    >
       {#if flow.phase === 'incoming'}
-        <p>
+        <p id="verification-question">
           Your other device
           {#if flow.otherDevice}<bdi>{flow.otherDevice}</bdi>{/if}
           wants to verify this device. Accept only if you started this on your own device.
@@ -104,7 +108,7 @@
         <p role="status">Waiting for your other device. Accept the request there.</p>
         <button type="button" disabled={busy} onclick={() => oncancel(flow.flowId)}>Cancel</button>
       {:else if flow.phase === 'compare'}
-        <p>Do these emoji match the ones on your other device, in the same order?</p>
+        <p id="verification-question">Do these emoji match the ones on your other device, in the same order?</p>
         <ol class="emoji">
           {#each flow.emoji as item, index (index)}
             <li><span class="symbol" aria-hidden="true">{item.symbol}</span> {item.description}</li>

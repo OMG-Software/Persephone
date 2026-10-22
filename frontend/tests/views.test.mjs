@@ -325,5 +325,11 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
   for (const html of [incoming, compare, cancelled]) {
     assert.doesNotMatch(html, /<input/);
   }
+  // Each dialog is named by its question, so a screen reader reads it first.
+  for (const html of [incoming, compare]) {
+    assert.match(html, /aria-labelledby="verification-question"/);
+    assert.match(html, /<p id="verification-question">/);
+  }
+  assert.match(view('waiting'), /<div class="verification">/, 'only the dialogs are named');
 });
 

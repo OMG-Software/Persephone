@@ -169,6 +169,17 @@ impl Peer {
         match command {
             "login" => {
                 let which = words.next().context("which client")?;
+                // Checked before signing in: replacing a client would leave its
+                // session signed in, since `quit` logs out only the kept ones.
+                let taken = match which {
+                    "bob" => self.bob.is_some(),
+                    "bob2" => self.bob2.is_some(),
+                    "alice" => self.alice.is_some(),
+                    _ => bail!("login bob, bob2 or alice"),
+                };
+                if taken {
+                    bail!("{which} is already signed in");
+                }
                 let client = build(&self.base_url, which != "bob2").await?;
                 let account = if which == "alice" {
                     &self.first
@@ -178,10 +189,10 @@ impl Peer {
                 client
                     .matrix_auth()
                     .login_username(&account.username, &account.password)
-                    .initial_device_display_name(if which == "bob" {
-                        "P4 peer"
-                    } else {
-                        "P4 unsigned"
+                    .initial_device_display_name(match which {
+                        "bob" => "P4 peer",
+                        "alice" => "P4 alice",
+                        _ => "P4 unsigned",
                     })
                     .await?;
                 client
@@ -205,7 +216,7 @@ impl Peer {
                         );
                         self.alice = Some(client);
                     }
-                    _ => bail!("login bob, bob2 or alice"),
+                    _ => unreachable!("checked above"),
                 }
                 Ok(reply)
             }
