@@ -130,4 +130,7 @@ live.
   device could read is lost; the confirmation says so.
 * Signing in again needs a restart, as after any lock once a client has run.
   Signing in as a different user after sign-out is not tested.
+* On Unix the marker's directory entry and the key's removal are also synced
+  to disk; that code path has not been built or run, because only Windows has
+  a vault so far.
 * Debug builds on one Windows host only.

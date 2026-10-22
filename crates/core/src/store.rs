@@ -56,7 +56,22 @@ const NOT_REVOKED: &[u8] = b"not-revoked\n";
 fn write_marker(dir: &Path, contents: &[u8]) -> std::io::Result<()> {
     let mut marker = File::create(dir.join(SIGNED_OUT_FILE))?;
     marker.write_all(contents)?;
-    marker.sync_all()
+    marker.sync_all()?;
+    sync_dir(dir)
+}
+
+/// Makes a created or removed entry in `dir` durable: on POSIX systems a
+/// file's own sync does not cover its directory entry.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
+/// Windows cannot open a directory with `File::open`; there the file's own
+/// flush is the only step taken.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Records durably that the profile in `dir` is being signed out, before the
@@ -76,7 +91,9 @@ pub fn mark_signed_out(dir: &Path, revoked: bool) -> std::io::Result<()> {
     let removed = match fs::remove_file(dir.join(KEY_FILE)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
-    };
+    }
+    // A removal lost in a crash would bring the key back.
+    .and_then(|()| sync_dir(dir));
     marked.and(removed)
 }
 
