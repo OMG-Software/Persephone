@@ -47,6 +47,8 @@ struct Fixed {
     secrets: std::sync::Mutex<Vec<Result<String, PromptError>>>,
     secrets_asked: AtomicUsize,
     shown: std::sync::Mutex<Option<String>>,
+    /// What showing the recovery key returns.
+    show: Result<(), PromptError>,
 }
 
 impl Fixed {
@@ -64,6 +66,15 @@ impl Fixed {
             secrets: std::sync::Mutex::new(vec![secret]),
             secrets_asked: AtomicUsize::new(0),
             shown: std::sync::Mutex::new(None),
+            show: Ok(()),
+        })
+    }
+
+    /// A source whose recovery-key window fails at once.
+    fn failing_window() -> Arc<Self> {
+        Arc::new(Self {
+            show: Err(PromptError::Failed),
+            ..Arc::into_inner(Self::new(Ok(()))).unwrap()
         })
     }
 }
@@ -93,8 +104,10 @@ impl CredentialSource for Fixed {
 
     fn show_recovery_key(&self, user_id: &str, key: &str) -> Result<(), PromptError> {
         assert_eq!(user_id, USER);
-        *self.shown.lock().unwrap() = Some(key.to_owned());
-        Ok(())
+        if self.show.is_ok() {
+            *self.shown.lock().unwrap() = Some(key.to_owned());
+        }
+        self.show
     }
 }
 
@@ -1157,6 +1170,32 @@ fn given_no_identity_when_setting_up_encryption_then_the_password_is_asked_once_
     );
     // With the stores closed, no profile file holds the key in plain text.
     assert!(files_contain(dir.path(), key.as_bytes()).is_empty());
+}
+
+/// GIVEN a recovery-key window that fails at once WHEN set-up succeeds THEN
+/// the status keeps saying the key was not shown: set-up's own result, which
+/// is written first, does not replace it.
+#[test]
+fn given_a_failing_key_window_then_set_up_reports_the_key_was_not_shown() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::failing_window();
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("the account to have no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let _: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    wait_for("the failure to be reported", || {
+        security(&core).error == Some(SecurityError::RecoveryKeyNotShown)
+    });
+    // Later refreshes keep it.
+    std::thread::sleep(Duration::from_secs(3));
+    let status = security(&core);
+    assert_eq!(status.error, Some(SecurityError::RecoveryKeyNotShown));
+    assert_eq!(status.operation, SecurityOperation::Idle);
+    assert!(source.shown.lock().unwrap().is_none());
 }
 
 /// GIVEN set-up that has reached the backup request WHEN the session is
