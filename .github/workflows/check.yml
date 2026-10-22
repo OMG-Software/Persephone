@@ -155,11 +155,13 @@ jobs:
           - name: opensuse-leap-16.0
             image: opensuse/leap:16.0@sha256:0c459bfe558e59b44b484e0e02dad66a28cdba92d24c8121d3901177938a3175 # 16.0
             install: >-
-              zypper --non-interactive install git curl tar gzip xz gcc gcc-c++ make pkg-config python3
+              zypper --non-interactive install bash git curl tar gzip xz gcc gcc-c++ make pkg-config python3
               'pkgconfig(webkit2gtk-4.1)'
     steps:
-      # Before checkout, so that it clones with git.
+      # Before checkout, so that it clones with git. The Leap image has no
+      # bash until this step installs it.
       - name: Install build prerequisites
+        shell: sh
         run: ${{ matrix.install }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
