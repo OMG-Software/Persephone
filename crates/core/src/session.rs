@@ -347,7 +347,12 @@ impl Session {
             Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
             Err(state) => (state, None),
         };
-        Self::with_state(Some(dir), protector, state, stores)
+        let unconfirmed = stores.as_ref().is_some_and(|s| s.unconfirmed_sign_out());
+        let session = Self::with_state(Some(dir), protector, state, stores);
+        if unconfirmed {
+            session.shared.set_status(not_revoked());
+        }
+        session
     }
 
     fn with_state(
@@ -616,6 +621,65 @@ impl Session {
         (state, closed.then_some(TrackedDrain { _private: () }))
     }
 
+    /// Signs out (owner decisions, 21 October 2026): revokes the session on
+    /// the homeserver if it can be reached, then deletes this device's local
+    /// profile. The key goes first, so the encrypted stores are unreadable at
+    /// once; then the session locks as usual (ending `restart_required`, since
+    /// a client ran). The store files are deleted by the next start, before
+    /// any client exists: the SDK's background work is not proven stopped in
+    /// this process (docs/architecture/sdk-lifecycle.md), so its files are not
+    /// deleted under it. A failed revocation still signs out locally and is
+    /// reported as `session_not_revoked`.
+    ///
+    /// Returns the resulting state; without a signed-in account nothing
+    /// changes. A saturated session is waited for up to `timeout` (leases
+    /// last one request or one sync round); after that the sign-out has not
+    /// started and `Saturated` is returned.
+    pub fn sign_out(
+        &self,
+        timeout: Duration,
+        announce: impl FnOnce(),
+    ) -> Result<StoreState, AdmissionError> {
+        let Some(dir) = self.profile.clone() else {
+            return Ok(self.state());
+        };
+        let deadline = Instant::now() + timeout;
+        let (began, revoked) = loop {
+            match self.with_client() {
+                Ok(Some((lease, client))) => {
+                    // Before the request: an interrupted sign-out must never
+                    // restore this account on the next start.
+                    let began = store::begin_sign_out(&dir).is_ok();
+                    let revoked = lease
+                        .stores()
+                        .block_on(client.matrix_auth().logout())
+                        .is_ok();
+                    break (began, revoked);
+                }
+                Ok(None) | Err(AdmissionError::Locked) => return Ok(self.state()),
+                Err(AdmissionError::Saturated) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let marked = store::mark_signed_out(&dir, revoked).is_ok() && began;
+        let (state, _) = self.lock(timeout, announce);
+        // The sync loop has been joined, so this status is not overwritten.
+        self.shared.set_status(AccountStatus {
+            state: AccountState::SignedOut,
+            user_id: None,
+            error: if !marked {
+                Some(SignInError::Failed)
+            } else if !revoked {
+                Some(SignInError::SessionNotRevoked)
+            } else {
+                None
+            },
+        });
+        Ok(state)
+    }
+
     /// Reopens a locked session with the key from the vault and restores a
     /// saved account. A session that failed to open may retry; `lock_failed`,
     /// `restart_required`, `locking` and an unconfigured session cannot unlock.
@@ -641,6 +705,9 @@ impl Session {
                 Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
                 Err(state) => (state, None),
             };
+            if stores.as_ref().is_some_and(|s| s.unconfirmed_sign_out()) {
+                self.shared.set_status(not_revoked());
+            }
             let mut inner = lock(&self.shared);
             inner.state = state;
             inner.stores = stores;
@@ -650,5 +717,14 @@ impl Session {
             self.restore_account();
         }
         state
+    }
+}
+
+/// The account after a sign-out whose revocation was not confirmed.
+fn not_revoked() -> AccountStatus {
+    AccountStatus {
+        state: AccountState::SignedOut,
+        user_id: None,
+        error: Some(SignInError::SessionNotRevoked),
     }
 }

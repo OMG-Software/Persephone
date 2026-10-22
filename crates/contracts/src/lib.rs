@@ -130,6 +130,9 @@ pub enum SignInError {
     Unsupported,
     /// Signed in, but syncing failed.
     SyncFailed,
+    /// Signed out locally, but the homeserver could not be told: the server
+    /// session may stay active until it expires or is revoked elsewhere.
+    SessionNotRevoked,
     /// Anything else.
     Failed,
 }

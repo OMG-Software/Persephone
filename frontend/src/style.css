@@ -47,6 +47,11 @@ header .session {
   margin-left: auto;
 }
 
+header .session + .session,
+header .confirm + .session {
+  margin-left: 0;
+}
+
 section {
   margin-top: 2rem;
 }
@@ -197,3 +202,18 @@ nav button:focus-visible,
   color: #b9c4d6;
   font-style: italic;
 }
+
+header .confirm {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 32rem;
+}
+
+header .confirm p {
+  margin: 0;
+  color: inherit;
+}
+

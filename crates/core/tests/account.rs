@@ -10,7 +10,7 @@ use persephone_contracts::{
 use persephone_core::{
     Core,
     credentials::{CredentialSource, Credentials, PromptError},
-    session::Session,
+    session::{AdmissionError, Session},
 };
 use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
 use serde_json::{Value, json};
@@ -132,6 +132,11 @@ impl Homeserver {
                 .mount(&server)
                 .await;
             Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/logout"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
                 .and(path("/_matrix/client/v3/login"))
                 .respond_with(ResponseTemplate::new(login.0).set_body_json(login.1))
                 .mount(&server)
@@ -181,6 +186,36 @@ impl Homeserver {
             false,
             true,
         )
+    }
+
+    /// Makes logout fail from now on (the server cannot revoke).
+    fn fail_logout(&self) {
+        self.runtime.block_on(
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/logout"))
+                .respond_with(
+                    ResponseTemplate::new(500)
+                        .set_body_json(json!({"errcode":"M_UNKNOWN","error":"down"})),
+                )
+                .with_priority(1)
+                .mount(&self.server),
+        );
+    }
+
+    /// Makes logout answer only after `delay`, so a test can look at the
+    /// profile while the request is in flight.
+    fn slow_logout(&self, delay: Duration) {
+        self.runtime.block_on(
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/logout"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({}))
+                        .set_delay(delay),
+                )
+                .with_priority(1)
+                .mount(&self.server),
+        );
     }
 
     fn uri(&self) -> String {
@@ -643,4 +678,206 @@ fn given_a_lock_and_unlock_while_the_prompt_is_open_then_the_old_attempt_never_s
     );
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::Locked, "no client ever ran");
+}
+
+fn signed_in_core(server: &Homeserver, dir: &Path) -> Core {
+    let core = make_core(dir, Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    core
+}
+
+/// Sign-out revokes the session and deletes the key at once; the store files
+/// stay, unreadable, until the next start wipes them before anything opens,
+/// and that start is a fresh, signed-out profile with nothing of the old
+/// account left.
+#[test]
+fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    {
+        let core = signed_in_core(&server, dir.path());
+        let state: StoreState = value(call(&core, Call::SignOut {}));
+        assert_eq!(state, StoreState::RestartRequired);
+        assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
+        let status = core.session().account_status();
+        assert_eq!(
+            (status.state, status.error),
+            (AccountState::SignedOut, None)
+        );
+        assert!(!dir.path().join("store-key.v1").exists(), "key deleted");
+        assert!(
+            dir.path().join("signed-out").exists() && dir.path().join("store").exists(),
+            "store files are left for the next start"
+        );
+        assert_eq!(
+            call(&core, Call::RoomList {}),
+            Outcome::Error(ErrorCode::Locked)
+        );
+        let state: StoreState = value(call(&core, Call::UnlockSession {}));
+        assert_eq!(state, StoreState::RestartRequired);
+    }
+    assert!(files_contain(dir.path(), TOKEN.as_bytes()).is_empty());
+    // Stands in for any old store file; the next start must remove it.
+    fs::write(dir.path().join("store").join("left-behind"), b"x").unwrap();
+
+    let never = Fixed::new(Err(PromptError::Failed));
+    let core = make_core(dir.path(), never.clone());
+    assert_eq!(
+        core.session().state(),
+        StoreState::Protected,
+        "fresh profile"
+    );
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedOut
+    );
+    assert!(!dir.path().join("signed-out").exists(), "wipe finished");
+    assert!(
+        !dir.path().join("store").join("left-behind").exists(),
+        "the old store directory was wiped"
+    );
+    assert_eq!(never.asked.load(Ordering::SeqCst), 0);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(
+        state,
+        StoreState::Locked,
+        "no account restored, no client ran"
+    );
+}
+
+/// When the server cannot revoke, sign-out still completes locally and says
+/// the server session may remain.
+#[test]
+fn given_the_server_cannot_revoke_then_sign_out_still_wipes_and_warns() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    server.fail_logout();
+    let state: StoreState = value(call(&core, Call::SignOut {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    assert_eq!(
+        core.session().account_status().error,
+        Some(SignInError::SessionNotRevoked)
+    );
+    assert!(
+        !dir.path().join("store-key.v1").exists(),
+        "key deleted anyway"
+    );
+}
+
+#[test]
+fn given_no_account_then_sign_out_changes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let state: StoreState = value(call(&core, Call::SignOut {}));
+    assert_eq!(state, StoreState::Protected);
+    assert!(dir.path().join("store-key.v1").exists());
+}
+
+/// GIVEN every lease in use WHEN signing out THEN the sign-out waits for one;
+/// if none frees in time nothing is signed out and the call says so, and once
+/// a lease frees the sign-out completes. (The first call waits not at all:
+/// the sync loop frees and retakes its own lease between rounds.)
+#[test]
+fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_start() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut leases = Vec::new();
+    while let Ok(lease) = core.session().admit() {
+        leases.push(lease);
+    }
+    assert_eq!(
+        core.session().sign_out(Duration::ZERO, || {}),
+        Err(AdmissionError::Saturated)
+    );
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    assert!(dir.path().join("store-key.v1").exists(), "nothing deleted");
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedIn
+    );
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            leases.clear();
+        });
+        assert_eq!(
+            core.session().sign_out(Duration::from_secs(10), || {}),
+            Ok(StoreState::RestartRequired)
+        );
+    });
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
+    assert!(!dir.path().join("store-key.v1").exists());
+}
+
+/// GIVEN a signed-in profile whose sign-out stopped after recording its
+/// intent (as if the process ended during the logout request) WHEN
+/// Persephone starts again THEN the account is not restored: the profile is
+/// wiped, nothing asks for credentials, and the page is told the homeserver
+/// may still hold the session.
+#[test]
+fn given_a_sign_out_interrupted_during_logout_then_the_next_start_wipes_and_warns() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    {
+        let core = signed_in_core(&server, dir.path());
+        persephone_core::store::begin_sign_out(dir.path()).unwrap();
+        let state: StoreState = value(call(&core, Call::LockSession {}));
+        assert_eq!(state, StoreState::RestartRequired);
+    }
+    let never = Fixed::new(Err(PromptError::Failed));
+    let core = make_core(dir.path(), never.clone());
+    assert_eq!(
+        core.session().state(),
+        StoreState::Protected,
+        "fresh profile"
+    );
+    let status = core.session().account_status();
+    assert_eq!(
+        (status.state, status.error),
+        (
+            AccountState::SignedOut,
+            Some(SignInError::SessionNotRevoked)
+        )
+    );
+    assert_eq!(never.asked.load(Ordering::SeqCst), 0);
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(
+        state,
+        StoreState::Locked,
+        "no account restored, no client ran"
+    );
+}
+
+/// GIVEN a homeserver that is slow to answer logout WHEN signing out THEN the
+/// sign-out intent is on disk while the request is still in flight (with the
+/// key not yet deleted), so ending the process then cannot restore the account.
+#[test]
+fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_ends() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    server.slow_logout(Duration::from_secs(2));
+    std::thread::scope(|scope| {
+        let signing_out = scope.spawn(|| core.session().sign_out(Duration::from_secs(10), || {}));
+        wait_for("the logout request", || {
+            server.requests_to("/_matrix/client/v3/logout") == 1
+        });
+        assert!(
+            dir.path().join("signed-out").exists(),
+            "intent recorded before the answer"
+        );
+        assert!(
+            dir.path().join("store-key.v1").exists(),
+            "key deleted only after the answer"
+        );
+        assert_eq!(signing_out.join().unwrap(), Ok(StoreState::RestartRequired));
+    });
+    assert!(!dir.path().join("store-key.v1").exists());
 }

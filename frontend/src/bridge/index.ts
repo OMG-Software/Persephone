@@ -71,3 +71,12 @@ export function unlockSession(): Promise<StoreState> {
 export function signIn(homeserver: string): Promise<AccountStatus> {
   return invoke<AccountStatus>('sign_in', { homeserver });
 }
+
+/**
+ * Signs out: the core revokes the session if the homeserver can be reached
+ * and deletes this device's local profile, keys first. The outcome arrives as
+ * a session change; Persephone must then be restarted to sign in again.
+ */
+export function signOut(): Promise<StoreState> {
+  return invoke<StoreState>('sign_out');
+}

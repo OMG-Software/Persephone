@@ -579,14 +579,14 @@ above passes; none has.
 | P1 | Explicit permissions and CSP | Done | [Tauri shell](../evidence/tauri-shell.md): allowlist, capability, CSP, navigation and IPC denial tests |
 | P1 | Production asset build | Partial | Frontend build checked; no release or packaged app run |
 | P1 | Three-OS CI | Partial | Windows CI ([development guide](../development.md#continuous-integration)); Linux and macOS not built |
-| P2 | Session owner | Partial | [Session owner](../evidence/session-owner.md): leases, lock and unlock; logout not built |
+| P2 | Session owner | Partial | [Session owner](../evidence/session-owner.md): leases, lock and unlock; [sign-out](../evidence/sign-out.md) deletes the key at once and leaves the store files to the next start, because SDK tasks are not joined |
 | P2 | Vault and storage adapters | Partial | [Protected store](../evidence/protected-store.md): Windows DPAPI only |
 | P2 | Task cancellation | Partial | Cooperative stop between complete operations; SDK tasks not joined, so lock ends `restart_required` once a client ran |
 | P2 | Worker broker | Done (Windows) | [Media worker](../evidence/media-worker.md); Linux/macOS not started |
 | P2 | Pixel transport | Not started | Decoded pixels do not reach the UI yet |
 | P2 | Baseline limits | Partial | Frame and page budgets, UI Job limits; no aggregate memory admission across features |
 | P3 | SDK integration | Partial | [Sign-in evidence](../evidence/matrix-sign-in.md): one client in the core over the encrypted stores |
-| P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; no SSO, sign-out or `.well-known` discovery |
+| P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; [sign-out](../evidence/sign-out.md) revokes the session and deletes the local profile; no SSO or `.well-known` discovery |
 | P3 | Sliding default, classic fallback | Partial | Initial selection passes live on Merovingian, Synapse and classic-only Synapse; no runtime mode switch |
 | P3 | Room and timeline projection | Partial | Room list, history paging, notices and live events; gap and dedup coverage incomplete |
 | P4 | Encrypted text experience | Not started | No sending, verification, recovery or key sharing; other devices' messages are undecryptable notices |
