@@ -6,11 +6,14 @@ Matrix Rust SDK 0.19.1, against disposable Merovingian 0.12.29 and Synapse
 the encryption policy of [ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md),
 setting up cross-signing and recovery for a new account, and verifying a new
 device with the recovery key. Sending (PR B) and verification from another
-device (PR C) follow. **Result: on both servers, a fresh account was set up
-from the page in about 3 seconds without the page ever holding the password or
-the recovery key; a second device of the same account showed as not verified,
-was verified with the recovery key, and stayed verified after a restart; a
-wrong recovery key was refused.**
+device (PR C) follow. **Result of the first live runs: on both servers, a
+fresh account was set up from the page in about 3 seconds without the page
+ever holding the password or the recovery key; a second device of the same
+account showed as not verified, was verified with the recovery key, and stayed
+verified after a restart. A wrong recovery key was refused on Merovingian; that
+step was not run on Synapse.** These runs tested the first version. Later
+review rounds changed the code, and their live coverage is listed under
+[Live runs](#live-runs).
 
 ## Design
 
@@ -64,7 +67,8 @@ wrong recovery key was refused.**
 
 ## Tests
 
-New, all passing (the full check passed 280 tests after the review fixes; see the [ledger](verification.json)):
+New, all passing. The test counts of each review round are in the
+[ledger](verification.json).
 
 * Account (mock homeserver, development feature):
   * set-up asks for the password once, answers a 401 authentication round with
@@ -77,7 +81,14 @@ New, all passing (the full check passed 280 tests after the review fixes; see th
   * a key backup that fails once leaves the identity without recovery;
     setting up recovery alone then succeeds without a second password, and
     set-up as a whole is not offered over the identity;
-  * an answer given after a lock is never sent.
+  * an answer given after a lock is never sent;
+  * a lock during set-up still shows the new recovery key
+    (`given_a_lock_during_set_up_then_the_new_recovery_key_is_still_shown`;
+    it fails on the code before the third round);
+  * a recovery-key window that fails at once leaves "key not shown" in the
+    status (`given_a_failing_key_window_then_set_up_reports_the_key_was_not_shown`).
+    This test also passed on the order before the fourth round, so it cannot
+    detect that race.
 * Session unit: a write meant for the session before a lock is refused after
   the lock and after a later unlock, and leaves no status or command.
 * Core unit: undecryptable reasons map to their notices; secret checks;
@@ -120,8 +131,9 @@ process crashed (four dumps in nine minutes, the `RTSSHooks64.dll` crash of
 the [window retry evidence](window-retry.md)); the account tests cover the
 fixes.
 
-Two review rounds followed these live runs. Neither has a live run on this
-branch alone:
+Three review rounds followed these live runs. None of them has a live run on
+this branch alone. The second round ran live later, on the PR C branch; the
+third and fourth have no live run:
 
 * The second round sends every encryption-state write through a check of the
   session generation. That covers the thread's results, queued commands,
