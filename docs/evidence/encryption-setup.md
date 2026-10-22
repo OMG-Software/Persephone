@@ -137,6 +137,12 @@ branch alone:
   starts during set-up. Before, the key was dropped, and recovery stayed
   enabled with a key nobody saw. An account test covers this case; no live run
   does.
+* The fourth round writes set-up's result before it starts the key window.
+  Without that order, a window that failed at once could have its
+  "key not shown" error replaced by the result. A new account test checks
+  that the error stays. It passed 20 of 20 runs on the old order too, because
+  that race is hard to hit, so the order, not the test, is the guarantee. No
+  live run.
 
 ## Limits
 
