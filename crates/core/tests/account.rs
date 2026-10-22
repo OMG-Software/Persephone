@@ -318,12 +318,24 @@ impl Homeserver {
                 .mount(&self.server)
                 .await;
             // The SDK asks for a room's encryption state when sync left it
-            // unknown; the plain room has none.
+            // unknown (a send can come before the first sync): the plain room
+            // has none, the others the state that sync gives them.
             Mock::given(method("GET"))
-                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/state/m\.room\.encryption/?$"))
+                .and(path_regex(
+                    r"^/_matrix/client/v3/rooms/[^/]*zplain[^/]*/state/m\.room\.encryption/?$",
+                ))
                 .respond_with(ResponseTemplate::new(404).set_body_json(
                     json!({"errcode": "M_NOT_FOUND", "error": "no encryption"}),
                 ))
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/state/m\.room\.encryption/?$"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"algorithm": "m.megolm.v1.aes-sha2"})),
+                )
                 .mount(&self.server)
                 .await;
             Mock::given(method("GET"))
@@ -1495,6 +1507,14 @@ fn given_an_unverified_device_then_an_encrypted_room_send_fails_without_any_send
     server.sending_endpoints(200);
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
+    // Before the first sync the room is unknown and the send fails as
+    // `not_joined`; this test is about the joined, encrypted room.
+    wait_for("the encrypted room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == ROOM)
+    });
     let queued: PendingMessage = value(send(&core, ROOM, "secret text"));
     assert_eq!(queued.state, PendingState::Queued);
     wait_for("the send to end", || {

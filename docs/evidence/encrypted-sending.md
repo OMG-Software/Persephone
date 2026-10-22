@@ -106,4 +106,12 @@ through the real page (development core).
   built; `identity_changed` only reports the failure.
 * One of 28 repeated runs of the account tests failed, early, before its
   output was captured; the other 27 passed. The cause is not known.
+  *Later correction (22 October 2026, during PR C):* the same test failed twice
+  more with its output: the unverified-device test sent before the first
+  sync, so the room was unknown (`not_joined`), or known with its encryption
+  not yet settled, when the mock answered "no encryption" for every room
+  (`confirmation_required`). Both are correct answers for that state, and
+  nothing was sent. The test now waits for the room, and the mock answers with
+  the room's real encryption state; 30 further runs passed, on the PR C branch.
+  That the earlier failure had this cause is likely, not shown.
 * Debug builds on one Windows host only.
