@@ -4,9 +4,10 @@ Checked 21 October 2026 on Windows 11 Pro x64 (build 26200), debug builds,
 Tauri 2.12.4 with the installed WebView2 runtime. **Result: the core noticed a
 failed window both when the web view's processes exited and when the page never
 reached it, showed its own dialog, and on Retry replaced the UI while the
-session kept running. The intermittent blank windows on this host are crashes
-of the WebView2 browser process inside a third-party overlay hook
-(`RTSSHooks64.dll`, RivaTuner Statistics Server), not a Persephone fault.**
+session kept running. On this host, every complete crash dump of the
+intermittent blank windows shows the WebView2 browser process failing inside a
+third-party overlay hook (`RTSSHooks64.dll`, RivaTuner Statistics Server).
+Whether removing the hook stops the failures has not been tested.**
 
 ## Design
 
@@ -44,7 +45,10 @@ New, all passing: six decision tests in `ui_watch.rs` (timeout boundary, a
 ready page never fails, the web view gone after the grace, brief gaps, a UI
 alone while still starting, an unreadable Job), and one serving-loop test: a
 reopened core serves a new connection, is not ready until it sends a request,
-and keeps no old subscription.
+and keeps no old subscription. An account test (mock homeserver, development
+feature) signs in, serves one UI connection, reopens the core and serves a new
+one: the new page sees the same signed-in account and its rooms, with no
+second sign-in or prompt.
 
 Updated: the store test `given_another_profiles_key_then_the_stores_refuse_it_and_keep_their_data`
 failed in the first full check and in 2 of 30 repeated runs on unchanged
@@ -72,7 +76,7 @@ Invoke pattern, because the core has no Common Controls manifest.
 | Normal close planned, but the web view had already crashed on its own | 2 | detected as `WebViewGone` before the close; one dialog was answered Retry by hand during the test, not by the probe |
 | WebView2 runtime folder missing | 1 | the UI panicked at start and exited, so the core exited 1; no dialog (a retry would not help) |
 
-## Cause of the spontaneous failures on this host
+## Where the spontaneous failures happen on this host
 
 WebView2's own crash reporter (Crashpad) writes minidumps under
 `%LOCALAPPDATA%\io.github.omg-software.persephone\EBWebView\Crashpad\reports`;
@@ -87,9 +91,11 @@ shows the same crash in all eight:
 * at `RTSSHooks64.dll+0x1490af`, the hook DLL of RivaTuner Statistics Server,
   which was running with its global hook loader.
 
-The earlier "cause not established" WebView2 failures in the
-[sign-in evidence](matrix-sign-in.md#limits) match this symptom, and the owner
-saw similar behaviour in other Chromium-based applications on this host. Three
+The earlier WebView2 failures in the [sign-in evidence](matrix-sign-in.md#limits)
+match this symptom, and the owner saw similar behaviour in other
+Chromium-based applications on this host. This locates the crash; it does not
+prove the hook causes it. No run with the hook disabled was made, so the hook
+remains the leading explanation, not an established cause. Three
 older dumps, from 20 October, are empty and were not analysed.
 
 Of seven retries, three replacement web views also crashed on their own within
@@ -109,7 +115,7 @@ application detection off should stop the injection; this was not tested.
 * A UI that exits on its own (a crash of the UI process, or a missing runtime)
   ends Persephone as before; it is not retried.
 * Retries are not limited in number; each needs the user's answer.
-* The fix for the root cause is outside Persephone. Blocking injected
+* The crashes occur in third-party code outside Persephone. Blocking injected
   third-party DLLs in the UI tree (for example with a process mitigation
   policy) could prevent it and would also harden the UI. It is not evaluated.
 * Debug builds on one Windows host only.

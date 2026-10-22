@@ -644,3 +644,76 @@ fn given_a_lock_and_unlock_while_the_prompt_is_open_then_the_old_attempt_never_s
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::Locked, "no client ever ran");
 }
+
+/// GIVEN a signed-in core whose UI connection ended (a failed window) WHEN
+/// the core is reopened and a new UI connects THEN the new page sees the same
+/// signed-in account and its rooms, with no second sign-in and no prompt.
+#[test]
+fn given_a_replaced_ui_then_the_signed_in_session_carries_on_for_the_new_page() {
+    use persephone_contracts::AppStatus;
+    use persephone_core::ServeEnd;
+    use persephone_core_protocol::{CoreMessage, Reply, receive, send};
+    use persephone_media_protocol::ResourceBudgets;
+    use std::io::Cursor;
+
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::new(Ok(()));
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("the first sync", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .first()
+            .is_some_and(|room| room.display_name.is_some())
+    });
+    // One UI connection: its requests, then its replies once it closes.
+    let connect = |calls: Vec<Call>| -> Vec<Reply> {
+        let mut wire = Vec::new();
+        for (n, call) in calls.into_iter().enumerate() {
+            send(
+                &mut wire,
+                &Request {
+                    id: n as u32 + 1,
+                    call,
+                },
+            )
+            .unwrap();
+        }
+        let mut output = Vec::new();
+        assert_eq!(
+            persephone_core::serve(&core, Cursor::new(wire), &mut output),
+            ServeEnd::UiClosed
+        );
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(output);
+        std::iter::from_fn(|| receive::<_, CoreMessage>(&mut reader, &budgets).ok())
+            .filter_map(|message| match message {
+                CoreMessage::Reply(reply) => Some(reply),
+                CoreMessage::Event(_) => None,
+            })
+            .collect()
+    };
+
+    assert!(
+        !connect(vec![Call::AppStatus {}]).is_empty(),
+        "the first UI"
+    );
+    core.reopen();
+    let mut replies = connect(vec![Call::AppStatus {}, Call::RoomList {}]).into_iter();
+    let status: AppStatus = value(replies.next().expect("status reply").outcome);
+    assert_eq!(status.store, StoreState::Protected);
+    assert_eq!(status.account.state, AccountState::SignedIn);
+    assert_eq!(status.account.user_id.as_deref(), Some(USER));
+    let rooms: RoomList = value(replies.next().expect("room list reply").outcome);
+    assert_eq!(rooms.rooms[0].room_id, ROOM, "the account's rooms");
+    assert_eq!(
+        server.requests_to("/_matrix/client/v3/login"),
+        1,
+        "no second sign-in"
+    );
+    assert_eq!(source.asked.load(Ordering::SeqCst), 1, "no second prompt");
+}
