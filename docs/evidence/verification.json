@@ -1316,7 +1316,7 @@
     },
     {
       "name": "ci_seven_platform_check",
-      "command": "GitHub Actions workflow Check (.github/workflows/check.yml): python tools/dev.py bootstrap, then python tools/dev.py check",
+      "command": "GitHub Actions workflow Check (.github/workflows/check.yml): python tools/dev.py bootstrap, then python tools/dev.py check (python3 in the distribution containers)",
       "checked_on": "2026-10-22",
       "run_id": 39785251911,
       "commit": "04c0538518f5067991e152fbb8bc57c19bdfe3bc",
@@ -1330,7 +1330,7 @@
         "fedora-44": {"container": "fedora:44 (digest in workflow)", "python": "3.14.8", "rust_tests_passed": 194, "frontend_tests_passed": 16, "python_tests_passed": 15},
         "opensuse-leap-16.0": {"container": "opensuse/leap:16.0 (digest in workflow)", "python": "3.13.14", "rust_tests_passed": 194, "frontend_tests_passed": 16, "python_tests_passed": 15}
       },
-      "not_covered": "application launch, vault, credential prompt, UI and worker containment off Windows (all fail closed); live homeservers; native sandbox probe; dependency audit; release or packaged builds",
+      "not_covered": "application launch on every platform, Windows included; vault, credential prompt, UI and worker containment off Windows (all fail closed); live homeservers; native sandbox probe; dependency audit; release or packaged builds",
       "toolchain": {"rustc": "1.99.1", "node": "24.15.0"},
       "cargo_lock_sha256": "946730d6f8521522bc2be69dc34998a1020b396f95d42015d55d582cc3b42c35",
       "evidence": "../development.md#continuous-integration"

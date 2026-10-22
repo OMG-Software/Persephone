@@ -81,7 +81,7 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 
 ### Continuous integration
 
-[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` for every pull request, every push to `main` and on demand. Every job pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target) and Node.js 24.15.0, uses the committed lockfiles, and caches only downloaded Cargo and npm sources. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit.
+[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` (`python3` in the distribution containers) for every pull request, every push to `main` and on demand. Every job pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target) and Node.js 24.15.0, uses the committed lockfiles, and caches only downloaded Cargo and npm sources. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit.
 
 | Job | Runner or image | Prerequisites | Python |
 | --- | --- | --- | --- |
@@ -95,7 +95,7 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 
 - **Containers.** Container images are pinned by digest in the workflow. Containers install Rust with rustup from `sh.rustup.rs` and Node.js with setup-node.
 - **Packages are not pinned.** Packages come from each distribution's current repositories, so only the base image is fixed. Arch supports only full upgrades, so its job always builds against the current rolling release.
-- **Off Windows, only build and tests are covered.** There is no vault, credential prompt, UI containment or worker containment there. These fail closed (`unsupported`), and the core refuses to start the UI. A passing non-Windows job therefore shows that the code builds and its tests pass, not that the application runs or is contained on that OS.
+- **Off Windows, only build and tests are covered.** There is no vault, credential prompt, UI containment or worker containment there. These fail closed (`unsupported`), and the core refuses to start the UI. A passing non-Windows job therefore shows that the code builds and its tests pass, not that the application runs or is contained on that OS. No job launches the application, on Windows either.
 - **Tests that are not compiled off Windows.** The AppContainer probe, DPAPI, the native-prompt and the contained-worker tests compile only on Windows. This is why Windows runs 41 more Rust tests.
 
 Run 39785251911 at `04c0538` passed every job:
