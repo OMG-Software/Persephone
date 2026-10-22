@@ -111,6 +111,10 @@ later attempts with the same accounts.
 
 ## Limits
 
+* Review changes after the live runs (22 October 2026) have no live run: a
+  queued action marks the operation as working until the security thread has
+  run it (unit-tested), and a queued start keeps an incoming request that
+  arrived first (no test: it needs live SDK flows).
 * Verifying other people, and approving a contact's changed identity, are not
   built; requests from other users are ignored.
 * The other device was an SDK peer, not another Matrix client; interoperability

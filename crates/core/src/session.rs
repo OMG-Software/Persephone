@@ -577,6 +577,13 @@ fn run_security(
                             Err(error) => (Some(error), None),
                         }
                     }
+                    // A request that came in after the start was queued is
+                    // kept: replacing it would leave the other device waiting.
+                    Some(SecurityCommand::Verify(VerifyAction::Start))
+                        if flow.as_ref().is_some_and(|flow| !flow.is_over()) =>
+                    {
+                        (None, None)
+                    }
                     Some(SecurityCommand::Verify(VerifyAction::Start)) => {
                         match verification::start(&client, &user_id).await {
                             Some(new) => {
@@ -712,6 +719,38 @@ fn show_recovery_key(
             security.status.error = Some(SecurityError::RecoveryKeyNotShown);
         });
     }
+}
+
+/// Leaves a verification action for the security thread if the current flow
+/// and phase allow it. The operation is `Working` until the thread has run
+/// it, so a second action cannot be queued while the first is with the SDK.
+/// Returns whether it was queued.
+fn queue_verification(security: &mut SecurityShared, action: VerifyAction) -> bool {
+    let flow = security.status.verification.as_ref();
+    let over = flow.is_none_or(|flow| {
+        matches!(
+            flow.phase,
+            VerificationPhase::Done | VerificationPhase::Cancelled
+        )
+    });
+    let allowed = match &action {
+        VerifyAction::Start => security.status.identity == IdentityState::Unverified && over,
+        VerifyAction::Accept(id) => flow
+            .is_some_and(|flow| &flow.flow_id == id && flow.phase == VerificationPhase::Incoming),
+        VerifyAction::Confirm(id) => {
+            flow.is_some_and(|flow| &flow.flow_id == id && flow.phase == VerificationPhase::Compare)
+        }
+        VerifyAction::Cancel(id) => flow.is_some_and(|flow| &flow.flow_id == id) && !over,
+    };
+    let queued = allowed
+        && security.status.operation == SecurityOperation::Idle
+        && security.command.is_none();
+    if queued {
+        security.command = Some(SecurityCommand::Verify(action));
+        security.status.operation = SecurityOperation::Working;
+        security.status.error = None;
+    }
+    queued
 }
 
 fn security_prompt_error(error: PromptError) -> SecurityError {
@@ -1231,34 +1270,8 @@ impl Session {
         if guard(&self.shared.account).is_none() {
             return self.security_status();
         }
-        self.shared.with_security(generation, |security| {
-            let flow = security.status.verification.as_ref();
-            let over = flow.is_none_or(|flow| {
-                matches!(
-                    flow.phase,
-                    VerificationPhase::Done | VerificationPhase::Cancelled
-                )
-            });
-            let allowed = match &action {
-                VerifyAction::Start => {
-                    security.status.identity == IdentityState::Unverified && over
-                }
-                VerifyAction::Accept(id) => flow.is_some_and(|flow| {
-                    &flow.flow_id == id && flow.phase == VerificationPhase::Incoming
-                }),
-                VerifyAction::Confirm(id) => flow.is_some_and(|flow| {
-                    &flow.flow_id == id && flow.phase == VerificationPhase::Compare
-                }),
-                VerifyAction::Cancel(id) => flow.is_some_and(|flow| &flow.flow_id == id) && !over,
-            };
-            if allowed
-                && security.status.operation == SecurityOperation::Idle
-                && security.command.is_none()
-            {
-                security.command = Some(SecurityCommand::Verify(action));
-                security.status.error = None;
-            }
-        });
+        self.shared
+            .with_security(generation, |security| queue_verification(security, action));
         self.security_status()
     }
 
@@ -1377,7 +1390,90 @@ fn not_revoked() -> AccountStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unverified() -> SecurityShared {
+        let mut security = SecurityShared::default();
+        security.status.identity = IdentityState::Unverified;
+        security.status.operation = SecurityOperation::Idle;
+        security
+    }
+
+    fn flow(phase: VerificationPhase) -> Option<VerificationView> {
+        Some(VerificationView {
+            flow_id: "f1".into(),
+            phase,
+            emoji: Vec::new(),
+            other_device: None,
+        })
+    }
+
+    /// GIVEN an unverified device WHEN a start is queued THEN the operation
+    /// is working until the security thread has run it, so a second start
+    /// (or any other action) is refused meanwhile.
+    #[test]
+    fn given_a_queued_verification_then_a_second_action_waits() {
+        let mut security = unverified();
+        assert!(queue_verification(&mut security, VerifyAction::Start));
+        assert_eq!(security.status.operation, SecurityOperation::Working);
+        assert!(!queue_verification(&mut security, VerifyAction::Start));
+        // The thread takes the command; until it publishes, still working.
+        security.command = None;
+        assert!(!queue_verification(&mut security, VerifyAction::Start));
+    }
+
+    /// GIVEN each phase WHEN an action arrives THEN only the action for that
+    /// flow and phase is queued.
+    #[test]
+    fn given_each_phase_then_only_its_actions_are_queued() {
+        let id = || "f1".to_owned();
+        let cases = [
+            (
+                VerificationPhase::Incoming,
+                VerifyAction::Accept(id()),
+                true,
+            ),
+            (
+                VerificationPhase::Incoming,
+                VerifyAction::Confirm(id()),
+                false,
+            ),
+            (VerificationPhase::Incoming, VerifyAction::Start, false),
+            (
+                VerificationPhase::Compare,
+                VerifyAction::Confirm(id()),
+                true,
+            ),
+            (
+                VerificationPhase::Compare,
+                VerifyAction::Accept(id()),
+                false,
+            ),
+            (VerificationPhase::Compare, VerifyAction::Cancel(id()), true),
+            (
+                VerificationPhase::Compare,
+                VerifyAction::Cancel("other".into()),
+                false,
+            ),
+            (VerificationPhase::Cancelled, VerifyAction::Start, true),
+            (
+                VerificationPhase::Cancelled,
+                VerifyAction::Cancel(id()),
+                false,
+            ),
+        ];
+        for (phase, action, expected) in cases {
+            let mut security = unverified();
+            security.status.verification = flow(phase);
+            let label = format!("{phase:?} {action:?}");
+            assert_eq!(
+                queue_verification(&mut security, action),
+                expected,
+                "{label}"
+            );
+        }
+    }
     use crate::vault::{KEY_BYTES, StoreKey, VaultError};
+    use persephone_contracts::VerificationView;
 
     /// Keeps the key as it is: enough for a profile in a temporary folder.
     struct Plain;
