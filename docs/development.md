@@ -106,6 +106,8 @@ The Encryption panel sets up cross-signing and recovery for an account without t
 
 ## Recorded verification
 
+After the third round of encryption setup review fixes, `python tools/dev.py check --offline` passed all 281 tests (249 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). The new account test failed on the code before the fix.
+
 After the second round of encryption setup review fixes, `python tools/dev.py check --offline` passed all 280 tests (248 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first round passed 278 (246 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first version passed 276 (244 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). See the [encryption setup evidence](evidence/encryption-setup.md).
 
 After merging sign-out and failed-window retry, `python tools/dev.py check --offline` passed all 266 tests (235 Rust, 16 frontend, 2 server-registration and 13 development-controller tests).
