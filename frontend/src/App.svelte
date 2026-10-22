@@ -12,6 +12,7 @@
     recoverWithKey,
     securityStatus,
     setUpEncryption,
+    setUpRecovery,
     signOut,
     roomList,
     signIn,
@@ -441,6 +442,7 @@
             busy={securityBusy}
             onsetup={() => startSecurity(setUpEncryption)}
             onrecover={() => startSecurity(recoverWithKey)}
+            onsetuprecovery={() => startSecurity(setUpRecovery)}
           />
         {/if}
         <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} onselect={open} />

@@ -9,12 +9,14 @@
     security,
     busy,
     onsetup,
-    onrecover
+    onrecover,
+    onsetuprecovery
   }: {
     security: SecurityStatus;
     busy: boolean;
     onsetup: () => void;
     onrecover: () => void;
+    onsetuprecovery: () => void;
   } = $props();
 
   // Fixed text per code; the core sends codes only. Secrets never reach this
@@ -66,6 +68,13 @@
     <button type="button" disabled={waiting} onclick={onrecover}>Use recovery key</button>
   {:else}
     <p>This device is verified.</p>
+    {#if security.recovery === 'disabled'}
+      <p>
+        Without recovery, your encrypted messages cannot be read on a new device if this one is
+        lost.
+      </p>
+      <button type="button" disabled={waiting} onclick={onsetuprecovery}>Set up recovery</button>
+    {/if}
   {/if}
   {#if recoveryText[security.recovery]}
     <p>{recoveryText[security.recovery]}</p>

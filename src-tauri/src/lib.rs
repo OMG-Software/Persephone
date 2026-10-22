@@ -252,6 +252,13 @@ async fn recover_with_key(core: State<'_, CoreLink>) -> Result<SecurityStatus, S
     relay(core.inner(), Call::RecoverWithKey {}).await
 }
 
+/// Starts setting up recovery alone (an earlier attempt failed). The core
+/// shows the new recovery key in its own window.
+#[tauri::command]
+async fn set_up_recovery(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::SetUpRecovery {}).await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -305,7 +312,8 @@ pub fn configure<R: Runtime>(
             sign_out,
             security_status,
             set_up_encryption,
-            recover_with_key
+            recover_with_key,
+            set_up_recovery
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

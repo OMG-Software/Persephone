@@ -15,6 +15,7 @@
     "allow-sign-out",
     "allow-security-status",
     "allow-set-up-encryption",
-    "allow-recover-with-key"
+    "allow-recover-with-key",
+    "allow-set-up-recovery"
   ]
 }

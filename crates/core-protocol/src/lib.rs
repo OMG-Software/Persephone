@@ -67,6 +67,9 @@ pub enum Call {
     /// Verify this device with the recovery key, asked in the core's own
     /// window. Replies at once with the status, like `SetUpEncryption`.
     RecoverWithKey {},
+    /// Set up recovery alone for a verified identity without it (an earlier
+    /// attempt failed). The core shows the new recovery key in its own window.
+    SetUpRecovery {},
 }
 
 /// Longest homeserver URL either side accepts in a call.
@@ -314,6 +317,7 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"recover_with_key","recovery_key":"x"}}"#,
             br#"{"id":1,"call":{"command":"export_room_keys"}}"#,
+            br#"{"id":1,"call":{"command":"set_up_recovery","passphrase":"x"}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

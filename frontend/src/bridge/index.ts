@@ -116,3 +116,8 @@ export function setUpEncryption(): Promise<SecurityStatus> {
 export function recoverWithKey(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('recover_with_key');
 }
+
+/** Sets up recovery alone when an earlier attempt failed; no password needed. */
+export function setUpRecovery(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('set_up_recovery');
+}

@@ -30,8 +30,11 @@ wrong recovery key was refused.**
   `none` (no identity on the homeserver), `unverified` (an identity this
   device is not verified with) or `verified` (identity verified and this
   device signed by it); `recovery` follows the SDK. A `core-security` thread
-  (8 MiB stack, one lease per step, joined by lock) asks the homeserver once
-  whether an identity exists, then reads the local store every 2 s. Changes
+  (8 MiB stack, one lease per step, joined by lock) asks the homeserver
+  whether an identity is published (a raw keys query, every 30 s while there
+  is none), then reads the local store every 2 s. An identity only this device
+  holds, left by a set-up whose upload failed, counts as none, so set-up can be
+  retried; the retry uploads the same keys. Changes
   raise a content-free `security_changed` event; the page fetches
   `security_status` without clearing anything else.
 * **Set up** (only when the homeserver says there is no identity, checked
@@ -40,6 +43,10 @@ wrong recovery key was refused.**
   authentication round, enables recovery (secret storage plus a new key
   backup), and shows the recovery key in a native window. Persephone does not
   keep the key.
+* **Set up recovery** alone: when cross-signing was set up but recovery
+  failed, the core offers recovery again (only if this device holds the
+  private cross-signing keys of a published identity). It needs no password
+  and shows the new key in the native window.
 * **Recover**: the core asks for the recovery key in its own prompt; the SDK
   imports the cross-signing keys from secret storage, marks the identity
   verified and signs this device.
@@ -51,7 +58,7 @@ wrong recovery key was refused.**
 
 ## Tests
 
-New, all passing (the full check passed 276 tests; see the [ledger](verification.json)):
+New, all passing (the full check passed 278 tests after the review fixes; see the [ledger](verification.json)):
 
 * Account (mock homeserver, development feature):
   * set-up asks for the password once, answers a 401 authentication round with
@@ -59,7 +66,11 @@ New, all passing (the full check passed 276 tests; see the [ledger](verification
     and no profile file; set-up is not offered again once an identity exists;
     lock joins the security thread and forgets the state;
   * a cancelled prompt uploads nothing with a password and reports
-    `cancelled`; a wrong password reports `invalid_password`;
+    `cancelled`; a wrong password reports `invalid_password`; both leave the
+    account at `none`, and set-up with the right password then succeeds;
+  * a key backup that fails once leaves the identity without recovery;
+    setting up recovery alone then succeeds without a second password, and
+    set-up as a whole is not offered over the identity;
   * an answer given after a lock is never sent.
 * Core unit: undecryptable reasons map to their notices; secret checks;
   unsupported platforms fail closed for secrets and the key window; the
@@ -93,7 +104,15 @@ The first Merovingian attempt lost the DevTools connection on device A, after
 set-up had in fact completed (device B found the identity and recovered); that
 run is not counted, and Merovingian was repeated on a fresh harness.
 
-One change followed the live runs: a recovery-key window that fails after the
+After the review fixes (a published-identity check by a raw keys query, retry
+after a refused password, recovery alone), the probe was repeated on Synapse
+and passed the same steps on the first attempt. The Merovingian repeat was
+blocked by this host: three attempts lost DevTools as the WebView2 browser
+process crashed (four dumps in nine minutes, the `RTSSHooks64.dll` crash of
+the [window retry evidence](window-retry.md)); the account tests cover the
+fixes.
+
+One change followed the first live runs: a recovery-key window that fails after the
 session was locked no longer reports its failure into the next session. It
 touches only that failure path, which the runs did not reach.
 
@@ -108,6 +127,8 @@ touches only that failure path, which the runs did not reach.
   into its import; those copies are outside the zeroing guarantee.
 * If the recovery-key window cannot be shown, recovery stays enabled with a key
   nobody saw; the page says so, but resetting the key is not built.
+* The mock homeserver does not sync account data back, so the account tests
+  cannot see recovery become enabled; the live runs do.
 * Not tested: an account whose identity was reset elsewhere, a homeserver that
   refuses key backup, other users' devices (no messages yet), and Linux and
   macOS (no prompt there: set-up and recovery report `unsupported`).

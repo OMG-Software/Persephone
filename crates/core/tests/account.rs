@@ -43,7 +43,8 @@ const PASSWORD: &str = "synthetic-password-K8";
 struct Fixed {
     answer: Result<(), PromptError>,
     asked: AtomicUsize,
-    secret: Result<String, PromptError>,
+    /// Answers in order; the last one repeats.
+    secrets: std::sync::Mutex<Vec<Result<String, PromptError>>>,
     secrets_asked: AtomicUsize,
     shown: std::sync::Mutex<Option<String>>,
 }
@@ -60,7 +61,7 @@ impl Fixed {
         Arc::new(Self {
             answer,
             asked: AtomicUsize::new(0),
-            secret,
+            secrets: std::sync::Mutex::new(vec![secret]),
             secrets_asked: AtomicUsize::new(0),
             shown: std::sync::Mutex::new(None),
         })
@@ -81,7 +82,13 @@ impl CredentialSource for Fixed {
         if let SecretPrompt::Password { user_id, .. } = prompt {
             assert_eq!(user_id, USER, "the prompt names the signed-in account");
         }
-        self.secret.clone().map(Zeroizing::new)
+        let mut secrets = self.secrets.lock().unwrap();
+        let answer = if secrets.len() > 1 {
+            secrets.remove(0)
+        } else {
+            secrets[0].clone()
+        };
+        answer.map(Zeroizing::new)
     }
 
     fn show_recovery_key(&self, user_id: &str, key: &str) -> Result<(), PromptError> {
@@ -1189,9 +1196,119 @@ fn given_a_cancelled_prompt_or_a_wrong_password_then_set_up_reports_it() {
             .filter(|body| body.get("auth").is_some())
             .count();
         assert_eq!(with_auth > 0, authenticated, "{expected:?}");
+        assert_eq!(
+            status.identity,
+            IdentityState::None,
+            "nothing reached the homeserver, so set-up can be retried"
+        );
         let state: StoreState = value(call(&core, Call::LockSession {}));
         assert_eq!(state, StoreState::RestartRequired);
     }
+}
+
+/// GIVEN a set-up refused for a wrong password WHEN the user tries again with
+/// the right one THEN set-up runs again, uploads the identity and shows a key.
+#[test]
+fn given_a_wrong_password_then_set_up_can_be_retried_and_succeeds() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::with_secret(Ok(()), Ok("wrong-password".to_owned()));
+    source.secrets.lock().unwrap().push(Ok(PASSWORD.to_owned()));
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    call(&core, Call::SetUpEncryption {});
+    wait_for("the refusal", || security(&core).error.is_some());
+    assert_eq!(security(&core).error, Some(SecurityError::InvalidPassword));
+    assert_eq!(security(&core).identity, IdentityState::None);
+
+    let again: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    assert_ne!(again.operation, SecurityOperation::Idle, "offered again");
+    wait_for("set-up to finish", || {
+        let status = security(&core);
+        status.operation == SecurityOperation::Idle && status.identity != IdentityState::None
+    });
+    assert_eq!(security(&core).error, None);
+    wait_for("the recovery key", || {
+        source.shown.lock().unwrap().is_some()
+    });
+    assert_eq!(source.secrets_asked.load(Ordering::SeqCst), 2);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a homeserver that fails the key backup once WHEN encryption is set
+/// up THEN the identity exists but recovery does not, and setting up recovery
+/// alone (no password) then succeeds and shows a key.
+#[test]
+fn given_recovery_fails_after_cross_signing_then_recovery_alone_can_be_set_up() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    server.runtime.block_on(
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/room_keys/version"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(json!({"errcode": "M_UNKNOWN", "error": "down"})),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::new(Ok(()));
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    call(&core, Call::SetUpEncryption {});
+    wait_for("the recovery failure", || security(&core).error.is_some());
+    wait_for("the identity", || {
+        security(&core).identity != IdentityState::None
+    });
+    let status = security(&core);
+    assert_eq!(
+        status.recovery,
+        persephone_contracts::RecoveryState::Disabled,
+        "{status:?}"
+    );
+    assert!(source.shown.lock().unwrap().is_none(), "no key yet");
+    // Set-up as a whole is not offered again over the identity.
+    let refused: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    assert_eq!(refused.operation, SecurityOperation::Idle);
+
+    let started: SecurityStatus = value(call(&core, Call::SetUpRecovery {}));
+    assert_eq!(started.operation, SecurityOperation::Working);
+    wait_for("the recovery set-up to end", || {
+        security(&core).operation == SecurityOperation::Idle
+    });
+    // The mock never syncs account data back, so the SDK cannot report
+    // recovery as enabled here (the live runs do); the second backup request
+    // and the shown key show that recovery was set up.
+    assert_eq!(
+        server
+            .bodies_to("/_matrix/client/v3/room_keys/version")
+            .iter()
+            .filter(|body| body.is_object())
+            .count(),
+        2,
+        "the failed backup, then the retry"
+    );
+    wait_for("the recovery key", || {
+        source.shown.lock().unwrap().is_some()
+    });
+    assert_eq!(security(&core).error, None);
+    assert_eq!(
+        source.secrets_asked.load(Ordering::SeqCst),
+        1,
+        "no second password"
+    );
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
 }
 
 /// Signs in at once and holds the secret prompt open until released, like a

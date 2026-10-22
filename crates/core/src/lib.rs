@@ -288,6 +288,7 @@ impl Core {
                 ok(&self.session.set_up_encryption(self.credentials.clone()))
             }
             Call::RecoverWithKey {} => ok(&self.session.recover_with_key(self.credentials.clone())),
+            Call::SetUpRecovery {} => ok(&self.session.set_up_recovery(self.credentials.clone())),
             Call::SignOut {} => match self
                 .session
                 .sign_out(LOCK_TIMEOUT, || self.hub.announce_session_change())

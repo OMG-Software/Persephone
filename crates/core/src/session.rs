@@ -33,8 +33,8 @@ use crate::store::{self, Stores};
 use crate::vault::KeyProtector;
 use matrix_sdk::{Client, ruma::OwnedUserId};
 use persephone_contracts::{
-    AccountState, AccountStatus, IdentityState, SecurityError, SecurityOperation, SecurityStatus,
-    SignInError, StoreState,
+    AccountState, AccountStatus, IdentityState, RecoveryState, SecurityError, SecurityOperation,
+    SecurityStatus, SignInError, StoreState,
 };
 use std::{
     path::PathBuf,
@@ -58,6 +58,9 @@ const MIN_SYNC_INTERVAL: Duration = Duration::from_millis(500);
 const SECURITY_TICK: Duration = Duration::from_millis(250);
 /// How often the shown encryption state is read again from the store.
 const SECURITY_REFRESH: Duration = Duration::from_secs(2);
+/// How often the homeserver is asked again while the account seems to have no
+/// identity (another device may set one up).
+const IDENTITY_REQUERY: Duration = Duration::from_secs(30);
 /// Stack for the security thread: the SDK's verification futures need more
 /// than the default in debug builds (`docs/evidence/verified-recipients.md`).
 const SECURITY_STACK_BYTES: usize = 8 * 1024 * 1024;
@@ -120,11 +123,18 @@ enum SecurityCommand {
         source: Arc<dyn CredentialSource>,
     },
     Recover(Zeroizing<String>),
+    /// Set up recovery alone, for an identity this device already holds.
+    SetUpRecovery {
+        source: Arc<dyn CredentialSource>,
+    },
 }
 
 struct SecurityShared {
     status: SecurityStatus,
     command: Option<SecurityCommand>,
+    /// This device holds the private cross-signing keys of a published
+    /// identity, so recovery can be set up from it.
+    can_set_up_recovery: bool,
 }
 
 impl Default for SecurityShared {
@@ -132,6 +142,7 @@ impl Default for SecurityShared {
         Self {
             status: SecurityStatus::unknown(),
             command: None,
+            can_set_up_recovery: false,
         }
     }
 }
@@ -419,7 +430,9 @@ fn run_security(
     user_id: OwnedUserId,
     runtime: tokio::runtime::Handle,
 ) {
-    let mut queried = false;
+    // What the homeserver last said about the identity, and when to ask again.
+    let mut published: Option<bool> = None;
+    let mut next_query = Instant::now();
     let mut next_refresh = Instant::now();
     // A recovery-key window can outlive this session; what it reports applies
     // only while the session is still this one.
@@ -443,28 +456,51 @@ fn run_security(
             }
         };
         let ran = command.is_some();
-        let (outcome, key, identity, recovery) = lease.stores().block_on(async {
-            if !queried && security::query_identity(&client, &user_id).await.is_ok() {
-                queried = true;
+        let (outcome, key, identity, recovery, private_keys) = lease.stores().block_on(async {
+            if (published.is_none() || published == Some(false)) && Instant::now() >= next_query {
+                if let Ok(exists) = security::query_identity(&client, &user_id).await {
+                    published = Some(exists);
+                }
+                next_query = Instant::now() + IDENTITY_REQUERY;
             }
             let (outcome, key) = match command {
                 Some(SecurityCommand::SetUp { password, source }) => {
-                    queried = true;
                     match security::set_up(&client, &user_id, &password).await {
-                        Ok(key) => (None, Some((key, source))),
-                        Err(error) => (Some(error), None),
+                        Ok(key) => {
+                            published = Some(true);
+                            (None, Some((key, source)))
+                        }
+                        Err(failure) => {
+                            // Where set-up stopped says whether the identity
+                            // was uploaded; when it does not, ask.
+                            published = match failure.published {
+                                Some(known) => Some(known),
+                                None => security::query_identity(&client, &user_id)
+                                    .await
+                                    .ok()
+                                    .or(published),
+                            };
+                            (Some(failure.error), None)
+                        }
                     }
                 }
                 Some(SecurityCommand::Recover(key)) => {
                     (security::recover(&client, &key).await.err(), None)
+                }
+                Some(SecurityCommand::SetUpRecovery { source }) => {
+                    match security::enable_recovery(&client).await {
+                        Ok(key) => (None, Some((key, source))),
+                        Err(error) => (Some(error), None),
+                    }
                 }
                 None => (None, None),
             };
             (
                 outcome,
                 key,
-                security::identity_state(&client, &user_id, queried).await,
+                security::identity_state(&client, &user_id, published).await,
                 security::recovery_state(&client),
+                published == Some(true) && security::holds_private_keys(&client).await,
             )
         });
         let current = lease.commit(|| ()).is_ok();
@@ -473,6 +509,7 @@ fn run_security(
             break;
         }
         next_refresh = Instant::now() + SECURITY_REFRESH;
+        guard(&shared.security).can_set_up_recovery = private_keys;
         shared.update_security(|status| {
             status.identity = identity;
             status.recovery = recovery;
@@ -917,6 +954,35 @@ impl Session {
                     .map(SecurityCommand::Recover)
             },
         )
+    }
+
+    /// Starts setting up recovery alone, for a published identity whose
+    /// private keys this device holds and whose recovery is not set up (an
+    /// earlier attempt failed). Needs no password; the new recovery key is
+    /// shown in the core's own window.
+    pub fn set_up_recovery(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
+        if guard(&self.shared.account).is_none()
+            || lock(&self.shared).state != StoreState::Protected
+        {
+            return self.security_status();
+        }
+        {
+            let mut security = guard(&self.shared.security);
+            if !security.can_set_up_recovery
+                || security.status.recovery != RecoveryState::Disabled
+                || security.status.operation != SecurityOperation::Idle
+                || security.command.is_some()
+            {
+                return security.status.clone();
+            }
+            security.command = Some(SecurityCommand::SetUpRecovery { source });
+            security.status.operation = SecurityOperation::Working;
+            security.status.error = None;
+        }
+        if let Some(listener) = self.shared.listener() {
+            listener.security_changed();
+        }
+        self.security_status()
     }
 
     /// Asks for a secret on a prompt thread without a lease, then leaves the

@@ -10,9 +10,13 @@
 //!   the recovery key for the core to show once.
 //! * **Recover** opens secret storage with the recovery key: the SDK imports
 //!   the cross-signing keys, marks the identity verified and signs this device.
-//! * The state shown is read from the local crypto store, except that the
-//!   first read asks the homeserver whether the account has an identity, so a
-//!   new device never offers to set one up over an existing one.
+//! * The state shown is read from the local crypto store, together with what
+//!   the homeserver last said about the account's identity. The first read
+//!   asks it, so a new device never offers to set one up over an existing one.
+//!   An identity only this device holds (a set-up whose upload failed) counts
+//!   as none, so set-up can be retried; the retry uploads the same keys.
+//! * **Set up recovery** alone is offered when the identity is set up but
+//!   recovery is not (its first attempt failed); it needs no password.
 //!
 //! These functions run under a session lease inside the stores' runtime; the
 //! session owns the thread and the prompts (`session.rs`). Errors are codes
@@ -27,25 +31,31 @@ use matrix_sdk::{
     },
     ruma::{
         UserId,
-        api::client::uiaa::{AuthData, MatrixUserIdentifier, Password, UserIdentifier},
+        api::client::{
+            keys::get_keys,
+            uiaa::{AuthData, MatrixUserIdentifier, Password, UserIdentifier},
+        },
     },
 };
 use persephone_contracts::{IdentityState, RecoveryState, SecurityError};
 use zeroize::Zeroizing;
 
-/// The identity state from the local store. `queried` says whether the
-/// homeserver was asked once; before that, no identity means "not known".
-pub async fn identity_state(client: &Client, user_id: &UserId, queried: bool) -> IdentityState {
+/// The identity state from the local store and `published`, what the
+/// homeserver last said (`None` before it was asked).
+pub async fn identity_state(
+    client: &Client,
+    user_id: &UserId,
+    published: Option<bool>,
+) -> IdentityState {
     let encryption = client.encryption();
     let Ok(identity) = encryption.get_user_identity(user_id).await else {
         return IdentityState::Unknown;
     };
-    let Some(identity) = identity else {
-        return if queried {
-            IdentityState::None
-        } else {
-            IdentityState::Unknown
-        };
+    let identity = match (identity, published) {
+        (_, None) => return IdentityState::Unknown,
+        // Not on the homeserver: nobody else can trust it yet.
+        (None, Some(_)) | (Some(_), Some(false)) => return IdentityState::None,
+        (Some(identity), Some(true)) => identity,
     };
     let signed = encryption
         .get_own_device()
@@ -60,6 +70,16 @@ pub async fn identity_state(client: &Client, user_id: &UserId, queried: bool) ->
     }
 }
 
+/// Whether this device holds all of the account's private cross-signing keys,
+/// which recovery stores.
+pub async fn holds_private_keys(client: &Client) -> bool {
+    client
+        .encryption()
+        .cross_signing_status()
+        .await
+        .is_some_and(|status| status.is_complete())
+}
+
 pub fn recovery_state(client: &Client) -> RecoveryState {
     match client.encryption().recovery().state() {
         SdkRecoveryState::Enabled => RecoveryState::Enabled,
@@ -69,15 +89,28 @@ pub fn recovery_state(client: &Client) -> RecoveryState {
     }
 }
 
-/// Asks the homeserver whether the account has an identity (and stores what
-/// it says). Returns whether one exists.
+/// Asks the homeserver whether the account has a published identity. The
+/// local store is no answer: a set-up whose upload failed leaves an identity
+/// there. A published identity is then also stored, for recovery.
 pub async fn query_identity(client: &Client, user_id: &UserId) -> Result<bool, SecurityError> {
-    client
-        .encryption()
-        .request_user_identity(user_id)
+    let mut request = get_keys::v3::Request::new();
+    request.device_keys.insert(user_id.to_owned(), Vec::new());
+    let response = client
+        .send(request)
         .await
-        .map(|identity| identity.is_some())
-        .map_err(|error| sdk_error(&error))
+        .map_err(|error| http_error(&error))?;
+    let published = response.master_keys.contains_key(user_id);
+    if published {
+        let _ = client.encryption().request_user_identity(user_id).await;
+    }
+    Ok(published)
+}
+
+/// Why set-up failed, and whether the identity reached the homeserver
+/// (`None` when that is not known).
+pub struct SetUpFailure {
+    pub error: SecurityError,
+    pub published: Option<bool>,
 }
 
 /// Sets up cross-signing and recovery for an account without an identity.
@@ -86,14 +119,17 @@ pub async fn set_up(
     client: &Client,
     user_id: &UserId,
     password: &Zeroizing<String>,
-) -> Result<Zeroizing<String>, SecurityError> {
-    if query_identity(client, user_id).await? {
-        return Err(SecurityError::IdentityExists);
+) -> Result<Zeroizing<String>, SetUpFailure> {
+    let failed = |error, published| SetUpFailure { error, published };
+    match query_identity(client, user_id).await {
+        Ok(true) => return Err(failed(SecurityError::IdentityExists, Some(true))),
+        Ok(false) => {}
+        Err(error) => return Err(failed(error, None)),
     }
     let encryption = client.encryption();
     if let Err(error) = encryption.bootstrap_cross_signing(None).await {
         let Some(info) = error.as_uiaa_response() else {
-            return Err(sdk_error(&error));
+            return Err(failed(sdk_error(&error), None));
         };
         let mut auth = Password::new(
             UserIdentifier::Matrix(MatrixUserIdentifier::new(user_id.to_string())),
@@ -107,13 +143,23 @@ pub async fn set_up(
             .await
             .map_err(|error| {
                 if error.as_uiaa_response().is_some() {
-                    SecurityError::InvalidPassword
+                    // Refused: nothing was uploaded.
+                    failed(SecurityError::InvalidPassword, Some(false))
                 } else {
-                    sdk_error(&error)
+                    failed(sdk_error(&error), None)
                 }
             })?;
     }
-    encryption
+    enable_recovery(client)
+        .await
+        .map_err(|error| failed(error, Some(true)))
+}
+
+/// Sets up recovery for an identity this device holds: secret storage and a
+/// new key backup. Returns the new recovery key. Needs no password.
+pub async fn enable_recovery(client: &Client) -> Result<Zeroizing<String>, SecurityError> {
+    client
+        .encryption()
         .recovery()
         .enable()
         .await
@@ -145,9 +191,14 @@ fn recovery_error(error: &RecoveryError) -> SecurityError {
 
 fn sdk_error(error: &matrix_sdk::Error) -> SecurityError {
     match error {
-        matrix_sdk::Error::Http(http) if matches!(**http, HttpError::Reqwest(_)) => {
-            SecurityError::Unreachable
-        }
+        matrix_sdk::Error::Http(http) => http_error(http),
+        _ => SecurityError::Failed,
+    }
+}
+
+fn http_error(error: &HttpError) -> SecurityError {
+    match error {
+        HttpError::Reqwest(_) => SecurityError::Unreachable,
         _ => SecurityError::Failed,
     }
 }

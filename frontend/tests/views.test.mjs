@@ -154,7 +154,7 @@ test('the encryption panel offers the step that fits and never asks for a secret
   });
   const panel = (security, busy = false) =>
     render(Security, {
-      props: { security, busy, onsetup: () => {}, onrecover: () => {} }
+      props: { security, busy, onsetup: () => {}, onrecover: () => {}, onsetuprecovery: () => {} }
     }).body;
 
   const none = panel(status('none'));
@@ -168,6 +168,9 @@ test('the encryption panel offers the step that fits and never asks for a secret
   assert.match(verified, /This device is verified\./);
   assert.match(verified, /Recovery is set up\./);
   assert.doesNotMatch(verified, /<button/);
+  const noRecovery = panel(status('verified', { recovery: 'disabled' }));
+  assert.match(noRecovery, />Set up recovery</);
+  assert.match(noRecovery, /cannot be read on a new device/);
   for (const html of [none, unverified, verified, panel(status('unknown'))]) {
     assert.doesNotMatch(html, /<input/, 'no field for a password or recovery key');
   }

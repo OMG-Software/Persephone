@@ -60,6 +60,9 @@ impl CoreTransport for FakeCore {
             Call::SecurityStatus {} => Ok(
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null}),
             ),
+            Call::SetUpRecovery {} => Ok(
+                serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null}),
+            ),
             Call::SetUpEncryption {} => Ok(
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null}),
             ),
@@ -289,7 +292,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-sign-out",
             "allow-security-status",
             "allow-set-up-encryption",
-            "allow-recover-with-key"
+            "allow-recover-with-key",
+            "allow-set-up-recovery"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -587,4 +591,5 @@ fn given_encryption_commands_then_only_codes_cross_and_secrets_are_refused() {
         "waiting_for_password"
     );
     assert_eq!(invoke("recover_with_key").unwrap_err(), "core_unavailable");
+    assert_eq!(invoke("set_up_recovery").unwrap()["operation"], "working");
 }

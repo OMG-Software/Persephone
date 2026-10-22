@@ -24,6 +24,7 @@ fn main() {
             "security_status",
             "set_up_encryption",
             "recover_with_key",
+            "set_up_recovery",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes
