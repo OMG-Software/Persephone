@@ -1716,3 +1716,36 @@ fn given_bad_input_or_no_account_then_nothing_is_queued() {
         Outcome::Error(ErrorCode::NotFound)
     );
 }
+
+/// GIVEN an account without an identity and no verification WHEN the page
+/// asks to verify, or acts on a flow THEN nothing starts and the flow ID is
+/// checked: an empty or oversized one is refused, an unknown one ignored.
+#[test]
+fn given_no_flow_then_verification_actions_change_nothing() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let started: SecurityStatus = value(call(&core, Call::VerifyThisDevice {}));
+    assert_eq!(started.verification, None, "nothing to verify against");
+    for call_for in [
+        |flow_id| Call::AcceptVerification { flow_id },
+        |flow_id| Call::ConfirmVerification { flow_id },
+        |flow_id| Call::CancelVerification { flow_id },
+    ] {
+        let status: SecurityStatus = value(call(&core, call_for("someone-else".into())));
+        assert_eq!(status.verification, None);
+        assert_eq!(status.error, None);
+        for bad in [String::new(), "f".repeat(129)] {
+            assert_eq!(
+                call(&core, call_for(bad)),
+                Outcome::Error(ErrorCode::InvalidArgument)
+            );
+        }
+    }
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}

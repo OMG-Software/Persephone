@@ -21,8 +21,8 @@ use persephone_contracts::{
     AccountStatus, AppStatus, PendingMessage, RoomList, SecurityStatus, StoreState, TimelinePage,
 };
 use persephone_core_protocol::{
-    Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES,
-    MAX_ROOM_ID_BYTES,
+    Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
+    MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -306,6 +306,58 @@ async fn set_up_recovery(core: State<'_, CoreLink>) -> Result<SecurityStatus, St
     relay(core.inner(), Call::SetUpRecovery {}).await
 }
 
+/// Asks the account's other devices to verify this one.
+#[tauri::command]
+async fn verify_this_device(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::VerifyThisDevice {}).await
+}
+
+/// Accepts, confirms or cancels the verification with this flow ID; the core
+/// refuses any other flow.
+async fn verification_step(
+    core: &CoreLink,
+    flow_id: String,
+    call: fn(String) -> Call,
+) -> Result<SecurityStatus, String> {
+    if flow_id.len() > MAX_FLOW_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core, call(flow_id)).await
+}
+
+#[tauri::command]
+async fn accept_verification(
+    core: State<'_, CoreLink>,
+    flow_id: String,
+) -> Result<SecurityStatus, String> {
+    verification_step(core.inner(), flow_id, |flow_id| Call::AcceptVerification {
+        flow_id,
+    })
+    .await
+}
+
+#[tauri::command]
+async fn confirm_verification(
+    core: State<'_, CoreLink>,
+    flow_id: String,
+) -> Result<SecurityStatus, String> {
+    verification_step(core.inner(), flow_id, |flow_id| Call::ConfirmVerification {
+        flow_id,
+    })
+    .await
+}
+
+#[tauri::command]
+async fn cancel_verification(
+    core: State<'_, CoreLink>,
+    flow_id: String,
+) -> Result<SecurityStatus, String> {
+    verification_step(core.inner(), flow_id, |flow_id| Call::CancelVerification {
+        flow_id,
+    })
+    .await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -365,7 +417,11 @@ pub fn configure<R: Runtime>(
             retry_message,
             discard_message,
             allow_unencrypted,
-            set_up_recovery
+            set_up_recovery,
+            verify_this_device,
+            accept_verification,
+            confirm_verification,
+            cancel_verification
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

@@ -157,12 +157,23 @@ test('the encryption panel offers the step that fits and never asks for a secret
     recovery: 'disabled',
     operation: 'idle',
     error: null,
+    verification: null,
     canSetUpRecovery: false,
     ...extra
   });
   const panel = (security, busy = false) =>
     render(Security, {
-      props: { security, busy, onsetup: () => {}, onrecover: () => {}, onsetuprecovery: () => {} }
+      props: {
+        security,
+        busy,
+        onsetup: () => {},
+        onrecover: () => {},
+        onsetuprecovery: () => {},
+        onverify: () => {},
+        onaccept: () => {},
+        onconfirm: () => {},
+        oncancel: () => {}
+      }
     }).body;
 
   const none = panel(status('none'));
@@ -170,6 +181,7 @@ test('the encryption panel offers the step that fits and never asks for a secret
   assert.doesNotMatch(none, /Use recovery key/);
   const unverified = panel(status('unverified', { recovery: 'enabled' }));
   assert.match(unverified, />Use recovery key</);
+  assert.match(unverified, />Verify with another device</);
   assert.match(unverified, /This device is not verified/);
   assert.doesNotMatch(unverified, /Set up encryption/);
   const verified = panel(status('verified', { recovery: 'enabled' }));
@@ -263,5 +275,55 @@ test('messages being sent show their state as fixed text with safe actions only'
   assert.match(blocked, /<textarea[^>]*disabled/);
   assert.match(blocked, /Verify this device in the Encryption panel/);
   assert.match(composer([], null, true), /Message \(not encrypted\)/);
+});
+
+test('verification shows each phase as fixed text, the emoji as text and the device name isolated', () => {
+  const view = (phase, extra = {}) =>
+    render(Security, {
+      props: {
+        security: {
+          identity: 'unverified',
+          recovery: 'enabled',
+          operation: 'idle',
+          error: null,
+          verification: { flowId: 'f1', phase, emoji: [], otherDevice: null, ...extra }
+        },
+        busy: false,
+        onsetup: () => {},
+        onrecover: () => {},
+        onsetuprecovery: () => {},
+        onverify: () => {},
+        onaccept: () => {},
+        onconfirm: () => {},
+        oncancel: () => {}
+      }
+    }).body;
+
+  const incoming = view('incoming', { otherDevice: hostileName });
+  assert.match(incoming, /role="alertdialog"/);
+  assert.match(incoming, /<bdi>&lt;img/);
+  assert.doesNotMatch(incoming, /<img/);
+  assert.match(incoming, />Accept</);
+  assert.match(incoming, />Decline</);
+  assert.doesNotMatch(incoming, /Verify with another device/, 'no second flow while one is open');
+
+  const emoji = [
+    ['🐶', 'Dog'], ['🐱', 'Cat'], ['🦁', 'Lion'], ['🐎', 'Horse'], ['🦄', 'Unicorn'], ['🐷', 'Pig'], ['🐘', 'Elephant']
+  ].map(([symbol, description]) => ({ symbol, description }));
+  const compare = view('compare', { emoji });
+  assert.equal((compare.match(/<li>/g) ?? []).length, 7);
+  assert.match(compare, /🐶<\/span> Dog/);
+  assert.match(compare, />They match</);
+  assert.match(compare, />They don't match</);
+
+  assert.match(view('waiting'), /Waiting for your other device\. Accept the request there\./);
+  assert.match(view('confirmed'), /Waiting for your other device to confirm\./);
+  assert.match(view('done'), /Verification finished\./);
+  const cancelled = view('cancelled');
+  assert.match(cancelled, /Verification was cancelled\./);
+  assert.match(cancelled, />Verify with another device</, 'a new attempt is offered');
+  for (const html of [incoming, compare, cancelled]) {
+    assert.doesNotMatch(html, /<input/);
+  }
 });
 

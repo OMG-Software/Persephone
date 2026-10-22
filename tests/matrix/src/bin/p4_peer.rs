@@ -16,6 +16,21 @@
 //! * `expect <bob|bob2> <room id> <seconds> <text>`: waits for a message with
 //!   exactly this text from someone else and reports whether it arrived and
 //!   whether it arrived encrypted.
+//! * `login alice`: sign in as the first account on a device of its own,
+//!   then `recover <file>` with the recovery key in that file (under
+//!   `.local`), so this device holds the account's cross-signing keys.
+//! * `wait-new-device <seconds>`: sync until this device knows another of the
+//!   account's devices that it did not know before, and print its ID. A real
+//!   other device syncs all the time; the SDK drops a request from a device
+//!   it does not know yet, so a test waits for this before a request is sent.
+//! * `verify-accept <seconds>`: wait for a verification request from another
+//!   of the account's devices, accept it and the comparison it starts, and
+//!   print the emoji once they can be compared.
+//! * `verify-request <device id> <seconds>`: ask that device of the account
+//!   to verify (a device that is not cross-signed yet gets a request only
+//!   when it is named), start the comparison once it is ready, and print the
+//!   emoji.
+//! * `verify-confirm`, `verify-mismatch`, `verify-wait <seconds>`.
 //! * `quit`
 
 use anyhow::{Context, Result, bail};
@@ -25,7 +40,7 @@ use matrix_sdk::{
     deserialized_responses::TimelineEventKind,
     room::MessagesOptions,
     ruma::{
-        OwnedRoomId, OwnedUserId, UInt,
+        OwnedDeviceId, OwnedRoomId, OwnedUserId, UInt,
         api::client::{
             room::create_room::v3::{Request as CreateRoomRequest, RoomPreset},
             uiaa::{AuthData, MatrixUserIdentifier, Password, UserIdentifier},
@@ -36,12 +51,20 @@ use matrix_sdk::{
         },
     },
 };
+use matrix_sdk::{
+    encryption::verification::{
+        SasState, SasVerification, VerificationRequest, VerificationRequestState,
+    },
+    ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEvent,
+};
 use matrix_sdk_crypto::{CollectStrategy, DecryptionSettings, TrustRequirement};
 use persephone_test_matrix::policy_http_client_builder;
 use serde::Deserialize;
 use serde_json::json;
 use std::{
+    collections::HashSet,
     io::BufRead,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -57,14 +80,46 @@ struct Account {
 struct Entry {
     name: String,
     base_url: String,
+    username: String,
+    password: String,
     recipient: Account,
 }
 
 struct Peer {
     base_url: String,
     account: Account,
+    first: Account,
     bob: Option<Client>,
     bob2: Option<Client>,
+    alice: Option<Client>,
+    /// The newest verification request another of Alice's devices sent.
+    requested: Arc<Mutex<Option<String>>>,
+    request: Option<VerificationRequest>,
+    sas: Option<SasVerification>,
+    /// Alice's devices this device knew when last asked.
+    known: HashSet<OwnedDeviceId>,
+}
+
+async fn own_devices(client: &Client) -> Result<HashSet<OwnedDeviceId>> {
+    let own = client.user_id().context("signed in")?;
+    Ok(client
+        .encryption()
+        .get_user_devices(own)
+        .await?
+        .devices()
+        .map(|device| device.device_id().to_owned())
+        .collect())
+}
+
+fn emoji(sas: &SasVerification) -> Vec<String> {
+    sas.emoji()
+        .map(|emoji| {
+            emoji
+                .iter()
+                .map(|item| item.description.to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn build(base_url: &str, policy: bool) -> Result<Client> {
@@ -93,13 +148,14 @@ impl Peer {
         match which {
             "bob" => self.bob.as_ref(),
             "bob2" => self.bob2.as_ref(),
+            "alice" => self.alice.as_ref(),
             _ => None,
         }
         .context("unknown or signed-out client")
     }
 
     async fn sync_all(&self) {
-        for client in [&self.bob, &self.bob2].into_iter().flatten() {
+        for client in [&self.bob, &self.bob2, &self.alice].into_iter().flatten() {
             let _ = client
                 .sync_once(SyncSettings::default().timeout(Duration::from_millis(500)))
                 .await;
@@ -113,10 +169,15 @@ impl Peer {
         match command {
             "login" => {
                 let which = words.next().context("which client")?;
-                let client = build(&self.base_url, which == "bob").await?;
+                let client = build(&self.base_url, which != "bob2").await?;
+                let account = if which == "alice" {
+                    &self.first
+                } else {
+                    &self.account
+                };
                 client
                     .matrix_auth()
-                    .login_username(&self.account.username, &self.account.password)
+                    .login_username(&account.username, &account.password)
                     .initial_device_display_name(if which == "bob" {
                         "P4 peer"
                     } else {
@@ -130,9 +191,173 @@ impl Peer {
                 match which {
                     "bob" => self.bob = Some(client),
                     "bob2" => self.bob2 = Some(client),
-                    _ => bail!("login bob or bob2"),
+                    "alice" => {
+                        let recorder = self.requested.clone();
+                        let own = client.user_id().context("signed in")?.to_owned();
+                        client.add_event_handler(
+                            move |event: ToDeviceKeyVerificationRequestEvent| {
+                                if event.sender == own {
+                                    *recorder.lock().unwrap() =
+                                        Some(event.content.transaction_id.to_string());
+                                }
+                                std::future::ready(())
+                            },
+                        );
+                        self.alice = Some(client);
+                    }
+                    _ => bail!("login bob, bob2 or alice"),
                 }
                 Ok(reply)
+            }
+            "recover" => {
+                let path = words.next().context("key file")?;
+                if !path.contains(".local") {
+                    bail!("the key file must be under .local");
+                }
+                let key = std::fs::read_to_string(path)?;
+                let client = self.client("alice")?;
+                client.encryption().recovery().recover(key.trim()).await?;
+                client
+                    .sync_once(SyncSettings::default().timeout(Duration::from_secs(1)))
+                    .await?;
+                let own = client.user_id().context("signed in")?.to_owned();
+                let verified = client
+                    .encryption()
+                    .get_user_identity(&own)
+                    .await?
+                    .is_some_and(|identity| identity.is_verified());
+                self.known = own_devices(client).await?;
+                Ok(json!({"ok": true, "identity_verified": verified}))
+            }
+            "wait-new-device" => {
+                let seconds: u64 = words.next().context("seconds")?.parse()?;
+                let client = self.client("alice")?.clone();
+                let deadline = Instant::now() + Duration::from_secs(seconds);
+                loop {
+                    // A device-list change is fetched before the next sync.
+                    let _ = client
+                        .sync_once(SyncSettings::default().timeout(Duration::from_millis(300)))
+                        .await;
+                    let devices = own_devices(&client).await?;
+                    let new: Vec<String> = devices
+                        .difference(&self.known)
+                        .map(ToString::to_string)
+                        .collect();
+                    if !new.is_empty() {
+                        self.known = devices;
+                        return Ok(json!({"new_devices": new}));
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(json!({"timeout": true}));
+                    }
+                }
+            }
+            "verify-accept" | "verify-request" => {
+                let target = if command == "verify-request" {
+                    Some(words.next().context("device id")?.to_owned())
+                } else {
+                    None
+                };
+                let seconds: u64 = words.next().context("seconds")?.parse()?;
+                let client = self.client("alice")?.clone();
+                let own = client.user_id().context("signed in")?.to_owned();
+                self.sas = None;
+                self.request = None;
+                if let Some(target) = target {
+                    let device = client
+                        .encryption()
+                        .get_device(&own, target.as_str().into())
+                        .await?
+                        .context("unknown device")?;
+                    self.request = Some(device.request_verification().await?);
+                }
+                let deadline = Instant::now() + Duration::from_secs(seconds);
+                loop {
+                    let _ = client
+                        .sync_once(SyncSettings::default().timeout(Duration::from_millis(300)))
+                        .await;
+                    if self.request.is_none() {
+                        let noted = self.requested.lock().unwrap().take();
+                        if let Some(flow_id) = noted {
+                            self.request = client
+                                .encryption()
+                                .get_verification_request(&own, &flow_id)
+                                .await;
+                        }
+                    }
+                    if let Some(request) = self.request.clone() {
+                        match request.state() {
+                            VerificationRequestState::Requested { .. } => {
+                                request.accept().await?;
+                            }
+                            VerificationRequestState::Ready { .. }
+                                if request.we_started() && self.sas.is_none() =>
+                            {
+                                self.sas = request.start_sas().await?;
+                            }
+                            VerificationRequestState::Transitioned { verification }
+                                if self.sas.is_none() =>
+                            {
+                                self.sas = verification.sas();
+                            }
+                            VerificationRequestState::Cancelled(_) => {
+                                return Ok(json!({"cancelled": true}));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(sas) = &self.sas {
+                        match sas.state() {
+                            SasState::Started { .. } if !sas.we_started() => sas.accept().await?,
+                            SasState::KeysExchanged { .. } => {
+                                return Ok(
+                                    json!({"emoji": emoji(sas), "flow_id": request_id(&self.request)}),
+                                );
+                            }
+                            SasState::Cancelled(_) => return Ok(json!({"cancelled": true})),
+                            _ => {}
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(json!({"timeout": true}));
+                    }
+                }
+            }
+            "verify-confirm" => {
+                self.sas
+                    .as_ref()
+                    .context("no comparison")?
+                    .confirm()
+                    .await?;
+                Ok(json!({"ok": true}))
+            }
+            "verify-mismatch" => {
+                self.sas
+                    .as_ref()
+                    .context("no comparison")?
+                    .mismatch()
+                    .await?;
+                Ok(json!({"ok": true}))
+            }
+            "verify-wait" => {
+                let seconds: u64 = words.next().context("seconds")?.parse()?;
+                let client = self.client("alice")?.clone();
+                let deadline = Instant::now() + Duration::from_secs(seconds);
+                loop {
+                    let _ = client
+                        .sync_once(SyncSettings::default().timeout(Duration::from_millis(300)))
+                        .await;
+                    let sas = self.sas.as_ref().context("no comparison")?;
+                    if sas.is_done() {
+                        return Ok(json!({"done": true}));
+                    }
+                    if sas.is_cancelled() {
+                        return Ok(json!({"cancelled": true}));
+                    }
+                    if Instant::now() >= deadline {
+                        return Ok(json!({"timeout": true}));
+                    }
+                }
             }
             "bootstrap" => {
                 let client = self.client("bob")?;
@@ -233,6 +458,10 @@ impl Peer {
     }
 }
 
+fn request_id(request: &Option<VerificationRequest>) -> Option<String> {
+    request.as_ref().map(|request| request.flow_id().to_owned())
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let profile = args
@@ -260,6 +489,15 @@ fn main() -> Result<()> {
                 let mut peer = Peer {
                     base_url: entry.base_url,
                     account: entry.recipient,
+                    first: Account {
+                        username: entry.username,
+                        password: entry.password,
+                    },
+                    alice: None,
+                    requested: Arc::default(),
+                    request: None,
+                    sas: None,
+                    known: HashSet::new(),
                     bob: None,
                     bob2: None,
                 };
@@ -275,7 +513,9 @@ fn main() -> Result<()> {
                     };
                     println!("{reply}");
                 }
-                for client in [peer.bob, peer.bob2].into_iter().flatten() {
+                drop(peer.sas.take());
+                drop(peer.request.take());
+                for client in [peer.bob, peer.bob2, peer.alice].into_iter().flatten() {
                     let _ = client.matrix_auth().logout().await;
                 }
                 Ok(())

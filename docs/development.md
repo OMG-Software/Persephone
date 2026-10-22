@@ -106,7 +106,11 @@ The Encryption panel sets up cross-signing and recovery for an account without t
 
 The composer sends text in the open room. The live sending check uses a second SDK client: build it with `cargo build --locked -p persephone-test-matrix --bin p4_peer`, then drive it with one command per line (`login bob`, `bootstrap`, `create encrypted|plain|public <user> <name>`, `send`, `expect`, `quit`) against a harness profile. See the [sending evidence](evidence/encrypted-sending.md).
 
+"Verify with another device" in the Encryption panel compares emoji with another device of the same account; the panel also offers to accept a request from one. For the live check, the same peer signs in as the first account (`login alice`), restores its keys from the development recovery-key file (`recover <file>`), waits until it knows the new Persephone device (`wait-new-device <seconds>`), and then accepts (`verify-accept <seconds>`) or asks (`verify-request <device id> <seconds>`), followed by `verify-confirm`, `verify-mismatch` or `verify-wait <seconds>`. See the [own-device verification evidence](evidence/own-device-verification.md).
+
 ## Recorded verification
+
+After adding own-device verification, `python tools/dev.py check --offline` passed all 298 tests (263 Rust, 20 frontend, 2 server-registration and 13 development-controller tests). See the [own-device verification evidence](evidence/own-device-verification.md).
 
 After adding encrypted sending, `python tools/dev.py check --offline` passed all 293 tests (259 Rust, 19 frontend, 2 server-registration and 13 development-controller tests). See the [sending evidence](evidence/encrypted-sending.md).
 

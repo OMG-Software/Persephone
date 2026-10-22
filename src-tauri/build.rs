@@ -30,6 +30,10 @@ fn main() {
             "discard_message",
             "allow_unencrypted",
             "set_up_recovery",
+            "verify_this_device",
+            "accept_verification",
+            "confirm_verification",
+            "cancel_verification",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

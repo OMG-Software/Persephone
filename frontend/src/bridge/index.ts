@@ -151,3 +151,23 @@ export function allowUnencrypted(roomId: string): Promise<void> {
 export function setUpRecovery(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('set_up_recovery');
 }
+
+/** Asks the account's other devices to verify this one by comparing emoji. */
+export function verifyThisDevice(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('verify_this_device');
+}
+
+/** Accepts the verification another of the account's devices asked for. */
+export function acceptVerification(flowId: string): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('accept_verification', { flowId });
+}
+
+/** Confirms that the emoji match those on the other device. */
+export function confirmVerification(flowId: string): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('confirm_verification', { flowId });
+}
+
+/** Cancels the verification; while comparing, says the emoji differ. */
+export function cancelVerification(flowId: string): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('cancel_verification', { flowId });
+}

@@ -35,6 +35,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Sign-out](evidence/sign-out.md): remote revocation, key deleted first, crash-safe wipe of the local profile; live runs on Merovingian and Synapse.
 - [Encryption setup](evidence/encryption-setup.md): identity-based key sharing, cross-signing and recovery set up from the page with secrets only in the core's windows, recovery-key verification; live runs on Merovingian and Synapse.
 - [Encrypted sending](evidence/encrypted-sending.md): outbox with per-room order and same-transaction retries, consent before unencrypted sends; live two-account runs on Merovingian and Synapse with an unsigned-device control.
+- [Own-device verification](evidence/own-device-verification.md): emoji comparison with another device of the same account, in both directions and with a mismatch; live runs on Merovingian and Synapse, and why a request from an unknown device is lost.
 - [Session owner](evidence/session-owner.md): lock and unlock while running; leases, generation fencing, retained ownership on timeout; real-app walkthrough.
 - [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.
 - [Live room updates](evidence/live-updates.md): content-free, coalescing core events for subscribed rooms; reply routing; real-app walkthrough including page reloads.

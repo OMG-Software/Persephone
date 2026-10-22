@@ -29,6 +29,7 @@ pub mod sending;
 pub mod session;
 pub mod store;
 pub mod vault;
+pub mod verification;
 pub mod views;
 
 use credentials::CredentialSource;
@@ -332,6 +333,16 @@ impl Core {
                 }
             }
             Call::SetUpRecovery {} => ok(&self.session.set_up_recovery(self.credentials.clone())),
+            Call::VerifyThisDevice {} => ok(&self.session.verify(verification::Action::Start)),
+            Call::AcceptVerification { flow_id } => {
+                self.verify(flow_id, verification::Action::Accept)
+            }
+            Call::ConfirmVerification { flow_id } => {
+                self.verify(flow_id, verification::Action::Confirm)
+            }
+            Call::CancelVerification { flow_id } => {
+                self.verify(flow_id, verification::Action::Cancel)
+            }
             Call::SignOut {} => match self
                 .session
                 .sign_out(LOCK_TIMEOUT, || self.hub.announce_session_change())
@@ -375,6 +386,13 @@ impl Core {
             Err(session::SendRefusal::Full) => Outcome::Error(ErrorCode::LimitExceeded),
             Err(session::SendRefusal::Unavailable) => Outcome::Error(ErrorCode::Unavailable),
         }
+    }
+
+    fn verify(&self, flow_id: &str, action: fn(String) -> verification::Action) -> Outcome {
+        if flow_id.is_empty() || flow_id.len() > verification::MAX_FLOW_ID_BYTES {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        ok(&self.session.verify(action(flow_id.to_owned())))
     }
 
     fn changed(&self, done: bool) -> Outcome {

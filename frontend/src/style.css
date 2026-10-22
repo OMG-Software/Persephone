@@ -267,3 +267,31 @@ header .confirm p {
 .unencrypted {
   font-weight: bold;
 }
+
+.verification {
+  border: 1px solid currentColor;
+  border-radius: 0.5rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+}
+
+.emoji {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+}
+
+.emoji li {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+  min-width: 3.5rem;
+}
+
+.emoji .symbol {
+  font-size: 1.75rem;
+}

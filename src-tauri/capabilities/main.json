@@ -21,6 +21,10 @@
     "allow-retry-message",
     "allow-discard-message",
     "allow-allow-unencrypted",
-    "allow-set-up-recovery"
+    "allow-set-up-recovery",
+    "allow-verify-this-device",
+    "allow-accept-verification",
+    "allow-confirm-verification",
+    "allow-cancel-verification"
   ]
 }

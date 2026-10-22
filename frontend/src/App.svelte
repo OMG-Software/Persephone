@@ -19,6 +19,10 @@
     securityStatus,
     setUpEncryption,
     setUpRecovery,
+    verifyThisDevice,
+    acceptVerification,
+    confirmVerification,
+    cancelVerification,
     signOut,
     roomList,
     signIn,
@@ -549,6 +553,10 @@
             onsetup={() => startSecurity(setUpEncryption)}
             onrecover={() => startSecurity(recoverWithKey)}
             onsetuprecovery={() => startSecurity(setUpRecovery)}
+            onverify={() => startSecurity(verifyThisDevice)}
+            onaccept={(flowId) => startSecurity(() => acceptVerification(flowId))}
+            onconfirm={(flowId) => startSecurity(() => confirmVerification(flowId))}
+            oncancel={(flowId) => startSecurity(() => cancelVerification(flowId))}
           />
         {/if}
         <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} onselect={open} />

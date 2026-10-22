@@ -34,10 +34,14 @@ use crate::security;
 use crate::sending;
 use crate::store::{self, Stores};
 use crate::vault::KeyProtector;
-use matrix_sdk::{Client, ruma::OwnedUserId};
+use crate::verification::{self, Action as VerifyAction, Flow};
+use matrix_sdk::{
+    Client,
+    ruma::{OwnedUserId, events::key::verification::request::ToDeviceKeyVerificationRequestEvent},
+};
 use persephone_contracts::{
     AccountState, AccountStatus, IdentityState, PendingMessage, RecoveryState, SecurityError,
-    SecurityOperation, SecurityStatus, SignInError, StoreState,
+    SecurityOperation, SecurityStatus, SignInError, StoreState, VerificationPhase,
 };
 use std::{
     path::PathBuf,
@@ -144,6 +148,8 @@ enum SecurityCommand {
     SetUpRecovery {
         source: Arc<dyn CredentialSource>,
     },
+    /// Start, accept, confirm or cancel a verification with another device.
+    Verify(VerifyAction),
 }
 
 struct SecurityShared {
@@ -396,6 +402,9 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
         let thread_runtime = runtime.clone();
         entry.sync = std::thread::Builder::new()
             .name("core-sync".into())
+            // Sync processes verification messages, whose SDK futures need
+            // more than the default stack in debug builds.
+            .stack_size(SECURITY_STACK_BYTES)
             .spawn(move || run_sync(&thread_shared, client, thread_user, thread_runtime))
             .ok();
     }
@@ -484,12 +493,28 @@ fn run_security(
     // A recovery-key window can outlive this session; what it reports applies
     // only while the session is still this one.
     let generation = lock(shared).generation;
+    // At most one verification at a time; requests from the account's own
+    // other devices are noted as they arrive during sync.
+    let mut flow: Option<Flow> = None;
+    let incoming: Arc<Mutex<Option<String>>> = Arc::default();
+    let recorder = incoming.clone();
+    let own = user_id.clone();
+    let handler = client.add_event_handler(move |event: ToDeviceKeyVerificationRequestEvent| {
+        if event.sender == own
+            && event.content.transaction_id.as_str().len() <= verification::MAX_FLOW_ID_BYTES
+        {
+            *guard(&recorder) = Some(event.content.transaction_id.to_string());
+        }
+        std::future::ready(())
+    });
     loop {
         if !shared.wait_open(SECURITY_TICK) {
             break;
         }
         let command = guard(&shared.security).command.take();
-        if command.is_none() && Instant::now() < next_refresh {
+        let active = flow.as_ref().is_some_and(|flow| !flow.is_over());
+        let waiting = guard(&incoming).is_some();
+        if command.is_none() && !active && !waiting && Instant::now() < next_refresh {
             continue;
         }
         let lease = match shared.admit() {
@@ -504,53 +529,84 @@ fn run_security(
             }
         };
         let ran = command.is_some();
-        let (outcome, key, identity, recovery, private_keys) = lease.stores().block_on(async {
-            if (published.is_none() || published == Some(false)) && Instant::now() >= next_query {
-                if let Ok(exists) = security::query_identity(&client, &user_id).await {
-                    published = Some(exists);
-                }
-                next_query = Instant::now() + IDENTITY_REQUERY;
-            }
-            let (outcome, key) = match command {
-                Some(SecurityCommand::SetUp { password, source }) => {
-                    match security::set_up(&client, &user_id, &password).await {
-                        Ok(key) => {
-                            published = Some(true);
-                            (None, Some((key, source)))
-                        }
-                        Err(failure) => {
-                            // Where set-up stopped says whether the identity
-                            // was uploaded; when it does not, ask.
-                            published = match failure.published {
-                                Some(known) => Some(known),
-                                None => security::query_identity(&client, &user_id)
-                                    .await
-                                    .ok()
-                                    .or(published),
-                            };
-                            (Some(failure.error), None)
-                        }
+        let (outcome, key, identity, recovery, private_keys, view) =
+            lease.stores().block_on(async {
+                // A new request from another device replaces a finished flow.
+                if flow.as_ref().is_none_or(Flow::is_over) {
+                    let noted = guard(&incoming).take();
+                    if let Some(flow_id) = noted
+                        && let Some(new) = verification::incoming(&client, &user_id, &flow_id).await
+                    {
+                        flow = Some(new);
                     }
                 }
-                Some(SecurityCommand::Recover(key)) => {
-                    (security::recover(&client, &key).await.err(), None)
-                }
-                Some(SecurityCommand::SetUpRecovery { source }) => {
-                    match security::enable_recovery(&client).await {
-                        Ok(key) => (None, Some((key, source))),
-                        Err(error) => (Some(error), None),
+                if (published.is_none() || published == Some(false)) && Instant::now() >= next_query
+                {
+                    if let Ok(exists) = security::query_identity(&client, &user_id).await {
+                        published = Some(exists);
                     }
+                    next_query = Instant::now() + IDENTITY_REQUERY;
                 }
-                None => (None, None),
-            };
-            (
-                outcome,
-                key,
-                security::identity_state(&client, &user_id, published).await,
-                security::recovery_state(&client),
-                published == Some(true) && security::holds_private_keys(&client).await,
-            )
-        });
+                let (outcome, key) = match command {
+                    Some(SecurityCommand::SetUp { password, source }) => {
+                        match security::set_up(&client, &user_id, &password).await {
+                            Ok(key) => {
+                                published = Some(true);
+                                (None, Some((key, source)))
+                            }
+                            Err(failure) => {
+                                // Where set-up stopped says whether the identity
+                                // was uploaded; when it does not, ask.
+                                published = match failure.published {
+                                    Some(known) => Some(known),
+                                    None => security::query_identity(&client, &user_id)
+                                        .await
+                                        .ok()
+                                        .or(published),
+                                };
+                                (Some(failure.error), None)
+                            }
+                        }
+                    }
+                    Some(SecurityCommand::Recover(key)) => {
+                        (security::recover(&client, &key).await.err(), None)
+                    }
+                    Some(SecurityCommand::SetUpRecovery { source }) => {
+                        match security::enable_recovery(&client).await {
+                            Ok(key) => (None, Some((key, source))),
+                            Err(error) => (Some(error), None),
+                        }
+                    }
+                    Some(SecurityCommand::Verify(VerifyAction::Start)) => {
+                        match verification::start(&client, &user_id).await {
+                            Some(new) => {
+                                flow = Some(new);
+                                (None, None)
+                            }
+                            None => (Some(SecurityError::Failed), None),
+                        }
+                    }
+                    Some(SecurityCommand::Verify(action)) => {
+                        let applied = match flow.as_mut() {
+                            Some(flow) => flow.act(&action).await,
+                            None => false,
+                        };
+                        ((!applied).then_some(SecurityError::Failed), None)
+                    }
+                    None => (None, None),
+                };
+                if let Some(flow) = flow.as_mut() {
+                    flow.drive().await;
+                }
+                (
+                    outcome,
+                    key,
+                    security::identity_state(&client, &user_id, published).await,
+                    security::recovery_state(&client),
+                    published == Some(true) && security::holds_private_keys(&client).await,
+                    flow.as_ref().map(Flow::view),
+                )
+            });
         let current = lease.commit(|| ()).is_ok();
         drop(lease);
         if !current {
@@ -562,6 +618,7 @@ fn run_security(
             let status = &mut security.status;
             status.identity = identity;
             status.recovery = recovery;
+            status.verification = view;
             status.can_set_up_recovery = private_keys;
             if ran {
                 status.operation = SecurityOperation::Idle;
@@ -593,6 +650,8 @@ fn run_security(
         }
     }
     let _context = runtime.enter();
+    client.remove_event_handler(handler);
+    drop(flow);
     drop(client);
 }
 
@@ -1134,6 +1193,48 @@ impl Session {
             {
                 security.command = Some(SecurityCommand::SetUpRecovery { source });
                 security.status.operation = SecurityOperation::Working;
+                security.status.error = None;
+            }
+        });
+        self.security_status()
+    }
+
+    /// Starts, accepts, confirms or cancels a verification with another of
+    /// the account's devices. A new verification is offered only to a device
+    /// that is not verified yet; the others need the current flow's ID and the
+    /// right phase. Returns the status at once.
+    pub fn verify(&self, action: VerifyAction) -> SecurityStatus {
+        let Some(generation) = self.shared.open_generation() else {
+            return self.security_status();
+        };
+        if guard(&self.shared.account).is_none() {
+            return self.security_status();
+        }
+        self.shared.with_security(generation, |security| {
+            let flow = security.status.verification.as_ref();
+            let over = flow.is_none_or(|flow| {
+                matches!(
+                    flow.phase,
+                    VerificationPhase::Done | VerificationPhase::Cancelled
+                )
+            });
+            let allowed = match &action {
+                VerifyAction::Start => {
+                    security.status.identity == IdentityState::Unverified && over
+                }
+                VerifyAction::Accept(id) => flow.is_some_and(|flow| {
+                    &flow.flow_id == id && flow.phase == VerificationPhase::Incoming
+                }),
+                VerifyAction::Confirm(id) => flow.is_some_and(|flow| {
+                    &flow.flow_id == id && flow.phase == VerificationPhase::Compare
+                }),
+                VerifyAction::Cancel(id) => flow.is_some_and(|flow| &flow.flow_id == id) && !over,
+            };
+            if allowed
+                && security.status.operation == SecurityOperation::Idle
+                && security.command.is_none()
+            {
+                security.command = Some(SecurityCommand::Verify(action));
                 security.status.error = None;
             }
         });

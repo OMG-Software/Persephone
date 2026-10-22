@@ -92,7 +92,25 @@ pub enum Call {
     /// Set up recovery alone for a verified identity without it (an earlier
     /// attempt failed). The core shows the new recovery key in its own window.
     SetUpRecovery {},
+    /// Ask the account's other devices to verify this one by comparing
+    /// emoji. Progress arrives as [`Event::SecurityChanged`].
+    VerifyThisDevice {},
+    /// Accept a verification another of the account's devices asked for.
+    AcceptVerification {
+        flow_id: String,
+    },
+    /// Confirm that the emoji match those on the other device.
+    ConfirmVerification {
+        flow_id: String,
+    },
+    /// Cancel a verification; during the comparison, say the emoji differ.
+    CancelVerification {
+        flow_id: String,
+    },
 }
+
+/// Longest verification flow ID either side accepts.
+pub const MAX_FLOW_ID_BYTES: usize = 128;
 
 /// Longest message body either side accepts, in bytes (the display limit).
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
@@ -351,6 +369,11 @@ mod tests {
             br#"{"id":1,"call":{"command":"allow_unencrypted","room_id":"!r:s","all":true}}"#,
             br#"{"id":1,"call":{"command":"pending_messages"}}"#,
             br#"{"id":1,"call":{"command":"set_up_recovery","passphrase":"x"}}"#,
+            br#"{"id":1,"call":{"command":"verify_this_device","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"accept_verification"}}"#,
+            br#"{"id":1,"call":{"command":"confirm_verification","flow_id":"f","emoji":[]}}"#,
+            br#"{"id":1,"call":{"command":"cancel_verification","flow_id":null}}"#,
+            br#"{"id":1,"call":{"command":"trust_device","device_id":"D"}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

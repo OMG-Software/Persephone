@@ -10,14 +10,25 @@
     busy,
     onsetup,
     onrecover,
-    onsetuprecovery
+    onsetuprecovery,
+    onverify,
+    onaccept,
+    onconfirm,
+    oncancel
   }: {
     security: SecurityStatus;
     busy: boolean;
     onsetup: () => void;
     onrecover: () => void;
     onsetuprecovery: () => void;
+    onverify: () => void;
+    onaccept: (flowId: string) => void;
+    onconfirm: (flowId: string) => void;
+    oncancel: (flowId: string) => void;
   } = $props();
+
+  const flow = $derived(security.verification);
+  const flowOpen = $derived(flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled');
 
   // Fixed text per code; the core sends codes only. Secrets never reach this
   // page: the core asks for them, and shows the recovery key, in its own
@@ -65,7 +76,10 @@
       This device is not verified. Verify it to read and send encrypted messages: other people's
       devices do not share keys with an unverified device.
     </p>
-    <button type="button" disabled={waiting} onclick={onrecover}>Use recovery key</button>
+    {#if !flowOpen}
+      <button type="button" disabled={waiting} onclick={onverify}>Verify with another device</button>
+      <button type="button" disabled={waiting} onclick={onrecover}>Use recovery key</button>
+    {/if}
   {:else}
     <p>This device is verified.</p>
     {#if security.recovery === 'disabled' && security.canSetUpRecovery}
@@ -75,6 +89,37 @@
       </p>
       <button type="button" disabled={waiting} onclick={onsetuprecovery}>Set up recovery</button>
     {/if}
+  {/if}
+  {#if flow}
+    <div class="verification" role={flow.phase === 'compare' || flow.phase === 'incoming' ? 'alertdialog' : null}>
+      {#if flow.phase === 'incoming'}
+        <p>
+          Your other device
+          {#if flow.otherDevice}<bdi>{flow.otherDevice}</bdi>{/if}
+          wants to verify this device. Accept only if you started this on your own device.
+        </p>
+        <button type="button" disabled={busy} onclick={() => onaccept(flow.flowId)}>Accept</button>
+        <button type="button" disabled={busy} onclick={() => oncancel(flow.flowId)}>Decline</button>
+      {:else if flow.phase === 'waiting'}
+        <p role="status">Waiting for your other device. Accept the request there.</p>
+        <button type="button" disabled={busy} onclick={() => oncancel(flow.flowId)}>Cancel</button>
+      {:else if flow.phase === 'compare'}
+        <p>Do these emoji match the ones on your other device, in the same order?</p>
+        <ol class="emoji">
+          {#each flow.emoji as item, index (index)}
+            <li><span class="symbol" aria-hidden="true">{item.symbol}</span> {item.description}</li>
+          {/each}
+        </ol>
+        <button type="button" disabled={busy} onclick={() => onconfirm(flow.flowId)}>They match</button>
+        <button type="button" disabled={busy} onclick={() => oncancel(flow.flowId)}>They don't match</button>
+      {:else if flow.phase === 'confirmed'}
+        <p role="status">Waiting for your other device to confirm.</p>
+      {:else if flow.phase === 'done'}
+        <p role="status">Verification finished.</p>
+      {:else}
+        <p role="status">Verification was cancelled.</p>
+      {/if}
+    </div>
   {/if}
   {#if recoveryText[security.recovery]}
     <p>{recoveryText[security.recovery]}</p>

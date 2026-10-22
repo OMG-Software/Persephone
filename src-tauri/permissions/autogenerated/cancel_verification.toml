@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-verification"
+description = "Enables the cancel_verification command without any pre-configured scope."
+commands.allow = ["cancel_verification"]
+
+[[permission]]
+identifier = "deny-cancel-verification"
+description = "Denies the cancel_verification command without any pre-configured scope."
+commands.deny = ["cancel_verification"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-accept-verification"
+description = "Enables the accept_verification command without any pre-configured scope."
+commands.allow = ["accept_verification"]
+
+[[permission]]
+identifier = "deny-accept-verification"
+description = "Denies the accept_verification command without any pre-configured scope."
+commands.deny = ["accept_verification"]

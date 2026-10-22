@@ -287,6 +287,44 @@ pub enum SecurityError {
     Failed,
 }
 
+/// Where a verification with another of the account's devices is.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationPhase {
+    /// Another device asked to verify; this one can accept or decline.
+    Incoming,
+    /// Waiting for the other device.
+    Waiting,
+    /// Compare the emoji with the other device.
+    Compare,
+    /// This device confirmed; waiting for the other one.
+    Confirmed,
+    Done,
+    Cancelled,
+}
+
+/// One emoji of the comparison, from the fixed table of the Matrix
+/// specification. Public comparison data, not a secret.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SasEmoji {
+    pub symbol: String,
+    pub description: String,
+}
+
+/// A verification with another device of the same account. The page acts on
+/// it by `flow_id`; the core refuses an action for any other flow.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct VerificationView {
+    pub flow_id: String,
+    pub phase: VerificationPhase,
+    /// Seven emoji once they can be compared, otherwise empty.
+    pub emoji: Vec<SasEmoji>,
+    /// The other device's name as it reported it (untrusted, projected).
+    pub other_device: Option<String>,
+}
+
 /// Reply of `security_status` and the encryption commands. Codes only: never
 /// a key, password or recovery key.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -296,6 +334,7 @@ pub struct SecurityStatus {
     pub recovery: RecoveryState,
     pub operation: SecurityOperation,
     pub error: Option<SecurityError>,
+    pub verification: Option<VerificationView>,
     /// This device can set up recovery alone (it holds the private keys of a
     /// published identity whose recovery is not set up).
     pub can_set_up_recovery: bool,
@@ -308,6 +347,7 @@ impl SecurityStatus {
             recovery: RecoveryState::Unknown,
             operation: SecurityOperation::Idle,
             error: None,
+            verification: None,
             can_set_up_recovery: false,
         }
     }
@@ -354,6 +394,9 @@ pub fn generated_typescript() -> String {
         format!("export {}", RecoveryState::decl(&config)),
         format!("export {}", SecurityOperation::decl(&config)),
         format!("export {}", SecurityError::decl(&config)),
+        format!("export {}", VerificationPhase::decl(&config)),
+        format!("export {}", SasEmoji::decl(&config)),
+        format!("export {}", VerificationView::decl(&config)),
         format!("export {}", SecurityStatus::decl(&config)),
         format!("export {}", RoomEncryption::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
