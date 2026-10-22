@@ -2,14 +2,19 @@
 //! one bit; the worker decodes nothing unless the result is zero.
 
 /// The process token is not an AppContainer token.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const MISSING_APPCONTAINER: u32 = 1 << 0;
 /// The process is not inside a Job object.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const MISSING_JOB: u32 = 1 << 1;
 /// Executable memory can still be allocated (dynamic code not prohibited).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const MISSING_DYNAMIC_CODE_BLOCK: u32 = 1 << 2;
 /// Win32k system calls are not disabled.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const MISSING_WIN32K_LOCKDOWN: u32 = 1 << 3;
 /// A check could not be evaluated; treated as missing.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const CHECK_FAILED: u32 = 1 << 4;
 /// Containment is not implemented for this operating system.
 #[cfg_attr(windows, allow(dead_code))]

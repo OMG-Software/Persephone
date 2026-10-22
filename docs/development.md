@@ -81,7 +81,31 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 
 ### Continuous integration
 
-[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` on a GitHub-hosted Windows runner for every pull request, every push to `main` and on demand. It pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target), Node.js 24.15.0 and Python 3.14, and caches only downloaded Cargo and npm sources. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit. Linux and macOS jobs are not set up yet.
+[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` (`python3` in the distribution containers) for every pull request, every push to `main` and on demand. Every job pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target) and Node.js 24.15.0, uses the committed lockfiles, and caches only downloaded Cargo and npm sources. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit.
+
+| Job | Runner or image | Prerequisites | Python |
+| --- | --- | --- | --- |
+| `windows` | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
+| `macos-latest` | `macos-latest` (arm64) | Preinstalled Xcode tools | 3.14 (setup-python) |
+| `ubuntu-latest` | `ubuntu-latest` (24.04) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config` | 3.14 (setup-python) |
+| `debian-13` | `debian:trixie` container | `apt-get`: build tools, `libwebkit2gtk-4.1-dev` | Distribution `python3` |
+| `arch` | `archlinux:base-devel` container | `pacman -Syu`: `webkit2gtk-4.1` | Distribution `python` |
+| `fedora-44` | `fedora:44` container | `dnf`: build tools, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
+| `opensuse-leap-16.0` | `opensuse/leap:16.0` container | `zypper`: build tools, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
+
+- **Containers.** Container images are pinned by digest in the workflow. Containers install Rust with rustup from `sh.rustup.rs` and Node.js with setup-node.
+- **Packages are not pinned.** Packages come from each distribution's current repositories, so only the base image is fixed. Arch supports only full upgrades, so its job always builds against the current rolling release.
+- **Off Windows, only build and tests are covered.** There is no vault, credential prompt, UI containment or worker containment there. These fail closed (`unsupported`), and the core refuses to start the UI. A passing non-Windows job therefore shows that the code builds and its tests pass, not that the application runs or is contained on that OS. No job launches the application, on Windows either.
+- **Tests that are not compiled off Windows.** The AppContainer probe, DPAPI, the native-prompt and the contained-worker tests compile only on Windows. This is why Windows runs 41 more Rust tests.
+
+Run 39785251911 at `04c0538` passed every job:
+
+| Jobs | Rust tests (workspace + development feature) | Frontend | Python |
+| --- | --- | --- | --- |
+| `windows` | 235 (202 + 33) | 16 | 15 (2 + 13) |
+| `macos-latest`, `ubuntu-latest`, `debian-13`, `arch`, `fedora-44`, `opensuse-leap-16.0` | 194 (163 + 31) each | 16 each | 15 (2 + 13) each |
+
+On every job, `cargo fmt`, Clippy with `-D warnings` (default and development feature), the contract drift check and the TypeScript check also passed. Each job took 8 to 17 minutes. The `#[cfg(unix)]` directory sync in `crates/core/src/store.rs` compiles on Linux and macOS, and the sign-out and store tests that use it pass there.
 
 ## Disposable homeservers
 
@@ -117,6 +141,8 @@ After the fourth round of encryption setup review fixes, the parts of `python to
 After the third round of encryption setup review fixes, `python tools/dev.py check --offline` passed all 281 tests (249 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). The new account test failed on the code before the fix.
 
 After the second round of encryption setup review fixes, `python tools/dev.py check --offline` passed all 280 tests (248 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first round passed 278 (246 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first version passed 276 (244 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). See the [encryption setup evidence](evidence/encryption-setup.md).
+
+After the portability fixes (commit `e005c7c`), `python tools/dev.py check --offline` passed all 266 tests on Windows (235 Rust, 16 frontend, 2 server-registration and 13 development-controller tests). The later fixture change was checked locally with `cargo test` and Clippy for `persephone-test-matrix`. At `04c0538`, every CI job passed; see [continuous integration](#continuous-integration).
 
 After merging sign-out and failed-window retry, `python tools/dev.py check --offline` passed all 266 tests (235 Rust, 16 frontend, 2 server-registration and 13 development-controller tests).
 
