@@ -17,9 +17,12 @@
 pub mod core_link;
 
 use core_link::{CoreError, CoreLink};
-use persephone_contracts::{AccountStatus, AppStatus, RoomList, StoreState, TimelinePage};
+use persephone_contracts::{
+    AccountStatus, AppStatus, PendingMessage, RoomList, SecurityStatus, StoreState, TimelinePage,
+};
 use persephone_core_protocol::{
-    Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_ROOM_ID_BYTES,
+    Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
+    MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -141,6 +144,11 @@ impl Subscriptions {
                     let _ = channel.send("rooms");
                 }
             }
+            Event::SecurityChanged {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("security");
+                }
+            }
         }
     }
 
@@ -225,6 +233,131 @@ async fn sign_out(core: State<'_, CoreLink>) -> Result<StoreState, String> {
     relay(core.inner(), Call::SignOut {}).await
 }
 
+/// The account's encryption state. Codes only.
+#[tauri::command]
+async fn security_status(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::SecurityStatus {}).await
+}
+
+/// Starts setting up encryption. Nothing crosses: the core asks for the
+/// password and shows the recovery key in its own windows.
+#[tauri::command]
+async fn set_up_encryption(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::SetUpEncryption {}).await
+}
+
+/// Starts verifying this device with the recovery key, which the core asks
+/// for in its own window.
+#[tauri::command]
+async fn recover_with_key(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::RecoverWithKey {}).await
+}
+
+/// Queues a text message. The core checks the room and body and decides at
+/// send time whether the room needs consent.
+#[tauri::command]
+async fn send_message(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    body: String,
+) -> Result<PendingMessage, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || body.len() > MAX_MESSAGE_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SendMessage { room_id, body }).await
+}
+
+/// The room's messages sent from this device in this session.
+#[tauri::command]
+async fn pending_messages(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<Vec<PendingMessage>, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::PendingMessages { room_id }).await
+}
+
+#[tauri::command]
+async fn retry_message(core: State<'_, CoreLink>, local_id: u32) -> Result<(), String> {
+    relay::<()>(core.inner(), Call::RetryMessage { local_id }).await
+}
+
+#[tauri::command]
+async fn discard_message(core: State<'_, CoreLink>, local_id: u32) -> Result<(), String> {
+    relay::<()>(core.inner(), Call::DiscardMessage { local_id }).await
+}
+
+/// Records the user's consent to send unencrypted messages in a room; the
+/// page asks first.
+#[tauri::command]
+async fn allow_unencrypted(core: State<'_, CoreLink>, room_id: String) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::AllowUnencrypted { room_id }).await
+}
+
+/// Starts setting up recovery alone (an earlier attempt failed). The core
+/// shows the new recovery key in its own window.
+#[tauri::command]
+async fn set_up_recovery(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::SetUpRecovery {}).await
+}
+
+/// Asks the account's other devices to verify this one.
+#[tauri::command]
+async fn verify_this_device(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::VerifyThisDevice {}).await
+}
+
+/// Accepts, confirms or cancels the verification with this flow ID; the core
+/// refuses any other flow.
+async fn verification_step(
+    core: &CoreLink,
+    flow_id: String,
+    call: fn(String) -> Call,
+) -> Result<SecurityStatus, String> {
+    if flow_id.len() > MAX_FLOW_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core, call(flow_id)).await
+}
+
+#[tauri::command]
+async fn accept_verification(
+    core: State<'_, CoreLink>,
+    flow_id: String,
+) -> Result<SecurityStatus, String> {
+    verification_step(core.inner(), flow_id, |flow_id| Call::AcceptVerification {
+        flow_id,
+    })
+    .await
+}
+
+#[tauri::command]
+async fn confirm_verification(
+    core: State<'_, CoreLink>,
+    flow_id: String,
+) -> Result<SecurityStatus, String> {
+    verification_step(core.inner(), flow_id, |flow_id| Call::ConfirmVerification {
+        flow_id,
+    })
+    .await
+}
+
+#[tauri::command]
+async fn cancel_verification(
+    core: State<'_, CoreLink>,
+    flow_id: String,
+) -> Result<SecurityStatus, String> {
+    verification_step(core.inner(), flow_id, |flow_id| Call::CancelVerification {
+        flow_id,
+    })
+    .await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -275,7 +408,20 @@ pub fn configure<R: Runtime>(
             lock_session,
             unlock_session,
             sign_in,
-            sign_out
+            sign_out,
+            security_status,
+            set_up_encryption,
+            recover_with_key,
+            send_message,
+            pending_messages,
+            retry_message,
+            discard_message,
+            allow_unencrypted,
+            set_up_recovery,
+            verify_this_device,
+            accept_verification,
+            confirm_verification,
+            cancel_verification
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

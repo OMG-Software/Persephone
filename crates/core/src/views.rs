@@ -12,7 +12,7 @@
 //! Every reply must fit one control frame, so pages are bounded by item count
 //! and by serialized size.
 
-use persephone_contracts::{RoomList, RoomSummary, TimelineItem, TimelinePage};
+use persephone_contracts::{RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage};
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 
 pub const MAX_ROOMS: usize = 200;
@@ -220,6 +220,8 @@ impl Fixtures {
                 room_id: room.room_id.clone(),
                 display_name: room.raw_name.as_deref().map(project_name),
                 unread_count: room.unread,
+                // Synthetic rooms: nothing can be sent to them.
+                encryption: RoomEncryption::Unknown,
             })
             .collect();
         RoomList {

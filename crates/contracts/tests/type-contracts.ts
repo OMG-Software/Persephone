@@ -15,6 +15,7 @@ const invalidName: RoomSummary = {
   room_id: "!r:s",
   displayName: null,
   unreadCount: 0,
+  encryption: "encrypted",
 };
 
 const unknownStore: AppStatus = {

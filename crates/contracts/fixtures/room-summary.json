@@ -1,5 +1,6 @@
 {
   "roomId": "!example:server.invalid",
   "displayName": null,
-  "unreadCount": 4294967295
+  "unreadCount": 4294967295,
+  "encryption": "encrypted"
 }

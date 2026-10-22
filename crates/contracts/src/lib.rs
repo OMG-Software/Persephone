@@ -9,6 +9,68 @@ pub struct RoomSummary {
     pub display_name: Option<String>,
     /// u32 caps this count below JavaScript's exact-integer limit.
     pub unread_count: u32,
+    pub encryption: RoomEncryption,
+}
+
+/// Whether a room's messages are end-to-end encrypted.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomEncryption {
+    Encrypted,
+    /// Messages sent here are readable by the homeserver; sending needs a
+    /// confirmation first (ADR-0005).
+    NotEncrypted,
+    /// Not known yet; the core checks before sending.
+    Unknown,
+}
+
+/// Where a message the user sent is.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingState {
+    /// Waiting its turn (later messages in a room wait for earlier ones).
+    Queued,
+    Sending,
+    /// The homeserver accepted it; `event_id` names the event.
+    Sent,
+    /// Not sent; `failure` says why. It can be retried or discarded.
+    Failed,
+    /// The connection failed after the request may have reached the
+    /// homeserver. Retrying sends the same request again, which the
+    /// homeserver recognises, so it cannot arrive twice.
+    Unknown,
+}
+
+/// Why a message was not sent. Codes only.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SendFailure {
+    /// The room is not encrypted and sending in it was not confirmed.
+    ConfirmationRequired,
+    /// This device is not verified, so room keys cannot be shared from it.
+    DeviceNotVerified,
+    /// A verified member changed identity; nothing is sent to them until
+    /// that is resolved.
+    IdentityChanged,
+    /// This account is not joined to the room.
+    NotJoined,
+    /// The homeserver refused the message.
+    Rejected,
+    /// Anything else.
+    Failed,
+}
+
+/// A message the user sent from this device in this session. Only the body
+/// the user typed is held; nothing is kept after a lock or restart.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PendingMessage {
+    pub local_id: u32,
+    pub room_id: String,
+    pub body: String,
+    pub state: PendingState,
+    pub event_id: Option<String>,
+    pub failure: Option<SendFailure>,
 }
 
 /// Serde's internally tagged wire representation is mirrored by ts-rs serde compatibility.
@@ -36,6 +98,12 @@ pub enum TimelineItem {
 pub enum NoticeKind {
     /// Encrypted, and this device has no key for it.
     Undecryptable,
+    /// The sender chose not to share the key with this device, for example
+    /// because this device is not verified.
+    Withheld,
+    /// Not shown: the sender's device is not signed by its owner's identity,
+    /// so it could be a device the sender never added.
+    UntrustedSender,
     /// A kind of event this client does not display yet.
     Unsupported,
 }
@@ -156,11 +224,141 @@ impl AccountStatus {
     }
 }
 
+/// Whether this account's encryption identity is set up and trusted here.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityState {
+    /// Not known yet (signed out, locked, or not yet asked of the homeserver).
+    Unknown,
+    /// The account has no cross-signing identity: encryption can be set up.
+    None,
+    /// The account has an identity, but this device is not verified with it:
+    /// verify it from another device or with the recovery key.
+    Unverified,
+    /// This device is verified with the account's identity and can send.
+    Verified,
+}
+
+/// Whether the account's keys are kept in secret storage on the homeserver.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryState {
+    Unknown,
+    Disabled,
+    /// Set up, but this device lacks some of the stored secrets.
+    Incomplete,
+    Enabled,
+}
+
+/// What the core is doing with the account's encryption.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityOperation {
+    Idle,
+    /// The core's own window is asking for the account password.
+    WaitingForPassword,
+    /// The core's own window is asking for the recovery key.
+    WaitingForRecoveryKey,
+    /// Talking to the homeserver.
+    Working,
+}
+
+/// Why an encryption operation failed. Codes only.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityError {
+    /// The user closed the prompt.
+    Cancelled,
+    /// No native prompt on this platform.
+    Unsupported,
+    /// The homeserver refused the password.
+    InvalidPassword,
+    /// The account already has an identity: verify this device instead.
+    IdentityExists,
+    /// The recovery key did not open the account's secret storage.
+    WrongRecoveryKey,
+    /// The homeserver already holds a key backup this device cannot use.
+    BackupExistsOnServer,
+    /// Recovery was set up, but its key could not be shown.
+    RecoveryKeyNotShown,
+    /// The homeserver could not be reached.
+    Unreachable,
+    /// Anything else.
+    Failed,
+}
+
+/// Where a verification with another of the account's devices is.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationPhase {
+    /// Another device asked to verify; this one can accept or decline.
+    Incoming,
+    /// Waiting for the other device.
+    Waiting,
+    /// Compare the emoji with the other device.
+    Compare,
+    /// This device confirmed; waiting for the other one.
+    Confirmed,
+    Done,
+    Cancelled,
+}
+
+/// One emoji of the comparison, from the fixed table of the Matrix
+/// specification. Public comparison data, not a secret.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SasEmoji {
+    pub symbol: String,
+    pub description: String,
+}
+
+/// A verification with another device of the same account. The page acts on
+/// it by `flow_id`; the core refuses an action for any other flow.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct VerificationView {
+    pub flow_id: String,
+    pub phase: VerificationPhase,
+    /// Seven emoji once they can be compared, otherwise empty.
+    pub emoji: Vec<SasEmoji>,
+    /// The other device's name as it reported it (untrusted, projected).
+    pub other_device: Option<String>,
+}
+
+/// Reply of `security_status` and the encryption commands. Codes only: never
+/// a key, password or recovery key.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SecurityStatus {
+    pub identity: IdentityState,
+    pub recovery: RecoveryState,
+    pub operation: SecurityOperation,
+    pub error: Option<SecurityError>,
+    pub verification: Option<VerificationView>,
+    /// This device can set up recovery alone (it holds the private keys of a
+    /// published identity whose recovery is not set up).
+    pub can_set_up_recovery: bool,
+}
+
+impl SecurityStatus {
+    pub fn unknown() -> Self {
+        Self {
+            identity: IdentityState::Unknown,
+            recovery: RecoveryState::Unknown,
+            operation: SecurityOperation::Idle,
+            error: None,
+            verification: None,
+            can_set_up_recovery: false,
+        }
+    }
+}
+
 pub fn sample_room_summary() -> RoomSummary {
     RoomSummary {
         room_id: "!example:server.invalid".into(),
         display_name: None,
         unread_count: u32::MAX,
+        encryption: RoomEncryption::Encrypted,
     }
 }
 
@@ -192,7 +390,19 @@ pub fn generated_typescript() -> String {
         format!("export {}", SignInError::decl(&config)),
         format!("export {}", AccountStatus::decl(&config)),
         format!("export {}", AppStatus::decl(&config)),
+        format!("export {}", IdentityState::decl(&config)),
+        format!("export {}", RecoveryState::decl(&config)),
+        format!("export {}", SecurityOperation::decl(&config)),
+        format!("export {}", SecurityError::decl(&config)),
+        format!("export {}", VerificationPhase::decl(&config)),
+        format!("export {}", SasEmoji::decl(&config)),
+        format!("export {}", VerificationView::decl(&config)),
+        format!("export {}", SecurityStatus::decl(&config)),
+        format!("export {}", RoomEncryption::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
+        format!("export {}", PendingState::decl(&config)),
+        format!("export {}", SendFailure::decl(&config)),
+        format!("export {}", PendingMessage::decl(&config)),
         format!("export {}", RoomList::decl(&config)),
         format!("export {}", NoticeKind::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),

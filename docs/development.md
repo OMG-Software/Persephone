@@ -126,7 +126,25 @@ Run `.local/build/rust/debug/persephone.exe --profile <new directory under .loca
 
 "Sign out" in the header attempts to revoke the session on the homeserver and deletes the profile's key; the next start deletes the store files. Restart Persephone to sign in again. See the [sign-out evidence](evidence/sign-out.md).
 
+The Encryption panel sets up cross-signing and recovery for an account without them, or verifies this device with the recovery key; the core asks for the password or key in its own window and shows a new recovery key in its own window. With `PERSEPHONE_DEV_PROFILE`, the development build answers the password from the profile, and `PERSEPHONE_DEV_RECOVERY_FILE` (a path inside `.local`) replaces the recovery-key windows with that file. See the [encryption setup evidence](evidence/encryption-setup.md).
+
+The composer sends text in the open room. The live sending check uses a second SDK client: build it with `cargo build --locked -p persephone-test-matrix --bin p4_peer`, then drive it with one command per line (`login bob`, `bootstrap`, `create encrypted|plain|public <user> <name>`, `send`, `expect`, `quit`) against a harness profile. See the [sending evidence](evidence/encrypted-sending.md).
+
+"Verify with another device" in the Encryption panel compares emoji with another device of the same account; the panel also offers to accept a request from one. For the live check, the same peer signs in as the first account (`login alice`), restores its keys from the development recovery-key file (`recover <file>`), waits until it knows the new Persephone device (`wait-new-device <seconds>`), and then accepts (`verify-accept <seconds>`) or asks (`verify-request <device id> <seconds>`), followed by `verify-confirm`, `verify-mismatch` or `verify-wait <seconds>`. See the [own-device verification evidence](evidence/own-device-verification.md).
+
 ## Recorded verification
+
+After adding own-device verification, `python tools/dev.py check --offline` passed all 298 tests (263 Rust, 20 frontend, 2 server-registration and 13 development-controller tests). See the [own-device verification evidence](evidence/own-device-verification.md).
+
+After the sending review fixes (outbox byte budget, room-ID parsing, unknown encryption refused, queueing under the session lock, ordered pending replies), `python tools/dev.py check --offline` passed all 299 tests (265 Rust, 19 frontend, 2 server-registration and 13 development-controller tests).
+
+After adding encrypted sending, `python tools/dev.py check --offline` passed all 293 tests (259 Rust, 19 frontend, 2 server-registration and 13 development-controller tests). See the [sending evidence](evidence/encrypted-sending.md).
+
+After the fourth round of encryption setup review fixes, the parts of `python tools/dev.py check --offline` passed in separate runs: 250 Rust tests, formatting and Clippy in the full run, whose frontend tests froze after a file-lock error (`EPERM`) in the worktree's Vite cache; then `frontend` (17 tests), `contracts` and both Python test directories (2 and 13 tests) each passed on their own.
+
+After the third round of encryption setup review fixes, `python tools/dev.py check --offline` passed all 281 tests (249 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). The new account test failed on the code before the fix.
+
+After the second round of encryption setup review fixes, `python tools/dev.py check --offline` passed all 280 tests (248 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first round passed 278 (246 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first version passed 276 (244 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). See the [encryption setup evidence](evidence/encryption-setup.md).
 
 After the portability fixes (commit `e005c7c`), `python tools/dev.py check --offline` passed all 266 tests on Windows (235 Rust, 16 frontend, 2 server-registration and 13 development-controller tests). The later fixture change was checked locally with `cargo test` and Clippy for `persephone-test-matrix`. At `04c0538`, every CI job passed; see [continuous integration](#continuous-integration).
 

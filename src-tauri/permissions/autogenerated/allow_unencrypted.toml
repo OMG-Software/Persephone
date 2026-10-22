@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-allow-unencrypted"
+description = "Enables the allow_unencrypted command without any pre-configured scope."
+commands.allow = ["allow_unencrypted"]
+
+[[permission]]
+identifier = "deny-allow-unencrypted"
+description = "Denies the allow_unencrypted command without any pre-configured scope."
+commands.deny = ["allow_unencrypted"]

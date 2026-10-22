@@ -57,7 +57,63 @@ pub enum Call {
     /// then delete this device's local profile (keys first). Replies with the
     /// resulting store state.
     SignOut {},
+    /// The account's encryption state (codes only).
+    SecurityStatus {},
+    /// Set up cross-signing and recovery for an account without an identity.
+    /// The core asks for the password in its own window and shows the
+    /// recovery key in its own window; neither crosses this channel. Replies
+    /// at once with the status; progress arrives as [`Event::SecurityChanged`].
+    SetUpEncryption {},
+    /// Verify this device with the recovery key, asked in the core's own
+    /// window. Replies at once with the status, like `SetUpEncryption`.
+    RecoverWithKey {},
+    /// Queue a text message. Replies at once with the queued message; its
+    /// progress arrives as [`Event::RoomChanged`] for the room.
+    SendMessage {
+        room_id: String,
+        body: String,
+    },
+    /// The room's messages sent from this device in this session.
+    PendingMessages {
+        room_id: String,
+    },
+    /// Send a failed or unknown message again, with the same transaction ID.
+    RetryMessage {
+        local_id: u32,
+    },
+    /// Drop a message that is not being sent.
+    DiscardMessage {
+        local_id: u32,
+    },
+    /// Record the user's consent to send unencrypted messages in this room.
+    AllowUnencrypted {
+        room_id: String,
+    },
+    /// Set up recovery alone for a verified identity without it (an earlier
+    /// attempt failed). The core shows the new recovery key in its own window.
+    SetUpRecovery {},
+    /// Ask the account's other devices to verify this one by comparing
+    /// emoji. Progress arrives as [`Event::SecurityChanged`].
+    VerifyThisDevice {},
+    /// Accept a verification another of the account's devices asked for.
+    AcceptVerification {
+        flow_id: String,
+    },
+    /// Confirm that the emoji match those on the other device.
+    ConfirmVerification {
+        flow_id: String,
+    },
+    /// Cancel a verification; during the comparison, say the emoji differ.
+    CancelVerification {
+        flow_id: String,
+    },
 }
+
+/// Longest verification flow ID either side accepts.
+pub const MAX_FLOW_ID_BYTES: usize = 128;
+
+/// Longest message body either side accepts, in bytes (the display limit).
+pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
 /// Longest homeserver URL either side accepts in a call.
 pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
@@ -82,6 +138,9 @@ pub enum Event {
     /// Rooms were added, removed or changed: fetch the room list again.
     /// Coalesced like room events.
     RoomListChanged {},
+    /// The account's encryption state changed: ask for `security_status`.
+    /// Coalesced; it does not clear what the UI shows.
+    SecurityChanged {},
 }
 
 /// Every frame from the core to the UI: a reply to a call, or an event.
@@ -236,6 +295,7 @@ mod tests {
         });
         let session = CoreMessage::Event(Event::SessionChanged {});
         let list = CoreMessage::Event(Event::RoomListChanged {});
+        let security = CoreMessage::Event(Event::SecurityChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
         send(&mut wire, &session).unwrap();
@@ -244,9 +304,14 @@ mod tests {
             "wire form of the session event"
         );
         send(&mut wire, &list).unwrap();
+        send(&mut wire, &security).unwrap();
+        assert!(
+            String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"security_changed":{}}}"#),
+            "wire form of the security event"
+        );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session, list] {
+        for expected in [reply, event, session, list, security] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -259,6 +324,8 @@ mod tests {
             br#"{"event":{"session_changed":{"state":"locked"}}}"#,
             br#"{"event":"session_changed"}"#,
             br#"{"event":{"room_list_changed":{"rooms":[]}}}"#,
+            br#"{"event":{"security_changed":{"identity":"verified"}}}"#,
+            br#"{"event":{"security_changed":{"recovery_key":"x"}}}"#,
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));
             assert!(
@@ -289,6 +356,24 @@ mod tests {
             br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,
             br#"{"id":1,"call":{"command":"sign_out","keep_data":true}}"#,
+            br#"{"id":1,"call":{"command":"security_status","user":"@a:s"}}"#,
+            br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"recover_with_key","recovery_key":"x"}}"#,
+            br#"{"id":1,"call":{"command":"export_room_keys"}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","encrypted":false}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","txn_id":"t"}}"#,
+            br#"{"id":1,"call":{"command":"retry_message","local_id":-1}}"#,
+            br#"{"id":1,"call":{"command":"retry_message","local_id":4294967296}}"#,
+            br#"{"id":1,"call":{"command":"discard_message","local_id":"1"}}"#,
+            br#"{"id":1,"call":{"command":"allow_unencrypted","room_id":"!r:s","all":true}}"#,
+            br#"{"id":1,"call":{"command":"pending_messages"}}"#,
+            br#"{"id":1,"call":{"command":"set_up_recovery","passphrase":"x"}}"#,
+            br#"{"id":1,"call":{"command":"verify_this_device","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"accept_verification"}}"#,
+            br#"{"id":1,"call":{"command":"confirm_verification","flow_id":"f","emoji":[]}}"#,
+            br#"{"id":1,"call":{"command":"cancel_verification","flow_id":null}}"#,
+            br#"{"id":1,"call":{"command":"trust_device","device_id":"D"}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

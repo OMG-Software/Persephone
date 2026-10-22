@@ -4,9 +4,12 @@
 //! * Names and senders go through `views::project_name`; message bodies
 //!   through `views::project_body`.
 //! * Text messages (text, notice, emote) are shown as messages. Other
-//!   `m.room.message` types become an `unsupported` notice and events this
-//!   device cannot decrypt an `undecryptable` notice, so neither disappears.
-//!   State events, reactions and other non-message events are not shown.
+//!   `m.room.message` types become an `unsupported` notice, so nothing
+//!   disappears. An encrypted event that cannot be shown becomes a notice
+//!   saying why: `withheld` (the sender withheld the key from this device),
+//!   `untrusted_sender` (the sending device is not signed by its owner, which
+//!   the decryption settings refuse; ADR-0005) or `undecryptable`. State
+//!   events, reactions and other non-message events are not shown.
 //! * A page holds at most `MAX_PAGE_ITEMS` items and `MAX_PAGE_BYTES`
 //!   serialized. The SDK cannot resume inside a fetched chunk, so a chunk that
 //!   would exceed the byte budget is fetched again with half the limit, down to
@@ -17,8 +20,8 @@
 
 use crate::views::{MAX_PAGE_BYTES, MAX_PAGE_ITEMS, MAX_ROOMS, project_body, project_name};
 use matrix_sdk::{
-    Client, RoomState,
-    deserialized_responses::{TimelineEvent, TimelineEventKind},
+    Client, EncryptionState, RoomState,
+    deserialized_responses::{TimelineEvent, TimelineEventKind, UnableToDecryptReason},
     room::MessagesOptions,
     ruma::{
         RoomId, UInt,
@@ -28,7 +31,9 @@ use matrix_sdk::{
         },
     },
 };
-use persephone_contracts::{NoticeKind, RoomList, RoomSummary, TimelineItem, TimelinePage};
+use persephone_contracts::{
+    NoticeKind, RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage,
+};
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
     collections::VecDeque,
@@ -70,7 +75,22 @@ fn joined_room(client: &Client, raw: &str) -> Result<matrix_sdk::Room, ErrorCode
 fn project(event: &TimelineEvent) -> Option<TimelineItem> {
     let event_id = event.event_id()?.to_string();
     let sender = project_name(event.sender()?.as_str());
-    if matches!(event.kind, TimelineEventKind::UnableToDecrypt { .. }) {
+    if let TimelineEventKind::UnableToDecrypt { utd_info, .. } = &event.kind {
+        return Some(TimelineItem::Notice {
+            event_id,
+            sender,
+            notice: undecryptable_notice(&utd_info.reason),
+        });
+    }
+    // An event the SDK could not try to decrypt arrives as plain text that is
+    // still encrypted; it is never shown as anything else.
+    if event
+        .raw()
+        .get_field::<String>("type")
+        .ok()
+        .flatten()
+        .is_some_and(|kind| kind == "m.room.encrypted")
+    {
         return Some(TimelineItem::Notice {
             event_id,
             sender,
@@ -105,6 +125,17 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             notice: NoticeKind::Unsupported,
         },
     })
+}
+
+/// Why an encrypted event is not shown.
+fn undecryptable_notice(reason: &UnableToDecryptReason) -> NoticeKind {
+    match reason {
+        UnableToDecryptReason::SenderIdentityNotTrusted(_) => NoticeKind::UntrustedSender,
+        UnableToDecryptReason::MissingMegolmSession {
+            withheld_code: Some(_),
+        } => NoticeKind::Withheld,
+        _ => NoticeKind::Undecryptable,
+    }
 }
 
 impl MatrixViews {
@@ -166,6 +197,11 @@ impl MatrixViews {
                         .cached_display_name()
                         .map(|name| project_name(&name.to_string())),
                     unread_count: u32::try_from(room.num_unread_messages()).unwrap_or(u32::MAX),
+                    encryption: match room.encryption_state() {
+                        EncryptionState::Encrypted => RoomEncryption::Encrypted,
+                        EncryptionState::NotEncrypted => RoomEncryption::NotEncrypted,
+                        EncryptionState::Unknown => RoomEncryption::Unknown,
+                    },
                 })
                 .collect(),
             truncated,
@@ -221,6 +257,44 @@ impl MatrixViews {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use matrix_sdk::deserialized_responses::{VerificationLevel, WithheldCode};
+
+    /// GIVEN each reason the SDK gives for not decrypting WHEN projected THEN
+    /// an untrusted sender and a withheld key get their own notice, and every
+    /// other reason (including a missing key that may still arrive) is
+    /// `undecryptable`.
+    #[test]
+    fn given_undecryptable_reasons_then_each_maps_to_its_notice() {
+        for level in [
+            VerificationLevel::UnsignedDevice,
+            VerificationLevel::VerificationViolation,
+            VerificationLevel::UnverifiedIdentity,
+        ] {
+            assert_eq!(
+                undecryptable_notice(&UnableToDecryptReason::SenderIdentityNotTrusted(level)),
+                NoticeKind::UntrustedSender
+            );
+        }
+        for code in [WithheldCode::Unverified, WithheldCode::Blacklisted] {
+            assert_eq!(
+                undecryptable_notice(&UnableToDecryptReason::MissingMegolmSession {
+                    withheld_code: Some(code)
+                }),
+                NoticeKind::Withheld
+            );
+        }
+        for reason in [
+            UnableToDecryptReason::MissingMegolmSession {
+                withheld_code: None,
+            },
+            UnableToDecryptReason::UnknownMegolmMessageIndex,
+            UnableToDecryptReason::MegolmDecryptionFailure,
+            UnableToDecryptReason::MismatchedIdentityKeys,
+            UnableToDecryptReason::Unknown,
+        ] {
+            assert_eq!(undecryptable_notice(&reason), NoticeKind::Undecryptable);
+        }
+    }
 
     #[test]
     fn given_many_tokens_then_only_the_newest_are_kept_and_cursors_are_room_bound() {

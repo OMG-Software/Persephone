@@ -6,6 +6,8 @@ let vite;
 let RoomList;
 let Timeline;
 let SignIn;
+let Security;
+let Composer;
 let render;
 
 before(async () => {
@@ -17,6 +19,8 @@ before(async () => {
   ({ default: RoomList } = await vite.ssrLoadModule('/src/RoomList.svelte'));
   ({ default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte'));
   ({ default: SignIn } = await vite.ssrLoadModule('/src/SignIn.svelte'));
+  ({ default: Security } = await vite.ssrLoadModule('/src/Security.svelte'));
+  ({ default: Composer } = await vite.ssrLoadModule('/src/Composer.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -30,8 +34,13 @@ test('room names render as isolated, escaped text with capped unread counts', ()
   const { body: html } = render(RoomList, {
     props: {
       rooms: [
-        { roomId: '!a:example.invalid', displayName: hostileName, unreadCount: 4294967295 },
-        { roomId: '!b:example.invalid', displayName: null, unreadCount: 0 }
+        {
+          roomId: '!a:example.invalid',
+          displayName: hostileName,
+          unreadCount: 4294967295,
+          encryption: 'encrypted'
+        },
+        { roomId: '!b:example.invalid', displayName: null, unreadCount: 0, encryption: 'not_encrypted' }
       ],
       truncated: true,
       selected: '!a:example.invalid',
@@ -96,7 +105,9 @@ test('notices render as fixed text with an isolated sender, never as content', (
       title: 'Room',
       items: [
         { kind: 'notice', event_id: '$1', sender: hostileName, notice: 'undecryptable' },
-        { kind: 'notice', event_id: '$2', sender: '@b:example.invalid', notice: 'unsupported' }
+        { kind: 'notice', event_id: '$2', sender: '@b:example.invalid', notice: 'unsupported' },
+        { kind: 'notice', event_id: '$3', sender: '@c:example.invalid', notice: 'withheld' },
+        { kind: 'notice', event_id: '$4', sender: '@d:example.invalid', notice: 'untrusted_sender' }
       ],
       hasOlder: false,
       loading: false,
@@ -108,6 +119,8 @@ test('notices render as fixed text with an isolated sender, never as content', (
   assert.match(html, /<bdi>&lt;img/);
   assert.match(html, /Encrypted message\. This device has no key for it\./);
   assert.match(html, /A kind of message Persephone does not show yet\./);
+  assert.match(html, /The sender did not share its key with this device\./);
+  assert.match(html, /from a device its owner has not verified/);
 });
 
 test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
@@ -136,5 +149,193 @@ test('the sign-in form asks only for the homeserver; the password goes to a nati
   }).body;
   assert.match(waiting, /Waiting for the Windows sign-in window/);
   assert.match(waiting, /<button type="submit" disabled/);
+});
+
+test('the encryption panel offers the step that fits and never asks for a secret itself', () => {
+  const status = (identity, extra = {}) => ({
+    identity,
+    recovery: 'disabled',
+    operation: 'idle',
+    error: null,
+    verification: null,
+    canSetUpRecovery: false,
+    ...extra
+  });
+  const panel = (security, busy = false) =>
+    render(Security, {
+      props: {
+        security,
+        busy,
+        onsetup: () => {},
+        onrecover: () => {},
+        onsetuprecovery: () => {},
+        onverify: () => {},
+        onaccept: () => {},
+        onconfirm: () => {},
+        oncancel: () => {}
+      }
+    }).body;
+
+  const none = panel(status('none'));
+  assert.match(none, />Set up encryption</);
+  assert.doesNotMatch(none, /Use recovery key/);
+  const unverified = panel(status('unverified', { recovery: 'enabled' }));
+  assert.match(unverified, />Use recovery key</);
+  assert.match(unverified, />Verify with another device</);
+  assert.match(unverified, /This device is not verified/);
+  assert.doesNotMatch(unverified, /Set up encryption/);
+  const verified = panel(status('verified', { recovery: 'enabled' }));
+  assert.match(verified, /This device is verified\./);
+  assert.match(verified, /Recovery is set up\./);
+  assert.doesNotMatch(verified, /<button/);
+  // Offered only when this device holds the keys recovery needs.
+  assert.doesNotMatch(panel(status('verified', { recovery: 'disabled' })), /Set up recovery/);
+  const noRecovery = panel(status('verified', { recovery: 'disabled', canSetUpRecovery: true }));
+  assert.match(noRecovery, />Set up recovery</);
+  assert.match(noRecovery, /cannot be read on a new device/);
+  for (const html of [none, unverified, verified, panel(status('unknown'))]) {
+    assert.doesNotMatch(html, /<input/, 'no field for a password or recovery key');
+  }
+
+  const waiting = panel(status('none', { operation: 'waiting_for_password' }));
+  assert.match(waiting, /Enter your password in the Windows window/);
+  assert.match(waiting, /<button type="button" disabled/);
+  const wrong = panel(status('unverified', { error: 'wrong_recovery_key' }));
+  assert.match(wrong, /role="alert"/);
+  assert.match(wrong, /That recovery key did not work\./);
+  const unknownError = panel(status('none', { error: 'something_new' }));
+  assert.match(unknownError, /That did not work\./);
+});
+
+test('rooms that are not encrypted are labelled in the list and the timeline', () => {
+  const list = render(RoomList, {
+    props: {
+      rooms: [
+        { roomId: '!a:example.invalid', displayName: 'A', unreadCount: 0, encryption: 'encrypted' },
+        { roomId: '!b:example.invalid', displayName: 'B', unreadCount: 0, encryption: 'not_encrypted' }
+      ],
+      truncated: false,
+      selected: null,
+      onselect: () => {}
+    }
+  }).body;
+  assert.equal((list.match(/Not encrypted/g) ?? []).length, 1);
+  const timeline = (notEncrypted) =>
+    render(Timeline, {
+      props: { title: 'R', notEncrypted, items: [], hasOlder: false, loading: false, error: null, onolder: () => {} }
+    }).body;
+  assert.match(timeline(true), /Not encrypted: the homeserver can read this room\./);
+  assert.doesNotMatch(timeline(false), /Not encrypted/);
+});
+
+test('messages being sent show their state as fixed text with safe actions only', () => {
+  const message = (localId, state, failure = null) => ({
+    localId,
+    roomId: '!r:example.invalid',
+    body: hostileName,
+    state,
+    eventId: state === 'sent' ? '$e' : null,
+    failure
+  });
+  const composer = (pending, blocked = null, notEncrypted = false) =>
+    render(Composer, {
+      props: {
+        pending,
+        blocked,
+        notEncrypted,
+        draftVersion: 0,
+        onsend: async () => true,
+        onretry: () => {},
+        ondiscard: () => {},
+        onallow: () => {}
+      }
+    }).body;
+
+  const html = composer([
+    message(1, 'queued'),
+    message(2, 'sending'),
+    message(3, 'unknown'),
+    message(4, 'failed', 'device_not_verified'),
+    message(5, 'failed', 'confirmation_required'),
+    message(6, 'sent')
+  ]);
+  assert.doesNotMatch(html, /<img/, 'bodies are text');
+  assert.match(html, /<p dir="auto">&lt;img/);
+  assert.match(html, /Waiting to send…/);
+  assert.match(html, /Sending…/);
+  assert.match(html, /Delivery unknown: the connection failed\. Retrying cannot send it twice\./);
+  assert.match(html, /Not sent: verify this device first\./);
+  assert.match(html, /Not sent: this room is not encrypted\./);
+  assert.match(html, /Sent\./);
+  assert.equal((html.match(/>Retry</g) ?? []).length, 3, 'unknown and the two failures');
+  assert.equal((html.match(/>Send unencrypted</g) ?? []).length, 1);
+  assert.equal((html.match(/>Discard</g) ?? []).length, 4, 'not while sending or once sent');
+
+  const blocked = composer([], 'Verify this device in the Encryption panel to send encrypted messages.');
+  assert.match(blocked, /<textarea[^>]*disabled/);
+  assert.match(blocked, /Verify this device in the Encryption panel/);
+  assert.match(composer([], null, true), /Message \(not encrypted\)/);
+});
+
+test('verification shows each phase as fixed text, the emoji as text and the device name isolated', () => {
+  const view = (phase, extra = {}) =>
+    render(Security, {
+      props: {
+        security: {
+          identity: 'unverified',
+          recovery: 'enabled',
+          operation: 'idle',
+          error: null,
+          verification: { flowId: 'f1', phase, emoji: [], otherDevice: null, ...extra }
+        },
+        busy: false,
+        onsetup: () => {},
+        onrecover: () => {},
+        onsetuprecovery: () => {},
+        onverify: () => {},
+        onaccept: () => {},
+        onconfirm: () => {},
+        oncancel: () => {}
+      }
+    }).body;
+
+  const incoming = view('incoming', { otherDevice: hostileName });
+  assert.match(incoming, /role="alertdialog"/);
+  assert.match(incoming, /<bdi>&lt;img/);
+  assert.doesNotMatch(incoming, /<img/);
+  assert.match(incoming, />Accept</);
+  assert.match(incoming, />Decline</);
+  assert.doesNotMatch(incoming, /Verify with another device/, 'no second flow while one is open');
+
+  const emoji = [
+    ['🐶', 'Dog'], ['🐱', 'Cat'], ['🦁', 'Lion'], ['🐎', 'Horse'], ['🦄', 'Unicorn'], ['🐷', 'Pig'], ['🐘', 'Elephant']
+  ].map(([symbol, description]) => ({ symbol, description }));
+  const compare = view('compare', { emoji });
+  assert.equal((compare.match(/<li>/g) ?? []).length, 7);
+  assert.match(compare, /🐶<\/span> Dog/);
+  assert.match(compare, />They match</);
+  assert.match(compare, />They don't match</);
+
+  assert.match(view('waiting'), /Waiting for your other device\. Accept the request there\./);
+  assert.match(view('confirmed'), /Waiting for your other device to confirm\./);
+  assert.match(view('done'), /Verification finished\./);
+  const cancelled = view('cancelled');
+  assert.match(cancelled, /Verification was cancelled\./);
+  assert.match(cancelled, />Verify with another device</, 'a new attempt is offered');
+  for (const html of [incoming, compare, cancelled]) {
+    assert.doesNotMatch(html, /<input/);
+  }
+  // Each dialog is named by its question, so a screen reader reads it first.
+  for (const html of [incoming, compare]) {
+    assert.match(html, /aria-labelledby="verification-question"/);
+    assert.match(html, /<p id="verification-question">/);
+  }
+  assert.match(view('waiting'), /<div class="verification">/, 'only the dialogs are named');
+  // A comparison without its seven emoji offers no match.
+  const short = view('compare', { emoji: emoji.slice(0, 6) });
+  assert.doesNotMatch(short, /They match/);
+  assert.doesNotMatch(short, /alertdialog/);
+  assert.match(short, /Waiting for your other device\. Accept the request there\./);
+  assert.match(short, />Cancel</);
 });
 

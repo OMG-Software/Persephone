@@ -21,6 +21,19 @@ fn main() {
             "unlock_session",
             "sign_in",
             "sign_out",
+            "security_status",
+            "set_up_encryption",
+            "recover_with_key",
+            "send_message",
+            "pending_messages",
+            "retry_message",
+            "discard_message",
+            "allow_unencrypted",
+            "set_up_recovery",
+            "verify_this_device",
+            "accept_verification",
+            "confirm_verification",
+            "cancel_verification",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

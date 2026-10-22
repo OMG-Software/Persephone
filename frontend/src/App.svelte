@@ -1,13 +1,28 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import markUrl from './assets/mark.svg';
+  import Composer from './Composer.svelte';
   import RoomList from './RoomList.svelte';
+  import Security from './Security.svelte';
   import SignIn from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
   import { mergeNewest } from './timeline';
   import {
+    allowUnencrypted,
     appStatus,
+    discardMessage,
     lockSession,
+    pendingMessages,
+    retryMessage,
+    sendMessage,
+    recoverWithKey,
+    securityStatus,
+    setUpEncryption,
+    setUpRecovery,
+    verifyThisDevice,
+    acceptVerification,
+    confirmVerification,
+    cancelVerification,
     signOut,
     roomList,
     signIn,
@@ -16,12 +31,29 @@
     unlockSession,
     watchSession,
     type AppStatus,
+    type PendingMessage,
     type RoomList as Rooms,
+    type SecurityStatus,
     type StoreState,
     type TimelineItem
   } from './bridge';
 
   let status = $state<AppStatus | null>(null);
+  let security = $state<SecurityStatus | null>(null);
+  let securityBusy = $state(false);
+  // A security reply replaces the shown one only if it is newer, as for rooms.
+  let securityRequest = 0;
+  let securityShown = 0;
+  // Messages sent from this device in the selected room.
+  let pending = $state<PendingMessage[]>([]);
+  // Sending in a room that is not encrypted asks once first (ADR-0005); the
+  // core also refuses until the consent is recorded.
+  let confirmingPlain = $state<{ roomId: string; body: string | null; retryId: number | null } | null>(
+    null
+  );
+  let draftVersion = $state(0);
+  // Rooms confirmed while this page runs; the core keeps the consent itself.
+  let confirmedRooms = new Set<string>();
   let unavailable = $state(false);
   let rooms = $state<Rooms | null>(null);
   let selected = $state<string | null>(null);
@@ -106,6 +138,7 @@
     if (generation !== sessionGeneration) return;
     status = reply;
     if (reply.store !== 'protected' && reply.store !== 'not_configured') return;
+    if (reply.account.state === 'signed_in') refreshSecurity();
     const request = ++roomsRequest;
     try {
       const list = await roomList();
@@ -126,6 +159,11 @@
     confirmingSignOut = false;
     // Nothing from the old session stays in the header while the new status loads.
     status = null;
+    security = null;
+    securityBusy = false;
+    pending = [];
+    confirmingPlain = null;
+    confirmedRooms = new Set();
     selected = null;
     rooms = null;
     items = [];
@@ -138,6 +176,40 @@
     opening = false;
     changedAgain = false;
     load();
+  }
+
+  // The account's encryption state changed: fetch it again. Nothing else
+  // changes.
+  async function refreshSecurity() {
+    const generation = sessionGeneration;
+    const request = ++securityRequest;
+    try {
+      const reply = await securityStatus();
+      if (generation === sessionGeneration && request > securityShown) {
+        security = reply;
+        securityShown = request;
+      }
+    } catch {
+      // The next security or session event tries again.
+    }
+  }
+
+  async function startSecurity(start: () => Promise<SecurityStatus>) {
+    if (securityBusy) return;
+    securityBusy = true;
+    const generation = sessionGeneration;
+    const request = ++securityRequest;
+    try {
+      const reply = await start();
+      if (generation === sessionGeneration && request > securityShown) {
+        security = reply;
+        securityShown = request;
+      }
+    } catch (reason) {
+      if (generation === sessionGeneration) error = describe(reason);
+    } finally {
+      if (generation === sessionGeneration) securityBusy = false;
+    }
   }
 
   // Rooms were added or changed: fetch the list again, keeping the selection.
@@ -218,7 +290,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms);
+      await watchSession(reset, refreshRooms, refreshSecurity);
     } catch {
       unavailable = true;
       return;
@@ -260,6 +332,8 @@
     const generation = sessionGeneration;
     selected = roomId;
     items = [];
+    pending = [];
+    confirmingPlain = null;
     nextCursor = null;
     error = null;
     loading = true;
@@ -273,6 +347,7 @@
       if (!current(roomId, generation)) return;
       items = page.items;
       nextCursor = page.nextCursor;
+      if (signedIn) loadPending(roomId, generation);
     } catch (reason) {
       if (current(roomId, generation)) error = describe(reason);
     } finally {
@@ -297,6 +372,7 @@
         const page = await timelinePage(roomId, null);
         if (!current(roomId, generation)) return;
         items = mergeNewest(items, page.items);
+        if (signedIn) await loadPending(roomId, generation);
       } while (changedAgain);
     } catch (reason) {
       if (current(roomId, generation)) error = describe(reason);
@@ -306,6 +382,97 @@
       if (changedAgain && selected && !opening) refresh(selected, sessionGeneration);
     }
   }
+
+  // As for the room list: an older pending-list reply that finishes last
+  // cannot replace a newer one (a late "queued" over "sent").
+  let pendingRequest = 0;
+  let pendingShown = 0;
+
+  async function loadPending(roomId: string, generation: number) {
+    const request = ++pendingRequest;
+    try {
+      const list = await pendingMessages(roomId);
+      if (current(roomId, generation) && request > pendingShown) {
+        pending = list;
+        pendingShown = request;
+      }
+    } catch {
+      // The next change of the room tries again.
+    }
+  }
+
+  async function queue(roomId: string, body: string, generation: number): Promise<boolean> {
+    try {
+      await sendMessage(roomId, body);
+      if (current(roomId, generation)) await loadPending(roomId, generation);
+      return true;
+    } catch (reason) {
+      if (current(roomId, generation)) {
+        error =
+          String(reason) === 'limit_exceeded'
+            ? 'Too many messages are waiting to send. Wait, or discard some.'
+            : describe(reason);
+      }
+      return false;
+    }
+  }
+
+  async function sendText(body: string): Promise<boolean> {
+    const roomId = selected;
+    if (!roomId) return false;
+    if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(roomId)) {
+      confirmingPlain = { roomId, body, retryId: null };
+      return false;
+    }
+    return queue(roomId, body, sessionGeneration);
+  }
+
+  async function confirmPlain() {
+    const asked = confirmingPlain;
+    confirmingPlain = null;
+    if (!asked) return;
+    const generation = sessionGeneration;
+    try {
+      await allowUnencrypted(asked.roomId);
+    } catch (reason) {
+      if (current(asked.roomId, generation)) error = describe(reason);
+      return;
+    }
+    if (!current(asked.roomId, generation)) return;
+    confirmedRooms.add(asked.roomId);
+    if (asked.body !== null && (await queue(asked.roomId, asked.body, generation))) {
+      draftVersion += 1;
+    }
+    if (asked.retryId !== null) changeMessage(retryMessage, asked.retryId);
+  }
+
+  async function changeMessage(change: (localId: number) => Promise<void>, localId: number) {
+    const roomId = selected;
+    if (!roomId) return;
+    const generation = sessionGeneration;
+    try {
+      await change(localId);
+    } catch (reason) {
+      if (current(roomId, generation)) error = describe(reason);
+    }
+    if (current(roomId, generation)) loadPending(roomId, generation);
+  }
+
+  // Messages the timeline already shows are not listed again.
+  const visiblePending = $derived(
+    pending.filter(
+      (message) =>
+        !(
+          message.state === 'sent' &&
+          items.some((item) => item.kind !== 'gap' && item.event_id === message.eventId)
+        )
+    )
+  );
+  const sendBlocked = $derived(
+    selectedRoom?.encryption !== 'not_encrypted' && security?.identity !== 'verified'
+      ? 'Verify this device in the Encryption panel to send encrypted messages.'
+      : null
+  );
 
   async function older() {
     if (!selected || !nextCursor) return;
@@ -387,21 +554,62 @@
     {#if profileOpen && !signedIn}
       <SignIn account={status!.account} busy={signingIn} onsignin={startSignIn} />
     {:else if rooms}
-      <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} onselect={open} />
+      <div class="side">
+        {#if signedIn && security}
+          <Security
+            {security}
+            busy={securityBusy}
+            onsetup={() => startSecurity(setUpEncryption)}
+            onrecover={() => startSecurity(recoverWithKey)}
+            onsetuprecovery={() => startSecurity(setUpRecovery)}
+            onverify={() => startSecurity(verifyThisDevice)}
+            onaccept={(flowId) => startSecurity(() => acceptVerification(flowId))}
+            onconfirm={(flowId) => startSecurity(() => confirmVerification(flowId))}
+            oncancel={(flowId) => startSecurity(() => cancelVerification(flowId))}
+          />
+        {/if}
+        <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} onselect={open} />
+      </div>
     {/if}
     {#if profileOpen && !signedIn}
       {#if error}
         <p role="alert" class="error">{error}</p>
       {/if}
     {:else if selectedRoom}
-      <Timeline
-        title={selectedRoom.displayName ?? selectedRoom.roomId}
-        {items}
-        hasOlder={nextCursor !== null}
-        {loading}
-        {error}
-        onolder={older}
-      />
+      <div class="room">
+        <Timeline
+          title={selectedRoom.displayName ?? selectedRoom.roomId}
+          notEncrypted={selectedRoom.encryption === 'not_encrypted'}
+          {items}
+          hasOlder={nextCursor !== null}
+          {loading}
+          {error}
+          onolder={older}
+        />
+        {#if signedIn}
+          {#if confirmingPlain}
+            <div class="confirm" role="alertdialog" aria-labelledby="plain-question">
+              <p id="plain-question">
+                This room is not encrypted: the homeserver and anyone with access to it can read
+                what you send here. Send unencrypted messages in this room?
+              </p>
+              <button type="button" onclick={confirmPlain}>Send unencrypted</button>
+              <button type="button" onclick={() => (confirmingPlain = null)}>Cancel</button>
+            </div>
+          {/if}
+          <Composer
+            pending={visiblePending}
+            blocked={sendBlocked}
+            notEncrypted={selectedRoom.encryption === 'not_encrypted'}
+            {draftVersion}
+            onsend={sendText}
+            onretry={(localId) => changeMessage(retryMessage, localId)}
+            ondiscard={(localId) => changeMessage(discardMessage, localId)}
+            onallow={(localId) =>
+              (confirmingPlain = { roomId: selectedRoom.roomId, body: null, retryId: localId })}
+          />
+        {/if}
+      </div>
     {:else}
       <section class="timeline" aria-label="No room selected">
         {#if status?.store === 'restart_required' && status.account.state === 'signed_out' && status.account.error === 'failed'}

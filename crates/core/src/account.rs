@@ -6,6 +6,12 @@
 //! session (tokens and device) is saved as a crypto-store custom value, which
 //! the store encrypts; the state store's custom values are not encrypted and
 //! are never used for it (`docs/evidence/encrypted-restart.md`).
+//!
+//! Encryption policy (ADR-0005): room keys go only to devices signed by their
+//! owner's cross-signing identity, so this device must be verified before it
+//! can send in an encrypted room; incoming messages are shown only from
+//! cross-signed devices or legacy sessions. Cross-signing and backups are never
+//! set up automatically: the user starts them (`security.rs`).
 
 use crate::credentials::Credentials;
 use crate::homeserver::{self, Homeserver};
@@ -15,10 +21,13 @@ use matrix_sdk::{
     authentication::matrix::MatrixSession,
     config::{RequestConfig, StoreConfig, SyncSettings},
     cross_process_lock::CrossProcessLockConfig,
+    encryption::{BackupDownloadStrategy, EncryptionSettings},
     ruma::{api::error::ErrorKind, events::StateEventType},
     sliding_sync::{SlidingSync, SlidingSyncList, SlidingSyncMode, Version, VersionBuilder},
 };
-use matrix_sdk_crypto::store::CryptoStore;
+use matrix_sdk_crypto::{
+    CollectStrategy, DecryptionSettings, TrustRequirement, store::CryptoStore,
+};
 use persephone_contracts::SignInError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -57,6 +66,17 @@ pub async fn build_client(homeserver: &Homeserver, stores: &Stores) -> Result<Cl
                 .timeout(REQUEST_TIMEOUT),
         )
         .store_config(store_config)
+        .with_room_key_recipient_strategy(CollectStrategy::IdentityBasedStrategy)
+        .with_decryption_settings(DecryptionSettings {
+            sender_device_trust_requirement: TrustRequirement::CrossSignedOrLegacy,
+        })
+        .with_encryption_settings(EncryptionSettings {
+            auto_enable_cross_signing: false,
+            auto_enable_backups: false,
+            // Once recovery is set up, a key missing for a message is fetched
+            // from the backup when that message fails to decrypt.
+            backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
+        })
         .build()
         .await
         .map_err(|_| SignInError::Failed)

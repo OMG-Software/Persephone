@@ -4,12 +4,13 @@
 #![cfg(feature = "dev-disposable-servers")]
 
 use persephone_contracts::{
-    AccountState, AccountStatus, NoticeKind, RoomList, SignInError, StoreState, TimelineItem,
-    TimelinePage,
+    AccountState, AccountStatus, IdentityState, NoticeKind, PendingMessage, PendingState,
+    RoomEncryption, RoomList, SecurityError, SecurityOperation, SecurityStatus, SendFailure,
+    SignInError, StoreState, TimelineItem, TimelinePage,
 };
 use persephone_core::{
     Core,
-    credentials::{CredentialSource, Credentials, PromptError},
+    credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
     session::{AdmissionError, Session},
 };
 use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
@@ -26,7 +27,7 @@ use std::{
 use tempfile::TempDir;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path, path_regex},
+    matchers::{body_partial_json, method, path, path_regex},
 };
 use zeroize::Zeroizing;
 
@@ -38,17 +39,43 @@ const USER: &str = "@alice:synthetic.test";
 const TOKEN: &str = "syt_synthetic_access_token_7Q2";
 const PASSWORD: &str = "synthetic-password-K8";
 
-/// Answers the prompt with fixed values and counts how often it was asked.
+/// Answers the prompts with fixed values, counts how often each was asked and
+/// keeps the recovery key it is shown.
 struct Fixed {
     answer: Result<(), PromptError>,
     asked: AtomicUsize,
+    /// Answers in order; the last one repeats.
+    secrets: std::sync::Mutex<Vec<Result<String, PromptError>>>,
+    secrets_asked: AtomicUsize,
+    shown: std::sync::Mutex<Option<String>>,
+    /// What showing the recovery key returns.
+    show: Result<(), PromptError>,
 }
 
 impl Fixed {
     fn new(answer: Result<(), PromptError>) -> Arc<Self> {
+        Self::with_secret(answer, Ok(PASSWORD.into()))
+    }
+
+    fn with_secret(
+        answer: Result<(), PromptError>,
+        secret: Result<String, PromptError>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             answer,
             asked: AtomicUsize::new(0),
+            secrets: std::sync::Mutex::new(vec![secret]),
+            secrets_asked: AtomicUsize::new(0),
+            shown: std::sync::Mutex::new(None),
+            show: Ok(()),
+        })
+    }
+
+    /// A source whose recovery-key window fails at once.
+    fn failing_window() -> Arc<Self> {
+        Arc::new(Self {
+            show: Err(PromptError::Failed),
+            ..Arc::into_inner(Self::new(Ok(()))).unwrap()
         })
     }
 }
@@ -60,6 +87,28 @@ impl CredentialSource for Fixed {
             username: Zeroizing::new("alice".into()),
             password: Zeroizing::new(PASSWORD.into()),
         })
+    }
+
+    fn ask_secret(&self, prompt: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
+        self.secrets_asked.fetch_add(1, Ordering::SeqCst);
+        if let SecretPrompt::Password { user_id, .. } = prompt {
+            assert_eq!(user_id, USER, "the prompt names the signed-in account");
+        }
+        let mut secrets = self.secrets.lock().unwrap();
+        let answer = if secrets.len() > 1 {
+            secrets.remove(0)
+        } else {
+            secrets[0].clone()
+        };
+        answer.map(Zeroizing::new)
+    }
+
+    fn show_recovery_key(&self, user_id: &str, key: &str) -> Result<(), PromptError> {
+        assert_eq!(user_id, USER);
+        if self.show.is_ok() {
+            *self.shown.lock().unwrap() = Some(key.to_owned());
+        }
+        self.show
     }
 }
 
@@ -91,14 +140,30 @@ fn history() -> Value {
 #[derive(Default)]
 struct LiveRoom {
     round: AtomicUsize,
+    /// Also report `PLAIN`, a room that is not encrypted.
+    plain: bool,
+}
+
+/// A joined room without encryption; it sorts after `ROOM`.
+const PLAIN: &str = "!zplain:synthetic.test";
+
+fn plain_state() -> Value {
+    json!([
+        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$pcreate","origin_server_ts":1,"content":{"creator":USER,"room_version":"11"}},
+        {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$pjoin","origin_server_ts":2,"content":{"membership":"join"}}
+    ])
 }
 
 impl wiremock::Respond for LiveRoom {
     fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
         let n = self.round.fetch_add(1, Ordering::SeqCst);
+        let mut rooms = json!({ROOM:{"state":{"events":room_state()},"timeline":{"events":[text(&format!("$live{n}"), "live")],"limited":true,"prev_batch":"history"},"ephemeral":{"events":[]},"account_data":{"events":[]}}});
+        if self.plain {
+            rooms[PLAIN] = json!({"state":{"events":plain_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+        }
         ResponseTemplate::new(200).set_body_json(json!({
             "next_batch": format!("classic-{n}"),
-            "rooms":{"join":{ROOM:{"state":{"events":room_state()},"timeline":{"events":[text(&format!("$live{n}"), "live")],"limited":true,"prev_batch":"history"},"ephemeral":{"events":[]},"account_data":{"events":[]}}}},
+            "rooms":{"join":rooms},
             "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
         }))
     }
@@ -153,7 +218,10 @@ impl Homeserver {
             }
             Mock::given(method("GET"))
                 .and(path("/_matrix/client/v3/sync"))
-                .respond_with(LiveRoom::default())
+                .respond_with(LiveRoom {
+                    round: AtomicUsize::new(0),
+                    plain: false,
+                })
                 .mount(&server)
                 .await;
             Mock::given(method("POST"))
@@ -175,6 +243,171 @@ impl Homeserver {
             server
         });
         Self { runtime, server }
+    }
+
+    /// Answers the cross-signing upload with an authentication round until it
+    /// carries `PASSWORD` and the round's session, and accepts the signature,
+    /// account data and key backup requests that setting up recovery makes.
+    fn encryption_endpoints(&self) {
+        self.runtime.block_on(async {
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/keys/device_signing/upload"))
+                .and(body_partial_json(json!({"auth": {
+                    "type": "m.login.password",
+                    "password": PASSWORD,
+                    "session": "uia-session-1",
+                    "identifier": {"type": "m.id.user", "user": USER}
+                }})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/keys/device_signing/upload"))
+                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                    "flows": [{"stages": ["m.login.password"]}],
+                    "params": {},
+                    "session": "uia-session-1"
+                })))
+                .mount(&self.server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/keys/signatures/upload"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"failures": {}})))
+                .mount(&self.server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path_regex(
+                    r"^/_matrix/client/v3/user/[^/]+/account_data/[^/]+$",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(
+                    r"^/_matrix/client/v3/user/[^/]+/account_data/[^/]+$",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(404)
+                        .set_body_json(json!({"errcode": "M_NOT_FOUND", "error": "none"})),
+                )
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/room_keys/version"))
+                .respond_with(
+                    ResponseTemplate::new(404)
+                        .set_body_json(json!({"errcode": "M_NOT_FOUND", "error": "no backup"})),
+                )
+                .mount(&self.server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/room_keys/version"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"version": "1"})))
+                .mount(&self.server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path("/_matrix/client/v3/room_keys/keys"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"etag": "1", "count": 0})),
+                )
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Adds the unencrypted room `PLAIN` to every sync, the member lists the
+    /// SDK loads before sharing keys, and a send endpoint that answers
+    /// `status` with an event ID.
+    fn sending_endpoints(&self, status: u16) {
+        self.runtime.block_on(async {
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/sync"))
+                .respond_with(LiveRoom {
+                    round: AtomicUsize::new(0),
+                    plain: true,
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            // The SDK asks for a room's encryption state when sync left it
+            // unknown (a send can come before the first sync): the plain room
+            // has none, the others the state that sync gives them.
+            Mock::given(method("GET"))
+                .and(path_regex(
+                    r"^/_matrix/client/v3/rooms/[^/]*zplain[^/]*/state/m\.room\.encryption/?$",
+                ))
+                .respond_with(ResponseTemplate::new(404).set_body_json(
+                    json!({"errcode": "M_NOT_FOUND", "error": "no encryption"}),
+                ))
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/state/m\.room\.encryption/?$"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"algorithm": "m.megolm.v1.aes-sha2"})),
+                )
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": [
+                    {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$m","origin_server_ts":2,"content":{"membership":"join"}}
+                ]})))
+                .mount(&self.server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/send/[^/]+/[^/]+$"))
+                .respond_with(if status == 200 {
+                    ResponseTemplate::new(200).set_body_json(json!({"event_id": "$sent"}))
+                } else {
+                    ResponseTemplate::new(status)
+                        .set_body_json(json!({"errcode": "M_UNKNOWN", "error": "refused"}))
+                })
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Answers sends with 200 from now on.
+    fn accept_sends(&self) {
+        self.runtime.block_on(
+            Mock::given(method("PUT"))
+                .and(path_regex(
+                    r"^/_matrix/client/v3/rooms/[^/]+/send/[^/]+/[^/]+$",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"event_id": "$sent"})),
+                )
+                .with_priority(1)
+                .mount(&self.server),
+        );
+    }
+
+    /// Paths of the send requests, in order.
+    fn sends(&self) -> Vec<String> {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "PUT" && request.url.path().contains("/send/")
+            })
+            .map(|request| request.url.path().to_owned())
+            .collect()
+    }
+
+    /// Bodies of the requests made to `endpoint`, in order.
+    fn bodies_to(&self, endpoint: &str) -> Vec<Value> {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path() == endpoint)
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
     }
 
     fn signed_in() -> Self {
@@ -955,6 +1188,651 @@ fn given_a_replaced_ui_then_the_signed_in_session_carries_on_for_the_new_page() 
     assert_eq!(source.asked.load(Ordering::SeqCst), 1, "no second prompt");
     // Stop the sync loop: wiremock reuses this server's address for later
     // tests, which must not see this client's requests.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+fn security(core: &Core) -> SecurityStatus {
+    value(call(core, Call::SecurityStatus {}))
+}
+
+/// GIVEN a signed-in account the homeserver says has no identity WHEN the
+/// page asks to set up encryption THEN the core asks for the password once in
+/// its own prompt, answers the homeserver's authentication round with it,
+/// sets up recovery and shows the recovery key only through the prompt
+/// source: never in a reply.
+#[test]
+fn given_no_identity_when_setting_up_encryption_then_the_password_is_asked_once_and_the_key_stays_in_the_core()
+ {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::new(Ok(()));
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("the account to have no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+
+    let reply: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    assert_ne!(
+        reply.operation,
+        SecurityOperation::Idle,
+        "started at once: {reply:?}"
+    );
+    wait_for("set-up to finish", || {
+        let status = security(&core);
+        status.operation == SecurityOperation::Idle && status.identity != IdentityState::None
+    });
+    let status = security(&core);
+    assert_eq!(status.error, None, "{status:?}");
+    assert_ne!(status.identity, IdentityState::None);
+    assert_eq!(source.secrets_asked.load(Ordering::SeqCst), 1, "asked once");
+
+    let uploads = server.bodies_to("/_matrix/client/v3/keys/device_signing/upload");
+    assert!(
+        uploads.len() >= 2,
+        "an authentication round: {}",
+        uploads.len()
+    );
+    assert!(
+        uploads[0].get("auth").is_none(),
+        "first upload asks how to authenticate"
+    );
+    assert_eq!(uploads.last().unwrap()["auth"]["session"], "uia-session-1");
+
+    // The key window has its own thread, which may still be starting.
+    wait_for("the recovery key to be shown", || {
+        source.shown.lock().unwrap().is_some()
+    });
+    let key = source.shown.lock().unwrap().clone().unwrap();
+    assert!(key.len() >= 40, "a recovery key, not an empty string");
+    let replies = serde_json::to_string(&(
+        call(&core, Call::AppStatus {}),
+        call(&core, Call::SecurityStatus {}),
+    ))
+    .unwrap();
+    assert!(
+        !replies.contains(&key),
+        "the recovery key never crosses to the UI"
+    );
+    // Set-up is not offered again once an identity exists.
+    let again: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    assert_eq!(again.operation, SecurityOperation::Idle);
+    assert_eq!(source.secrets_asked.load(Ordering::SeqCst), 1);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(
+        state,
+        StoreState::RestartRequired,
+        "the security thread is joined"
+    );
+    assert_eq!(
+        security(&core),
+        SecurityStatus::unknown(),
+        "nothing kept after the lock"
+    );
+    // With the stores closed, no profile file holds the key in plain text.
+    assert!(files_contain(dir.path(), key.as_bytes()).is_empty());
+}
+
+/// GIVEN a recovery-key window that fails at once WHEN set-up succeeds THEN
+/// the status keeps saying the key was not shown: set-up's own result, which
+/// is written first, does not replace it.
+#[test]
+fn given_a_failing_key_window_then_set_up_reports_the_key_was_not_shown() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::failing_window();
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("the account to have no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let _: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    wait_for("the failure to be reported", || {
+        security(&core).error == Some(SecurityError::RecoveryKeyNotShown)
+    });
+    // Later refreshes keep it.
+    std::thread::sleep(Duration::from_secs(3));
+    let status = security(&core);
+    assert_eq!(status.error, Some(SecurityError::RecoveryKeyNotShown));
+    assert_eq!(status.operation, SecurityOperation::Idle);
+    assert!(source.shown.lock().unwrap().is_none());
+    // Joins the sync and security threads: a core left running keeps polling
+    // this mock server's port, which wiremock hands to a later test.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN set-up that has reached the backup request WHEN the session is
+/// locked before set-up ends THEN the lock waits for the step, and the new
+/// recovery key, which recovery is already enabled with, is still shown.
+#[test]
+fn given_a_lock_during_set_up_then_the_new_recovery_key_is_still_shown() {
+    let server = Homeserver::signed_in();
+    server.runtime.block_on(
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/room_keys/version"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"version": "1"}))
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .with_priority(1)
+            .mount(&server.server),
+    );
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::new(Ok(()));
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("the account to have no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let _: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    wait_for("the backup request", || {
+        server
+            .bodies_to("/_matrix/client/v3/room_keys/version")
+            .iter()
+            .any(Value::is_object)
+    });
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    wait_for("the recovery key to be shown", || {
+        source.shown.lock().unwrap().is_some()
+    });
+    assert_eq!(
+        security(&core),
+        SecurityStatus::unknown(),
+        "nothing kept after the lock"
+    );
+}
+
+/// GIVEN a prompt the user cancels, or a password the homeserver refuses
+/// WHEN setting up encryption THEN nothing is uploaded with a password (for
+/// a cancel) and the status says why, with the account still unset.
+#[test]
+fn given_a_cancelled_prompt_or_a_wrong_password_then_set_up_reports_it() {
+    for (secret, expected, authenticated) in [
+        (Err(PromptError::Cancelled), SecurityError::Cancelled, false),
+        (
+            Ok("wrong-password".to_owned()),
+            SecurityError::InvalidPassword,
+            true,
+        ),
+    ] {
+        let server = Homeserver::signed_in();
+        server.encryption_endpoints();
+        let dir = TempDir::new().unwrap();
+        let source = Fixed::with_secret(Ok(()), secret);
+        let core = make_core(dir.path(), source.clone());
+        sign_in(&core, &server.uri());
+        wait_for("no identity", || {
+            security(&core).identity == IdentityState::None
+        });
+        call(&core, Call::SetUpEncryption {});
+        wait_for("the failure", || security(&core).error.is_some());
+        let status = security(&core);
+        assert_eq!(status.error, Some(expected));
+        assert_eq!(status.operation, SecurityOperation::Idle);
+        assert!(
+            source.shown.lock().unwrap().is_none(),
+            "no key for a failed set-up"
+        );
+        let with_auth = server
+            .bodies_to("/_matrix/client/v3/keys/device_signing/upload")
+            .into_iter()
+            .filter(|body| body.get("auth").is_some())
+            .count();
+        assert_eq!(with_auth > 0, authenticated, "{expected:?}");
+        assert_eq!(
+            status.identity,
+            IdentityState::None,
+            "nothing reached the homeserver, so set-up can be retried"
+        );
+        let state: StoreState = value(call(&core, Call::LockSession {}));
+        assert_eq!(state, StoreState::RestartRequired);
+    }
+}
+
+/// GIVEN a set-up refused for a wrong password WHEN the user tries again with
+/// the right one THEN set-up runs again, uploads the identity and shows a key.
+#[test]
+fn given_a_wrong_password_then_set_up_can_be_retried_and_succeeds() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::with_secret(Ok(()), Ok("wrong-password".to_owned()));
+    source.secrets.lock().unwrap().push(Ok(PASSWORD.to_owned()));
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    call(&core, Call::SetUpEncryption {});
+    wait_for("the refusal", || security(&core).error.is_some());
+    assert_eq!(security(&core).error, Some(SecurityError::InvalidPassword));
+    assert_eq!(security(&core).identity, IdentityState::None);
+
+    let again: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    assert_ne!(again.operation, SecurityOperation::Idle, "offered again");
+    wait_for("set-up to finish", || {
+        let status = security(&core);
+        status.operation == SecurityOperation::Idle && status.identity != IdentityState::None
+    });
+    assert_eq!(security(&core).error, None);
+    wait_for("the recovery key", || {
+        source.shown.lock().unwrap().is_some()
+    });
+    assert_eq!(source.secrets_asked.load(Ordering::SeqCst), 2);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a homeserver that fails the key backup once WHEN encryption is set
+/// up THEN the identity exists but recovery does not, and setting up recovery
+/// alone (no password) then succeeds and shows a key.
+#[test]
+fn given_recovery_fails_after_cross_signing_then_recovery_alone_can_be_set_up() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    server.runtime.block_on(
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/room_keys/version"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(json!({"errcode": "M_UNKNOWN", "error": "down"})),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::new(Ok(()));
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    call(&core, Call::SetUpEncryption {});
+    wait_for("the recovery failure", || security(&core).error.is_some());
+    wait_for("the identity", || {
+        security(&core).identity != IdentityState::None
+    });
+    let status = security(&core);
+    assert_eq!(
+        status.recovery,
+        persephone_contracts::RecoveryState::Disabled,
+        "{status:?}"
+    );
+    assert!(source.shown.lock().unwrap().is_none(), "no key yet");
+    // Set-up as a whole is not offered again over the identity.
+    let refused: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    assert_eq!(refused.operation, SecurityOperation::Idle);
+
+    let started: SecurityStatus = value(call(&core, Call::SetUpRecovery {}));
+    assert_eq!(started.operation, SecurityOperation::Working);
+    wait_for("the recovery set-up to end", || {
+        security(&core).operation == SecurityOperation::Idle
+    });
+    // The mock never syncs account data back, so the SDK cannot report
+    // recovery as enabled here (the live runs do); the second backup request
+    // and the shown key show that recovery was set up.
+    assert_eq!(
+        server
+            .bodies_to("/_matrix/client/v3/room_keys/version")
+            .iter()
+            .filter(|body| body.is_object())
+            .count(),
+        2,
+        "the failed backup, then the retry"
+    );
+    wait_for("the recovery key", || {
+        source.shown.lock().unwrap().is_some()
+    });
+    assert_eq!(security(&core).error, None);
+    assert_eq!(
+        source.secrets_asked.load(Ordering::SeqCst),
+        1,
+        "no second password"
+    );
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// Signs in at once and holds the secret prompt open until released, like a
+/// user still typing the password.
+struct HeldSecret {
+    released: std::sync::Mutex<bool>,
+    wake: std::sync::Condvar,
+    asked: AtomicUsize,
+}
+
+impl CredentialSource for HeldSecret {
+    fn ask(&self, _host: &str) -> Result<Credentials, PromptError> {
+        Ok(Credentials {
+            username: Zeroizing::new("alice".into()),
+            password: Zeroizing::new(PASSWORD.into()),
+        })
+    }
+
+    fn ask_secret(&self, _prompt: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.wake.wait(released).unwrap();
+        }
+        Ok(Zeroizing::new(PASSWORD.into()))
+    }
+}
+
+/// GIVEN a password prompt left open WHEN the session locks
+/// THEN the answer is dropped: nothing is set up with it.
+#[test]
+fn given_a_lock_while_the_password_prompt_is_open_then_the_answer_is_dropped() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let held = Arc::new(HeldSecret {
+        released: std::sync::Mutex::new(false),
+        wake: std::sync::Condvar::new(),
+        asked: AtomicUsize::new(0),
+    });
+    let core = Core::default()
+        .with_credentials(held.clone())
+        .with_session(Session::open(dir.path().into(), Box::new(Tagged(1))));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    call(&core, Call::SetUpEncryption {});
+    wait_for("the prompt", || held.asked.load(Ordering::SeqCst) == 1);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    *held.released.lock().unwrap() = true;
+    held.wake.notify_all();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        server
+            .bodies_to("/_matrix/client/v3/keys/device_signing/upload")
+            .iter()
+            .all(|body| body.get("auth").is_none()),
+        "the late password is never sent"
+    );
+    assert_eq!(security(&core), SecurityStatus::unknown());
+}
+
+fn pending(core: &Core, room_id: &str) -> Vec<PendingMessage> {
+    value(call(
+        core,
+        Call::PendingMessages {
+            room_id: room_id.into(),
+        },
+    ))
+}
+
+fn send(core: &Core, room_id: &str, body: &str) -> Outcome {
+    call(
+        core,
+        Call::SendMessage {
+            room_id: room_id.into(),
+            body: body.into(),
+        },
+    )
+}
+
+/// GIVEN a device that is not verified WHEN sending in an encrypted room THEN
+/// the message fails as `device_not_verified` and no request to send anything,
+/// encrypted or plain, reaches the homeserver.
+#[test]
+fn given_an_unverified_device_then_an_encrypted_room_send_fails_without_any_send_request() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(200);
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    // Before the first sync the room is unknown and the send fails as
+    // `not_joined`; this test is about the joined, encrypted room.
+    wait_for("the encrypted room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == ROOM)
+    });
+    let queued: PendingMessage = value(send(&core, ROOM, "secret text"));
+    assert_eq!(queued.state, PendingState::Queued);
+    wait_for("the send to end", || {
+        pending(&core, ROOM)[0].state == PendingState::Failed
+    });
+    assert_eq!(
+        pending(&core, ROOM)[0].failure,
+        Some(SendFailure::DeviceNotVerified)
+    );
+    assert!(
+        server.sends().is_empty(),
+        "nothing sent: {:?}",
+        server.sends()
+    );
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(
+        state,
+        StoreState::RestartRequired,
+        "the sending thread is joined"
+    );
+    assert!(
+        pending(&core, ROOM).is_empty(),
+        "unsent messages are dropped"
+    );
+}
+
+/// GIVEN a room that is not encrypted WHEN sending without consent THEN
+/// nothing is sent and the message asks for confirmation; after consent a
+/// retry sends it as plain text with the same transaction ID, and consent is
+/// remembered for the next message.
+#[test]
+fn given_an_unencrypted_room_then_sending_needs_consent_once_and_keeps_the_transaction_id() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(200);
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the plain room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN)
+    });
+    let first: PendingMessage = value(send(&core, PLAIN, "plain hello"));
+    wait_for("the confirmation request", || {
+        pending(&core, PLAIN)[0].state == PendingState::Failed
+    });
+    // The send checked the room, so the list now labels it.
+    assert!(
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN && room.encryption == RoomEncryption::NotEncrypted)
+    );
+    assert_eq!(
+        pending(&core, PLAIN)[0].failure,
+        Some(SendFailure::ConfirmationRequired)
+    );
+    assert!(server.sends().is_empty(), "nothing sent before consent");
+
+    assert_eq!(
+        call(
+            &core,
+            Call::AllowUnencrypted {
+                room_id: PLAIN.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::RetryMessage {
+                local_id: first.local_id
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    wait_for("the send", || {
+        pending(&core, PLAIN)[0].state == PendingState::Sent
+    });
+    let sent = &pending(&core, PLAIN)[0];
+    assert_eq!(sent.event_id.as_deref(), Some("$sent"));
+    let paths = server.sends();
+    assert_eq!(paths.len(), 1);
+    assert!(
+        paths[0].contains("/send/m.room.message/"),
+        "plain text: {}",
+        paths[0]
+    );
+
+    value::<PendingMessage>(send(&core, PLAIN, "second"));
+    wait_for("the second send", || {
+        pending(&core, PLAIN)
+            .iter()
+            .filter(|m| m.state == PendingState::Sent)
+            .count()
+            == 2
+    });
+    assert_eq!(server.sends().len(), 2, "consent was remembered");
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a homeserver that refuses a send WHEN the user retries THEN the same
+/// transaction ID is sent again, so the homeserver can recognise it; a later
+/// message in the room waits until the earlier one is resolved.
+#[test]
+fn given_a_refused_send_then_a_retry_reuses_its_transaction_id_and_later_messages_wait() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(500);
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    assert_eq!(
+        call(
+            &core,
+            Call::AllowUnencrypted {
+                room_id: PLAIN.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    wait_for("the plain room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN)
+    });
+    let first: PendingMessage = value(send(&core, PLAIN, "one"));
+    let second: PendingMessage = value(send(&core, PLAIN, "two"));
+    wait_for("the refusal", || {
+        pending(&core, PLAIN)[0].state == PendingState::Failed
+    });
+    assert_eq!(
+        pending(&core, PLAIN)[0].failure,
+        Some(SendFailure::Rejected)
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        pending(&core, PLAIN)[1].state,
+        PendingState::Queued,
+        "waits behind it"
+    );
+    assert_eq!(server.sends().len(), 1);
+
+    server.accept_sends();
+    call(
+        &core,
+        Call::RetryMessage {
+            local_id: first.local_id,
+        },
+    );
+    wait_for("both sent", || {
+        pending(&core, PLAIN)
+            .iter()
+            .all(|m| m.state == PendingState::Sent)
+    });
+    let paths = server.sends();
+    assert_eq!(paths.len(), 3);
+    assert_eq!(paths[0], paths[1], "the retry repeats the transaction ID");
+    assert_ne!(paths[1], paths[2], "the next message has its own");
+    assert_eq!(
+        call(
+            &core,
+            Call::DiscardMessage {
+                local_id: second.local_id
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    assert_eq!(pending(&core, PLAIN).len(), 1);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN bad input or no account WHEN sending THEN the core refuses before
+/// queueing anything.
+#[test]
+fn given_bad_input_or_no_account_then_nothing_is_queued() {
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    assert_eq!(
+        send(&core, ROOM, "x"),
+        Outcome::Error(ErrorCode::Unavailable)
+    );
+    for (room, body) in [
+        ("#alias:s", "x"),
+        (ROOM, ""),
+        (ROOM, "  "),
+        (ROOM, "a\u{7}b"),
+    ] {
+        assert_eq!(
+            send(&core, room, body),
+            Outcome::Error(ErrorCode::InvalidArgument),
+            "{room} {body:?}"
+        );
+    }
+    assert_eq!(
+        call(&core, Call::RetryMessage { local_id: 1 }),
+        Outcome::Error(ErrorCode::NotFound)
+    );
+}
+
+/// GIVEN an account without an identity and no verification WHEN the page
+/// asks to verify, or acts on a flow THEN nothing starts and the flow ID is
+/// checked: an empty or oversized one is refused, an unknown one ignored.
+#[test]
+fn given_no_flow_then_verification_actions_change_nothing() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let started: SecurityStatus = value(call(&core, Call::VerifyThisDevice {}));
+    assert_eq!(started.verification, None, "nothing to verify against");
+    for call_for in [
+        |flow_id| Call::AcceptVerification { flow_id },
+        |flow_id| Call::ConfirmVerification { flow_id },
+        |flow_id| Call::CancelVerification { flow_id },
+    ] {
+        let status: SecurityStatus = value(call(&core, call_for("someone-else".into())));
+        assert_eq!(status.verification, None);
+        assert_eq!(status.error, None);
+        for bad in [String::new(), "f".repeat(129)] {
+            assert_eq!(
+                call(&core, call_for(bad)),
+                Outcome::Error(ErrorCode::InvalidArgument)
+            );
+        }
+    }
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
 }

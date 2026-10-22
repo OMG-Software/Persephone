@@ -44,7 +44,7 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}}),
             ),
             Call::RoomList {} => Ok(serde_json::json!({
-                "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2}],
+                "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2, "encryption": "encrypted"}],
                 "truncated": false
             })),
             Call::Subscribe { room_id } => match room_id.as_str() {
@@ -57,6 +57,47 @@ impl CoreTransport for FakeCore {
             // A state outside the contract must not reach the page.
             Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
             Call::SignOut {} => Ok(serde_json::json!("restart_required")),
+            Call::SecurityStatus {} => Ok(
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false}),
+            ),
+            Call::VerifyThisDevice {} => Ok(serde_json::json!({
+                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false,
+                "verification": {"flowId": "f1", "phase": "waiting", "emoji": [], "otherDevice": null}
+            })),
+            Call::AcceptVerification { flow_id }
+            | Call::ConfirmVerification { flow_id }
+            | Call::CancelVerification { flow_id } => Ok(serde_json::json!({
+                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false,
+                "verification": {"flowId": flow_id, "phase": "compare",
+                    "emoji": [{"symbol": "🐶", "description": "Dog"}], "otherDevice": "<b>Laptop</b>"}
+            })),
+            Call::SetUpRecovery {} => Ok(
+                serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null, "verification": null, "canSetUpRecovery": false}),
+            ),
+            Call::SetUpEncryption {} => Ok(
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false}),
+            ),
+            // A reply carrying a secret is refused by the contract.
+            Call::SendMessage { room_id, body } => match body.as_str() {
+                "hello" => Ok(serde_json::json!({
+                    "localId": 1, "roomId": room_id, "body": body, "state": "queued",
+                    "eventId": null, "failure": null
+                })),
+                // A reply carrying the transaction ID is refused by the contract.
+                _ => Ok(serde_json::json!({
+                    "localId": 2, "roomId": room_id, "body": body, "state": "queued",
+                    "eventId": null, "failure": null, "transactionId": "t"
+                })),
+            },
+            Call::PendingMessages { .. } => Ok(serde_json::json!([])),
+            Call::RetryMessage { local_id } | Call::DiscardMessage { local_id } => match local_id {
+                1 => Ok(serde_json::Value::Null),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
+            Call::AllowUnencrypted { .. } => Ok(serde_json::Value::Null),
+            Call::RecoverWithKey {} => Ok(
+                serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "recoveryKey": "x"}),
+            ),
             Call::SignIn { homeserver } => match homeserver.as_str() {
                 "https://matrix.example.org" => {
                     Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
@@ -276,7 +317,20 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-lock-session",
             "allow-unlock-session",
             "allow-sign-in",
-            "allow-sign-out"
+            "allow-sign-out",
+            "allow-security-status",
+            "allow-set-up-encryption",
+            "allow-recover-with-key",
+            "allow-send-message",
+            "allow-pending-messages",
+            "allow-retry-message",
+            "allow-discard-message",
+            "allow-allow-unencrypted",
+            "allow-set-up-recovery",
+            "allow-verify-this-device",
+            "allow-accept-verification",
+            "allow-confirm-verification",
+            "allow-cancel-verification"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -485,7 +539,12 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
         room_id: "!r:example.invalid".into(),
     });
     subscriptions.dispatch(Event::RoomListChanged {});
+    subscriptions.dispatch(Event::SecurityChanged {});
     let delivered = delivered.lock().unwrap().clone();
+    assert!(
+        delivered.contains(&(3, r#""security""#.into())),
+        "{delivered:?}"
+    );
     assert!(
         delivered.contains(&(3, r#""session""#.into())),
         "{delivered:?}"
@@ -546,4 +605,130 @@ fn given_sign_in_then_only_the_homeserver_crosses_and_replies_are_checked() {
     )
     .map(|reply| reply.deserialize::<serde_json::Value>().unwrap());
     assert_eq!(signed_out, Ok(serde_json::json!("restart_required")));
+}
+
+/// The encryption commands take no arguments and relay codes only: a reply
+/// carrying a recovery key is refused by the contract.
+#[test]
+fn given_encryption_commands_then_only_codes_cross_and_secrets_are_refused() {
+    let app = app_with(FakeCore::new(true));
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str| {
+        get_ipc_response(&window, request(cmd, app_origin(), serde_json::json!({})))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    assert_eq!(
+        invoke("security_status"),
+        Ok(
+            serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false})
+        )
+    );
+    assert_eq!(
+        invoke("set_up_encryption").unwrap()["operation"],
+        "waiting_for_password"
+    );
+    assert_eq!(invoke("recover_with_key").unwrap_err(), "core_unavailable");
+    assert_eq!(invoke("set_up_recovery").unwrap()["operation"], "working");
+}
+
+/// Sending relays the room and body only; oversized input never reaches the
+/// core, and a reply carrying more than the contract (a transaction ID) is
+/// refused.
+#[test]
+fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let room = "!r:example.invalid";
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "hello"})
+        )
+        .unwrap()["state"],
+        "queued"
+    );
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "other"})
+        )
+        .unwrap_err(),
+        "core_unavailable"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "x".repeat(16 * 1024 + 1)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized body never crossed"
+    );
+    assert_eq!(
+        invoke("pending_messages", serde_json::json!({"roomId": room})),
+        Ok(serde_json::json!([]))
+    );
+    assert_eq!(
+        invoke("retry_message", serde_json::json!({"localId": 1})),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke("discard_message", serde_json::json!({"localId": 7})).unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        invoke("allow_unencrypted", serde_json::json!({"roomId": room})),
+        Ok(serde_json::Value::Null)
+    );
+}
+
+/// Verification relays the flow ID only, refuses an oversized one before the
+/// core, and passes the emoji and device name through unchanged for the page
+/// to render as text.
+#[test]
+fn given_verification_commands_then_only_the_flow_id_crosses() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    assert_eq!(
+        invoke("verify_this_device", serde_json::json!({})).unwrap()["verification"]["phase"],
+        "waiting"
+    );
+    for cmd in [
+        "accept_verification",
+        "confirm_verification",
+        "cancel_verification",
+    ] {
+        let reply = invoke(cmd, serde_json::json!({"flowId": "f1"})).unwrap();
+        assert_eq!(reply["verification"]["flowId"], "f1", "{cmd}");
+        assert_eq!(reply["verification"]["emoji"][0]["symbol"], "🐶");
+    }
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "confirm_verification",
+            serde_json::json!({"flowId": "f".repeat(129)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized flow ID never crossed"
+    );
 }

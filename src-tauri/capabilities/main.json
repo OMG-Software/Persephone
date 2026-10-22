@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "The main window may call the app's view, subscription, session lock, sign-in and sign-out commands and nothing else: no core plugin, event, window, path or webview permissions.",
+  "description": "The main window may call the app's view, subscription, session lock, sign-in, sign-out, encryption and sending commands and nothing else: no core plugin, event, window, path or webview permissions.",
   "windows": ["main"],
   "permissions": [
     "allow-app-status",
@@ -12,6 +12,19 @@
     "allow-lock-session",
     "allow-unlock-session",
     "allow-sign-in",
-    "allow-sign-out"
+    "allow-sign-out",
+    "allow-security-status",
+    "allow-set-up-encryption",
+    "allow-recover-with-key",
+    "allow-send-message",
+    "allow-pending-messages",
+    "allow-retry-message",
+    "allow-discard-message",
+    "allow-allow-unencrypted",
+    "allow-set-up-recovery",
+    "allow-verify-this-device",
+    "allow-accept-verification",
+    "allow-confirm-verification",
+    "allow-cancel-verification"
   ]
 }
