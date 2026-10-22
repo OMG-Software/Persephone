@@ -58,13 +58,13 @@ impl CoreTransport for FakeCore {
             Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
             Call::SignOut {} => Ok(serde_json::json!("restart_required")),
             Call::SecurityStatus {} => Ok(
-                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null}),
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "canSetUpRecovery": false}),
             ),
             Call::SetUpRecovery {} => Ok(
-                serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null}),
+                serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null, "canSetUpRecovery": false}),
             ),
             Call::SetUpEncryption {} => Ok(
-                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null}),
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "canSetUpRecovery": false}),
             ),
             // A reply carrying a secret is refused by the contract.
             Call::SendMessage { room_id, body } => match body.as_str() {
@@ -85,7 +85,7 @@ impl CoreTransport for FakeCore {
             },
             Call::AllowUnencrypted { .. } => Ok(serde_json::Value::Null),
             Call::RecoverWithKey {} => Ok(
-                serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "recoveryKey": "x"}),
+                serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "canSetUpRecovery": false, "recoveryKey": "x"}),
             ),
             Call::SignIn { homeserver } => match homeserver.as_str() {
                 "https://matrix.example.org" => {
@@ -605,7 +605,7 @@ fn given_encryption_commands_then_only_codes_cross_and_secrets_are_refused() {
     assert_eq!(
         invoke("security_status"),
         Ok(
-            serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null})
+            serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "canSetUpRecovery": false})
         )
     );
     assert_eq!(

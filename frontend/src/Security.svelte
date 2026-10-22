@@ -68,7 +68,7 @@
     <button type="button" disabled={waiting} onclick={onrecover}>Use recovery key</button>
   {:else}
     <p>This device is verified.</p>
-    {#if security.recovery === 'disabled'}
+    {#if security.recovery === 'disabled' && security.canSetUpRecovery}
       <p>
         Without recovery, your encrypted messages cannot be read on a new device if this one is
         lost.

@@ -1368,6 +1368,28 @@
       "evidence": "encryption-setup.md"
     },
     {
+      "name": "workspace_check_after_encryption_setup_second_review",
+      "command": "python tools/dev.py check --offline (CARGO_BUILD_JOBS=4)",
+      "checked_on": "2026-10-22",
+      "exit_code": 0,
+      "rust_tests_passed": 248,
+      "frontend_tests_passed": 17,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 280,
+      "includes": "core unit, binary and account tests and Clippy with dev-disposable-servers",
+      "source": "uncommitted p4/encrypted-messaging working tree with the second review round, committed next with only these docs added",
+      "working_tree_clean": false,
+      "live_runs": "not repeated: the changes guard writes against a concurrent lock and add a status field; the normal path is unchanged",
+      "platform": "Windows 11 Pro x64 26200, debug",
+      "toolchain": {"rustc": "1.99.1", "cargo": "1.99.1", "node": "24.15.0", "npm": "11.13.0", "python": "3.14.4"},
+      "inputs": "--offline; dependencies cached under .local/cache",
+      "cargo_lock_sha256": "946730d6f8521522bc2be69dc34998a1020b396f95d42015d55d582cc3b42c35",
+      "package_lock_sha256": "a22d978b8b0313e6fabaa1c1583abdfbda9e623e28bb9793ccd822f0b04ef3e2",
+      "raw_output": ".local/check-p4a-3.log (ignored)",
+      "evidence": "encryption-setup.md"
+    },
+    {
       "name": "live_encrypted_sending",
       "command": "development core and desktop UI driven through WebView2 DevTools; tests/matrix p4_peer as the second account (cross-signed) and an unsigned second device; tools/servers/run.py in WSL",
       "checked_on": "2026-10-22",

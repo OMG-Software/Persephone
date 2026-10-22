@@ -52,13 +52,19 @@ wrong recovery key was refused.**
   verified and signs this device.
 * **Prompts never hold a lease**: they run on short-lived threads, so a prompt
   left open does not delay a lock; an answer given after a lock is dropped.
+* **No stale writes**: every change to the encryption state (the thread's
+  results, a queued command, a prompt's answer, a failed key window) is checked
+  against the session's generation under the lock a lock takes to advance it,
+  so nothing from before a lock reaches the locked or the next session. The
+  status also says whether this device can set up recovery alone, and the page
+  offers it only then.
 * **Contracts and calls**: `security_status`, `set_up_encryption`,
   `recover_with_key` take no arguments and reply with codes only; a reply with
   any extra field (such as a key) is refused by the UI host.
 
 ## Tests
 
-New, all passing (the full check passed 278 tests after the review fixes; see the [ledger](verification.json)):
+New, all passing (the full check passed 280 tests after the review fixes; see the [ledger](verification.json)):
 
 * Account (mock homeserver, development feature):
   * set-up asks for the password once, answers a 401 authentication round with
@@ -72,6 +78,8 @@ New, all passing (the full check passed 278 tests after the review fixes; see th
     setting up recovery alone then succeeds without a second password, and
     set-up as a whole is not offered over the identity;
   * an answer given after a lock is never sent.
+* Session unit: a write meant for the session before a lock is refused after
+  the lock and after a later unlock, and leaves no status or command.
 * Core unit: undecryptable reasons map to their notices; secret checks;
   unsupported platforms fail closed for secrets and the key window; the
   development key file must be inside `.local`.

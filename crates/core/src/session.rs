@@ -212,17 +212,37 @@ impl Shared {
         guard(&self.listener).clone()
     }
 
-    /// Changes the encryption status and tells the listener if it changed.
-    fn update_security(&self, change: impl FnOnce(&mut SecurityStatus)) {
-        let changed = {
+    /// The generation of the open session, or `None` while it is not open.
+    fn open_generation(&self) -> Option<u64> {
+        let inner = lock(self);
+        (inner.state == StoreState::Protected).then_some(inner.generation)
+    }
+
+    /// Changes the encryption state only while the session is still the open
+    /// one of `generation`. The check and the change happen under the lock a
+    /// lock takes to advance the generation, so nothing written here outlives
+    /// a lock (which then resets the state). Tells the listener, after both
+    /// locks are released, if the status changed. `None` when the session
+    /// moved on.
+    fn with_security<R>(
+        &self,
+        generation: u64,
+        change: impl FnOnce(&mut SecurityShared) -> R,
+    ) -> Option<R> {
+        let (result, changed) = {
+            let inner = lock(self);
+            if inner.generation != generation || inner.state != StoreState::Protected {
+                return None;
+            }
             let mut security = guard(&self.security);
             let before = security.status.clone();
-            change(&mut security.status);
-            security.status != before
+            let result = change(&mut security);
+            (result, security.status != before)
         };
         if changed && let Some(listener) = self.listener() {
             listener.security_changed();
         }
+        Some(result)
     }
 
     fn set_status(&self, status: AccountStatus) {
@@ -477,7 +497,8 @@ fn run_security(
             Err(AdmissionError::Locked) => break,
             Err(AdmissionError::Saturated) => {
                 if command.is_some() {
-                    guard(&shared.security).command = command;
+                    // Dropped (and its secret zeroed) if a lock came first.
+                    shared.with_security(generation, |security| security.command = command);
                 }
                 continue;
             }
@@ -536,15 +557,20 @@ fn run_security(
             break;
         }
         next_refresh = Instant::now() + SECURITY_REFRESH;
-        guard(&shared.security).can_set_up_recovery = private_keys;
-        shared.update_security(|status| {
+        let published_now = shared.with_security(generation, |security| {
+            security.can_set_up_recovery = private_keys;
+            let status = &mut security.status;
             status.identity = identity;
             status.recovery = recovery;
+            status.can_set_up_recovery = private_keys;
             if ran {
                 status.operation = SecurityOperation::Idle;
                 status.error = outcome;
             }
         });
+        if published_now.is_none() {
+            break;
+        }
         if let Some((key, source)) = key {
             // The window waits for the user, so it has its own thread; the
             // key is zeroed when that thread ends.
@@ -553,20 +579,15 @@ fn run_security(
             let spawned = std::thread::Builder::new()
                 .name("core-recovery-key".into())
                 .spawn(move || {
-                    let shown = source.show_recovery_key(&shown_user, &key).is_ok();
-                    let current = {
-                        let inner = lock(&display_shared);
-                        inner.generation == generation && inner.state == StoreState::Protected
-                    };
-                    if !shown && current {
-                        display_shared.update_security(|status| {
-                            status.error = Some(SecurityError::RecoveryKeyNotShown);
+                    if source.show_recovery_key(&shown_user, &key).is_err() {
+                        display_shared.with_security(generation, |security| {
+                            security.status.error = Some(SecurityError::RecoveryKeyNotShown);
                         });
                     }
                 });
             if spawned.is_err() {
-                shared.update_security(|status| {
-                    status.error = Some(SecurityError::RecoveryKeyNotShown);
+                shared.with_security(generation, |security| {
+                    security.status.error = Some(SecurityError::RecoveryKeyNotShown);
                 });
             }
         }
@@ -1099,27 +1120,23 @@ impl Session {
     /// earlier attempt failed). Needs no password; the new recovery key is
     /// shown in the core's own window.
     pub fn set_up_recovery(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
-        if guard(&self.shared.account).is_none()
-            || lock(&self.shared).state != StoreState::Protected
-        {
+        let Some(generation) = self.shared.open_generation() else {
+            return self.security_status();
+        };
+        if guard(&self.shared.account).is_none() {
             return self.security_status();
         }
-        {
-            let mut security = guard(&self.shared.security);
-            if !security.can_set_up_recovery
-                || security.status.recovery != RecoveryState::Disabled
-                || security.status.operation != SecurityOperation::Idle
-                || security.command.is_some()
+        self.shared.with_security(generation, |security| {
+            if security.can_set_up_recovery
+                && security.status.recovery == RecoveryState::Disabled
+                && security.status.operation == SecurityOperation::Idle
+                && security.command.is_none()
             {
-                return security.status.clone();
+                security.command = Some(SecurityCommand::SetUpRecovery { source });
+                security.status.operation = SecurityOperation::Working;
+                security.status.error = None;
             }
-            security.command = Some(SecurityCommand::SetUpRecovery { source });
-            security.status.operation = SecurityOperation::Working;
-            security.status.error = None;
-        }
-        if let Some(listener) = self.shared.listener() {
-            listener.security_changed();
-        }
+        });
         self.security_status()
     }
 
@@ -1139,57 +1156,48 @@ impl Session {
             Some(account) => (account.user_id.clone(), account.host.clone()),
             None => return self.security_status(),
         };
-        let started = {
-            let inner = lock(&self.shared);
-            if inner.state != StoreState::Protected {
-                return self.security_status();
-            }
-            inner.generation
+        let Some(started) = self.shared.open_generation() else {
+            return self.security_status();
         };
-        {
-            let mut security = guard(&self.shared.security);
-            if security.status.identity != required
-                || security.status.operation != SecurityOperation::Idle
-                || security.command.is_some()
-            {
-                return security.status.clone();
+        let accepted = self.shared.with_security(started, |security| {
+            let free = security.status.identity == required
+                && security.status.operation == SecurityOperation::Idle
+                && security.command.is_none();
+            if free {
+                security.status.operation = waiting;
+                security.status.error = None;
             }
-            security.status.operation = waiting;
-            security.status.error = None;
-        }
-        if let Some(listener) = self.shared.listener() {
-            listener.security_changed();
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
         }
         let shared = self.shared.clone();
         let spawned = std::thread::Builder::new()
             .name("core-secret-prompt".into())
             .spawn(move || {
-                let answer = ask(&source, &user_id, &host);
-                let current = {
-                    let inner = lock(&shared);
-                    inner.generation == started && inner.state == StoreState::Protected
-                };
-                match answer {
-                    Ok(command) if current => {
-                        guard(&shared.security).command = Some(command);
-                        shared.update_security(|status| {
-                            status.operation = SecurityOperation::Working;
+                // After a lock (and perhaps an unlock) nothing is written: a
+                // secret is dropped and zeroed here, and the lock reset the
+                // status.
+                match ask(&source, &user_id, &host) {
+                    Ok(command) => {
+                        shared.with_security(started, |security| {
+                            security.command = Some(command);
+                            security.status.operation = SecurityOperation::Working;
                         });
                     }
-                    // Locked while the prompt was open: the secret is dropped
-                    // (and zeroed) here, and the lock reset the status.
-                    Ok(_) => {}
-                    Err(error) if current => shared.update_security(|status| {
-                        status.operation = SecurityOperation::Idle;
-                        status.error = Some(security_prompt_error(error));
-                    }),
-                    Err(_) => {}
+                    Err(error) => {
+                        shared.with_security(started, |security| {
+                            security.status.operation = SecurityOperation::Idle;
+                            security.status.error = Some(security_prompt_error(error));
+                        });
+                    }
                 }
             });
         if spawned.is_err() {
-            self.shared.update_security(|status| {
-                status.operation = SecurityOperation::Idle;
-                status.error = Some(SecurityError::Failed);
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
             });
         }
         self.security_status()
@@ -1241,5 +1249,63 @@ fn not_revoked() -> AccountStatus {
         state: AccountState::SignedOut,
         user_id: None,
         error: Some(SignInError::SessionNotRevoked),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::{KEY_BYTES, StoreKey, VaultError};
+
+    /// Keeps the key as it is: enough for a profile in a temporary folder.
+    struct Plain;
+
+    impl KeyProtector for Plain {
+        fn protect(&self, key: &StoreKey) -> Result<Vec<u8>, VaultError> {
+            Ok(key.to_vec())
+        }
+
+        fn unprotect(&self, blob: &[u8]) -> Result<StoreKey, VaultError> {
+            let bytes: [u8; KEY_BYTES] = blob.try_into().map_err(|_| VaultError::Failed)?;
+            Ok(Zeroizing::new(bytes))
+        }
+    }
+
+    /// GIVEN a write meant for the session before a lock WHEN it arrives
+    /// after the lock, or after a later unlock THEN it is refused: no stale
+    /// status or command reaches the locked or the new session.
+    #[test]
+    fn given_a_lock_then_writes_for_the_old_session_are_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Box::new(Plain));
+        let old = session.shared.open_generation().expect("open");
+        assert!(
+            session
+                .shared
+                .with_security(old, |security| security.status.identity =
+                    IdentityState::None)
+                .is_some()
+        );
+        assert_eq!(
+            session.lock(Duration::from_secs(5), || {}).0,
+            StoreState::Locked
+        );
+        let late = session.shared.with_security(old, |security| {
+            security.status.operation = SecurityOperation::Working;
+            security.command = Some(SecurityCommand::Recover(Zeroizing::new("key".into())));
+        });
+        assert_eq!(late, None);
+        assert_eq!(session.security_status(), SecurityStatus::unknown());
+        assert!(guard(&session.shared.security).command.is_none());
+
+        assert_eq!(session.unlock(), StoreState::Protected);
+        let new = session.shared.open_generation().expect("open again");
+        assert_ne!(new, old);
+        assert_eq!(
+            session.shared.with_security(old, |_| ()),
+            None,
+            "still the old session"
+        );
+        assert!(session.shared.with_security(new, |_| ()).is_some());
     }
 }

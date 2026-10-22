@@ -110,7 +110,7 @@ The composer sends text in the open room. The live sending check uses a second S
 
 After adding encrypted sending, `python tools/dev.py check --offline` passed all 293 tests (259 Rust, 19 frontend, 2 server-registration and 13 development-controller tests). See the [sending evidence](evidence/encrypted-sending.md).
 
-After the encryption setup review fixes, `python tools/dev.py check --offline` passed all 278 tests (246 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first version passed 276 (244 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). See the [encryption setup evidence](evidence/encryption-setup.md).
+After the second round of encryption setup review fixes, `python tools/dev.py check --offline` passed all 280 tests (248 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first round passed 278 (246 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first version passed 276 (244 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). See the [encryption setup evidence](evidence/encryption-setup.md).
 
 After merging sign-out and failed-window retry, `python tools/dev.py check --offline` passed all 266 tests (235 Rust, 16 frontend, 2 server-registration and 13 development-controller tests).
 
