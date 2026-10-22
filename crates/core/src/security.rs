@@ -52,9 +52,11 @@ pub async fn identity_state(
         return IdentityState::Unknown;
     };
     let identity = match (identity, published) {
-        (_, None) => return IdentityState::Unknown,
+        // Not asked yet, or published but not stored here yet (sync stores it):
+        // never offer set-up over an identity the homeserver has.
+        (_, None) | (None, Some(true)) => return IdentityState::Unknown,
         // Not on the homeserver: nobody else can trust it yet.
-        (None, Some(_)) | (Some(_), Some(false)) => return IdentityState::None,
+        (None, Some(false)) | (Some(_), Some(false)) => return IdentityState::None,
         (Some(identity), Some(true)) => identity,
     };
     let signed = encryption
