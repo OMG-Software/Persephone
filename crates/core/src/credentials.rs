@@ -115,8 +115,8 @@ pub fn from_wide(username: &[u16], password: &[u16]) -> Result<Credentials, Prom
 #[cfg(feature = "dev-disposable-servers")]
 pub mod dev {
     use super::{
-        CredentialSource, Credentials, MAX_RECOVERY_KEY_CHARS, PromptError, SecretPrompt,
-        checked_secret,
+        CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, PromptError,
+        SecretPrompt, checked_secret,
     };
     use std::path::{Component, PathBuf};
     use zeroize::Zeroizing;
@@ -152,14 +152,34 @@ pub mod dev {
             self
         }
 
-        fn recovery_file(&self) -> Result<&PathBuf, PromptError> {
-            self.recovery_file
+        /// The recovery-key file, resolved: it must stay inside the `.local`
+        /// directory its path names once `..` and links are followed, and an
+        /// existing one must be a plain file, not a link.
+        fn recovery_file(&self) -> Result<PathBuf, PromptError> {
+            let path = self
+                .recovery_file
                 .as_ref()
-                .filter(|path| {
-                    path.components()
-                        .any(|part| part == Component::Normal(".local".as_ref()))
-                })
-                .ok_or(PromptError::Unsupported)
+                .ok_or(PromptError::Unsupported)?;
+            let parts: Vec<Component> = path.components().collect();
+            let local_at = parts
+                .iter()
+                .position(|part| *part == Component::Normal(".local".as_ref()))
+                .ok_or(PromptError::Unsupported)?;
+            let local: PathBuf = parts[..=local_at].iter().collect();
+            let local = std::fs::canonicalize(local).map_err(|_| PromptError::Unsupported)?;
+            let name = path.file_name().ok_or(PromptError::Unsupported)?;
+            let parent = path.parent().ok_or(PromptError::Unsupported)?;
+            let parent = std::fs::canonicalize(parent).map_err(|_| PromptError::Unsupported)?;
+            if !parent.starts_with(&local) {
+                return Err(PromptError::Unsupported);
+            }
+            let resolved = parent.join(name);
+            match std::fs::symlink_metadata(&resolved) {
+                Ok(meta) if meta.file_type().is_file() => Ok(resolved),
+                Ok(_) => Err(PromptError::Unsupported),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(resolved),
+                Err(_) => Err(PromptError::Unsupported),
+            }
         }
 
         fn entry(&self, host: &str) -> Result<Entry, PromptError> {
@@ -194,15 +214,17 @@ pub mod dev {
             let entry = self.entry(host)?;
             Ok(Credentials {
                 username: Zeroizing::new(entry.username),
-                password: Zeroizing::new(entry.password),
+                // The same checks as the native prompt's.
+                password: checked_secret(Zeroizing::new(entry.password), MAX_PASSWORD_CHARS)?,
             })
         }
 
         fn ask_secret(&self, prompt: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
             match prompt {
-                SecretPrompt::Password { host, .. } => {
-                    Ok(Zeroizing::new(self.entry(host)?.password))
-                }
+                SecretPrompt::Password { host, .. } => checked_secret(
+                    Zeroizing::new(self.entry(host)?.password),
+                    MAX_PASSWORD_CHARS,
+                ),
                 SecretPrompt::RecoveryKey { .. } => {
                     use std::io::Read;
                     let mut bytes = Zeroizing::new(Vec::new());
@@ -666,5 +688,53 @@ mod tests {
                 .as_str(),
             "EsTs abcd efgh"
         );
+        // `..` out of `.local` is followed before the check, so it is refused.
+        let escaped = dev::HarnessProfile::new(dir.path().join("profile.json"))
+            .with_recovery_file(local.join("..").join("escaped.txt"));
+        assert_eq!(
+            escaped.show_recovery_key("@a:s", "key"),
+            Err(PromptError::Unsupported)
+        );
+        assert!(!dir.path().join("escaped.txt").exists());
+        // A directory where the file should be is not a key file.
+        std::fs::create_dir(local.join("dir")).unwrap();
+        let directory = dev::HarnessProfile::new(dir.path().join("profile.json"))
+            .with_recovery_file(local.join("dir"));
+        assert_eq!(
+            directory
+                .ask_secret(SecretPrompt::RecoveryKey { user_id: "@a:s" })
+                .err(),
+            Some(PromptError::Unsupported)
+        );
+    }
+
+    /// GIVEN a development profile WHEN its password is empty, oversized or
+    /// holds a control character THEN it is refused as the native prompt
+    /// refuses it, before anything is sent.
+    #[cfg(feature = "dev-disposable-servers")]
+    #[test]
+    fn given_a_bad_profile_password_then_the_dev_source_refuses_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let profile = dir.path().join("profile.json");
+        let long = "p".repeat(MAX_PASSWORD_CHARS + 1);
+        for bad in ["", "a\u{1}b", long.as_str()] {
+            let entries = serde_json::json!([
+                {"base_url": "http://h.test:8008", "username": "u", "password": bad}
+            ]);
+            std::fs::write(&profile, entries.to_string()).unwrap();
+            let source = dev::HarnessProfile::new(profile.clone());
+            assert_eq!(
+                source
+                    .ask_secret(SecretPrompt::Password {
+                        user_id: "@u:h.test",
+                        host: "h.test:8008"
+                    })
+                    .err(),
+                Some(PromptError::Invalid),
+                "{:?}",
+                bad.len()
+            );
+            assert_eq!(source.ask("h.test:8008").err(), Some(PromptError::Invalid));
+        }
     }
 }
