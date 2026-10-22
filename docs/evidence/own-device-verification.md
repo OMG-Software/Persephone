@@ -115,6 +115,10 @@ later attempts with the same accounts.
   queued action marks the operation as working until the security thread has
   run it (unit-tested), and a queued start keeps an incoming request that
   arrived first (no test: it needs live SDK flows).
+* A comparison is offered, and a match accepted, only with seven emoji. When
+  the other device chooses numbers only, the core cancels the flow, since the
+  page cannot show numbers. The core and page guards are tested; the
+  cancellation is not, because it needs a live SDK flow.
 * Verifying other people, and approving a contact's changed identity, are not
   built; requests from other users are ignored.
 * The other device was an SDK peer, not another Matrix client; interoperability

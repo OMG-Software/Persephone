@@ -331,5 +331,11 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
     assert.match(html, /<p id="verification-question">/);
   }
   assert.match(view('waiting'), /<div class="verification">/, 'only the dialogs are named');
+  // A comparison without its seven emoji offers no match.
+  const short = view('compare', { emoji: emoji.slice(0, 6) });
+  assert.doesNotMatch(short, /They match/);
+  assert.doesNotMatch(short, /alertdialog/);
+  assert.match(short, /Waiting for your other device\. Accept the request there\./);
+  assert.match(short, />Cancel</);
 });
 

@@ -28,6 +28,9 @@
   } = $props();
 
   const flow = $derived(security.verification);
+  // Only seven emoji can be compared; anything else is never offered for a match.
+  const comparing = $derived(flow?.phase === 'compare' && flow.emoji.length === 7);
+  const asking = $derived(comparing || flow?.phase === 'incoming');
   const flowOpen = $derived(flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled');
 
   // Fixed text per code; the core sends codes only. Secrets never reach this
@@ -93,8 +96,8 @@
   {#if flow}
     <div
       class="verification"
-      role={flow.phase === 'compare' || flow.phase === 'incoming' ? 'alertdialog' : null}
-      aria-labelledby={flow.phase === 'compare' || flow.phase === 'incoming' ? 'verification-question' : null}
+      role={asking ? 'alertdialog' : null}
+      aria-labelledby={asking ? 'verification-question' : null}
     >
       {#if flow.phase === 'incoming'}
         <p id="verification-question">
@@ -104,10 +107,10 @@
         </p>
         <button type="button" disabled={busy} onclick={() => onaccept(flow.flowId)}>Accept</button>
         <button type="button" disabled={busy} onclick={() => oncancel(flow.flowId)}>Decline</button>
-      {:else if flow.phase === 'waiting'}
+      {:else if flow.phase === 'waiting' || (flow.phase === 'compare' && !comparing)}
         <p role="status">Waiting for your other device. Accept the request there.</p>
         <button type="button" disabled={busy} onclick={() => oncancel(flow.flowId)}>Cancel</button>
-      {:else if flow.phase === 'compare'}
+      {:else if comparing}
         <p id="verification-question">Do these emoji match the ones on your other device, in the same order?</p>
         <ol class="emoji">
           {#each flow.emoji as item, index (index)}

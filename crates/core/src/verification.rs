@@ -72,6 +72,14 @@ impl Flow {
         {
             let _ = sas.accept().await;
         }
+        // The other device chose a comparison without emoji (numbers only),
+        // which this page cannot show: end it rather than leave both waiting.
+        if let Some(sas) = &self.sas
+            && matches!(sas.state(), SasState::KeysExchanged { .. })
+            && emoji_of(sas).len() != SAS_EMOJI
+        {
+            let _ = sas.cancel().await;
+        }
     }
 
     /// Carries out an action meant for this flow. Returns `false` when it
@@ -105,27 +113,23 @@ impl Flow {
     pub fn view(&self) -> VerificationView {
         let (phase, emoji, other) = match &self.sas {
             Some(sas) => {
+                let mut emoji = Vec::new();
                 let phase = match sas.state() {
-                    SasState::KeysExchanged { .. } => VerificationPhase::Compare,
+                    // Only seven emoji can be compared; without them nothing
+                    // may be confirmed (`drive` cancels such a flow).
+                    SasState::KeysExchanged { .. } => {
+                        emoji = emoji_of(sas);
+                        if emoji.len() == SAS_EMOJI {
+                            VerificationPhase::Compare
+                        } else {
+                            emoji.clear();
+                            VerificationPhase::Waiting
+                        }
+                    }
                     SasState::Confirmed => VerificationPhase::Confirmed,
                     SasState::Done { .. } => VerificationPhase::Done,
                     SasState::Cancelled(_) => VerificationPhase::Cancelled,
                     _ => VerificationPhase::Waiting,
-                };
-                let emoji = if phase == VerificationPhase::Compare {
-                    sas.emoji()
-                        .map(|emoji| {
-                            emoji
-                                .iter()
-                                .map(|item| SasEmoji {
-                                    symbol: item.symbol.to_owned(),
-                                    description: item.description.to_owned(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
                 };
                 (
                     phase,
@@ -155,6 +159,25 @@ impl Flow {
             other_device: other.as_deref().map(project_name),
         }
     }
+}
+
+/// How many emoji a comparison shows.
+pub const SAS_EMOJI: usize = 7;
+
+/// The emoji the SDK gives for comparing, or none when the other device
+/// chose numbers only.
+fn emoji_of(sas: &SasVerification) -> Vec<SasEmoji> {
+    sas.emoji()
+        .map(|emoji| {
+            emoji
+                .iter()
+                .map(|item| SasEmoji {
+                    symbol: item.symbol.to_owned(),
+                    description: item.description.to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Asks the account's other devices to verify this one.

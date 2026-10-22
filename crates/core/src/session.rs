@@ -743,9 +743,12 @@ fn queue_verification(security: &mut SecurityShared, action: VerifyAction) -> bo
         VerifyAction::Start => security.status.identity == IdentityState::Unverified && over,
         VerifyAction::Accept(id) => flow
             .is_some_and(|flow| &flow.flow_id == id && flow.phase == VerificationPhase::Incoming),
-        VerifyAction::Confirm(id) => {
-            flow.is_some_and(|flow| &flow.flow_id == id && flow.phase == VerificationPhase::Compare)
-        }
+        // A match is confirmed only against the seven emoji shown.
+        VerifyAction::Confirm(id) => flow.is_some_and(|flow| {
+            &flow.flow_id == id
+                && flow.phase == VerificationPhase::Compare
+                && flow.emoji.len() == verification::SAS_EMOJI
+        }),
         VerifyAction::Cancel(id) => flow.is_some_and(|flow| &flow.flow_id == id) && !over,
     };
     let queued = allowed
@@ -1405,12 +1408,46 @@ mod tests {
     }
 
     fn flow(phase: VerificationPhase) -> Option<VerificationView> {
+        // A comparison always carries its seven emoji.
+        let emoji = if phase == VerificationPhase::Compare {
+            vec![
+                SasEmoji {
+                    symbol: "x".into(),
+                    description: "X".into(),
+                };
+                verification::SAS_EMOJI
+            ]
+        } else {
+            Vec::new()
+        };
         Some(VerificationView {
             flow_id: "f1".into(),
             phase,
-            emoji: Vec::new(),
+            emoji,
             other_device: None,
         })
+    }
+
+    /// GIVEN a comparison without its seven emoji WHEN the page confirms THEN
+    /// nothing is queued: a match needs something to compare. Declining is
+    /// still allowed.
+    #[test]
+    fn given_a_comparison_without_seven_emoji_then_confirm_is_refused() {
+        for count in [0, 6, 8] {
+            let mut security = unverified();
+            let mut view = flow(VerificationPhase::Compare).unwrap();
+            let one = view.emoji[0].clone();
+            view.emoji.resize(count, one);
+            security.status.verification = Some(view);
+            assert!(
+                !queue_verification(&mut security, VerifyAction::Confirm("f1".into())),
+                "{count} emoji"
+            );
+            assert!(queue_verification(
+                &mut security,
+                VerifyAction::Cancel("f1".into())
+            ));
+        }
     }
 
     /// GIVEN an unverified device WHEN a start is queued THEN the operation
@@ -1479,7 +1516,7 @@ mod tests {
         }
     }
     use crate::vault::{KEY_BYTES, StoreKey, VaultError};
-    use persephone_contracts::VerificationView;
+    use persephone_contracts::{SasEmoji, VerificationView};
 
     /// Keeps the key as it is: enough for a profile in a temporary folder.
     struct Plain;
