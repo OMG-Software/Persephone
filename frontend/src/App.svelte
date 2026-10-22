@@ -379,10 +379,19 @@
     }
   }
 
+  // As for the room list: an older pending-list reply that finishes last
+  // cannot replace a newer one (a late "queued" over "sent").
+  let pendingRequest = 0;
+  let pendingShown = 0;
+
   async function loadPending(roomId: string, generation: number) {
+    const request = ++pendingRequest;
     try {
       const list = await pendingMessages(roomId);
-      if (current(roomId, generation)) pending = list;
+      if (current(roomId, generation) && request > pendingShown) {
+        pending = list;
+        pendingShown = request;
+      }
     } catch {
       // The next change of the room tries again.
     }

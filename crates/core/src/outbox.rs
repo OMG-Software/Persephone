@@ -10,6 +10,9 @@
 //! * At most [`MAX_UNSENT`] messages are not yet sent; a sent message is kept
 //!   (up to [`MAX_KEPT`] in all, oldest sent dropped first) so the page can
 //!   match it to its event in the timeline.
+//! * All bodies together take at most [`MAX_BODY_BUDGET`] bytes as JSON, so a
+//!   room's list always fits one reply; old sent messages make room first,
+//!   and a message that does not fit beside the unsent ones is refused.
 //! * Memory only: nothing is kept after a lock or restart.
 
 use matrix_sdk::ruma::{OwnedTransactionId, TransactionId};
@@ -21,6 +24,10 @@ use zeroize::Zeroizing;
 pub const MAX_UNSENT: usize = 16;
 /// Most messages kept, sent ones included.
 pub const MAX_KEPT: usize = 32;
+/// Most bytes all kept bodies take as JSON strings. With [`MAX_KEPT`]
+/// entries' other fields (under 1 KiB each) this stays within one bounded
+/// view (`views::MAX_PAGE_BYTES`, 112 KiB).
+pub const MAX_BODY_BUDGET: usize = 80 * 1024;
 
 /// How a send ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +42,8 @@ struct Entry {
     local_id: u32,
     room_id: String,
     body: Zeroizing<String>,
+    /// The body's size as a JSON string.
+    size: usize,
     transaction_id: OwnedTransactionId,
     state: PendingState,
     event_id: Option<String>,
@@ -69,17 +78,23 @@ pub struct Outbox {
 }
 
 impl Outbox {
-    /// Queues a message, or `None` when [`MAX_UNSENT`] are already unsent.
+    /// Queues a message, or `None` when [`MAX_UNSENT`] are already unsent or
+    /// the body does not fit [`MAX_BODY_BUDGET`] beside the unsent ones.
     pub fn queue(&mut self, room_id: &str, body: Zeroizing<String>) -> Option<PendingMessage> {
-        let unsent = self
+        let unsent: Vec<&Entry> = self
             .entries
             .iter()
             .filter(|entry| entry.state != PendingState::Sent)
-            .count();
-        if unsent >= MAX_UNSENT {
+            .collect();
+        let size = json_size(&body);
+        let unsent_size: usize = unsent.iter().map(|entry| entry.size).sum();
+        if unsent.len() >= MAX_UNSENT || unsent_size + size > MAX_BODY_BUDGET {
             return None;
         }
-        if self.entries.len() >= MAX_KEPT {
+        // Old sent messages make room, by count and by size.
+        while self.entries.len() >= MAX_KEPT
+            || self.entries.iter().map(|entry| entry.size).sum::<usize>() + size > MAX_BODY_BUDGET
+        {
             let oldest_sent = self
                 .entries
                 .iter()
@@ -91,6 +106,7 @@ impl Outbox {
             local_id: self.next_id,
             room_id: room_id.to_owned(),
             body,
+            size,
             transaction_id: TransactionId::new(),
             state: PendingState::Queued,
             event_id: None,
@@ -203,6 +219,11 @@ impl Outbox {
     }
 }
 
+/// The size of `body` as a JSON string, escapes and quotes included.
+fn json_size(body: &str) -> usize {
+    serde_json::to_string(body).map_or(usize::MAX / 2, |json| json.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +306,50 @@ mod tests {
         assert!(outbox.queue("!t:s", body("z")).is_some());
         assert!(outbox.for_room("!r0:s").is_empty(), "oldest sent dropped");
         assert_eq!(outbox.for_room("!r1:s").len(), 1);
+    }
+
+    /// GIVEN large bodies WHEN they are queued THEN all kept bodies stay
+    /// within `MAX_BODY_BUDGET` as JSON: unsent ones that do not fit are
+    /// refused, and sent ones make room oldest first. Escaped characters
+    /// count at their escaped size.
+    #[test]
+    fn given_large_bodies_then_the_kept_bodies_stay_within_the_byte_budget() {
+        let large = "\"".repeat(8 * 1024); // 16 KiB once escaped
+        let total = |outbox: &Outbox| {
+            outbox
+                .for_room("!a:s")
+                .iter()
+                .map(|message| json_size(&message.body))
+                .sum::<usize>()
+        };
+        let mut outbox = Outbox::default();
+        let mut fitted = 0;
+        while outbox.queue("!a:s", body(&large)).is_some() {
+            fitted += 1;
+        }
+        assert_eq!(fitted, MAX_BODY_BUDGET / json_size(&large));
+        assert!(total(&outbox) <= MAX_BODY_BUDGET);
+        assert!(fitted < MAX_UNSENT, "the budget, not the count, refused");
+
+        for _ in 0..fitted {
+            let job = outbox.next_job().unwrap();
+            outbox.finish(
+                job.local_id,
+                SendOutcome::Sent(format!("${}", job.local_id)),
+            );
+        }
+        let first = outbox.for_room("!a:s")[0].local_id;
+        assert!(
+            outbox.queue("!a:s", body(&large)).is_some(),
+            "sent ones make room"
+        );
+        assert!(total(&outbox) <= MAX_BODY_BUDGET);
+        assert!(
+            outbox
+                .for_room("!a:s")
+                .iter()
+                .all(|message| message.local_id != first),
+            "oldest sent dropped"
+        );
     }
 }

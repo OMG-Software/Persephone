@@ -108,6 +108,8 @@ The composer sends text in the open room. The live sending check uses a second S
 
 ## Recorded verification
 
+After the sending review fixes (outbox byte budget, room-ID parsing, unknown encryption refused, queueing under the session lock, ordered pending replies), `python tools/dev.py check --offline` passed all 299 tests (265 Rust, 19 frontend, 2 server-registration and 13 development-controller tests).
+
 After adding encrypted sending, `python tools/dev.py check --offline` passed all 293 tests (259 Rust, 19 frontend, 2 server-registration and 13 development-controller tests). See the [sending evidence](evidence/encrypted-sending.md).
 
 After the fourth round of encryption setup review fixes, the parts of `python tools/dev.py check --offline` passed in separate runs: 250 Rust tests, formatting and Clippy in the full run, whose frontend tests froze after a file-lock error (`EPERM`) in the worktree's Vite cache; then `frontend` (17 tests), `contracts` and both Python test directories (2 and 13 tests) each passed on their own.

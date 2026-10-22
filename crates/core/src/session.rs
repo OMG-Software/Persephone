@@ -1035,14 +1035,19 @@ impl Session {
         room_id: &str,
         body: Zeroizing<String>,
     ) -> Result<PendingMessage, SendRefusal> {
-        if guard(&self.shared.account).is_none()
-            || lock(&self.shared).state != StoreState::Protected
-        {
+        if guard(&self.shared.account).is_none() {
             return Err(SendRefusal::Unavailable);
         }
-        let queued = guard(&self.shared.outbox)
-            .queue(room_id, body)
-            .ok_or(SendRefusal::Full)?;
+        let queued = {
+            // Held while queueing: a lock changes the state under it before it
+            // clears the outbox, so nothing queued here outlives a lock.
+            let inner = lock(&self.shared);
+            if inner.state != StoreState::Protected {
+                return Err(SendRefusal::Unavailable);
+            }
+            guard(&self.shared.outbox).queue(room_id, body)
+        }
+        .ok_or(SendRefusal::Full)?;
         if let Some(listener) = self.shared.listener() {
             listener.outbox_changed(room_id);
         }
