@@ -10,7 +10,7 @@
 //! * At most [`MAX_UNSENT`] messages are not yet sent; a sent message is kept
 //!   (up to [`MAX_KEPT`] in all, oldest sent dropped first) so the page can
 //!   match it to its event in the timeline.
-//! * All bodies together take at most [`MAX_BODY_BUDGET`] bytes as JSON, so a
+//! * All kept messages together take at most [`MAX_KEPT_BYTES`] as JSON, so a
 //!   room's list always fits one reply; old sent messages make room first,
 //!   and a message that does not fit beside the unsent ones is refused.
 //! * Memory only: nothing is kept after a lock or restart.
@@ -24,10 +24,14 @@ use zeroize::Zeroizing;
 pub const MAX_UNSENT: usize = 16;
 /// Most messages kept, sent ones included.
 pub const MAX_KEPT: usize = 32;
-/// Most bytes all kept bodies take as JSON strings. With [`MAX_KEPT`]
-/// entries' other fields (under 1 KiB each) this stays within one bounded
-/// view (`views::MAX_PAGE_BYTES`, 112 KiB).
-pub const MAX_BODY_BUDGET: usize = 80 * 1024;
+/// Most bytes all kept messages take as JSON (see [`entry_size`]). This
+/// leaves room for the list's brackets and commas within one bounded view
+/// (`views::MAX_PAGE_BYTES`, 112 KiB).
+pub const MAX_KEPT_BYTES: usize = 100 * 1024;
+/// What a message takes as JSON besides its body and room ID: field names,
+/// the local ID, state and failure, and an event ID (at most 255 bytes, as
+/// the SDK parses it) even if every byte of it is escaped.
+const ENTRY_OVERHEAD: usize = 768;
 
 /// How a send ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +46,7 @@ struct Entry {
     local_id: u32,
     room_id: String,
     body: Zeroizing<String>,
-    /// The body's size as a JSON string.
+    /// What the message takes as JSON, from [`entry_size`].
     size: usize,
     transaction_id: OwnedTransactionId,
     state: PendingState,
@@ -79,21 +83,27 @@ pub struct Outbox {
 
 impl Outbox {
     /// Queues a message, or `None` when [`MAX_UNSENT`] are already unsent or
-    /// the body does not fit [`MAX_BODY_BUDGET`] beside the unsent ones.
+    /// the message does not fit [`MAX_KEPT_BYTES`] beside the unsent ones.
     pub fn queue(&mut self, room_id: &str, body: Zeroizing<String>) -> Option<PendingMessage> {
         let unsent: Vec<&Entry> = self
             .entries
             .iter()
             .filter(|entry| entry.state != PendingState::Sent)
             .collect();
-        let size = json_size(&body);
+        let size = entry_size(room_id, &body);
         let unsent_size: usize = unsent.iter().map(|entry| entry.size).sum();
-        if unsent.len() >= MAX_UNSENT || unsent_size + size > MAX_BODY_BUDGET {
+        if unsent.len() >= MAX_UNSENT || unsent_size.saturating_add(size) > MAX_KEPT_BYTES {
             return None;
         }
         // Old sent messages make room, by count and by size.
         while self.entries.len() >= MAX_KEPT
-            || self.entries.iter().map(|entry| entry.size).sum::<usize>() + size > MAX_BODY_BUDGET
+            || self
+                .entries
+                .iter()
+                .map(|entry| entry.size)
+                .sum::<usize>()
+                .saturating_add(size)
+                > MAX_KEPT_BYTES
         {
             let oldest_sent = self
                 .entries
@@ -219,9 +229,16 @@ impl Outbox {
     }
 }
 
-/// The size of `body` as a JSON string, escapes and quotes included.
-fn json_size(body: &str) -> usize {
-    serde_json::to_string(body).map_or(usize::MAX / 2, |json| json.len())
+/// The size of `text` as a JSON string, escapes and quotes included.
+fn json_size(text: &str) -> usize {
+    serde_json::to_string(text).map_or(usize::MAX / 2, |json| json.len())
+}
+
+/// The most a message can take in a pending-list reply.
+fn entry_size(room_id: &str, body: &str) -> usize {
+    json_size(body)
+        .saturating_add(json_size(room_id))
+        .saturating_add(ENTRY_OVERHEAD)
 }
 
 #[cfg(test)]
@@ -308,18 +325,18 @@ mod tests {
         assert_eq!(outbox.for_room("!r1:s").len(), 1);
     }
 
-    /// GIVEN large bodies WHEN they are queued THEN all kept bodies stay
-    /// within `MAX_BODY_BUDGET` as JSON: unsent ones that do not fit are
-    /// refused, and sent ones make room oldest first. Escaped characters
-    /// count at their escaped size.
+    /// GIVEN large bodies WHEN they are queued THEN the kept messages stay
+    /// within `MAX_KEPT_BYTES`: unsent ones that do not fit are refused, and
+    /// sent ones make room oldest first. Escaped characters count at their
+    /// escaped size.
     #[test]
-    fn given_large_bodies_then_the_kept_bodies_stay_within_the_byte_budget() {
+    fn given_large_bodies_then_the_kept_messages_stay_within_the_byte_budget() {
         let large = "\"".repeat(8 * 1024); // 16 KiB once escaped
         let total = |outbox: &Outbox| {
             outbox
                 .for_room("!a:s")
                 .iter()
-                .map(|message| json_size(&message.body))
+                .map(|message| entry_size(&message.room_id, &message.body))
                 .sum::<usize>()
         };
         let mut outbox = Outbox::default();
@@ -327,8 +344,8 @@ mod tests {
         while outbox.queue("!a:s", body(&large)).is_some() {
             fitted += 1;
         }
-        assert_eq!(fitted, MAX_BODY_BUDGET / json_size(&large));
-        assert!(total(&outbox) <= MAX_BODY_BUDGET);
+        assert_eq!(fitted, MAX_KEPT_BYTES / entry_size("!a:s", &large));
+        assert!(total(&outbox) <= MAX_KEPT_BYTES);
         assert!(fitted < MAX_UNSENT, "the budget, not the count, refused");
 
         for _ in 0..fitted {
@@ -343,7 +360,7 @@ mod tests {
             outbox.queue("!a:s", body(&large)).is_some(),
             "sent ones make room"
         );
-        assert!(total(&outbox) <= MAX_BODY_BUDGET);
+        assert!(total(&outbox) <= MAX_KEPT_BYTES);
         assert!(
             outbox
                 .for_room("!a:s")
@@ -351,5 +368,51 @@ mod tests {
                 .all(|message| message.local_id != first),
             "oldest sent dropped"
         );
+    }
+
+    /// GIVEN the worst case for one room (every room-ID, body and event-ID
+    /// byte escaped, the longest IDs) WHEN the outbox is full THEN the room's
+    /// pending list, as the reply is written, fits one bounded view.
+    #[test]
+    fn given_the_worst_case_then_a_rooms_pending_list_fits_one_view() {
+        let room = format!("!{}", "\"".repeat(254));
+        let event_id = format!("${}", "\"".repeat(254));
+        // About 2.5 KiB escaped: 32 of these fit a body-only budget of 80 KiB,
+        // and their escaped IDs then push the list past one view.
+        let text = "\\".repeat(1270);
+        let mut outbox = Outbox::default();
+        // Fill with sent messages until the budget makes room, then with
+        // unsent ones until it refuses.
+        for _ in 0..MAX_KEPT * 2 {
+            if outbox.queue(&room, body(&text)).is_none() {
+                break;
+            }
+            let job = outbox.next_job().unwrap();
+            outbox.finish(job.local_id, SendOutcome::Sent(event_id.clone()));
+        }
+        // Sent messages carry the longest event IDs: the largest list.
+        let fits = |outbox: &Outbox| {
+            let reply = serde_json::to_vec(&outbox.for_room(&room)).unwrap();
+            assert!(
+                reply.len() <= crate::views::MAX_PAGE_BYTES,
+                "{} bytes",
+                reply.len()
+            );
+        };
+        fits(&outbox);
+        while outbox.queue(&room, body(&text)).is_some() {}
+        fits(&outbox);
+        // And with many small messages, the count limit holds it.
+        let mut outbox = Outbox::default();
+        for _ in 0..MAX_KEPT * 2 {
+            if outbox.queue(&room, body("x")).is_none() {
+                break;
+            }
+            let job = outbox.next_job().unwrap();
+            outbox.finish(job.local_id, SendOutcome::Sent(event_id.clone()));
+        }
+        let reply = serde_json::to_vec(&outbox.for_room(&room)).unwrap();
+        assert!(reply.len() <= crate::views::MAX_PAGE_BYTES);
+        assert_eq!(outbox.for_room(&room).len(), MAX_KEPT);
     }
 }
