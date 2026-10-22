@@ -199,13 +199,23 @@ mod tests {
             .unwrap();
         drop(plaintext_store);
 
+        // The pool closes its connections on background threads, so a scan
+        // can read the database before the checkpoint and find the WAL
+        // already gone. A miss never counts as a detection; scan again until
+        // the close settles.
         let mut plaintext_marker_files = Vec::new();
-        find_marker_files(
-            &plaintext_path,
-            CHECKPOINT_MARKER,
-            &mut plaintext_marker_files,
-        )
-        .unwrap();
+        for _ in 0..50 {
+            find_marker_files(
+                &plaintext_path,
+                CHECKPOINT_MARKER,
+                &mut plaintext_marker_files,
+            )
+            .unwrap();
+            if !plaintext_marker_files.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         assert!(
             !plaintext_marker_files.is_empty(),
             "artifact scanner failed to detect the plaintext crypto-store control"

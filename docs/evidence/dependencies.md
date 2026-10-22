@@ -153,6 +153,15 @@ through another API, and no Linux build or Linux test has been run. Moving to
 `glib` 0.20 needs GTK bindings that Tauri 2.12.4 does not use; patching or
 forking the GTK stack is out of scope.
 
+## First Linux and macOS builds (22 October 2026)
+
+The macOS and Linux CI jobs ([development guide](../development.md#continuous-integration)) are the first builds of this lockfile for other targets. `Cargo.lock` is unchanged (SHA-256 `946730d6…2c35`); no dependency version or feature changed.
+
+- **`glib 0.18.5` is now compiled.** The Fedora 44 job log of run 39747084371 shows Cargo compiling `glib v0.18.5`, `gtk`, `webkit2gtk` and `persephone-desktop`, so the [GTK stack above](#advisory-after-the-tauri-shell-glib) is in the Linux graph, as the earlier `cargo tree` result predicted. These are CI build and test artifacts only and are not distributed. The disposition is unchanged: retain the pin, adopt a fixed GTK binding through a Tauri release, and recheck before any Linux build is distributed.
+- **No new advisory.** On 22 October 2026, after the first push of the CI branch, GitHub Dependabot lists one open alert, the same `glib` alert 1 ([GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g)). OSV was not re-queried.
+- **Native code.** `aws-lc-sys` and `libsqlite3-sys` build with each image's C compiler (GCC on Linux, Apple Clang on macOS). The Fedora 44 container, which passed, installed no CMake, NASM or Go (only the `cmake-filesystem` directory package came in as a dependency). So the `aws-lc-sys` build there needed only a C toolchain. Hosted runners preinstall more tools, so their jobs do not show this.
+- **System libraries not reviewed.** Linux jobs link the distribution's WebKitGTK 4.1, GTK 3 and libsoup 3 (for example `webkit2gtk4.1-devel 2.54.1` on Fedora 44). Arch installs the current rolling release, so its versions change from run to run. Their versions, licences and advisories are not part of this review. The macOS job links only system frameworks.
+
 ## Historical per-package inventory
 
 Before the repository restructure, five separate Rust lockfiles were audited: matrix (412 registry entries), storage (260), resources (0), Windows sandbox (2), and contracts (20), for 418 distinct crate/version pairs after deduplication. Those counts and package-specific notes describe that earlier workspace shape. They are not the scope of the current single-lockfile result above, and the current JSON must not be interpreted as five separate lockfile reports.

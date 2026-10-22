@@ -243,8 +243,28 @@ pub mod dev {
             }
         }
 
+        /// Writes the key to the recovery file, readable by its owner only on
+        /// Unix (a new file is created so; an existing one is narrowed
+        /// first). On Windows the file takes its folder's ACL, which under
+        /// the user's profile is already the owner's.
         fn show_recovery_key(&self, _user_id: &str, key: &str) -> Result<(), PromptError> {
-            std::fs::write(self.recovery_file()?, key).map_err(|_| PromptError::Failed)
+            use std::io::Write;
+            let path = self.recovery_file()?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                options.mode(0o600);
+                if path.exists() {
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .map_err(|_| PromptError::Failed)?;
+                }
+            }
+            options
+                .open(&path)
+                .and_then(|mut file| file.write_all(key.as_bytes()))
+                .map_err(|_| PromptError::Failed)
         }
     }
 }
@@ -680,7 +700,27 @@ mod tests {
         std::fs::create_dir(&local).unwrap();
         let inside = dev::HarnessProfile::new(dir.path().join("profile.json"))
             .with_recovery_file(local.join("key.txt"));
+        // On Unix an existing, wider file is narrowed to its owner first.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(local.join("key.txt"), "old").unwrap();
+            std::fs::set_permissions(
+                local.join("key.txt"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
         inside.show_recovery_key("@a:s", "EsTs abcd efgh").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(local.join("key.txt"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "owner only");
+        }
         assert_eq!(
             inside
                 .ask_secret(SecretPrompt::RecoveryKey { user_id: "@a:s" })

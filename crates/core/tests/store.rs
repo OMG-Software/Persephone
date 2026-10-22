@@ -6,7 +6,7 @@ use matrix_sdk_crypto::store::CryptoStore;
 use persephone_contracts::StoreState;
 use persephone_core::{
     store::{self, KEY_FILE, MAX_KEY_FILE_BYTES, STORE_DIR},
-    vault::{KEY_BYTES, KeyProtector, Unsupported, VaultError},
+    vault::{KEY_BYTES, KeyProtector, Unsupported},
 };
 use std::{
     collections::BTreeMap,
@@ -49,10 +49,6 @@ fn durable(mut files: BTreeMap<PathBuf, Vec<u8>>) -> BTreeMap<PathBuf, Vec<u8>> 
         !(name.ends_with("-shm") || (name.ends_with("-wal") && bytes.is_empty()))
     });
     files
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Creates a profile, stores the marker through the encrypted crypto store and
@@ -282,7 +278,11 @@ fn given_the_sign_out_marker_cannot_be_written_then_the_key_still_goes_and_the_p
 #[cfg(windows)]
 mod dpapi {
     use super::*;
-    use persephone_core::vault::Dpapi;
+    use persephone_core::vault::{Dpapi, VaultError};
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
 
     #[test]
     fn given_dpapi_then_no_profile_file_holds_the_raw_key_or_the_marker() {
