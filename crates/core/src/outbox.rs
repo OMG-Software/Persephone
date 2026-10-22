@@ -28,10 +28,14 @@ pub const MAX_KEPT: usize = 32;
 /// leaves room for the list's brackets and commas within one bounded view
 /// (`views::MAX_PAGE_BYTES`, 112 KiB).
 pub const MAX_KEPT_BYTES: usize = 100 * 1024;
-/// What a message takes as JSON besides its body and room ID: field names,
-/// the local ID, state and failure, and an event ID (at most 255 bytes, as
-/// the SDK parses it) even if every byte of it is escaped.
-const ENTRY_OVERHEAD: usize = 768;
+/// The most an event ID takes as JSON. The SDK accepts up to 255 bytes and
+/// checks little more, so every byte may be a control character, which JSON
+/// writes as `\u00XX` (6 bytes); 2 more for the quotes.
+const MAX_EVENT_ID_JSON: usize = 255 * 6 + 2;
+/// What a message takes as JSON besides its body and room ID: the event ID,
+/// and under 128 bytes for the field names, the local ID, the state, the
+/// failure and the list's comma.
+const ENTRY_OVERHEAD: usize = MAX_EVENT_ID_JSON + 128;
 
 /// How a send ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -371,12 +375,14 @@ mod tests {
     }
 
     /// GIVEN the worst case for one room (every room-ID, body and event-ID
-    /// byte escaped, the longest IDs) WHEN the outbox is full THEN the room's
-    /// pending list, as the reply is written, fits one bounded view.
+    /// byte escaped, the event ID as control characters, the longest IDs)
+    /// WHEN the outbox is full THEN the room's pending list, as the reply is
+    /// written, fits one bounded view.
     #[test]
     fn given_the_worst_case_then_a_rooms_pending_list_fits_one_view() {
         let room = format!("!{}", "\"".repeat(254));
-        let event_id = format!("${}", "\"".repeat(254));
+        // Control characters are the longest escape (`\u0001`, 6 bytes).
+        let event_id = format!("${}", "\u{1}".repeat(254));
         // About 2.5 KiB escaped: 32 of these fit a body-only budget of 80 KiB,
         // and their escaped IDs then push the list past one view.
         let text = "\\".repeat(1270);
