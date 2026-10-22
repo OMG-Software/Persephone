@@ -609,25 +609,28 @@ fn run_security(
             });
         let current = lease.commit(|| ()).is_ok();
         drop(lease);
+        let published_now = if current {
+            next_refresh = Instant::now() + SECURITY_REFRESH;
+            shared.with_security(generation, |security| {
+                security.can_set_up_recovery = private_keys;
+                let status = &mut security.status;
+                status.identity = identity;
+                status.recovery = recovery;
+                status.verification = view;
+                status.can_set_up_recovery = private_keys;
+                if ran {
+                    status.operation = SecurityOperation::Idle;
+                    status.error = outcome;
+                }
+            })
+        } else {
+            None
+        };
+        // After the status, so the result above cannot overwrite a window
+        // that fails at once; and even after a lock (see the function).
         if let Some((key, source)) = key {
             show_recovery_key(shared, generation, user_id.as_str(), key, source);
         }
-        if !current {
-            break;
-        }
-        next_refresh = Instant::now() + SECURITY_REFRESH;
-        let published_now = shared.with_security(generation, |security| {
-            security.can_set_up_recovery = private_keys;
-            let status = &mut security.status;
-            status.identity = identity;
-            status.recovery = recovery;
-            status.verification = view;
-            status.can_set_up_recovery = private_keys;
-            if ran {
-                status.operation = SecurityOperation::Idle;
-                status.error = outcome;
-            }
-        });
         if published_now.is_none() {
             break;
         }
