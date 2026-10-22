@@ -32,16 +32,19 @@ and a failed revocation still signs out locally, with a warning.
      client exists.
 * **Wipe** ([`store.rs`](../../crates/core/src/store.rs)): opening a
   profile with the marker wipes the store, the key and its temporary file
-  before anything else, and deletes the marker last. If the marker's presence
-  cannot be read, the profile does not open. A crash at any point
+  before anything else, and deletes the marker last. If the file system
+  cannot say whether the marker exists (an error other than "not found"), the
+  profile does not open. A crash at any point
   repeats the wipe; it never opens the old stores. If the marker cannot be
   written, the key is still deleted: a store without its key opens as
   `key_missing`, never as a new or signed-in profile.
 * **Reporting**: the account becomes `signed_out`. `session_not_revoked` means
   the homeserver may not have been told; `failed` means the local deletion did
-  not finish. A start that wipes a profile whose marker does not record a
-  confirmed revocation (an interrupted sign-out, a failed request, or an
-  unreadable marker) also reports `session_not_revoked`, on the sign-in page.
+  not finish. A start that wipes a profile whose marker exists but does
+  not record a confirmed revocation also reports `session_not_revoked`, on the
+  sign-in page. That covers a marker that records an interrupted sign-out
+  (`revoking`) or a failed request (`not-revoked`), and a marker whose contents
+  cannot be read or are not one of the three values.
   The page shows each case in fixed text and never reports revocation when the
   request failed or its outcome is unknown.
 * **UI**: the header's "Sign out" button asks once more ("Sign out and delete
@@ -62,7 +65,8 @@ New, all passing (the full check passed 258 tests after the review fixes; see th
   deletes the key, leaves the store files and ends `restart_required`, and the
   next start wipes them and opens a fresh profile; a logout that fails with 500
   still signs out and reports `session_not_revoked`; with every lease in use,
-  sign-out reports that it did not start, and completes once a lease frees;
+  a sign-out whose wait ends first returns `Saturated` and changes nothing,
+  and a later sign-out that gets a lease when one frees completes;
   with a slow logout, the intent is on disk (and the key still present) while
   the request is in flight, which fails if the intent is written after the
   request; a sign-out interrupted after its intent is not restored on the next
