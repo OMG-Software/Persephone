@@ -1196,6 +1196,10 @@ fn given_a_failing_key_window_then_set_up_reports_the_key_was_not_shown() {
     assert_eq!(status.error, Some(SecurityError::RecoveryKeyNotShown));
     assert_eq!(status.operation, SecurityOperation::Idle);
     assert!(source.shown.lock().unwrap().is_none());
+    // Joins the sync and security threads: a core left running keeps polling
+    // this mock server's port, which wiremock hands to a later test.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
 }
 
 /// GIVEN set-up that has reached the backup request WHEN the session is
