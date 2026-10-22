@@ -1544,6 +1544,36 @@
       "package_lock_sha256": "a22d978b8b0313e6fabaa1c1583abdfbda9e623e28bb9793ccd822f0b04ef3e2",
       "raw_output": ".local/runs/pr9-r4 (ignored)",
       "evidence": "encryption-setup.md"
+    },
+    {
+      "name": "workspace_check_after_sending_review",
+      "command": "python tools/dev.py check --offline (CARGO_BUILD_JOBS=4)",
+      "checked_on": "2026-10-22",
+      "exit_code": 0,
+      "rust_tests_passed": 265,
+      "rust_tests_ignored": 2,
+      "frontend_tests_passed": 19,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 299,
+      "includes": "core unit, binary and account tests and Clippy with dev-disposable-servers",
+      "source": "uncommitted p4/sending working tree on fecb4ae with the sending review fixes, committed next with only these docs added",
+      "working_tree_clean": false,
+      "untested": "the unknown-encryption guard in sending.rs (unreachable with the mock or a live server once the SDK has asked) and the ordered pending replies in App.svelte (no test of App logic)",
+      "live_runs": "none for these changes",
+      "platform": "Windows 11 Pro x64 26200, debug",
+      "toolchain": {
+        "rustc": "1.99.1",
+        "cargo": "1.99.1",
+        "node": "24.15.0",
+        "npm": "11.13.0",
+        "python": "3.14.4"
+      },
+      "inputs": "--offline; dependencies cached under .local/cache",
+      "cargo_lock_sha256": "946730d6f8521522bc2be69dc34998a1020b396f95d42015d55d582cc3b42c35",
+      "package_lock_sha256": "a22d978b8b0313e6fabaa1c1583abdfbda9e623e28bb9793ccd822f0b04ef3e2",
+      "raw_output": ".local/runs/pr10-r1/check.txt (ignored)",
+      "evidence": "encrypted-sending.md"
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

@@ -45,6 +45,9 @@ pub async fn send(
         return SendOutcome::Failed(SendFailure::NotJoined);
     };
     let encrypted = match room.latest_encryption_state().await {
+        // Never treated as "not encrypted": consent must not send plain text
+        // into a room whose encryption is not known.
+        Ok(state) if state.is_unknown() => return SendOutcome::Failed(SendFailure::Failed),
         Ok(state) => state.is_encrypted(),
         Err(error) => return classify(&error),
     };

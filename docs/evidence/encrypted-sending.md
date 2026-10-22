@@ -16,13 +16,22 @@ message), and sent in an unencrypted room only after the user confirmed.**
   ID, queues the message (at most 16 unsent; sent ones kept up to 32 so the
   page can match them to timeline events) and replies at once. Memory only:
   unsent messages are dropped on lock or restart.
+  *Review change (22 October 2026):* all kept bodies together take at most
+  80 KiB as JSON, so one room's list always fits a reply (112 KiB); old sent
+  messages make room first, and a message that does not fit beside the unsent
+  ones is refused as `limit_exceeded`. The core refuses a larger list reply
+  rather than write a frame that would end the connection. Room IDs must
+  parse as the SDK parses them. A message is queued under the session lock,
+  so none is kept after a lock.
 * **Order**: one `core-send` thread (one lease per send, joined by lock) takes
   messages in order. A later message in a room waits while an earlier one
   there is sending, failed or unknown; other rooms carry on.
 * **Send** ([`sending.rs`](../../crates/core/src/sending.rs)): the room's
   encryption is read, from the homeserver if not known. A room that is not
   encrypted needs the user's recorded consent, or the message fails as
-  `confirmation_required` and nothing is sent. In an encrypted room the SDK
+  `confirmation_required` and nothing is sent. A room whose encryption is
+  still unknown after that fails as `failed`: consent never sends plain text
+  there (review change, 22 October 2026). In an encrypted room the SDK
   shares keys under the identity-based policy and encrypts, or fails before
   any request.
 * **Outcomes**: `sent` with the event ID; `failed` with a code
@@ -97,6 +106,9 @@ through the real page (development core).
 
 ## Limits
 
+* The review changes above have no live run, and the unknown-encryption
+  guard has no test: after the SDK asks the homeserver the state is known, so
+  neither the mock nor a live server reaches it.
 * `unknown` (a transport failure) is covered by unit tests and code review,
   not by a mock or live run: the mock server cannot drop a connection, and the
   request timeout is 30 s.

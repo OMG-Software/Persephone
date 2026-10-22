@@ -181,8 +181,21 @@ fn ok<T: Serialize>(value: &T) -> Outcome {
     serde_json::to_value(value).map_or(Outcome::Error(ErrorCode::Internal), Outcome::Ok)
 }
 
+/// Like [`ok`], for a reply that must fit one bounded view. The outbox's
+/// byte budget keeps pending messages within it; this refuses anything
+/// larger rather than ending the connection with a frame that is too big.
+fn bounded<T: Serialize>(value: &T) -> Outcome {
+    match serde_json::to_vec(value) {
+        Ok(bytes) if bytes.len() <= views::MAX_PAGE_BYTES => ok(value),
+        Ok(_) => Outcome::Error(ErrorCode::LimitExceeded),
+        Err(_) => Outcome::Error(ErrorCode::Internal),
+    }
+}
+
+/// A room ID the SDK accepts, so nothing queued or consented to can fail to
+/// parse later.
 fn valid_room_id(room_id: &str) -> bool {
-    room_id.len() <= MAX_ROOM_ID_BYTES && room_id.starts_with('!')
+    room_id.len() <= MAX_ROOM_ID_BYTES && matrix_sdk::ruma::RoomId::parse(room_id).is_ok()
 }
 
 /// A message body: some visible text, within the limit, and no control
@@ -312,7 +325,7 @@ impl Core {
             Call::SendMessage { room_id, body } => self.send_message(room_id, body),
             Call::PendingMessages { room_id } => {
                 if valid_room_id(room_id) {
-                    ok(&self.session.pending_messages(room_id))
+                    bounded(&self.session.pending_messages(room_id))
                 } else {
                     Outcome::Error(ErrorCode::InvalidArgument)
                 }
@@ -580,6 +593,13 @@ mod tests {
         }
         assert!(valid_room_id("!r:s"));
         assert!(!valid_room_id("#alias:s"));
+        assert!(!valid_room_id("!r\u{0}:s"), "the SDK refuses a NUL byte");
+        // A reply too large for one view is refused, not written.
+        assert!(matches!(bounded(&["x"]), Outcome::Ok(_)));
+        assert!(matches!(
+            bounded(&["x".repeat(views::MAX_PAGE_BYTES)]),
+            Outcome::Error(ErrorCode::LimitExceeded)
+        ));
         assert!(!valid_room_id(&format!(
             "!{}",
             "r".repeat(MAX_ROOM_ID_BYTES)
