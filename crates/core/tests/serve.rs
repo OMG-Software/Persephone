@@ -429,3 +429,48 @@ fn given_a_profile_when_the_ui_locks_and_unlocks_then_views_follow_the_session()
         .lock(std::time::Duration::from_secs(30), || {});
     assert_eq!(state, StoreState::Locked);
 }
+
+/// GIVEN a UI connection that subscribed and then ended WHEN the core is
+/// reopened for a new UI THEN the new connection is served from a clean
+/// start: not ready until it sends a request, and with no old subscription.
+#[test]
+fn given_a_replaced_ui_then_the_reopened_core_serves_the_new_one_from_a_clean_start() {
+    use std::io::{PipeReader, PipeWriter};
+
+    let core = Core::default();
+    let budgets = ResourceBudgets::default();
+    let room = "!planning:example.invalid";
+    assert!(!core.ui_ready(), "nothing has reached the core yet");
+    std::thread::scope(|scope| {
+        let (from_ui, mut to_core): (PipeReader, PipeWriter) = std::io::pipe().unwrap();
+        let (mut from_core, to_ui) = std::io::pipe().unwrap();
+        let server = scope.spawn(|| persephone_core::serve(&core, from_ui, to_ui));
+        send(&mut to_core, &call(1, subscribe(room))).unwrap();
+        let Ok(CoreMessage::Reply(_)) = receive::<_, CoreMessage>(&mut from_core, &budgets) else {
+            panic!("subscribe reply");
+        };
+        assert!(core.ui_ready(), "the first request marks the page as ready");
+        drop(to_core);
+        assert_eq!(server.join().unwrap(), ServeEnd::UiClosed);
+    });
+
+    core.reopen();
+    assert!(!core.ui_ready(), "readiness belongs to one connection");
+    assert!(core.post_message(room, "@a:example.invalid", "x".into()));
+    assert_eq!(
+        core.pending_notifications(),
+        0,
+        "the old subscription is gone"
+    );
+    assert!(
+        core.wait_running(std::time::Duration::from_millis(10)),
+        "open for the new connection"
+    );
+
+    let mut output = Vec::new();
+    assert_eq!(
+        persephone_core::serve(&core, Cursor::new(requests(&[7])), &mut output),
+        ServeEnd::UiClosed
+    );
+    assert_eq!(replies(output)[0].id, 7, "the new UI is answered");
+}

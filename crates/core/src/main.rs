@@ -5,6 +5,12 @@
 //! its requests over its stdin and stdout. When the UI exits or misbehaves, the
 //! core shuts it down, closes the stores and exits.
 //!
+//! On Windows the core also watches the UI's window ([`ui_watch`]). If the
+//! page never reaches the core, or the web view's processes exit while the UI
+//! keeps running, the core asks in a native dialog whether to start the
+//! window again. Retry ends the old UI tree and starts a new UI; the session,
+//! its sync and any sign-in keep running in the core.
+//!
 //! Options:
 //! * `--profile <dir>` opens (or creates) the encrypted profile in `<dir>`.
 //!   Without it nothing is stored.
@@ -14,17 +20,22 @@
 
 use persephone_contracts::StoreState;
 use persephone_core::{Core, ServeEnd, serve, session::Session, vault};
+#[cfg(windows)]
+use std::time::Instant;
 use std::{
     env,
     ffi::OsString,
     path::PathBuf,
     process::{Command, ExitCode, Stdio},
+    sync::{Condvar, Mutex},
     thread,
     time::Duration,
 };
 
 #[cfg(windows)]
 mod ui_job;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod ui_watch;
 
 /// Argument that marks the UI as started by the core; the UI refuses to run
 /// without it.
@@ -34,6 +45,28 @@ const DEMO_ROOM: &str = "!planning:example.invalid";
 const DEMO_MESSAGES: u32 = 1000;
 /// How long exit waits for admitted work before giving up on a clean close.
 const EXIT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the window watch looks at the page and the UI's Job.
+#[cfg(windows)]
+const WATCH_PERIOD: Duration = Duration::from_millis(500);
+/// How long a replaced UI tree may take to exit before a new UI starts.
+#[cfg(windows)]
+const REPLACE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How one UI run ended.
+enum Run {
+    Exit(ExitCode),
+    /// The window failed and the user asked for a new one.
+    Retry,
+}
+
+/// What the window watch decided for one UI run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// The run ended on its own.
+    None,
+    Retry,
+    Close,
+}
 
 #[derive(Default)]
 struct Options {
@@ -85,7 +118,15 @@ fn main() -> ExitCode {
         None => core,
     };
     let core = core.with_session(session);
-    let code = run_ui(&core, options.demo_live);
+    let code = loop {
+        match run_ui(&core, options.demo_live) {
+            Run::Exit(code) => break code,
+            Run::Retry => {
+                eprintln!("persephone: starting the window again");
+                core.reopen();
+            }
+        }
+    };
     // Exit locks through the same path as a requested lock: admission closes,
     // admitted work finishes, then the stores close.
     match core.session().lock(EXIT_LOCK_TIMEOUT, || {}).0 {
@@ -101,10 +142,10 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_ui(core: &Core, demo_live: bool) -> ExitCode {
+fn run_ui(core: &Core, demo_live: bool) -> Run {
     let Ok(exe) = env::current_exe() else {
         eprintln!("persephone: cannot locate its own executable");
-        return ExitCode::from(2);
+        return Run::Exit(ExitCode::from(2));
     };
     let ui = exe.with_file_name(if cfg!(windows) {
         "persephone-ui.exe"
@@ -124,7 +165,7 @@ fn run_ui(core: &Core, demo_live: bool) -> ExitCode {
                 "persephone: cannot start the UI at {}: {error}",
                 ui.display()
             );
-            return ExitCode::from(2);
+            return Run::Exit(ExitCode::from(2));
         }
     };
     // Contain the UI before it creates its web view. The Job holds the UI and
@@ -136,29 +177,82 @@ fn run_ui(core: &Core, demo_live: bool) -> ExitCode {
             eprintln!("persephone: cannot contain the UI: {error}");
             let _ = child.kill();
             let _ = child.wait();
-            return ExitCode::from(2);
+            return Run::Exit(ExitCode::from(2));
         }
     };
     let (Some(from_ui), Some(to_ui)) = (child.stdout.take(), child.stdin.take()) else {
         let _ = child.kill();
-        return ExitCode::from(2);
+        return Run::Exit(ExitCode::from(2));
     };
-    let end = thread::scope(|scope| {
+    let finished = (Mutex::new(false), Condvar::new());
+    let (end, verdict) = thread::scope(|scope| {
         if demo_live {
             scope.spawn(|| demo(core));
         }
-        serve(core, from_ui, to_ui)
+        #[cfg(windows)]
+        let watcher = scope.spawn(|| watch(core, &job, &finished));
+        let end = serve(core, from_ui, to_ui);
+        *finished.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        finished.1.notify_all();
+        #[cfg(windows)]
+        let verdict = watcher.join().unwrap_or(Verdict::None);
+        #[cfg(not(windows))]
+        let verdict = Verdict::None;
+        (end, verdict)
     });
-    if end != ServeEnd::UiClosed {
+    if end != ServeEnd::UiClosed && verdict == Verdict::None {
         eprintln!("persephone: stopping the UI: {end:?}");
         let _ = child.kill();
     }
     let status = child.wait();
     #[cfg(windows)]
     drop(job);
-    match (end, status) {
-        (ServeEnd::UiClosed, Ok(status)) if status.success() => ExitCode::SUCCESS,
-        _ => ExitCode::from(1),
+    match (verdict, end, status) {
+        (Verdict::Retry, _, _) => Run::Retry,
+        (Verdict::Close, _, _) => Run::Exit(ExitCode::from(1)),
+        (Verdict::None, ServeEnd::UiClosed, Ok(status)) if status.success() => {
+            Run::Exit(ExitCode::SUCCESS)
+        }
+        _ => Run::Exit(ExitCode::from(1)),
+    }
+}
+
+/// Watches one UI run until it finishes. On a failed window it asks whether
+/// to retry, then ends the UI tree either way, which ends the run.
+#[cfg(windows)]
+fn watch(
+    core: &Core,
+    job: &std::os::windows::io::OwnedHandle,
+    finished: &(Mutex<bool>, Condvar),
+) -> Verdict {
+    let mut window = ui_watch::Watch::new(Instant::now());
+    let (done, wake) = finished;
+    let mut done = done.lock().unwrap_or_else(|p| p.into_inner());
+    loop {
+        done = wake
+            .wait_timeout(done, WATCH_PERIOD)
+            .unwrap_or_else(|p| p.into_inner())
+            .0;
+        if *done {
+            return Verdict::None;
+        }
+        let processes = ui_job::active_processes(job).ok();
+        let Some(failure) = window.observe(Instant::now(), core.ui_ready(), processes) else {
+            continue;
+        };
+        drop(done);
+        // A code only: nothing from the page or the web view.
+        eprintln!("persephone: the window failed: {failure:?}");
+        let retry = ui_job::ask_to_retry();
+        if !ui_job::terminate(job, REPLACE_TIMEOUT) {
+            eprintln!("persephone: the old window did not exit; closing");
+            return Verdict::Close;
+        }
+        return if retry {
+            Verdict::Retry
+        } else {
+            Verdict::Close
+        };
     }
 }
 
