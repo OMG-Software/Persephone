@@ -53,7 +53,7 @@ impl Drop for Cleanup {
     }
 }
 
-fn main() {
+pub fn main() {
     if let Err(error) = run() {
         eprintln!("vault probe failed: {error}");
         std::process::exit(1);
