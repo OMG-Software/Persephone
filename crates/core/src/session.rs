@@ -655,17 +655,23 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
         if !shared.wait_open(SEND_TICK) {
             break;
         }
-        let Some(job) = guard(&shared.outbox).next_job() else {
+        // A message is marked as sending only once a lease is held, so one
+        // that must wait for a lease stays queued, as the page shows it.
+        if !guard(&shared.outbox).has_job() {
             continue;
-        };
+        }
         let lease = match shared.admit() {
             Ok(lease) => lease,
             Err(AdmissionError::Locked) => break,
-            Err(AdmissionError::Saturated) => {
-                guard(&shared.outbox).requeue(job.local_id);
-                continue;
-            }
+            Err(AdmissionError::Saturated) => continue,
         };
+        // Discarded meanwhile: the lease is dropped unused.
+        let Some(job) = guard(&shared.outbox).next_job() else {
+            continue;
+        };
+        if let Some(listener) = shared.listener() {
+            listener.outbox_changed(&job.room_id);
+        }
         let outcome = lease.stores().block_on(async {
             let consented = sending::consented(lease.stores(), &job.room_id).await;
             sending::send(

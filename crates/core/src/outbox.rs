@@ -131,39 +131,41 @@ impl Outbox {
         Some(view)
     }
 
-    /// The next message to send, marked as sending: the first queued one in a
-    /// room where nothing earlier is still unresolved.
-    pub fn next_job(&mut self) -> Option<Job> {
+    /// Where the next message to send is: the first queued one in a room
+    /// where nothing earlier is still unresolved.
+    fn next_index(&self) -> Option<usize> {
         let mut blocked = BTreeSet::new();
-        for entry in self.entries.iter_mut() {
+        for (index, entry) in self.entries.iter().enumerate() {
             match entry.state {
                 PendingState::Sent => {}
-                PendingState::Queued if !blocked.contains(&entry.room_id) => {
-                    entry.state = PendingState::Sending;
-                    return Some(Job {
-                        local_id: entry.local_id,
-                        room_id: entry.room_id.clone(),
-                        body: entry.body.clone(),
-                        transaction_id: entry.transaction_id.clone(),
-                    });
+                PendingState::Queued if !blocked.contains(entry.room_id.as_str()) => {
+                    return Some(index);
                 }
                 _ => {
-                    blocked.insert(entry.room_id.clone());
+                    blocked.insert(entry.room_id.as_str());
                 }
             }
         }
         None
     }
 
-    /// Puts a message taken for sending back in the queue (no lease was free).
-    pub fn requeue(&mut self, local_id: u32) {
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|entry| entry.local_id == local_id && entry.state == PendingState::Sending)
-        {
-            entry.state = PendingState::Queued;
-        }
+    /// Whether a message is ready to send. Changes nothing, so the sender can
+    /// ask before it takes a lease.
+    pub fn has_job(&self) -> bool {
+        self.next_index().is_some()
+    }
+
+    /// The next message to send, marked as sending.
+    pub fn next_job(&mut self) -> Option<Job> {
+        let index = self.next_index()?;
+        let entry = &mut self.entries[index];
+        entry.state = PendingState::Sending;
+        Some(Job {
+            local_id: entry.local_id,
+            room_id: entry.room_id.clone(),
+            body: entry.body.clone(),
+            transaction_id: entry.transaction_id.clone(),
+        })
     }
 
     /// Records how a send ended; returns the room to tell the page about.
@@ -327,6 +329,26 @@ mod tests {
         assert!(outbox.queue("!t:s", body("z")).is_some());
         assert!(outbox.for_room("!r0:s").is_empty(), "oldest sent dropped");
         assert_eq!(outbox.for_room("!r1:s").len(), 1);
+    }
+
+    /// GIVEN messages in each state WHEN the sender asks whether one is ready
+    /// THEN asking changes nothing, and the answer matches what `next_job`
+    /// would take.
+    #[test]
+    fn given_each_state_then_has_job_only_looks() {
+        let mut outbox = Outbox::default();
+        assert!(!outbox.has_job());
+        let id = outbox.queue("!a:s", body("x")).unwrap().local_id;
+        assert!(outbox.has_job());
+        assert!(outbox.has_job(), "asking twice changes nothing");
+        assert_eq!(outbox.for_room("!a:s")[0].state, PendingState::Queued);
+        outbox.queue("!a:s", body("y")).unwrap();
+        assert_eq!(outbox.next_job().unwrap().local_id, id);
+        assert!(!outbox.has_job(), "the next one in the room waits");
+        outbox.finish(id, SendOutcome::Failed(SendFailure::Failed));
+        assert!(!outbox.has_job(), "still waits behind the failure");
+        outbox.discard(id);
+        assert!(outbox.has_job());
     }
 
     /// GIVEN large bodies WHEN they are queued THEN the kept messages stay
