@@ -716,4 +716,8 @@ fn given_a_replaced_ui_then_the_signed_in_session_carries_on_for_the_new_page() 
         "no second sign-in"
     );
     assert_eq!(source.asked.load(Ordering::SeqCst), 1, "no second prompt");
+    // Stop the sync loop: wiremock reuses this server's address for later
+    // tests, which must not see this client's requests.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
 }
