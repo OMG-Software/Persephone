@@ -272,6 +272,14 @@ impl Core {
                 ok(&state)
             }
             Call::SignIn { homeserver } => self.sign_in(homeserver),
+            Call::SignOut {} => match self
+                .session
+                .sign_out(LOCK_TIMEOUT, || self.hub.announce_session_change())
+            {
+                Ok(state) => ok(&state),
+                // Too much work in progress: nothing was signed out.
+                Err(_) => Outcome::Error(ErrorCode::LimitExceeded),
+            },
         };
         Reply {
             id: request.id,

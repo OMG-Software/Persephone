@@ -31,6 +31,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Bounded room and timeline views](evidence/mock-views.md): synthetic data through the core; hostile names and bodies, byte-bounded paging, real-app walkthrough.
 - [Native sign-in and real rooms](evidence/matrix-sign-in.md): core-owned Windows prompt, encrypted session, Sliding/classic sync, Matrix views; live runs on Merovingian, Synapse and classic-only Synapse.
 - [Failed window retry](evidence/window-retry.md): on Windows, the core offers Retry when the web view's processes exit while the UI runs, or the page sends no request within 30 s; a UI that exits on its own is not retried. This host's crash dumps all fail inside a third-party overlay hook (not tested with it removed).
+- [Sign-out](evidence/sign-out.md): remote revocation, key deleted first, crash-safe wipe of the local profile; live runs on Merovingian and Synapse.
 - [Session owner](evidence/session-owner.md): lock and unlock while running; leases, generation fencing, retained ownership on timeout; real-app walkthrough.
 - [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.
 - [Live room updates](evidence/live-updates.md): content-free, coalescing core events for subscribed rooms; reply routing; real-app walkthrough including page reloads.

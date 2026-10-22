@@ -182,7 +182,8 @@ raising `room_list_changed`; the Matrix path the live runs used is unchanged.
 * No end-to-end encryption beyond the SDK's own device keys: no key sharing,
   verification, recovery or backup UI (P4). Messages from other devices in
   encrypted rooms are undecryptable notices.
-* No sign-out or remote revocation; no SSO; no `.well-known` discovery.
+* No SSO; no `.well-known` discovery. Sign-out and remote revocation came
+  later; see the [sign-out evidence](sign-out.md).
 * The SDK's background tasks are not stopped and joined; lock therefore ends
   `restart_required` once a client has run.
 * The real credential dialog is checked by hand only; see above.

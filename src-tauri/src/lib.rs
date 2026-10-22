@@ -218,6 +218,13 @@ async fn sign_in(core: State<'_, CoreLink>, homeserver: String) -> Result<Accoun
     relay(core.inner(), Call::SignIn { homeserver }).await
 }
 
+/// Signs out: the core revokes the session if it can and deletes this
+/// device's local profile. Replies with the resulting store state.
+#[tauri::command]
+async fn sign_out(core: State<'_, CoreLink>) -> Result<StoreState, String> {
+    relay(core.inner(), Call::SignOut {}).await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -267,7 +274,8 @@ pub fn configure<R: Runtime>(
             watch_session,
             lock_session,
             unlock_session,
-            sign_in
+            sign_in,
+            sign_out
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

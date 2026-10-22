@@ -56,6 +56,7 @@ impl CoreTransport for FakeCore {
             Call::LockSession {} => Ok(serde_json::json!("locked")),
             // A state outside the contract must not reach the page.
             Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
+            Call::SignOut {} => Ok(serde_json::json!("restart_required")),
             Call::SignIn { homeserver } => match homeserver.as_str() {
                 "https://matrix.example.org" => {
                     Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
@@ -274,7 +275,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-watch-session",
             "allow-lock-session",
             "allow-unlock-session",
-            "allow-sign-in"
+            "allow-sign-in",
+            "allow-sign-out"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -538,4 +540,10 @@ fn given_sign_in_then_only_the_homeserver_crosses_and_replies_are_checked() {
         calls,
         "oversized URL never reached the core"
     );
+    let signed_out = get_ipc_response(
+        &window,
+        request("sign_out", app_origin(), serde_json::json!({})),
+    )
+    .map(|reply| reply.deserialize::<serde_json::Value>().unwrap());
+    assert_eq!(signed_out, Ok(serde_json::json!("restart_required")));
 }
