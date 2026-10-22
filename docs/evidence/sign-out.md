@@ -40,9 +40,12 @@ and a failed revocation still signs out locally, with a warning.
   `key_missing`, never as a new or signed-in profile.
 * **Reporting**: the account becomes `signed_out`. `session_not_revoked` means
   the homeserver may not have been told; `failed` means the local deletion did
-  not finish. A start that wipes a profile whose marker exists but does
-  not record a confirmed revocation also reports `session_not_revoked`, on the
-  sign-in page. That covers a marker that records an interrupted sign-out
+  not finish. A start that wipes such a profile successfully, when its
+  marker exists but does not record a confirmed revocation, also reports
+  `session_not_revoked`, on the sign-in page. If deleting the store, the key,
+  its temporary file or the marker fails, the profile stays closed as
+  `store_unavailable`, nothing is reported yet, and the next start repeats the
+  wipe. That covers a marker that records an interrupted sign-out
   (`revoking`) or a failed request (`not-revoked`), and a marker whose contents
   cannot be read or are not one of the three values.
   The page shows each case in fixed text and never reports revocation when the
