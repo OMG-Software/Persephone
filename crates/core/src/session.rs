@@ -553,6 +553,9 @@ fn run_security(
         });
         let current = lease.commit(|| ()).is_ok();
         drop(lease);
+        if let Some((key, source)) = key {
+            show_recovery_key(shared, generation, user_id.as_str(), key, source);
+        }
         if !current {
             break;
         }
@@ -570,26 +573,6 @@ fn run_security(
         });
         if published_now.is_none() {
             break;
-        }
-        if let Some((key, source)) = key {
-            // The window waits for the user, so it has its own thread; the
-            // key is zeroed when that thread ends.
-            let display_shared = shared.clone();
-            let shown_user = user_id.to_string();
-            let spawned = std::thread::Builder::new()
-                .name("core-recovery-key".into())
-                .spawn(move || {
-                    if source.show_recovery_key(&shown_user, &key).is_err() {
-                        display_shared.with_security(generation, |security| {
-                            security.status.error = Some(SecurityError::RecoveryKeyNotShown);
-                        });
-                    }
-                });
-            if spawned.is_err() {
-                shared.with_security(generation, |security| {
-                    security.status.error = Some(SecurityError::RecoveryKeyNotShown);
-                });
-            }
         }
     }
     let _context = runtime.enter();
@@ -637,6 +620,36 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
     }
     let _context = runtime.enter();
     drop(client);
+}
+
+/// Shows a new recovery key in the credential source's own window. Recovery
+/// is already enabled with this key, so it is shown even when a lock or
+/// sign-out began meanwhile; only the failure report is dropped then. The
+/// window waits for the user, so it has its own thread; the key is zeroed
+/// when that thread ends.
+fn show_recovery_key(
+    shared: &Arc<Shared>,
+    generation: u64,
+    user_id: &str,
+    key: Zeroizing<String>,
+    source: Arc<dyn CredentialSource>,
+) {
+    let display_shared = shared.clone();
+    let shown_user = user_id.to_owned();
+    let spawned = std::thread::Builder::new()
+        .name("core-recovery-key".into())
+        .spawn(move || {
+            if source.show_recovery_key(&shown_user, &key).is_err() {
+                display_shared.with_security(generation, |security| {
+                    security.status.error = Some(SecurityError::RecoveryKeyNotShown);
+                });
+            }
+        });
+    if spawned.is_err() {
+        shared.with_security(generation, |security| {
+            security.status.error = Some(SecurityError::RecoveryKeyNotShown);
+        });
+    }
 }
 
 fn security_prompt_error(error: PromptError) -> SecurityError {

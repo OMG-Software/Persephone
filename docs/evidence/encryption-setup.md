@@ -120,9 +120,23 @@ process crashed (four dumps in nine minutes, the `RTSSHooks64.dll` crash of
 the [window retry evidence](window-retry.md)); the account tests cover the
 fixes.
 
-One change followed the first live runs: a recovery-key window that fails after the
-session was locked no longer reports its failure into the next session. It
-touches only that failure path, which the runs did not reach.
+Two review rounds followed these live runs. Neither has a live run on this
+branch alone:
+
+* The second round sends every encryption-state write through a check of the
+  session generation. That covers the thread's results, queued commands,
+  prompt answers and a failed recovery-key window. A write that belongs to a
+  session that was locked meanwhile is dropped. The round also adds
+  `canSetUpRecovery`, and it maps an unreadable development recovery file to
+  `failed`. This changes the normal path. The same code later ran live as
+  step A (set up encryption and recovery) of the own-device verification runs
+  on both servers, on the PR C branch
+  ([#11](https://github.com/OMG-Software/Persephone/pull/11)), which also holds
+  sending and verification.
+* The third round shows a new recovery key even when a lock or sign-out
+  starts during set-up. Before, the key was dropped, and recovery stayed
+  enabled with a key nobody saw. An account test covers this case; no live run
+  does.
 
 ## Limits
 
