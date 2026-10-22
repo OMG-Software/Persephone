@@ -9,6 +9,68 @@ pub struct RoomSummary {
     pub display_name: Option<String>,
     /// u32 caps this count below JavaScript's exact-integer limit.
     pub unread_count: u32,
+    pub encryption: RoomEncryption,
+}
+
+/// Whether a room's messages are end-to-end encrypted.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomEncryption {
+    Encrypted,
+    /// Messages sent here are readable by the homeserver; sending needs a
+    /// confirmation first (ADR-0005).
+    NotEncrypted,
+    /// Not known yet; the core checks before sending.
+    Unknown,
+}
+
+/// Where a message the user sent is.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingState {
+    /// Waiting its turn (later messages in a room wait for earlier ones).
+    Queued,
+    Sending,
+    /// The homeserver accepted it; `event_id` names the event.
+    Sent,
+    /// Not sent; `failure` says why. It can be retried or discarded.
+    Failed,
+    /// The connection failed after the request may have reached the
+    /// homeserver. Retrying sends the same request again, which the
+    /// homeserver recognises, so it cannot arrive twice.
+    Unknown,
+}
+
+/// Why a message was not sent. Codes only.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SendFailure {
+    /// The room is not encrypted and sending in it was not confirmed.
+    ConfirmationRequired,
+    /// This device is not verified, so room keys cannot be shared from it.
+    DeviceNotVerified,
+    /// A verified member changed identity; nothing is sent to them until
+    /// that is resolved.
+    IdentityChanged,
+    /// This account is not joined to the room.
+    NotJoined,
+    /// The homeserver refused the message.
+    Rejected,
+    /// Anything else.
+    Failed,
+}
+
+/// A message the user sent from this device in this session. Only the body
+/// the user typed is held; nothing is kept after a lock or restart.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PendingMessage {
+    pub local_id: u32,
+    pub room_id: String,
+    pub body: String,
+    pub state: PendingState,
+    pub event_id: Option<String>,
+    pub failure: Option<SendFailure>,
 }
 
 /// Serde's internally tagged wire representation is mirrored by ts-rs serde compatibility.
@@ -252,6 +314,7 @@ pub fn sample_room_summary() -> RoomSummary {
         room_id: "!example:server.invalid".into(),
         display_name: None,
         unread_count: u32::MAX,
+        encryption: RoomEncryption::Encrypted,
     }
 }
 
@@ -288,7 +351,11 @@ pub fn generated_typescript() -> String {
         format!("export {}", SecurityOperation::decl(&config)),
         format!("export {}", SecurityError::decl(&config)),
         format!("export {}", SecurityStatus::decl(&config)),
+        format!("export {}", RoomEncryption::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
+        format!("export {}", PendingState::decl(&config)),
+        format!("export {}", SendFailure::decl(&config)),
+        format!("export {}", PendingMessage::decl(&config)),
         format!("export {}", RoomList::decl(&config)),
         format!("export {}", NoticeKind::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),

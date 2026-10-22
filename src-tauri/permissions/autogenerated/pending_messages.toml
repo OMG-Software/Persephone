@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pending-messages"
+description = "Enables the pending_messages command without any pre-configured scope."
+commands.allow = ["pending_messages"]
+
+[[permission]]
+identifier = "deny-pending-messages"
+description = "Denies the pending_messages command without any pre-configured scope."
+commands.deny = ["pending_messages"]

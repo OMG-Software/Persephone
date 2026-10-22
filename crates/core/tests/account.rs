@@ -4,8 +4,9 @@
 #![cfg(feature = "dev-disposable-servers")]
 
 use persephone_contracts::{
-    AccountState, AccountStatus, IdentityState, NoticeKind, RoomList, SecurityError,
-    SecurityOperation, SecurityStatus, SignInError, StoreState, TimelineItem, TimelinePage,
+    AccountState, AccountStatus, IdentityState, NoticeKind, PendingMessage, PendingState,
+    RoomEncryption, RoomList, SecurityError, SecurityOperation, SecurityStatus, SendFailure,
+    SignInError, StoreState, TimelineItem, TimelinePage,
 };
 use persephone_core::{
     Core,
@@ -126,14 +127,30 @@ fn history() -> Value {
 #[derive(Default)]
 struct LiveRoom {
     round: AtomicUsize,
+    /// Also report `PLAIN`, a room that is not encrypted.
+    plain: bool,
+}
+
+/// A joined room without encryption; it sorts after `ROOM`.
+const PLAIN: &str = "!zplain:synthetic.test";
+
+fn plain_state() -> Value {
+    json!([
+        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$pcreate","origin_server_ts":1,"content":{"creator":USER,"room_version":"11"}},
+        {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$pjoin","origin_server_ts":2,"content":{"membership":"join"}}
+    ])
 }
 
 impl wiremock::Respond for LiveRoom {
     fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
         let n = self.round.fetch_add(1, Ordering::SeqCst);
+        let mut rooms = json!({ROOM:{"state":{"events":room_state()},"timeline":{"events":[text(&format!("$live{n}"), "live")],"limited":true,"prev_batch":"history"},"ephemeral":{"events":[]},"account_data":{"events":[]}}});
+        if self.plain {
+            rooms[PLAIN] = json!({"state":{"events":plain_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+        }
         ResponseTemplate::new(200).set_body_json(json!({
             "next_batch": format!("classic-{n}"),
-            "rooms":{"join":{ROOM:{"state":{"events":room_state()},"timeline":{"events":[text(&format!("$live{n}"), "live")],"limited":true,"prev_batch":"history"},"ephemeral":{"events":[]},"account_data":{"events":[]}}}},
+            "rooms":{"join":rooms},
             "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
         }))
     }
@@ -188,7 +205,10 @@ impl Homeserver {
             }
             Mock::given(method("GET"))
                 .and(path("/_matrix/client/v3/sync"))
-                .respond_with(LiveRoom::default())
+                .respond_with(LiveRoom {
+                    round: AtomicUsize::new(0),
+                    plain: false,
+                })
                 .mount(&server)
                 .await;
             Mock::given(method("POST"))
@@ -281,6 +301,77 @@ impl Homeserver {
                 .mount(&self.server)
                 .await;
         });
+    }
+
+    /// Adds the unencrypted room `PLAIN` to every sync, the member lists the
+    /// SDK loads before sharing keys, and a send endpoint that answers
+    /// `status` with an event ID.
+    fn sending_endpoints(&self, status: u16) {
+        self.runtime.block_on(async {
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/sync"))
+                .respond_with(LiveRoom {
+                    round: AtomicUsize::new(0),
+                    plain: true,
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            // The SDK asks for a room's encryption state when sync left it
+            // unknown; the plain room has none.
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/state/m\.room\.encryption/?$"))
+                .respond_with(ResponseTemplate::new(404).set_body_json(
+                    json!({"errcode": "M_NOT_FOUND", "error": "no encryption"}),
+                ))
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": [
+                    {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$m","origin_server_ts":2,"content":{"membership":"join"}}
+                ]})))
+                .mount(&self.server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/send/[^/]+/[^/]+$"))
+                .respond_with(if status == 200 {
+                    ResponseTemplate::new(200).set_body_json(json!({"event_id": "$sent"}))
+                } else {
+                    ResponseTemplate::new(status)
+                        .set_body_json(json!({"errcode": "M_UNKNOWN", "error": "refused"}))
+                })
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Answers sends with 200 from now on.
+    fn accept_sends(&self) {
+        self.runtime.block_on(
+            Mock::given(method("PUT"))
+                .and(path_regex(
+                    r"^/_matrix/client/v3/rooms/[^/]+/send/[^/]+/[^/]+$",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"event_id": "$sent"})),
+                )
+                .with_priority(1)
+                .mount(&self.server),
+        );
+    }
+
+    /// Paths of the send requests, in order.
+    fn sends(&self) -> Vec<String> {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "PUT" && request.url.path().contains("/send/")
+            })
+            .map(|request| request.url.path().to_owned())
+            .collect()
     }
 
     /// Bodies of the requests made to `endpoint`, in order.
@@ -1374,4 +1465,234 @@ fn given_a_lock_while_the_password_prompt_is_open_then_the_answer_is_dropped() {
         "the late password is never sent"
     );
     assert_eq!(security(&core), SecurityStatus::unknown());
+}
+
+fn pending(core: &Core, room_id: &str) -> Vec<PendingMessage> {
+    value(call(
+        core,
+        Call::PendingMessages {
+            room_id: room_id.into(),
+        },
+    ))
+}
+
+fn send(core: &Core, room_id: &str, body: &str) -> Outcome {
+    call(
+        core,
+        Call::SendMessage {
+            room_id: room_id.into(),
+            body: body.into(),
+        },
+    )
+}
+
+/// GIVEN a device that is not verified WHEN sending in an encrypted room THEN
+/// the message fails as `device_not_verified` and no request to send anything,
+/// encrypted or plain, reaches the homeserver.
+#[test]
+fn given_an_unverified_device_then_an_encrypted_room_send_fails_without_any_send_request() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(200);
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let queued: PendingMessage = value(send(&core, ROOM, "secret text"));
+    assert_eq!(queued.state, PendingState::Queued);
+    wait_for("the send to end", || {
+        pending(&core, ROOM)[0].state == PendingState::Failed
+    });
+    assert_eq!(
+        pending(&core, ROOM)[0].failure,
+        Some(SendFailure::DeviceNotVerified)
+    );
+    assert!(
+        server.sends().is_empty(),
+        "nothing sent: {:?}",
+        server.sends()
+    );
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(
+        state,
+        StoreState::RestartRequired,
+        "the sending thread is joined"
+    );
+    assert!(
+        pending(&core, ROOM).is_empty(),
+        "unsent messages are dropped"
+    );
+}
+
+/// GIVEN a room that is not encrypted WHEN sending without consent THEN
+/// nothing is sent and the message asks for confirmation; after consent a
+/// retry sends it as plain text with the same transaction ID, and consent is
+/// remembered for the next message.
+#[test]
+fn given_an_unencrypted_room_then_sending_needs_consent_once_and_keeps_the_transaction_id() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(200);
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the plain room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN)
+    });
+    let first: PendingMessage = value(send(&core, PLAIN, "plain hello"));
+    wait_for("the confirmation request", || {
+        pending(&core, PLAIN)[0].state == PendingState::Failed
+    });
+    // The send checked the room, so the list now labels it.
+    assert!(
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN && room.encryption == RoomEncryption::NotEncrypted)
+    );
+    assert_eq!(
+        pending(&core, PLAIN)[0].failure,
+        Some(SendFailure::ConfirmationRequired)
+    );
+    assert!(server.sends().is_empty(), "nothing sent before consent");
+
+    assert_eq!(
+        call(
+            &core,
+            Call::AllowUnencrypted {
+                room_id: PLAIN.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::RetryMessage {
+                local_id: first.local_id
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    wait_for("the send", || {
+        pending(&core, PLAIN)[0].state == PendingState::Sent
+    });
+    let sent = &pending(&core, PLAIN)[0];
+    assert_eq!(sent.event_id.as_deref(), Some("$sent"));
+    let paths = server.sends();
+    assert_eq!(paths.len(), 1);
+    assert!(
+        paths[0].contains("/send/m.room.message/"),
+        "plain text: {}",
+        paths[0]
+    );
+
+    value::<PendingMessage>(send(&core, PLAIN, "second"));
+    wait_for("the second send", || {
+        pending(&core, PLAIN)
+            .iter()
+            .filter(|m| m.state == PendingState::Sent)
+            .count()
+            == 2
+    });
+    assert_eq!(server.sends().len(), 2, "consent was remembered");
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a homeserver that refuses a send WHEN the user retries THEN the same
+/// transaction ID is sent again, so the homeserver can recognise it; a later
+/// message in the room waits until the earlier one is resolved.
+#[test]
+fn given_a_refused_send_then_a_retry_reuses_its_transaction_id_and_later_messages_wait() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(500);
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    assert_eq!(
+        call(
+            &core,
+            Call::AllowUnencrypted {
+                room_id: PLAIN.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    wait_for("the plain room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN)
+    });
+    let first: PendingMessage = value(send(&core, PLAIN, "one"));
+    let second: PendingMessage = value(send(&core, PLAIN, "two"));
+    wait_for("the refusal", || {
+        pending(&core, PLAIN)[0].state == PendingState::Failed
+    });
+    assert_eq!(
+        pending(&core, PLAIN)[0].failure,
+        Some(SendFailure::Rejected)
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        pending(&core, PLAIN)[1].state,
+        PendingState::Queued,
+        "waits behind it"
+    );
+    assert_eq!(server.sends().len(), 1);
+
+    server.accept_sends();
+    call(
+        &core,
+        Call::RetryMessage {
+            local_id: first.local_id,
+        },
+    );
+    wait_for("both sent", || {
+        pending(&core, PLAIN)
+            .iter()
+            .all(|m| m.state == PendingState::Sent)
+    });
+    let paths = server.sends();
+    assert_eq!(paths.len(), 3);
+    assert_eq!(paths[0], paths[1], "the retry repeats the transaction ID");
+    assert_ne!(paths[1], paths[2], "the next message has its own");
+    assert_eq!(
+        call(
+            &core,
+            Call::DiscardMessage {
+                local_id: second.local_id
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    assert_eq!(pending(&core, PLAIN).len(), 1);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN bad input or no account WHEN sending THEN the core refuses before
+/// queueing anything.
+#[test]
+fn given_bad_input_or_no_account_then_nothing_is_queued() {
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    assert_eq!(
+        send(&core, ROOM, "x"),
+        Outcome::Error(ErrorCode::Unavailable)
+    );
+    for (room, body) in [
+        ("#alias:s", "x"),
+        (ROOM, ""),
+        (ROOM, "  "),
+        (ROOM, "a\u{7}b"),
+    ] {
+        assert_eq!(
+            send(&core, room, body),
+            Outcome::Error(ErrorCode::InvalidArgument),
+            "{room} {body:?}"
+        );
+    }
+    assert_eq!(
+        call(&core, Call::RetryMessage { local_id: 1 }),
+        Outcome::Error(ErrorCode::NotFound)
+    );
 }

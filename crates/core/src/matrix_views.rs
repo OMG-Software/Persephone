@@ -20,7 +20,7 @@
 
 use crate::views::{MAX_PAGE_BYTES, MAX_PAGE_ITEMS, MAX_ROOMS, project_body, project_name};
 use matrix_sdk::{
-    Client, RoomState,
+    Client, EncryptionState, RoomState,
     deserialized_responses::{TimelineEvent, TimelineEventKind, UnableToDecryptReason},
     room::MessagesOptions,
     ruma::{
@@ -31,7 +31,9 @@ use matrix_sdk::{
         },
     },
 };
-use persephone_contracts::{NoticeKind, RoomList, RoomSummary, TimelineItem, TimelinePage};
+use persephone_contracts::{
+    NoticeKind, RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage,
+};
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
     collections::VecDeque,
@@ -195,6 +197,11 @@ impl MatrixViews {
                         .cached_display_name()
                         .map(|name| project_name(&name.to_string())),
                     unread_count: u32::try_from(room.num_unread_messages()).unwrap_or(u32::MAX),
+                    encryption: match room.encryption_state() {
+                        EncryptionState::Encrypted => RoomEncryption::Encrypted,
+                        EncryptionState::NotEncrypted => RoomEncryption::NotEncrypted,
+                        EncryptionState::Unknown => RoomEncryption::Unknown,
+                    },
                 })
                 .collect(),
             truncated,

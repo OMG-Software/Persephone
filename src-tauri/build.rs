@@ -24,6 +24,11 @@ fn main() {
             "security_status",
             "set_up_encryption",
             "recover_with_key",
+            "send_message",
+            "pending_messages",
+            "retry_message",
+            "discard_message",
+            "allow_unencrypted",
             "set_up_recovery",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {

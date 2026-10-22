@@ -7,6 +7,7 @@ let RoomList;
 let Timeline;
 let SignIn;
 let Security;
+let Composer;
 let render;
 
 before(async () => {
@@ -19,6 +20,7 @@ before(async () => {
   ({ default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte'));
   ({ default: SignIn } = await vite.ssrLoadModule('/src/SignIn.svelte'));
   ({ default: Security } = await vite.ssrLoadModule('/src/Security.svelte'));
+  ({ default: Composer } = await vite.ssrLoadModule('/src/Composer.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -32,8 +34,13 @@ test('room names render as isolated, escaped text with capped unread counts', ()
   const { body: html } = render(RoomList, {
     props: {
       rooms: [
-        { roomId: '!a:example.invalid', displayName: hostileName, unreadCount: 4294967295 },
-        { roomId: '!b:example.invalid', displayName: null, unreadCount: 0 }
+        {
+          roomId: '!a:example.invalid',
+          displayName: hostileName,
+          unreadCount: 4294967295,
+          encryption: 'encrypted'
+        },
+        { roomId: '!b:example.invalid', displayName: null, unreadCount: 0, encryption: 'not_encrypted' }
       ],
       truncated: true,
       selected: '!a:example.invalid',
@@ -184,3 +191,74 @@ test('the encryption panel offers the step that fits and never asks for a secret
   const unknownError = panel(status('none', { error: 'something_new' }));
   assert.match(unknownError, /That did not work\./);
 });
+
+test('rooms that are not encrypted are labelled in the list and the timeline', () => {
+  const list = render(RoomList, {
+    props: {
+      rooms: [
+        { roomId: '!a:example.invalid', displayName: 'A', unreadCount: 0, encryption: 'encrypted' },
+        { roomId: '!b:example.invalid', displayName: 'B', unreadCount: 0, encryption: 'not_encrypted' }
+      ],
+      truncated: false,
+      selected: null,
+      onselect: () => {}
+    }
+  }).body;
+  assert.equal((list.match(/Not encrypted/g) ?? []).length, 1);
+  const timeline = (notEncrypted) =>
+    render(Timeline, {
+      props: { title: 'R', notEncrypted, items: [], hasOlder: false, loading: false, error: null, onolder: () => {} }
+    }).body;
+  assert.match(timeline(true), /Not encrypted: the homeserver can read this room\./);
+  assert.doesNotMatch(timeline(false), /Not encrypted/);
+});
+
+test('messages being sent show their state as fixed text with safe actions only', () => {
+  const message = (localId, state, failure = null) => ({
+    localId,
+    roomId: '!r:example.invalid',
+    body: hostileName,
+    state,
+    eventId: state === 'sent' ? '$e' : null,
+    failure
+  });
+  const composer = (pending, blocked = null, notEncrypted = false) =>
+    render(Composer, {
+      props: {
+        pending,
+        blocked,
+        notEncrypted,
+        draftVersion: 0,
+        onsend: async () => true,
+        onretry: () => {},
+        ondiscard: () => {},
+        onallow: () => {}
+      }
+    }).body;
+
+  const html = composer([
+    message(1, 'queued'),
+    message(2, 'sending'),
+    message(3, 'unknown'),
+    message(4, 'failed', 'device_not_verified'),
+    message(5, 'failed', 'confirmation_required'),
+    message(6, 'sent')
+  ]);
+  assert.doesNotMatch(html, /<img/, 'bodies are text');
+  assert.match(html, /<p dir="auto">&lt;img/);
+  assert.match(html, /Waiting to send…/);
+  assert.match(html, /Sending…/);
+  assert.match(html, /Delivery unknown: the connection failed\. Retrying cannot send it twice\./);
+  assert.match(html, /Not sent: verify this device first\./);
+  assert.match(html, /Not sent: this room is not encrypted\./);
+  assert.match(html, /Sent\./);
+  assert.equal((html.match(/>Retry</g) ?? []).length, 3, 'unknown and the two failures');
+  assert.equal((html.match(/>Send unencrypted</g) ?? []).length, 1);
+  assert.equal((html.match(/>Discard</g) ?? []).length, 4, 'not while sending or once sent');
+
+  const blocked = composer([], 'Verify this device in the Encryption panel to send encrypted messages.');
+  assert.match(blocked, /<textarea[^>]*disabled/);
+  assert.match(blocked, /Verify this device in the Encryption panel/);
+  assert.match(composer([], null, true), /Message \(not encrypted\)/);
+});
+

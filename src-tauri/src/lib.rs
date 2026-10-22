@@ -18,10 +18,11 @@ pub mod core_link;
 
 use core_link::{CoreError, CoreLink};
 use persephone_contracts::{
-    AccountStatus, AppStatus, RoomList, SecurityStatus, StoreState, TimelinePage,
+    AccountStatus, AppStatus, PendingMessage, RoomList, SecurityStatus, StoreState, TimelinePage,
 };
 use persephone_core_protocol::{
-    Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_ROOM_ID_BYTES,
+    Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES,
+    MAX_ROOM_ID_BYTES,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -252,6 +253,52 @@ async fn recover_with_key(core: State<'_, CoreLink>) -> Result<SecurityStatus, S
     relay(core.inner(), Call::RecoverWithKey {}).await
 }
 
+/// Queues a text message. The core checks the room and body and decides at
+/// send time whether the room needs consent.
+#[tauri::command]
+async fn send_message(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    body: String,
+) -> Result<PendingMessage, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || body.len() > MAX_MESSAGE_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SendMessage { room_id, body }).await
+}
+
+/// The room's messages sent from this device in this session.
+#[tauri::command]
+async fn pending_messages(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<Vec<PendingMessage>, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::PendingMessages { room_id }).await
+}
+
+#[tauri::command]
+async fn retry_message(core: State<'_, CoreLink>, local_id: u32) -> Result<(), String> {
+    relay::<()>(core.inner(), Call::RetryMessage { local_id }).await
+}
+
+#[tauri::command]
+async fn discard_message(core: State<'_, CoreLink>, local_id: u32) -> Result<(), String> {
+    relay::<()>(core.inner(), Call::DiscardMessage { local_id }).await
+}
+
+/// Records the user's consent to send unencrypted messages in a room; the
+/// page asks first.
+#[tauri::command]
+async fn allow_unencrypted(core: State<'_, CoreLink>, room_id: String) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::AllowUnencrypted { room_id }).await
+}
+
 /// Starts setting up recovery alone (an earlier attempt failed). The core
 /// shows the new recovery key in its own window.
 #[tauri::command]
@@ -313,6 +360,11 @@ pub fn configure<R: Runtime>(
             security_status,
             set_up_encryption,
             recover_with_key,
+            send_message,
+            pending_messages,
+            retry_message,
+            discard_message,
+            allow_unencrypted,
             set_up_recovery
         ])
         .on_page_load(|webview, payload| {

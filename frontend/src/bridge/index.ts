@@ -6,6 +6,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   AccountStatus,
   AppStatus,
+  PendingMessage,
   SignInError,
   RoomList,
   SecurityStatus,
@@ -17,6 +18,7 @@ import type {
 export type {
   AccountStatus,
   AppStatus,
+  PendingMessage,
   RoomList,
   SecurityStatus,
   SignInError,
@@ -115,6 +117,34 @@ export function setUpEncryption(): Promise<SecurityStatus> {
 /** Starts verifying this device with the recovery key, asked by the core. */
 export function recoverWithKey(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('recover_with_key');
+}
+
+/**
+ * Queues a text message. The core decides when it is sent: in an encrypted
+ * room only from a verified device, in a room that is not encrypted only after
+ * `allowUnencrypted`. Progress arrives as a change of the room.
+ */
+export function sendMessage(roomId: string, body: string): Promise<PendingMessage> {
+  return invoke<PendingMessage>('send_message', { roomId, body });
+}
+
+/** The room's messages sent from this device in this session. */
+export function pendingMessages(roomId: string): Promise<PendingMessage[]> {
+  return invoke<PendingMessage[]>('pending_messages', { roomId });
+}
+
+/** Sends a failed or unknown message again; it cannot arrive twice. */
+export function retryMessage(localId: number): Promise<void> {
+  return invoke<void>('retry_message', { localId });
+}
+
+export function discardMessage(localId: number): Promise<void> {
+  return invoke<void>('discard_message', { localId });
+}
+
+/** Records consent to send unencrypted messages in a room; ask the user first. */
+export function allowUnencrypted(roomId: string): Promise<void> {
+  return invoke<void>('allow_unencrypted', { roomId });
 }
 
 /** Sets up recovery alone when an earlier attempt failed; no password needed. */

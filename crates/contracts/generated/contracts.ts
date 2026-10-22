@@ -30,11 +30,19 @@ export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "
 
 export type SecurityStatus = { identity: IdentityState, recovery: RecoveryState, operation: SecurityOperation, error: SecurityError | null, };
 
+export type RoomEncryption = "encrypted" | "not_encrypted" | "unknown";
+
 export type RoomSummary = { roomId: string, displayName: string | null, 
 /**
  * u32 caps this count below JavaScript's exact-integer limit.
  */
-unreadCount: number, };
+unreadCount: number, encryption: RoomEncryption, };
+
+export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
+
+export type SendFailure = "confirmation_required" | "device_not_verified" | "identity_changed" | "not_joined" | "rejected" | "failed";
+
+export type PendingMessage = { localId: number, roomId: string, body: string, state: PendingState, eventId: string | null, failure: SendFailure | null, };
 
 export type RoomList = { rooms: Array<RoomSummary>, truncated: boolean, };
 
@@ -47,7 +55,8 @@ export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCur
 export const roomSummaryFixture = {
   "roomId": "!example:server.invalid",
   "displayName": null,
-  "unreadCount": 4294967295
+  "unreadCount": 4294967295,
+  "encryption": "encrypted"
 } as const satisfies RoomSummary;
 
 export const timelinePageFixture = {

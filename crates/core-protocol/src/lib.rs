@@ -67,10 +67,35 @@ pub enum Call {
     /// Verify this device with the recovery key, asked in the core's own
     /// window. Replies at once with the status, like `SetUpEncryption`.
     RecoverWithKey {},
+    /// Queue a text message. Replies at once with the queued message; its
+    /// progress arrives as [`Event::RoomChanged`] for the room.
+    SendMessage {
+        room_id: String,
+        body: String,
+    },
+    /// The room's messages sent from this device in this session.
+    PendingMessages {
+        room_id: String,
+    },
+    /// Send a failed or unknown message again, with the same transaction ID.
+    RetryMessage {
+        local_id: u32,
+    },
+    /// Drop a message that is not being sent.
+    DiscardMessage {
+        local_id: u32,
+    },
+    /// Record the user's consent to send unencrypted messages in this room.
+    AllowUnencrypted {
+        room_id: String,
+    },
     /// Set up recovery alone for a verified identity without it (an earlier
     /// attempt failed). The core shows the new recovery key in its own window.
     SetUpRecovery {},
 }
+
+/// Longest message body either side accepts, in bytes (the display limit).
+pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
 /// Longest homeserver URL either side accepts in a call.
 pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
@@ -317,6 +342,14 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"recover_with_key","recovery_key":"x"}}"#,
             br#"{"id":1,"call":{"command":"export_room_keys"}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","encrypted":false}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","txn_id":"t"}}"#,
+            br#"{"id":1,"call":{"command":"retry_message","local_id":-1}}"#,
+            br#"{"id":1,"call":{"command":"retry_message","local_id":4294967296}}"#,
+            br#"{"id":1,"call":{"command":"discard_message","local_id":"1"}}"#,
+            br#"{"id":1,"call":{"command":"allow_unencrypted","room_id":"!r:s","all":true}}"#,
+            br#"{"id":1,"call":{"command":"pending_messages"}}"#,
             br#"{"id":1,"call":{"command":"set_up_recovery","passphrase":"x"}}"#,
             b"not json",
         ] {

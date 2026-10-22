@@ -4,6 +4,7 @@
 
   let {
     title,
+    notEncrypted = false,
     items,
     hasOlder,
     loading,
@@ -11,6 +12,7 @@
     onolder
   }: {
     title: string;
+    notEncrypted?: boolean;
     items: TimelineItem[];
     hasOlder: boolean;
     loading: boolean;
@@ -33,6 +35,9 @@
 
 <section class="timeline" aria-labelledby="timeline-heading">
   <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
+  {#if notEncrypted}
+    <p class="note unencrypted">Not encrypted: the homeserver can read this room.</p>
+  {/if}
   <button type="button" disabled={!hasOlder || loading} onclick={onolder}>
     {loading
       ? 'Loading…'

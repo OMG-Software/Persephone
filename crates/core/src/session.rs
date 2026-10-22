@@ -10,8 +10,9 @@
 //! 3. Wait for every admitted lease to finish. A timeout leaves the session in
 //!    `locking` with the stores still open and owned; locking again resumes
 //!    the wait. Nothing is released early.
-//! 4. Join the sync and security threads, drop the SDK client, close the
-//!    stores, then release the profile. A failed close leaves `lock_failed`.
+//! 4. Join the sync, security and sending threads, drop the SDK client,
+//!    close the stores, then release the profile. A failed close leaves
+//!    `lock_failed`. Unsent messages are dropped (`outbox.rs`).
 //!
 //! The sync loop and sign-in take one lease per unit of work and check for a
 //! lock only between complete SDK operations. The SDK's own background tasks
@@ -28,13 +29,15 @@
 use crate::account;
 use crate::credentials::{CredentialSource, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
+use crate::outbox::Outbox;
 use crate::security;
+use crate::sending;
 use crate::store::{self, Stores};
 use crate::vault::KeyProtector;
 use matrix_sdk::{Client, ruma::OwnedUserId};
 use persephone_contracts::{
-    AccountState, AccountStatus, IdentityState, RecoveryState, SecurityError, SecurityOperation,
-    SecurityStatus, SignInError, StoreState,
+    AccountState, AccountStatus, IdentityState, PendingMessage, RecoveryState, SecurityError,
+    SecurityOperation, SecurityStatus, SignInError, StoreState,
 };
 use std::{
     path::PathBuf,
@@ -54,6 +57,8 @@ const MAX_SYNC_BACKOFF: Duration = Duration::from_secs(30);
 /// Shortest time between the starts of two sync rounds. A homeserver should
 /// long-poll; one that answers at once must not make the core spin.
 const MIN_SYNC_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the sending thread checks for queued messages.
+const SEND_TICK: Duration = Duration::from_millis(100);
 /// How often the security thread checks for work.
 const SECURITY_TICK: Duration = Duration::from_millis(250);
 /// How often the shown encryption state is read again from the store.
@@ -98,6 +103,17 @@ pub trait SessionListener: Send + Sync {
     fn session_changed(&self);
     /// The account's encryption state changed.
     fn security_changed(&self) {}
+    /// A message the user sent in this room changed state.
+    fn outbox_changed(&self, _room_id: &str) {}
+}
+
+/// Why a message was not queued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendRefusal {
+    /// No signed-in account, or the session is not open.
+    Unavailable,
+    /// Too many messages are waiting.
+    Full,
 }
 
 struct Inner {
@@ -111,6 +127,7 @@ struct ActiveAccount {
     client: Client,
     sync: Option<JoinHandle<()>>,
     security: Option<JoinHandle<()>>,
+    sender: Option<JoinHandle<()>>,
     user_id: String,
     /// The homeserver as the prompts name it.
     host: String,
@@ -157,6 +174,7 @@ struct Shared {
     /// Set once any SDK client was built over these stores.
     client_ran: AtomicBool,
     security: Mutex<SecurityShared>,
+    outbox: Mutex<Outbox>,
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -302,6 +320,7 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
             client: client.clone(),
             sync: None,
             security: None,
+            sender: None,
             user_id: user_id.clone(),
             host,
         });
@@ -344,6 +363,14 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
                 })
                 .ok();
         }
+        let sender_shared = shared.clone();
+        let sender_client = client.clone();
+        let sender_runtime = runtime.clone();
+        entry.sender = std::thread::Builder::new()
+            .name("core-send".into())
+            .stack_size(SECURITY_STACK_BYTES)
+            .spawn(move || run_sender(&sender_shared, sender_client, sender_runtime))
+            .ok();
         let thread_shared = shared.clone();
         let thread_user = user_id.clone();
         let thread_runtime = runtime.clone();
@@ -548,6 +575,49 @@ fn run_security(
     drop(client);
 }
 
+/// The sending loop: one message at a time in queue order, one lease per
+/// send; a lock is noticed between sends.
+fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Handle) {
+    loop {
+        if !shared.wait_open(SEND_TICK) {
+            break;
+        }
+        let Some(job) = guard(&shared.outbox).next_job() else {
+            continue;
+        };
+        let lease = match shared.admit() {
+            Ok(lease) => lease,
+            Err(AdmissionError::Locked) => break,
+            Err(AdmissionError::Saturated) => {
+                guard(&shared.outbox).requeue(job.local_id);
+                continue;
+            }
+        };
+        let outcome = lease.stores().block_on(async {
+            let consented = sending::consented(lease.stores(), &job.room_id).await;
+            sending::send(
+                &client,
+                &job.room_id,
+                &job.body,
+                job.transaction_id.clone(),
+                consented,
+            )
+            .await
+        });
+        let current = lease.commit(|| ()).is_ok();
+        drop(lease);
+        if !current {
+            break;
+        }
+        let room = guard(&shared.outbox).finish(job.local_id, outcome);
+        if let (Some(room), Some(listener)) = (room, shared.listener()) {
+            listener.outbox_changed(&room);
+        }
+    }
+    let _context = runtime.enter();
+    drop(client);
+}
+
 fn security_prompt_error(error: PromptError) -> SecurityError {
     match error {
         PromptError::Cancelled => SecurityError::Cancelled,
@@ -603,6 +673,7 @@ impl Session {
                 status: Mutex::new(AccountStatus::signed_out()),
                 account: Mutex::new(None),
                 security: Mutex::default(),
+                outbox: Mutex::default(),
                 listener: Mutex::new(None),
                 client_ran: AtomicBool::new(false),
             }),
@@ -812,8 +883,10 @@ impl Session {
         }
         let stores = inner.stores.take();
         drop(inner);
-        // A secret left for a command that will not run is zeroed here.
+        // A secret left for a command that will not run is zeroed here, and
+        // unsent messages are dropped.
         *guard(&self.shared.security) = SecurityShared::default();
+        guard(&self.shared.outbox).clear();
         // No lease remains, so the sync loop is between rounds and will see
         // the lock at its next admission; join it, then drop the client inside
         // the stores' runtime before closing them.
@@ -823,6 +896,9 @@ impl Session {
             }
             if let Some(security) = account.security {
                 let _ = security.join();
+            }
+            if let Some(sender) = account.sender {
+                let _ = sender.join();
             }
             match &stores {
                 Some(stores) => {
@@ -912,6 +988,68 @@ impl Session {
             },
         });
         Ok(state)
+    }
+
+    /// Queues a message for the signed-in account. The room and body were
+    /// checked by the caller; whether the account is in the room and whether
+    /// the room needs consent are decided when it is sent.
+    pub fn send_message(
+        &self,
+        room_id: &str,
+        body: Zeroizing<String>,
+    ) -> Result<PendingMessage, SendRefusal> {
+        if guard(&self.shared.account).is_none()
+            || lock(&self.shared).state != StoreState::Protected
+        {
+            return Err(SendRefusal::Unavailable);
+        }
+        let queued = guard(&self.shared.outbox)
+            .queue(room_id, body)
+            .ok_or(SendRefusal::Full)?;
+        if let Some(listener) = self.shared.listener() {
+            listener.outbox_changed(room_id);
+        }
+        Ok(queued)
+    }
+
+    /// The room's messages sent from this device in this session.
+    pub fn pending_messages(&self, room_id: &str) -> Vec<PendingMessage> {
+        guard(&self.shared.outbox).for_room(room_id)
+    }
+
+    /// Queues a failed or unknown message again, with its transaction ID.
+    pub fn retry_message(&self, local_id: u32) -> bool {
+        let room = guard(&self.shared.outbox).retry(local_id);
+        self.outbox_changed(room)
+    }
+
+    /// Drops a message that is not being sent.
+    pub fn discard_message(&self, local_id: u32) -> bool {
+        let room = guard(&self.shared.outbox).discard(local_id);
+        self.outbox_changed(room)
+    }
+
+    fn outbox_changed(&self, room: Option<String>) -> bool {
+        let Some(room) = room else {
+            return false;
+        };
+        if let Some(listener) = self.shared.listener() {
+            listener.outbox_changed(&room);
+        }
+        true
+    }
+
+    /// Records the user's consent to send unencrypted messages in a room.
+    /// `Ok(false)` when the consent list is full.
+    pub fn allow_unencrypted(&self, room_id: &str) -> Result<bool, AdmissionError> {
+        if guard(&self.shared.account).is_none() {
+            return Err(AdmissionError::Locked);
+        }
+        let lease = self.shared.admit()?;
+        let allowed = lease
+            .stores()
+            .block_on(sending::allow_plaintext(lease.stores(), room_id));
+        Ok(allowed && lease.commit(|| ()).is_ok())
     }
 
     /// The account's encryption state; `unknown` without a signed-in account.

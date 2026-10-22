@@ -34,6 +34,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Failed window retry](evidence/window-retry.md): on Windows, the core offers Retry when the web view's processes exit while the UI runs, or the page sends no request within 30 s; a UI that exits on its own is not retried. This host's crash dumps all fail inside a third-party overlay hook (not tested with it removed).
 - [Sign-out](evidence/sign-out.md): remote revocation, key deleted first, crash-safe wipe of the local profile; live runs on Merovingian and Synapse.
 - [Encryption setup](evidence/encryption-setup.md): identity-based key sharing, cross-signing and recovery set up from the page with secrets only in the core's windows, recovery-key verification; live runs on Merovingian and Synapse.
+- [Encrypted sending](evidence/encrypted-sending.md): outbox with per-room order and same-transaction retries, consent before unencrypted sends; live two-account runs on Merovingian and Synapse with an unsigned-device control.
 - [Session owner](evidence/session-owner.md): lock and unlock while running; leases, generation fencing, retained ownership on timeout; real-app walkthrough.
 - [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.
 - [Live room updates](evidence/live-updates.md): content-free, coalescing core events for subscribed rooms; reply routing; real-app walkthrough including page reloads.

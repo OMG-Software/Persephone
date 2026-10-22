@@ -26,6 +26,9 @@
           onclick={() => onselect(room.roomId)}
         >
           <bdi class="room-name">{room.displayName ?? room.roomId}</bdi>
+          {#if room.encryption === 'not_encrypted'}
+            <span class="note">Not encrypted</span>
+          {/if}
           {#if room.unreadCount > 0}
             <span class="badge" aria-label={unreadLabel(room.unreadCount) + ' unread'}
               >{unreadLabel(room.unreadCount)}</span

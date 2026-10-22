@@ -23,7 +23,9 @@ pub mod account;
 pub mod credentials;
 pub mod homeserver;
 pub mod matrix_views;
+pub mod outbox;
 pub mod security;
+pub mod sending;
 pub mod session;
 pub mod store;
 pub mod vault;
@@ -34,8 +36,8 @@ use homeserver::Homeserver;
 use matrix_views::MatrixViews;
 use persephone_contracts::{AccountStatus, AppStatus, RoomList, StoreState};
 use persephone_core_protocol::{
-    Call, CoreMessage, ErrorCode, Event, MAX_HOMESERVER_URL_BYTES, MAX_ROOM_ID_BYTES,
-    MAX_SUBSCRIPTIONS, Outcome, ReceiveError, Reply, Request, receive, send,
+    Call, CoreMessage, ErrorCode, Event, MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES,
+    MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, Outcome, ReceiveError, Reply, Request, receive, send,
 };
 use persephone_media_protocol::ResourceBudgets;
 use serde::Serialize;
@@ -137,6 +139,10 @@ impl SessionListener for Hub {
         self.announce_session_change();
     }
 
+    fn outbox_changed(&self, room_id: &str) {
+        self.mark_changed(&[room_id.to_owned()], false);
+    }
+
     fn security_changed(&self) {
         let mut notifications = lock(&self.notifications);
         if !notifications.security_changed {
@@ -172,6 +178,20 @@ impl Default for Core {
 
 fn ok<T: Serialize>(value: &T) -> Outcome {
     serde_json::to_value(value).map_or(Outcome::Error(ErrorCode::Internal), Outcome::Ok)
+}
+
+fn valid_room_id(room_id: &str) -> bool {
+    room_id.len() <= MAX_ROOM_ID_BYTES && room_id.starts_with('!')
+}
+
+/// A message body: some visible text, within the limit, and no control
+/// characters except line breaks and tabs.
+fn valid_body(body: &str) -> bool {
+    body.len() <= MAX_MESSAGE_BYTES
+        && !body.trim().is_empty()
+        && !body
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
 }
 
 fn empty_rooms() -> RoomList {
@@ -288,6 +308,29 @@ impl Core {
                 ok(&self.session.set_up_encryption(self.credentials.clone()))
             }
             Call::RecoverWithKey {} => ok(&self.session.recover_with_key(self.credentials.clone())),
+            Call::SendMessage { room_id, body } => self.send_message(room_id, body),
+            Call::PendingMessages { room_id } => {
+                if valid_room_id(room_id) {
+                    ok(&self.session.pending_messages(room_id))
+                } else {
+                    Outcome::Error(ErrorCode::InvalidArgument)
+                }
+            }
+            Call::RetryMessage { local_id } => self.changed(self.session.retry_message(*local_id)),
+            Call::DiscardMessage { local_id } => {
+                self.changed(self.session.discard_message(*local_id))
+            }
+            Call::AllowUnencrypted { room_id } => {
+                if !valid_room_id(room_id) {
+                    Outcome::Error(ErrorCode::InvalidArgument)
+                } else {
+                    match self.session.allow_unencrypted(room_id) {
+                        Ok(true) => Outcome::Ok(serde_json::Value::Null),
+                        Ok(false) => Outcome::Error(ErrorCode::LimitExceeded),
+                        Err(_) => Outcome::Error(ErrorCode::Locked),
+                    }
+                }
+            }
             Call::SetUpRecovery {} => ok(&self.session.set_up_recovery(self.credentials.clone())),
             Call::SignOut {} => match self
                 .session
@@ -320,8 +363,30 @@ impl Core {
         }
     }
 
+    fn send_message(&self, room_id: &str, body: &str) -> Outcome {
+        if !valid_room_id(room_id) || !valid_body(body) {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        match self
+            .session
+            .send_message(room_id, zeroize::Zeroizing::new(body.to_owned()))
+        {
+            Ok(queued) => ok(&queued),
+            Err(session::SendRefusal::Full) => Outcome::Error(ErrorCode::LimitExceeded),
+            Err(session::SendRefusal::Unavailable) => Outcome::Error(ErrorCode::Unavailable),
+        }
+    }
+
+    fn changed(&self, done: bool) -> Outcome {
+        if done {
+            Outcome::Ok(serde_json::Value::Null)
+        } else {
+            Outcome::Error(ErrorCode::NotFound)
+        }
+    }
+
     fn subscribe(&self, room_id: &str) -> Outcome {
-        if room_id.len() > MAX_ROOM_ID_BYTES || !room_id.starts_with('!') {
+        if !valid_room_id(room_id) {
             return Outcome::Error(ErrorCode::InvalidArgument);
         }
         let known = match self.source() {
@@ -478,6 +543,30 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN message bodies WHEN checked THEN text with line breaks and tabs
+    /// passes; empty, blank, oversized or control-bearing bodies are refused.
+    #[test]
+    fn given_message_bodies_then_only_bounded_visible_text_is_accepted() {
+        assert!(valid_body("hello\n\tworld <b>ok</b>"));
+        assert!(valid_body(&"x".repeat(MAX_MESSAGE_BYTES)));
+        for bad in [
+            String::new(),
+            " \n\t ".to_owned(),
+            "x".repeat(MAX_MESSAGE_BYTES + 1),
+            "a\u{0}b".to_owned(),
+            "a\u{1b}[31mred".to_owned(),
+            "a\rb".to_owned(),
+        ] {
+            assert!(!valid_body(&bad), "{bad:?}");
+        }
+        assert!(valid_room_id("!r:s"));
+        assert!(!valid_room_id("#alias:s"));
+        assert!(!valid_room_id(&format!(
+            "!{}",
+            "r".repeat(MAX_ROOM_ID_BYTES)
+        )));
+    }
 
     /// A session change drops every subscription and pending room event, so
     /// nothing from the old session is announced afterwards.

@@ -44,7 +44,7 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}}),
             ),
             Call::RoomList {} => Ok(serde_json::json!({
-                "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2}],
+                "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2, "encryption": "encrypted"}],
                 "truncated": false
             })),
             Call::Subscribe { room_id } => match room_id.as_str() {
@@ -67,6 +67,23 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null}),
             ),
             // A reply carrying a secret is refused by the contract.
+            Call::SendMessage { room_id, body } => match body.as_str() {
+                "hello" => Ok(serde_json::json!({
+                    "localId": 1, "roomId": room_id, "body": body, "state": "queued",
+                    "eventId": null, "failure": null
+                })),
+                // A reply carrying the transaction ID is refused by the contract.
+                _ => Ok(serde_json::json!({
+                    "localId": 2, "roomId": room_id, "body": body, "state": "queued",
+                    "eventId": null, "failure": null, "transactionId": "t"
+                })),
+            },
+            Call::PendingMessages { .. } => Ok(serde_json::json!([])),
+            Call::RetryMessage { local_id } | Call::DiscardMessage { local_id } => match local_id {
+                1 => Ok(serde_json::Value::Null),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
+            Call::AllowUnencrypted { .. } => Ok(serde_json::Value::Null),
             Call::RecoverWithKey {} => Ok(
                 serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "recoveryKey": "x"}),
             ),
@@ -293,6 +310,11 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-security-status",
             "allow-set-up-encryption",
             "allow-recover-with-key",
+            "allow-send-message",
+            "allow-pending-messages",
+            "allow-retry-message",
+            "allow-discard-message",
+            "allow-allow-unencrypted",
             "allow-set-up-recovery"
         ])
     );
@@ -592,4 +614,65 @@ fn given_encryption_commands_then_only_codes_cross_and_secrets_are_refused() {
     );
     assert_eq!(invoke("recover_with_key").unwrap_err(), "core_unavailable");
     assert_eq!(invoke("set_up_recovery").unwrap()["operation"], "working");
+}
+
+/// Sending relays the room and body only; oversized input never reaches the
+/// core, and a reply carrying more than the contract (a transaction ID) is
+/// refused.
+#[test]
+fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let room = "!r:example.invalid";
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "hello"})
+        )
+        .unwrap()["state"],
+        "queued"
+    );
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "other"})
+        )
+        .unwrap_err(),
+        "core_unavailable"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "x".repeat(16 * 1024 + 1)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized body never crossed"
+    );
+    assert_eq!(
+        invoke("pending_messages", serde_json::json!({"roomId": room})),
+        Ok(serde_json::json!([]))
+    );
+    assert_eq!(
+        invoke("retry_message", serde_json::json!({"localId": 1})),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke("discard_message", serde_json::json!({"localId": 7})).unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        invoke("allow_unencrypted", serde_json::json!({"roomId": room})),
+        Ok(serde_json::Value::Null)
+    );
 }

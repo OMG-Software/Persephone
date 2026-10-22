@@ -104,7 +104,11 @@ Run `.local/build/rust/debug/persephone.exe --profile <new directory under .loca
 
 The Encryption panel sets up cross-signing and recovery for an account without them, or verifies this device with the recovery key; the core asks for the password or key in its own window and shows a new recovery key in its own window. With `PERSEPHONE_DEV_PROFILE`, the development build answers the password from the profile, and `PERSEPHONE_DEV_RECOVERY_FILE` (a path inside `.local`) replaces the recovery-key windows with that file. See the [encryption setup evidence](evidence/encryption-setup.md).
 
+The composer sends text in the open room. The live sending check uses a second SDK client: build it with `cargo build --locked -p persephone-test-matrix --bin p4_peer`, then drive it with one command per line (`login bob`, `bootstrap`, `create encrypted|plain|public <user> <name>`, `send`, `expect`, `quit`) against a harness profile. See the [sending evidence](evidence/encrypted-sending.md).
+
 ## Recorded verification
+
+After adding encrypted sending, `python tools/dev.py check --offline` passed all 293 tests (259 Rust, 19 frontend, 2 server-registration and 13 development-controller tests). See the [sending evidence](evidence/encrypted-sending.md).
 
 After the encryption setup review fixes, `python tools/dev.py check --offline` passed all 278 tests (246 Rust, 17 frontend, 2 server-registration and 13 development-controller tests); the first version passed 276 (244 Rust, 17 frontend, 2 server-registration and 13 development-controller tests). See the [encryption setup evidence](evidence/encryption-setup.md).
 

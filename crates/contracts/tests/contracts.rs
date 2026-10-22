@@ -30,7 +30,7 @@ fn serde_serialized_fixtures_match_checked_in_json() {
 
 #[test]
 fn serde_rejects_unknown_fields_and_variants() {
-    let unknown_field = r#"{"roomId":"!r:s","displayName":null,"unreadCount":1,"secret":"x"}"#;
+    let unknown_field = r#"{"roomId":"!r:s","displayName":null,"unreadCount":1,"encryption":"encrypted","secret":"x"}"#;
     assert!(serde_json::from_str::<persephone_contracts::RoomSummary>(unknown_field).is_err());
 
     let unknown_variant = r#"{"kind":"future_variant","value":1}"#;
@@ -55,7 +55,8 @@ fn serde_rejects_unknown_fields_and_variants() {
 fn serde_enforces_u32_integer_range_for_json_count() {
     type Summary = persephone_contracts::RoomSummary;
 
-    let valid_max = r#"{"roomId":"!r:s","displayName":null,"unreadCount":4294967295}"#;
+    let valid_max =
+        r#"{"roomId":"!r:s","displayName":null,"unreadCount":4294967295,"encryption":"encrypted"}"#;
     assert_eq!(
         serde_json::from_str::<Summary>(valid_max)
             .unwrap()
@@ -64,9 +65,9 @@ fn serde_enforces_u32_integer_range_for_json_count() {
     );
 
     for invalid in [
-        r#"{"roomId":"!r:s","displayName":null,"unreadCount":-1}"#,
-        r#"{"roomId":"!r:s","displayName":null,"unreadCount":1.5}"#,
-        r#"{"roomId":"!r:s","displayName":null,"unreadCount":4294967296}"#,
+        r#"{"roomId":"!r:s","displayName":null,"unreadCount":-1,"encryption":"encrypted"}"#,
+        r#"{"roomId":"!r:s","displayName":null,"unreadCount":1.5,"encryption":"encrypted"}"#,
+        r#"{"roomId":"!r:s","displayName":null,"unreadCount":4294967296,"encryption":"encrypted"}"#,
     ] {
         assert!(
             serde_json::from_str::<Summary>(invalid).is_err(),
