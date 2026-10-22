@@ -234,6 +234,9 @@ pub struct SecurityStatus {
     pub recovery: RecoveryState,
     pub operation: SecurityOperation,
     pub error: Option<SecurityError>,
+    /// This device can set up recovery alone (it holds the private keys of a
+    /// published identity whose recovery is not set up).
+    pub can_set_up_recovery: bool,
 }
 
 impl SecurityStatus {
@@ -243,6 +246,7 @@ impl SecurityStatus {
             recovery: RecoveryState::Unknown,
             operation: SecurityOperation::Idle,
             error: None,
+            can_set_up_recovery: false,
         }
     }
 }

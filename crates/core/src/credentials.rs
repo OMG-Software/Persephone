@@ -211,7 +211,7 @@ pub mod dev {
                             file.take(MAX_RECOVERY_FILE_BYTES + 1)
                                 .read_to_end(&mut bytes)
                         })
-                        .map_err(|_| PromptError::Cancelled)?;
+                        .map_err(|_| PromptError::Failed)?;
                     let text = std::str::from_utf8(&bytes).map_err(|_| PromptError::Invalid)?;
                     checked_secret(
                         Zeroizing::new(text.trim().to_owned()),

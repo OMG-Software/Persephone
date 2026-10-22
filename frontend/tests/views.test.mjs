@@ -150,6 +150,7 @@ test('the encryption panel offers the step that fits and never asks for a secret
     recovery: 'disabled',
     operation: 'idle',
     error: null,
+    canSetUpRecovery: false,
     ...extra
   });
   const panel = (security, busy = false) =>
@@ -168,7 +169,9 @@ test('the encryption panel offers the step that fits and never asks for a secret
   assert.match(verified, /This device is verified\./);
   assert.match(verified, /Recovery is set up\./);
   assert.doesNotMatch(verified, /<button/);
-  const noRecovery = panel(status('verified', { recovery: 'disabled' }));
+  // Offered only when this device holds the keys recovery needs.
+  assert.doesNotMatch(panel(status('verified', { recovery: 'disabled' })), /Set up recovery/);
+  const noRecovery = panel(status('verified', { recovery: 'disabled', canSetUpRecovery: true }));
   assert.match(noRecovery, />Set up recovery</);
   assert.match(noRecovery, /cannot be read on a new device/);
   for (const html of [none, unverified, verified, panel(status('unknown'))]) {

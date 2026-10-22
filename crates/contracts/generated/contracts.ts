@@ -28,7 +28,12 @@ export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_r
 
 export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "failed";
 
-export type SecurityStatus = { identity: IdentityState, recovery: RecoveryState, operation: SecurityOperation, error: SecurityError | null, };
+export type SecurityStatus = { identity: IdentityState, recovery: RecoveryState, operation: SecurityOperation, error: SecurityError | null, 
+/**
+ * This device can set up recovery alone (it holds the private keys of a
+ * published identity whose recovery is not set up).
+ */
+canSetUpRecovery: boolean, };
 
 export type RoomSummary = { roomId: string, displayName: string | null, 
 /**
