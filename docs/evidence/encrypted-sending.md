@@ -16,8 +16,10 @@ message), and sent in an unencrypted room only after the user confirmed.**
   ID, queues the message (at most 16 unsent; sent ones kept up to 32 so the
   page can match them to timeline events) and replies at once. Memory only:
   unsent messages are dropped on lock or restart.
-  *Review change (22 October 2026):* all kept bodies together take at most
-  80 KiB as JSON, so one room's list always fits a reply (112 KiB); old sent
+  *Review change (22 October 2026):* all kept messages together take at most
+  100 KiB as JSON (body and room ID as written, plus a fixed allowance for the
+  other fields and the longest event ID), so one room's list always fits a
+  reply (112 KiB); old sent
   messages make room first, and a message that does not fit beside the unsent
   ones is refused as `limit_exceeded`. The core refuses a larger list reply
   rather than write a frame that would end the connection. Room IDs must
