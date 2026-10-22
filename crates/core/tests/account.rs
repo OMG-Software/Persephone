@@ -1262,6 +1262,50 @@ fn given_no_identity_when_setting_up_encryption_then_the_password_is_asked_once_
     assert!(files_contain(dir.path(), key.as_bytes()).is_empty());
 }
 
+/// GIVEN set-up that has reached the backup request WHEN the session is
+/// locked before set-up ends THEN the lock waits for the step, and the new
+/// recovery key, which recovery is already enabled with, is still shown.
+#[test]
+fn given_a_lock_during_set_up_then_the_new_recovery_key_is_still_shown() {
+    let server = Homeserver::signed_in();
+    server.runtime.block_on(
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/room_keys/version"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"version": "1"}))
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .with_priority(1)
+            .mount(&server.server),
+    );
+    server.encryption_endpoints();
+    let dir = TempDir::new().unwrap();
+    let source = Fixed::new(Ok(()));
+    let core = make_core(dir.path(), source.clone());
+    sign_in(&core, &server.uri());
+    wait_for("the account to have no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let _: SecurityStatus = value(call(&core, Call::SetUpEncryption {}));
+    wait_for("the backup request", || {
+        server
+            .bodies_to("/_matrix/client/v3/room_keys/version")
+            .iter()
+            .any(Value::is_object)
+    });
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    wait_for("the recovery key to be shown", || {
+        source.shown.lock().unwrap().is_some()
+    });
+    assert_eq!(
+        security(&core),
+        SecurityStatus::unknown(),
+        "nothing kept after the lock"
+    );
+}
+
 /// GIVEN a prompt the user cancels, or a password the homeserver refuses
 /// WHEN setting up encryption THEN nothing is uploaded with a password (for
 /// a cancel) and the status says why, with the account still unset.
