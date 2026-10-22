@@ -6,6 +6,7 @@ let vite;
 let RoomList;
 let Timeline;
 let SignIn;
+let Security;
 let render;
 
 before(async () => {
@@ -17,6 +18,7 @@ before(async () => {
   ({ default: RoomList } = await vite.ssrLoadModule('/src/RoomList.svelte'));
   ({ default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte'));
   ({ default: SignIn } = await vite.ssrLoadModule('/src/SignIn.svelte'));
+  ({ default: Security } = await vite.ssrLoadModule('/src/Security.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -96,7 +98,9 @@ test('notices render as fixed text with an isolated sender, never as content', (
       title: 'Room',
       items: [
         { kind: 'notice', event_id: '$1', sender: hostileName, notice: 'undecryptable' },
-        { kind: 'notice', event_id: '$2', sender: '@b:example.invalid', notice: 'unsupported' }
+        { kind: 'notice', event_id: '$2', sender: '@b:example.invalid', notice: 'unsupported' },
+        { kind: 'notice', event_id: '$3', sender: '@c:example.invalid', notice: 'withheld' },
+        { kind: 'notice', event_id: '$4', sender: '@d:example.invalid', notice: 'untrusted_sender' }
       ],
       hasOlder: false,
       loading: false,
@@ -108,6 +112,8 @@ test('notices render as fixed text with an isolated sender, never as content', (
   assert.match(html, /<bdi>&lt;img/);
   assert.match(html, /Encrypted message\. This device has no key for it\./);
   assert.match(html, /A kind of message Persephone does not show yet\./);
+  assert.match(html, /The sender did not share its key with this device\./);
+  assert.match(html, /from a device its owner has not verified/);
 });
 
 test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
@@ -138,3 +144,40 @@ test('the sign-in form asks only for the homeserver; the password goes to a nati
   assert.match(waiting, /<button type="submit" disabled/);
 });
 
+test('the encryption panel offers the step that fits and never asks for a secret itself', () => {
+  const status = (identity, extra = {}) => ({
+    identity,
+    recovery: 'disabled',
+    operation: 'idle',
+    error: null,
+    ...extra
+  });
+  const panel = (security, busy = false) =>
+    render(Security, {
+      props: { security, busy, onsetup: () => {}, onrecover: () => {} }
+    }).body;
+
+  const none = panel(status('none'));
+  assert.match(none, />Set up encryption</);
+  assert.doesNotMatch(none, /Use recovery key/);
+  const unverified = panel(status('unverified', { recovery: 'enabled' }));
+  assert.match(unverified, />Use recovery key</);
+  assert.match(unverified, /This device is not verified/);
+  assert.doesNotMatch(unverified, /Set up encryption/);
+  const verified = panel(status('verified', { recovery: 'enabled' }));
+  assert.match(verified, /This device is verified\./);
+  assert.match(verified, /Recovery is set up\./);
+  assert.doesNotMatch(verified, /<button/);
+  for (const html of [none, unverified, verified, panel(status('unknown'))]) {
+    assert.doesNotMatch(html, /<input/, 'no field for a password or recovery key');
+  }
+
+  const waiting = panel(status('none', { operation: 'waiting_for_password' }));
+  assert.match(waiting, /Enter your password in the Windows window/);
+  assert.match(waiting, /<button type="button" disabled/);
+  const wrong = panel(status('unverified', { error: 'wrong_recovery_key' }));
+  assert.match(wrong, /role="alert"/);
+  assert.match(wrong, /That recovery key did not work\./);
+  const unknownError = panel(status('none', { error: 'something_new' }));
+  assert.match(unknownError, /That did not work\./);
+});

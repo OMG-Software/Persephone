@@ -2,12 +2,16 @@
   import { onMount } from 'svelte';
   import markUrl from './assets/mark.svg';
   import RoomList from './RoomList.svelte';
+  import Security from './Security.svelte';
   import SignIn from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
   import { mergeNewest } from './timeline';
   import {
     appStatus,
     lockSession,
+    recoverWithKey,
+    securityStatus,
+    setUpEncryption,
     signOut,
     roomList,
     signIn,
@@ -17,11 +21,17 @@
     watchSession,
     type AppStatus,
     type RoomList as Rooms,
+    type SecurityStatus,
     type StoreState,
     type TimelineItem
   } from './bridge';
 
   let status = $state<AppStatus | null>(null);
+  let security = $state<SecurityStatus | null>(null);
+  let securityBusy = $state(false);
+  // A security reply replaces the shown one only if it is newer, as for rooms.
+  let securityRequest = 0;
+  let securityShown = 0;
   let unavailable = $state(false);
   let rooms = $state<Rooms | null>(null);
   let selected = $state<string | null>(null);
@@ -106,6 +116,7 @@
     if (generation !== sessionGeneration) return;
     status = reply;
     if (reply.store !== 'protected' && reply.store !== 'not_configured') return;
+    if (reply.account.state === 'signed_in') refreshSecurity();
     const request = ++roomsRequest;
     try {
       const list = await roomList();
@@ -126,6 +137,8 @@
     confirmingSignOut = false;
     // Nothing from the old session stays in the header while the new status loads.
     status = null;
+    security = null;
+    securityBusy = false;
     selected = null;
     rooms = null;
     items = [];
@@ -138,6 +151,40 @@
     opening = false;
     changedAgain = false;
     load();
+  }
+
+  // The account's encryption state changed: fetch it again. Nothing else
+  // changes.
+  async function refreshSecurity() {
+    const generation = sessionGeneration;
+    const request = ++securityRequest;
+    try {
+      const reply = await securityStatus();
+      if (generation === sessionGeneration && request > securityShown) {
+        security = reply;
+        securityShown = request;
+      }
+    } catch {
+      // The next security or session event tries again.
+    }
+  }
+
+  async function startSecurity(start: () => Promise<SecurityStatus>) {
+    if (securityBusy) return;
+    securityBusy = true;
+    const generation = sessionGeneration;
+    const request = ++securityRequest;
+    try {
+      const reply = await start();
+      if (generation === sessionGeneration && request > securityShown) {
+        security = reply;
+        securityShown = request;
+      }
+    } catch (reason) {
+      if (generation === sessionGeneration) error = describe(reason);
+    } finally {
+      if (generation === sessionGeneration) securityBusy = false;
+    }
   }
 
   // Rooms were added or changed: fetch the list again, keeping the selection.
@@ -218,7 +265,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms);
+      await watchSession(reset, refreshRooms, refreshSecurity);
     } catch {
       unavailable = true;
       return;
@@ -387,7 +434,17 @@
     {#if profileOpen && !signedIn}
       <SignIn account={status!.account} busy={signingIn} onsignin={startSignIn} />
     {:else if rooms}
-      <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} onselect={open} />
+      <div class="side">
+        {#if signedIn && security}
+          <Security
+            {security}
+            busy={securityBusy}
+            onsetup={() => startSecurity(setUpEncryption)}
+            onrecover={() => startSecurity(recoverWithKey)}
+          />
+        {/if}
+        <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} onselect={open} />
+      </div>
     {/if}
     {#if profileOpen && !signedIn}
       {#if error}

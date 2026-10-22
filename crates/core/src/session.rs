@@ -10,8 +10,8 @@
 //! 3. Wait for every admitted lease to finish. A timeout leaves the session in
 //!    `locking` with the stores still open and owned; locking again resumes
 //!    the wait. Nothing is released early.
-//! 4. Join the sync thread, drop the SDK client, close the stores, then
-//!    release the profile. A failed close leaves `lock_failed`.
+//! 4. Join the sync and security threads, drop the SDK client, close the
+//!    stores, then release the profile. A failed close leaves `lock_failed`.
 //!
 //! The sync loop and sign-in take one lease per unit of work and check for a
 //! lock only between complete SDK operations. The SDK's own background tasks
@@ -19,14 +19,23 @@
 //! stopped, so the session ends `restart_required` and will not reopen the
 //! stores in this process. [`TrackedDrain::require_full_sdk_drain`] always
 //! refuses until the SDK provides a stop-and-join contract.
+//!
+//! Encryption setup (`security.rs`) runs on its own thread, one lease per
+//! step, like sync. Its prompts run on short-lived threads without a lease, so
+//! a prompt left open never holds up a lock; an answer given after a lock (or
+//! a lock and unlock) is dropped.
 
 use crate::account;
-use crate::credentials::{CredentialSource, PromptError};
+use crate::credentials::{CredentialSource, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
+use crate::security;
 use crate::store::{self, Stores};
 use crate::vault::KeyProtector;
-use matrix_sdk::Client;
-use persephone_contracts::{AccountState, AccountStatus, SignInError, StoreState};
+use matrix_sdk::{Client, ruma::OwnedUserId};
+use persephone_contracts::{
+    AccountState, AccountStatus, IdentityState, SecurityError, SecurityOperation, SecurityStatus,
+    SignInError, StoreState,
+};
 use std::{
     path::PathBuf,
     sync::{
@@ -36,6 +45,7 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
 /// Most leases outstanding at once.
 pub const MAX_LEASES: usize = 8;
@@ -44,6 +54,13 @@ const MAX_SYNC_BACKOFF: Duration = Duration::from_secs(30);
 /// Shortest time between the starts of two sync rounds. A homeserver should
 /// long-poll; one that answers at once must not make the core spin.
 const MIN_SYNC_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the security thread checks for work.
+const SECURITY_TICK: Duration = Duration::from_millis(250);
+/// How often the shown encryption state is read again from the store.
+const SECURITY_REFRESH: Duration = Duration::from_secs(2);
+/// Stack for the security thread: the SDK's verification futures need more
+/// than the default in debug builds (`docs/evidence/verified-recipients.md`).
+const SECURITY_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionError {
@@ -76,6 +93,8 @@ pub trait SessionListener: Send + Sync {
     fn rooms_changed(&self, rooms: &[String]);
     /// The account's status changed.
     fn session_changed(&self);
+    /// The account's encryption state changed.
+    fn security_changed(&self) {}
 }
 
 struct Inner {
@@ -88,6 +107,33 @@ struct Inner {
 struct ActiveAccount {
     client: Client,
     sync: Option<JoinHandle<()>>,
+    security: Option<JoinHandle<()>>,
+    user_id: String,
+    /// The homeserver as the prompts name it.
+    host: String,
+}
+
+/// Work for the security thread, with the secret the user entered.
+enum SecurityCommand {
+    SetUp {
+        password: Zeroizing<String>,
+        source: Arc<dyn CredentialSource>,
+    },
+    Recover(Zeroizing<String>),
+}
+
+struct SecurityShared {
+    status: SecurityStatus,
+    command: Option<SecurityCommand>,
+}
+
+impl Default for SecurityShared {
+    fn default() -> Self {
+        Self {
+            status: SecurityStatus::unknown(),
+            command: None,
+        }
+    }
 }
 
 struct Shared {
@@ -99,6 +145,7 @@ struct Shared {
     listener: Mutex<Option<Arc<dyn SessionListener>>>,
     /// Set once any SDK client was built over these stores.
     client_ran: AtomicBool,
+    security: Mutex<SecurityShared>,
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -134,6 +181,19 @@ impl Shared {
 
     fn listener(&self) -> Option<Arc<dyn SessionListener>> {
         guard(&self.listener).clone()
+    }
+
+    /// Changes the encryption status and tells the listener if it changed.
+    fn update_security(&self, change: impl FnOnce(&mut SecurityStatus)) {
+        let changed = {
+            let mut security = guard(&self.security);
+            let before = security.status.clone();
+            change(&mut security.status);
+            security.status != before
+        };
+        if changed && let Some(listener) = self.listener() {
+            listener.security_changed();
+        }
     }
 
     fn set_status(&self, status: AccountStatus) {
@@ -223,10 +283,16 @@ fn signed_in(user_id: &str, error: Option<SignInError>) -> AccountStatus {
 /// Starts the account: records it, then runs its sync loop on a thread.
 /// Refused (and the client dropped) if a lock began since `lease`.
 fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) {
+    let host = Homeserver::parse(client.homeserver().as_str())
+        .map(|homeserver| homeserver.display_host())
+        .unwrap_or_default();
     let installed = lease.commit(|| {
         *guard(&shared.account) = Some(ActiveAccount {
             client: client.clone(),
             sync: None,
+            security: None,
+            user_id: user_id.clone(),
+            host,
         });
     });
     if installed.is_err() {
@@ -250,6 +316,23 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
             drop(client);
             return;
         };
+        if let Ok(owned_user) = OwnedUserId::try_from(user_id.as_str()) {
+            let security_shared = shared.clone();
+            let security_client = client.clone();
+            let security_runtime = runtime.clone();
+            entry.security = std::thread::Builder::new()
+                .name("core-security".into())
+                .stack_size(SECURITY_STACK_BYTES)
+                .spawn(move || {
+                    run_security(
+                        &security_shared,
+                        security_client,
+                        owned_user,
+                        security_runtime,
+                    )
+                })
+                .ok();
+        }
         let thread_shared = shared.clone();
         let thread_user = user_id.clone();
         let thread_runtime = runtime.clone();
@@ -328,6 +411,114 @@ fn run_sync(
     drop(client);
 }
 
+/// The security loop: runs the command the prompts leave and keeps the shown
+/// state current, one lease per step; a lock is noticed between steps.
+fn run_security(
+    shared: &Arc<Shared>,
+    client: Client,
+    user_id: OwnedUserId,
+    runtime: tokio::runtime::Handle,
+) {
+    let mut queried = false;
+    let mut next_refresh = Instant::now();
+    // A recovery-key window can outlive this session; what it reports applies
+    // only while the session is still this one.
+    let generation = lock(shared).generation;
+    loop {
+        if !shared.wait_open(SECURITY_TICK) {
+            break;
+        }
+        let command = guard(&shared.security).command.take();
+        if command.is_none() && Instant::now() < next_refresh {
+            continue;
+        }
+        let lease = match shared.admit() {
+            Ok(lease) => lease,
+            Err(AdmissionError::Locked) => break,
+            Err(AdmissionError::Saturated) => {
+                if command.is_some() {
+                    guard(&shared.security).command = command;
+                }
+                continue;
+            }
+        };
+        let ran = command.is_some();
+        let (outcome, key, identity, recovery) = lease.stores().block_on(async {
+            if !queried && security::query_identity(&client, &user_id).await.is_ok() {
+                queried = true;
+            }
+            let (outcome, key) = match command {
+                Some(SecurityCommand::SetUp { password, source }) => {
+                    queried = true;
+                    match security::set_up(&client, &user_id, &password).await {
+                        Ok(key) => (None, Some((key, source))),
+                        Err(error) => (Some(error), None),
+                    }
+                }
+                Some(SecurityCommand::Recover(key)) => {
+                    (security::recover(&client, &key).await.err(), None)
+                }
+                None => (None, None),
+            };
+            (
+                outcome,
+                key,
+                security::identity_state(&client, &user_id, queried).await,
+                security::recovery_state(&client),
+            )
+        });
+        let current = lease.commit(|| ()).is_ok();
+        drop(lease);
+        if !current {
+            break;
+        }
+        next_refresh = Instant::now() + SECURITY_REFRESH;
+        shared.update_security(|status| {
+            status.identity = identity;
+            status.recovery = recovery;
+            if ran {
+                status.operation = SecurityOperation::Idle;
+                status.error = outcome;
+            }
+        });
+        if let Some((key, source)) = key {
+            // The window waits for the user, so it has its own thread; the
+            // key is zeroed when that thread ends.
+            let display_shared = shared.clone();
+            let shown_user = user_id.to_string();
+            let spawned = std::thread::Builder::new()
+                .name("core-recovery-key".into())
+                .spawn(move || {
+                    let shown = source.show_recovery_key(&shown_user, &key).is_ok();
+                    let current = {
+                        let inner = lock(&display_shared);
+                        inner.generation == generation && inner.state == StoreState::Protected
+                    };
+                    if !shown && current {
+                        display_shared.update_security(|status| {
+                            status.error = Some(SecurityError::RecoveryKeyNotShown);
+                        });
+                    }
+                });
+            if spawned.is_err() {
+                shared.update_security(|status| {
+                    status.error = Some(SecurityError::RecoveryKeyNotShown);
+                });
+            }
+        }
+    }
+    let _context = runtime.enter();
+    drop(client);
+}
+
+fn security_prompt_error(error: PromptError) -> SecurityError {
+    match error {
+        PromptError::Cancelled => SecurityError::Cancelled,
+        PromptError::Unsupported => SecurityError::Unsupported,
+        PromptError::Invalid | PromptError::Failed => SecurityError::Failed,
+    }
+}
+
 impl Session {
     /// A session with no profile: nothing is stored and nothing can unlock.
     pub fn not_configured() -> Self {
@@ -374,6 +565,7 @@ impl Session {
                 drained: Condvar::new(),
                 status: Mutex::new(AccountStatus::signed_out()),
                 account: Mutex::new(None),
+                security: Mutex::default(),
                 listener: Mutex::new(None),
                 client_ran: AtomicBool::new(false),
             }),
@@ -583,12 +775,17 @@ impl Session {
         }
         let stores = inner.stores.take();
         drop(inner);
+        // A secret left for a command that will not run is zeroed here.
+        *guard(&self.shared.security) = SecurityShared::default();
         // No lease remains, so the sync loop is between rounds and will see
         // the lock at its next admission; join it, then drop the client inside
         // the stores' runtime before closing them.
         if let Some(account) = guard(&self.shared.account).take() {
             if let Some(sync) = account.sync {
                 let _ = sync.join();
+            }
+            if let Some(security) = account.security {
+                let _ = security.join();
             }
             match &stores {
                 Some(stores) => {
@@ -678,6 +875,120 @@ impl Session {
             },
         });
         Ok(state)
+    }
+
+    /// The account's encryption state; `unknown` without a signed-in account.
+    pub fn security_status(&self) -> SecurityStatus {
+        guard(&self.shared.security).status.clone()
+    }
+
+    /// Starts setting up encryption for an account without an identity: the
+    /// core asks for the password in its own window, then the security thread
+    /// sets up cross-signing and recovery and shows the recovery key. Does
+    /// nothing unless the account is known to have no identity and nothing
+    /// else is running. Returns the status at once.
+    pub fn set_up_encryption(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
+        self.start_secret_operation(
+            IdentityState::None,
+            SecurityOperation::WaitingForPassword,
+            source,
+            |prompt_source, user_id, host| {
+                prompt_source
+                    .ask_secret(SecretPrompt::Password { user_id, host })
+                    .map(|password| SecurityCommand::SetUp {
+                        password,
+                        source: prompt_source.clone(),
+                    })
+            },
+        )
+    }
+
+    /// Starts verifying this device with the recovery key, asked in the
+    /// core's own window. Does nothing unless the account has an identity this
+    /// device is not verified with and nothing else is running.
+    pub fn recover_with_key(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
+        self.start_secret_operation(
+            IdentityState::Unverified,
+            SecurityOperation::WaitingForRecoveryKey,
+            source,
+            |prompt_source, user_id, _host| {
+                prompt_source
+                    .ask_secret(SecretPrompt::RecoveryKey { user_id })
+                    .map(SecurityCommand::Recover)
+            },
+        )
+    }
+
+    /// Asks for a secret on a prompt thread without a lease, then leaves the
+    /// command for the security thread, unless the session was locked (and
+    /// perhaps unlocked) meanwhile.
+    fn start_secret_operation(
+        &self,
+        required: IdentityState,
+        waiting: SecurityOperation,
+        source: Arc<dyn CredentialSource>,
+        ask: impl FnOnce(&Arc<dyn CredentialSource>, &str, &str) -> Result<SecurityCommand, PromptError>
+        + Send
+        + 'static,
+    ) -> SecurityStatus {
+        let (user_id, host) = match guard(&self.shared.account).as_ref() {
+            Some(account) => (account.user_id.clone(), account.host.clone()),
+            None => return self.security_status(),
+        };
+        let started = {
+            let inner = lock(&self.shared);
+            if inner.state != StoreState::Protected {
+                return self.security_status();
+            }
+            inner.generation
+        };
+        {
+            let mut security = guard(&self.shared.security);
+            if security.status.identity != required
+                || security.status.operation != SecurityOperation::Idle
+                || security.command.is_some()
+            {
+                return security.status.clone();
+            }
+            security.status.operation = waiting;
+            security.status.error = None;
+        }
+        if let Some(listener) = self.shared.listener() {
+            listener.security_changed();
+        }
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-secret-prompt".into())
+            .spawn(move || {
+                let answer = ask(&source, &user_id, &host);
+                let current = {
+                    let inner = lock(&shared);
+                    inner.generation == started && inner.state == StoreState::Protected
+                };
+                match answer {
+                    Ok(command) if current => {
+                        guard(&shared.security).command = Some(command);
+                        shared.update_security(|status| {
+                            status.operation = SecurityOperation::Working;
+                        });
+                    }
+                    // Locked while the prompt was open: the secret is dropped
+                    // (and zeroed) here, and the lock reset the status.
+                    Ok(_) => {}
+                    Err(error) if current => shared.update_security(|status| {
+                        status.operation = SecurityOperation::Idle;
+                        status.error = Some(security_prompt_error(error));
+                    }),
+                    Err(_) => {}
+                }
+            });
+        if spawned.is_err() {
+            self.shared.update_security(|status| {
+                status.operation = SecurityOperation::Idle;
+                status.error = Some(SecurityError::Failed);
+            });
+        }
+        self.security_status()
     }
 
     /// Reopens a locked session with the key from the vault and restores a

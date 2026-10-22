@@ -57,6 +57,16 @@ pub enum Call {
     /// then delete this device's local profile (keys first). Replies with the
     /// resulting store state.
     SignOut {},
+    /// The account's encryption state (codes only).
+    SecurityStatus {},
+    /// Set up cross-signing and recovery for an account without an identity.
+    /// The core asks for the password in its own window and shows the
+    /// recovery key in its own window; neither crosses this channel. Replies
+    /// at once with the status; progress arrives as [`Event::SecurityChanged`].
+    SetUpEncryption {},
+    /// Verify this device with the recovery key, asked in the core's own
+    /// window. Replies at once with the status, like `SetUpEncryption`.
+    RecoverWithKey {},
 }
 
 /// Longest homeserver URL either side accepts in a call.
@@ -82,6 +92,9 @@ pub enum Event {
     /// Rooms were added, removed or changed: fetch the room list again.
     /// Coalesced like room events.
     RoomListChanged {},
+    /// The account's encryption state changed: ask for `security_status`.
+    /// Coalesced; it does not clear what the UI shows.
+    SecurityChanged {},
 }
 
 /// Every frame from the core to the UI: a reply to a call, or an event.
@@ -236,6 +249,7 @@ mod tests {
         });
         let session = CoreMessage::Event(Event::SessionChanged {});
         let list = CoreMessage::Event(Event::RoomListChanged {});
+        let security = CoreMessage::Event(Event::SecurityChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
         send(&mut wire, &session).unwrap();
@@ -244,9 +258,14 @@ mod tests {
             "wire form of the session event"
         );
         send(&mut wire, &list).unwrap();
+        send(&mut wire, &security).unwrap();
+        assert!(
+            String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"security_changed":{}}}"#),
+            "wire form of the security event"
+        );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session, list] {
+        for expected in [reply, event, session, list, security] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -259,6 +278,8 @@ mod tests {
             br#"{"event":{"session_changed":{"state":"locked"}}}"#,
             br#"{"event":"session_changed"}"#,
             br#"{"event":{"room_list_changed":{"rooms":[]}}}"#,
+            br#"{"event":{"security_changed":{"identity":"verified"}}}"#,
+            br#"{"event":{"security_changed":{"recovery_key":"x"}}}"#,
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));
             assert!(
@@ -289,6 +310,10 @@ mod tests {
             br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,
             br#"{"id":1,"call":{"command":"sign_out","keep_data":true}}"#,
+            br#"{"id":1,"call":{"command":"security_status","user":"@a:s"}}"#,
+            br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"recover_with_key","recovery_key":"x"}}"#,
+            br#"{"id":1,"call":{"command":"export_room_keys"}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

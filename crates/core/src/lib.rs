@@ -23,6 +23,7 @@ pub mod account;
 pub mod credentials;
 pub mod homeserver;
 pub mod matrix_views;
+pub mod security;
 pub mod session;
 pub mod store;
 pub mod vault;
@@ -72,6 +73,8 @@ struct Notifications {
     session_changed: bool,
     /// The room list changed since the last notification.
     room_list_changed: bool,
+    /// The account's encryption state changed since the last notification.
+    security_changed: bool,
     /// The UI sent a valid request on this connection, so its page runs.
     ready: bool,
     closed: bool,
@@ -132,6 +135,14 @@ impl SessionListener for Hub {
 
     fn session_changed(&self) {
         self.announce_session_change();
+    }
+
+    fn security_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.security_changed {
+            notifications.security_changed = true;
+            self.changed.notify_all();
+        }
     }
 }
 
@@ -272,6 +283,11 @@ impl Core {
                 ok(&state)
             }
             Call::SignIn { homeserver } => self.sign_in(homeserver),
+            Call::SecurityStatus {} => ok(&self.session.security_status()),
+            Call::SetUpEncryption {} => {
+                ok(&self.session.set_up_encryption(self.credentials.clone()))
+            }
+            Call::RecoverWithKey {} => ok(&self.session.recover_with_key(self.credentials.clone())),
             Call::SignOut {} => match self
                 .session
                 .sign_out(LOCK_TIMEOUT, || self.hub.announce_session_change())
@@ -351,6 +367,7 @@ impl Core {
         while notifications.pending.is_empty()
             && !notifications.session_changed
             && !notifications.room_list_changed
+            && !notifications.security_changed
             && !notifications.closed
         {
             notifications = self
@@ -366,11 +383,14 @@ impl Core {
             std::mem::take(&mut notifications.session_changed).then_some(Event::SessionChanged {});
         let list = std::mem::take(&mut notifications.room_list_changed)
             .then_some(Event::RoomListChanged {});
+        let security = std::mem::take(&mut notifications.security_changed)
+            .then_some(Event::SecurityChanged {});
         let rooms = std::mem::take(&mut notifications.pending);
         Some(
             session
                 .into_iter()
                 .chain(list)
+                .chain(security)
                 .chain(
                     rooms
                         .into_iter()

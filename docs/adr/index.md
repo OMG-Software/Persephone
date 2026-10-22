@@ -8,6 +8,7 @@
 * [0002 - Use SDK-owned Matrix cryptography and explicit features](0002-use-sdk-owned-matrix-cryptography-and-explicit-features.md)
 * [0003 - Run untrusted media decoding in a WebAssembly sandbox](0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md)
 * [0004 - Separate the key-holding core from the web view process](0004-separate-the-key-holding-core-from-the-web-view-process.md)
+* [0005 - Share room keys only with cross-signed devices](0005-share-room-keys-only-with-cross-signed-devices.md)
 
 ## Superseded Records
 

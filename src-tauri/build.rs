@@ -21,6 +21,9 @@ fn main() {
             "unlock_session",
             "sign_in",
             "sign_out",
+            "security_status",
+            "set_up_encryption",
+            "recover_with_key",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

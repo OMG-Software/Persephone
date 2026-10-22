@@ -111,9 +111,11 @@ fn main() -> ExitCode {
     let core = match env::var_os("PERSEPHONE_DEV_PROFILE") {
         Some(path) => {
             eprintln!("persephone: DEVELOPMENT BUILD: credentials come from the harness profile");
-            core.with_credentials(std::sync::Arc::new(
-                persephone_core::credentials::dev::HarnessProfile::new(path.into()),
-            ))
+            let mut source = persephone_core::credentials::dev::HarnessProfile::new(path.into());
+            if let Some(file) = env::var_os("PERSEPHONE_DEV_RECOVERY_FILE") {
+                source = source.with_recovery_file(file.into());
+            }
+            core.with_credentials(std::sync::Arc::new(source))
         }
         None => core,
     };

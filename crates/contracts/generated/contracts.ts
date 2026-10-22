@@ -20,6 +20,16 @@ version: string,
  */
 milestone: string, store: StoreState, account: AccountStatus, };
 
+export type IdentityState = "unknown" | "none" | "unverified" | "verified";
+
+export type RecoveryState = "unknown" | "disabled" | "incomplete" | "enabled";
+
+export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "working";
+
+export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "failed";
+
+export type SecurityStatus = { identity: IdentityState, recovery: RecoveryState, operation: SecurityOperation, error: SecurityError | null, };
+
 export type RoomSummary = { roomId: string, displayName: string | null, 
 /**
  * u32 caps this count below JavaScript's exact-integer limit.
@@ -28,7 +38,7 @@ unreadCount: number, };
 
 export type RoomList = { rooms: Array<RoomSummary>, truncated: boolean, };
 
-export type NoticeKind = "undecryptable" | "unsupported";
+export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported";
 
 export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, } | { "kind": "gap", next_cursor: string | null, } | { "kind": "notice", event_id: string, sender: string, notice: NoticeKind, };
 

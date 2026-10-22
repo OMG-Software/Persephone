@@ -8,12 +8,22 @@ import type {
   AppStatus,
   SignInError,
   RoomList,
+  SecurityStatus,
   StoreState,
   TimelineItem,
   TimelinePage
 } from '../../../crates/contracts/generated/contracts';
 
-export type { AccountStatus, AppStatus, RoomList, SignInError, StoreState, TimelineItem, TimelinePage };
+export type {
+  AccountStatus,
+  AppStatus,
+  RoomList,
+  SecurityStatus,
+  SignInError,
+  StoreState,
+  TimelineItem,
+  TimelinePage
+};
 
 export function appStatus(): Promise<AppStatus> {
   return invoke<AppStatus>('app_status');
@@ -46,11 +56,18 @@ export async function subscribeRoom(
  * Calls `onSession` whenever the core's session locks, unlocks or changes
  * state: everything shown from the session must be dropped then, and the host
  * has already ended every room subscription. Calls `onRooms` when rooms were
- * added or changed, so the room list should be fetched again. Anything else
- * counts as a session change, which clears the page.
+ * added or changed, so the room list should be fetched again, and
+ * `onSecurity` when the account's encryption state changed (it clears
+ * nothing). Anything else counts as a session change, which clears the page.
  */
-export async function watchSession(onSession: () => void, onRooms: () => void): Promise<void> {
-  const channel = new Channel<string>((message) => (message === 'rooms' ? onRooms() : onSession()));
+export async function watchSession(
+  onSession: () => void,
+  onRooms: () => void,
+  onSecurity: () => void
+): Promise<void> {
+  const channel = new Channel<string>((message) =>
+    message === 'rooms' ? onRooms() : message === 'security' ? onSecurity() : onSession()
+  );
   await invoke<null>('watch_session', { onChange: channel });
 }
 
@@ -79,4 +96,23 @@ export function signIn(homeserver: string): Promise<AccountStatus> {
  */
 export function signOut(): Promise<StoreState> {
   return invoke<StoreState>('sign_out');
+}
+
+/** The account's encryption state. Codes only. */
+export function securityStatus(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('security_status');
+}
+
+/**
+ * Starts setting up encryption. The core asks for the password and shows the
+ * recovery key in its own Windows windows; neither reaches this page.
+ * Progress arrives as security changes.
+ */
+export function setUpEncryption(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('set_up_encryption');
+}
+
+/** Starts verifying this device with the recovery key, asked by the core. */
+export function recoverWithKey(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('recover_with_key');
 }

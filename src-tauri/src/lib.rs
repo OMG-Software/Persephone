@@ -17,7 +17,9 @@
 pub mod core_link;
 
 use core_link::{CoreError, CoreLink};
-use persephone_contracts::{AccountStatus, AppStatus, RoomList, StoreState, TimelinePage};
+use persephone_contracts::{
+    AccountStatus, AppStatus, RoomList, SecurityStatus, StoreState, TimelinePage,
+};
 use persephone_core_protocol::{
     Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_ROOM_ID_BYTES,
 };
@@ -141,6 +143,11 @@ impl Subscriptions {
                     let _ = channel.send("rooms");
                 }
             }
+            Event::SecurityChanged {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("security");
+                }
+            }
         }
     }
 
@@ -225,6 +232,26 @@ async fn sign_out(core: State<'_, CoreLink>) -> Result<StoreState, String> {
     relay(core.inner(), Call::SignOut {}).await
 }
 
+/// The account's encryption state. Codes only.
+#[tauri::command]
+async fn security_status(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::SecurityStatus {}).await
+}
+
+/// Starts setting up encryption. Nothing crosses: the core asks for the
+/// password and shows the recovery key in its own windows.
+#[tauri::command]
+async fn set_up_encryption(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::SetUpEncryption {}).await
+}
+
+/// Starts verifying this device with the recovery key, which the core asks
+/// for in its own window.
+#[tauri::command]
+async fn recover_with_key(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::RecoverWithKey {}).await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -275,7 +302,10 @@ pub fn configure<R: Runtime>(
             lock_session,
             unlock_session,
             sign_in,
-            sign_out
+            sign_out,
+            security_status,
+            set_up_encryption,
+            recover_with_key
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

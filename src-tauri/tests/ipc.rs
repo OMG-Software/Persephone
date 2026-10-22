@@ -57,6 +57,16 @@ impl CoreTransport for FakeCore {
             // A state outside the contract must not reach the page.
             Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
             Call::SignOut {} => Ok(serde_json::json!("restart_required")),
+            Call::SecurityStatus {} => Ok(
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null}),
+            ),
+            Call::SetUpEncryption {} => Ok(
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null}),
+            ),
+            // A reply carrying a secret is refused by the contract.
+            Call::RecoverWithKey {} => Ok(
+                serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "recoveryKey": "x"}),
+            ),
             Call::SignIn { homeserver } => match homeserver.as_str() {
                 "https://matrix.example.org" => {
                     Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
@@ -276,7 +286,10 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-lock-session",
             "allow-unlock-session",
             "allow-sign-in",
-            "allow-sign-out"
+            "allow-sign-out",
+            "allow-security-status",
+            "allow-set-up-encryption",
+            "allow-recover-with-key"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -485,7 +498,12 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
         room_id: "!r:example.invalid".into(),
     });
     subscriptions.dispatch(Event::RoomListChanged {});
+    subscriptions.dispatch(Event::SecurityChanged {});
     let delivered = delivered.lock().unwrap().clone();
+    assert!(
+        delivered.contains(&(3, r#""security""#.into())),
+        "{delivered:?}"
+    );
     assert!(
         delivered.contains(&(3, r#""session""#.into())),
         "{delivered:?}"
@@ -546,4 +564,27 @@ fn given_sign_in_then_only_the_homeserver_crosses_and_replies_are_checked() {
     )
     .map(|reply| reply.deserialize::<serde_json::Value>().unwrap());
     assert_eq!(signed_out, Ok(serde_json::json!("restart_required")));
+}
+
+/// The encryption commands take no arguments and relay codes only: a reply
+/// carrying a recovery key is refused by the contract.
+#[test]
+fn given_encryption_commands_then_only_codes_cross_and_secrets_are_refused() {
+    let app = app_with(FakeCore::new(true));
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str| {
+        get_ipc_response(&window, request(cmd, app_origin(), serde_json::json!({})))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    assert_eq!(
+        invoke("security_status"),
+        Ok(
+            serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null})
+        )
+    );
+    assert_eq!(
+        invoke("set_up_encryption").unwrap()["operation"],
+        "waiting_for_password"
+    );
+    assert_eq!(invoke("recover_with_key").unwrap_err(), "core_unavailable");
 }

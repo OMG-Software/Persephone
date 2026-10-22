@@ -217,3 +217,18 @@ header .confirm p {
   color: inherit;
 }
 
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.security h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.security p {
+  margin: 0 0 0.5rem;
+}

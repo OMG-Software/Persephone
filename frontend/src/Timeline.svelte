@@ -19,6 +19,14 @@
   } = $props();
 
   const startsWithGap = $derived(items[0]?.kind === 'gap');
+  // Fixed text per notice; the core sends codes only.
+  const noticeText: Record<string, string> = {
+    undecryptable: 'Encrypted message. This device has no key for it.',
+    withheld: 'Encrypted message. The sender did not share its key with this device.',
+    untrusted_sender:
+      'Encrypted message from a device its owner has not verified. It is not shown, because it could come from a device they never added.',
+    unsupported: 'A kind of message Persephone does not show yet.'
+  };
   const key = (item: TimelineItem, index: number) =>
     item.kind === 'gap' ? 'gap-' + index : item.event_id;
 </script>
@@ -45,9 +53,7 @@
         {:else if item.kind === 'notice'}
           <p class="notice">
             <bdi>{item.sender}</bdi>:
-            {item.notice === 'undecryptable'
-              ? 'Encrypted message. This device has no key for it.'
-              : 'A kind of message Persephone does not show yet.'}
+            {noticeText[item.notice] ?? noticeText.unsupported}
           </p>
         {:else}
           <p class="gap">Some messages are not shown here.</p>
