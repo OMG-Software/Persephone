@@ -3,7 +3,8 @@
 This area inherits `../AGENTS.md`.
 
 - `workflows/pages.yml` deploys the static `site/` directory. Do not assume it runs Rust, frontend, security, or integration checks.
-- `workflows/check.yml` runs `python tools/dev.py check` on Windows for pull requests and pushes to `main`. Keep its toolchain pins aligned with the versions recorded in evidence, and do not add the local `AR_x86_64_pc_windows_msvc` workaround or other machine-specific paths. It does not run live homeservers, the native sandbox probe or the dependency audit.
+- `workflows/check.yml` runs `python tools/dev.py check` on Windows, macOS and Ubuntu runners and in Debian, Arch, Fedora and openSUSE containers, for pull requests and pushes to `main`. Keep its toolchain pins aligned with the versions recorded in evidence, and do not add the local `AR_x86_64_pc_windows_msvc` workaround or other machine-specific paths. It does not run live homeservers, the native sandbox probe or the dependency audit.
+- Pin container images by digest, with the tag in a comment. Install each distribution's prerequisites from its own package manager. A passing non-Windows job shows that the code builds and its tests pass. It does not show a vault, prompt, UI containment or worker containment on that OS; these fail closed there.
 - Keep action references pinned to full commit SHAs with version comments. Verify the upstream source and tag before changing a pin.
 - Preserve minimum permissions: read-only contents by default, with Pages and identity-token write permissions limited to the deployment job.
 - Keep checkout credentials disabled, the Pages environment, and serialized deployment behavior. Do not add secrets to logs or artifacts.

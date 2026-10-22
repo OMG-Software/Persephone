@@ -60,6 +60,7 @@ enum Run {
 }
 
 /// What the window watch decided for one UI run.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     /// The run ended on its own.
@@ -143,6 +144,12 @@ fn main() -> ExitCode {
 }
 
 fn run_ui(core: &Core, demo_live: bool) -> Run {
+    // The UI's memory cap and kill-on-exit (ui_job) exist only on Windows;
+    // elsewhere the core does not start an uncontained UI.
+    if cfg!(not(windows)) {
+        eprintln!("persephone: UI containment is implemented for Windows only");
+        return Run::Exit(ExitCode::from(2));
+    }
     let Ok(exe) = env::current_exe() else {
         eprintln!("persephone: cannot locate its own executable");
         return Run::Exit(ExitCode::from(2));
