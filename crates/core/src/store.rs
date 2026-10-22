@@ -18,10 +18,10 @@
 //! `store/` (state, event-cache, media and crypto databases).
 //!
 //! Signing out writes `signed-out` and deletes the key at once, so the
-//! encrypted files are unreadable from then on; the files themselves are
-//! deleted after the stores close, and whatever remains is wiped the next time
-//! the profile opens, before anything else. A crash at any point repeats the
-//! wipe rather than leaving a profile half-deleted.
+//! encrypted files are unreadable from then on. The files themselves are
+//! wiped the next time the profile opens, before anything else, so no SDK
+//! work from the signed-out session can still use them. A crash at any point
+//! repeats the wipe rather than leaving a profile half-deleted.
 
 use crate::vault::{KeyProtector, StoreKey, VaultError, generate_key};
 use matrix_sdk_base::store::StateStore;
@@ -61,8 +61,11 @@ pub fn mark_signed_out(dir: &Path) -> std::io::Result<()> {
 /// Deletes a signed-out profile's store files and key, then the marker.
 /// The marker goes last, so an interrupted wipe is repeated.
 pub fn wipe_signed_out(dir: &Path) -> std::io::Result<()> {
-    if fs::symlink_metadata(dir.join(SIGNED_OUT_FILE)).is_err() {
-        return Ok(());
+    match fs::symlink_metadata(dir.join(SIGNED_OUT_FILE)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // Unknown whether the profile was signed out: it must not open.
+        Err(error) => return Err(error),
+        Ok(_) => {}
     }
     match fs::remove_dir_all(dir.join(STORE_DIR)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),

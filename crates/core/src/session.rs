@@ -620,20 +620,39 @@ impl Session {
     /// the homeserver if it can be reached, then deletes this device's local
     /// profile. The key goes first, so the encrypted stores are unreadable at
     /// once; then the session locks as usual (ending `restart_required`, since
-    /// a client ran) and the store files are deleted, with anything left
-    /// wiped on the next start. A failed revocation still signs out locally
-    /// and is reported as `session_not_revoked`. Returns the resulting state;
-    /// without a signed-in account nothing changes.
-    pub fn sign_out(&self, timeout: Duration, announce: impl FnOnce()) -> StoreState {
+    /// a client ran). The store files are deleted by the next start, before
+    /// any client exists: the SDK's background work is not proven stopped in
+    /// this process (docs/architecture/sdk-lifecycle.md), so its files are not
+    /// deleted under it. A failed revocation still signs out locally and is
+    /// reported as `session_not_revoked`.
+    ///
+    /// Returns the resulting state; without a signed-in account nothing
+    /// changes. A saturated session is waited for up to `timeout` (leases
+    /// last one request or one sync round); after that the sign-out has not
+    /// started and `Saturated` is returned.
+    pub fn sign_out(
+        &self,
+        timeout: Duration,
+        announce: impl FnOnce(),
+    ) -> Result<StoreState, AdmissionError> {
         let Some(dir) = self.profile.clone() else {
-            return self.state();
+            return Ok(self.state());
         };
-        let revoked = match self.with_client() {
-            Ok(Some((lease, client))) => lease
-                .stores()
-                .block_on(client.matrix_auth().logout())
-                .is_ok(),
-            _ => return self.state(),
+        let deadline = Instant::now() + timeout;
+        let revoked = loop {
+            match self.with_client() {
+                Ok(Some((lease, client))) => {
+                    break lease
+                        .stores()
+                        .block_on(client.matrix_auth().logout())
+                        .is_ok();
+                }
+                Ok(None) | Err(AdmissionError::Locked) => return Ok(self.state()),
+                Err(AdmissionError::Saturated) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error),
+            }
         };
         let marked = store::mark_signed_out(&dir).is_ok();
         let (state, _) = self.lock(timeout, announce);
@@ -649,11 +668,7 @@ impl Session {
                 None
             },
         });
-        if matches!(state, StoreState::RestartRequired | StoreState::Locked) {
-            // Best effort: files still in use are wiped on the next start.
-            let _ = store::wipe_signed_out(&dir);
-        }
-        state
+        Ok(state)
     }
 
     /// Reopens a locked session with the key from the vault and restores a

@@ -10,7 +10,7 @@ use persephone_contracts::{
 use persephone_core::{
     Core,
     credentials::{CredentialSource, Credentials, PromptError},
-    session::Session,
+    session::{AdmissionError, Session},
 };
 use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
 use serde_json::{Value, json};
@@ -673,9 +673,10 @@ fn signed_in_core(server: &Homeserver, dir: &Path) -> Core {
     core
 }
 
-/// Sign-out revokes the session, deletes the key at once and the profile
-/// after the stores close, and a restart opens a fresh, signed-out profile
-/// with nothing of the old account left.
+/// Sign-out revokes the session and deletes the key at once; the store files
+/// stay, unreadable, until the next start wipes them before anything opens,
+/// and that start is a fresh, signed-out profile with nothing of the old
+/// account left.
 #[test]
 fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
     let server = Homeserver::signed_in();
@@ -691,6 +692,10 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
             (AccountState::SignedOut, None)
         );
         assert!(!dir.path().join("store-key.v1").exists(), "key deleted");
+        assert!(
+            dir.path().join("signed-out").exists() && dir.path().join("store").exists(),
+            "store files are left for the next start"
+        );
         assert_eq!(
             call(&core, Call::RoomList {}),
             Outcome::Error(ErrorCode::Locked)
@@ -699,6 +704,8 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
         assert_eq!(state, StoreState::RestartRequired);
     }
     assert!(files_contain(dir.path(), TOKEN.as_bytes()).is_empty());
+    // Stands in for any old store file; the next start must remove it.
+    fs::write(dir.path().join("store").join("left-behind"), b"x").unwrap();
 
     let never = Fixed::new(Err(PromptError::Failed));
     let core = make_core(dir.path(), never.clone());
@@ -712,6 +719,10 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
         AccountState::SignedOut
     );
     assert!(!dir.path().join("signed-out").exists(), "wipe finished");
+    assert!(
+        !dir.path().join("store").join("left-behind").exists(),
+        "the old store directory was wiped"
+    );
     assert_eq!(never.asked.load(Ordering::SeqCst), 0);
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(
@@ -748,4 +759,42 @@ fn given_no_account_then_sign_out_changes_nothing() {
     let state: StoreState = value(call(&core, Call::SignOut {}));
     assert_eq!(state, StoreState::Protected);
     assert!(dir.path().join("store-key.v1").exists());
+}
+
+/// GIVEN every lease in use WHEN signing out THEN the sign-out waits for one;
+/// if none frees in time nothing is signed out and the call says so, and once
+/// a lease frees the sign-out completes. (The first call waits not at all:
+/// the sync loop frees and retakes its own lease between rounds.)
+#[test]
+fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_start() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut leases = Vec::new();
+    while let Ok(lease) = core.session().admit() {
+        leases.push(lease);
+    }
+    assert_eq!(
+        core.session().sign_out(Duration::ZERO, || {}),
+        Err(AdmissionError::Saturated)
+    );
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    assert!(dir.path().join("store-key.v1").exists(), "nothing deleted");
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedIn
+    );
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            leases.clear();
+        });
+        assert_eq!(
+            core.session().sign_out(Duration::from_secs(10), || {}),
+            Ok(StoreState::RestartRequired)
+        );
+    });
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
+    assert!(!dir.path().join("store-key.v1").exists());
 }

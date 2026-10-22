@@ -122,6 +122,8 @@
   // the cleared selection and discard their results.
   function reset() {
     sessionGeneration += 1;
+    // A question about the old session no longer applies.
+    confirmingSignOut = false;
     // Nothing from the old session stays in the header while the new status loads.
     status = null;
     selected = null;
@@ -182,14 +184,19 @@
       const store = await signOut();
       if (generation === sessionGeneration && status) status = { ...status, store };
     } catch (reason) {
-      if (generation === sessionGeneration) error = describe(reason);
+      if (generation === sessionGeneration) {
+        error =
+          String(reason) === 'limit_exceeded'
+            ? 'Persephone is busy, so signing out did not start. Try again.'
+            : describe(reason);
+      }
     } finally {
       switching = false;
     }
   }
 
   async function toggleLock() {
-    if (!status || switching) return;
+    if (!status || switching || confirmingSignOut) return;
     switching = true;
     const generation = sessionGeneration;
     try {
@@ -360,7 +367,13 @@
       </div>
     {/if}
     {#if status && (status.store === 'protected' || status.store === 'locking')}
-      <button type="button" class="session" disabled={switching} onclick={toggleLock}>
+      <!-- Not while the sign-out question is open: it would apply to a locked session. -->
+      <button
+        type="button"
+        class="session"
+        disabled={switching || confirmingSignOut}
+        onclick={toggleLock}
+      >
         {switching ? 'Working…' : 'Lock'}
       </button>
     {:else if status && unlockable.includes(status.store)}
@@ -397,7 +410,10 @@
             Persephone and sign out again.
           </p>
         {:else if status?.store === 'restart_required' && status.account.state === 'signed_out'}
-          <p>Signed out, and this device's local data was deleted. Restart Persephone to sign in again.</p>
+          <p>
+            Signed out, and this device's keys were deleted. Restart Persephone to sign in again;
+            the rest of this device's local data is deleted as it starts.
+          </p>
           {#if status.account.error === 'session_not_revoked'}
             <p role="alert" class="error">
               The homeserver could not be reached, so the session may stay active there until it
