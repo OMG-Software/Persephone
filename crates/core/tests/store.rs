@@ -545,3 +545,50 @@ fn given_a_reset_then_the_profile_is_deleted_unless_it_is_in_use() {
     assert_eq!(read_marker(dir.path(), &protector), None);
     assert_eq!(store::reset(TempDir::new().unwrap().path()), Ok(false));
 }
+
+/// Wraps like `Tagged(1)`, but cannot unwrap a sealed key: it stands in for a
+/// vault whose read-back of a new key file fails.
+struct SealedUnreadable;
+
+impl KeyProtector for SealedUnreadable {
+    fn protect(&self, data: &[u8]) -> Result<Vec<u8>, persephone_core::vault::VaultError> {
+        Tagged(1).protect(data)
+    }
+
+    fn unprotect(
+        &self,
+        blob: &[u8],
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, persephone_core::vault::VaultError> {
+        if blob.len() > 1 + persephone_core::vault::KEY_BYTES {
+            return Err(persephone_core::vault::VaultError::Failed);
+        }
+        Tagged(1).unprotect(blob)
+    }
+}
+
+/// GIVEN a new key file that does not read back WHEN a profile is created or
+/// upgraded THEN `store-key.v2` never appears (nor its temporary file), so an
+/// old key stays usable, and a later upgrade with a working vault succeeds.
+#[test]
+fn given_a_failed_read_back_then_no_sealed_key_file_is_left() {
+    let dir = TempDir::new().unwrap();
+    assert_eq!(
+        store::open(dir.path(), &SealedUnreadable, &unlock()).err(),
+        Some(StoreState::KeyUnreadable)
+    );
+    for gone in [KEY_FILE, "store-key.v2.tmp", STORE_DIR] {
+        assert!(!dir.path().join(gone).exists(), "{gone}");
+    }
+
+    let protector = Tagged(1);
+    let old = seeded(&protector);
+    downgrade(old.path(), &protector);
+    assert_eq!(
+        store::open(old.path(), &SealedUnreadable, &unlock()).err(),
+        Some(StoreState::KeyUnreadable)
+    );
+    assert!(!old.path().join(KEY_FILE).exists());
+    assert!(!old.path().join("store-key.v2.tmp").exists());
+    assert!(old.path().join(OLD_KEY_FILE).exists(), "old key kept");
+    assert_eq!(read_marker(old.path(), &protector).as_deref(), Some(MARKER));
+}

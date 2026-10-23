@@ -1463,13 +1463,16 @@ impl Session {
 }
 
 /// Publishes the result of an unlock or reset, then restores a saved account.
+/// No listener runs before the state and stores are published together, so
+/// a listener that panics cannot leave the session `unlocking`.
 fn finish_open(shared: &Arc<Shared>, opened: Result<Stores, StoreState>) {
     let (state, stores) = match opened {
         Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
         Err(state) => (state, None),
     };
     if stores.as_ref().is_some_and(|s| s.unconfirmed_sign_out()) {
-        shared.set_status(not_revoked());
+        // Announced with the state change below.
+        *guard(&shared.status) = not_revoked();
     }
     {
         let mut inner = lock(shared);

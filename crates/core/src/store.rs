@@ -354,8 +354,10 @@ fn choose_passphrase(
     Err(StoreState::Locked)
 }
 
-/// Seals, wraps and saves `key`, then reads the file back and opens it with
-/// the same passphrase. A file that does not give back the key is removed.
+/// Seals, wraps and writes `key` to a temporary file, reads that back and
+/// opens it with the same passphrase, and only then renames it into place. A
+/// file that does not give back the key never becomes `store-key.v2`, so it
+/// cannot hide a usable key from before ADR-0006.
 fn save_key(
     dir: &Path,
     protector: &dyn KeyProtector,
@@ -371,23 +373,24 @@ fn save_key(
         let mut file = File::create(&temporary)?;
         file.write_all(KEY_MAGIC)?;
         file.write_all(&blob)?;
-        file.sync_all()?;
-        fs::rename(&temporary, dir.join(KEY_FILE))?;
-        sync_dir(dir)
+        file.sync_all()
     };
     write().map_err(|_| StoreState::StoreUnavailable)?;
-    let read_back = read_key_file(&dir.join(KEY_FILE), KEY_MAGIC)
+    let read_back = read_key_file(&temporary, KEY_MAGIC)
         .and_then(|saved| protector.unprotect(&saved).map_err(vault_error))
         .and_then(|sealed| {
             passphrase::open(&sealed, passphrase).map_err(|_| StoreState::KeyUnreadable)
         });
     match read_back {
-        Ok(read_back) if *read_back == **key => Ok(()),
+        Ok(read_back) if *read_back == **key => {}
         other => {
-            let _ = remove_if_present(dir, KEY_FILE);
-            Err(other.err().unwrap_or(StoreState::KeyUnreadable))
+            let _ = fs::remove_file(&temporary);
+            return Err(other.err().unwrap_or(StoreState::KeyUnreadable));
         }
     }
+    fs::rename(&temporary, dir.join(KEY_FILE))
+        .and_then(|()| sync_dir(dir))
+        .map_err(|_| StoreState::StoreUnavailable)
 }
 
 /// The key from before ADR-0006, wrapped by the vault alone.

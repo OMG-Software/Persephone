@@ -29,7 +29,8 @@ manual run of the native dialogs were made for this change.**
   On Windows the vault is DPAPI, as before
   ([`vault.rs`](../../crates/core/src/vault.rs)). A new file is written
   through a temporary file and read back with the same passphrase before the
-  stores are used. A file that does not give back the key is removed.
+  stores are used. The temporary file is read back before its rename, so a
+  file that does not give back the key never becomes `store-key.v2`.
 * **States:**
 
   | Profile or entry | Result |
@@ -91,14 +92,16 @@ attacker can run them in parallel, so an offline guess costs less than this.
 ## Tests
 
 `python tools/dev.py check --offline` passed (exit 0) on the working tree
-that became commit `22f05ba`, after the first review fixes; that commit added
+of the commit that made the second review fixes (the sealed key read back
+before its rename, and no listener before publication). That commit added
 only the test counts in this file, `docs/development.md` and
-`verification.json`: 298 Rust tests (234 in the workspace run and 64
-in the `dev-disposable-servers` core run; 2 ignored), 21 frontend tests, 2
-server-registration and 13 development-controller tests, with formatting,
-Clippy (default and development features), contract drift and TypeScript
-checks. Raw output: `.local/runs/unlock-secret/check-review.txt` (ignored).
-The run before the review fixes also passed, with 297 Rust tests. An earlier run of the same
+`verification.json` after the run: 300 Rust tests (236 in the workspace run
+and 64 in the `dev-disposable-servers` core run; 2 ignored), 21 frontend
+tests, 2 server-registration and 13 development-controller tests, with
+formatting, Clippy (default and development features), contract drift and
+TypeScript checks. Raw output: `.local/runs/unlock-secret/check-review2.txt`
+(ignored). Earlier runs on `f02cdd5` and on the tree that became `22f05ba`
+also passed, with 297 and 298 Rust tests. An earlier run of the same
 command failed (exit 101) on two unused imports in `tests/account.rs` that only
 the development-feature Clippy step sees; they were removed before the
 passing run.
@@ -109,7 +112,8 @@ New and changed tests (GIVEN/WHEN/THEN):
   changed byte is refused; parameter bounds; backoff waits.
 * [`tests/store.rs`](../../crates/core/tests/store.rs): upgrade of a v1
   profile with its data; cancelled and interrupted upgrades; new-passphrase
-  rules (short, empty, mismatch, cancelled, unsupported); five wrong entries
+  rules (short, empty, mismatch, cancelled, unsupported); a new key file
+  that does not read back never becomes `store-key.v2`; five wrong entries
   leave every file unchanged; reset deletes everything, or nothing when the
   profile is in use. Existing tests now use v2 files. A changed sealed key now
   ends in `secret_rejected` instead of `key_rejected`.
@@ -118,7 +122,8 @@ New and changed tests (GIVEN/WHEN/THEN):
   does not block lock, unlock or reset; declined and failed reset warnings
   keep the data; a confirmed reset makes a new empty profile that only the
   new passphrase opens; no reset of an open or missing profile; a panicking
-  prompt ends in `store_unavailable`, not `unlocking`.
+  prompt ends in `store_unavailable`, not `unlocking`; a listener that
+  panics on the announcement finds the state and stores already published.
 * `tests/serve.rs`, `tests/account.rs`: Unlock replies `unlocking`, then the
   session change follows.
 * `crates/core-protocol`: unknown fields on `unlock_session` and

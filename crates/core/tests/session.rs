@@ -6,7 +6,7 @@ use persephone_contracts::SignInError;
 use persephone_contracts::StoreState;
 use persephone_core::{
     credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
-    session::{AdmissionError, MAX_LEASES, Session},
+    session::{AdmissionError, MAX_LEASES, Session, SessionListener},
     store::{self, KEY_FILE},
 };
 use std::{
@@ -504,4 +504,36 @@ fn given_a_panicking_prompt_at_unlock_then_the_session_does_not_stay_unlocking()
     assert_eq!(session.unlock(), StoreState::Unlocking);
     assert_eq!(settled(&session), StoreState::Protected);
     assert_eq!(read_marker(&session).as_deref(), Some(MARKER));
+}
+
+/// Panics on every session change.
+struct PanickingListener;
+
+impl SessionListener for PanickingListener {
+    fn rooms_changed(&self, _: &[String]) {}
+
+    fn session_changed(&self) {
+        panic!("synthetic listener failure");
+    }
+}
+
+/// GIVEN a profile with an unconfirmed sign-out WHEN it is unlocked and the
+/// listener panics on the announcement THEN the new state and stores are
+/// already published together: the session is open with the sign-out
+/// reported, not left `unlocking`.
+#[test]
+fn given_a_panicking_listener_at_unlock_then_the_state_is_published_first() {
+    let dir = TempDir::new().unwrap();
+    let session = open(dir.path());
+    assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
+    store::begin_sign_out(dir.path()).unwrap();
+    session.set_listener(Arc::new(PanickingListener));
+
+    assert_eq!(session.unlock(), StoreState::Unlocking);
+    assert_eq!(settled(&session), StoreState::Protected);
+    assert!(session.admit().is_ok());
+    assert_eq!(
+        session.account_status().error,
+        Some(SignInError::SessionNotRevoked)
+    );
 }
