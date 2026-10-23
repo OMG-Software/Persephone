@@ -13,6 +13,7 @@
     blocked,
     encryption,
     roomName,
+    draft = $bindable(''),
     draftVersion,
     onsend,
     onretry,
@@ -25,6 +26,9 @@
     blocked: string | null;
     encryption: RoomEncryption;
     roomName: string;
+    // The unsent text. The caller keeps it, so it survives while another
+    // screen, such as a verification, replaces the room view.
+    draft?: string;
     // Advanced when the draft was sent after a confirmation, to clear it.
     draftVersion: number;
     onsend: (body: string) => Promise<boolean>;
@@ -35,7 +39,6 @@
 
   // The core's limit is 16 KiB of UTF-8; this length is only a first stop.
   const MAX_DRAFT = 16 * 1024;
-  let draft = $state('');
   let sending = $state(false);
   let explaining = $state(false);
   let lastVersion = 0;

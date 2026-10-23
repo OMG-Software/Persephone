@@ -20,6 +20,9 @@
   --warn-bg: #fdecea;
   --warn-ink: #912018;
   --danger: #d92d20;
+  /* Red for text and outlined buttons: --danger is below 4.5:1 on some
+     surfaces, so it is kept for icons and borders. */
+  --danger-text: #b42318;
   --presence: #3dbe7a;
   --ok: #4fc89b;
   --attention: #e5b454;
@@ -58,6 +61,7 @@
     --enc-fg: #4fc89b;
     --warn-bg: #3a1a18;
     --warn-ink: #ffb4ab;
+    --danger-text: #ff6b5e;
   }
 }
 
@@ -129,7 +133,7 @@ button:disabled {
 }
 
 .error {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .note {
@@ -178,9 +182,9 @@ button:disabled {
 }
 
 .danger {
-  border-color: var(--danger);
+  border-color: var(--danger-text);
   background: transparent;
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .primary:hover:not(:disabled) {

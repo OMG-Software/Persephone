@@ -459,3 +459,37 @@ test('GIVEN the jump palette WHEN it opens THEN it lists rooms as escaped, bound
   assert.match(html, /role="img" aria-label="Not encrypted"/);
   assert.doesNotMatch(html, /<mark>/, 'nothing is highlighted before a query');
 });
+
+test('GIVEN a draft kept by the caller WHEN the composer mounts again THEN it shows the draft as text', () => {
+  const html = render(Composer, {
+    props: {
+      pending: [],
+      blocked: null,
+      encryption: 'encrypted',
+      roomName: 'R',
+      draft: hostileName,
+      draftVersion: 0,
+      onsend: async () => true,
+      onretry: () => {},
+      ondiscard: () => {},
+      onallow: () => {}
+    }
+  }).body;
+  assert.match(html, /<textarea[^>]*>&lt;img src=x onerror=alert\(1\)><\/textarea>/);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /<button type="submit" class="send" aria-label="Send" title="Send">/, 'a kept draft can be sent');
+});
+
+test('the verification screen heading can take focus when the screen opens', () => {
+  const html = render(Verification, {
+    props: {
+      flow: { flowId: 'f1', phase: 'incoming', emoji: [], otherDevice: null },
+      busy: false,
+      onaccept: () => {},
+      onconfirm: () => {},
+      oncancel: () => {},
+      ondismiss: () => {}
+    }
+  }).body;
+  assert.match(html, /<h2 id="verify-heading" tabindex="-1">Verify this device<\/h2>/);
+});

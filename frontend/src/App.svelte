@@ -60,6 +60,8 @@
     null
   );
   let draftVersion = $state(0);
+  // The composer's unsent text, kept here so it outlives the composer.
+  let draft = $state('');
   // Rooms confirmed while this page runs; the core keeps the consent itself.
   let confirmedRooms = new Set<string>();
   let unavailable = $state(false);
@@ -235,6 +237,7 @@
     view = 'chat';
     paletteOpen = false;
     dismissedFlow = null;
+    draft = '';
     // Nothing from the old session stays in the header while the new status loads.
     status = null;
     security = null;
@@ -625,14 +628,19 @@
     </div>
   {:else if showFlow && flow}
     <div class="centred">
-      <Verification
-        {flow}
-        busy={securityBusy}
-        onaccept={(flowId) => startSecurity(() => acceptVerification(flowId))}
-        onconfirm={(flowId) => startSecurity(() => confirmVerification(flowId))}
-        oncancel={(flowId) => startSecurity(() => cancelVerification(flowId))}
-        ondismiss={dismissFlow}
-      />
+      <div class="centred-stack">
+        <Verification
+          {flow}
+          busy={securityBusy}
+          onaccept={(flowId) => startSecurity(() => acceptVerification(flowId))}
+          onconfirm={(flowId) => startSecurity(() => confirmVerification(flowId))}
+          oncancel={(flowId) => startSecurity(() => cancelVerification(flowId))}
+          ondismiss={dismissFlow}
+        />
+        {#if error}
+          <p role="alert" class="error">{error}</p>
+        {/if}
+      </div>
     </div>
   {:else if profileOpen && !signedIn}
     <div class="centred">
@@ -670,6 +678,9 @@
                 : 'No account is signed in. All rooms and messages here are synthetic test data.'}
             </p>
           </section>
+        {/if}
+        {#if error}
+          <p role="alert" class="error">{error}</p>
         {/if}
       {:else}
         <section class="settings-page" aria-labelledby="session-heading">
@@ -792,6 +803,7 @@
               blocked={sendBlocked}
               encryption={selectedRoom.encryption}
               roomName={selectedRoom.displayName ?? selectedRoom.roomId}
+              bind:draft
               {draftVersion}
               onsend={sendText}
               onretry={(localId) => changeMessage(retryMessage, localId)}
