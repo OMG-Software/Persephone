@@ -144,6 +144,10 @@ impl SessionListener for Hub {
         self.mark_changed(&[room_id.to_owned()], false);
     }
 
+    fn room_keys_arrived(&self, rooms: &[String]) {
+        self.mark_changed(rooms, false);
+    }
+
     fn security_changed(&self) {
         let mut notifications = lock(&self.notifications);
         if !notifications.security_changed {
@@ -634,5 +638,21 @@ mod tests {
         drop(notifications);
         hub.rooms_changed(&["!a:s".into()]);
         assert!(lock(&hub.notifications).pending.is_empty());
+    }
+
+    /// GIVEN an open room WHEN room keys arrive for it and for a room not open
+    /// THEN only the open room is queued, so the page fetches it again and its
+    /// undecryptable notices can become messages; the room list is untouched.
+    #[test]
+    fn given_room_keys_for_an_open_room_then_only_that_room_is_fetched_again() {
+        let hub = Hub::default();
+        lock(&hub.notifications).subscribed.insert("!a:s".into());
+        hub.room_keys_arrived(&["!a:s".into(), "!b:s".into()]);
+        let notifications = lock(&hub.notifications);
+        assert_eq!(notifications.pending.iter().collect::<Vec<_>>(), ["!a:s"]);
+        assert!(
+            !notifications.room_list_changed,
+            "a key changes no room's place in the list"
+        );
     }
 }

@@ -109,6 +109,9 @@ pub trait SessionListener: Send + Sync {
     fn security_changed(&self) {}
     /// A message the user sent in this room changed state.
     fn outbox_changed(&self, _room_id: &str) {}
+    /// Room keys arrived for these rooms, so messages there that could not
+    /// be decrypted may be readable now.
+    fn room_keys_arrived(&self, _rooms: &[String]) {}
 }
 
 /// Why a message was not queued.
@@ -421,6 +424,8 @@ fn run_sync(
 ) {
     let mut backoff = Duration::from_secs(1);
     let mut engine = None;
+    // The SDK's room-key stream, taken once per round; a receiver, not a task.
+    let mut keys = None;
     loop {
         let lease = match shared.admit() {
             Ok(lease) => lease,
@@ -434,10 +439,25 @@ fn run_sync(
         };
         let started = Instant::now();
         let outcome = lease.stores().block_on(async {
+            if keys.is_none() {
+                keys = client
+                    .encryption()
+                    .room_keys_received_stream()
+                    .await
+                    .map(Box::pin);
+            }
             if engine.is_none() {
                 engine = Some(account::select_engine(&client).await?);
             }
-            account::sync_round(&client, engine.as_ref().expect("selected above")).await
+            let rooms =
+                account::sync_round(&client, engine.as_ref().expect("selected above")).await?;
+            let keyed = match keys.as_mut() {
+                Some(stream) => account::take_key_rooms(stream.as_mut())
+                    .await
+                    .room_ids(&client),
+                None => Vec::new(),
+            };
+            Ok::<_, SignInError>((rooms, keyed))
         });
         let committed = lease.commit(|| ()).is_ok();
         drop(lease);
@@ -445,15 +465,18 @@ fn run_sync(
             break;
         }
         match outcome {
-            Ok(rooms) => {
+            Ok((rooms, keyed)) => {
                 backoff = Duration::from_secs(1);
                 if guard(&shared.status).error.is_some() {
                     shared.set_status(signed_in(&user_id, None));
                 }
-                if !rooms.is_empty()
-                    && let Some(listener) = shared.listener()
-                {
-                    listener.rooms_changed(&rooms);
+                if let Some(listener) = shared.listener() {
+                    if !rooms.is_empty() {
+                        listener.rooms_changed(&rooms);
+                    }
+                    if !keyed.is_empty() {
+                        listener.room_keys_arrived(&keyed);
+                    }
                 }
                 let elapsed = started.elapsed();
                 if elapsed < MIN_SYNC_INTERVAL && !shared.wait_open(MIN_SYNC_INTERVAL - elapsed) {
@@ -474,6 +497,7 @@ fn run_sync(
         }
     }
     let _context = runtime.enter();
+    drop(keys);
     drop(engine);
     drop(client);
 }

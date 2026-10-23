@@ -12,10 +12,17 @@
 //! can send in an encrypted room; incoming messages are shown only from
 //! cross-signed devices or legacy sessions. Cross-signing and backups are never
 //! set up automatically: the user starts them (`security.rs`).
+//!
+//! Room keys can arrive after the message they open: from another device, or
+//! from the key backup, which the SDK asks only once a message fails to
+//! decrypt. [`take_key_rooms`] names the rooms that got keys since it was last
+//! called, so the page can fetch them again (`session.rs`).
 
 use crate::credentials::Credentials;
 use crate::homeserver::{self, Homeserver};
 use crate::store::Stores;
+use crate::views::MAX_ROOMS;
+use futures_core::Stream;
 use matrix_sdk::{
     Client,
     authentication::matrix::MatrixSession,
@@ -26,11 +33,12 @@ use matrix_sdk::{
     sliding_sync::{SlidingSync, SlidingSyncList, SlidingSyncMode, Version, VersionBuilder},
 };
 use matrix_sdk_crypto::{
-    CollectStrategy, DecryptionSettings, TrustRequirement, store::CryptoStore,
+    CollectStrategy, DecryptionSettings, TrustRequirement,
+    store::{CryptoStore, types::RoomKeyInfo},
 };
 use persephone_contracts::SignInError;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{collections::BTreeSet, pin::Pin, task::Poll, time::Duration};
 use zeroize::Zeroizing;
 
 /// Crypto-store custom value holding the saved account.
@@ -40,6 +48,8 @@ const DEVICE_NAME: &str = "Persephone";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Long-poll wait for one sync round. A lock waits for at most one round.
 pub const SYNC_POLL: Duration = Duration::from_secs(5);
+/// Most batches [`take_key_rooms`] takes in one call; later ones wait.
+const MAX_KEY_BATCHES: usize = 64;
 
 #[derive(Serialize, Deserialize)]
 struct SavedAccount {
@@ -227,5 +237,181 @@ pub async fn sync_round(client: &Client, engine: &Engine) -> Result<Vec<String>,
                 .map(ToString::to_string)
                 .collect())
         }
+    }
+}
+
+/// Rooms for which this device stored new room keys.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyRooms {
+    /// These rooms, at most [`MAX_ROOMS`].
+    Listed(BTreeSet<String>),
+    /// More rooms than may be listed, or the stream dropped batches it could
+    /// not keep (it lagged): any joined room may have new keys.
+    All,
+}
+
+impl KeyRooms {
+    fn note<E>(&mut self, batch: Result<Vec<RoomKeyInfo>, E>) {
+        let Self::Listed(rooms) = self else {
+            return;
+        };
+        let overflow = match batch {
+            Ok(keys) => keys.iter().any(|key| {
+                if !rooms.contains(key.room_id.as_str()) {
+                    rooms.insert(key.room_id.to_string());
+                }
+                rooms.len() > MAX_ROOMS
+            }),
+            Err(_) => true,
+        };
+        if overflow {
+            *self = Self::All;
+        }
+    }
+
+    /// The room IDs these stand for.
+    pub fn room_ids(self, client: &Client) -> Vec<String> {
+        match self {
+            Self::Listed(rooms) => rooms.into_iter().collect(),
+            Self::All => client
+                .joined_rooms()
+                .iter()
+                .map(|room| room.room_id().to_string())
+                .collect(),
+        }
+    }
+}
+
+/// Takes the batches the SDK's room-key stream holds now, without waiting.
+/// The stream is `Encryption::room_keys_received_stream`: keys from other
+/// devices and from the backup alike. Later batches stay for the next call.
+pub async fn take_key_rooms<S, E>(mut stream: Pin<&mut S>) -> KeyRooms
+where
+    S: Stream<Item = Result<Vec<RoomKeyInfo>, E>> + ?Sized,
+{
+    std::future::poll_fn(|context| {
+        let mut rooms = KeyRooms::Listed(BTreeSet::new());
+        for _ in 0..MAX_KEY_BATCHES {
+            match stream.as_mut().poll_next(context) {
+                Poll::Ready(Some(batch)) => rooms.note(batch),
+                // Nothing more now, or the stream ended.
+                Poll::Ready(None) | Poll::Pending => break,
+            }
+        }
+        Poll::Ready(rooms)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matrix_sdk::{
+        SessionMeta, SessionTokens,
+        ruma::{device_id, room_id, user_id},
+    };
+    use matrix_sdk_crypto::{
+        EncryptionSettings as KeySettings, OlmMachine, encrypt_room_key_export,
+        types::EventEncryptionAlgorithm, vodozemac::Curve25519PublicKey,
+    };
+
+    /// GIVEN a signed-in client watching its room keys WHEN three keys for two
+    /// rooms are imported (the way a backup download stores them) THEN one
+    /// take names both rooms once, and the next take, with nothing new, none.
+    #[test]
+    fn given_imported_room_keys_then_their_rooms_are_named_once() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let client = Client::builder()
+                .homeserver_url("https://example.org")
+                .build()
+                .await
+                .unwrap();
+            client
+                .restore_session(MatrixSession {
+                    meta: SessionMeta {
+                        user_id: user_id!("@me:example.org").to_owned(),
+                        device_id: device_id!("ME").to_owned(),
+                    },
+                    tokens: SessionTokens {
+                        access_token: "synthetic".into(),
+                        refresh_token: None,
+                    },
+                })
+                .await
+                .unwrap();
+            let mut keys = Box::pin(
+                client
+                    .encryption()
+                    .room_keys_received_stream()
+                    .await
+                    .expect("signed in"),
+            );
+            assert_eq!(
+                take_key_rooms(keys.as_mut()).await,
+                KeyRooms::Listed(BTreeSet::new())
+            );
+
+            // A peer makes the keys: two sessions in one room, one in another.
+            let peer = OlmMachine::new(user_id!("@peer:example.org"), device_id!("PEER")).await;
+            let (a, b) = (room_id!("!a:example.org"), room_id!("!b:example.org"));
+            for room in [a, b, a] {
+                peer.discard_room_key(room).await.unwrap();
+                peer.share_room_key(room, std::iter::empty(), KeySettings::default())
+                    .await
+                    .unwrap();
+            }
+            let exported = peer.store().export_room_keys(|_| true).await.unwrap();
+            assert_eq!(exported.len(), 3);
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                file.path(),
+                encrypt_room_key_export(&exported, "synthetic", 1).unwrap(),
+            )
+            .unwrap();
+            client
+                .encryption()
+                .import_room_keys(file.path().to_owned(), "synthetic")
+                .await
+                .unwrap();
+
+            assert_eq!(
+                take_key_rooms(keys.as_mut()).await,
+                KeyRooms::Listed([a.to_string(), b.to_string()].into())
+            );
+            assert_eq!(
+                take_key_rooms(keys.as_mut()).await,
+                KeyRooms::Listed(BTreeSet::new())
+            );
+        });
+    }
+
+    /// GIVEN keys for more rooms than may be listed, or a stream that lagged
+    /// WHEN noted THEN any joined room counts, and stays counted.
+    #[test]
+    fn given_too_many_rooms_or_a_lag_then_all_rooms_count() {
+        let key = |room: usize| RoomKeyInfo {
+            algorithm: EventEncryptionAlgorithm::MegolmV1AesSha2,
+            room_id: format!("!r{room}:example.org").try_into().unwrap(),
+            sender_key: Curve25519PublicKey::from_bytes([0; 32]),
+            session_id: room.to_string(),
+        };
+        let listed = |rooms: &KeyRooms| match rooms {
+            KeyRooms::Listed(rooms) => rooms.len(),
+            KeyRooms::All => usize::MAX,
+        };
+        let mut rooms = KeyRooms::Listed(BTreeSet::new());
+        rooms.note::<()>(Ok((0..MAX_ROOMS).map(key).collect()));
+        assert_eq!(listed(&rooms), MAX_ROOMS);
+        rooms.note::<()>(Ok(vec![key(0)]));
+        assert_eq!(listed(&rooms), MAX_ROOMS, "a room already listed");
+        rooms.note::<()>(Ok(vec![key(MAX_ROOMS)]));
+        assert_eq!(rooms, KeyRooms::All);
+        rooms.note::<()>(Ok(vec![key(0)]));
+        assert_eq!(rooms, KeyRooms::All);
+
+        let mut lagged = KeyRooms::Listed(BTreeSet::new());
+        lagged.note(Err(()));
+        assert_eq!(lagged, KeyRooms::All);
     }
 }
