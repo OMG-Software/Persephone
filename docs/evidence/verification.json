@@ -1721,6 +1721,40 @@
       "source": "uncommitted p4/identity-changes working tree on p4/verify-contacts 'Lock the session at the end of the contact account tests', committed next with only these docs added",
       "working_tree_clean": false,
       "earlier_attempts": "one run failed Clippy result_unit_err on identities::changed_members; changed to Option and rerun. Before that, repeated account test runs failed intermittently until the new tests locked their session (wiremock reuses mock servers)"
+    },
+    {
+      "name": "live_encrypted_text_exit_runs",
+      "command": "development core and desktop UI driven through WebView2 DevTools (.local/runs/p4d-driver/drive_f.py) via a local TCP proxy that cuts the reply to one message send; tests/matrix p4_peer as Bob, Bob's second device and another device of the first account; tools/servers/run.py in WSL",
+      "checked_on": "2026-10-23",
+      "servers": {
+        "merovingian": "0.12.29",
+        "synapse": "1.163.0"
+      },
+      "unclear_delivery": "reply cut once; page showed delivery unknown; Retry sent; Bob counted the text once, on both",
+      "new_device": "Bob's unsigned second device could not decrypt (withheld m.unverified) while his first could; after Bob signed it, it decrypted the next message, on both",
+      "clean_profile": "new unverified device shown withheld for Bob's next message and no earlier history; after the recovery key, verified, earlier history read from the key backup, and the withheld message too (same Megolm session, backed up by the first device); its next message reached Bob, on both",
+      "driver_result": "pass on both",
+      "harness_starts": {
+        "merovingian": ".local/runs/p4f-02",
+        "synapse": ".local/runs/p4f-01"
+      },
+      "not_counted": "p4f-01 Merovingian: DevTools connection lost before the first step",
+      "evidence": "encrypted-text-exit-runs.md"
+    },
+    {
+      "name": "workspace_check_after_encrypted_text_exit_runs",
+      "command": "python tools/dev.py check --offline",
+      "checked_on": "2026-10-23",
+      "exit_code": 0,
+      "rust_tests_passed": 324,
+      "rust_tests_ignored": 2,
+      "frontend_tests_passed": 39,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 378,
+      "includes": "core unit, binary and account tests and Clippy with dev-disposable-servers",
+      "source": "uncommitted p4/exit-evidence working tree on p4/identity-changes 35c0813 (test peer commands and docs only), committed next with only these docs added",
+      "working_tree_clean": false
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

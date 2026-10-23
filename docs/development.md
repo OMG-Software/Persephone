@@ -138,6 +138,8 @@ In a direct-message room, the header names the contact and how far the account t
 
 While a member of an encrypted room has a changed identity, the room shows that sending is paused, and the core refuses every send there (ADR-0007). "Accept new identity…" asks in the core's own window; with `PERSEPHONE_DEV_PROFILE`, `PERSEPHONE_DEV_IDENTITY_ANSWER_FILE` (a path inside `.local`, read each time) answers it: `yes` accepts, anything else declines. For the live check, the peer replaces Bob's identity with `reset-identity [<user>]`, naming a user Bob had verified so that his client withdraws that verification. See the [identity changes evidence](evidence/identity-changes.md).
 
+The remaining P4 runs also use `count <bob|bob2> <room> <seconds> <text>`, which counts the decrypted messages with that text and lists the ones that could not be decrypted, and `sign-devices`, which has Bob sign his own unsigned devices. See the [encrypted text exit runs](evidence/encrypted-text-exit-runs.md).
+
 ## Recorded verification
 
 After pausing sends on identity changes (ADR-0007), `python tools/dev.py check --offline` passed all 378 tests (324 Rust, 39 frontend, 2 server-registration and 13 development-controller tests). See the [identity changes evidence](evidence/identity-changes.md).

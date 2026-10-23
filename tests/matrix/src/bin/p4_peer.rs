@@ -51,6 +51,11 @@
 //!   are ready, and prints the emoji.
 //! * `trust <bob|alice> <user id>`: whether that client sees the user's
 //!   identity as verified.
+//! * `count <bob|bob2> <room id> <seconds> <text>`: sync for that long, then
+//!   count the messages with exactly this text from someone else (decrypted
+//!   ones only) and the ones it cannot decrypt, with their reasons.
+//! * `sign-devices`: `bob` signs each of his own devices that his identity
+//!   has not signed yet (such as `bob2`), as accepting a new session does.
 //! * `wait-devices <bob|alice> <user id> <count> <seconds>`: sync until that
 //!   client knows at least `count` devices of the user. The SDK drops a
 //!   request from a device it does not know yet, so a test waits for this.
@@ -604,6 +609,55 @@ impl Peer {
                         return Ok(json!({"timeout": true, "devices": known}));
                     }
                 }
+            }
+            "count" => {
+                let which = words.next().context("which client")?;
+                let room_id: OwnedRoomId = words.next().context("room")?.try_into()?;
+                let seconds: u64 = words.next().context("seconds")?.parse()?;
+                let text = words.collect::<Vec<_>>().join(" ");
+                let client = self.client(which)?.clone();
+                let own = client.user_id().context("signed in")?.to_owned();
+                let deadline = Instant::now() + Duration::from_secs(seconds);
+                while Instant::now() < deadline {
+                    let _ = client
+                        .sync_once(SyncSettings::default().timeout(Duration::from_millis(500)))
+                        .await;
+                }
+                let room = client.get_room(&room_id).context("room not known")?;
+                let mut options = MessagesOptions::backward();
+                options.limit = UInt::from(50u32);
+                let messages = room.messages(options).await?;
+                let mut found = 0usize;
+                let mut undecryptable = Vec::new();
+                for event in &messages.chunk {
+                    if let TimelineEventKind::UnableToDecrypt { utd_info, .. } = &event.kind {
+                        undecryptable.push(format!("{:?}", utd_info.reason));
+                        continue;
+                    }
+                    if let Ok(AnySyncTimelineEvent::MessageLike(
+                        AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(
+                            message,
+                        )),
+                    )) = event.raw().deserialize()
+                        && message.sender != own
+                        && message.content.body() == text
+                    {
+                        found += 1;
+                    }
+                }
+                Ok(json!({"found": found, "undecryptable": undecryptable}))
+            }
+            "sign-devices" => {
+                let client = self.client("bob")?;
+                let own = client.user_id().context("signed in")?.to_owned();
+                let mut signed = Vec::new();
+                for device in client.encryption().get_user_devices(&own).await?.devices() {
+                    if !device.is_cross_signed_by_owner() {
+                        device.verify().await?;
+                        signed.push(device.device_id().to_string());
+                    }
+                }
+                Ok(json!({"signed": signed}))
             }
             "trust" => {
                 let which = words.next().context("which client")?;
