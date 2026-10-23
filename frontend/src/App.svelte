@@ -67,9 +67,11 @@
   let contact = $state<ContactStatus | null>(null);
   // Members of the selected room whose identity changed (ADR-0007).
   let changes = $state<RoomIdentityChanges | null>(null);
-  // The room whose contact this page last asked to verify: the core reports
-  // why that failed in the security status, shown in that room.
+  // The room whose contact this page last asked to verify, and the room in
+  // which it last asked to accept a new identity: the core reports why that
+  // failed in the security status, shown in that room, each in its own place.
   let contactAsked = $state<string | null>(null);
+  let identityAsked = $state<string | null>(null);
   // Messages sent from this device in the selected room.
   let pending = $state<PendingMessage[]>([]);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
@@ -190,6 +192,16 @@
       ? securityErrorText[security.error]
       : null
   );
+  // A refused request (`securityFailure`) or what the core reported after
+  // asking in its own window.
+  const identityFailure = $derived(
+    identityAsked === null || identityAsked !== selected
+      ? null
+      : (securityFailure ??
+          (security?.operation === 'idle' && security.error
+            ? securityErrorText[security.error]
+            : null))
+  );
 
   // The jump shortcut as this system writes it.
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
@@ -285,6 +297,7 @@
     contact = null;
     changes = null;
     contactAsked = null;
+    identityAsked = null;
     confirmingPlain = null;
     confirmedRooms = new Set();
     selected = null;
@@ -349,7 +362,20 @@
   }
 
   function verifyRoomContact(roomId: string) {
-    startSecurity(() => verifyContact(roomId), roomId);
+    startSecurity(() => verifyContact(roomId), { room: roomId, kind: 'contact' });
+  }
+
+  // Asks the core to accept a member's new identity; the room's list is
+  // fetched again afterwards, since the change may be gone (`not_found`).
+  async function acceptRoomIdentity(roomId: string, userId: string) {
+    const generation = sessionGeneration;
+    await startSecurity(
+      () => acceptIdentity(roomId, userId),
+      { room: roomId, kind: 'identity' },
+      (reason) =>
+        String(reason) === 'not_found' ? 'That identity change is no longer listed.' : describe(reason)
+    );
+    if (current(roomId, generation)) loadChanges(roomId, generation);
   }
 
   // The selected room's contact, for a direct-message room. Kept only while
@@ -377,16 +403,19 @@
     }
   }
 
-  // `contactRoom` names the room whose contact this action verifies; every
-  // other action clears it, so a later failure is not shown in that room.
+  // `asked` names the room whose contact this action verifies, or in which
+  // it accepts a new identity; every other action clears both, so a later
+  // failure is not shown in that room. `explain` turns a refusal into text.
   async function startSecurity(
     start: () => Promise<SecurityStatus>,
-    contactRoom: string | null = null
+    asked: { room: string; kind: 'contact' | 'identity' } | null = null,
+    explain: (reason: unknown) => string = describe
   ) {
     if (securityBusy) return;
     securityBusy = true;
     securityFailure = null;
-    contactAsked = contactRoom;
+    contactAsked = asked?.kind === 'contact' ? asked.room : null;
+    identityAsked = asked?.kind === 'identity' ? asked.room : null;
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {
@@ -396,7 +425,7 @@
         securityShown = request;
       }
     } catch (reason) {
-      if (generation === sessionGeneration) securityFailure = describe(reason);
+      if (generation === sessionGeneration) securityFailure = explain(reason);
     } finally {
       if (generation === sessionGeneration) securityBusy = false;
     }
@@ -916,8 +945,8 @@
               canVerify={security?.identity === 'verified'}
               busy={securityBusy || security?.operation !== 'idle'}
               confirming={security?.operation === 'waiting_for_confirmation'}
-              onaccept={(userId) =>
-                startSecurity(() => acceptIdentity(selectedRoom.roomId, userId), selectedRoom.roomId)}
+              failure={identityFailure}
+              onaccept={(userId) => acceptRoomIdentity(selectedRoom.roomId, userId)}
               onverify={() => verifyRoomContact(selectedRoom.roomId)}
             />
           {/if}

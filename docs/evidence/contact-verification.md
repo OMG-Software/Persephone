@@ -152,6 +152,11 @@ Earlier harness starts under `.local/runs/p4d-01` to `p4d-06`:
 * A contact whose identity changes is not handled yet (P4, PR E):
   `identity_changed` only reports the failure, and an unverified contact's
   new identity still receives keys (ADR-0005).
+  *Superseded later the same day:* sending now pauses until the user accepts
+  the new identity or verifies it
+  ([ADR-0007](../adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md),
+  [identity changes evidence](identity-changes.md)). The result above is kept
+  as it was checked.
 * A rate-limited verification step is not sent again; the user cancels and
   starts again. A request refused by the homeserver before the flow starts
   reads `failed`.

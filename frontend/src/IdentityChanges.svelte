@@ -10,6 +10,7 @@
     canVerify = false,
     busy,
     confirming,
+    failure = null,
     onaccept,
     onverify
   }: {
@@ -20,6 +21,8 @@
     busy: boolean;
     // The core's window is asking right now.
     confirming: boolean;
+    // Why the last "Accept new identity" in this room did not work.
+    failure?: string | null;
     onaccept: (userId: string) => void;
     onverify: () => void;
   } = $props();
@@ -63,5 +66,7 @@
   {/if}
   {#if confirming}
     <p role="status">Answer in the Windows window Persephone opened.</p>
+  {:else if failure}
+    <p role="alert" class="error">{failure}</p>
   {/if}
 </section>

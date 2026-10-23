@@ -684,5 +684,11 @@ test('GIVEN members whose identity changed WHEN the room shows THEN sending is p
 
   const asking = view({ changes: changes([{ userId: '@a:s', wasVerified: false }]), busy: true, confirming: true });
   assert.match(asking, /Answer in the Windows window Persephone opened\./);
+  const failed = view({
+    changes: changes([{ userId: '@a:s', wasVerified: false }]),
+    failure: 'That identity change is no longer listed.'
+  });
+  assert.match(failed, /<p role="alert" class="error">That identity change is no longer listed\.<\/p>/);
+  assert.doesNotMatch(one, /class="error"/, 'no failure, no error line');
   assert.match(asking, /<button[^>]*disabled/);
 });
