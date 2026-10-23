@@ -1943,6 +1943,9 @@ fn given_a_direct_room_then_its_contact_and_their_trust_are_shown() {
             "{bad}"
         );
     }
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
 }
 
 /// GIVEN a device that is not verified WHEN the page asks to verify the
@@ -1974,4 +1977,7 @@ fn given_an_unverified_device_then_verifying_a_contact_sends_nothing() {
     std::thread::sleep(Duration::from_millis(600));
     assert!(server.sends().is_empty(), "no request reached the room");
     assert_eq!(security(&core).verification, None);
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
 }
