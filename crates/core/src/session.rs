@@ -25,11 +25,17 @@
 //! step, like sync. Its prompts run on short-lived threads without a lease, so
 //! a prompt left open never holds up a lock; an answer given after a lock (or
 //! a lock and unlock) is dropped.
+//!
+//! Unlocking and resetting the profile ask for the passphrase (ADR-0006) in
+//! the core's own window. They run on a worker thread in the `unlocking`
+//! state, which refuses every other transition, so the serving loop is never
+//! blocked by an open prompt and nothing else can change the stores meanwhile.
 
 use crate::account;
 use crate::credentials::{CredentialSource, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
 use crate::outbox::Outbox;
+use crate::passphrase::Unlock;
 use crate::security;
 use crate::sending;
 use crate::store::{self, Stores};
@@ -44,7 +50,7 @@ use persephone_contracts::{
     SecurityOperation, SecurityStatus, SignInError, StoreState, VerificationPhase,
 };
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
@@ -272,7 +278,8 @@ impl Shared {
 
 pub struct Session {
     profile: Option<PathBuf>,
-    protector: Box<dyn KeyProtector>,
+    protector: Arc<dyn KeyProtector>,
+    unlock: Unlock,
     shared: Arc<Shared>,
     /// Serializes lock and unlock; admission does not take it.
     transition: Mutex<()>,
@@ -775,22 +782,24 @@ impl Session {
     pub fn not_configured() -> Self {
         Self::with_state(
             None,
-            Box::new(crate::vault::Unsupported),
+            Arc::new(crate::vault::Unsupported),
+            Unlock::new(Arc::new(crate::credentials::Unsupported)),
             StoreState::NotConfigured,
             None,
         )
     }
 
-    /// Opens the profile in `dir`; on failure the session starts locked with
-    /// the reason as its state. A saved account is restored by
+    /// Opens the profile in `dir`, asking for its passphrase (or a new one)
+    /// through `unlock` before returning; on failure the session starts locked
+    /// with the reason as its state. A saved account is restored by
     /// [`Session::restore_account`], once a listener is set.
-    pub fn open(dir: PathBuf, protector: Box<dyn KeyProtector>) -> Self {
-        let (state, stores) = match store::open(&dir, &*protector) {
+    pub fn open(dir: PathBuf, protector: Arc<dyn KeyProtector>, unlock: Unlock) -> Self {
+        let (state, stores) = match store::open(&dir, &*protector, &unlock) {
             Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
             Err(state) => (state, None),
         };
         let unconfirmed = stores.as_ref().is_some_and(|s| s.unconfirmed_sign_out());
-        let session = Self::with_state(Some(dir), protector, state, stores);
+        let session = Self::with_state(Some(dir), protector, unlock, state, stores);
         if unconfirmed {
             session.shared.set_status(not_revoked());
         }
@@ -799,13 +808,15 @@ impl Session {
 
     fn with_state(
         profile: Option<PathBuf>,
-        protector: Box<dyn KeyProtector>,
+        protector: Arc<dyn KeyProtector>,
+        unlock: Unlock,
         state: StoreState,
         stores: Option<Arc<Stores>>,
     ) -> Self {
         Self {
             profile,
             protector,
+            unlock,
             shared: Arc::new(Shared {
                 inner: Mutex::new(Inner {
                     state,
@@ -859,24 +870,7 @@ impl Session {
     /// Restores a saved account without a prompt and starts syncing. Does
     /// nothing when no account was saved or one is already running.
     pub fn restore_account(&self) {
-        if guard(&self.shared.account).is_some() {
-            return;
-        }
-        let Ok(lease) = self.admit() else {
-            return;
-        };
-        let restored = lease.stores().block_on(async {
-            let result = account::restore(lease.stores()).await;
-            if !matches!(result, Ok(None)) {
-                self.shared.client_ran.store(true, Ordering::SeqCst);
-            }
-            result
-        });
-        match restored {
-            Ok(Some((client, user_id))) => install(&self.shared, lease, client, user_id),
-            Ok(None) => {}
-            Err(error) => self.shared.set_status(failed(error)),
-        }
+        restore(&self.shared);
     }
 
     /// Starts signing in to `homeserver` on a worker thread and returns the
@@ -1347,43 +1341,159 @@ impl Session {
         self.security_status()
     }
 
-    /// Reopens a locked session with the key from the vault and restores a
-    /// saved account. A session that failed to open may retry; `lock_failed`,
-    /// `restart_required`, `locking` and an unconfigured session cannot unlock.
+    /// Starts reopening a locked session: replies `unlocking` at once, then
+    /// asks for the passphrase on a worker thread, opens the stores, restores
+    /// a saved account and announces the result. A session that failed to
+    /// open may retry; `lock_failed`, `restart_required`, `locking`,
+    /// `unlocking` and an unconfigured session cannot unlock, and get their
+    /// state back unchanged.
     pub fn unlock(&self) -> StoreState {
-        let state = {
-            let _transition = self
-                .transition
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let current = self.state();
-            let Some(dir) = &self.profile else {
-                return current;
-            };
-            match current {
-                StoreState::Protected
-                | StoreState::Locking
-                | StoreState::LockFailed
-                | StoreState::RestartRequired
-                | StoreState::NotConfigured => return current,
-                _ => {}
-            }
-            let (state, stores) = match store::open(dir, &*self.protector) {
-                Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
-                Err(state) => (state, None),
-            };
-            if stores.as_ref().is_some_and(|s| s.unconfirmed_sign_out()) {
-                self.shared.set_status(not_revoked());
-            }
-            let mut inner = lock(&self.shared);
-            inner.state = state;
-            inner.stores = stores;
-            state
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = self.state();
+        let Some(dir) = self.profile.clone() else {
+            return current;
         };
-        if state == StoreState::Protected {
-            self.restore_account();
+        match current {
+            StoreState::Protected
+            | StoreState::Locking
+            | StoreState::Unlocking
+            | StoreState::LockFailed
+            | StoreState::RestartRequired
+            | StoreState::NotConfigured => return current,
+            _ => {}
         }
-        state
+        self.open_in_background(dir, current, |dir, protector, unlock, _| {
+            Some(store::open(dir, protector, unlock))
+        })
+    }
+
+    /// Starts resetting the profile, for a forgotten passphrase (ADR-0006).
+    /// Only a closed profile that no Matrix client used in this process can
+    /// be reset. Replies `unlocking` at once; the worker shows the core's own
+    /// warning, and only an explicit yes deletes the profile, after which a
+    /// new passphrase is asked for a new, empty profile. Any other answer
+    /// puts the session back as it was.
+    pub fn reset_profile(&self) -> StoreState {
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = self.state();
+        let Some(dir) = self.profile.clone() else {
+            return current;
+        };
+        let closed = matches!(
+            current,
+            StoreState::Locked
+                | StoreState::SecretRejected
+                | StoreState::KeyMissing
+                | StoreState::KeyUnreadable
+                | StoreState::KeyRejected
+                | StoreState::StoreUnavailable
+        );
+        if !closed || self.shared.client_ran.load(Ordering::SeqCst) {
+            return current;
+        }
+        self.open_in_background(dir, current, |dir, protector, unlock, shared| {
+            if unlock.source.confirm_reset() != Ok(true) {
+                return None;
+            }
+            Some(store::reset(dir).and_then(|had_data| {
+                // The access token was in the deleted store, so the
+                // homeserver was not told.
+                if had_data {
+                    shared.set_status(not_revoked());
+                }
+                store::open(dir, protector, unlock)
+            }))
+        })
+    }
+
+    /// Moves the session to `unlocking` and runs `open` on a worker thread
+    /// without the transition lock, so an open prompt blocks no other call;
+    /// `unlocking` refuses every other transition meanwhile. `None` from
+    /// `open` puts the session back in `previous`.
+    fn open_in_background(
+        &self,
+        dir: PathBuf,
+        previous: StoreState,
+        open: impl FnOnce(
+            &Path,
+            &dyn KeyProtector,
+            &Unlock,
+            &Arc<Shared>,
+        ) -> Option<Result<Stores, StoreState>>
+        + Send
+        + 'static,
+    ) -> StoreState {
+        lock(&self.shared).state = StoreState::Unlocking;
+        let shared = self.shared.clone();
+        let protector = self.protector.clone();
+        let unlock = self.unlock.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-unlock".into())
+            .spawn(move || match open(&dir, &*protector, &unlock, &shared) {
+                Some(opened) => finish_open(&shared, opened),
+                None => {
+                    lock(&shared).state = previous;
+                    if let Some(listener) = shared.listener() {
+                        listener.session_changed();
+                    }
+                }
+            });
+        if spawned.is_err() {
+            lock(&self.shared).state = previous;
+            return previous;
+        }
+        StoreState::Unlocking
+    }
+}
+
+/// Publishes the result of an unlock or reset, then restores a saved account.
+fn finish_open(shared: &Arc<Shared>, opened: Result<Stores, StoreState>) {
+    let (state, stores) = match opened {
+        Ok(stores) => (StoreState::Protected, Some(Arc::new(stores))),
+        Err(state) => (state, None),
+    };
+    if stores.as_ref().is_some_and(|s| s.unconfirmed_sign_out()) {
+        shared.set_status(not_revoked());
+    }
+    {
+        let mut inner = lock(shared);
+        inner.state = state;
+        inner.stores = stores;
+    }
+    if let Some(listener) = shared.listener() {
+        listener.session_changed();
+    }
+    if state == StoreState::Protected {
+        restore(shared);
+    }
+}
+
+/// Restores a saved account without a prompt and starts syncing. Does
+/// nothing when no account was saved or one is already running.
+fn restore(shared: &Arc<Shared>) {
+    if guard(&shared.account).is_some() {
+        return;
+    }
+    let Ok(lease) = shared.admit() else {
+        return;
+    };
+    let restored = lease.stores().block_on(async {
+        let result = account::restore(lease.stores()).await;
+        if !matches!(result, Ok(None)) {
+            shared.client_ran.store(true, Ordering::SeqCst);
+        }
+        result
+    });
+    match restored {
+        Ok(Some((client, user_id))) => install(shared, lease, client, user_id),
+        Ok(None) => {}
+        Err(error) => shared.set_status(failed(error)),
     }
 }
 
@@ -1515,21 +1625,52 @@ mod tests {
             );
         }
     }
-    use crate::vault::{KEY_BYTES, StoreKey, VaultError};
+    use crate::credentials::{CredentialSource, Credentials, PromptError, SecretPrompt};
+    use crate::passphrase::KdfParams;
+    use crate::vault::VaultError;
     use persephone_contracts::{SasEmoji, VerificationView};
 
-    /// Keeps the key as it is: enough for a profile in a temporary folder.
+    /// Keeps the sealed key as it is: enough for a profile in a temporary
+    /// folder.
     struct Plain;
 
     impl KeyProtector for Plain {
-        fn protect(&self, key: &StoreKey) -> Result<Vec<u8>, VaultError> {
-            Ok(key.to_vec())
+        fn protect(&self, data: &[u8]) -> Result<Vec<u8>, VaultError> {
+            Ok(data.to_vec())
         }
 
-        fn unprotect(&self, blob: &[u8]) -> Result<StoreKey, VaultError> {
-            let bytes: [u8; KEY_BYTES] = blob.try_into().map_err(|_| VaultError::Failed)?;
-            Ok(Zeroizing::new(bytes))
+        fn unprotect(&self, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+            Ok(Zeroizing::new(blob.to_vec()))
         }
+    }
+
+    /// Answers every passphrase prompt with the same passphrase.
+    struct Answer;
+
+    impl CredentialSource for Answer {
+        fn ask(&self, _: &str) -> Result<Credentials, PromptError> {
+            Err(PromptError::Unsupported)
+        }
+
+        fn ask_secret(&self, _: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
+            Ok(Zeroizing::new("correct horse battery".into()))
+        }
+    }
+
+    fn unlock() -> Unlock {
+        Unlock {
+            source: Arc::new(Answer),
+            kdf: KdfParams::new(64, 1, 1).unwrap(),
+            backoff: Duration::ZERO,
+        }
+    }
+
+    fn settled(session: &Session) -> StoreState {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while session.state() == StoreState::Unlocking && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        session.state()
     }
 
     /// GIVEN a write meant for the session before a lock WHEN it arrives
@@ -1538,7 +1679,7 @@ mod tests {
     #[test]
     fn given_a_lock_then_writes_for_the_old_session_are_refused() {
         let dir = tempfile::TempDir::new().unwrap();
-        let session = Session::open(dir.path().into(), Box::new(Plain));
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
         let old = session.shared.open_generation().expect("open");
         assert!(
             session
@@ -1559,7 +1700,8 @@ mod tests {
         assert_eq!(session.security_status(), SecurityStatus::unknown());
         assert!(guard(&session.shared.security).command.is_none());
 
-        assert_eq!(session.unlock(), StoreState::Protected);
+        assert_eq!(session.unlock(), StoreState::Unlocking);
+        assert_eq!(settled(&session), StoreState::Protected);
         let new = session.shared.open_generation().expect("open again");
         assert_ne!(new, old);
         assert_eq!(

@@ -9,7 +9,8 @@
 //! The same holds for encryption secrets (ADR-0005): the account password
 //! asked again to set up cross-signing and the recovery key are entered in the
 //! core's own dialog, and a new recovery key is shown in a native window,
-//! never in the page.
+//! never in the page. So is the profile passphrase (ADR-0006), and the
+//! warning that confirms a profile reset.
 
 use zeroize::Zeroizing;
 
@@ -45,6 +46,26 @@ pub enum SecretPrompt<'a> {
     Password { user_id: &'a str, host: &'a str },
     /// The recovery key (or its passphrase), to verify this device.
     RecoveryKey { user_id: &'a str },
+    /// The passphrase that opens this computer's profile; `retry` after a
+    /// wrong entry.
+    Passphrase { retry: bool },
+    /// A new profile passphrase.
+    NewPassphrase(NewPassphrase),
+}
+
+/// Which step of choosing a new profile passphrase a prompt is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewPassphrase {
+    /// A new profile.
+    Choose,
+    /// A profile from before passphrases (ADR-0006).
+    Upgrade,
+    /// The same passphrase again.
+    Confirm,
+    /// The last entry was shorter than the minimum.
+    TooShort,
+    /// The two entries differed.
+    Mismatch,
 }
 
 /// Asks the user for credentials and secrets in the core's own windows.
@@ -60,6 +81,12 @@ pub trait CredentialSource: Send + Sync {
     /// Shows a new recovery key so the user can save it. Unsupported unless a
     /// source provides it; the key is never kept.
     fn show_recovery_key(&self, _user_id: &str, _key: &str) -> Result<(), PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
+    /// Asks whether to delete this computer's profile. `Ok(true)` only for an
+    /// explicit yes. Unsupported unless a source provides it.
+    fn confirm_reset(&self) -> Result<bool, PromptError> {
         Err(PromptError::Unsupported)
     }
 }
@@ -118,7 +145,7 @@ pub mod dev {
         CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, PromptError,
         SecretPrompt, checked_secret,
     };
-    use std::path::{Component, PathBuf};
+    use std::path::{Component, Path, PathBuf};
     use zeroize::Zeroizing;
 
     const MAX_PROFILE_BYTES: u64 = 64 * 1024;
@@ -134,6 +161,7 @@ pub mod dev {
     pub struct HarnessProfile {
         path: PathBuf,
         recovery_file: Option<PathBuf>,
+        passphrase_file: Option<PathBuf>,
     }
 
     impl HarnessProfile {
@@ -141,7 +169,16 @@ pub mod dev {
             Self {
                 path,
                 recovery_file: None,
+                passphrase_file: None,
             }
+        }
+
+        /// Answers the profile passphrase prompts from `path` (its trimmed
+        /// contents), under the same `.local` rule as the recovery file. Without
+        /// it, those prompts and the reset warning use the native windows.
+        pub fn with_passphrase_file(mut self, path: PathBuf) -> Self {
+            self.passphrase_file = Some(path);
+            self
         }
 
         /// Shows and reads recovery keys through `path` instead of a window,
@@ -152,36 +189,56 @@ pub mod dev {
             self
         }
 
-        /// The recovery-key file, resolved: it must stay inside the `.local`
-        /// directory its path names once `..` and links are followed, and an
-        /// existing one must be a plain file, not a link.
+        /// The recovery-key file, resolved by [`local_file`].
         fn recovery_file(&self) -> Result<PathBuf, PromptError> {
-            let path = self
-                .recovery_file
-                .as_ref()
-                .ok_or(PromptError::Unsupported)?;
-            let parts: Vec<Component> = path.components().collect();
-            let local_at = parts
-                .iter()
-                .position(|part| *part == Component::Normal(".local".as_ref()))
-                .ok_or(PromptError::Unsupported)?;
-            let local: PathBuf = parts[..=local_at].iter().collect();
-            let local = std::fs::canonicalize(local).map_err(|_| PromptError::Unsupported)?;
-            let name = path.file_name().ok_or(PromptError::Unsupported)?;
-            let parent = path.parent().ok_or(PromptError::Unsupported)?;
-            let parent = std::fs::canonicalize(parent).map_err(|_| PromptError::Unsupported)?;
-            if !parent.starts_with(&local) {
-                return Err(PromptError::Unsupported);
-            }
-            let resolved = parent.join(name);
-            match std::fs::symlink_metadata(&resolved) {
-                Ok(meta) if meta.file_type().is_file() => Ok(resolved),
-                Ok(_) => Err(PromptError::Unsupported),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(resolved),
-                Err(_) => Err(PromptError::Unsupported),
-            }
+            local_file(
+                self.recovery_file
+                    .as_ref()
+                    .ok_or(PromptError::Unsupported)?,
+            )
         }
 
+        fn read_secret(path: &Path, max: usize) -> Result<Zeroizing<String>, PromptError> {
+            use std::io::Read;
+            let mut bytes = Zeroizing::new(Vec::new());
+            std::fs::File::open(path)
+                .and_then(|file| {
+                    file.take(MAX_RECOVERY_FILE_BYTES + 1)
+                        .read_to_end(&mut bytes)
+                })
+                .map_err(|_| PromptError::Failed)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| PromptError::Invalid)?;
+            checked_secret(Zeroizing::new(text.trim().to_owned()), max)
+        }
+    }
+
+    /// `path`, resolved: it must stay inside the `.local` directory it names
+    /// once `..` and links are followed, and an existing one must be a plain
+    /// file, not a link.
+    fn local_file(path: &Path) -> Result<PathBuf, PromptError> {
+        let parts: Vec<Component> = path.components().collect();
+        let local_at = parts
+            .iter()
+            .position(|part| *part == Component::Normal(".local".as_ref()))
+            .ok_or(PromptError::Unsupported)?;
+        let local: PathBuf = parts[..=local_at].iter().collect();
+        let local = std::fs::canonicalize(local).map_err(|_| PromptError::Unsupported)?;
+        let name = path.file_name().ok_or(PromptError::Unsupported)?;
+        let parent = path.parent().ok_or(PromptError::Unsupported)?;
+        let parent = std::fs::canonicalize(parent).map_err(|_| PromptError::Unsupported)?;
+        if !parent.starts_with(&local) {
+            return Err(PromptError::Unsupported);
+        }
+        let resolved = parent.join(name);
+        match std::fs::symlink_metadata(&resolved) {
+            Ok(meta) if meta.file_type().is_file() => Ok(resolved),
+            Ok(_) => Err(PromptError::Unsupported),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(resolved),
+            Err(_) => Err(PromptError::Unsupported),
+        }
+    }
+
+    impl HarnessProfile {
         fn entry(&self, host: &str) -> Result<Entry, PromptError> {
             use std::io::Read;
             let mut bytes = Zeroizing::new(Vec::new());
@@ -226,21 +283,19 @@ pub mod dev {
                     MAX_PASSWORD_CHARS,
                 ),
                 SecretPrompt::RecoveryKey { .. } => {
-                    use std::io::Read;
-                    let mut bytes = Zeroizing::new(Vec::new());
-                    std::fs::File::open(self.recovery_file()?)
-                        .and_then(|file| {
-                            file.take(MAX_RECOVERY_FILE_BYTES + 1)
-                                .read_to_end(&mut bytes)
-                        })
-                        .map_err(|_| PromptError::Failed)?;
-                    let text = std::str::from_utf8(&bytes).map_err(|_| PromptError::Invalid)?;
-                    checked_secret(
-                        Zeroizing::new(text.trim().to_owned()),
-                        MAX_RECOVERY_KEY_CHARS,
-                    )
+                    Self::read_secret(&self.recovery_file()?, MAX_RECOVERY_KEY_CHARS)
+                }
+                SecretPrompt::Passphrase { .. } | SecretPrompt::NewPassphrase(_) => {
+                    match &self.passphrase_file {
+                        Some(path) => Self::read_secret(&local_file(path)?, MAX_PASSWORD_CHARS),
+                        None => super::platform().ask_secret(prompt),
+                    }
                 }
             }
+        }
+
+        fn confirm_reset(&self) -> Result<bool, PromptError> {
+            super::platform().confirm_reset()
         }
 
         /// Writes the key to the recovery file, readable by its owner only on
@@ -272,9 +327,10 @@ pub mod dev {
 #[cfg(windows)]
 mod windows {
     use super::{
-        CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, PromptError,
-        SecretPrompt, checked_secret, from_wide,
+        CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, NewPassphrase,
+        PromptError, SecretPrompt, checked_secret, from_wide,
     };
+    use crate::passphrase::MIN_PASSPHRASE_CHARS;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::{
         Foundation::{ERROR_CANCELLED, ERROR_INSUFFICIENT_BUFFER, GetLastError},
@@ -285,7 +341,8 @@ mod windows {
         },
         System::Com::CoTaskMemFree,
         UI::WindowsAndMessaging::{
-            IDOK, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
+            IDNO, IDOK, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
+            MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW,
         },
     };
     use zeroize::Zeroizing;
@@ -455,8 +512,85 @@ mod windows {
                     .password,
                     MAX_RECOVERY_KEY_CHARS,
                 ),
+                SecretPrompt::Passphrase { retry } => (
+                    prompt(
+                        "Unlock Persephone",
+                        if retry {
+                            "That passphrase was not correct. Type the passphrase for \
+                             Persephone on this computer in the password field. Only \
+                             Persephone's core sees it."
+                        } else {
+                            "Type the passphrase for Persephone on this computer in the \
+                             password field. Only Persephone's core sees it."
+                        },
+                        Some("Profile passphrase"),
+                    )?
+                    .password,
+                    MAX_PASSWORD_CHARS,
+                ),
+                SecretPrompt::NewPassphrase(step) => {
+                    let choose = format!(
+                        "Choose a passphrase of at least {MIN_PASSPHRASE_CHARS} characters \
+                         and type it in the password field. Persephone asks for it each \
+                         time it opens. If you forget it, you must reset this computer's \
+                         profile and sign in again; encrypted history comes back only from \
+                         key backup."
+                    );
+                    let message = match step {
+                        NewPassphrase::Choose => choose,
+                        NewPassphrase::Upgrade => format!(
+                            "Persephone now protects this computer's profile with a \
+                             passphrase. {choose}"
+                        ),
+                        NewPassphrase::Confirm => {
+                            "Type the same passphrase again to confirm it.".to_owned()
+                        }
+                        NewPassphrase::TooShort => {
+                            format!("That passphrase was too short. {choose}")
+                        }
+                        NewPassphrase::Mismatch => {
+                            format!("The two passphrases were different. {choose}")
+                        }
+                    };
+                    (
+                        prompt(
+                            "Protect Persephone on this computer",
+                            &message,
+                            Some("New profile passphrase"),
+                        )?
+                        .password,
+                        MAX_PASSWORD_CHARS,
+                    )
+                }
             };
             checked_secret(secret, max)
+        }
+
+        fn confirm_reset(&self) -> Result<bool, PromptError> {
+            let caption = wide("Reset Persephone on this computer?");
+            let text = wide(
+                "This deletes Persephone's profile on this computer: its messages, \
+                 keys and sign-in. It cannot be undone.\n\n\
+                 Your account stays on the server. This device stays signed in there \
+                 until you remove it from another client. Encrypted history comes back \
+                 only from key backup, with your recovery key.\n\n\
+                 Delete the profile and choose a new passphrase?",
+            );
+            // SAFETY: both strings are NUL-terminated and live for the call.
+            // "No" is the default button.
+            let answer = unsafe {
+                MessageBoxW(
+                    null_mut(),
+                    text.as_ptr(),
+                    caption.as_ptr(),
+                    MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+                )
+            };
+            match answer {
+                IDYES => Ok(true),
+                IDNO => Ok(false),
+                _ => Err(PromptError::Failed),
+            }
         }
 
         fn show_recovery_key(&self, user_id: &str, key: &str) -> Result<(), PromptError> {

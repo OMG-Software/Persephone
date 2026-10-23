@@ -24,6 +24,7 @@ pub mod credentials;
 pub mod homeserver;
 pub mod matrix_views;
 pub mod outbox;
+pub mod passphrase;
 pub mod security;
 pub mod sending;
 pub mod session;
@@ -311,6 +312,14 @@ impl Core {
             Call::UnlockSession {} => {
                 let before = self.session.state();
                 let state = self.session.unlock();
+                if state != before {
+                    self.hub.announce_session_change();
+                }
+                ok(&state)
+            }
+            Call::ResetProfile {} => {
+                let before = self.session.state();
+                let state = self.session.reset_profile();
                 if state != before {
                     self.hub.announce_session_change();
                 }

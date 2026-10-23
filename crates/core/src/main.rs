@@ -19,7 +19,14 @@
 //!   integrated.
 
 use persephone_contracts::StoreState;
-use persephone_core::{Core, ServeEnd, serve, session::Session, vault};
+use persephone_core::{
+    Core, ServeEnd,
+    credentials::{self, CredentialSource},
+    passphrase::Unlock,
+    serve,
+    session::Session,
+    vault,
+};
 #[cfg(windows)]
 use std::time::Instant;
 use std::{
@@ -27,7 +34,7 @@ use std::{
     ffi::OsString,
     path::PathBuf,
     process::{Command, ExitCode, Stdio},
-    sync::{Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::Duration,
 };
@@ -98,8 +105,26 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let source: Arc<dyn CredentialSource> = Arc::from(credentials::platform());
+    #[cfg(feature = "dev-disposable-servers")]
+    let source: Arc<dyn CredentialSource> = match env::var_os("PERSEPHONE_DEV_PROFILE") {
+        Some(path) => {
+            eprintln!("persephone: DEVELOPMENT BUILD: credentials come from the harness profile");
+            let mut harness = credentials::dev::HarnessProfile::new(path.into());
+            if let Some(file) = env::var_os("PERSEPHONE_DEV_RECOVERY_FILE") {
+                harness = harness.with_recovery_file(file.into());
+            }
+            if let Some(file) = env::var_os("PERSEPHONE_DEV_PASSPHRASE_FILE") {
+                harness = harness.with_passphrase_file(file.into());
+            }
+            Arc::new(harness)
+        }
+        None => source,
+    };
+    // The passphrase is asked here, in the core's own window, before the UI
+    // starts (ADR-0006).
     let session = match options.profile {
-        Some(dir) => Session::open(dir, vault::platform()),
+        Some(dir) => Session::open(dir, vault::platform(), Unlock::new(source.clone())),
         None => Session::not_configured(),
     };
     let state = session.state();
@@ -107,20 +132,9 @@ fn main() -> ExitCode {
         // A code only: no path or vault detail.
         eprintln!("persephone: local store locked: {state:?}");
     }
-    let core = Core::default();
-    #[cfg(feature = "dev-disposable-servers")]
-    let core = match env::var_os("PERSEPHONE_DEV_PROFILE") {
-        Some(path) => {
-            eprintln!("persephone: DEVELOPMENT BUILD: credentials come from the harness profile");
-            let mut source = persephone_core::credentials::dev::HarnessProfile::new(path.into());
-            if let Some(file) = env::var_os("PERSEPHONE_DEV_RECOVERY_FILE") {
-                source = source.with_recovery_file(file.into());
-            }
-            core.with_credentials(std::sync::Arc::new(source))
-        }
-        None => core,
-    };
-    let core = core.with_session(session);
+    let core = Core::default()
+        .with_credentials(source)
+        .with_session(session);
     let code = loop {
         match run_ui(&core, options.demo_live) {
             Run::Exit(code) => break code,
@@ -139,6 +153,11 @@ fn main() -> ExitCode {
         }
         StoreState::Locking => {
             eprintln!("persephone: admitted work did not finish; stores were not closed cleanly");
+            ExitCode::from(1)
+        }
+        StoreState::Unlocking => {
+            // The worker may be opening the stores; the process ends under it.
+            eprintln!("persephone: exiting while an unlock was in progress");
             ExitCode::from(1)
         }
         _ => code,

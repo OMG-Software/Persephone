@@ -162,6 +162,34 @@ The macOS and Linux CI jobs ([development guide](../development.md#continuous-in
 - **Native code.** `aws-lc-sys` and `libsqlite3-sys` build with each image's C compiler (GCC on Linux, Apple Clang on macOS). The Fedora 44 container, which passed, installed no CMake, NASM or Go (only the `cmake-filesystem` directory package came in as a dependency). So the `aws-lc-sys` build there needed only a C toolchain. Hosted runners preinstall more tools, so their jobs do not show this.
 - **System libraries not reviewed.** Linux jobs link the distribution's WebKitGTK 4.1, GTK 3 and libsoup 3 (for example `webkit2gtk4.1-devel 2.54.1` on Fedora 44). Arch installs the current rolling release, so its versions change from run to run. Their versions, licences and advisories are not part of this review. The macOS job links only system frameworks.
 
+## Profile passphrase (23 October 2026)
+
+[ADR-0006](../adr/0006-require-an-unlock-secret-for-the-local-profile.md) adds two direct dependencies to `persephone-core`. The owner accepted `argon2` on 23 October 2026. The UI process gains neither.
+
+| Crate | Features | Lockfile | Compiled for Windows x64 |
+| --- | --- | --- | --- |
+| `argon2 =0.6.0` (RustCrypto, published 27 August 2026, not yanked) | `default-features = false`, `alloc`, `zeroize` | New | Yes |
+| `chacha20poly1305 =0.11.0` | `default-features = false`, `alloc`, `zeroize` | Already present (matrix-sdk-store-encryption, `alloc`) | Yes, as before; `zeroize` is added by feature unification |
+
+`Cargo.lock` gains four entries: `argon2 0.6.0`, `blake2 0.11.0`, `password-hash 0.6.1` and `phc 0.6.1`. Only `argon2` and `blake2` are compiled. `password-hash` and `phc` are optional dependencies of `argon2` that the chosen features leave off: `cargo tree --locked -p persephone-core -e normal --target x86_64-pc-windows-msvc -i password-hash` prints nothing. `argon2`'s other dependencies (`base64ct 1.8.3`, `cpufeatures 0.3.1`, `digest 0.11.3`) were already in the lockfile. New `Cargo.lock` SHA-256: `16664f13…b451`. Before: `946730d6…2c35`.
+
+Review notes:
+
+- To our knowledge, `argon2` has no independent audit. It is pure Rust and has no build script or native code.
+- `argon2::hash_password_into` frees its working memory without zeroing it. The core therefore passes its own zeroizing buffer to `hash_password_into_with_memory` ([`passphrase.rs`](../../crates/core/src/passphrase.rs)).
+- The `parallel` feature (`rayon`) is off, so the four lanes run one after another.
+
+### OSV query, 23 October 2026
+
+`python tools/audit_dependencies.py --output .local/runs/unlock-secret/rust-advisories.json` (exit 0) queried 644 of 644 crate/version pairs in 7 batches and found 8 advisories. The committed [`rust-advisories.json`](rust-advisories.json) (19 October) is not replaced by this run. None is for `argon2`, `blake2`, `password-hash` or `phc`. Compared with 19 October:
+
+| Crate | Advisory | Relation to this change |
+| --- | --- | --- |
+| `ctutils 0.4.3` | RUSTSEC-2026-0385, non-constant-time mask generation and `u128` comparisons (published 23 October 2026) | Already compiled through `digest 0.11.3` for `vodozemac`. `blake2` adds a second path to it. The passphrase check runs on a local file that an attacker can already test offline, so a timing difference gives no extra access there. Not reviewed further. |
+| `rustls-webpki 0.103.15` | RUSTSEC-2026-0382, may accept distrusted intermediates | Not related. Affects TLS certificate checks; needs its own review. |
+| `webpki-root-certs 1.0.9` | RUSTSEC-2026-0383, bundled roots trust distrusted emSign intermediates | Not related. Same issue as the row above. |
+| `proc-macro-error 1.0.4`, `glib 0.18.5` | RUSTSEC-2024-0370, RUSTSEC-2024-0429 | Not related. `glib` is recorded above. `proc-macro-error` was not in the 19 October result. |
+
 ## Historical per-package inventory
 
 Before the repository restructure, five separate Rust lockfiles were audited: matrix (412 registry entries), storage (260), resources (0), Windows sandbox (2), and contracts (20), for 418 distinct crate/version pairs after deduplication. Those counts and package-specific notes describe that earlier workspace shape. They are not the scope of the current single-lockfile result above, and the current JSON must not be interpreted as five separate lockfile reports.

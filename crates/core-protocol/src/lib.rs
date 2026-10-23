@@ -43,9 +43,15 @@ pub enum Call {
     /// Close the protected session: refuse new work, wait for admitted work,
     /// then close the stores. Replies with the resulting store state.
     LockSession {},
-    /// Reopen the protected session with the key from the OS vault. Replies
-    /// with the resulting store state.
+    /// Reopen the protected session. The core asks for the profile passphrase
+    /// in its own window; nothing secret crosses this channel. Replies at once
+    /// with the store state (`unlocking` while the prompt is open); the
+    /// outcome arrives as [`Event::SessionChanged`].
     UnlockSession {},
+    /// Delete this computer's profile after a forgotten passphrase. Only asks:
+    /// the core shows its own warning, and deletes nothing without an explicit
+    /// yes there. Replies like `UnlockSession`.
+    ResetProfile {},
     /// Sign in to this homeserver. The core asks for the username and password
     /// itself, in a native prompt; nothing secret crosses this channel. Replies
     /// at once with the account status; the outcome arrives as
@@ -352,6 +358,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"timeline_page","room_id":"!r:s","cursor":null,"x":1}}"#,
             br#"{"id":1,"call":{"command":"lock_session","force":true}}"#,
             br#"{"id":1,"call":{"command":"unlock_session","key":"00"}}"#,
+            br#"{"id":1,"call":{"command":"unlock_session","passphrase":"x"}}"#,
+            br#"{"id":1,"call":{"command":"reset_profile","confirm":true}}"#,
             br#"{"id":1,"call":{"command":"sign_in"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,

@@ -210,9 +210,19 @@ async fn lock_session(core: State<'_, CoreLink>) -> Result<StoreState, String> {
     relay(core.inner(), Call::LockSession {}).await
 }
 
+/// Asks the core to unlock. The core asks for the passphrase in its own
+/// window; the reply is `unlocking` until the result arrives as a session
+/// change.
 #[tauri::command]
 async fn unlock_session(core: State<'_, CoreLink>) -> Result<StoreState, String> {
     relay(core.inner(), Call::UnlockSession {}).await
+}
+
+/// Asks the core to reset a profile whose passphrase was forgotten. The core
+/// shows its own warning and deletes nothing without a yes there.
+#[tauri::command]
+async fn reset_profile(core: State<'_, CoreLink>) -> Result<StoreState, String> {
+    relay(core.inner(), Call::ResetProfile {}).await
 }
 
 /// Starts signing in. Only the homeserver URL crosses: the core asks for the
@@ -407,6 +417,7 @@ pub fn configure<R: Runtime>(
             watch_session,
             lock_session,
             unlock_session,
+            reset_profile,
             sign_in,
             sign_out,
             security_status,

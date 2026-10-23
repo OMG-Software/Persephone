@@ -52,6 +52,48 @@ header .confirm + .session {
   margin-left: 0;
 }
 
+/* Help text for a header button, shown on hover and keyboard focus. */
+.tip-anchor {
+  position: relative;
+  display: inline-block;
+}
+
+.tip {
+  position: absolute;
+  top: calc(100% + 0.375rem);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  max-width: min(22rem, calc(100vw - 2rem));
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #354154;
+  border-radius: 0.5rem;
+  background: #182231;
+  color: #e6edf7;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  visibility: hidden;
+}
+
+/* Bridges the gap above the tip, so the pointer can move onto it. */
+.tip::before {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  left: 0;
+  height: 0.5rem;
+}
+
+.tip-anchor:hover .tip,
+.tip-anchor button:focus-visible + .tip {
+  visibility: visible;
+}
+
+.tip-anchor .tip.dismissed {
+  visibility: hidden;
+}
+
 section {
   margin-top: 2rem;
 }

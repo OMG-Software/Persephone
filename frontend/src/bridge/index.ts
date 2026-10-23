@@ -78,8 +78,21 @@ export function lockSession(): Promise<StoreState> {
   return invoke<StoreState>('lock_session');
 }
 
+/**
+ * Asks the core to unlock. The core asks for the profile passphrase in its own
+ * window; the reply is `unlocking` and the outcome arrives as a session change.
+ */
 export function unlockSession(): Promise<StoreState> {
   return invoke<StoreState>('unlock_session');
+}
+
+/**
+ * Asks the core to reset a profile whose passphrase was forgotten. The core
+ * shows its own warning and deletes nothing without a yes there; the reply is
+ * `unlocking` and the outcome arrives as a session change.
+ */
+export function resetProfile(): Promise<StoreState> {
+  return invoke<StoreState>('reset_profile');
 }
 
 /**

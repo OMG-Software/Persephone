@@ -11,7 +11,7 @@ use persephone_contracts::{
 use persephone_core::{
     Core,
     credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
-    session::{AdmissionError, Session},
+    session::AdmissionError,
 };
 use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
 use serde_json::{Value, json};
@@ -32,7 +32,6 @@ use wiremock::{
 use zeroize::Zeroizing;
 
 mod common;
-use common::Tagged;
 
 const ROOM: &str = "!room:synthetic.test";
 const USER: &str = "@alice:synthetic.test";
@@ -468,7 +467,7 @@ impl Homeserver {
 fn make_core(dir: &Path, source: Arc<dyn CredentialSource>) -> Core {
     Core::default()
         .with_credentials(source)
-        .with_session(Session::open(dir.to_path_buf(), Box::new(Tagged(1))))
+        .with_session(common::open_session(dir))
 }
 
 fn call(core: &Core, call: Call) -> Outcome {
@@ -861,7 +860,10 @@ fn given_a_lock_while_the_prompt_is_open_then_the_attempt_is_abandoned_cleanly()
     assert_eq!(server.requests_to("/_matrix/client/v3/login"), 0);
 
     let state: StoreState = value(call(&core, Call::UnlockSession {}));
-    assert_eq!(state, StoreState::Protected);
+    assert_eq!(state, StoreState::Unlocking);
+    wait_for("the unlock", || {
+        core.session().state() == StoreState::Protected
+    });
     assert_eq!(sign_in(&core, &server.uri()).state, AccountState::SigningIn);
     wait_for("a new prompt", || held.asked.load(Ordering::SeqCst) == 2);
     wait_for("sign-in", || {
@@ -889,11 +891,10 @@ fn given_a_lock_and_unlock_while_the_prompt_is_open_then_the_old_attempt_never_s
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::Locked);
     let state: StoreState = value(call(&core, Call::UnlockSession {}));
-    assert_eq!(
-        state,
-        StoreState::Protected,
-        "unlocked before the prompt returns"
-    );
+    assert_eq!(state, StoreState::Unlocking);
+    wait_for("the unlock", || {
+        core.session().state() == StoreState::Protected
+    });
     *held.released.lock().unwrap() = true;
     held.wake.notify_all();
     wait_for("the attempt to end", || {
@@ -940,7 +941,7 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
             (status.state, status.error),
             (AccountState::SignedOut, None)
         );
-        assert!(!dir.path().join("store-key.v1").exists(), "key deleted");
+        assert!(!dir.path().join("store-key.v2").exists(), "key deleted");
         assert!(
             dir.path().join("signed-out").exists() && dir.path().join("store").exists(),
             "store files are left for the next start"
@@ -996,7 +997,7 @@ fn given_the_server_cannot_revoke_then_sign_out_still_wipes_and_warns() {
         Some(SignInError::SessionNotRevoked)
     );
     assert!(
-        !dir.path().join("store-key.v1").exists(),
+        !dir.path().join("store-key.v2").exists(),
         "key deleted anyway"
     );
 }
@@ -1007,7 +1008,7 @@ fn given_no_account_then_sign_out_changes_nothing() {
     let core = make_core(dir.path(), Fixed::new(Ok(())));
     let state: StoreState = value(call(&core, Call::SignOut {}));
     assert_eq!(state, StoreState::Protected);
-    assert!(dir.path().join("store-key.v1").exists());
+    assert!(dir.path().join("store-key.v2").exists());
 }
 
 /// GIVEN every lease in use WHEN signing out THEN the sign-out waits for one;
@@ -1028,7 +1029,7 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
         Err(AdmissionError::Saturated)
     );
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
-    assert!(dir.path().join("store-key.v1").exists(), "nothing deleted");
+    assert!(dir.path().join("store-key.v2").exists(), "nothing deleted");
     assert_eq!(
         core.session().account_status().state,
         AccountState::SignedIn
@@ -1045,7 +1046,7 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
         );
     });
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
-    assert!(!dir.path().join("store-key.v1").exists());
+    assert!(!dir.path().join("store-key.v2").exists());
 }
 
 /// GIVEN a signed-in profile whose sign-out stopped after recording its
@@ -1107,12 +1108,12 @@ fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_e
             "intent recorded before the answer"
         );
         assert!(
-            dir.path().join("store-key.v1").exists(),
+            dir.path().join("store-key.v2").exists(),
             "key deleted only after the answer"
         );
         assert_eq!(signing_out.join().unwrap(), Ok(StoreState::RestartRequired));
     });
-    assert!(!dir.path().join("store-key.v1").exists());
+    assert!(!dir.path().join("store-key.v2").exists());
 }
 
 /// GIVEN a signed-in core whose UI connection ended (a failed window) WHEN
@@ -1541,7 +1542,7 @@ fn given_a_lock_while_the_password_prompt_is_open_then_the_answer_is_dropped() {
     });
     let core = Core::default()
         .with_credentials(held.clone())
-        .with_session(Session::open(dir.path().into(), Box::new(Tagged(1))));
+        .with_session(common::open_session(dir.path()));
     sign_in(&core, &server.uri());
     wait_for("sign-in", || {
         core.session().account_status().state == AccountState::SignedIn

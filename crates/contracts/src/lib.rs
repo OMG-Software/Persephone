@@ -132,13 +132,17 @@ pub struct RoomList {
 pub enum StoreState {
     /// No profile was given; nothing is stored.
     NotConfigured,
-    /// The store is open with its key from the OS vault.
+    /// The store is open with its key, unsealed by the profile passphrase.
     Protected,
     /// Locked on request; the stores are closed.
     Locked,
     /// A lock was requested and new work is refused, but admitted work has not
     /// finished yet; the stores are still open. Locking again resumes the wait.
     Locking,
+    /// The core is asking for the passphrase (or confirming a reset) in its
+    /// own window and opening the stores. The result follows as a session
+    /// change.
+    Unlocking,
     /// The stores did not close cleanly while locking. The session stays
     /// locked until the application restarts.
     LockFailed,
@@ -147,8 +151,11 @@ pub enum StoreState {
     RestartRequired,
     /// A store exists but its key does not; the store was left untouched.
     KeyMissing,
-    /// The key exists but the OS vault could not unwrap it.
+    /// The key exists but the OS vault could not unwrap it, or it is
+    /// malformed.
     KeyUnreadable,
+    /// The passphrase was wrong too many times; Unlock may try again.
+    SecretRejected,
     /// The store refused the key.
     KeyRejected,
     /// Another process holds the profile.

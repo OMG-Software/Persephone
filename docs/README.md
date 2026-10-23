@@ -37,6 +37,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Encrypted sending](evidence/encrypted-sending.md): outbox with per-room order and same-transaction retries, consent before unencrypted sends; live two-account runs on Merovingian and Synapse with an unsigned-device control.
 - [Own-device verification](evidence/own-device-verification.md): emoji comparison with another device of the same account, in both directions and with a mismatch; live runs on Merovingian and Synapse, and why a request from an unknown device is lost.
 - [Session owner](evidence/session-owner.md): lock and unlock while running; leases, generation fencing, retained ownership on timeout; real-app walkthrough.
+- [Unlock secret](evidence/unlock-secret.md): profile passphrase with Argon2id inside DPAPI, upgrade of DPAPI-only profiles, wrong-entry limit, native-confirmed reset, Lock help text.
 - [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.
 - [Live room updates](evidence/live-updates.md): content-free, coalescing core events for subscribed rooms; reply routing; real-app walkthrough including page reloads.
 - [Web view to host IPC size](evidence/ipc-transport.md): measured 9× host allocation for page payloads up to 256 MiB; decision pending.
