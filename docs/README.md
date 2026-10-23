@@ -18,6 +18,7 @@
 - [ADR-0003](adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md): WebAssembly decoder with no networking capability, inside OS containment.
 - [ADR-0004](adr/0004-separate-the-key-holding-core-from-the-web-view-process.md): the key-holding core runs in its own process; the Tauri process is a keyless UI relay.
 - [ADR-0005](adr/0005-share-room-keys-only-with-cross-signed-devices.md): room keys only for cross-signed devices, messages shown only from cross-signed devices, confirmed sends in unencrypted rooms, secrets in the core's windows.
+- [ADR-0006](adr/0006-require-an-unlock-secret-for-the-local-profile.md): a profile passphrase (Argon2id, inside DPAPI) to open the local profile, upgrade of DPAPI-only profiles, and a reset confirmed in the core's window.
 
 ## Evidence
 

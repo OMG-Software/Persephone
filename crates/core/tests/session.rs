@@ -458,3 +458,50 @@ fn given_an_open_or_missing_profile_then_reset_is_refused() {
         StoreState::NotConfigured
     );
 }
+
+/// Answers the two prompts that create a profile, then panics once.
+struct PanicsOnce {
+    asked: Mutex<usize>,
+}
+
+impl CredentialSource for PanicsOnce {
+    fn ask(&self, _: &str) -> Result<Credentials, PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
+    fn ask_secret(&self, _: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
+        let asked = {
+            let mut asked = self.asked.lock().unwrap();
+            *asked += 1;
+            *asked
+        };
+        if asked == 3 {
+            panic!("synthetic prompt failure");
+        }
+        Ok(Zeroizing::new(PASSPHRASE.into()))
+    }
+}
+
+/// GIVEN an Unlock whose prompt panics WHEN the worker unwinds THEN the
+/// session ends `store_unavailable`, not `unlocking`, the profile is
+/// released, and a later Unlock opens it.
+#[test]
+fn given_a_panicking_prompt_at_unlock_then_the_session_does_not_stay_unlocking() {
+    let dir = TempDir::new().unwrap();
+    let session = open_with(
+        dir.path(),
+        Arc::new(PanicsOnce {
+            asked: Mutex::new(0),
+        }),
+    );
+    write_marker(&session);
+    assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
+
+    assert_eq!(session.unlock(), StoreState::Unlocking);
+    assert_eq!(settled(&session), StoreState::StoreUnavailable);
+    assert_eq!(session.admit().err(), Some(AdmissionError::Locked));
+
+    assert_eq!(session.unlock(), StoreState::Unlocking);
+    assert_eq!(settled(&session), StoreState::Protected);
+    assert_eq!(read_marker(&session).as_deref(), Some(MARKER));
+}

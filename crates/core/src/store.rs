@@ -10,7 +10,7 @@
 //! | --- | --- |
 //! | New (no key, empty store directory) | Passphrase chosen; key created, sealed, wrapped and read back; then stores created |
 //! | Key present | Passphrase asked; key unsealed; the stores must accept it |
-//! | Only a key from before ADR-0006 | Stores opened with it; passphrase chosen; sealed key saved and read back; old key deleted |
+//! | Only a key from before ADR-0006 | Passphrase chosen; key sealed, saved and read back; stores opened; old key deleted |
 //! | Store present, key absent | `KeyMissing`; no new key is made |
 //! | Prompt cancelled or not shown | `Locked`; nothing written |
 //! | [`MAX_ATTEMPTS`] wrong passphrases | `SecretRejected`; nothing written |
@@ -464,16 +464,16 @@ pub fn open(
         return remove_old_key(dir, stores);
     }
     if exists(&dir.join(OLD_KEY_FILE))? {
-        // The stores must accept the old key before it is sealed again.
+        // The stores are opened only after the sealed key is saved, so a
+        // cancelled or failed prompt leaves every store file untouched. If the
+        // stores then refuse the key, both files stay and the next open uses
+        // the sealed one, which fails the same way.
         let key = old_key(dir, protector)?;
+        let passphrase = choose_passphrase(unlock, NewPassphrase::Upgrade)?;
+        save_key(dir, protector, &key, &passphrase, unlock)?;
+        drop(passphrase);
         let stores = open_stores(&store_dir, &key, lock, unconfirmed_sign_out)?;
-        let saved = choose_passphrase(unlock, NewPassphrase::Upgrade)
-            .and_then(|passphrase| save_key(dir, protector, &key, &passphrase, unlock));
         drop(key);
-        if let Err(state) = saved {
-            stores.close();
-            return Err(state);
-        }
         return remove_old_key(dir, stores);
     }
     if has_entries(&store_dir)? {

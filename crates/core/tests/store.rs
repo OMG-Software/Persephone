@@ -437,11 +437,13 @@ fn given_a_cancelled_or_interrupted_upgrade_then_the_old_key_is_kept_until_it_co
     let dir = seeded(&protector);
     downgrade(dir.path(), &protector);
     let old = fs::read(dir.path().join(OLD_KEY_FILE)).unwrap();
+    let before = files(dir.path());
     let cancelled = unlock_with(Script::new([Err(PromptError::Cancelled)]));
     assert_eq!(
         store::open(dir.path(), &protector, &cancelled).err(),
         Some(StoreState::Locked)
     );
+    assert_eq!(files(dir.path()), before, "no store file is touched");
     assert_eq!(fs::read(dir.path().join(OLD_KEY_FILE)).unwrap(), old);
     assert!(!dir.path().join(KEY_FILE).exists(), "nothing sealed");
 

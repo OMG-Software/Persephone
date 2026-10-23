@@ -1415,7 +1415,9 @@ impl Session {
     /// Moves the session to `unlocking` and runs `open` on a worker thread
     /// without the transition lock, so an open prompt blocks no other call;
     /// `unlocking` refuses every other transition meanwhile. `None` from
-    /// `open` puts the session back in `previous`.
+    /// `open` puts the session back in `previous`. A panic in `open` (a
+    /// prompt, the vault or a store) ends in `store_unavailable`, closed and
+    /// retryable, instead of leaving the session `unlocking` for good.
     fn open_in_background(
         &self,
         dir: PathBuf,
@@ -1435,13 +1437,21 @@ impl Session {
         let unlock = self.unlock.clone();
         let spawned = std::thread::Builder::new()
             .name("core-unlock".into())
-            .spawn(move || match open(&dir, &*protector, &unlock, &shared) {
-                Some(opened) => finish_open(&shared, opened),
-                None => {
-                    lock(&shared).state = previous;
-                    if let Some(listener) = shared.listener() {
-                        listener.session_changed();
+            .spawn(move || {
+                // Anything `open` held (stores, the profile lock) is dropped
+                // while the panic unwinds, before the state is published.
+                let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    open(&dir, &*protector, &unlock, &shared)
+                }));
+                match opened {
+                    Ok(Some(opened)) => finish_open(&shared, opened),
+                    Ok(None) => {
+                        lock(&shared).state = previous;
+                        if let Some(listener) = shared.listener() {
+                            listener.session_changed();
+                        }
                     }
+                    Err(_) => finish_open(&shared, Err(StoreState::StoreUnavailable)),
                 }
             });
         if spawned.is_err() {
