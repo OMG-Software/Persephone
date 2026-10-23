@@ -3,6 +3,8 @@
 //!
 //! * Names and senders go through `views::project_name`; message bodies
 //!   through `views::project_body`.
+//! * Each item carries the event's `origin_server_ts`: the time the sender's
+//!   homeserver claims, unchecked. An event without a usable one has none.
 //! * Text messages (text, notice, emote) are shown as messages. Other
 //!   `m.room.message` types become an `unsupported` notice, so nothing
 //!   disappears. An encrypted event that cannot be shown becomes a notice
@@ -32,7 +34,7 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    NoticeKind, RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage,
+    NoticeKind, RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage, UnixMillis,
 };
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
@@ -75,11 +77,20 @@ fn joined_room(client: &Client, raw: &str) -> Result<matrix_sdk::Room, ErrorCode
 fn project(event: &TimelineEvent) -> Option<TimelineItem> {
     let event_id = event.event_id()?.to_string();
     let sender = project_name(event.sender()?.as_str());
+    // Read from the raw event, so an encrypted one has its time too. `UInt`
+    // is at most 2^53 - 1, which `UnixMillis` holds.
+    let origin_server_ts = event
+        .raw()
+        .get_field::<UInt>("origin_server_ts")
+        .ok()
+        .flatten()
+        .and_then(|millis| UnixMillis::new(millis.into()));
     if let TimelineEventKind::UnableToDecrypt { utd_info, .. } = &event.kind {
         return Some(TimelineItem::Notice {
             event_id,
             sender,
             notice: undecryptable_notice(&utd_info.reason),
+            origin_server_ts,
         });
     }
     // An event the SDK could not try to decrypt arrives as plain text that is
@@ -95,6 +106,7 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             event_id,
             sender,
             notice: NoticeKind::Undecryptable,
+            origin_server_ts,
         });
     }
     let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
@@ -108,21 +120,25 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             event_id,
             sender,
             body: project_body(&text.body),
+            origin_server_ts,
         },
         MessageType::Notice(notice) => TimelineItem::Message {
             event_id,
             sender,
             body: project_body(&notice.body),
+            origin_server_ts,
         },
         MessageType::Emote(emote) => TimelineItem::Message {
             event_id,
             sender,
             body: project_body(&emote.body),
+            origin_server_ts,
         },
         _ => TimelineItem::Notice {
             event_id,
             sender,
             notice: NoticeKind::Unsupported,
+            origin_server_ts,
         },
     })
 }

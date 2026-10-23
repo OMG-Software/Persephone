@@ -2,12 +2,17 @@
   import { onMount } from 'svelte';
   import markUrl from './assets/mark.svg';
   import Composer from './Composer.svelte';
-  import RoomList from './RoomList.svelte';
+  import Icon from './Icon.svelte';
+  import JumpPalette from './JumpPalette.svelte';
   import Security from './Security.svelte';
+  import Settings, { type SettingsTab } from './Settings.svelte';
+  import Sidebar from './Sidebar.svelte';
   import SignIn from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
   import TipButton from './TipButton.svelte';
+  import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
+  import { isolate } from './people';
   import { mergeNewest } from './timeline';
   import {
     allowUnencrypted,
@@ -44,6 +49,9 @@
   let status = $state<AppStatus | null>(null);
   let security = $state<SecurityStatus | null>(null);
   let securityBusy = $state(false);
+  // Why the last security action failed. Kept apart from `error`, so a later
+  // success clears it without hiding a room's error.
+  let securityFailure = $state<string | null>(null);
   // A security reply replaces the shown one only if it is newer, as for rooms.
   let securityRequest = 0;
   let securityShown = 0;
@@ -55,6 +63,8 @@
     null
   );
   let draftVersion = $state(0);
+  // The composer's unsent text, kept here so it outlives the composer.
+  let draft = $state('');
   // Rooms confirmed while this page runs; the core keeps the consent itself.
   let confirmedRooms = new Set<string>();
   let unavailable = $state(false);
@@ -67,6 +77,12 @@
   let switching = $state(false);
   // Sign-out deletes this device's keys, so it asks once more first.
   let confirmingSignOut = $state(false);
+  // What the window shows besides the room: settings, and the jump palette.
+  let view = $state<'chat' | 'settings'>('chat');
+  let settingsTab = $state<SettingsTab>('security');
+  let paletteOpen = $state(false);
+  // A finished or cancelled verification stays on screen until this is its ID.
+  let dismissedFlow = $state<string | null>(null);
   // A room-list reply replaces the list only if it is newer than the one
   // shown: an older reply that finishes last cannot bring back a stale list,
   // and a failed newer request leaves the newest successful one in place.
@@ -131,7 +147,54 @@
   const profileOpen = $derived(status?.store === 'protected');
   const signedIn = $derived(profileOpen && status?.account.state === 'signed_in');
 
+  // The room shell: signed in, or synthetic rooms with no profile.
+  const shellOpen = $derived(status !== null && (signedIn || status.store === 'not_configured'));
+
   const selectedRoom = $derived(rooms?.rooms.find((room) => room.roomId === selected) ?? null);
+
+  // A verification has its own screen while it runs, and until the person
+  // continues after it ends.
+  const flow = $derived(signedIn ? (security?.verification ?? null) : null);
+  const showFlow = $derived(flow !== null && flow.flowId !== dismissedFlow);
+  const chatShown = $derived(shellOpen && view === 'chat' && !showFlow);
+
+  // The jump shortcut as this system writes it.
+  const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+  const shortcut = mac ? '⌘K' : 'Ctrl K';
+
+  // Ctrl K (⌘K on macOS) opens the jump palette from the room view.
+  function shortcutKey(event: KeyboardEvent) {
+    if (!(mac ? event.metaKey : event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'k') {
+      return;
+    }
+    if (chatShown && rooms && !paletteOpen) {
+      event.preventDefault();
+      paletteOpen = true;
+    }
+  }
+
+  function openSettings(tab: SettingsTab) {
+    paletteOpen = false;
+    settingsTab = tab;
+    view = 'settings';
+  }
+
+  function closeSettings() {
+    confirmingSignOut = false;
+    view = 'chat';
+  }
+
+  // After a verification, the next step is recovery if it is not set up.
+  function dismissFlow(flowId: string) {
+    dismissedFlow = flowId;
+    if (security?.recovery === 'disabled' && security.canSetUpRecovery) openSettings('security');
+  }
+
+  // Room names are untrusted: isolated, so they cannot reorder the suffix.
+  $effect(() => {
+    const name = selectedRoom ? (selectedRoom.displayName ?? selectedRoom.roomId) : null;
+    document.title = chatShown && name !== null ? isolate(name) + ' · Persephone' : 'Persephone';
+  });
 
   // Error codes from the host map to fixed messages; nothing else is shown.
   const messages: Record<string, string> = {
@@ -174,10 +237,15 @@
     sessionGeneration += 1;
     // A question about the old session no longer applies.
     confirmingSignOut = false;
+    view = 'chat';
+    paletteOpen = false;
+    dismissedFlow = null;
+    draft = '';
     // Nothing from the old session stays in the header while the new status loads.
     status = null;
     security = null;
     securityBusy = false;
+    securityFailure = null;
     pending = [];
     confirmingPlain = null;
     confirmedRooms = new Set();
@@ -214,6 +282,7 @@
   async function startSecurity(start: () => Promise<SecurityStatus>) {
     if (securityBusy) return;
     securityBusy = true;
+    securityFailure = null;
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {
@@ -223,7 +292,7 @@
         securityShown = request;
       }
     } catch (reason) {
-      if (generation === sessionGeneration) error = describe(reason);
+      if (generation === sessionGeneration) securityFailure = describe(reason);
     } finally {
       if (generation === sessionGeneration) securityBusy = false;
     }
@@ -501,7 +570,7 @@
   );
   const sendBlocked = $derived(
     selectedRoom?.encryption !== 'not_encrypted' && security?.identity !== 'verified'
-      ? 'Verify this device in the Encryption panel to send encrypted messages.'
+      ? 'Verify this device in Settings, Security & encryption, to send encrypted messages.'
       : null
   );
 
@@ -523,74 +592,79 @@
   }
 </script>
 
-<main>
-  <header>
-    <img src={markUrl} alt="" width="36" height="36" />
-    <div>
-      <h1>Persephone</h1>
-      <p role="status">
-        {#if status}
-          Rust host {status.version} · {status.milestone} · {storeText[status.store] ??
-            'Local store state unknown'}
-          {#if signedIn && status.account.userId}
-            · Signed in as <bdi>{status.account.userId}</bdi>
-          {/if}
-        {:else if unavailable}
-          Rust host unavailable
-        {:else}
-          Connecting to the Rust host…
-        {/if}
-      </p>
-    </div>
-    {#if signedIn && !confirmingSignOut}
-      <button
-        type="button"
-        class="session"
-        disabled={switching}
-        onclick={() => (confirmingSignOut = true)}
-      >
-        Sign out
-      </button>
-    {/if}
-    {#if confirmingSignOut}
-      <div class="confirm" role="alertdialog" aria-labelledby="sign-out-question">
-        <p id="sign-out-question">
-          Sign out and delete this device's keys and local data? Encrypted history this device
-          could read may not be readable again.
-        </p>
-        <button type="button" disabled={switching} onclick={confirmSignOut}>Sign out</button>
-        <button type="button" disabled={switching} onclick={() => (confirmingSignOut = false)}>
-          Cancel
-        </button>
-      </div>
-    {/if}
-    {#if status && (status.store === 'protected' || status.store === 'locking')}
-      <!-- Not while the sign-out question is open: it would apply to a locked session. -->
-      <TipButton
-        id="lock-help"
-        help={LOCK_HELP}
-        disabled={switching || confirmingSignOut}
-        onclick={toggleLock}
-      >
-        {switching ? 'Working…' : 'Lock'}
-      </TipButton>
-    {:else if status && unlockable.includes(status.store)}
-      <button type="button" class="session" disabled={switching} onclick={toggleLock}>
-        {switching ? 'Unlocking…' : 'Unlock'}
-      </button>
-    {/if}
-    {#if status && resettable.includes(status.store)}
-      <TipButton id="reset-help" help={RESET_HELP} disabled={switching} onclick={startReset}>
-        Reset profile…
-      </TipButton>
-    {/if}
-  </header>
 
-  <div class="layout">
-    {#if profileOpen && !signedIn}
-      <SignIn account={status!.account} busy={signingIn} onsignin={startSignIn} />
-    {:else if rooms}
-      <div class="side">
+<svelte:window onkeydown={shortcutKey} />
+
+{#snippet brand()}
+  <div class="auth-brand">
+    <img src={markUrl} alt="" width="32" height="32" />
+    Persephone
+  </div>
+{/snippet}
+
+{#snippet lockButton(above: boolean, iconOnly: boolean)}
+  <!-- Not while the sign-out question is open: it would apply to a locked session. -->
+  <TipButton
+    id="lock-help"
+    help={LOCK_HELP}
+    {above}
+    class={iconOnly ? 'icon-button' : 'secondary'}
+    label={iconOnly ? (switching ? 'Working…' : 'Lock') : undefined}
+    disabled={switching || confirmingSignOut}
+    onclick={toggleLock}
+  >
+    {#if iconOnly}
+      <Icon name="lock" />
+    {:else}
+      {switching ? 'Working…' : 'Lock'}
+    {/if}
+  </TipButton>
+{/snippet}
+
+<main>
+  {#if !status}
+    <div class="centred">
+      <section class="auth-card" aria-label="Persephone">
+        {@render brand()}
+        <p role="status">
+          {unavailable ? 'Rust host unavailable' : 'Connecting to the Rust host…'}
+        </p>
+      </section>
+    </div>
+  {:else if showFlow && flow}
+    <div class="centred">
+      <div class="centred-stack">
+        <Verification
+          {flow}
+          busy={securityBusy}
+          onaccept={(flowId) => startSecurity(() => acceptVerification(flowId))}
+          onconfirm={(flowId) => startSecurity(() => confirmVerification(flowId))}
+          oncancel={(flowId) => startSecurity(() => cancelVerification(flowId))}
+          ondismiss={dismissFlow}
+        />
+        {#if securityFailure}
+          <p role="alert" class="error">{securityFailure}</p>
+        {/if}
+      </div>
+    </div>
+  {:else if profileOpen && !signedIn}
+    <div class="centred">
+      <div class="centred-stack">
+        <SignIn account={status.account} busy={signingIn} onsignin={startSignIn} />
+        {#if error}
+          <p role="alert" class="error">{error}</p>
+        {/if}
+        {@render lockButton(false, false)}
+      </div>
+    </div>
+  {:else if shellOpen && view === 'settings'}
+    <Settings
+      userId={signedIn ? status.account.userId : null}
+      tab={settingsTab}
+      ontab={(tab) => (settingsTab = tab)}
+      onback={closeSettings}
+    >
+      {#if settingsTab === 'security'}
         {#if signedIn && security}
           <Security
             {security}
@@ -599,62 +673,185 @@
             onrecover={() => startSecurity(recoverWithKey)}
             onsetuprecovery={() => startSecurity(setUpRecovery)}
             onverify={() => startSecurity(verifyThisDevice)}
-            onaccept={(flowId) => startSecurity(() => acceptVerification(flowId))}
-            onconfirm={(flowId) => startSecurity(() => confirmVerification(flowId))}
-            oncancel={(flowId) => startSecurity(() => cancelVerification(flowId))}
           />
+        {:else}
+          <section class="settings-page" aria-labelledby="security-heading">
+            <h2 id="security-heading">Security &amp; encryption</h2>
+            <p class="lede">
+              {signedIn
+                ? "Checking this account's encryption…"
+                : 'No account is signed in. All rooms and messages here are synthetic test data.'}
+            </p>
+          </section>
         {/if}
-        <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} onselect={open} />
-      </div>
-    {/if}
-    {#if profileOpen && !signedIn}
-      {#if error}
-        <p role="alert" class="error">{error}</p>
-      {/if}
-    {:else if selectedRoom}
-      <div class="room">
-        <Timeline
-          title={selectedRoom.displayName ?? selectedRoom.roomId}
-          notEncrypted={selectedRoom.encryption === 'not_encrypted'}
-          {items}
-          hasOlder={nextCursor !== null}
-          {loading}
-          {error}
-          onolder={older}
-        />
-        {#if signedIn}
-          {#if confirmingPlain}
-            <div class="confirm" role="alertdialog" aria-labelledby="plain-question">
-              <p id="plain-question">
-                This room is not encrypted: the homeserver and anyone with access to it can read
-                what you send here. Send unencrypted messages in this room?
-              </p>
-              <button type="button" onclick={confirmPlain}>Send unencrypted</button>
-              <button type="button" onclick={() => (confirmingPlain = null)}>Cancel</button>
+        {#if securityFailure}
+          <p role="alert" class="error">{securityFailure}</p>
+        {/if}
+      {:else}
+        <section class="settings-page" aria-labelledby="session-heading">
+          <h2 id="session-heading">Session</h2>
+          <div class="panel">
+            <p role="status">
+              Rust host {status.version} · {status.milestone} · {storeText[status.store] ??
+                'Local store state unknown'}
+              {#if signedIn && status.account.userId}
+                · Signed in as <bdi>{status.account.userId}</bdi>
+              {/if}
+            </p>
+          </div>
+          {#if status.store === 'protected' || status.store === 'locking'}
+            <div class="panel">
+              <h3>Lock</h3>
+              <p>{LOCK_HELP}</p>
+              <div class="actions">{@render lockButton(false, false)}</div>
             </div>
           {/if}
-          <Composer
-            pending={visiblePending}
-            blocked={sendBlocked}
-            notEncrypted={selectedRoom.encryption === 'not_encrypted'}
-            {draftVersion}
-            onsend={sendText}
-            onretry={(localId) => changeMessage(retryMessage, localId)}
-            ondiscard={(localId) => changeMessage(discardMessage, localId)}
-            onallow={(localId) =>
-              (confirmingPlain = { roomId: selectedRoom.roomId, body: null, retryId: localId })}
+          {#if signedIn}
+            <div class="panel">
+              <h3>Sign out</h3>
+              {#if confirmingSignOut}
+                <div class="confirm" role="alertdialog" aria-labelledby="sign-out-question">
+                  <p id="sign-out-question">
+                    Sign out and delete this device's keys and local data? Encrypted history this
+                    device could read may not be readable again.
+                  </p>
+                  <button type="button" disabled={switching} class="danger" onclick={confirmSignOut}>
+                    Sign out
+                  </button>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    class="secondary"
+                    onclick={() => (confirmingSignOut = false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              {:else}
+                <p>Signs this device out of the homeserver and deletes its keys and local data.</p>
+                <div class="actions">
+                  <button
+                    type="button"
+                    disabled={switching}
+                    class="danger"
+                    onclick={() => (confirmingSignOut = true)}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              {/if}
+            </div>
+          {/if}
+          {#if error}
+            <p role="alert" class="error">{error}</p>
+          {/if}
+        </section>
+      {/if}
+    </Settings>
+  {:else if shellOpen}
+    <div class="shell">
+      <Sidebar
+        {rooms}
+        {selected}
+        userId={signedIn ? status.account.userId : null}
+        {shortcut}
+        onselect={open}
+        onsearch={() => (paletteOpen = rooms !== null)}
+        onsettings={() => openSettings('security')}
+      >
+        {#snippet notice()}
+          {#if signedIn && (security?.identity === 'none' || security?.identity === 'unverified')}
+            <div class="device-notice">
+              <p>
+                {security.identity === 'none'
+                  ? 'Encryption is not set up for this account.'
+                  : 'This device is not verified.'}
+              </p>
+              <button type="button" class="secondary" onclick={() => openSettings('security')}>
+                {security.identity === 'none' ? 'Set up encryption' : 'Verify this device'}
+              </button>
+            </div>
+          {/if}
+        {/snippet}
+        {#snippet lock()}
+          {#if status?.store === 'protected' || status?.store === 'locking'}
+            {@render lockButton(true, true)}
+          {/if}
+        {/snippet}
+      </Sidebar>
+      <div class="pane">
+        {#if selectedRoom}
+          <Timeline
+            title={selectedRoom.displayName ?? selectedRoom.roomId}
+            encryption={selectedRoom.encryption}
+            {items}
+            hasOlder={nextCursor !== null}
+            {loading}
+            {error}
+            onolder={older}
           />
+          {#if signedIn}
+            {#if confirmingPlain}
+              <div class="confirm" role="alertdialog" aria-labelledby="plain-question">
+                <p id="plain-question">
+                  This room is not encrypted: the homeserver and anyone with access to it can read
+                  what you send here. Send unencrypted messages in this room?
+                </p>
+                <button type="button" class="danger" onclick={confirmPlain}>Send unencrypted</button>
+                <button type="button" class="secondary" onclick={() => (confirmingPlain = null)}>
+                  Cancel
+                </button>
+              </div>
+            {/if}
+            <Composer
+              pending={visiblePending}
+              blocked={sendBlocked}
+              encryption={selectedRoom.encryption}
+              roomName={selectedRoom.displayName ?? selectedRoom.roomId}
+              bind:draft
+              {draftVersion}
+              onsend={sendText}
+              onretry={(localId) => changeMessage(retryMessage, localId)}
+              ondiscard={(localId) => changeMessage(discardMessage, localId)}
+              onallow={(localId) =>
+                (confirmingPlain = { roomId: selectedRoom.roomId, body: null, retryId: localId })}
+            />
+          {/if}
+        {:else}
+          <section class="empty-pane" aria-label="No room selected">
+            <p>
+              {signedIn
+                ? 'Select a room.'
+                : 'Select a room. All rooms and messages here are synthetic test data.'}
+            </p>
+            {#if error}
+              <p role="alert" class="error">{error}</p>
+            {/if}
+          </section>
         {/if}
       </div>
-    {:else}
-      <section class="timeline" aria-label="No room selected">
-        {#if status?.store === 'restart_required' && status.account.state === 'signed_out' && status.account.error === 'failed'}
+      {#if paletteOpen && rooms}
+        <JumpPalette rooms={rooms.rooms} onselect={open} onclose={() => (paletteOpen = false)} />
+      {/if}
+    </div>
+  {:else}
+    <!-- Locked, locking or signed out: nothing from the session is shown. -->
+    <div class="centred">
+      <section class="auth-card" aria-labelledby="locked-heading">
+        {@render brand()}
+        <h1 id="locked-heading">
+          {status.store === 'restart_required' && status.account.state === 'signed_out'
+            ? 'Signed out'
+            : 'Locked'}
+        </h1>
+        <p role="status">{storeText[status.store] ?? 'Local store state unknown'}</p>
+        {#if status.store === 'restart_required' && status.account.state === 'signed_out' && status.account.error === 'failed'}
           <p role="alert" class="error">
             Signing out did not finish: this device's local data could not be deleted. Restart
             Persephone and sign out again.
           </p>
-        {:else if status?.store === 'restart_required' && status.account.state === 'signed_out'}
-          <p>
+        {:else if status.store === 'restart_required' && status.account.state === 'signed_out'}
+          <p class="auth-note">
             Signed out, and this device's keys were deleted. Restart Persephone to sign in again;
             the rest of this device's local data is deleted as it starts.
           </p>
@@ -664,19 +861,29 @@
               expires. Revoke it from another device if you need to.
             </p>
           {/if}
-        {:else if status?.store === 'restart_required'}
-          <p>The session is locked. Restart Persephone to unlock it.</p>
-        {:else if status && status.store !== 'protected' && status.store !== 'not_configured'}
-          <p>The session is locked. Nothing from it is shown.</p>
-        {:else if signedIn}
-          <p>Select a room.</p>
+        {:else if status.store === 'restart_required'}
+          <p class="auth-note">The session is locked. Restart Persephone to unlock it.</p>
         {:else}
-          <p>Select a room. All rooms and messages here are synthetic test data.</p>
+          <p class="auth-note">The session is locked. Nothing from it is shown.</p>
         {/if}
+        <div class="actions">
+          {#if status.store === 'locking'}
+            {@render lockButton(false, false)}
+          {:else if unlockable.includes(status.store)}
+            <button type="button" class="primary" disabled={switching} onclick={toggleLock}>
+              {switching ? 'Unlocking…' : 'Unlock'}
+            </button>
+          {/if}
+          {#if resettable.includes(status.store)}
+            <TipButton id="reset-help" help={RESET_HELP} disabled={switching} onclick={startReset}>
+              Reset profile…
+            </TipButton>
+          {/if}
+        </div>
         {#if error}
           <p role="alert" class="error">{error}</p>
         {/if}
       </section>
-    {/if}
-  </div>
+    </div>
+  {/if}
 </main>

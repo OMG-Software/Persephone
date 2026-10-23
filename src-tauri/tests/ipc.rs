@@ -82,12 +82,12 @@ impl CoreTransport for FakeCore {
             Call::SendMessage { room_id, body } => match body.as_str() {
                 "hello" => Ok(serde_json::json!({
                     "localId": 1, "roomId": room_id, "body": body, "state": "queued",
-                    "eventId": null, "failure": null
+                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
                 })),
                 // A reply carrying the transaction ID is refused by the contract.
                 _ => Ok(serde_json::json!({
                     "localId": 2, "roomId": room_id, "body": body, "state": "queued",
-                    "eventId": null, "failure": null, "transactionId": "t"
+                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64, "transactionId": "t"
                 })),
             },
             Call::PendingMessages { .. } => Ok(serde_json::json!([])),
@@ -111,7 +111,7 @@ impl CoreTransport for FakeCore {
             Call::TimelinePage { room_id, cursor } => match (room_id.as_str(), cursor.as_deref()) {
                 ("!r:example.invalid", None) => Ok(serde_json::json!({
                     "roomId": room_id,
-                    "items": [{"kind": "message", "event_id": "$1", "sender": "@a:example.invalid", "body": "hi"}],
+                    "items": [{"kind": "message", "event_id": "$1", "sender": "@a:example.invalid", "body": "hi", "origin_server_ts": 1_767_258_000_000_u64}],
                     "nextCursor": null
                 })),
                 // A reply with a field the contract does not have.

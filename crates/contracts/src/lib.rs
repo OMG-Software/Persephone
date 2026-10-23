@@ -1,5 +1,38 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use ts_rs::{Config, TS};
+
+/// A time in milliseconds since the Unix epoch, at most [`UnixMillis::MAX`]
+/// so that JavaScript holds it exactly. A larger value fails to deserialize.
+/// It says nothing about who set the time; each field says that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct UnixMillis(u64);
+
+impl UnixMillis {
+    /// JavaScript's largest exact integer, 2^53 - 1.
+    pub const MAX: u64 = (1 << 53) - 1;
+
+    /// `millis`, or `None` when JavaScript cannot hold it exactly.
+    pub fn new(millis: u64) -> Option<Self> {
+        (millis <= Self::MAX).then_some(Self(millis))
+    }
+
+    /// `millis`, capped at [`UnixMillis::MAX`].
+    pub fn saturating(millis: u64) -> Self {
+        Self(millis.min(Self::MAX))
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for UnixMillis {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(u64::deserialize(deserializer)?)
+            .ok_or_else(|| D::Error::custom("time out of JavaScript's exact range"))
+    }
+}
 
 /// Deliberately small frontend projection; never expose SDK, authentication, or key types here.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -71,6 +104,9 @@ pub struct PendingMessage {
     pub state: PendingState,
     pub event_id: Option<String>,
     pub failure: Option<SendFailure>,
+    /// When it was queued on this device, by this computer's clock.
+    #[ts(type = "number")]
+    pub queued_at: UnixMillis,
 }
 
 /// Serde's internally tagged wire representation is mirrored by ts-rs serde compatibility.
@@ -81,6 +117,11 @@ pub enum TimelineItem {
         event_id: String,
         sender: String,
         body: String,
+        /// When the sender's homeserver says it received the event
+        /// (`origin_server_ts`). That server sets it and nothing checks it,
+        /// so it can be wrong. `None` when the event has no usable time.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
     },
     Gap {
         next_cursor: Option<String>,
@@ -90,6 +131,9 @@ pub enum TimelineItem {
         event_id: String,
         sender: String,
         notice: NoticeKind,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
     },
 }
 
@@ -377,11 +421,13 @@ pub fn sample_timeline_page() -> TimelinePage {
                 event_id: "$event".into(),
                 sender: "@alice:server.invalid".into(),
                 body: "hostile <img src=x onerror=alert(1)>".into(),
+                origin_server_ts: UnixMillis::new(1_767_258_000_000),
             },
             TimelineItem::Notice {
                 event_id: "$encrypted".into(),
                 sender: "@bob:server.invalid".into(),
                 notice: NoticeKind::Undecryptable,
+                origin_server_ts: None,
             },
             TimelineItem::Gap { next_cursor: None },
         ],

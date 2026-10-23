@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import type { AccountStatus } from '../../crates/contracts/generated/contracts';
+  import markUrl from './assets/mark.svg';
+  import ServerPicker from './ServerPicker.svelte';
 
   let {
     account,
@@ -11,7 +14,9 @@
     onsignin: (homeserver: string) => void;
   } = $props();
 
-  let homeserver = $state('https://');
+  let homeserver = $state('https://matrix.org');
+  let picking = $state(false);
+  let change = $state<HTMLButtonElement | null>(null);
 
   // Fixed text per error code; the core sends codes only.
   const errors: Record<string, string> = {
@@ -28,32 +33,55 @@
 
   const waiting = $derived(busy || account.state === 'signing_in');
 
+  // The address as typed, without its scheme, for the server row.
+  const shown = $derived(homeserver.replace(/^https:\/\//i, ''));
+
   function submit(event: SubmitEvent) {
     event.preventDefault();
     onsignin(homeserver.trim());
   }
+
+  // The page behind the modal dialog is inert until the dialog is gone.
+  async function close(chosen: string | null) {
+    if (chosen !== null) homeserver = chosen;
+    picking = false;
+    await tick();
+    change?.focus();
+  }
 </script>
 
-<section class="timeline sign-in" aria-labelledby="sign-in-heading">
+<section class="auth-card sign-in" aria-labelledby="sign-in-heading">
+  <div class="auth-brand">
+    <img src={markUrl} alt="" width="32" height="32" />
+    Persephone
+  </div>
   <h2 id="sign-in-heading">Sign in</h2>
+  <p class="auth-lede">Welcome back. Pick up where you left off.</p>
   <form onsubmit={submit}>
-    <label for="homeserver">Homeserver address</label>
-    <input
-      id="homeserver"
-      type="url"
-      required
-      maxlength="2048"
-      autocomplete="url"
-      spellcheck="false"
-      bind:value={homeserver}
-      disabled={waiting}
-    />
-    <button type="submit" disabled={waiting}>{waiting ? 'Waiting…' : 'Sign in'}</button>
+    <div class="server-row">
+      <div>
+        <span class="server-label">Your server</span>
+        <bdi class="server-value">{shown}</bdi>
+      </div>
+      <button
+        type="button"
+        class="link"
+        aria-label="Change server"
+        disabled={waiting}
+        bind:this={change}
+        onclick={() => (picking = true)}
+      >
+        Change
+      </button>
+    </div>
+    <p class="auth-note">
+      Persephone asks for your username and password in a separate Windows sign-in window, which
+      names the homeserver. This page never sees your password.
+    </p>
+    <button type="submit" class="primary wide" disabled={waiting}>
+      {waiting ? 'Waiting…' : 'Continue'}
+    </button>
   </form>
-  <p>
-    Persephone asks for your username and password in a separate Windows sign-in window, which
-    names the homeserver. This page never sees your password.
-  </p>
   {#if account.state === 'signing_in'}
     <p role="status">Waiting for the Windows sign-in window…</p>
   {:else if account.state === 'sign_in_failed' && account.error}
@@ -62,3 +90,7 @@
     <p role="alert" class="error">{errors.session_not_revoked}</p>
   {/if}
 </section>
+
+{#if picking}
+  <ServerPicker current={homeserver} onchoose={close} oncancel={() => close(null)} />
+{/if}

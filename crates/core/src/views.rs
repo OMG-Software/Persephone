@@ -12,8 +12,11 @@
 //! Every reply must fit one control frame, so pages are bounded by item count
 //! and by serialized size.
 
-use persephone_contracts::{RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage};
+use persephone_contracts::{
+    RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage, UnixMillis,
+};
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MAX_ROOMS: usize = 200;
 pub const MAX_PAGE_ITEMS: usize = 100;
@@ -24,6 +27,19 @@ pub const MAX_DISPLAY_NAME_CHARS: usize = 128;
 /// The media plan's 16 KiB text limit.
 pub const MAX_BODY_BYTES: usize = 16 * 1024;
 const CURSOR_PREFIX: &str = "t1.";
+/// When the synthetic history starts: 2026-01-01 09:00 UTC.
+const FIXTURE_START: u64 = 1_767_258_000_000;
+const MINUTE: u64 = 60_000;
+
+/// This computer's clock, or the epoch if the clock is before it.
+pub fn now_millis() -> UnixMillis {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
+    UnixMillis::saturating(millis)
+}
 
 fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
@@ -77,6 +93,7 @@ struct Message {
     event_id: String,
     sender: String,
     body: String,
+    origin_server_ts: Option<UnixMillis>,
 }
 
 struct Room {
@@ -94,10 +111,12 @@ pub struct Fixtures {
 
 impl Default for Fixtures {
     fn default() -> Self {
+        // Synthetic times: one message every few minutes from FIXTURE_START.
         let message = |room: &str, n: usize, sender: &str, body: String| Message {
             event_id: format!("${room}-{n}"),
             sender: sender.into(),
             body,
+            origin_server_ts: UnixMillis::new(FIXTURE_START + 7 * MINUTE * n as u64),
         };
         let planning: Vec<Message> = (0..250)
             .map(|n| {
@@ -122,10 +141,19 @@ impl Default for Fixtures {
             "x".repeat(MAX_BODY_BYTES * 2),
             "🧪 emoji, 日本語, العربية mixed".to_string(),
         ];
+        // Hostile times too: none, the epoch, and the largest JavaScript holds
+        // exactly, which is past the end of JavaScript's dates.
+        let hostile_times = [None, UnixMillis::new(0), UnixMillis::new(UnixMillis::MAX)];
         let hostile: Vec<Message> = hostile_bodies
             .into_iter()
             .enumerate()
-            .map(|(n, body)| message("hostile", n, "@mallory:example.invalid", body))
+            .map(|(n, body)| {
+                let mut message = message("hostile", n, "@mallory:example.invalid", body);
+                if let Some(time) = hostile_times.get(n) {
+                    message.origin_server_ts = *time;
+                }
+                message
+            })
             .collect();
         // Many large bodies: one page must stop at the byte budget, not the count.
         let large: Vec<Message> = (0..60)
@@ -207,6 +235,7 @@ impl Fixtures {
             event_id: format!("$live-{n}"),
             sender: sender.into(),
             body,
+            origin_server_ts: Some(now_millis()),
         });
         true
     }
@@ -258,6 +287,7 @@ impl Fixtures {
                 event_id: message.event_id.clone(),
                 sender: message.sender.clone(),
                 body: project_body(&message.body),
+                origin_server_ts: message.origin_server_ts,
             };
             let size = serde_json::to_vec(&item)
                 .map_err(|_| ErrorCode::Internal)?
@@ -356,6 +386,48 @@ mod tests {
         }
         let expected: Vec<String> = (0..250).map(|n| format!("$planning-{n}")).collect();
         assert_eq!(seen, expected);
+    }
+
+    /// GIVEN synthetic history WHEN a page is read THEN each message carries
+    /// its time, including hostile ones (none, the epoch, the largest safe),
+    /// and a live message carries this computer's time.
+    #[test]
+    fn given_history_then_messages_carry_their_times() {
+        let times = |fixtures: &Fixtures, room: &str| -> Vec<Option<u64>> {
+            fixtures
+                .timeline_page(room, None)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| match item {
+                    TimelineItem::Message {
+                        origin_server_ts, ..
+                    } => origin_server_ts.map(UnixMillis::get),
+                    TimelineItem::Gap { .. } | TimelineItem::Notice { .. } => unreachable!(),
+                })
+                .collect()
+        };
+        let mut fixtures = Fixtures::default();
+        let planning = times(&fixtures, "!planning:example.invalid");
+        assert_eq!(
+            planning.last(),
+            Some(&Some(FIXTURE_START + 7 * MINUTE * 249))
+        );
+        assert!(planning.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            times(&fixtures, "!hostile:example.invalid")[..3],
+            [None, Some(0), Some(UnixMillis::MAX)]
+        );
+
+        let before = now_millis();
+        assert!(fixtures.append_message(
+            "!planning:example.invalid",
+            "@bot:example.invalid",
+            "x".into()
+        ));
+        let live = times(&fixtures, "!planning:example.invalid");
+        let live = live.last().unwrap().unwrap();
+        assert!(live >= before.get() && live <= now_millis().get());
     }
 
     #[test]

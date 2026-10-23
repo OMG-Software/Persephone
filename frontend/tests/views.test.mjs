@@ -8,6 +8,9 @@ let Timeline;
 let SignIn;
 let Security;
 let Composer;
+let ServerPicker;
+let Verification;
+let JumpPalette;
 let render;
 
 before(async () => {
@@ -21,6 +24,9 @@ before(async () => {
   ({ default: SignIn } = await vite.ssrLoadModule('/src/SignIn.svelte'));
   ({ default: Security } = await vite.ssrLoadModule('/src/Security.svelte'));
   ({ default: Composer } = await vite.ssrLoadModule('/src/Composer.svelte'));
+  ({ default: ServerPicker } = await vite.ssrLoadModule('/src/ServerPicker.svelte'));
+  ({ default: Verification } = await vite.ssrLoadModule('/src/Verification.svelte'));
+  ({ default: JumpPalette } = await vite.ssrLoadModule('/src/JumpPalette.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -128,10 +134,11 @@ test('the sign-in form asks only for the homeserver; the password goes to a nati
   const { body: html } = render(SignIn, {
     props: { account: signedOut, busy: false, onsignin: () => {} }
   });
-  assert.match(html, /<label for="homeserver">Homeserver address<\/label>/);
-  assert.match(html, /type="url"/);
+  assert.match(html, /Your server/);
+  assert.match(html, /<bdi class="server-value">matrix\.org<\/bdi>/, 'matrix.org until changed');
+  assert.match(html, />Continue</);
   assert.doesNotMatch(html, /type="password"/i, 'no password field in the page');
-  assert.equal((html.match(/<input/g) ?? []).length, 1, 'one field: the homeserver');
+  assert.doesNotMatch(html, /<input/, 'the server is chosen in the picker; nothing else is asked');
   assert.match(html, /This page never sees your password/);
 
   const failed = render(SignIn, {
@@ -148,7 +155,26 @@ test('the sign-in form asks only for the homeserver; the password goes to a nati
     props: { account: { state: 'signing_in', userId: null, error: null }, busy: false, onsignin: () => {} }
   }).body;
   assert.match(waiting, /Waiting for the Windows sign-in window/);
-  assert.match(waiting, /<button type="submit" disabled/);
+  assert.match(waiting, /<button type="submit" class="primary wide" disabled/);
+});
+
+test('GIVEN the server picker WHEN another server is chosen THEN it asks only for a URL', () => {
+  const picker = (current) =>
+    render(ServerPicker, { props: { current, onchoose: () => {}, oncancel: () => {} } }).body;
+
+  const matrixOrg = picker('https://matrix.org');
+  assert.match(matrixOrg, /<dialog[^>]*aria-labelledby="picker-heading"/);
+  assert.equal((matrixOrg.match(/type="radio"/g) ?? []).length, 2);
+  assert.doesNotMatch(matrixOrg, /type="url"/, 'no address field until another server is chosen');
+  assert.match(matrixOrg, />Use matrix\.org</);
+
+  const other = picker(hostileName);
+  assert.match(other, /<label for="homeserver" class="visually-hidden">Homeserver address<\/label>/);
+  assert.match(other, /<input id="homeserver"[^>]*type="url"[^>]*required/);
+  assert.match(other, /value="&lt;img src=x onerror=alert\(1\)>"/, 'the typed address stays text');
+  assert.doesNotMatch(other, /<img/);
+  assert.doesNotMatch(other, /type="password"/i);
+  assert.match(other, />Use this server</);
 });
 
 test('the encryption panel offers the step that fits and never asks for a secret itself', () => {
@@ -169,10 +195,7 @@ test('the encryption panel offers the step that fits and never asks for a secret
         onsetup: () => {},
         onrecover: () => {},
         onsetuprecovery: () => {},
-        onverify: () => {},
-        onaccept: () => {},
-        onconfirm: () => {},
-        oncancel: () => {}
+        onverify: () => {}
       }
     }).body;
 
@@ -205,27 +228,76 @@ test('the encryption panel offers the step that fits and never asks for a secret
   assert.match(wrong, /That recovery key did not work\./);
   const unknownError = panel(status('none', { error: 'something_new' }));
   assert.match(unknownError, /That did not work\./);
+
+  // Health cards: green only for what is in place, amber for what needs a step.
+  const tones = (html) => [...html.matchAll(/class="health-value (\w+)">([^<]+)</g)].map((m) => m.slice(1).join(':'));
+  assert.deepEqual(tones(verified), ['good:Ready', 'good:Verified', 'good:Set up']);
+  assert.deepEqual(tones(unverified), ['good:Ready', 'attention:Not verified', 'good:Set up']);
+  assert.deepEqual(tones(none), ['attention:Not set up', 'attention:Not verified', 'attention:Not set up']);
+  assert.deepEqual(tones(panel(status('unknown', { recovery: 'unknown' }))), [
+    'unknown:Checking…',
+    'unknown:Checking…',
+    'unknown:Checking…'
+  ]);
 });
 
-test('rooms that are not encrypted are labelled in the list and the timeline', () => {
+test('every room is labelled with its encryption in the list and the header', () => {
   const list = render(RoomList, {
     props: {
       rooms: [
         { roomId: '!a:example.invalid', displayName: 'A', unreadCount: 0, encryption: 'encrypted' },
-        { roomId: '!b:example.invalid', displayName: 'B', unreadCount: 0, encryption: 'not_encrypted' }
+        { roomId: '!b:example.invalid', displayName: 'B', unreadCount: 0, encryption: 'not_encrypted' },
+        { roomId: '!c:example.invalid', displayName: 'C', unreadCount: 0, encryption: 'unknown' }
       ],
       truncated: false,
       selected: null,
       onselect: () => {}
     }
   }).body;
-  assert.equal((list.match(/Not encrypted/g) ?? []).length, 1);
-  const timeline = (notEncrypted) =>
+  const labels = (html) => [...html.matchAll(/role="img" aria-label="([^"]+)"/g)].map((m) => m[1]);
+  // The icon comes first in each row, before the name.
+  assert.deepEqual(labels(list), ['Encrypted', 'Not encrypted', 'Encryption unknown']);
+  assert.match(list, /aria-label="Not encrypted" title="Not encrypted">[\s\S]*?<bdi class="room-name">B</);
+
+  const timeline = (encryption) =>
     render(Timeline, {
-      props: { title: 'R', notEncrypted, items: [], hasOlder: false, loading: false, error: null, onolder: () => {} }
+      props: { title: 'R', encryption, items: [], hasOlder: false, loading: false, error: null, onolder: () => {} }
     }).body;
-  assert.match(timeline(true), /Not encrypted: the homeserver can read this room\./);
-  assert.doesNotMatch(timeline(false), /Not encrypted/);
+  assert.deepEqual(labels(timeline('not_encrypted')), ['Not encrypted']);
+  assert.deepEqual(labels(timeline('encrypted')), ['Encrypted']);
+  assert.match(timeline('not_encrypted'), /class="enc-icon large not_encrypted"/);
+  // Unknown never claims encryption.
+  assert.deepEqual(labels(timeline('unknown')), ['Encryption unknown']);
+});
+
+test('GIVEN a room that is not encrypted WHEN the composer shows THEN it warns, and only then', () => {
+  const composer = (encryption) =>
+    render(Composer, {
+      props: {
+        pending: [],
+        blocked: null,
+        encryption,
+        roomName: 'general',
+        draftVersion: 0,
+        onsend: async () => true,
+        onretry: () => {},
+        ondiscard: () => {},
+        onallow: () => {}
+      }
+    }).body;
+
+  const plain = composer('not_encrypted');
+  assert.match(plain, /<strong>Not encrypted\.<\/strong> Messages in this room can be read by the server and anyone\s+who joins\./);
+  assert.match(plain, /aria-expanded="false"[^>]*>Learn more</);
+  assert.match(plain, /class="composer plain"/);
+  assert.doesNotMatch(plain, /class="enc-note"/, 'no "Encrypted" note in a room that is not');
+
+  const encrypted = composer('encrypted');
+  assert.doesNotMatch(encrypted, /Not encrypted/);
+  assert.match(encrypted, /class="enc-note"><svg[\s\S]*?<\/svg>(?:<!---->)?Encrypted</);
+
+  const unknown = composer('unknown');
+  assert.doesNotMatch(unknown, /Not encrypted|enc-note/, 'unknown makes neither claim');
 });
 
 test('messages being sent show their state as fixed text with safe actions only', () => {
@@ -237,12 +309,13 @@ test('messages being sent show their state as fixed text with safe actions only'
     eventId: state === 'sent' ? '$e' : null,
     failure
   });
-  const composer = (pending, blocked = null, notEncrypted = false) =>
+  const composer = (pending, blocked = null, encryption = 'encrypted', roomName = 'R') =>
     render(Composer, {
       props: {
         pending,
         blocked,
-        notEncrypted,
+        encryption,
+        roomName,
         draftVersion: 0,
         onsend: async () => true,
         onretry: () => {},
@@ -271,14 +344,32 @@ test('messages being sent show their state as fixed text with safe actions only'
   assert.equal((html.match(/>Send unencrypted</g) ?? []).length, 1);
   assert.equal((html.match(/>Discard</g) ?? []).length, 4, 'not while sending or once sent');
 
-  const blocked = composer([], 'Verify this device in the Encryption panel to send encrypted messages.');
+  const blocked = composer([], 'Verify this device in Settings, Security & encryption, to send encrypted messages.');
   assert.match(blocked, /<textarea[^>]*disabled/);
-  assert.match(blocked, /Verify this device in the Encryption panel/);
-  assert.match(composer([], null, true), /Message \(not encrypted\)/);
+  assert.match(blocked, /Verify this device in Settings, Security &amp; encryption/);
+  assert.match(composer([], null, 'not_encrypted'), />Message \(not encrypted\)</);
+  // The room name in the placeholder is escaped and direction-isolated.
+  const named = composer([], null, 'encrypted', hostileName);
+  assert.doesNotMatch(named, /<img/);
+  assert.match(named, /placeholder="Message #⁨&lt;img src=x onerror=alert\(1\)>⁩"/);
+  assert.match(named, /<button type="submit" class="send" aria-label="Send"/);
 });
 
 test('verification shows each phase as fixed text, the emoji as text and the device name isolated', () => {
+  const flow = (phase, extra = {}) => ({ flowId: 'f1', phase, emoji: [], otherDevice: null, ...extra });
   const view = (phase, extra = {}) =>
+    render(Verification, {
+      props: {
+        flow: flow(phase, extra),
+        busy: false,
+        onaccept: () => {},
+        onconfirm: () => {},
+        oncancel: () => {},
+        ondismiss: () => {}
+      }
+    }).body;
+  // The settings panel while a verification is in a phase.
+  const settings = (phase) =>
     render(Security, {
       props: {
         security: {
@@ -286,16 +377,14 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
           recovery: 'enabled',
           operation: 'idle',
           error: null,
-          verification: { flowId: 'f1', phase, emoji: [], otherDevice: null, ...extra }
+          verification: flow(phase),
+          canSetUpRecovery: false
         },
         busy: false,
         onsetup: () => {},
         onrecover: () => {},
         onsetuprecovery: () => {},
-        onverify: () => {},
-        onaccept: () => {},
-        onconfirm: () => {},
-        oncancel: () => {}
+        onverify: () => {}
       }
     }).body;
 
@@ -305,7 +394,7 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
   assert.doesNotMatch(incoming, /<img/);
   assert.match(incoming, />Accept</);
   assert.match(incoming, />Decline</);
-  assert.doesNotMatch(incoming, /Verify with another device/, 'no second flow while one is open');
+  assert.doesNotMatch(settings('incoming'), /Verify with another device/, 'no second flow while one is open');
 
   const emoji = [
     ['🐶', 'Dog'], ['🐱', 'Cat'], ['🦁', 'Lion'], ['🐎', 'Horse'], ['🦄', 'Unicorn'], ['🐷', 'Pig'], ['🐘', 'Elephant']
@@ -319,9 +408,13 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
   assert.match(view('waiting'), /Waiting for your other device\. Accept the request there\./);
   assert.match(view('confirmed'), /Waiting for your other device to confirm\./);
   assert.match(view('done'), /Verification finished\./);
+  assert.match(view('done'), />Continue</);
+  assert.match(view('done'), /<li class="step done">Verify<\/li>/);
+  assert.match(view('waiting'), /<li class="step current" aria-current="step">Verify<\/li>/);
   const cancelled = view('cancelled');
   assert.match(cancelled, /Verification was cancelled\./);
-  assert.match(cancelled, />Verify with another device</, 'a new attempt is offered');
+  assert.match(cancelled, />Continue</);
+  assert.match(settings('cancelled'), />Verify with another device</, 'a new attempt is offered');
   for (const html of [incoming, compare, cancelled]) {
     assert.doesNotMatch(html, /<input/);
   }
@@ -339,3 +432,124 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
   assert.match(short, />Cancel</);
 });
 
+
+test('GIVEN the jump palette WHEN it opens THEN it lists rooms as escaped, bounded options', () => {
+  const room = (n, displayName = `room ${n}`, encryption = 'encrypted') => ({
+    roomId: `!${n}:example.invalid`,
+    displayName,
+    unreadCount: 0,
+    encryption
+  });
+  const rooms = [room(0, hostileName, 'not_encrypted'), room(1, null), ...Array.from({ length: 80 }, (_, i) => room(i + 2))];
+  const html = render(JumpPalette, { props: { rooms, onselect: () => {}, onclose: () => {} } }).body;
+
+  assert.match(html, /<dialog class="palette" aria-label="Jump to a room"/);
+  assert.match(html, /role="combobox"[^>]*aria-controls="jump-results"/);
+  assert.match(html, /aria-activedescendant="jump-option-0"/);
+  assert.equal((html.match(/role="option"/g) ?? []).length, 50, 'at most 50 results');
+  assert.equal((html.match(/aria-selected="true"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /<img/);
+  // Svelte's hydration markers may follow the text inside the <bdi>.
+  assert.match(html, /<bdi class="room-name">&lt;img src=x onerror=alert\(1\)>(?:<!--[^>]*-->)*<\/bdi>/);
+  assert.match(
+    html,
+    /<bdi class="room-name">!1:example\.invalid(?:<!--[^>]*-->)*<\/bdi>/,
+    'a room without a name shows its ID'
+  );
+  assert.match(html, /role="img" aria-label="Not encrypted"/);
+  assert.doesNotMatch(html, /<mark>/, 'nothing is highlighted before a query');
+});
+
+test('GIVEN a draft kept by the caller WHEN the composer mounts again THEN it shows the draft as text', () => {
+  const html = render(Composer, {
+    props: {
+      pending: [],
+      blocked: null,
+      encryption: 'encrypted',
+      roomName: 'R',
+      draft: hostileName,
+      draftVersion: 0,
+      onsend: async () => true,
+      onretry: () => {},
+      ondiscard: () => {},
+      onallow: () => {}
+    }
+  }).body;
+  assert.match(html, /<textarea[^>]*>&lt;img src=x onerror=alert\(1\)><\/textarea>/);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /<button type="submit" class="send" aria-label="Send" title="Send">/, 'a kept draft can be sent');
+});
+
+test('the verification screen heading can take focus when the screen opens', () => {
+  const html = render(Verification, {
+    props: {
+      flow: { flowId: 'f1', phase: 'incoming', emoji: [], otherDevice: null },
+      busy: false,
+      onaccept: () => {},
+      onconfirm: () => {},
+      oncancel: () => {},
+      ondismiss: () => {}
+    }
+  }).body;
+  assert.match(html, /<h2 id="verify-heading" tabindex="-1">Verify this device<\/h2>/);
+});
+
+test('GIVEN timeline items with times WHEN rendered THEN times and day dividers show, and bad times do not', () => {
+  const start = 1_767_258_000_000;
+  const item = (n, origin_server_ts) => ({
+    kind: 'message',
+    event_id: `$${n}`,
+    sender: '@a:example.invalid',
+    body: `m${n}`,
+    origin_server_ts
+  });
+  const html = render(Timeline, {
+    props: {
+      title: 'R',
+      items: [
+        item(1, start),
+        item(2, start + 60_000),
+        { kind: 'notice', event_id: '$n', sender: '@b:example.invalid', notice: 'withheld', origin_server_ts: start + 120_000 },
+        // Hostile times: past JavaScript's dates, negative, fractional, text.
+        item(3, Number.MAX_SAFE_INTEGER),
+        item(4, -1),
+        item(5, 1.5),
+        item(6, '<b>noon</b>'),
+        item(7, null)
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  }).body;
+  assert.equal((html.match(/<time datetime=/g) ?? []).length, 3, 'two messages and the notice');
+  assert.match(html, /<time datetime="2026-01-01T09:00:00\.000Z"/);
+  assert.match(html, /<time datetime="2026-01-01T09:02:00\.000Z"/);
+  assert.equal((html.match(/class="day-divider"/g) ?? []).length, 1, 'one day');
+  assert.doesNotMatch(html, /<b>noon/);
+  assert.doesNotMatch(html, /Invalid Date|NaN/);
+  // Every message still shows, with or without a time.
+  assert.equal((html.match(/<p dir="auto">/g) ?? []).length, 7);
+});
+
+test('a pending message shows when it was queued on this device', () => {
+  const html = render(Composer, {
+    props: {
+      pending: [
+        { localId: 1, roomId: '!r:example.invalid', body: 'hi', state: 'queued', eventId: null, failure: null, queuedAt: 1_767_258_000_000 },
+        { localId: 2, roomId: '!r:example.invalid', body: 'hi', state: 'queued', eventId: null, failure: null, queuedAt: -5 }
+      ],
+      blocked: null,
+      encryption: 'encrypted',
+      roomName: 'R',
+      draftVersion: 0,
+      onsend: async () => true,
+      onretry: () => {},
+      ondiscard: () => {},
+      onallow: () => {}
+    }
+  }).body;
+  assert.equal((html.match(/<time datetime="2026-01-01T09:00:00\.000Z" title="Queued on this device /g) ?? []).length, 1);
+  assert.equal((html.match(/Waiting to send…/g) ?? []).length, 2);
+});
