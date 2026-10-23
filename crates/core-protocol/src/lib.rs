@@ -113,6 +113,18 @@ pub enum Call {
     CancelVerification {
         flow_id: String,
     },
+    /// The other person in a direct-message room, and how far this account
+    /// trusts them.
+    ContactStatus {
+        room_id: String,
+    },
+    /// Ask the other person in this direct-message room to verify each other
+    /// by comparing emoji. The core finds the person itself; the request goes
+    /// to an existing direct-message room with them, never a new one.
+    /// Progress arrives as [`Event::SecurityChanged`].
+    VerifyContact {
+        room_id: String,
+    },
 }
 
 /// Longest verification flow ID either side accepts.
@@ -345,6 +357,37 @@ mod tests {
         }
     }
 
+    /// GIVEN the contact calls WHEN sent THEN only the room ID crosses, in the
+    /// documented wire form.
+    #[test]
+    fn given_contact_calls_then_only_the_room_id_crosses() {
+        let budgets = ResourceBudgets::default();
+        for (call, wire) in [
+            (
+                Call::ContactStatus {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"contact_status","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::VerifyContact {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s"}}"#,
+            ),
+        ] {
+            let request = Request { id: 1, call };
+            let mut sent = Vec::new();
+            send(&mut sent, &request).unwrap();
+            assert_eq!(String::from_utf8(sent[17..].to_vec()).unwrap(), wire);
+            let mut reader = Cursor::new(sent);
+            assert_eq!(
+                receive::<_, Request>(&mut reader, &budgets).unwrap(),
+                request
+            );
+        }
+    }
+
     #[test]
     fn given_unknown_command_field_or_kind_then_receive_refuses() {
         let budgets = ResourceBudgets::default();
@@ -382,6 +425,13 @@ mod tests {
             br#"{"id":1,"call":{"command":"confirm_verification","flow_id":"f","emoji":[]}}"#,
             br#"{"id":1,"call":{"command":"cancel_verification","flow_id":null}}"#,
             br#"{"id":1,"call":{"command":"trust_device","device_id":"D"}}"#,
+            br#"{"id":1,"call":{"command":"contact_status"}}"#,
+            br#"{"id":1,"call":{"command":"contact_status","room_id":"!r:s","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"verify_contact"}}"#,
+            br#"{"id":1,"call":{"command":"verify_contact","room_id":null}}"#,
+            br#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s","create_room":true}}"#,
+            br#"{"id":1,"call":{"command":"verify_user","user_id":"@b:s"}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

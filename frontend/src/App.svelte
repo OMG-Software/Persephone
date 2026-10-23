@@ -13,6 +13,7 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
+  import { securityErrorText } from './securityText';
   import { mergeNewest } from './timeline';
   import {
     allowUnencrypted,
@@ -30,6 +31,8 @@
     acceptVerification,
     confirmVerification,
     cancelVerification,
+    contactStatus,
+    verifyContact,
     signOut,
     roomList,
     signIn,
@@ -39,6 +42,7 @@
     unlockSession,
     watchSession,
     type AppStatus,
+    type ContactStatus,
     type PendingMessage,
     type RoomList as Rooms,
     type SecurityStatus,
@@ -55,6 +59,11 @@
   // A security reply replaces the shown one only if it is newer, as for rooms.
   let securityRequest = 0;
   let securityShown = 0;
+  // The other person in the selected direct-message room, if it is one.
+  let contact = $state<ContactStatus | null>(null);
+  // The room whose contact this page last asked to verify: the core reports
+  // why that failed in the security status, shown in that room.
+  let contactAsked = $state<string | null>(null);
   // Messages sent from this device in the selected room.
   let pending = $state<PendingMessage[]>([]);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
@@ -157,6 +166,24 @@
   const flow = $derived(signedIn ? (security?.verification ?? null) : null);
   const showFlow = $derived(flow !== null && flow.flowId !== dismissedFlow);
   const chatShown = $derived(shellOpen && view === 'chat' && !showFlow);
+  // Why the core could not carry out the last step of an open verification.
+  const flowFailure = $derived(
+    flow !== null &&
+      flow.phase !== 'done' &&
+      flow.phase !== 'cancelled' &&
+      security?.operation === 'idle' &&
+      security.error
+      ? securityErrorText[security.error]
+      : null
+  );
+  const contactFailure = $derived(
+    contactAsked !== null &&
+      contactAsked === selected &&
+      security?.operation === 'idle' &&
+      security.error
+      ? securityErrorText[security.error]
+      : null
+  );
 
   // The jump shortcut as this system writes it.
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
@@ -184,9 +211,11 @@
     view = 'chat';
   }
 
-  // After a verification, the next step is recovery if it is not set up.
+  // After verifying this device, the next step is recovery if it is not set
+  // up; after verifying a contact, the room they came from.
   function dismissFlow(flowId: string) {
     dismissedFlow = flowId;
+    if (flow?.contact) return;
     if (security?.recovery === 'disabled' && security.canSetUpRecovery) openSettings('security');
   }
 
@@ -247,6 +276,8 @@
     securityBusy = false;
     securityFailure = null;
     pending = [];
+    contact = null;
+    contactAsked = null;
     confirmingPlain = null;
     confirmedRooms = new Set();
     selected = null;
@@ -276,6 +307,28 @@
       }
     } catch {
       // The next security or session event tries again.
+    }
+    // A verification may have changed how far a contact is trusted.
+    if (selected && generation === sessionGeneration) loadContact(selected, generation);
+  }
+
+  function verifyRoomContact(roomId: string) {
+    contactAsked = roomId;
+    startSecurity(() => verifyContact(roomId));
+  }
+
+  // The selected room's contact, for a direct-message room. Kept only while
+  // the same room in the same session is selected.
+  async function loadContact(roomId: string, generation: number) {
+    if (!signedIn || !selectedRoom?.contact) {
+      contact = null;
+      return;
+    }
+    try {
+      const reply = await contactStatus(roomId);
+      if (current(roomId, generation)) contact = reply;
+    } catch {
+      if (current(roomId, generation)) contact = null;
     }
   }
 
@@ -433,6 +486,7 @@
     selected = roomId;
     items = [];
     pending = [];
+    contact = null;
     confirmingPlain = null;
     nextCursor = null;
     error = null;
@@ -447,7 +501,10 @@
       if (!current(roomId, generation)) return;
       items = page.items;
       nextCursor = page.nextCursor;
-      if (signedIn) loadPending(roomId, generation);
+      if (signedIn) {
+        loadPending(roomId, generation);
+        loadContact(roomId, generation);
+      }
     } catch (reason) {
       if (current(roomId, generation)) error = describe(reason);
     } finally {
@@ -644,6 +701,8 @@
         />
         {#if securityFailure}
           <p role="alert" class="error">{securityFailure}</p>
+        {:else if flowFailure}
+          <p role="alert" class="error">{flowFailure}</p>
         {/if}
       </div>
     </div>
@@ -789,7 +848,14 @@
             {loading}
             {error}
             onolder={older}
+            {contact}
+            canVerify={security?.identity === 'verified'}
+            verifying={securityBusy || (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
+            onverify={() => verifyRoomContact(selectedRoom.roomId)}
           />
+          {#if contactFailure}
+            <p role="alert" class="error contact-error">{contactFailure}</p>
+          {/if}
           {#if signedIn}
             {#if confirmingPlain}
               <div class="confirm" role="alertdialog" aria-labelledby="plain-question">

@@ -241,6 +241,77 @@ test('the encryption panel offers the step that fits and never asks for a secret
   ]);
 });
 
+test('GIVEN a contact verification WHEN each phase shows THEN the contact is isolated text and no device steps show', () => {
+  const view = (phase, extra = {}) =>
+    render(Verification, {
+      props: {
+        flow: { flowId: 'f1', phase, emoji: [], otherDevice: null, contact: hostileName, ...extra },
+        busy: false,
+        onaccept: () => {},
+        onconfirm: () => {},
+        oncancel: () => {},
+        ondismiss: () => {}
+      }
+    }).body;
+  const incoming = view('incoming');
+  assert.match(incoming, /role="alertdialog"/);
+  assert.match(incoming, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi> wants to verify each other/);
+  assert.doesNotMatch(incoming, /<img/);
+  assert.doesNotMatch(incoming, /Your other device/);
+  assert.doesNotMatch(incoming, /class="steps"/, 'the sign-in steps are for this device only');
+  assert.match(incoming, />Accept</);
+  assert.match(incoming, />Decline</);
+  assert.match(view('waiting'), /Waiting for <bdi>&lt;img[^<]*<\/bdi> to accept the request\./);
+  assert.match(view('confirmed'), /Waiting for <bdi>&lt;img[^<]*<\/bdi> to confirm\./);
+  assert.match(view('done'), /<bdi>&lt;img[^<]*<\/bdi> is verified\./);
+  assert.match(view('cancelled'), /Verification was cancelled\./);
+  const emoji = Array.from({ length: 7 }, (_, i) => ({ symbol: '🐶', description: 'Dog' + i }));
+  const compare = view('compare', { emoji });
+  assert.match(compare, /not in this chat/);
+  assert.match(compare, />They match</);
+});
+
+test('GIVEN a direct-message room WHEN the header shows THEN the contact and their trust are fixed, isolated text', () => {
+  const header = (trust, canVerify = true, verifying = false) =>
+    render(Timeline, {
+      props: {
+        title: 'Bob',
+        encryption: 'encrypted',
+        items: [],
+        hasOlder: false,
+        loading: false,
+        error: null,
+        onolder: () => {},
+        contact: { roomId: '!dm:example.invalid', userId: hostileName, trust },
+        canVerify,
+        verifying,
+        onverify: () => {}
+      }
+    }).body;
+  const unverified = header('unverified');
+  assert.match(unverified, /class="contact-id"><bdi>&lt;img[^<]*<\/bdi> · Not verified/);
+  assert.doesNotMatch(unverified, /<img/);
+  assert.match(unverified, /class="secondary header-action"[^>]*>\s*Verify/);
+  assert.doesNotMatch(unverified, /verified-shield/);
+  assert.doesNotMatch(header('unverified', false), /header-action/, 'an unverified device offers no verification');
+  assert.match(header('unverified', true, true), /header-action" disabled/);
+  const verified = header('verified');
+  assert.match(verified, /verified-shield/);
+  assert.match(verified, / · Verified/);
+  assert.doesNotMatch(verified, /header-action/);
+  assert.match(header('no_identity'), / · Has not set up encryption/);
+  assert.doesNotMatch(header('no_identity'), /header-action/);
+  // A trust level the page does not know never reads as verified.
+  assert.match(header('trusted_anyway'), / · Checking…/);
+  assert.doesNotMatch(header('trusted_anyway'), /verified-shield/);
+  // Other rooms keep the room icon and no contact line.
+  const room = render(Timeline, {
+    props: { title: 'R', items: [], hasOlder: false, loading: false, error: null, onolder: () => {} }
+  }).body;
+  assert.doesNotMatch(room, /contact-id/);
+  assert.match(room, /class="icon hash"/);
+});
+
 test('every room is labelled with its encryption in the list and the header', () => {
   const list = render(RoomList, {
     props: {
@@ -407,6 +478,8 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
 
   assert.match(view('waiting'), /Waiting for your other device\. Accept the request there\./);
   assert.match(view('confirmed'), /Waiting for your other device to confirm\./);
+  // The confirmation may not have been sent, so the wait can always be ended.
+  assert.match(view('confirmed'), />Cancel</);
   assert.match(view('done'), /Verification finished\./);
   assert.match(view('done'), />Continue</);
   assert.match(view('done'), /<li class="step done">Verify<\/li>/);
@@ -491,7 +564,7 @@ test('the verification screen heading can take focus when the screen opens', () 
       ondismiss: () => {}
     }
   }).body;
-  assert.match(html, /<h2 id="verify-heading" tabindex="-1">Verify this device<\/h2>/);
+  assert.match(html, /<h2 id="verify-heading" tabindex="-1">(?:<!--[^>]*-->)*Verify this device(?:<!--[^>]*-->)*<\/h2>/);
 });
 
 test('GIVEN timeline items with times WHEN rendered THEN times and day dividers show, and bad times do not', () => {

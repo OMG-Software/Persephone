@@ -1,9 +1,6 @@
 <script lang="ts">
-  import type {
-    RecoveryState,
-    SecurityError,
-    SecurityStatus
-  } from '../../crates/contracts/generated/contracts';
+  import type { RecoveryState, SecurityStatus } from '../../crates/contracts/generated/contracts';
+  import { securityErrorText } from './securityText';
 
   let {
     security,
@@ -25,29 +22,14 @@
   const flow = $derived(security.verification);
   const flowOpen = $derived(flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled');
 
-  // Fixed text per code; the core sends codes only. Secrets never reach this
-  // page: the core asks for them, and shows the recovery key, in its own
-  // Windows windows.
+  // Fixed text per code; the core sends codes only.
   const recoveryText: Record<RecoveryState, string> = {
     unknown: '',
     disabled: 'Recovery is not set up.',
     incomplete: 'Recovery is set up, but this device does not have all of its keys.',
     enabled: 'Recovery is set up.'
   };
-  const errorText: Record<SecurityError, string> = {
-    cancelled: 'Cancelled.',
-    unsupported: 'This system has no Persephone sign-in window yet.',
-    invalid_password: 'The homeserver did not accept that password.',
-    identity_exists:
-      'This account already has encryption set up. Verify this device with your recovery key instead.',
-    wrong_recovery_key: 'That recovery key did not work.',
-    backup_exists_on_server:
-      'The homeserver already has a key backup that Persephone cannot use yet.',
-    recovery_key_not_shown:
-      'Recovery was set up, but its key could not be shown. Do not rely on it until it is set up again.',
-    unreachable: 'The homeserver could not be reached.',
-    failed: 'That did not work.'
-  };
+  const errorText = securityErrorText;
 
   // Health at a glance: "good" is green, "attention" is amber.
   type Health = { title: string; value: string; tone: 'good' | 'attention' | 'unknown' };

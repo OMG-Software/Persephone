@@ -1652,6 +1652,39 @@
       "package_lock_sha256": "a22d978b8b0313e6fabaa1c1583abdfbda9e623e28bb9793ccd822f0b04ef3e2",
       "raw_output": ".local/runs/unlock-secret/check-merge.txt (ignored)",
       "evidence": "unlock-secret.md"
+    },
+    {
+      "name": "live_contact_verification",
+      "command": "development core and desktop UI driven through WebView2 DevTools (.local/runs/p4d-driver/drive.py); tests/matrix p4_peer as the second account (Bob) and as another device of the first account; tools/servers/run.py in WSL",
+      "checked_on": "2026-10-23",
+      "servers": {
+        "merovingian": "0.12.29",
+        "synapse": "1.163.0"
+      },
+      "bob_asks_mismatch": "incoming request accepted in the page; same 7 emoji; cancelled on both sides; Bob still not verified, on both",
+      "persephone_asks_match": "Verify from the direct-message room header; same 7 emoji; done on both sides; header verified; Bob's client sees the first account verified, on both",
+      "bob_asks_match": "Merovingian: same 7 emoji, done. Synapse: same 7 emoji; Persephone's confirmation got 429 twice (server log) and was not resent; the page showed the failure and Cancel; cancelled; repeated after 60 s: done",
+      "driver_result": "pass on both",
+      "harness_start": ".local/runs/p4d-07",
+      "not_counted": "p4d-01 to p4d-06: two lost DevTools connections after sign-in (RTSS and MSI Afterburner running), the lazy-member and stale room-list defects found and fixed, one reused-account run, two driver defects, and two Synapse runs that stuck in 'confirmed' before Cancel was offered",
+      "evidence": "contact-verification.md"
+    },
+    {
+      "name": "workspace_check_after_contact_verification",
+      "command": "python tools/dev.py check --offline",
+      "checked_on": "2026-10-23",
+      "exit_code": 0,
+      "rust_tests_passed": 319,
+      "rust_tests_ignored": 2,
+      "frontend_tests_passed": 38,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 372,
+      "includes": "core unit, binary and account tests and Clippy with dev-disposable-servers",
+      "source": "uncommitted p4/verify-contacts working tree on 90e7157 with the PR D changes, committed next with only these docs added",
+      "working_tree_clean": false,
+      "earlier_attempts": "one run failed cargo fmt on new test rows; formatted and rerun",
+      "note": "frontend_tests_passed rose from 21 to 38 with the UI redesign (PR 15), which recorded no ledger entry"
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

@@ -43,6 +43,9 @@ pub struct RoomSummary {
     /// u32 caps this count below JavaScript's exact-integer limit.
     pub unread_count: u32,
     pub encryption: RoomEncryption,
+    /// In a direct-message room with one other person, that person's user ID
+    /// (untrusted, projected like a name). Otherwise none.
+    pub contact: Option<String>,
 }
 
 /// Whether a room's messages are end-to-end encrypted.
@@ -334,8 +337,42 @@ pub enum SecurityError {
     RecoveryKeyNotShown,
     /// The homeserver could not be reached.
     Unreachable,
+    /// The contact has no cross-signing identity, so there is nothing to
+    /// verify.
+    ContactHasNoIdentity,
+    /// This device lacks the account's key for signing other people
+    /// (verify it with the recovery key first).
+    CannotSignContacts,
+    /// The room is not a direct-message room with one other person who is
+    /// still in it.
+    NotDirectRoom,
     /// Anything else.
     Failed,
+}
+
+/// How far this account trusts the other person in a direct-message room.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactTrust {
+    /// Not known yet.
+    Unknown,
+    /// The contact has no cross-signing identity; they receive no keys
+    /// (ADR-0005).
+    NoIdentity,
+    /// The contact has an identity this account has not verified.
+    Unverified,
+    /// This account verified the contact's identity.
+    Verified,
+}
+
+/// Reply of `contact_status`: the other person in a direct-message room.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ContactStatus {
+    pub room_id: String,
+    /// Untrusted, projected like a name.
+    pub user_id: String,
+    pub trust: ContactTrust,
 }
 
 /// Where a verification with another of the account's devices is.
@@ -363,8 +400,9 @@ pub struct SasEmoji {
     pub description: String,
 }
 
-/// A verification with another device of the same account. The page acts on
-/// it by `flow_id`; the core refuses an action for any other flow.
+/// A verification with another device of the same account, or with a
+/// contact. The page acts on it by `flow_id`; the core refuses an action for
+/// any other flow.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct VerificationView {
@@ -374,6 +412,9 @@ pub struct VerificationView {
     pub emoji: Vec<SasEmoji>,
     /// The other device's name as it reported it (untrusted, projected).
     pub other_device: Option<String>,
+    /// The contact's user ID when this verifies another person (untrusted,
+    /// projected); none when it verifies this device.
+    pub contact: Option<String>,
 }
 
 /// Reply of `security_status` and the encryption commands. Codes only: never
@@ -410,6 +451,7 @@ pub fn sample_room_summary() -> RoomSummary {
         display_name: None,
         unread_count: u32::MAX,
         encryption: RoomEncryption::Encrypted,
+        contact: Some("@alice:server.invalid".into()),
     }
 }
 
@@ -451,6 +493,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", SasEmoji::decl(&config)),
         format!("export {}", VerificationView::decl(&config)),
         format!("export {}", SecurityStatus::decl(&config)),
+        format!("export {}", ContactTrust::decl(&config)),
+        format!("export {}", ContactStatus::decl(&config)),
         format!("export {}", RoomEncryption::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
         format!("export {}", PendingState::decl(&config)),

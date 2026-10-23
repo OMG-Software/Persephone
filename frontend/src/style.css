@@ -662,6 +662,54 @@ kbd {
   white-space: nowrap;
 }
 
+.chat-header .room-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-header .room-title h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-header .room-title h2 bdi {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.verified-shield {
+  display: inline-flex;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--accent);
+}
+
+.verified-shield .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.contact-id {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact-error {
+  margin: 8px 20px 0;
+}
+
+.chat-header .header-action {
+  flex: none;
+  margin-left: auto;
+}
+
 .scroller {
   flex: 1;
   min-height: 0;

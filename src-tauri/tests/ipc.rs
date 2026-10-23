@@ -72,6 +72,20 @@ impl CoreTransport for FakeCore {
                 "verification": {"flowId": flow_id, "phase": "compare",
                     "emoji": [{"symbol": "🐶", "description": "Dog"}], "otherDevice": "<b>Laptop</b>"}
             })),
+            Call::ContactStatus { room_id } => match room_id.as_str() {
+                "!dm:example.invalid" => Ok(serde_json::json!({
+                    "roomId": room_id, "userId": "<b>@bob</b>:example.invalid", "trust": "unverified"
+                })),
+                // A trust level outside the contract must not reach the page.
+                "!odd:example.invalid" => Ok(serde_json::json!({
+                    "roomId": room_id, "userId": "@bob:example.invalid", "trust": "trusted_anyway"
+                })),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
+            Call::VerifyContact { .. } => Ok(serde_json::json!({
+                "identity": "verified", "recovery": "enabled", "operation": "working", "error": null, "canSetUpRecovery": false,
+                "verification": null
+            })),
             Call::SetUpRecovery {} => Ok(
                 serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null, "verification": null, "canSetUpRecovery": false}),
             ),
@@ -332,7 +346,9 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-verify-this-device",
             "allow-accept-verification",
             "allow-confirm-verification",
-            "allow-cancel-verification"
+            "allow-cancel-verification",
+            "allow-contact-status",
+            "allow-verify-contact"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -736,5 +752,54 @@ fn given_verification_commands_then_only_the_flow_id_crosses() {
         core.calls.load(Ordering::SeqCst),
         calls,
         "oversized flow ID never crossed"
+    );
+}
+
+/// Contact commands relay the room ID only and refuse an oversized one before
+/// the core; the contact's user ID comes back unchanged for the page to render
+/// as text, and a trust level outside the contract is refused.
+#[test]
+fn given_contact_commands_then_only_the_room_id_crosses() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let status = invoke(
+        "contact_status",
+        serde_json::json!({"roomId": "!dm:example.invalid"}),
+    )
+    .unwrap();
+    assert_eq!(status["userId"], "<b>@bob</b>:example.invalid");
+    assert_eq!(status["trust"], "unverified");
+    assert!(
+        invoke(
+            "contact_status",
+            serde_json::json!({"roomId": "!odd:example.invalid"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        invoke(
+            "verify_contact",
+            serde_json::json!({"roomId": "!dm:example.invalid"})
+        )
+        .unwrap()["operation"],
+        "working"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for cmd in ["contact_status", "verify_contact"] {
+        assert_eq!(
+            invoke(cmd, serde_json::json!({"roomId": "!".repeat(256)})).unwrap_err(),
+            "invalid_argument",
+            "{cmd}"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized room IDs never crossed"
     );
 }

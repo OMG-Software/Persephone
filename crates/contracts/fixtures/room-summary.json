@@ -2,5 +2,6 @@
   "roomId": "!example:server.invalid",
   "displayName": null,
   "unreadCount": 4294967295,
-  "encryption": "encrypted"
+  "encryption": "encrypted",
+  "contact": "@alice:server.invalid"
 }

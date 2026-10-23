@@ -6,6 +6,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   AccountStatus,
   AppStatus,
+  ContactStatus,
   PendingMessage,
   SignInError,
   RoomList,
@@ -18,6 +19,7 @@ import type {
 export type {
   AccountStatus,
   AppStatus,
+  ContactStatus,
   PendingMessage,
   RoomList,
   SecurityStatus,
@@ -183,4 +185,18 @@ export function confirmVerification(flowId: string): Promise<SecurityStatus> {
 /** Cancels the verification; while comparing, says the emoji differ. */
 export function cancelVerification(flowId: string): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('cancel_verification', { flowId });
+}
+
+/** The other person in a direct-message room and how far the account trusts them. */
+export function contactStatus(roomId: string): Promise<ContactStatus> {
+  return invoke<ContactStatus>('contact_status', { roomId });
+}
+
+/**
+ * Asks the other person in this direct-message room to verify each other by
+ * comparing emoji. The core finds the person; progress arrives as security
+ * changes.
+ */
+export function verifyContact(roomId: string): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('verify_contact', { roomId });
 }
