@@ -1,10 +1,12 @@
 <script lang="ts">
-  import type { TimelineItem } from '../../crates/contracts/generated/contracts';
+  import type { RoomEncryption, TimelineItem } from '../../crates/contracts/generated/contracts';
+  import EncryptionIcon from './EncryptionIcon.svelte';
+  import Icon from './Icon.svelte';
   import Message from './Message.svelte';
 
   let {
     title,
-    notEncrypted = false,
+    encryption = 'unknown',
     items,
     hasOlder,
     loading,
@@ -12,7 +14,7 @@
     onolder
   }: {
     title: string;
-    notEncrypted?: boolean;
+    encryption?: RoomEncryption;
     items: TimelineItem[];
     hasOlder: boolean;
     loading: boolean;
@@ -31,39 +33,58 @@
   };
   const key = (item: TimelineItem, index: number) =>
     item.kind === 'gap' ? 'gap-' + index : item.event_id;
+
+  // The timeline stays at the newest message while the reader is there; it
+  // does not move when they have scrolled up to read older ones.
+  let scroller = $state<HTMLElement | null>(null);
+  let atEnd = true;
+  $effect.pre(() => {
+    void items;
+    if (scroller) {
+      atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+    }
+  });
+  $effect(() => {
+    void items;
+    if (scroller && atEnd) scroller.scrollTop = scroller.scrollHeight;
+  });
 </script>
 
 <section class="timeline" aria-labelledby="timeline-heading">
-  <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
-  {#if notEncrypted}
-    <p class="note unencrypted">Not encrypted: the homeserver can read this room.</p>
-  {/if}
-  <button type="button" disabled={!hasOlder || loading} onclick={onolder}>
-    {loading
-      ? 'Loading…'
-      : hasOlder
-        ? 'Load older messages'
-        : startsWithGap
-          ? 'Older messages not shown'
-          : 'Start of history'}
-  </button>
-  {#if error}
-    <p role="alert" class="error">{error}</p>
-  {/if}
-  <ol>
-    {#each items as item, index (key(item, index))}
-      <li>
-        {#if item.kind === 'message'}
-          <Message name={item.sender} body={item.body} />
-        {:else if item.kind === 'notice'}
-          <p class="notice">
-            <bdi>{item.sender}</bdi>:
-            {noticeText[item.notice] ?? noticeText.unsupported}
-          </p>
-        {:else}
-          <p class="gap">Some messages are not shown here.</p>
-        {/if}
-      </li>
-    {/each}
-  </ol>
+  <header class="chat-header">
+    <EncryptionIcon {encryption} size="large" />
+    <Icon name="hash" class="hash" />
+    <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
+  </header>
+  <div class="scroller" bind:this={scroller}>
+    <div class="stream">
+      <button type="button" disabled={!hasOlder || loading} class="older" onclick={onolder}>
+        {loading
+          ? 'Loading…'
+          : hasOlder
+            ? 'Load older messages'
+            : startsWithGap
+              ? 'Older messages not shown'
+              : 'Start of history'}
+      </button>
+      {#if error}
+        <p role="alert" class="error">{error}</p>
+      {/if}
+      <ol>
+        {#each items as item, index (key(item, index))}
+          <li>
+            {#if item.kind === 'message'}
+              <Message name={item.sender} body={item.body} />
+            {:else if item.kind === 'notice'}
+              <p class="notice">
+                <span><bdi>{item.sender}</bdi>: {noticeText[item.notice] ?? noticeText.unsupported}</span>
+              </p>
+            {:else}
+              <p class="gap">Some messages are not shown here.</p>
+            {/if}
+          </li>
+        {/each}
+      </ol>
+    </div>
+  </div>
 </section>
