@@ -68,12 +68,21 @@ manual run of the native dialogs were made for this change.**
 
 ## KDF cost
 
-A temporary ignored test (not committed) sealed and opened a key with the
-default parameters three times on the development computer:
+**Informal measurement, not a verification result.** On 23 October 2026, a
+temporary ignored test, `timing_default`, was added to the tests in
+`crates/core/src/passphrase.rs` and removed again; it was never committed. It
+sealed and opened a key with `KdfParams::DEFAULT` three times, timed with
+`std::time::Instant`. The source was the uncommitted implementation before
+commit `f02cdd5`, with the same `Cargo.lock` as that commit (SHA-256
+`16664f13…b451`). Commands, both with test result `ok`:
+`cargo test --locked --release -p persephone-core --lib timing_default -- --ignored --nocapture`
+and the same without `--release`. The host was the development computer:
+Windows 11 Pro x64 build 26300, rustc 1.99.1. The CPU model was not recorded,
+and no raw output was kept; the figures below were copied from the console.
 
 | Build | Seal | Open |
 | --- | --- | --- |
-| Release (`cargo test --release`) | 83–93 ms | 80–93 ms |
+| Release | 83–93 ms | 80–93 ms |
 | Debug | 1256–1330 ms | 1273–1287 ms |
 
 The lanes run one after another, because the `parallel` feature is off. An
