@@ -2,8 +2,11 @@
 //! them.
 //!
 //! * A room counts as a direct-message room with a contact when the account
-//!   data marks it as direct with exactly one other user. Those marks are the
-//!   account's own, but the room's members are the homeserver's word.
+//!   data marks it as direct with exactly one other user, and the room has
+//!   exactly two members (joined or invited): this account and that user.
+//!   The direct marks can outlive membership changes, so a room someone else
+//!   joined is no longer a contact's room. The marks are the account's own,
+//!   but the room's members are the homeserver's word.
 //! * Verifying a contact needs them to be joined to the direct-message room
 //!   the SDK sends the request to. The SDK picks that room itself
 //!   (`Client::get_dm_room`); were the contact not in it, the SDK would invite
@@ -18,14 +21,15 @@
 use crate::views::project_name;
 use matrix_sdk::{
     Client, Room, RoomMemberships, RoomState,
-    ruma::{OwnedUserId, RoomId, UserId},
+    ruma::{OwnedUserId, RoomId, UserId, events::room::member::MembershipState},
 };
 use persephone_contracts::{ContactStatus, ContactTrust, SecurityError};
 
-/// The one other user a direct-message room is marked for, or `None`.
+/// The one other user a direct-message room is marked for, while the room
+/// has exactly two members, or `None`. Uses the member count from sync.
 pub fn contact_of(client: &Client, room: &Room) -> Option<OwnedUserId> {
     let targets = room.direct_targets();
-    if targets.len() != 1 {
+    if targets.len() != 1 || room.active_members_count() != 2 {
         return None;
     }
     let contact = targets.iter().next()?.as_user_id()?.to_owned();
@@ -37,10 +41,21 @@ pub fn shown(contact: &UserId) -> String {
     project_name(contact.as_str())
 }
 
-async fn joined(room: &Room, contact: &UserId) -> bool {
-    room.members(RoomMemberships::JOIN)
+/// Whether the room's members (joined or invited) are exactly this account
+/// and `contact`, both joined, as its member list says.
+async fn just_us(client: &Client, room: &Room, contact: &UserId) -> bool {
+    let Some(own) = client.user_id() else {
+        return false;
+    };
+    room.members(RoomMemberships::ACTIVE)
         .await
-        .is_ok_and(|members| members.iter().any(|member| member.user_id() == contact))
+        .is_ok_and(|members| {
+            members.len() == 2
+                && members.iter().all(|member| {
+                    (member.user_id() == own || member.user_id() == contact)
+                        && *member.membership() == MembershipState::Join
+                })
+        })
 }
 
 /// The contact of a joined direct-message room, if they are still joined to
@@ -58,7 +73,7 @@ pub async fn verifiable_contact(
     let target = client
         .get_dm_room(&contact)
         .ok_or(SecurityError::NotDirectRoom)?;
-    if !joined(&room, &contact).await || !joined(&target, &contact).await {
+    if !just_us(client, &room, &contact).await || !just_us(client, &target, &contact).await {
         return Err(SecurityError::NotDirectRoom);
     }
     Ok(contact)

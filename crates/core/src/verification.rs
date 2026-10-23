@@ -235,12 +235,21 @@ pub async fn start_contact(client: &Client, room_id: &str) -> Result<Flow, Secur
         return Err(SecurityError::CannotSignContacts);
     }
     let contact = contacts::verifiable_contact(client, room_id).await?;
-    let identity = client
-        .encryption()
+    let encryption = client.encryption();
+    // The store may not hold the contact's keys yet (`contacts.rs`): ask the
+    // homeserver before saying they have no identity.
+    let identity = match encryption
         .get_user_identity(&contact)
         .await
         .map_err(|_| SecurityError::Failed)?
-        .ok_or(SecurityError::ContactHasNoIdentity)?;
+    {
+        Some(identity) => identity,
+        None => encryption
+            .request_user_identity(&contact)
+            .await
+            .map_err(|_| SecurityError::Failed)?
+            .ok_or(SecurityError::ContactHasNoIdentity)?,
+    };
     let request = identity
         .request_verification()
         .await

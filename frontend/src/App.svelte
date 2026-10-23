@@ -313,29 +313,44 @@
   }
 
   function verifyRoomContact(roomId: string) {
-    contactAsked = roomId;
-    startSecurity(() => verifyContact(roomId));
+    startSecurity(() => verifyContact(roomId), roomId);
   }
 
   // The selected room's contact, for a direct-message room. Kept only while
   // the same room in the same session is selected.
+  // A reply replaces the shown one only if it is newer, as for security: a
+  // slow reply from when the room opened must not undo a verification.
+  let contactRequest = 0;
+  let contactShown = 0;
   async function loadContact(roomId: string, generation: number) {
+    const request = ++contactRequest;
     if (!signedIn || !selectedRoom?.contact) {
       contact = null;
+      contactShown = request;
       return;
     }
+    let reply: ContactStatus | null = null;
     try {
-      const reply = await contactStatus(roomId);
-      if (current(roomId, generation)) contact = reply;
+      reply = await contactStatus(roomId);
     } catch {
-      if (current(roomId, generation)) contact = null;
+      // Shown as no contact.
+    }
+    if (current(roomId, generation) && request > contactShown) {
+      contact = reply;
+      contactShown = request;
     }
   }
 
-  async function startSecurity(start: () => Promise<SecurityStatus>) {
+  // `contactRoom` names the room whose contact this action verifies; every
+  // other action clears it, so a later failure is not shown in that room.
+  async function startSecurity(
+    start: () => Promise<SecurityStatus>,
+    contactRoom: string | null = null
+  ) {
     if (securityBusy) return;
     securityBusy = true;
     securityFailure = null;
+    contactAsked = contactRoom;
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {

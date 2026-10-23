@@ -14,14 +14,18 @@ flow was cancelled on both sides and the contact stayed unverified.**
 
 * **Direct-message rooms only** ([`contacts.rs`](../../crates/core/src/contacts.rs)):
   a room is a direct-message room when the account's `m.direct` data marks it
-  for exactly one other user. The room list names that contact (`contact`),
+  for exactly one other user and it has exactly two members, this account
+  and that user. The marks can outlive membership changes, so a room a third
+  person joined has no contact. The room list names that contact (`contact`),
   and a direct-message room without a name of its own is named after them.
 * **No room created, nobody invited**: the SDK sends a contact verification
   request to the first direct-message room it finds with that user
   (`get_dm_room`); with none it creates one, and if the contact left it, it
-  invites them back. The core refuses (`not_direct_room`) unless the contact
-  is joined both to the room the page names and to the room the SDK will use.
-  A membership change between that check and the SDK's own is still possible.
+  invites them back. The core refuses (`not_direct_room`) unless both the
+  room the page names and the room the SDK will use have exactly two members,
+  this account and the contact, both joined. A membership change between
+  that check and the SDK's own is still possible: the SDK 0.19.1 offers no
+  public way to send the request without its invitation fallback.
 * **Only a verified device vouches for someone**: the page offers "Verify"
   only on a verified device, and the core queues the start only then. A match
   signs the contact's identity with the account's user-signing key, so both
@@ -33,7 +37,8 @@ flow was cancelled on both sides and the contact stayed unverified.**
   room it arrived in. One flow at a time, as before; the flow's view now
   carries the contact's user ID (untrusted, projected like a name).
 * **Trust** (`contact_status`): `verified`, `unverified`, `no_identity` or
-  `unknown`, read from the local crypto store. Sync loads members lazily, so
+  `unknown`, read from the local crypto store. Starting a verification also
+  asks the homeserver before it reports `contact_has_no_identity`. Sync loads members lazily, so
   the SDK may not follow a contact's keys yet: when the store has nothing, the
   core loads the room's members (from then on the SDK follows every member's
   keys) and asks the homeserver once for the contact's keys. A failure reads
@@ -54,7 +59,8 @@ New or changed, all passing (see the [ledger](verification.json)):
 * Core, hub: a change to the account's direct-message rooms refreshes only the
   room list.
 * Account (mock homeserver, development feature): only the direct-message room
-  names its contact, and is named after them; a contact without an identity
+  names its contact, and is named after them; a room still marked direct with
+  the contact that a third person joined names no contact and is `not_found`; a contact without an identity
   reads `no_identity`; any other room is `not_found`; empty, malformed and
   oversized room IDs are refused; on a device that is not verified, asking to
   verify a contact queues nothing and sends nothing to the room.
@@ -64,6 +70,10 @@ New or changed, all passing (see the [ledger](verification.json)):
 * UI host: only the room ID crosses; an oversized one is refused before the
   core; a trust level outside the contract is refused; the user ID comes back
   unchanged for the page to render as text.
+* Review changes (23 October 2026, no live run): the two-member rule above,
+  the homeserver lookup before `contact_has_no_identity`, contact replies
+  applied only when newer than the one shown, and a verification failure shown
+  under the header only for the room whose contact the last action verified.
 * Frontend: the header shows the contact and trust as isolated, escaped text,
   offers "Verify" only to a verified device and only for an unverified
   contact, never reads an unknown trust level as verified, and other rooms keep

@@ -149,6 +149,16 @@ struct LiveRoom {
 /// `ROOM`.
 const DM: &str = "!dm:synthetic.test";
 const CONTACT: &str = "@bob:synthetic.test";
+/// Still marked as direct with `CONTACT`, but a third person joined it.
+const GROUP: &str = "!group:synthetic.test";
+
+fn group_state() -> Value {
+    let mut state = dm_state();
+    state.as_array_mut().unwrap().push(json!(
+        {"type":"m.room.member","state_key":"@carol:synthetic.test","sender":"@carol:synthetic.test","event_id":"$gcarol","origin_server_ts":5,"content":{"membership":"join"}}
+    ));
+    state
+}
 
 fn dm_state() -> Value {
     json!([
@@ -178,8 +188,9 @@ impl wiremock::Respond for LiveRoom {
         }
         let mut account_data = json!([]);
         if self.dm {
-            rooms[DM] = json!({"state":{"events":dm_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
-            account_data = json!([{"type":"m.direct","content":{CONTACT:[DM]}}]);
+            rooms[DM] = json!({"summary":{"m.joined_member_count":2,"m.invited_member_count":0},"state":{"events":dm_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+            rooms[GROUP] = json!({"summary":{"m.joined_member_count":3,"m.invited_member_count":0},"state":{"events":group_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+            account_data = json!([{"type":"m.direct","content":{CONTACT:[DM, GROUP]}}]);
         }
         ResponseTemplate::new(200).set_body_json(json!({
             "next_batch": format!("classic-{n}"),
@@ -1888,10 +1899,11 @@ fn given_no_flow_then_verification_actions_change_nothing() {
     assert_eq!(state, StoreState::RestartRequired);
 }
 
-/// GIVEN a direct-message room with a contact who has no identity WHEN the
-/// page lists rooms and asks about the contact THEN only that room names the
-/// contact, and their trust is `no_identity`; any other room has no contact,
-/// and a bad room ID is refused.
+/// GIVEN a direct-message room with a contact who has no identity, and a
+/// room still marked direct with them that a third person joined WHEN the
+/// page lists rooms and asks about the contact THEN only the two-person room
+/// names the contact, and their trust is `no_identity`; any other room has no
+/// contact, and a bad room ID is refused.
 #[test]
 fn given_a_direct_room_then_its_contact_and_their_trust_are_shown() {
     let server = Homeserver::signed_in();
@@ -1908,6 +1920,10 @@ fn given_a_direct_room_then_its_contact_and_their_trust_are_shown() {
             .iter()
             .any(|room| room.room_id == DM && room.contact.is_some())
     });
+    assert!(
+        list.rooms.iter().any(|room| room.room_id == GROUP),
+        "the group room is listed"
+    );
     for room in &list.rooms {
         let expected = (room.room_id == DM).then(|| CONTACT.to_owned());
         assert_eq!(room.contact, expected, "{}", room.room_id);
@@ -1922,15 +1938,18 @@ fn given_a_direct_room_then_its_contact_and_their_trust_are_shown() {
     assert_eq!(status.room_id, DM);
     assert_eq!(status.user_id, CONTACT);
     assert_eq!(status.trust, ContactTrust::NoIdentity);
-    assert_eq!(
-        call(
-            &core,
-            Call::ContactStatus {
-                room_id: ROOM.into()
-            }
-        ),
-        Outcome::Error(ErrorCode::NotFound)
-    );
+    for other in [ROOM, GROUP] {
+        assert_eq!(
+            call(
+                &core,
+                Call::ContactStatus {
+                    room_id: other.into()
+                }
+            ),
+            Outcome::Error(ErrorCode::NotFound),
+            "{other}"
+        );
+    }
     for bad in [String::new(), "dm".into(), format!("!{}", "x".repeat(255))] {
         assert_eq!(
             call(
