@@ -8,6 +8,7 @@ const invalidTag: TimelineItem = {
   event_id: "$e",
   sender: "@a:s",
   body: "text",
+  origin_server_ts: null,
 };
 
 const invalidName: RoomSummary = {
@@ -40,6 +41,16 @@ const unknownNotice: TimelineItem = {
   sender: "@a:s",
   // @ts-expect-error only the core's notice kinds are valid
   notice: "redacted",
+  origin_server_ts: null,
+};
+
+const bigTime: TimelineItem = {
+  kind: "message",
+  event_id: "$e",
+  sender: "@a:s",
+  body: "text",
+  // @ts-expect-error times are JavaScript numbers, not bigint
+  origin_server_ts: 1n,
 };
 
 // @ts-expect-error the store state is required
@@ -51,3 +62,4 @@ void unknownStore;
 void missingStore;
 void unknownAccountState;
 void unknownNotice;
+void bigTime;

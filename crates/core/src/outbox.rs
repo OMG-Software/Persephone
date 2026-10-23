@@ -16,7 +16,7 @@
 //! * Memory only: nothing is kept after a lock or restart.
 
 use matrix_sdk::ruma::{OwnedTransactionId, TransactionId};
-use persephone_contracts::{PendingMessage, PendingState, SendFailure};
+use persephone_contracts::{PendingMessage, PendingState, SendFailure, UnixMillis};
 use std::collections::{BTreeSet, VecDeque};
 use zeroize::Zeroizing;
 
@@ -33,9 +33,9 @@ pub const MAX_KEPT_BYTES: usize = 100 * 1024;
 /// writes as `\u00XX` (6 bytes); 2 more for the quotes.
 const MAX_EVENT_ID_JSON: usize = 255 * 6 + 2;
 /// What a message takes as JSON besides its body and room ID: the event ID,
-/// and under 128 bytes for the field names, the local ID, the state, the
-/// failure and the list's comma.
-const ENTRY_OVERHEAD: usize = MAX_EVENT_ID_JSON + 128;
+/// and under 160 bytes for the field names, the local ID, the state, the
+/// failure, the queue time and the list's comma.
+const ENTRY_OVERHEAD: usize = MAX_EVENT_ID_JSON + 160;
 
 /// How a send ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +56,7 @@ struct Entry {
     state: PendingState,
     event_id: Option<String>,
     failure: Option<SendFailure>,
+    queued_at: UnixMillis,
 }
 
 impl Entry {
@@ -67,6 +68,7 @@ impl Entry {
             state: self.state,
             event_id: self.event_id.clone(),
             failure: self.failure,
+            queued_at: self.queued_at,
         }
     }
 }
@@ -125,6 +127,7 @@ impl Outbox {
             state: PendingState::Queued,
             event_id: None,
             failure: None,
+            queued_at: crate::views::now_millis(),
         };
         let view = entry.view();
         self.entries.push_back(entry);
@@ -394,6 +397,25 @@ mod tests {
                 .all(|message| message.local_id != first),
             "oldest sent dropped"
         );
+    }
+
+    /// GIVEN every field at its longest WHEN one message is written as JSON
+    /// THEN it takes no more than its budgeted size, comma included.
+    #[test]
+    fn given_the_longest_fields_then_an_entry_fits_its_budget() {
+        let room = format!("!{}", "\"".repeat(254));
+        let text = "\u{1}".repeat(100);
+        let longest = PendingMessage {
+            local_id: u32::MAX,
+            room_id: room.clone(),
+            body: text.clone(),
+            state: PendingState::Unknown,
+            event_id: Some(format!("${}", "\u{1}".repeat(254))),
+            failure: Some(SendFailure::ConfirmationRequired),
+            queued_at: UnixMillis::saturating(u64::MAX),
+        };
+        let written = serde_json::to_vec(&longest).unwrap().len() + 1;
+        assert!(written <= entry_size(&room, &text), "{written} bytes");
     }
 
     /// GIVEN the worst case for one room (every room-ID, body and event-ID

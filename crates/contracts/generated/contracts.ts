@@ -61,13 +61,27 @@ export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
 export type SendFailure = "confirmation_required" | "device_not_verified" | "identity_changed" | "not_joined" | "rejected" | "failed";
 
-export type PendingMessage = { localId: number, roomId: string, body: string, state: PendingState, eventId: string | null, failure: SendFailure | null, };
+export type PendingMessage = { localId: number, roomId: string, body: string, state: PendingState, eventId: string | null, failure: SendFailure | null, 
+/**
+ * When it was queued on this device, by this computer's clock.
+ */
+queuedAt: number, };
 
 export type RoomList = { rooms: Array<RoomSummary>, truncated: boolean, };
 
 export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported";
 
-export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, } | { "kind": "gap", next_cursor: string | null, } | { "kind": "notice", event_id: string, sender: string, notice: NoticeKind, };
+export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, 
+/**
+ * When the sender's homeserver says it received the event
+ * (`origin_server_ts`). That server sets it and nothing checks it,
+ * so it can be wrong. `None` when the event has no usable time.
+ */
+origin_server_ts: number | null, } | { "kind": "gap", next_cursor: string | null, } | { "kind": "notice", event_id: string, sender: string, notice: NoticeKind, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, };
 
 export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, };
 
@@ -85,13 +99,15 @@ export const timelinePageFixture = {
       "kind": "message",
       "event_id": "$event",
       "sender": "@alice:server.invalid",
-      "body": "hostile <img src=x onerror=alert(1)>"
+      "body": "hostile <img src=x onerror=alert(1)>",
+      "origin_server_ts": 1767258000000
     },
     {
       "kind": "notice",
       "event_id": "$encrypted",
       "sender": "@bob:server.invalid",
-      "notice": "undecryptable"
+      "notice": "undecryptable",
+      "origin_server_ts": null
     },
     {
       "kind": "gap",

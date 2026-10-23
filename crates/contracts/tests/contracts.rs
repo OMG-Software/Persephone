@@ -36,8 +36,7 @@ fn serde_rejects_unknown_fields_and_variants() {
     let unknown_variant = r#"{"kind":"future_variant","value":1}"#;
     assert!(serde_json::from_str::<persephone_contracts::TimelineItem>(unknown_variant).is_err());
 
-    let unknown_message_field =
-        r#"{"kind":"message","event_id":"$e","sender":"@a:s","body":"hi","extra":true}"#;
+    let unknown_message_field = r#"{"kind":"message","event_id":"$e","sender":"@a:s","body":"hi","origin_server_ts":null,"extra":true}"#;
     assert!(
         serde_json::from_str::<persephone_contracts::TimelineItem>(unknown_message_field).is_err()
     );
@@ -74,6 +73,68 @@ fn serde_enforces_u32_integer_range_for_json_count() {
             "{invalid}"
         );
     }
+}
+
+/// GIVEN a time WHEN it is read THEN only values JavaScript holds exactly are
+/// accepted, so the page never shows a rounded time.
+#[test]
+fn serde_enforces_javascript_safe_range_for_times() {
+    use persephone_contracts::{TimelineItem, UnixMillis};
+
+    let message = |ts: &str| {
+        format!(
+            r#"{{"kind":"message","event_id":"$e","sender":"@a:s","body":"hi","origin_server_ts":{ts}}}"#
+        )
+    };
+    let time = |item: TimelineItem| match item {
+        TimelineItem::Message {
+            origin_server_ts, ..
+        } => origin_server_ts.map(UnixMillis::get),
+        _ => unreachable!(),
+    };
+    assert_eq!(time(serde_json::from_str(&message("null")).unwrap()), None);
+    assert_eq!(
+        time(serde_json::from_str(&message("9007199254740991")).unwrap()),
+        Some(UnixMillis::MAX)
+    );
+    for invalid in [
+        "9007199254740992",
+        "18446744073709551615",
+        "-1",
+        "1.5",
+        "\"1\"",
+    ] {
+        assert!(
+            serde_json::from_str::<TimelineItem>(&message(invalid)).is_err(),
+            "{invalid}"
+        );
+    }
+    // A missing time reads as none, never as a default time.
+    assert_eq!(
+        time(
+            serde_json::from_str(
+                r#"{"kind":"message","event_id":"$e","sender":"@a:s","body":"hi"}"#
+            )
+            .unwrap()
+        ),
+        None
+    );
+    assert_eq!(UnixMillis::new(UnixMillis::MAX + 1), None);
+    assert_eq!(UnixMillis::saturating(u64::MAX).get(), UnixMillis::MAX);
+
+    let pending = |queued_at: &str| {
+        format!(
+            r#"{{"localId":1,"roomId":"!r:s","body":"b","state":"queued","eventId":null,"failure":null,"queuedAt":{queued_at}}}"#
+        )
+    };
+    assert!(serde_json::from_str::<persephone_contracts::PendingMessage>(&pending("0")).is_ok());
+    assert!(
+        serde_json::from_str::<persephone_contracts::PendingMessage>(&pending("9007199254740992"))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_str::<persephone_contracts::PendingMessage>(&pending("null")).is_err()
+    );
 }
 
 #[test]

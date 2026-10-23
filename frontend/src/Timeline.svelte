@@ -3,6 +3,7 @@
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
   import Message from './Message.svelte';
+  import { clockTime, dayDividers, fullTime, toDate } from './time';
 
   let {
     title,
@@ -33,6 +34,11 @@
   };
   const key = (item: TimelineItem, index: number) =>
     item.kind === 'gap' ? 'gap-' + index : item.event_id;
+
+  // A "Today", "Yesterday" or date line where the day changes. Items stay in
+  // the order the homeserver gave; their times are not used to sort.
+  const timeOf = (item: TimelineItem) => (item.kind === 'gap' ? null : item.origin_server_ts);
+  const dividers = $derived(dayDividers(items.map(timeOf), new Date()));
 
   // The timeline stays at the newest message while the reader is there; it
   // does not move when they have scrolled up to read older ones.
@@ -73,11 +79,18 @@
       <ol>
         {#each items as item, index (key(item, index))}
           <li>
+            {#if dividers[index]}
+              <p class="day-divider"><span>{dividers[index]}</span></p>
+            {/if}
             {#if item.kind === 'message'}
-              <Message name={item.sender} body={item.body} />
+              <Message name={item.sender} body={item.body} time={item.origin_server_ts} />
             {:else if item.kind === 'notice'}
+              {@const date = toDate(item.origin_server_ts)}
               <p class="notice">
                 <span><bdi>{item.sender}</bdi>: {noticeText[item.notice] ?? noticeText.unsupported}</span>
+                {#if date}
+                  <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
+                {/if}
               </p>
             {:else}
               <p class="gap">Some messages are not shown here.</p>

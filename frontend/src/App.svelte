@@ -49,6 +49,9 @@
   let status = $state<AppStatus | null>(null);
   let security = $state<SecurityStatus | null>(null);
   let securityBusy = $state(false);
+  // Why the last security action failed. Kept apart from `error`, so a later
+  // success clears it without hiding a room's error.
+  let securityFailure = $state<string | null>(null);
   // A security reply replaces the shown one only if it is newer, as for rooms.
   let securityRequest = 0;
   let securityShown = 0;
@@ -242,6 +245,7 @@
     status = null;
     security = null;
     securityBusy = false;
+    securityFailure = null;
     pending = [];
     confirmingPlain = null;
     confirmedRooms = new Set();
@@ -278,6 +282,7 @@
   async function startSecurity(start: () => Promise<SecurityStatus>) {
     if (securityBusy) return;
     securityBusy = true;
+    securityFailure = null;
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {
@@ -287,7 +292,7 @@
         securityShown = request;
       }
     } catch (reason) {
-      if (generation === sessionGeneration) error = describe(reason);
+      if (generation === sessionGeneration) securityFailure = describe(reason);
     } finally {
       if (generation === sessionGeneration) securityBusy = false;
     }
@@ -637,8 +642,8 @@
           oncancel={(flowId) => startSecurity(() => cancelVerification(flowId))}
           ondismiss={dismissFlow}
         />
-        {#if error}
-          <p role="alert" class="error">{error}</p>
+        {#if securityFailure}
+          <p role="alert" class="error">{securityFailure}</p>
         {/if}
       </div>
     </div>
@@ -679,8 +684,8 @@
             </p>
           </section>
         {/if}
-        {#if error}
-          <p role="alert" class="error">{error}</p>
+        {#if securityFailure}
+          <p role="alert" class="error">{securityFailure}</p>
         {/if}
       {:else}
         <section class="settings-page" aria-labelledby="session-heading">

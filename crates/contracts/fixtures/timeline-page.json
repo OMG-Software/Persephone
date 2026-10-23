@@ -5,13 +5,15 @@
       "kind": "message",
       "event_id": "$event",
       "sender": "@alice:server.invalid",
-      "body": "hostile <img src=x onerror=alert(1)>"
+      "body": "hostile <img src=x onerror=alert(1)>",
+      "origin_server_ts": 1767258000000
     },
     {
       "kind": "notice",
       "event_id": "$encrypted",
       "sender": "@bob:server.invalid",
-      "notice": "undecryptable"
+      "notice": "undecryptable",
+      "origin_server_ts": null
     },
     {
       "kind": "gap",

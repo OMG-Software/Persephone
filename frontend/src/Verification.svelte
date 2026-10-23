@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import type { VerificationView } from '../../crates/contracts/generated/contracts';
 
   // An emoji verification of this device with another of the account's
@@ -25,10 +24,15 @@
   const comparing = $derived(flow.phase === 'compare' && flow.emoji.length === 7);
   const asking = $derived(comparing || flow.phase === 'incoming');
 
-  // This screen replaces whatever had focus, so focus moves to its heading
-  // and screen readers start at the question.
+  // This screen replaces whatever had focus, and each phase replaces the
+  // buttons of the last one, so focus moves to the heading when the screen
+  // opens and whenever the phase changes; screen readers start there.
   let heading = $state<HTMLElement | null>(null);
-  onMount(() => heading?.focus());
+  $effect(() => {
+    void flow.flowId;
+    void flow.phase;
+    heading?.focus();
+  });
 </script>
 
 <section class="centred-stack" aria-labelledby="verify-heading">

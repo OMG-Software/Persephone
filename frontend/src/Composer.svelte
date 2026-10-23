@@ -7,6 +7,7 @@
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
   import { isolate } from './people';
+  import { clockTime, fullTime, toDate } from './time';
 
   let {
     pending,
@@ -41,7 +42,10 @@
   const MAX_DRAFT = 16 * 1024;
   let sending = $state(false);
   let explaining = $state(false);
-  let lastVersion = 0;
+  // Starts at the version the composer mounts with, so mounting again (after
+  // settings or a verification) keeps the draft the caller kept.
+  // svelte-ignore state_referenced_locally
+  let lastVersion = draftVersion;
   let form = $state<HTMLFormElement | null>(null);
 
   const notEncrypted = $derived(encryption === 'not_encrypted');
@@ -102,9 +106,15 @@
   {#if pending.length > 0}
     <ol class="pending" aria-label="Messages you sent">
       {#each pending as message (message.localId)}
+        {@const queued = toDate(message.queuedAt)}
         <li>
           <p dir="auto">{message.body}</p>
           <p class="note" role={message.state === 'failed' || message.state === 'unknown' ? 'alert' : null}>
+            {#if queued}
+              <time datetime={queued.toISOString()} title={'Sent from this device ' + fullTime(queued)}
+                >{clockTime(queued)}</time
+              > ·
+            {/if}
             {stateText(message)}
           </p>
           {#if message.state === 'failed' && message.failure === 'confirmation_required'}

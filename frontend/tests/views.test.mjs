@@ -493,3 +493,63 @@ test('the verification screen heading can take focus when the screen opens', () 
   }).body;
   assert.match(html, /<h2 id="verify-heading" tabindex="-1">Verify this device<\/h2>/);
 });
+
+test('GIVEN timeline items with times WHEN rendered THEN times and day dividers show, and bad times do not', () => {
+  const start = 1_767_258_000_000;
+  const item = (n, origin_server_ts) => ({
+    kind: 'message',
+    event_id: `$${n}`,
+    sender: '@a:example.invalid',
+    body: `m${n}`,
+    origin_server_ts
+  });
+  const html = render(Timeline, {
+    props: {
+      title: 'R',
+      items: [
+        item(1, start),
+        item(2, start + 60_000),
+        { kind: 'notice', event_id: '$n', sender: '@b:example.invalid', notice: 'withheld', origin_server_ts: start + 120_000 },
+        // Hostile times: past JavaScript's dates, negative, fractional, text.
+        item(3, Number.MAX_SAFE_INTEGER),
+        item(4, -1),
+        item(5, 1.5),
+        item(6, '<b>noon</b>'),
+        item(7, null)
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  }).body;
+  assert.equal((html.match(/<time datetime=/g) ?? []).length, 3, 'two messages and the notice');
+  assert.match(html, /<time datetime="2026-01-01T09:00:00\.000Z"/);
+  assert.match(html, /<time datetime="2026-01-01T09:02:00\.000Z"/);
+  assert.equal((html.match(/class="day-divider"/g) ?? []).length, 1, 'one day');
+  assert.doesNotMatch(html, /<b>noon/);
+  assert.doesNotMatch(html, /Invalid Date|NaN/);
+  // Every message still shows, with or without a time.
+  assert.equal((html.match(/<p dir="auto">/g) ?? []).length, 7);
+});
+
+test('a pending message shows when it was queued on this device', () => {
+  const html = render(Composer, {
+    props: {
+      pending: [
+        { localId: 1, roomId: '!r:example.invalid', body: 'hi', state: 'queued', eventId: null, failure: null, queuedAt: 1_767_258_000_000 },
+        { localId: 2, roomId: '!r:example.invalid', body: 'hi', state: 'queued', eventId: null, failure: null, queuedAt: -5 }
+      ],
+      blocked: null,
+      encryption: 'encrypted',
+      roomName: 'R',
+      draftVersion: 0,
+      onsend: async () => true,
+      onretry: () => {},
+      ondiscard: () => {},
+      onallow: () => {}
+    }
+  }).body;
+  assert.equal((html.match(/<time datetime="2026-01-01T09:00:00\.000Z" title="Sent from this device /g) ?? []).length, 1);
+  assert.equal((html.match(/Waiting to send…/g) ?? []).length, 2);
+});
