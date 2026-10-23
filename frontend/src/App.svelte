@@ -65,8 +65,10 @@
   let securityShown = 0;
   // The other person in the selected direct-message room, if it is one.
   let contact = $state<ContactStatus | null>(null);
-  // Members of the selected room whose identity changed (ADR-0007).
+  // Members of the selected room whose identity changed (ADR-0007), and
+  // whether the last attempt to find out failed.
   let changes = $state<RoomIdentityChanges | null>(null);
+  let changesFailed = $state(false);
   // The room whose contact this page last asked to verify, and the room in
   // which it last asked to accept a new identity: the core reports why that
   // failed in the security status, shown in that room, each in its own place.
@@ -296,6 +298,7 @@
     pending = [];
     contact = null;
     changes = null;
+    changesFailed = false;
     contactAsked = null;
     identityAsked = null;
     confirmingPlain = null;
@@ -346,6 +349,7 @@
     const request = ++changesRequest;
     if (!signedIn || selectedRoom?.encryption !== 'encrypted') {
       changes = null;
+      changesFailed = false;
       changesShown = request;
       return;
     }
@@ -353,10 +357,12 @@
     try {
       reply = await identityChanges(roomId);
     } catch {
-      // Shown as none; the core still refuses to send.
+      // The core still refuses to send when it cannot tell; say so and
+      // offer to look again rather than show nothing.
     }
     if (current(roomId, generation) && request > changesShown) {
       changes = reply;
+      changesFailed = reply === null;
       changesShown = request;
     }
   }
@@ -568,6 +574,7 @@
     pending = [];
     contact = null;
     changes = null;
+    changesFailed = false;
     confirmingPlain = null;
     nextCursor = null;
     error = null;
@@ -937,6 +944,17 @@
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
+          {/if}
+          {#if signedIn && changesFailed}
+            <div class="error contact-error" role="alert">
+              Persephone could not check whether anyone's identity changed in this room, so it
+              sends nothing here for now.
+              <button
+                type="button"
+                class="secondary"
+                onclick={() => loadChanges(selectedRoom.roomId, sessionGeneration)}>Try again</button
+              >
+            </div>
           {/if}
           {#if signedIn && changes && (changes.changes.length > 0 || changes.truncated)}
             <IdentityChanges
