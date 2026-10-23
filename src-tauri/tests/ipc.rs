@@ -56,6 +56,7 @@ impl CoreTransport for FakeCore {
             Call::LockSession {} => Ok(serde_json::json!("locked")),
             // A state outside the contract must not reach the page.
             Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
+            Call::ResetProfile {} => Ok(serde_json::json!("unlocking")),
             Call::SignOut {} => Ok(serde_json::json!("restart_required")),
             Call::SecurityStatus {} => Ok(
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false}),
@@ -316,6 +317,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-watch-session",
             "allow-lock-session",
             "allow-unlock-session",
+            "allow-reset-profile",
             "allow-sign-in",
             "allow-sign-out",
             "allow-security-status",
@@ -567,6 +569,10 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     assert_eq!(
         invoke("unlock_session", serde_json::json!({})).unwrap_err(),
         "core_unavailable"
+    );
+    assert_eq!(
+        invoke("reset_profile", serde_json::json!({})),
+        Ok(serde_json::json!("unlocking"))
     );
 }
 

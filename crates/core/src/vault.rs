@@ -1,10 +1,11 @@
-//! Store-key protection through the OS vault.
+//! The OS vault: the outer layer around the sealed store key.
 //!
-//! The local store key is 32 random bytes. It is never derived from a human
-//! password and never written to disk unwrapped: on Windows, DPAPI wraps it for
-//! the current user, and only the wrapped blob is saved. DPAPI does not prompt;
-//! any process running as the same user can unwrap the blob, so this protects
-//! a copied profile, not a compromised account.
+//! The local store key is 32 random bytes and is never written to disk in
+//! the clear. The profile passphrase seals it (`passphrase.rs`, ADR-0006), and
+//! on Windows DPAPI then wraps the sealed form for the current user. DPAPI
+//! does not prompt; any process running as the same user can remove this
+//! layer, so on its own it protects only a copied profile. Profiles from
+//! before ADR-0006 hold a store key wrapped by DPAPI alone.
 
 use zeroize::Zeroizing;
 
@@ -23,11 +24,12 @@ pub enum VaultError {
     Failed,
 }
 
-/// Wraps and unwraps the store key. Implemented by the OS vault, and by
-/// stand-ins in tests.
+/// Wraps and unwraps key material: the sealed store key, or a store key
+/// from before ADR-0006. Implemented by the OS vault, and by stand-ins in
+/// tests. The caller checks the unwrapped length.
 pub trait KeyProtector: Send + Sync {
-    fn protect(&self, key: &StoreKey) -> Result<Vec<u8>, VaultError>;
-    fn unprotect(&self, blob: &[u8]) -> Result<StoreKey, VaultError>;
+    fn protect(&self, data: &[u8]) -> Result<Vec<u8>, VaultError>;
+    fn unprotect(&self, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError>;
 }
 
 /// A new random key from the OS generator.
@@ -38,22 +40,22 @@ pub fn generate_key() -> Result<StoreKey, VaultError> {
 }
 
 /// The platform's vault, or a protector that refuses everything.
-pub fn platform() -> Box<dyn KeyProtector> {
+pub fn platform() -> std::sync::Arc<dyn KeyProtector> {
     #[cfg(windows)]
-    return Box::new(Dpapi::new());
+    return std::sync::Arc::new(Dpapi::new());
     #[cfg(not(windows))]
-    return Box::new(Unsupported);
+    return std::sync::Arc::new(Unsupported);
 }
 
 /// Refuses every operation, so an unsupported platform stays locked.
 pub struct Unsupported;
 
 impl KeyProtector for Unsupported {
-    fn protect(&self, _: &StoreKey) -> Result<Vec<u8>, VaultError> {
+    fn protect(&self, _: &[u8]) -> Result<Vec<u8>, VaultError> {
         Err(VaultError::Unsupported)
     }
 
-    fn unprotect(&self, _: &[u8]) -> Result<StoreKey, VaultError> {
+    fn unprotect(&self, _: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         Err(VaultError::Unsupported)
     }
 }
@@ -88,7 +90,7 @@ impl Default for Dpapi {
 
 #[cfg(windows)]
 mod dpapi {
-    use super::{Dpapi, KEY_BYTES, KeyProtector, StoreKey, VaultError};
+    use super::{Dpapi, KeyProtector, VaultError};
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::{
         Foundation::LocalFree,
@@ -140,8 +142,8 @@ mod dpapi {
     }
 
     impl KeyProtector for Dpapi {
-        fn protect(&self, key: &StoreKey) -> Result<Vec<u8>, VaultError> {
-            let input = blob(key.as_ref())?;
+        fn protect(&self, data: &[u8]) -> Result<Vec<u8>, VaultError> {
+            let input = blob(data)?;
             let entropy = blob(self.entropy)?;
             let mut output = empty();
             // SAFETY: all blobs point to live buffers for the call; UI is
@@ -163,7 +165,7 @@ mod dpapi {
             Ok(output.bytes().to_vec())
         }
 
-        fn unprotect(&self, wrapped: &[u8]) -> Result<StoreKey, VaultError> {
+        fn unprotect(&self, wrapped: &[u8]) -> Result<Zeroizing<Vec<u8>>, VaultError> {
             let input = blob(wrapped)?;
             let entropy = blob(self.entropy)?;
             let mut output = empty();
@@ -179,12 +181,10 @@ mod dpapi {
                     &mut output.0,
                 )
             };
-            if ok == 0 || output.bytes().len() != KEY_BYTES {
+            if ok == 0 {
                 return Err(VaultError::Failed);
             }
-            let mut key = Zeroizing::new([0u8; KEY_BYTES]);
-            key.copy_from_slice(output.bytes());
-            Ok(key)
+            Ok(Zeroizing::new(output.bytes().to_vec()))
         }
     }
 }

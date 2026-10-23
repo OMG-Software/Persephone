@@ -1,12 +1,15 @@
-//! The protected profile against real SDK SQLite stores. On Windows the key is
-//! wrapped by real DPAPI; the fail-closed rules are also checked with a
+//! The protected profile against real SDK SQLite stores. The store key is
+//! sealed under the profile passphrase (ADR-0006); on Windows the sealed key
+//! is wrapped by real DPAPI. The fail-closed rules are also checked with a
 //! stand-in protector so they run on every platform.
 
 use matrix_sdk_crypto::store::CryptoStore;
 use persephone_contracts::StoreState;
 use persephone_core::{
-    store::{self, KEY_FILE, MAX_KEY_FILE_BYTES, STORE_DIR},
-    vault::{KEY_BYTES, KeyProtector, Unsupported},
+    credentials::PromptError,
+    passphrase::{self, SEALED_BYTES},
+    store::{self, KEY_FILE, MAX_KEY_FILE_BYTES, OLD_KEY_FILE, STORE_DIR},
+    vault::{KeyProtector, Unsupported},
 };
 use std::{
     collections::BTreeMap,
@@ -16,7 +19,7 @@ use std::{
 use tempfile::TempDir;
 
 mod common;
-use common::Tagged;
+use common::{PASSPHRASE, Script, Tagged, unlock, unlock_with};
 
 const MARKER: &[u8] = b"PERSEPHONE_SYNTHETIC_CORE_STORE_MARKER_7C1D";
 const MARKER_KEY: &str = "synthetic-marker";
@@ -55,7 +58,7 @@ fn durable(mut files: BTreeMap<PathBuf, Vec<u8>>) -> BTreeMap<PathBuf, Vec<u8>> 
 /// closes it.
 fn seeded(protector: &dyn KeyProtector) -> TempDir {
     let dir = TempDir::new().unwrap();
-    let stores = store::open(dir.path(), protector).expect("new profile opens");
+    let stores = store::open(dir.path(), protector, &unlock()).expect("new profile opens");
     stores
         .block_on(
             stores
@@ -68,7 +71,7 @@ fn seeded(protector: &dyn KeyProtector) -> TempDir {
 }
 
 fn read_marker(dir: &Path, protector: &dyn KeyProtector) -> Option<Vec<u8>> {
-    let stores = store::open(dir, protector).expect("profile reopens");
+    let stores = store::open(dir, protector, &unlock()).expect("profile reopens");
     let value = stores
         .block_on(stores.crypto().get_custom_value(MARKER_KEY))
         .unwrap();
@@ -77,7 +80,7 @@ fn read_marker(dir: &Path, protector: &dyn KeyProtector) -> Option<Vec<u8>> {
 }
 
 fn refused(dir: &Path, protector: &dyn KeyProtector) -> StoreState {
-    match store::open(dir, protector) {
+    match store::open(dir, protector, &unlock()) {
         Ok(stores) => {
             stores.close();
             panic!("profile opened");
@@ -127,7 +130,7 @@ fn given_an_unreadable_key_file_then_the_profile_stays_locked_and_recovers_when_
         // Wrapped for another context.
         {
             let mut other = original.clone();
-            let tag = other.len() - KEY_BYTES - 1;
+            let tag = other.len() - SEALED_BYTES - 1;
             other[tag] = 2;
             other
         },
@@ -141,9 +144,10 @@ fn given_an_unreadable_key_file_then_the_profile_stays_locked_and_recovers_when_
         assert_eq!(refused(dir.path(), &protector), StoreState::KeyUnreadable);
         assert_eq!(files(dir.path()), before);
     }
-    // A flipped key byte unwraps, but the stores refuse it.
+    // A changed sealed key unwraps, but no passphrase opens it: the AEAD
+    // cannot tell a tampered file from a wrong passphrase.
     fs::write(&key_path, &flipped).unwrap();
-    assert_eq!(refused(dir.path(), &protector), StoreState::KeyRejected);
+    assert_eq!(refused(dir.path(), &protector), StoreState::SecretRejected);
     fs::write(&key_path, &original).unwrap();
     assert_eq!(read_marker(dir.path(), &protector).as_deref(), Some(MARKER));
 }
@@ -174,10 +178,14 @@ fn given_another_profiles_key_then_the_stores_refuse_it_and_keep_their_data() {
 fn given_an_open_profile_then_a_second_owner_is_refused_until_it_closes() {
     let protector = Tagged(1);
     let dir = TempDir::new().unwrap();
-    let stores = store::open(dir.path(), &protector).unwrap();
+    let stores = store::open(dir.path(), &protector, &unlock()).unwrap();
     assert_eq!(refused(dir.path(), &protector), StoreState::ProfileInUse);
     assert!(stores.close());
-    assert!(store::open(dir.path(), &protector).unwrap().close());
+    assert!(
+        store::open(dir.path(), &protector, &unlock())
+            .unwrap()
+            .close()
+    );
 }
 
 #[test]
@@ -196,7 +204,11 @@ fn given_an_interrupted_first_run_then_opening_completes_it() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join(format!("{KEY_FILE}.tmp")), b"torn").unwrap();
     fs::create_dir(dir.path().join(STORE_DIR)).unwrap();
-    assert!(store::open(dir.path(), &protector).unwrap().close());
+    assert!(
+        store::open(dir.path(), &protector, &unlock())
+            .unwrap()
+            .close()
+    );
 
     let key_only = seeded(&protector);
     fs::remove_dir_all(key_only.path().join(STORE_DIR)).unwrap();
@@ -210,7 +222,7 @@ fn given_an_interrupted_first_run_then_opening_completes_it() {
 fn given_open_stores_dropped_without_close_then_they_shut_down_and_keep_their_data() {
     let protector = Tagged(1);
     let dir = TempDir::new().unwrap();
-    let stores = store::open(dir.path(), &protector).unwrap();
+    let stores = store::open(dir.path(), &protector, &unlock()).unwrap();
     stores
         .block_on(
             stores
@@ -241,7 +253,7 @@ fn given_a_signed_out_profile_then_opening_wipes_it_and_starts_fresh() {
         "wipe finished"
     );
     assert!(dir.path().join(KEY_FILE).exists(), "a new key");
-    let stores = store::open(dir.path(), &protector).unwrap();
+    let stores = store::open(dir.path(), &protector, &unlock()).unwrap();
     assert!(!stores.unconfirmed_sign_out(), "nothing wiped this time");
     assert!(stores.close());
 
@@ -290,7 +302,7 @@ mod dpapi {
         let dir = seeded(&protector);
         let saved = fs::read(dir.path().join(KEY_FILE)).unwrap();
         let blob = &saved[saved.iter().position(|b| *b == b'\n').unwrap() + 1..];
-        let key = protector.unprotect(blob).unwrap();
+        let key = passphrase::open(&protector.unprotect(blob).unwrap(), PASSPHRASE).unwrap();
         for (path, bytes) in files(dir.path()) {
             assert!(!contains(&bytes, key.as_ref()), "raw key in {path:?}");
             assert!(!contains(&bytes, MARKER), "marker in {path:?}");
@@ -319,11 +331,14 @@ mod dpapi {
     fn given_dpapi_then_wrapping_is_randomized_and_tamper_evident() {
         let protector = Dpapi::new();
         let key = persephone_core::vault::generate_key().unwrap();
-        let first = protector.protect(&key).unwrap();
-        let second = protector.protect(&key).unwrap();
+        let first = protector.protect(key.as_ref()).unwrap();
+        let second = protector.protect(key.as_ref()).unwrap();
         assert_ne!(first, second, "fresh salt per wrap");
         assert!(!contains(&first, key.as_ref()));
-        assert_eq!(*protector.unprotect(&first).unwrap(), *key);
+        assert_eq!(
+            protector.unprotect(&first).unwrap().as_slice(),
+            key.as_ref()
+        );
         let mut tampered = first.clone();
         let middle = tampered.len() / 2;
         tampered[middle] ^= 1;
@@ -345,7 +360,7 @@ fn given_an_interrupted_or_unrevoked_sign_out_then_opening_wipes_and_reports_it(
         interrupted.path().join(KEY_FILE).exists(),
         "key not yet deleted"
     );
-    let stores = store::open(interrupted.path(), &protector).unwrap();
+    let stores = store::open(interrupted.path(), &protector, &unlock()).unwrap();
     assert!(stores.unconfirmed_sign_out());
     assert_eq!(
         stores
@@ -360,7 +375,7 @@ fn given_an_interrupted_or_unrevoked_sign_out_then_opening_wipes_and_reports_it(
         let dir = seeded(&protector);
         store::begin_sign_out(dir.path()).unwrap();
         store::mark_signed_out(dir.path(), revoked).unwrap();
-        let stores = store::open(dir.path(), &protector).unwrap();
+        let stores = store::open(dir.path(), &protector, &unlock()).unwrap();
         assert_eq!(
             stores.unconfirmed_sign_out(),
             unconfirmed,
@@ -368,4 +383,212 @@ fn given_an_interrupted_or_unrevoked_sign_out_then_opening_wipes_and_reports_it(
         );
         assert!(stores.close());
     }
+}
+
+/// Turns a profile back into one from before ADR-0006: the bare key wrapped
+/// by the vault alone, in `store-key.v1`.
+fn downgrade(dir: &Path, protector: &dyn KeyProtector) {
+    let saved = fs::read(dir.join(KEY_FILE)).unwrap();
+    let blob = &saved[saved.iter().position(|b| *b == b'\n').unwrap() + 1..];
+    let key = passphrase::open(&protector.unprotect(blob).unwrap(), PASSPHRASE).unwrap();
+    let mut old = b"PERSEPHONE-STORE-KEY-1\n".to_vec();
+    old.extend(protector.protect(key.as_ref()).unwrap());
+    fs::write(dir.join(OLD_KEY_FILE), old).unwrap();
+    fs::remove_file(dir.join(KEY_FILE)).unwrap();
+}
+
+/// GIVEN a profile from before ADR-0006 WHEN it opens THEN a new passphrase
+/// is chosen, the key is sealed and saved, the old key file is deleted, and
+/// from then on only the passphrase opens the same data.
+#[test]
+fn given_an_old_profile_then_opening_upgrades_it_to_a_passphrase() {
+    let protector = Tagged(1);
+    let dir = seeded(&protector);
+    downgrade(dir.path(), &protector);
+    let script = Script::new([Ok("a new passphrase"), Ok("a new passphrase")]);
+    let stores = store::open(dir.path(), &protector, &unlock_with(script.clone())).unwrap();
+    assert!(stores.close());
+    assert_eq!(
+        script.seen(),
+        ["NewPassphrase(Upgrade)", "NewPassphrase(Confirm)"]
+    );
+    assert!(dir.path().join(KEY_FILE).exists());
+    assert!(!dir.path().join(OLD_KEY_FILE).exists(), "old key deleted");
+
+    let new = unlock_with(Script::new([Ok("a new passphrase")]));
+    let stores = store::open(dir.path(), &protector, &new).unwrap();
+    assert_eq!(
+        stores
+            .block_on(stores.crypto().get_custom_value(MARKER_KEY))
+            .unwrap()
+            .as_deref(),
+        Some(MARKER)
+    );
+    assert!(stores.close());
+}
+
+/// GIVEN a profile from before ADR-0006 WHEN the new passphrase is cancelled
+/// THEN the profile stays locked and its old key is kept, so it upgrades
+/// later; WHEN both key files exist (an interrupted upgrade) THEN the sealed
+/// one is used and the old one deleted.
+#[test]
+fn given_a_cancelled_or_interrupted_upgrade_then_the_old_key_is_kept_until_it_completes() {
+    let protector = Tagged(1);
+    let dir = seeded(&protector);
+    downgrade(dir.path(), &protector);
+    let old = fs::read(dir.path().join(OLD_KEY_FILE)).unwrap();
+    let before = files(dir.path());
+    let cancelled = unlock_with(Script::new([Err(PromptError::Cancelled)]));
+    assert_eq!(
+        store::open(dir.path(), &protector, &cancelled).err(),
+        Some(StoreState::Locked)
+    );
+    assert_eq!(files(dir.path()), before, "no store file is touched");
+    assert_eq!(fs::read(dir.path().join(OLD_KEY_FILE)).unwrap(), old);
+    assert!(!dir.path().join(KEY_FILE).exists(), "nothing sealed");
+
+    assert!(
+        store::open(dir.path(), &protector, &unlock())
+            .unwrap()
+            .close()
+    );
+    fs::write(dir.path().join(OLD_KEY_FILE), &old).unwrap();
+    let script = Script::new([]);
+    let stores = store::open(dir.path(), &protector, &unlock_with(script.clone())).unwrap();
+    assert!(stores.close());
+    assert_eq!(script.seen(), ["Passphrase { retry: false }"]);
+    assert!(!dir.path().join(OLD_KEY_FILE).exists());
+}
+
+/// GIVEN a new profile WHEN the new passphrase is too short, empty, or not
+/// confirmed THEN it is asked again with the reason, and only a matching
+/// passphrase of the minimum length is saved; WHEN cancelled THEN no key and
+/// no store are created.
+#[test]
+fn given_a_new_profile_then_the_passphrase_must_be_long_enough_and_confirmed() {
+    let protector = Tagged(1);
+    let dir = TempDir::new().unwrap();
+    let short = "x".repeat(passphrase::MIN_PASSPHRASE_CHARS - 1);
+    let script = Script::new([
+        Ok(short.as_str()),
+        Err(PromptError::Invalid),
+        Ok("long enough!"),
+        Ok("long enough?"),
+        Ok("long enough!"),
+        Ok("long enough!"),
+    ]);
+    let stores = store::open(dir.path(), &protector, &unlock_with(script.clone())).unwrap();
+    assert!(stores.close());
+    assert_eq!(
+        script.seen(),
+        [
+            "NewPassphrase(Choose)",
+            "NewPassphrase(TooShort)",
+            "NewPassphrase(TooShort)",
+            "NewPassphrase(Confirm)",
+            "NewPassphrase(Mismatch)",
+            "NewPassphrase(Confirm)",
+        ]
+    );
+    let right = unlock_with(Script::new([Ok("long enough!")]));
+    assert!(store::open(dir.path(), &protector, &right).unwrap().close());
+
+    let empty = TempDir::new().unwrap();
+    for answer in [PromptError::Cancelled, PromptError::Unsupported] {
+        let refused = unlock_with(Script::new([Err(answer)]));
+        let state = store::open(empty.path(), &protector, &refused).err();
+        assert_eq!(
+            state,
+            Some(match answer {
+                PromptError::Unsupported => StoreState::Unsupported,
+                _ => StoreState::Locked,
+            })
+        );
+        assert!(!empty.path().join(KEY_FILE).exists());
+        assert!(!empty.path().join(STORE_DIR).exists());
+    }
+}
+
+/// GIVEN a profile WHEN a wrong passphrase is entered five times THEN it is
+/// `secret_rejected` and not one byte changes; the right one still opens it.
+#[test]
+fn given_wrong_passphrases_then_the_profile_is_rejected_and_unchanged() {
+    let protector = Tagged(1);
+    let dir = seeded(&protector);
+    let before = files(dir.path());
+    let wrong = unlock_with(Script::new([Ok("not the passphrase"); 5]));
+    assert_eq!(
+        store::open(dir.path(), &protector, &wrong).err(),
+        Some(StoreState::SecretRejected)
+    );
+    assert_eq!(files(dir.path()), before);
+    assert_eq!(read_marker(dir.path(), &protector).as_deref(), Some(MARKER));
+}
+
+/// GIVEN a profile with data WHEN it is reset THEN the stores, every key file
+/// and the marker are gone, and it opens as a new profile without the data;
+/// WHEN it is in use THEN the reset is refused and nothing is deleted.
+#[test]
+fn given_a_reset_then_the_profile_is_deleted_unless_it_is_in_use() {
+    let protector = Tagged(1);
+    let dir = seeded(&protector);
+    let stores = store::open(dir.path(), &protector, &unlock()).unwrap();
+    assert_eq!(store::reset(dir.path()), Err(StoreState::ProfileInUse));
+    assert!(stores.close());
+    assert!(dir.path().join(KEY_FILE).exists());
+
+    fs::write(dir.path().join(OLD_KEY_FILE), b"left over").unwrap();
+    assert_eq!(store::reset(dir.path()), Ok(true));
+    for gone in [KEY_FILE, OLD_KEY_FILE, STORE_DIR, store::SIGNED_OUT_FILE] {
+        assert!(!dir.path().join(gone).exists(), "{gone}");
+    }
+    assert_eq!(read_marker(dir.path(), &protector), None);
+    assert_eq!(store::reset(TempDir::new().unwrap().path()), Ok(false));
+}
+
+/// Wraps like `Tagged(1)`, but cannot unwrap a sealed key: it stands in for a
+/// vault whose read-back of a new key file fails.
+struct SealedUnreadable;
+
+impl KeyProtector for SealedUnreadable {
+    fn protect(&self, data: &[u8]) -> Result<Vec<u8>, persephone_core::vault::VaultError> {
+        Tagged(1).protect(data)
+    }
+
+    fn unprotect(
+        &self,
+        blob: &[u8],
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, persephone_core::vault::VaultError> {
+        if blob.len() > 1 + persephone_core::vault::KEY_BYTES {
+            return Err(persephone_core::vault::VaultError::Failed);
+        }
+        Tagged(1).unprotect(blob)
+    }
+}
+
+/// GIVEN a new key file that does not read back WHEN a profile is created or
+/// upgraded THEN `store-key.v2` never appears (nor its temporary file), so an
+/// old key stays usable, and a later upgrade with a working vault succeeds.
+#[test]
+fn given_a_failed_read_back_then_no_sealed_key_file_is_left() {
+    let dir = TempDir::new().unwrap();
+    assert_eq!(
+        store::open(dir.path(), &SealedUnreadable, &unlock()).err(),
+        Some(StoreState::KeyUnreadable)
+    );
+    for gone in [KEY_FILE, "store-key.v2.tmp", STORE_DIR] {
+        assert!(!dir.path().join(gone).exists(), "{gone}");
+    }
+
+    let protector = Tagged(1);
+    let old = seeded(&protector);
+    downgrade(old.path(), &protector);
+    assert_eq!(
+        store::open(old.path(), &SealedUnreadable, &unlock()).err(),
+        Some(StoreState::KeyUnreadable)
+    );
+    assert!(!old.path().join(KEY_FILE).exists());
+    assert!(!old.path().join("store-key.v2.tmp").exists());
+    assert!(old.path().join(OLD_KEY_FILE).exists(), "old key kept");
+    assert_eq!(read_marker(old.path(), &protector).as_deref(), Some(MARKER));
 }

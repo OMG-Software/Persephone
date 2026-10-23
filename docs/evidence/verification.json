@@ -1622,6 +1622,36 @@
       "package_lock_sha256": "a22d978b8b0313e6fabaa1c1583abdfbda9e623e28bb9793ccd822f0b04ef3e2",
       "raw_output": ".local/runs/pr10-r1/check.txt (ignored)",
       "evidence": "encrypted-sending.md"
+    },
+    {
+      "name": "workspace_check_after_unlock_secret",
+      "command": "python tools/dev.py check --offline",
+      "checked_on": "2026-10-23",
+      "exit_code": 0,
+      "rust_tests_passed": 306,
+      "rust_tests_ignored": 2,
+      "frontend_tests_passed": 21,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 342,
+      "includes": "core unit, binary and account tests and Clippy with dev-disposable-servers",
+      "source": "the uncommitted merge of origin/main (f355333) into p4/unlock-secret a039a53; the merge commit added only counts and hashes in unlock-secret.md, dependencies.md, development.md and this entry after the run",
+      "working_tree_clean": false,
+      "untested": "the native passphrase and reset dialogs, the tooltip in the real web view, and an exit while unlocking were not run by hand",
+      "live_runs": "none for these changes",
+      "platform": "Windows 11 Pro x64 26300, debug",
+      "toolchain": {
+        "rustc": "1.99.1",
+        "cargo": "1.99.1",
+        "node": "24.15.0",
+        "npm": "11.13.0",
+        "python": "3.14.4"
+      },
+      "inputs": "--offline; dependencies cached under .local/cache",
+      "cargo_lock_sha256": "ba36db1533ed87195404caa6d9225f12a096de9a23702be625fd8cef9732a54f",
+      "package_lock_sha256": "a22d978b8b0313e6fabaa1c1583abdfbda9e623e28bb9793ccd822f0b04ef3e2",
+      "raw_output": ".local/runs/unlock-secret/check-merge.txt (ignored)",
+      "evidence": "unlock-secret.md"
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

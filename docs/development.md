@@ -124,6 +124,8 @@ cargo build --locked -p persephone-core --features dev-disposable-servers --bin 
 
 Run `.local/build/rust/debug/persephone.exe --profile <new directory under .local>` and enter the server's `base_url` from the harness profile in the page. Windows then asks for the username and password (`username` and `password` in the profile). To skip the prompt for automated runs, set `PERSEPHONE_DEV_PROFILE` to the harness `profile.json`; the core then prints `DEVELOPMENT BUILD` and answers the prompt from that file for the matching host. Never ship or distribute a build with this feature. See the [sign-in evidence](evidence/matrix-sign-in.md).
 
+With `--profile`, the core asks for the profile passphrase in its own Windows window before the page opens. A new profile asks for a new passphrase twice (at least 10 characters), and a profile from before passphrases is upgraded: it also asks for a new passphrase twice (ADR-0006). "Lock" closes the profile; "Unlock" asks for the passphrase again, but after a sign-in only a restart unlocks. "Reset profile…" is shown while the profile is closed; the core confirms in its own window, deletes the profile and asks for a new passphrase. With `PERSEPHONE_DEV_PROFILE`, `PERSEPHONE_DEV_PASSPHRASE_FILE` (a path inside `.local`) answers the passphrase prompts from that file; without it the native window is used. See the [unlock secret evidence](evidence/unlock-secret.md).
+
 "Sign out" in the header attempts to revoke the session on the homeserver and deletes the profile's key; the next start deletes the store files. Restart Persephone to sign in again. See the [sign-out evidence](evidence/sign-out.md).
 
 The Encryption panel sets up cross-signing and recovery for an account without them, or verifies this device with the recovery key; the core asks for the password or key in its own window and shows a new recovery key in its own window. With `PERSEPHONE_DEV_PROFILE`, the development build answers the password from the profile, and `PERSEPHONE_DEV_RECOVERY_FILE` (a path inside `.local`) replaces the recovery-key windows with that file. See the [encryption setup evidence](evidence/encryption-setup.md).
@@ -133,6 +135,8 @@ The composer sends text in the open room. The live sending check uses a second S
 "Verify with another device" in the Encryption panel compares emoji with another device of the same account; the panel also offers to accept a request from one. For the live check, the same peer signs in as the first account (`login alice`), restores its keys from the development recovery-key file (`recover <file>`), waits until it knows the new Persephone device (`wait-new-device <seconds>`), and then accepts (`verify-accept <seconds>`) or asks (`verify-request <device id> <seconds>`), followed by `verify-confirm`, `verify-mismatch` or `verify-wait <seconds>`. See the [own-device verification evidence](evidence/own-device-verification.md).
 
 ## Recorded verification
+
+After adding the profile passphrase (ADR-0006), `python tools/dev.py check --offline` passed all 342 tests (306 Rust, 21 frontend, 2 server-registration and 13 development-controller tests). See the [unlock secret evidence](evidence/unlock-secret.md).
 
 After adding own-device verification, `python tools/dev.py check --offline` passed all 298 tests (263 Rust, 20 frontend, 2 server-registration and 13 development-controller tests). See the [own-device verification evidence](evidence/own-device-verification.md).
 

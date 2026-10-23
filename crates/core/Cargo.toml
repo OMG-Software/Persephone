@@ -21,6 +21,12 @@ persephone-media-protocol = { path = "../media-protocol" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 getrandom = "=0.4.3"
+# ADR-0006: Argon2id derives the key that seals the store key under the
+# profile passphrase. No default features: no password-hash strings or OS RNG.
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "zeroize"] }
+# Already compiled for the SDK's store cipher, with the same features plus
+# zeroize, so the cipher's key is cleared on drop.
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 # Only the `Stream` trait, to read the SDK's room-key stream; already in the
 # graph through matrix-sdk at this version.
 futures-core = { version = "=0.3.34", default-features = false }

@@ -1,5 +1,6 @@
-//! The protected local profile: one exclusive owner, one vault-wrapped key,
-//! and the SDK's encrypted SQLite stores.
+//! The protected local profile: one exclusive owner, one store key sealed by
+//! the profile passphrase and wrapped by the vault (ADR-0006), and the SDK's
+//! encrypted SQLite stores.
 //!
 //! The SDK opens an existing encrypted store without a key and then writes
 //! plaintext, so the stores are never opened until the key is held. Every path
@@ -7,15 +8,21 @@
 //!
 //! | Profile | Result |
 //! | --- | --- |
-//! | New (no key, empty store directory) | Key created, wrapped, read back, then stores created |
-//! | Key present | Key unwrapped; the stores must accept it |
+//! | New (no key, empty store directory) | Passphrase chosen; key created, sealed, wrapped and read back; then stores created |
+//! | Key present | Passphrase asked; key unsealed; the stores must accept it |
+//! | Only a key from before ADR-0006 | Passphrase chosen; key sealed, saved and read back; stores opened; old key deleted |
 //! | Store present, key absent | `KeyMissing`; no new key is made |
-//! | Key unwrap fails | `KeyUnreadable` |
+//! | Prompt cancelled or not shown | `Locked`; nothing written |
+//! | [`MAX_ATTEMPTS`] wrong passphrases | `SecretRejected`; nothing written |
+//! | Key unwrap fails, or the sealed key is malformed | `KeyUnreadable` |
 //! | Stores refuse the key | `KeyRejected` |
 //! | Another process holds the profile | `ProfileInUse` |
+//! | No vault or no prompt on this platform | `Unsupported` |
 //!
-//! Layout: `profile.lock`, `store-key.v1` (magic plus the vault's blob) and
-//! `store/` (state, event-cache, media and crypto databases).
+//! Layout: `profile.lock`, `store-key.v2` (magic plus the vault's blob of the
+//! sealed key) and `store/` (state, event-cache, media and crypto databases).
+//! A profile from before ADR-0006 has `store-key.v1` (magic plus the vault's
+//! blob of the bare key) instead, until it is first opened.
 //!
 //! Signing out writes `signed-out` before it asks the homeserver to revoke
 //! the session, so an interrupted sign-out never restores the account. The
@@ -25,8 +32,14 @@
 //! so no SDK work from the signed-out session can still use them. A crash at
 //! any point repeats the wipe rather than leaving a profile half-deleted, and
 //! a wipe without a confirmed revocation is reported.
+//!
+//! A reset (a forgotten passphrase) wipes the same way, with a marker that
+//! records no revocation: the access token is in the encrypted store, so the
+//! homeserver cannot be told.
 
-use crate::vault::{KeyProtector, StoreKey, VaultError, generate_key};
+use crate::credentials::{NewPassphrase, PromptError, SecretPrompt};
+use crate::passphrase::{self, MAX_ATTEMPTS, MIN_PASSPHRASE_CHARS, SealError, Unlock};
+use crate::vault::{KEY_BYTES, KeyProtector, StoreKey, VaultError, generate_key};
 use matrix_sdk_base::store::StateStore;
 use matrix_sdk_crypto::store::CryptoStore;
 use matrix_sdk_sqlite::{
@@ -40,9 +53,14 @@ use std::{
     path::Path,
 };
 use tokio::runtime::Runtime;
+use zeroize::Zeroizing;
 
 pub const LOCK_FILE: &str = "profile.lock";
-pub const KEY_FILE: &str = "store-key.v1";
+/// The sealed and wrapped store key.
+pub const KEY_FILE: &str = "store-key.v2";
+/// A store key wrapped by the vault alone, from before ADR-0006.
+pub const OLD_KEY_FILE: &str = "store-key.v1";
+const KEY_FILES: [&str; 2] = [KEY_FILE, OLD_KEY_FILE];
 pub const STORE_DIR: &str = "store";
 /// Present from the start of sign-out until the profile has been wiped.
 pub const SIGNED_OUT_FILE: &str = "signed-out";
@@ -88,13 +106,20 @@ pub fn begin_sign_out(dir: &Path) -> std::io::Result<()> {
 /// opens as `key_missing`, never as a new or signed-in profile.
 pub fn mark_signed_out(dir: &Path, revoked: bool) -> std::io::Result<()> {
     let marked = write_marker(dir, if revoked { REVOKED } else { NOT_REVOKED });
-    let removed = match fs::remove_file(dir.join(KEY_FILE)) {
+    let removed = KEY_FILES
+        .iter()
+        .try_for_each(|file| remove_if_present(dir, file))
+        // A removal lost in a crash would bring the key back.
+        .and_then(|()| sync_dir(dir));
+    marked.and(removed)
+}
+
+/// Removes `name` from `dir`; a file that is already gone is not an error.
+fn remove_if_present(dir: &Path, name: &str) -> std::io::Result<()> {
+    match fs::remove_file(dir.join(name)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
-    // A removal lost in a crash would bring the key back.
-    .and_then(|()| sync_dir(dir));
-    marked.and(removed)
 }
 
 /// Whether the marker records a confirmed revocation; reads at most a few
@@ -122,19 +147,30 @@ pub fn wipe_signed_out(dir: &Path) -> std::io::Result<Option<bool>> {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
-    for file in [KEY_FILE, &format!("{KEY_FILE}.tmp")] {
-        match fs::remove_file(dir.join(file)) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
+    for file in KEY_FILES {
+        remove_if_present(dir, file)?;
+        remove_if_present(dir, &format!("{file}.tmp"))?;
     }
     let revoked = revocation_confirmed(dir);
     fs::remove_file(dir.join(SIGNED_OUT_FILE))?;
     Ok(Some(revoked))
 }
-const KEY_MAGIC: &[u8] = b"PERSEPHONE-STORE-KEY-1\n";
-/// A DPAPI blob for 32 bytes is a few hundred bytes; anything far larger is
-/// not a key file.
+
+/// Deletes the profile in `dir`, for a forgotten passphrase (ADR-0006). The
+/// marker is written first, as "not revoked", so an interrupted reset is
+/// finished by the next open. Returns whether the store held anything.
+pub fn reset(dir: &Path) -> Result<bool, StoreState> {
+    let _lock = lock_profile(dir)?;
+    let had_data = has_entries(&dir.join(STORE_DIR))?;
+    write_marker(dir, NOT_REVOKED).map_err(|_| StoreState::StoreUnavailable)?;
+    wipe_signed_out(dir).map_err(|_| StoreState::StoreUnavailable)?;
+    Ok(had_data)
+}
+
+const KEY_MAGIC: &[u8] = b"PERSEPHONE-STORE-KEY-2\n";
+const OLD_KEY_MAGIC: &[u8] = b"PERSEPHONE-STORE-KEY-1\n";
+/// A DPAPI blob for a sealed key is a few hundred bytes; anything far larger
+/// is not a key file.
 pub const MAX_KEY_FILE_BYTES: u64 = 4096;
 
 /// The SDK's four encrypted stores.
@@ -214,7 +250,7 @@ impl Drop for Stores {
     }
 }
 
-fn read_key_file(path: &Path) -> Result<Vec<u8>, StoreState> {
+fn read_key_file(path: &Path, magic: &[u8]) -> Result<Vec<u8>, StoreState> {
     let file = File::open(path).map_err(|_| StoreState::KeyUnreadable)?;
     let mut bytes = Vec::new();
     file.take(MAX_KEY_FILE_BYTES + 1)
@@ -223,7 +259,7 @@ fn read_key_file(path: &Path) -> Result<Vec<u8>, StoreState> {
     if bytes.len() as u64 > MAX_KEY_FILE_BYTES {
         return Err(StoreState::KeyUnreadable);
     }
-    match bytes.strip_prefix(KEY_MAGIC) {
+    match bytes.strip_prefix(magic) {
         Some(blob) if !blob.is_empty() => Ok(blob.to_vec()),
         _ => Err(StoreState::KeyUnreadable),
     }
@@ -244,24 +280,144 @@ fn has_entries(dir: &Path) -> Result<bool, StoreState> {
     }
 }
 
-/// Makes and saves a new key for a profile with no store. The key is used
-/// only after its saved form unwraps to the same bytes.
-fn create_key(dir: &Path, protector: &dyn KeyProtector) -> Result<StoreKey, StoreState> {
-    let key = generate_key().map_err(vault_error)?;
-    let blob = protector.protect(&key).map_err(vault_error)?;
+/// Whether `path` exists; a failure to tell keeps the profile closed.
+fn exists(path: &Path) -> Result<bool, StoreState> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(StoreState::StoreUnavailable),
+    }
+}
+
+/// What a prompt that gave no entry leaves: a cancelled or failed prompt
+/// leaves the profile locked, so Unlock can try again.
+fn prompt_state(error: PromptError) -> StoreState {
+    match error {
+        PromptError::Unsupported => StoreState::Unsupported,
+        PromptError::Cancelled | PromptError::Invalid | PromptError::Failed => StoreState::Locked,
+    }
+}
+
+/// Asks for the passphrase until it unseals the key, waiting longer before
+/// each new entry. Nothing is written.
+fn unseal(
+    dir: &Path,
+    protector: &dyn KeyProtector,
+    unlock: &Unlock,
+) -> Result<StoreKey, StoreState> {
+    let wrapped = read_key_file(&dir.join(KEY_FILE), KEY_MAGIC)?;
+    let sealed = protector.unprotect(&wrapped).map_err(vault_error)?;
+    for attempt in 0..MAX_ATTEMPTS {
+        std::thread::sleep(unlock.wait_before(attempt));
+        let entry = unlock
+            .source
+            .ask_secret(SecretPrompt::Passphrase { retry: attempt > 0 });
+        let passphrase = match entry {
+            Ok(passphrase) => passphrase,
+            // An empty entry counts as a wrong one.
+            Err(PromptError::Invalid) => continue,
+            Err(error) => return Err(prompt_state(error)),
+        };
+        match passphrase::open(&sealed, &passphrase) {
+            Ok(key) => return Ok(key),
+            Err(SealError::Wrong) => {}
+            Err(SealError::Malformed) => return Err(StoreState::KeyUnreadable),
+            Err(SealError::Failed) => return Err(StoreState::StoreUnavailable),
+        }
+    }
+    Err(StoreState::SecretRejected)
+}
+
+/// Asks for a new passphrase twice until the entries are long enough and
+/// match, for at most [`MAX_ATTEMPTS`] rounds.
+fn choose_passphrase(
+    unlock: &Unlock,
+    first: NewPassphrase,
+) -> Result<Zeroizing<String>, StoreState> {
+    let ask = |step| unlock.source.ask_secret(SecretPrompt::NewPassphrase(step));
+    let mut step = first;
+    for _ in 0..MAX_ATTEMPTS {
+        let entry = match ask(step) {
+            Ok(entry) if entry.chars().count() >= MIN_PASSPHRASE_CHARS => entry,
+            Ok(_) | Err(PromptError::Invalid) => {
+                step = NewPassphrase::TooShort;
+                continue;
+            }
+            Err(error) => return Err(prompt_state(error)),
+        };
+        match ask(NewPassphrase::Confirm) {
+            Ok(again) if *again == *entry => return Ok(entry),
+            Ok(_) | Err(PromptError::Invalid) => step = NewPassphrase::Mismatch,
+            Err(error) => return Err(prompt_state(error)),
+        }
+    }
+    Err(StoreState::Locked)
+}
+
+/// Seals, wraps and writes `key` to a temporary file, reads that back and
+/// opens it with the same passphrase, and only then renames it into place. A
+/// file that does not give back the key never becomes `store-key.v2`, so it
+/// cannot hide a usable key from before ADR-0006.
+fn save_key(
+    dir: &Path,
+    protector: &dyn KeyProtector,
+    key: &StoreKey,
+    passphrase: &str,
+    unlock: &Unlock,
+) -> Result<(), StoreState> {
+    let sealed =
+        passphrase::seal(key, passphrase, unlock.kdf).map_err(|_| StoreState::StoreUnavailable)?;
+    let blob = protector.protect(&sealed).map_err(vault_error)?;
     let temporary = dir.join(format!("{KEY_FILE}.tmp"));
     let write = || -> std::io::Result<()> {
         let mut file = File::create(&temporary)?;
         file.write_all(KEY_MAGIC)?;
         file.write_all(&blob)?;
-        file.sync_all()?;
-        fs::rename(&temporary, dir.join(KEY_FILE))
+        file.sync_all()
     };
     write().map_err(|_| StoreState::StoreUnavailable)?;
-    let saved = read_key_file(&dir.join(KEY_FILE))?;
-    match protector.unprotect(&saved) {
-        Ok(read_back) if *read_back == *key => Ok(key),
-        _ => Err(StoreState::KeyUnreadable),
+    let read_back = read_key_file(&temporary, KEY_MAGIC)
+        .and_then(|saved| protector.unprotect(&saved).map_err(vault_error))
+        .and_then(|sealed| {
+            passphrase::open(&sealed, passphrase).map_err(|_| StoreState::KeyUnreadable)
+        });
+    match read_back {
+        Ok(read_back) if *read_back == **key => {}
+        other => {
+            let _ = fs::remove_file(&temporary);
+            return Err(other.err().unwrap_or(StoreState::KeyUnreadable));
+        }
+    }
+    fs::rename(&temporary, dir.join(KEY_FILE))
+        .and_then(|()| sync_dir(dir))
+        .map_err(|_| StoreState::StoreUnavailable)
+}
+
+/// The key from before ADR-0006, wrapped by the vault alone.
+fn old_key(dir: &Path, protector: &dyn KeyProtector) -> Result<StoreKey, StoreState> {
+    let wrapped = read_key_file(&dir.join(OLD_KEY_FILE), OLD_KEY_MAGIC)?;
+    let bytes = protector.unprotect(&wrapped).map_err(vault_error)?;
+    if bytes.len() != KEY_BYTES {
+        return Err(StoreState::KeyUnreadable);
+    }
+    let mut key = Zeroizing::new([0u8; KEY_BYTES]);
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
+/// Deletes the key from before ADR-0006 once the sealed key is in place.
+/// While it exists, DPAPI alone opens the profile, so a failure closes the
+/// stores again; the next open retries.
+fn remove_old_key(dir: &Path, stores: Stores) -> Result<Stores, StoreState> {
+    let removed = remove_if_present(dir, OLD_KEY_FILE)
+        .and_then(|()| remove_if_present(dir, &format!("{OLD_KEY_FILE}.tmp")))
+        .and_then(|()| sync_dir(dir));
+    match removed {
+        Ok(()) => Ok(stores),
+        Err(_) => {
+            stores.close();
+            Err(StoreState::StoreUnavailable)
+        }
     }
 }
 
@@ -272,8 +428,8 @@ fn open_error(error: OpenStoreError) -> StoreState {
     }
 }
 
-/// Opens the profile in `dir`, creating it if it is new.
-pub fn open(dir: &Path, protector: &dyn KeyProtector) -> Result<Stores, StoreState> {
+/// Takes the profile's exclusive lock, creating the directory if needed.
+fn lock_profile(dir: &Path) -> Result<File, StoreState> {
     fs::create_dir_all(dir).map_err(|_| StoreState::StoreUnavailable)?;
     let lock = OpenOptions::new()
         .read(true)
@@ -283,37 +439,71 @@ pub fn open(dir: &Path, protector: &dyn KeyProtector) -> Result<Stores, StoreSta
         .open(dir.join(LOCK_FILE))
         .map_err(|_| StoreState::StoreUnavailable)?;
     match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Err(StoreState::ProfileInUse),
-        Err(TryLockError::Error(_)) => return Err(StoreState::StoreUnavailable),
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(StoreState::ProfileInUse),
+        Err(TryLockError::Error(_)) => Err(StoreState::StoreUnavailable),
     }
+}
+
+/// Opens the profile in `dir`, creating it if it is new. Asks for the
+/// passphrase (or a new one) through `unlock`; see the module documentation.
+pub fn open(
+    dir: &Path,
+    protector: &dyn KeyProtector,
+    unlock: &Unlock,
+) -> Result<Stores, StoreState> {
+    let lock = lock_profile(dir)?;
     // A profile signed out earlier is wiped before anything else; it then
     // opens as a new profile.
     let wiped = wipe_signed_out(dir).map_err(|_| StoreState::StoreUnavailable)?;
+    let unconfirmed_sign_out = wiped == Some(false);
 
     let store_dir = dir.join(STORE_DIR);
-    let key = match fs::symlink_metadata(dir.join(KEY_FILE)) {
-        Ok(_) => {
-            let blob = read_key_file(&dir.join(KEY_FILE))?;
-            protector.unprotect(&blob).map_err(vault_error)?
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if has_entries(&store_dir)? {
-                return Err(StoreState::KeyMissing);
-            }
-            create_key(dir, protector)?
-        }
-        Err(_) => return Err(StoreState::StoreUnavailable),
-    };
+    if exists(&dir.join(KEY_FILE))? {
+        let key = unseal(dir, protector, unlock)?;
+        let stores = open_stores(&store_dir, &key, lock, unconfirmed_sign_out)?;
+        drop(key);
+        // An interrupted upgrade may have left the old key behind.
+        return remove_old_key(dir, stores);
+    }
+    if exists(&dir.join(OLD_KEY_FILE))? {
+        // The stores are opened only after the sealed key is saved, so a
+        // cancelled or failed prompt leaves every store file untouched. If the
+        // stores then refuse the key, both files stay and the next open uses
+        // the sealed one, which fails the same way.
+        let key = old_key(dir, protector)?;
+        let passphrase = choose_passphrase(unlock, NewPassphrase::Upgrade)?;
+        save_key(dir, protector, &key, &passphrase, unlock)?;
+        drop(passphrase);
+        let stores = open_stores(&store_dir, &key, lock, unconfirmed_sign_out)?;
+        drop(key);
+        return remove_old_key(dir, stores);
+    }
+    if has_entries(&store_dir)? {
+        return Err(StoreState::KeyMissing);
+    }
+    let passphrase = choose_passphrase(unlock, NewPassphrase::Choose)?;
+    let key = generate_key().map_err(vault_error)?;
+    save_key(dir, protector, &key, &passphrase, unlock)?;
+    drop(passphrase);
+    open_stores(&store_dir, &key, lock, unconfirmed_sign_out)
+}
 
+/// Opens the SDK's stores with `key`. The configuration's own copy is dropped
+/// as soon as the stores are open.
+fn open_stores(
+    store_dir: &Path,
+    key: &StoreKey,
+    lock: File,
+    unconfirmed_sign_out: bool,
+) -> Result<Stores, StoreState> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_name("core-store")
         .enable_all()
         .build()
         .map_err(|_| StoreState::StoreUnavailable)?;
-    let config = SqliteStoreConfig::new(&store_dir).key(Some(key.as_ref()));
-    drop(key);
+    let config = SqliteStoreConfig::new(store_dir).key(Some(key.as_ref()));
     let opened = runtime.block_on(async {
         // Crypto first: a wrong key is refused before the other stores are
         // created in a new directory.
@@ -352,7 +542,7 @@ pub fn open(dir: &Path, protector: &dyn KeyProtector) -> Result<Stores, StoreSta
             media,
             crypto,
         }),
-        unconfirmed_sign_out: wiped == Some(false),
+        unconfirmed_sign_out,
         _lock: lock,
     })
 }

@@ -6,6 +6,8 @@
   import Security from './Security.svelte';
   import SignIn from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
+  import TipButton from './TipButton.svelte';
+  import { LOCK_HELP, RESET_HELP } from './help';
   import { mergeNewest } from './timeline';
   import {
     allowUnencrypted,
@@ -28,6 +30,7 @@
     signIn,
     subscribeRoom,
     timelinePage,
+    resetProfile,
     unlockSession,
     watchSession,
     type AppStatus,
@@ -89,10 +92,12 @@
     protected: 'Local store protected',
     locked: 'Local store locked',
     locking: 'Locking: work in progress is finishing',
+    unlocking: 'Unlocking: enter the passphrase in the Persephone window',
     lock_failed: 'Local store did not close cleanly; restart Persephone',
     restart_required: 'Locked: restart Persephone to unlock',
     key_missing: 'Local store locked: its key is missing',
     key_unreadable: 'Local store locked: its key cannot be unlocked',
+    secret_rejected: 'Local store locked: the passphrase was wrong too many times',
     key_rejected: 'Local store locked: the key does not match',
     profile_in_use: 'Local store locked: open in another window',
     store_unavailable: 'Local store unavailable',
@@ -103,10 +108,22 @@
   // have nothing to unlock.
   const unlockable: StoreState[] = [
     'locked',
+    'secret_rejected',
     'key_missing',
     'key_unreadable',
     'key_rejected',
     'profile_in_use',
+    'store_unavailable'
+  ];
+
+  // Closed profiles the core may reset after a forgotten passphrase. The core
+  // checks again and asks for confirmation in its own window.
+  const resettable: StoreState[] = [
+    'locked',
+    'secret_rejected',
+    'key_missing',
+    'key_unreadable',
+    'key_rejected',
     'store_unavailable'
   ];
 
@@ -276,6 +293,20 @@
         ? await lockSession()
         : await unlockSession();
       // A session change during the call already reloaded the status.
+      if (generation === sessionGeneration && status) status = { ...status, store };
+    } catch (reason) {
+      if (generation === sessionGeneration) error = describe(reason);
+    } finally {
+      switching = false;
+    }
+  }
+
+  async function startReset() {
+    if (!status || switching) return;
+    switching = true;
+    const generation = sessionGeneration;
+    try {
+      const store = await resetProfile();
       if (generation === sessionGeneration && status) status = { ...status, store };
     } catch (reason) {
       if (generation === sessionGeneration) error = describe(reason);
@@ -535,18 +566,23 @@
     {/if}
     {#if status && (status.store === 'protected' || status.store === 'locking')}
       <!-- Not while the sign-out question is open: it would apply to a locked session. -->
-      <button
-        type="button"
-        class="session"
+      <TipButton
+        id="lock-help"
+        help={LOCK_HELP}
         disabled={switching || confirmingSignOut}
         onclick={toggleLock}
       >
         {switching ? 'Working…' : 'Lock'}
-      </button>
+      </TipButton>
     {:else if status && unlockable.includes(status.store)}
       <button type="button" class="session" disabled={switching} onclick={toggleLock}>
         {switching ? 'Unlocking…' : 'Unlock'}
       </button>
+    {/if}
+    {#if status && resettable.includes(status.store)}
+      <TipButton id="reset-help" help={RESET_HELP} disabled={switching} onclick={startReset}>
+        Reset profile…
+      </TipButton>
     {/if}
   </header>
 

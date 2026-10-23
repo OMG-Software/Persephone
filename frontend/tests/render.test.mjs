@@ -41,3 +41,29 @@ test('message view contains no raw HTML insertion or attribute spreading', async
   assert.doesNotMatch(source, /\{@html\b|\binnerHTML\b|\{@const\s+.*\bspread\b/i);
   assert.doesNotMatch(source, /\.\.\.\w+/);
 });
+
+test('GIVEN the Lock button WHEN rendered THEN help text describes it and says what Lock does', async () => {
+  const { default: TipButton } = await vite.ssrLoadModule('/src/TipButton.svelte');
+  const { LOCK_HELP } = await vite.ssrLoadModule('/src/help.ts');
+  const { createRawSnippet } = await vite.ssrLoadModule('svelte');
+  const { body: html } = render(TipButton, {
+    props: {
+      id: 'lock-help',
+      help: LOCK_HELP,
+      onclick() {},
+      children: createRawSnippet(() => ({ render: () => '<span>Lock</span>' }))
+    }
+  });
+
+  // Screen readers get the text through the button; the tip is shown on
+  // hover and on keyboard focus (style.css).
+  assert.match(html, /<button[^>]*aria-describedby="lock-help"/);
+  assert.match(html, /<span[^>]*\bid="lock-help"[^>]*\brole="tooltip"|<span[^>]*\brole="tooltip"[^>]*\bid="lock-help"/);
+  assert.ok(html.includes(LOCK_HELP), html);
+  // What it closes, what it does not do, and what unlocking needs.
+  assert.match(LOCK_HELP, /encrypted profile on this computer/);
+  assert.match(LOCK_HELP, /clears the screen/);
+  assert.match(LOCK_HELP, /does not sign you out of the server/);
+  assert.match(LOCK_HELP, /passphrase/);
+  assert.match(LOCK_HELP, /restart Persephone/);
+});

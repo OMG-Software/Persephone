@@ -344,14 +344,10 @@ fn given_a_subscribed_room_changes_while_serving_then_the_ui_gets_an_event_and_t
 #[test]
 fn given_a_profile_when_the_ui_locks_and_unlocks_then_views_follow_the_session() {
     use persephone_contracts::StoreState;
-    use persephone_core::session::Session;
     use std::io::{PipeReader, PipeWriter};
 
     let dir = tempfile::TempDir::new().unwrap();
-    let core = Core::default().with_session(Session::open(
-        dir.path().to_path_buf(),
-        Box::new(common::Tagged(1)),
-    ));
+    let core = Core::default().with_session(common::open_session(dir.path()));
     let (from_ui, mut to_core): (PipeReader, PipeWriter) = std::io::pipe().unwrap();
     let (mut from_core, to_ui) = std::io::pipe().unwrap();
     let budgets = ResourceBudgets::default();
@@ -414,11 +410,33 @@ fn given_a_profile_when_the_ui_locks_and_unlocks_then_views_follow_the_session()
             assert_eq!(ask(id, call).0, Outcome::Error(ErrorCode::Locked));
         }
 
+        // The passphrase is asked on a worker thread: the reply comes at once,
+        // and the result follows as a session change.
         let (outcome, mut events) = ask(8, Call::UnlockSession {});
-        assert_eq!(state(outcome), StoreState::Protected);
-        events.extend(ask(9, Call::AppStatus {}).1);
-        assert_eq!(events, [Event::SessionChanged {}]);
-        assert_eq!(ask(10, Call::RoomList {}).0, empty);
+        assert_eq!(state(outcome), StoreState::Unlocking);
+        let mut id = 9;
+        loop {
+            let (outcome, more) = ask(id, Call::AppStatus {});
+            events.extend(more);
+            let Outcome::Ok(value) = outcome else {
+                panic!("{outcome:?}");
+            };
+            let status: AppStatus = serde_json::from_value(value).unwrap();
+            if status.store == StoreState::Protected {
+                break;
+            }
+            assert_eq!(status.store, StoreState::Unlocking);
+            assert!(id < 2000, "the unlock never finished");
+            id += 1;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!events.is_empty());
+        assert!(
+            events
+                .iter()
+                .all(|event| *event == Event::SessionChanged {})
+        );
+        assert_eq!(ask(id + 1, Call::RoomList {}).0, empty);
 
         // Closes the UI's ends of both pipes.
         drop(ask);

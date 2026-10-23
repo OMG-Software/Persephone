@@ -1,5 +1,11 @@
 # Protected local store in the core
 
+> **Later change (23 October 2026):** [ADR-0006](../adr/0006-require-an-unlock-secret-for-the-local-profile.md)
+> seals the store key under a profile passphrase before DPAPI wraps it, in
+> `store-key.v2`. A `store-key.v1` profile, as described below, is upgraded
+> when it is first opened. See the [unlock secret evidence](unlock-secret.md).
+> The record below describes the 21 October design and run, unchanged.
+
 Checked 21 October 2026 on Windows 11 Pro x64 (build 26200), debug builds,
 Matrix SDK SQLite stores 0.19.1. P2 "vault and storage adapters", first slice:
 the core owns one local profile, unwraps its store key through the OS vault

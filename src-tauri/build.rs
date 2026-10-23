@@ -19,6 +19,7 @@ fn main() {
             "watch_session",
             "lock_session",
             "unlock_session",
+            "reset_profile",
             "sign_in",
             "sign_out",
             "security_status",
