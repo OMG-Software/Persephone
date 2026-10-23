@@ -33,6 +33,7 @@ pub mod vault;
 pub mod verification;
 pub mod views;
 
+use account::KeyRooms;
 use credentials::CredentialSource;
 use homeserver::Homeserver;
 use matrix_views::MatrixViews;
@@ -143,6 +144,22 @@ impl SessionListener for Hub {
 
     fn outbox_changed(&self, room_id: &str) {
         self.mark_changed(&[room_id.to_owned()], false);
+    }
+
+    /// Walks the subscriptions (at most `MAX_SUBSCRIPTIONS`), so `All` costs
+    /// no more than a listed batch.
+    fn room_keys_arrived(&self, rooms: &KeyRooms) {
+        let mut notifications = lock(&self.notifications);
+        let notifications = &mut *notifications;
+        let mut any = false;
+        for room in &notifications.subscribed {
+            if rooms.includes(room) {
+                any |= notifications.pending.insert(room.clone());
+            }
+        }
+        if any {
+            self.changed.notify_all();
+        }
     }
 
     fn security_changed(&self) {
@@ -643,5 +660,40 @@ mod tests {
         drop(notifications);
         hub.rooms_changed(&["!a:s".into()]);
         assert!(lock(&hub.notifications).pending.is_empty());
+    }
+
+    /// GIVEN two open rooms WHEN room keys arrive for one of them and for a
+    /// room not open THEN only that open room is queued, so the page fetches
+    /// it again and its undecryptable notices can become messages; WHEN keys
+    /// arrive for any room (overflow or lag) THEN every open room is queued
+    /// and nothing else. The room list is never touched.
+    #[test]
+    fn given_room_keys_for_an_open_room_then_only_that_room_is_fetched_again() {
+        let hub = Hub::default();
+        let open = |hub: &Hub| {
+            let mut notifications = lock(&hub.notifications);
+            notifications
+                .subscribed
+                .extend(["!a:s".into(), "!c:s".into()]);
+            notifications.pending.clear();
+        };
+        open(&hub);
+        hub.room_keys_arrived(&KeyRooms::Listed(["!a:s".into(), "!b:s".into()].into()));
+        let notifications = lock(&hub.notifications);
+        assert_eq!(notifications.pending.iter().collect::<Vec<_>>(), ["!a:s"]);
+        assert!(
+            !notifications.room_list_changed,
+            "a key changes no room's place in the list"
+        );
+        drop(notifications);
+
+        open(&hub);
+        hub.room_keys_arrived(&KeyRooms::All);
+        let notifications = lock(&hub.notifications);
+        assert_eq!(
+            notifications.pending.iter().collect::<Vec<_>>(),
+            ["!a:s", "!c:s"]
+        );
+        assert!(!notifications.room_list_changed);
     }
 }

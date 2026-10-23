@@ -27,6 +27,9 @@ argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "z
 # Already compiled for the SDK's store cipher, with the same features plus
 # zeroize, so the cipher's key is cleared on drop.
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+# Only the `Stream` trait, to read the SDK's room-key stream; already in the
+# graph through matrix-sdk at this version.
+futures-core = { version = "=0.3.34", default-features = false }
 # Same explicit features as the P0 Matrix fixtures; rustls-aws-lc-rs is also
 # what gives reqwest its TLS backend when the core is built on its own.
 matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "rustls-aws-lc-rs"] }

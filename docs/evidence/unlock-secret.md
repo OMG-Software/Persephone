@@ -91,17 +91,17 @@ attacker can run them in parallel, so an offline guess costs less than this.
 
 ## Tests
 
-`python tools/dev.py check --offline` passed (exit 0) on the working tree
-of the commit that made the second review fixes (the sealed key read back
-before its rename, and no listener before publication). That commit added
-only the test counts in this file, `docs/development.md` and
-`verification.json` after the run: 300 Rust tests (236 in the workspace run
-and 64 in the `dev-disposable-servers` core run; 2 ignored), 21 frontend
-tests, 2 server-registration and 13 development-controller tests, with
-formatting, Clippy (default and development features), contract drift and
-TypeScript checks. Raw output: `.local/runs/unlock-secret/check-review2.txt`
-(ignored). Earlier runs on `f02cdd5` and on the tree that became `22f05ba`
-also passed, with 297 and 298 Rust tests. An earlier run of the same
+`python tools/dev.py check --offline` passed (exit 0) on the merge of
+`origin/main` (`f355333`, the key-refresh change) into `a039a53`, before the
+merge commit was made; that commit added only the counts and hashes in this
+file, `dependencies.md`, `docs/development.md` and `verification.json` after
+the run: 306 Rust tests (239 in the workspace run and 67 in the
+`dev-disposable-servers` core run; 2 ignored), 21 frontend tests, 2
+server-registration and 13 development-controller tests, with formatting,
+Clippy (default and development features), contract drift and TypeScript
+checks. Raw output: `.local/runs/unlock-secret/check-merge.txt` (ignored).
+Earlier runs on this branch also passed: 297 Rust tests on `f02cdd5`, 298 on
+the tree that became `22f05ba`, and 300 on the tree that became `a039a53`. An earlier run of the same
 command failed (exit 101) on two unused imports in `tests/account.rs` that only
 the development-feature Clippy step sees; they were removed before the
 passing run.

@@ -136,7 +136,7 @@ The composer sends text in the open room. The live sending check uses a second S
 
 ## Recorded verification
 
-After adding the profile passphrase (ADR-0006), `python tools/dev.py check --offline` passed all 336 tests (300 Rust, 21 frontend, 2 server-registration and 13 development-controller tests). See the [unlock secret evidence](evidence/unlock-secret.md).
+After adding the profile passphrase (ADR-0006), `python tools/dev.py check --offline` passed all 342 tests (306 Rust, 21 frontend, 2 server-registration and 13 development-controller tests). See the [unlock secret evidence](evidence/unlock-secret.md).
 
 After adding own-device verification, `python tools/dev.py check --offline` passed all 298 tests (263 Rust, 20 frontend, 2 server-registration and 13 development-controller tests). See the [own-device verification evidence](evidence/own-device-verification.md).
 

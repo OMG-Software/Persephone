@@ -171,7 +171,7 @@ The macOS and Linux CI jobs ([development guide](../development.md#continuous-in
 | `argon2 =0.6.0` (RustCrypto, published 27 August 2026, not yanked) | `default-features = false`, `alloc`, `zeroize` | New | Yes |
 | `chacha20poly1305 =0.11.0` | `default-features = false`, `alloc`, `zeroize` | Already present (matrix-sdk-store-encryption, `alloc`) | Yes, as before; `zeroize` is added by feature unification |
 
-`Cargo.lock` gains four entries: `argon2 0.6.0`, `blake2 0.11.0`, `password-hash 0.6.1` and `phc 0.6.1`. Only `argon2` and `blake2` are compiled. `password-hash` and `phc` are optional dependencies of `argon2` that the chosen features leave off: `cargo tree --locked -p persephone-core -e normal --target x86_64-pc-windows-msvc -i password-hash` prints nothing. `argon2`'s other dependencies (`base64ct 1.8.3`, `cpufeatures 0.3.1`, `digest 0.11.3`) were already in the lockfile. New `Cargo.lock` SHA-256: `16664f13…b451`. Before: `946730d6…2c35`.
+`Cargo.lock` gains four entries: `argon2 0.6.0`, `blake2 0.11.0`, `password-hash 0.6.1` and `phc 0.6.1`. Only `argon2` and `blake2` are compiled. `password-hash` and `phc` are optional dependencies of `argon2` that the chosen features leave off: `cargo tree --locked -p persephone-core -e normal --target x86_64-pc-windows-msvc -i password-hash` prints nothing. `argon2`'s other dependencies (`base64ct 1.8.3`, `cpufeatures 0.3.1`, `digest 0.11.3`) were already in the lockfile. New `Cargo.lock` SHA-256: `16664f13…b451`. Before: `946730d6…2c35`. After merging `main` with the key-refresh change (`futures-core` added there), the lockfile is `ba36db15…a54f` (`main`: `4c606ea8…f597`), with the same four entries added.
 
 Review notes:
 
