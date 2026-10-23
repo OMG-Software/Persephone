@@ -29,7 +29,8 @@ review rounds changed the code, and their live coverage is listed under
   undecryptable, from another device or from the backup download that the
   failure started. After each sync round the core takes the rooms named by the
   SDK's room-key stream (at most `MAX_ROOMS`; more, or a lagged stream, counts
-  as every joined room) and tells the page, which fetches an open room's
+  as any room, which the core applies to the rooms the page has open without
+  listing every joined room) and tells the page, which fetches an open room's
   newest page again and replaces each notice whose message now decrypts.
 * **Notices** ([`matrix_views.rs`](../../crates/core/src/matrix_views.rs)): an
   undecryptable event says why: `withheld` (the sender withheld the key),
@@ -177,8 +178,11 @@ third and fourth have no live run:
   nobody saw; the page says so, but resetting the key is not built.
 * The mock homeserver does not sync account data back, so the account tests
   cannot see recovery become enabled; the live runs do.
-* Late keys reach the page at the end of the next sync round (up to
-  `SYNC_POLL`, 5 s, after the key is stored). Only an open room's newest page
+* Late keys reach the page at the end of the next successful sync round,
+  normally within `SYNC_POLL` (5 s) of the key being stored. This is not an
+  upper bound: keys are not taken after a failed round, so sync failures
+  delay them until a round succeeds, and one round takes at most 64 batches,
+  leaving any later ones for the following rounds. Only an open room's newest page
   is fetched again; an older page already loaded keeps its notices until the
   room is opened again. The unit test imports keys the way a backup download
   stores them; no live run has checked keys arriving from another device or

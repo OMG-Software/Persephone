@@ -111,7 +111,7 @@ pub trait SessionListener: Send + Sync {
     fn outbox_changed(&self, _room_id: &str) {}
     /// Room keys arrived for these rooms, so messages there that could not
     /// be decrypted may be readable now.
-    fn room_keys_arrived(&self, _rooms: &[String]) {}
+    fn room_keys_arrived(&self, _rooms: &account::KeyRooms) {}
 }
 
 /// Why a message was not queued.
@@ -452,10 +452,8 @@ fn run_sync(
             let rooms =
                 account::sync_round(&client, engine.as_ref().expect("selected above")).await?;
             let keyed = match keys.as_mut() {
-                Some(stream) => account::take_key_rooms(stream.as_mut())
-                    .await
-                    .room_ids(&client),
-                None => Vec::new(),
+                Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
+                None => None,
             };
             Ok::<_, SignInError>((rooms, keyed))
         });
@@ -474,7 +472,7 @@ fn run_sync(
                     if !rooms.is_empty() {
                         listener.rooms_changed(&rooms);
                     }
-                    if !keyed.is_empty() {
+                    if let Some(keyed) = keyed.filter(|keyed| !keyed.is_empty()) {
                         listener.room_keys_arrived(&keyed);
                     }
                 }

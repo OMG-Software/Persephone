@@ -246,7 +246,8 @@ pub enum KeyRooms {
     /// These rooms, at most [`MAX_ROOMS`].
     Listed(BTreeSet<String>),
     /// More rooms than may be listed, or the stream dropped batches it could
-    /// not keep (it lagged): any joined room may have new keys.
+    /// not keep (it lagged): any joined room may have new keys. Never expanded
+    /// to room IDs; the receiver applies it to the rooms it watches.
     All,
 }
 
@@ -269,15 +270,15 @@ impl KeyRooms {
         }
     }
 
-    /// The room IDs these stand for.
-    pub fn room_ids(self, client: &Client) -> Vec<String> {
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Listed(rooms) if rooms.is_empty())
+    }
+
+    /// Whether `room` may have new keys.
+    pub fn includes(&self, room: &str) -> bool {
         match self {
-            Self::Listed(rooms) => rooms.into_iter().collect(),
-            Self::All => client
-                .joined_rooms()
-                .iter()
-                .map(|room| room.room_id().to_string())
-                .collect(),
+            Self::Listed(rooms) => rooms.contains(room),
+            Self::All => true,
         }
     }
 }
