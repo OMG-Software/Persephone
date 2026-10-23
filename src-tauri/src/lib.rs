@@ -18,12 +18,12 @@ pub mod core_link;
 
 use core_link::{CoreError, CoreLink};
 use persephone_contracts::{
-    AccountStatus, AppStatus, ContactStatus, PendingMessage, RoomList, SecurityStatus, StoreState,
-    TimelinePage,
+    AccountStatus, AppStatus, ContactStatus, PendingMessage, RoomIdentityChanges, RoomList,
+    SecurityStatus, StoreState, TimelinePage,
 };
 use persephone_core_protocol::{
     Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
-    MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES,
+    MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_USER_ID_BYTES,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -395,6 +395,32 @@ async fn verify_contact(
     relay(core.inner(), Call::VerifyContact { room_id }).await
 }
 
+/// The members of a room whose identity changed (ADR-0007).
+#[tauri::command]
+async fn identity_changes(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<RoomIdentityChanges, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::IdentityChanges { room_id }).await
+}
+
+/// Asks the core to accept a room member's new identity. The core confirms
+/// in its own window; this command cannot accept anything by itself.
+#[tauri::command]
+async fn accept_identity(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    user_id: String,
+) -> Result<SecurityStatus, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || user_id.len() > MAX_USER_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::AcceptIdentity { room_id, user_id }).await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -461,7 +487,9 @@ pub fn configure<R: Runtime>(
             confirm_verification,
             cancel_verification,
             contact_status,
-            verify_contact
+            verify_contact,
+            identity_changes,
+            accept_identity
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

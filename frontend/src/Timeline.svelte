@@ -41,6 +41,8 @@
   const trustText: Record<string, string> = {
     verified: 'Verified',
     unverified: 'Not verified',
+    changed: 'Identity changed',
+    verified_changed: 'Identity changed since you verified them',
     no_identity: 'Has not set up encryption',
     unknown: 'Checking…'
   };

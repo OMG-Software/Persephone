@@ -11,6 +11,7 @@ let Composer;
 let ServerPicker;
 let Verification;
 let JumpPalette;
+let IdentityChanges;
 let render;
 
 before(async () => {
@@ -27,6 +28,7 @@ before(async () => {
   ({ default: ServerPicker } = await vite.ssrLoadModule('/src/ServerPicker.svelte'));
   ({ default: Verification } = await vite.ssrLoadModule('/src/Verification.svelte'));
   ({ default: JumpPalette } = await vite.ssrLoadModule('/src/JumpPalette.svelte'));
+  ({ default: IdentityChanges } = await vite.ssrLoadModule('/src/IdentityChanges.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -301,6 +303,10 @@ test('GIVEN a direct-message room WHEN the header shows THEN the contact and the
   assert.doesNotMatch(verified, /header-action/);
   assert.match(header('no_identity'), / · Has not set up encryption/);
   assert.doesNotMatch(header('no_identity'), /header-action/);
+  assert.match(header('changed'), / · Identity changed/);
+  assert.doesNotMatch(header('changed'), /header-action/, 'a changed identity is handled in the room');
+  assert.match(header('verified_changed'), / · Identity changed since you verified them/);
+  assert.doesNotMatch(header('verified_changed'), /verified-shield/);
   // A trust level the page does not know never reads as verified.
   assert.match(header('trusted_anyway'), / · Checking…/);
   assert.doesNotMatch(header('trusted_anyway'), /verified-shield/);
@@ -625,4 +631,58 @@ test('a pending message shows when it was queued on this device', () => {
   }).body;
   assert.equal((html.match(/<time datetime="2026-01-01T09:00:00\.000Z" title="Queued on this device /g) ?? []).length, 1);
   assert.equal((html.match(/Waiting to send…/g) ?? []).length, 2);
+});
+
+test('GIVEN members whose identity changed WHEN the room shows THEN sending is paused and each can be accepted as isolated text', () => {
+  const view = (props) =>
+    render(IdentityChanges, {
+      props: {
+        busy: false,
+        confirming: false,
+        onaccept: () => {},
+        onverify: () => {},
+        ...props
+      }
+    }).body;
+  const changes = (list, truncated = false) => ({ roomId: '!r:s', changes: list, truncated });
+  const one = view({ changes: changes([{ userId: hostileName, wasVerified: false }]) });
+  assert.match(one, /role="alert"/);
+  assert.match(one, /Sending is paused in this room/);
+  assert.match(one, /This person's encryption identity changed\./);
+  assert.match(one, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  assert.doesNotMatch(one, /<img/);
+  assert.match(one, /Accept new identity…/);
+  assert.doesNotMatch(one, /Verify instead/, 'only the direct-message contact can be verified here');
+  assert.doesNotMatch(one, /was verified/);
+  assert.doesNotMatch(one, /<input/);
+
+  const contact = view({
+    changes: changes([{ userId: '@bob:s', wasVerified: false }]),
+    contact: '@bob:s',
+    canVerify: true
+  });
+  assert.match(contact, />\s*Verify instead\s*</);
+  const unverifiedDevice = view({
+    changes: changes([{ userId: '@bob:s', wasVerified: false }]),
+    contact: '@bob:s',
+    canVerify: false
+  });
+  assert.doesNotMatch(unverifiedDevice, /Verify instead/);
+  // A verified contact's change blocks the verification request too.
+  const wasVerified = view({
+    changes: changes([{ userId: '@bob:s', wasVerified: true }]),
+    contact: '@bob:s',
+    canVerify: true
+  });
+  assert.match(wasVerified, /· was verified; accepting withdraws that/);
+  assert.doesNotMatch(wasVerified, /Verify instead/);
+  assert.match(wasVerified, /Accept new identity…/);
+
+  const cut = view({ changes: changes([{ userId: '@a:s', wasVerified: false }], true) });
+  assert.match(cut, /These people's encryption identities changed\./);
+  assert.match(cut, /More people changed identity than are listed here/);
+
+  const asking = view({ changes: changes([{ userId: '@a:s', wasVerified: false }]), busy: true, confirming: true });
+  assert.match(asking, /Answer in the Windows window Persephone opened\./);
+  assert.match(asking, /<button[^>]*disabled/);
 });

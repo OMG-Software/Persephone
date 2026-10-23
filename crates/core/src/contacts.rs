@@ -15,7 +15,7 @@
 //!   for users the SDK follows, so `status` makes the SDK follow the contact
 //!   first (see there).
 
-use crate::views::project_name;
+use crate::{identities, views::project_name};
 use matrix_sdk::{
     Client, Room, RoomMemberships, RoomState,
     ruma::{OwnedUserId, RoomId, UserId},
@@ -97,6 +97,20 @@ pub async fn status(client: &Client, room: &Room) -> Option<ContactStatus> {
                 Err(_) => ContactTrust::Unknown,
             }
         }
+    };
+    // An identity that changed reads as unverified until the room says so
+    // (ADR-0007); a failure to tell reads `unknown`.
+    let trust = if trust == ContactTrust::Unverified {
+        match identities::changed_members(room).await {
+            Some(changed) => match changed.iter().find(|change| change.user_id == contact) {
+                Some(change) if change.was_verified => ContactTrust::VerifiedChanged,
+                Some(_) => ContactTrust::Changed,
+                None => trust,
+            },
+            None => ContactTrust::Unknown,
+        }
+    } else {
+        trust
     };
     Some(ContactStatus {
         room_id: room.room_id().to_string(),

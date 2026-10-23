@@ -85,8 +85,8 @@ pub enum SendFailure {
     ConfirmationRequired,
     /// This device is not verified, so room keys cannot be shared from it.
     DeviceNotVerified,
-    /// A verified member changed identity; nothing is sent to them until
-    /// that is resolved.
+    /// A member's identity changed; nothing is sent in the room until the
+    /// user accepts the new identity or verifies it (ADR-0007).
     IdentityChanged,
     /// This account is not joined to the room.
     NotJoined,
@@ -313,6 +313,9 @@ pub enum SecurityOperation {
     WaitingForPassword,
     /// The core's own window is asking for the recovery key.
     WaitingForRecoveryKey,
+    /// The core's own window is asking whether to accept a contact's new
+    /// identity (ADR-0007).
+    WaitingForConfirmation,
     /// Talking to the homeserver.
     Working,
 }
@@ -363,6 +366,35 @@ pub enum ContactTrust {
     Unverified,
     /// This account verified the contact's identity.
     Verified,
+    /// The contact's identity changed since this account first saw it, and
+    /// the user has not accepted the new one: sending to them is paused
+    /// (ADR-0007).
+    Changed,
+    /// The contact's identity changed after this account verified it:
+    /// verify them again or withdraw the verification.
+    VerifiedChanged,
+}
+
+/// A room member whose cross-signing identity changed (ADR-0007).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct IdentityChange {
+    /// A valid Matrix user ID (printable ASCII, at most 255 bytes), so the
+    /// page can name it back to the core; untrusted text all the same.
+    pub user_id: String,
+    /// This account had verified the old identity.
+    pub was_verified: bool,
+}
+
+/// Reply of `identity_changes`: the members of a room whose identity changed.
+/// While any is listed, nothing is sent in the room.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomIdentityChanges {
+    pub room_id: String,
+    pub changes: Vec<IdentityChange>,
+    /// More members changed than are listed.
+    pub truncated: bool,
 }
 
 /// Reply of `contact_status`: the other person in a direct-message room.
@@ -495,6 +527,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", SecurityStatus::decl(&config)),
         format!("export {}", ContactTrust::decl(&config)),
         format!("export {}", ContactStatus::decl(&config)),
+        format!("export {}", IdentityChange::decl(&config)),
+        format!("export {}", RoomIdentityChanges::decl(&config)),
         format!("export {}", RoomEncryption::decl(&config)),
         format!("export {}", RoomSummary::decl(&config)),
         format!("export {}", PendingState::decl(&config)),

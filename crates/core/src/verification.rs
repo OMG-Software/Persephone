@@ -47,6 +47,8 @@ pub enum Action {
 pub struct Flow {
     request: VerificationRequest,
     sas: Option<SasVerification>,
+    /// The contact's identity was asked for again after the match.
+    refreshed: bool,
 }
 
 impl Flow {
@@ -91,6 +93,23 @@ impl Flow {
         {
             let _ = sas.cancel().await;
         }
+    }
+
+    /// Once a contact verification is done, asks the homeserver once for
+    /// the contact's identity. The match signed it with the account's
+    /// user-signing key. In live runs on Merovingian 0.12.29, a contact
+    /// verified right after their identity changed still read as changed
+    /// until the next start, which queries keys again; most likely nothing
+    /// started an earlier keys query (`docs/evidence/identity-changes.md`).
+    pub async fn refresh_contact(&mut self, client: &Client) {
+        if self.refreshed || !self.is_contact() || self.view().phase != VerificationPhase::Done {
+            return;
+        }
+        self.refreshed = true;
+        let _ = client
+            .encryption()
+            .request_user_identity(self.request.other_user_id())
+            .await;
     }
 
     /// Whether this flow verifies a contact rather than this device.
@@ -225,7 +244,11 @@ pub async fn start(client: &Client, user_id: &UserId) -> Option<Flow> {
         .await
         .ok()??;
     let request = identity.request_verification().await.ok()?;
-    Some(Flow { request, sas: None })
+    Some(Flow {
+        request,
+        sas: None,
+        refreshed: false,
+    })
 }
 
 /// Asks the contact of this direct-message room to verify each other, with a
@@ -245,7 +268,11 @@ pub async fn start_contact(client: &Client, room_id: &str) -> Result<Flow, Secur
         .request_verification()
         .await
         .map_err(|_| SecurityError::Failed)?;
-    Ok(Flow { request, sas: None })
+    Ok(Flow {
+        request,
+        sas: None,
+        refreshed: false,
+    })
 }
 
 /// An incoming request: from another of the account's devices, or from a
@@ -255,5 +282,9 @@ pub async fn incoming(client: &Client, sender: &UserId, flow_id: &str) -> Option
         .encryption()
         .get_verification_request(sender, flow_id)
         .await?;
-    Some(Flow { request, sas: None })
+    Some(Flow {
+        request,
+        sas: None,
+        refreshed: false,
+    })
 }

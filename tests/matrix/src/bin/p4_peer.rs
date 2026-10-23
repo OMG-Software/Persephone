@@ -8,6 +8,12 @@
 //!   (ADR-0005); `bob2` is a second device of the same account that is never
 //!   cross-signed and uses the SDK's default key sharing.
 //! * `bootstrap`: set up cross-signing for `bob`, answering the password round.
+//!   With keys already on this device it uploads the same identity again.
+//! * `reset-identity [<user id>]`: replace `bob`'s cross-signing identity with
+//!   a new one (as after losing every device), answering the password round.
+//!   Bob's new identity has not signed anyone, so a user he had verified now
+//!   reads as a changed verified user and his client refuses to send to them;
+//!   naming that user withdraws the old verification, as a user would.
 //! * `create <encrypted|plain|public> <user id> <name>`: `bob` creates a
 //!   room with that name and invites the user: private and encrypted,
 //!   private without encryption state (some servers encrypt it anyway), or
@@ -72,6 +78,7 @@ use matrix_sdk::{
     },
 };
 use matrix_sdk::{
+    encryption::CrossSigningResetAuthType,
     encryption::verification::{
         SasState, SasVerification, VerificationRequest, VerificationRequestState,
     },
@@ -452,6 +459,35 @@ impl Peer {
                         .await?;
                 }
                 Ok(json!({"ok": true}))
+            }
+            "reset-identity" => {
+                let client = self.client("bob")?;
+                if let Some(handle) = client.encryption().reset_cross_signing().await? {
+                    let CrossSigningResetAuthType::Uiaa(uiaa) = handle.auth_type() else {
+                        bail!("not a password round");
+                    };
+                    let user = client.user_id().context("signed in")?.to_string();
+                    let mut auth = Password::new(
+                        UserIdentifier::Matrix(MatrixUserIdentifier::new(user)),
+                        self.account.password.clone(),
+                    );
+                    auth.session = uiaa.session.clone();
+                    handle.auth(Some(AuthData::Password(auth))).await?;
+                }
+                let mut withdrawn = false;
+                if let Some(user) = words.next() {
+                    let user: OwnedUserId = user.try_into()?;
+                    client
+                        .sync_once(SyncSettings::default().timeout(Duration::from_secs(1)))
+                        .await?;
+                    if let Some(identity) = client.encryption().get_user_identity(&user).await?
+                        && identity.has_verification_violation()
+                    {
+                        identity.withdraw_verification().await?;
+                        withdrawn = true;
+                    }
+                }
+                Ok(json!({"ok": true, "withdrawn": withdrawn}))
             }
             "create" => {
                 let kind = words.next().context("encrypted or plain")?;

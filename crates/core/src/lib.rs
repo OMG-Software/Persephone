@@ -23,6 +23,7 @@ pub mod account;
 pub mod contacts;
 pub mod credentials;
 pub mod homeserver;
+pub mod identities;
 pub mod matrix_views;
 pub mod outbox;
 pub mod passphrase;
@@ -41,7 +42,8 @@ use matrix_views::MatrixViews;
 use persephone_contracts::{AccountStatus, AppStatus, RoomList, StoreState};
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES,
-    MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, Outcome, ReceiveError, Reply, Request, receive, send,
+    MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, MAX_USER_ID_BYTES, Outcome, ReceiveError, Reply, Request,
+    receive, send,
 };
 use persephone_media_protocol::ResourceBudgets;
 use serde::Serialize;
@@ -392,6 +394,8 @@ impl Core {
                 self.verify(flow_id, verification::Action::Cancel)
             }
             Call::ContactStatus { room_id } => self.contact_status(room_id),
+            Call::IdentityChanges { room_id } => self.identity_changes(room_id),
+            Call::AcceptIdentity { room_id, user_id } => self.accept_identity(room_id, user_id),
             Call::VerifyContact { room_id } => {
                 if valid_room_id(room_id) {
                     ok(&self
@@ -468,6 +472,50 @@ impl Core {
         match status {
             Ok(status) => ok(&status),
             Err(code) => Outcome::Error(code),
+        }
+    }
+
+    fn identity_changes(&self, room_id: &str) -> Outcome {
+        if !valid_room_id(room_id) {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        let changes = match self.source() {
+            Source::Locked => Err(ErrorCode::Locked),
+            Source::Fixtures | Source::SignedOut => Err(ErrorCode::NotFound),
+            Source::Matrix(lease, client) => lease
+                .stores()
+                .block_on(identities::room_changes(&client, room_id)),
+        };
+        match changes {
+            Ok(changes) => ok(&changes),
+            Err(code) => Outcome::Error(code),
+        }
+    }
+
+    /// Asks the core's own window to accept a member's new identity, if that
+    /// member's identity changed in this room; `not_found` otherwise.
+    fn accept_identity(&self, room_id: &str, user_id: &str) -> Outcome {
+        let user = (user_id.len() <= MAX_USER_ID_BYTES)
+            .then(|| matrix_sdk::ruma::UserId::parse(user_id).ok())
+            .flatten();
+        let Some(user) = user.filter(|_| valid_room_id(room_id)) else {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        };
+        let changed = match self.source() {
+            Source::Locked => return Outcome::Error(ErrorCode::Locked),
+            Source::Fixtures | Source::SignedOut => None,
+            Source::Matrix(lease, client) => lease
+                .stores()
+                .block_on(identities::find(&client, room_id, &user)),
+        };
+        match changed {
+            Some(changed) => ok(&self.session.accept_identity(
+                room_id.to_owned(),
+                changed.user_id,
+                changed.was_verified,
+                self.credentials.clone(),
+            )),
+            None => Outcome::Error(ErrorCode::NotFound),
         }
     }
 

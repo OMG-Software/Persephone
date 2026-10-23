@@ -117,6 +117,9 @@ fn main() -> ExitCode {
             if let Some(file) = env::var_os("PERSEPHONE_DEV_PASSPHRASE_FILE") {
                 harness = harness.with_passphrase_file(file.into());
             }
+            if let Some(file) = env::var_os("PERSEPHONE_DEV_IDENTITY_ANSWER_FILE") {
+                harness = harness.with_identity_answer_file(file.into());
+            }
             Arc::new(harness)
         }
         None => source,

@@ -5,6 +5,10 @@
 //!   that is not encrypted needs the user's consent first; without it nothing
 //!   is sent. In an encrypted room the SDK encrypts or fails before any
 //!   request: it never sends plain text there.
+//! * In an encrypted room, nothing is sent while a member's identity changed
+//!   and the user has not accepted it (ADR-0007; `identities.rs`), or when
+//!   that cannot be told. The check runs just before the send: an identity
+//!   that changes in between still gets this one message's key.
 //! * A failure is a code. A transport failure (the connection dropped or timed
 //!   out) is `unknown`, because the request may have reached the homeserver;
 //!   retrying with the same transaction ID is then safe. The SDK is built
@@ -12,6 +16,7 @@
 //! * Consent is a list of room IDs in an encrypted crypto-store custom value,
 //!   at most [`MAX_CONSENTED_ROOMS`].
 
+use crate::identities;
 use crate::outbox::SendOutcome;
 use crate::store::Stores;
 use matrix_sdk::{
@@ -53,6 +58,13 @@ pub async fn send(
     };
     if !encrypted && !consented {
         return SendOutcome::Failed(SendFailure::ConfirmationRequired);
+    }
+    if encrypted {
+        match identities::changed_members(&room).await {
+            Some(changed) if changed.is_empty() => {}
+            Some(_) => return SendOutcome::Failed(SendFailure::IdentityChanged),
+            None => return SendOutcome::Failed(SendFailure::Failed),
+        }
     }
     match room
         .send(RoomMessageEventContent::text_plain(body))

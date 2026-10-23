@@ -85,6 +85,8 @@
       <p role="status">Enter your password in the Windows window Persephone opened.</p>
     {:else if security.operation === 'waiting_for_recovery_key'}
       <p role="status">Enter your recovery key in the Windows window Persephone opened.</p>
+    {:else if security.operation === 'waiting_for_confirmation'}
+      <p role="status">Answer in the Windows window Persephone opened.</p>
     {:else if security.operation === 'working'}
       <p role="status">Working…</p>
     {/if}
