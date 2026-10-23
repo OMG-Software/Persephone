@@ -36,7 +36,7 @@ manual run of the native dialogs were made for this change.**
   | --- | --- |
   | New profile | New passphrase twice, at least 10 characters; reasons are shown for a short or mismatched entry; at most 5 rounds, then `locked` |
   | `store-key.v2` | Passphrase asked; 5 entries with waits of 1, 2, 4 and 8 s before the second to fifth; then `secret_rejected` |
-  | Only `store-key.v1` | Key unwrapped with DPAPI; new passphrase twice; v2 saved and read back; then the stores are opened and v1 is deleted. A cancelled prompt touches no file. If the stores refuse the key, both files stay and later opens fail the same way. If v1 cannot be deleted, the stores close again (`store_unavailable`) |
+  | Only `store-key.v1` | Key unwrapped with DPAPI; new passphrase twice; v2 saved and read back; then the stores are opened and v1 is deleted. A cancelled prompt writes or changes no key or store file (`profile.lock` may be created when the profile is locked). If the stores refuse the key, both files stay and later opens fail the same way. If v1 cannot be deleted, the stores close again (`store_unavailable`) |
   | Both files (interrupted upgrade) | v2 used; v1 deleted |
   | Prompt cancelled or failed | `locked`; nothing written |
   | Changed sealed key | Same as a wrong passphrase (`secret_rejected`) |
@@ -81,8 +81,10 @@ attacker can run them in parallel, so an offline guess costs less than this.
 
 ## Tests
 
-`python tools/dev.py check --offline` passed (exit 0) on the final tree,
-after the first review fixes: 298 Rust tests (234 in the workspace run and 64
+`python tools/dev.py check --offline` passed (exit 0) on the working tree
+that became commit `22f05ba`, after the first review fixes; that commit added
+only the test counts in this file, `docs/development.md` and
+`verification.json`: 298 Rust tests (234 in the workspace run and 64
 in the `dev-disposable-servers` core run; 2 ignored), 21 frontend tests, 2
 server-registration and 13 development-controller tests, with formatting,
 Clippy (default and development features), contract drift and TypeScript
