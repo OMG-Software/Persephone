@@ -20,6 +20,10 @@
   --warn-bg: #fdecea;
   --warn-ink: #912018;
   --danger: #d92d20;
+  /* Solid green for the encrypted icon, the counterpart of --danger in both
+     themes: a white glyph on it is 4.1:1 and it is 3:1 or more on every
+     panel, so encrypted and not encrypted stand out equally. */
+  --secure: #1a8f55;
   /* Red for text and outlined buttons: --danger is below 4.5:1 on some
      surfaces, so it is kept for icons and borders. */
   --danger-text: #b42318;
@@ -320,15 +324,15 @@ kbd {
 }
 
 .enc-icon.encrypted {
-  background: var(--enc-bg);
+  background: var(--secure);
 }
 
 .enc-icon.encrypted svg {
-  stroke: var(--enc-fg);
+  stroke: #ffffff;
 }
 
 .enc-icon.encrypted rect {
-  fill: var(--enc-fg);
+  fill: #ffffff;
 }
 
 .enc-icon.not_encrypted {
@@ -947,14 +951,19 @@ kbd {
   gap: 4px;
   height: 32px;
   padding-right: 6px;
-  color: var(--ink3);
+  color: var(--enc-fg);
   font-size: 11.5px;
+  font-weight: 600;
 }
 
 .enc-note .icon {
   width: 13px;
   height: 13px;
   stroke-width: 2;
+}
+
+.enc-note .icon rect {
+  fill: currentColor;
 }
 
 .send {
