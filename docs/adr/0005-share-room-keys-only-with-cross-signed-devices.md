@@ -74,7 +74,8 @@ Chosen options (owner decisions, 22 October 2026):
   device or with the recovery key.
 * An unverified contact who changes identity still receives keys for their new
   identity's devices (the SDK raises no error); warning about this needs its
-  own UI, which is not in the first slice.
+  own UI, which is not in the first slice. *[ADR-0007](0007-block-sending-to-a-changed-contact-identity-until-approved.md)
+  (23 October 2026) now pauses sending until the user decides.*
 * Lost recovery keys cannot be shown again; the key must be reset.
 
 ## Links

@@ -5,8 +5,9 @@
 
 use persephone_contracts::{
     AccountState, AccountStatus, ContactStatus, ContactTrust, IdentityState, NoticeKind,
-    PendingMessage, PendingState, RoomEncryption, RoomList, SecurityError, SecurityOperation,
-    SecurityStatus, SendFailure, SignInError, StoreState, TimelineItem, TimelinePage,
+    PendingMessage, PendingState, RoomEncryption, RoomIdentityChanges, RoomList, SecurityError,
+    SecurityOperation, SecurityStatus, SendFailure, SignInError, StoreState, TimelineItem,
+    TimelinePage,
 };
 use persephone_core::{
     Core,
@@ -1996,6 +1997,68 @@ fn given_an_unverified_device_then_verifying_a_contact_sends_nothing() {
     std::thread::sleep(Duration::from_millis(600));
     assert!(server.sends().is_empty(), "no request reached the room");
     assert_eq!(security(&core).verification, None);
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a direct-message room whose contact's identity did not change WHEN
+/// the page asks for the room's changed identities, or asks to accept one
+/// THEN none is listed, accepting is `not_found` and asks nothing, and bad
+/// room or user IDs are refused (ADR-0007).
+#[test]
+fn given_no_changed_identity_then_nothing_is_listed_or_accepted() {
+    let server = Homeserver::signed_in();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the direct room", || {
+        let list: RoomList = value(call(&core, Call::RoomList {}));
+        list.rooms.iter().any(|room| room.room_id == DM)
+    });
+    let changes: RoomIdentityChanges =
+        value(call(&core, Call::IdentityChanges { room_id: DM.into() }));
+    assert_eq!(changes.room_id, DM);
+    assert!(changes.changes.is_empty());
+    assert!(!changes.truncated);
+    assert_eq!(
+        call(
+            &core,
+            Call::IdentityChanges {
+                room_id: "!unknown:synthetic.test".into()
+            }
+        ),
+        Outcome::Error(ErrorCode::NotFound)
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::AcceptIdentity {
+                room_id: DM.into(),
+                user_id: CONTACT.into()
+            }
+        ),
+        Outcome::Error(ErrorCode::NotFound),
+        "nothing to accept"
+    );
+    assert_eq!(security(&core).operation, SecurityOperation::Idle);
+    for (room_id, user_id) in [
+        ("dm", CONTACT.to_owned()),
+        (DM, "bob".to_owned()),
+        (DM, format!("@{}:synthetic.test", "b".repeat(250))),
+    ] {
+        assert_eq!(
+            call(
+                &core,
+                Call::AcceptIdentity {
+                    room_id: room_id.into(),
+                    user_id
+                }
+            ),
+            Outcome::Error(ErrorCode::InvalidArgument),
+            "{room_id}"
+        );
+    }
     // Stops the sync loop: the mock server goes back to a shared pool.
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);

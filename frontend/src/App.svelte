@@ -3,6 +3,7 @@
   import markUrl from './assets/mark.svg';
   import Composer from './Composer.svelte';
   import Icon from './Icon.svelte';
+  import IdentityChanges from './IdentityChanges.svelte';
   import JumpPalette from './JumpPalette.svelte';
   import Security from './Security.svelte';
   import Settings, { type SettingsTab } from './Settings.svelte';
@@ -33,6 +34,8 @@
     cancelVerification,
     contactStatus,
     verifyContact,
+    identityChanges,
+    acceptIdentity,
     signOut,
     roomList,
     signIn,
@@ -43,6 +46,7 @@
     watchSession,
     type AppStatus,
     type ContactStatus,
+    type RoomIdentityChanges,
     type PendingMessage,
     type RoomList as Rooms,
     type SecurityStatus,
@@ -61,6 +65,8 @@
   let securityShown = 0;
   // The other person in the selected direct-message room, if it is one.
   let contact = $state<ContactStatus | null>(null);
+  // Members of the selected room whose identity changed (ADR-0007).
+  let changes = $state<RoomIdentityChanges | null>(null);
   // The room whose contact this page last asked to verify: the core reports
   // why that failed in the security status, shown in that room.
   let contactAsked = $state<string | null>(null);
@@ -277,6 +283,7 @@
     securityFailure = null;
     pending = [];
     contact = null;
+    changes = null;
     contactAsked = null;
     confirmingPlain = null;
     confirmedRooms = new Set();
@@ -308,8 +315,37 @@
     } catch {
       // The next security or session event tries again.
     }
-    // A verification may have changed how far a contact is trusted.
-    if (selected && generation === sessionGeneration) loadContact(selected, generation);
+    // A verification or an identity change may have changed how far a
+    // contact is trusted, and whether sending in the room is paused.
+    if (selected && generation === sessionGeneration) {
+      loadContact(selected, generation);
+      loadChanges(selected, generation);
+    }
+  }
+
+  // The selected room's changed identities. Kept only while the same room in
+  // the same session is selected; a failure shows nothing (the core still
+  // refuses to send).
+  // Ordered like the contact replies: an older reply never replaces a newer one.
+  let changesRequest = 0;
+  let changesShown = 0;
+  async function loadChanges(roomId: string, generation: number) {
+    const request = ++changesRequest;
+    if (!signedIn || selectedRoom?.encryption !== 'encrypted') {
+      changes = null;
+      changesShown = request;
+      return;
+    }
+    let reply: RoomIdentityChanges | null = null;
+    try {
+      reply = await identityChanges(roomId);
+    } catch {
+      // Shown as none; the core still refuses to send.
+    }
+    if (current(roomId, generation) && request > changesShown) {
+      changes = reply;
+      changesShown = request;
+    }
   }
 
   function verifyRoomContact(roomId: string) {
@@ -502,6 +538,7 @@
     items = [];
     pending = [];
     contact = null;
+    changes = null;
     confirmingPlain = null;
     nextCursor = null;
     error = null;
@@ -519,6 +556,7 @@
       if (signedIn) {
         loadPending(roomId, generation);
         loadContact(roomId, generation);
+        loadChanges(roomId, generation);
       }
     } catch (reason) {
       if (current(roomId, generation)) error = describe(reason);
@@ -870,6 +908,18 @@
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
+          {/if}
+          {#if signedIn && changes && (changes.changes.length > 0 || changes.truncated)}
+            <IdentityChanges
+              {changes}
+              contact={contact?.userId ?? null}
+              canVerify={security?.identity === 'verified'}
+              busy={securityBusy || security?.operation !== 'idle'}
+              confirming={security?.operation === 'waiting_for_confirmation'}
+              onaccept={(userId) =>
+                startSecurity(() => acceptIdentity(selectedRoom.roomId, userId), selectedRoom.roomId)}
+              onverify={() => verifyRoomContact(selectedRoom.roomId)}
+            />
           {/if}
           {#if signedIn}
             {#if confirmingPlain}

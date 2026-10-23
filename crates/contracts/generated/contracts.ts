@@ -24,7 +24,7 @@ export type IdentityState = "unknown" | "none" | "unverified" | "verified";
 
 export type RecoveryState = "unknown" | "disabled" | "incomplete" | "enabled";
 
-export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "working";
+export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_confirmation" | "working";
 
 export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "failed";
 
@@ -54,13 +54,30 @@ export type SecurityStatus = { identity: IdentityState, recovery: RecoveryState,
  */
 canSetUpRecovery: boolean, };
 
-export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified";
+export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
 
 export type ContactStatus = { roomId: string, 
 /**
  * Untrusted, projected like a name.
  */
 userId: string, trust: ContactTrust, };
+
+export type IdentityChange = { 
+/**
+ * A valid Matrix user ID (printable ASCII, at most 255 bytes), so the
+ * page can name it back to the core; untrusted text all the same.
+ */
+userId: string, 
+/**
+ * This account had verified the old identity.
+ */
+wasVerified: boolean, };
+
+export type RoomIdentityChanges = { roomId: string, changes: Array<IdentityChange>, 
+/**
+ * More members changed than are listed.
+ */
+truncated: boolean, };
 
 export type RoomEncryption = "encrypted" | "not_encrypted" | "unknown";
 

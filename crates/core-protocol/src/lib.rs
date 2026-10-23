@@ -125,7 +125,23 @@ pub enum Call {
     VerifyContact {
         room_id: String,
     },
+    /// The members of this room whose identity changed (ADR-0007).
+    IdentityChanges {
+        room_id: String,
+    },
+    /// Accept the new identity of a member of this room whose identity
+    /// changed: pin it, or withdraw the verification of the old one. Only
+    /// asks: the core confirms in its own window and changes nothing without
+    /// an explicit yes there. Replies at once with the status; the outcome
+    /// arrives as [`Event::SecurityChanged`].
+    AcceptIdentity {
+        room_id: String,
+        user_id: String,
+    },
 }
+
+/// Longest user ID either side accepts in a call (the Matrix limit).
+pub const MAX_USER_ID_BYTES: usize = 255;
 
 /// Longest verification flow ID either side accepts.
 pub const MAX_FLOW_ID_BYTES: usize = 128;
@@ -375,6 +391,19 @@ mod tests {
                 },
                 r#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s"}}"#,
             ),
+            (
+                Call::IdentityChanges {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"identity_changes","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::AcceptIdentity {
+                    room_id: "!r:s".into(),
+                    user_id: "@b:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"accept_identity","room_id":"!r:s","user_id":"@b:s"}}"#,
+            ),
         ] {
             let request = Request { id: 1, call };
             let mut sent = Vec::new();
@@ -432,6 +461,12 @@ mod tests {
             br#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s","user_id":"@b:s"}}"#,
             br#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s","create_room":true}}"#,
             br#"{"id":1,"call":{"command":"verify_user","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"identity_changes"}}"#,
+            br#"{"id":1,"call":{"command":"identity_changes","room_id":"!r:s","all":true}}"#,
+            br#"{"id":1,"call":{"command":"accept_identity","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"accept_identity","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"accept_identity","room_id":"!r:s","user_id":"@b:s","confirmed":true}}"#,
+            br#"{"id":1,"call":{"command":"pin_identity","user_id":"@b:s"}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

@@ -8,6 +8,7 @@ import type {
   AppStatus,
   ContactStatus,
   PendingMessage,
+  RoomIdentityChanges,
   SignInError,
   RoomList,
   SecurityStatus,
@@ -20,6 +21,7 @@ export type {
   AccountStatus,
   AppStatus,
   ContactStatus,
+  RoomIdentityChanges,
   PendingMessage,
   RoomList,
   SecurityStatus,
@@ -199,4 +201,17 @@ export function contactStatus(roomId: string): Promise<ContactStatus> {
  */
 export function verifyContact(roomId: string): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('verify_contact', { roomId });
+}
+
+/** The members of a room whose encryption identity changed (ADR-0007). */
+export function identityChanges(roomId: string): Promise<RoomIdentityChanges> {
+  return invoke<RoomIdentityChanges>('identity_changes', { roomId });
+}
+
+/**
+ * Asks the core to accept a member's new identity. The core confirms in its
+ * own window; the outcome arrives as a security change.
+ */
+export function acceptIdentity(roomId: string, userId: string): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('accept_identity', { roomId, userId });
 }

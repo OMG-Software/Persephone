@@ -35,6 +35,7 @@ use crate::account;
 use crate::contacts;
 use crate::credentials::{CredentialSource, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
+use crate::identities;
 use crate::outbox::Outbox;
 use crate::passphrase::Unlock;
 use crate::security;
@@ -172,6 +173,13 @@ enum SecurityCommand {
     },
     /// Start, accept, confirm or cancel a verification with another device.
     Verify(VerifyAction),
+    /// Accept a room member's new identity; the user said yes in the core's
+    /// own window (ADR-0007).
+    AcceptIdentity {
+        room_id: String,
+        user_id: OwnedUserId,
+        was_verified: bool,
+    },
 }
 
 struct SecurityShared {
@@ -446,6 +454,9 @@ fn run_sync(
     let mut engine = None;
     // The SDK's room-key stream, taken once per round; a receiver, not a task.
     let mut keys = None;
+    // The SDK's stream of changed user identities, taken once per round; a
+    // receiver, not a task. Any update may change a room's paused state.
+    let mut identities = None;
     // Set by the SDK while it processes a round that changed `m.direct`.
     let direct = Arc::new(AtomicBool::new(false));
     let noted = direct.clone();
@@ -479,13 +490,25 @@ fn run_sync(
             if engine.is_none() {
                 engine = Some(account::select_engine(&client).await?);
             }
+            if identities.is_none() {
+                identities = client
+                    .encryption()
+                    .user_identities_stream()
+                    .await
+                    .ok()
+                    .map(Box::pin);
+            }
             let rooms =
                 account::sync_round(&client, engine.as_ref().expect("selected above")).await?;
             let keyed = match keys.as_mut() {
                 Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
                 None => None,
             };
-            Ok::<_, SignInError>((rooms, keyed))
+            let changed = match identities.as_mut() {
+                Some(stream) => account::take_any(stream.as_mut()).await,
+                None => false,
+            };
+            Ok::<_, SignInError>((rooms, keyed, changed))
         });
         let committed = lease.commit(|| ()).is_ok();
         drop(lease);
@@ -493,7 +516,7 @@ fn run_sync(
             break;
         }
         match outcome {
-            Ok((rooms, keyed)) => {
+            Ok((rooms, keyed, identities_changed)) => {
                 backoff = Duration::from_secs(1);
                 if guard(&shared.status).error.is_some() {
                     shared.set_status(signed_in(&user_id, None));
@@ -504,6 +527,9 @@ fn run_sync(
                     }
                     if direct.swap(false, Ordering::SeqCst) {
                         listener.direct_rooms_changed();
+                    }
+                    if identities_changed {
+                        listener.security_changed();
                     }
                     if let Some(keyed) = keyed.filter(|keyed| !keyed.is_empty()) {
                         listener.room_keys_arrived(&keyed);
@@ -529,6 +555,7 @@ fn run_sync(
     }
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
+    drop(identities);
     drop(keys);
     drop(engine);
     drop(client);
@@ -672,6 +699,16 @@ fn run_security(
                             None => (Some(SecurityError::Failed), None),
                         }
                     }
+                    Some(SecurityCommand::AcceptIdentity {
+                        room_id,
+                        user_id,
+                        was_verified,
+                    }) => (
+                        identities::accept(&client, &room_id, &user_id, was_verified)
+                            .await
+                            .err(),
+                        None,
+                    ),
                     Some(SecurityCommand::Verify(action)) => {
                         let outcome = match flow.as_mut() {
                             Some(flow) => flow.act(&client, &action).await,
@@ -683,6 +720,7 @@ fn run_security(
                 };
                 if let Some(flow) = flow.as_mut() {
                     flow.drive().await;
+                    flow.refresh_contact(&client).await;
                 }
                 (
                     outcome,
@@ -1353,6 +1391,71 @@ impl Session {
         }
         self.shared
             .with_security(generation, |security| queue_verification(security, action));
+        self.security_status()
+    }
+
+    /// Asks in the core's own window whether to accept `user_id`'s new
+    /// identity in `room_id` (ADR-0007), then leaves the command for the
+    /// security thread, which checks the change again before applying it.
+    /// The caller has checked that the change exists and how; the window
+    /// runs on its own thread without a lease, like the secret prompts, and
+    /// an answer given after a lock is dropped. Does nothing while another
+    /// operation runs.
+    pub fn accept_identity(
+        &self,
+        room_id: String,
+        user_id: OwnedUserId,
+        was_verified: bool,
+        source: Arc<dyn CredentialSource>,
+    ) -> SecurityStatus {
+        if guard(&self.shared.account).is_none() {
+            return self.security_status();
+        }
+        let Some(started) = self.shared.open_generation() else {
+            return self.security_status();
+        };
+        let accepted = self.shared.with_security(started, |security| {
+            let free =
+                security.status.operation == SecurityOperation::Idle && security.command.is_none();
+            if free {
+                security.status.operation = SecurityOperation::WaitingForConfirmation;
+                security.status.error = None;
+            }
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
+        }
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-identity-prompt".into())
+            .spawn(move || {
+                let answer = source.confirm_identity_change(user_id.as_str(), was_verified);
+                shared.with_security(started, |security| match answer {
+                    Ok(true) => {
+                        security.command = Some(SecurityCommand::AcceptIdentity {
+                            room_id,
+                            user_id,
+                            was_verified,
+                        });
+                        security.status.operation = SecurityOperation::Working;
+                    }
+                    Ok(false) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(SecurityError::Cancelled);
+                    }
+                    Err(error) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(security_prompt_error(error));
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
+            });
+        }
         self.security_status()
     }
 

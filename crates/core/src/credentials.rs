@@ -89,6 +89,17 @@ pub trait CredentialSource: Send + Sync {
     fn confirm_reset(&self) -> Result<bool, PromptError> {
         Err(PromptError::Unsupported)
     }
+
+    /// Asks whether to accept the new identity of `user_id` (ADR-0007);
+    /// `was_verified` when this account had verified the old one. `Ok(true)`
+    /// only for an explicit yes. Unsupported unless a source provides it.
+    fn confirm_identity_change(
+        &self,
+        _user_id: &str,
+        _was_verified: bool,
+    ) -> Result<bool, PromptError> {
+        Err(PromptError::Unsupported)
+    }
 }
 
 /// Checks a secret the way a password is checked: not empty, within `max`
@@ -162,6 +173,7 @@ pub mod dev {
         path: PathBuf,
         recovery_file: Option<PathBuf>,
         passphrase_file: Option<PathBuf>,
+        identity_answer_file: Option<PathBuf>,
     }
 
     impl HarnessProfile {
@@ -170,7 +182,17 @@ pub mod dev {
                 path,
                 recovery_file: None,
                 passphrase_file: None,
+                identity_answer_file: None,
             }
+        }
+
+        /// Answers "accept this new identity?" from `path` instead of the
+        /// native window: `yes` accepts, anything else declines. Read each
+        /// time it is asked, so a run can test both answers. Under the same
+        /// `.local` rule as the recovery file.
+        pub fn with_identity_answer_file(mut self, path: PathBuf) -> Self {
+            self.identity_answer_file = Some(path);
+            self
         }
 
         /// Answers the profile passphrase prompts from `path` (its trimmed
@@ -296,6 +318,17 @@ pub mod dev {
 
         fn confirm_reset(&self) -> Result<bool, PromptError> {
             super::platform().confirm_reset()
+        }
+
+        fn confirm_identity_change(
+            &self,
+            user_id: &str,
+            was_verified: bool,
+        ) -> Result<bool, PromptError> {
+            match &self.identity_answer_file {
+                Some(path) => Ok(Self::read_secret(&local_file(path)?, 16)?.as_str() == "yes"),
+                None => super::platform().confirm_identity_change(user_id, was_verified),
+            }
         }
 
         /// Writes the key to the recovery file, readable by its owner only on
@@ -576,6 +609,57 @@ mod windows {
                  only from key backup, with your recovery key.\n\n\
                  Delete the profile and choose a new passphrase?",
             );
+            // SAFETY: both strings are NUL-terminated and live for the call.
+            // "No" is the default button.
+            let answer = unsafe {
+                MessageBoxW(
+                    null_mut(),
+                    text.as_ptr(),
+                    caption.as_ptr(),
+                    MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+                )
+            };
+            match answer {
+                IDYES => Ok(true),
+                IDNO => Ok(false),
+                _ => Err(PromptError::Failed),
+            }
+        }
+
+        fn confirm_identity_change(
+            &self,
+            user_id: &str,
+            was_verified: bool,
+        ) -> Result<bool, PromptError> {
+            // The caller passes a valid Matrix user ID: printable ASCII only,
+            // so it cannot reorder or hide the surrounding text.
+            if user_id.len() > 255 || !user_id.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(PromptError::Invalid);
+            }
+            let caption = wide("A contact's identity changed");
+            let before = if was_verified {
+                "You verified this person before. Their encryption identity is now a \
+                 different one, so it is no longer verified."
+            } else {
+                "This person's encryption identity is not the one Persephone saw \
+                 before."
+            };
+            let after = if was_verified {
+                "Accepting withdraws your verification of the old identity. You \
+                 can then verify the new one by comparing emoji."
+            } else {
+                "You can also verify them by comparing emoji instead."
+            };
+            let text = wide(&format!(
+                "{user_id}\n\n{before}\n\n\
+                 This happens when they reset their encryption, for example after \
+                 losing their devices. It also happens when someone who controls \
+                 the server tries to read your messages.\n\n\
+                 Persephone sends nothing in rooms with this person until you \
+                 decide. Ask them in person or on a call you trust whether they \
+                 reset their encryption.\n\n{after}\n\n\
+                 Accept the new identity and send to it?"
+            ));
             // SAFETY: both strings are NUL-terminated and live for the call.
             // "No" is the default button.
             let answer = unsafe {
@@ -879,6 +963,45 @@ mod tests {
                 .ask_secret(SecretPrompt::RecoveryKey { user_id: "@a:s" })
                 .err(),
             Some(PromptError::Unsupported)
+        );
+    }
+
+    /// GIVEN a development answer file WHEN a contact's new identity is to be
+    /// accepted THEN only `yes` accepts, the file is read each time, and a
+    /// file outside `.local` or missing answers nothing.
+    #[cfg(feature = "dev-disposable-servers")]
+    #[test]
+    fn given_an_identity_answer_file_then_only_yes_accepts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let local = dir.path().join(".local");
+        std::fs::create_dir(&local).unwrap();
+        let answer = local.join("answer.txt");
+        let source = dev::HarnessProfile::new(dir.path().join("profile.json"))
+            .with_identity_answer_file(answer.clone());
+        assert_eq!(
+            source.confirm_identity_change("@b:s", false),
+            Err(PromptError::Failed),
+            "missing file"
+        );
+        for (text, accepted) in [
+            ("yes\n", true),
+            ("no", false),
+            ("YES", false),
+            ("yes!", false),
+        ] {
+            std::fs::write(&answer, text).unwrap();
+            assert_eq!(
+                source.confirm_identity_change("@b:s", true),
+                Ok(accepted),
+                "{text}"
+            );
+        }
+        let outside = dev::HarnessProfile::new(dir.path().join("profile.json"))
+            .with_identity_answer_file(dir.path().join("answer.txt"));
+        std::fs::write(dir.path().join("answer.txt"), "yes").unwrap();
+        assert_eq!(
+            outside.confirm_identity_change("@b:s", false),
+            Err(PromptError::Unsupported)
         );
     }
 

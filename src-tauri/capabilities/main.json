@@ -28,6 +28,8 @@
     "allow-confirm-verification",
     "allow-cancel-verification",
     "allow-contact-status",
-    "allow-verify-contact"
+    "allow-verify-contact",
+    "allow-identity-changes",
+    "allow-accept-identity"
   ]
 }

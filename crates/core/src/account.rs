@@ -304,6 +304,25 @@ where
     .await
 }
 
+/// Whether the stream has any item ready now; takes at most
+/// [`MAX_KEY_BATCHES`] of them without waiting.
+pub async fn take_any<S>(mut stream: Pin<&mut S>) -> bool
+where
+    S: Stream + ?Sized,
+{
+    std::future::poll_fn(|context| {
+        let mut any = false;
+        for _ in 0..MAX_KEY_BATCHES {
+            match stream.as_mut().poll_next(context) {
+                Poll::Ready(Some(_)) => any = true,
+                Poll::Ready(None) | Poll::Pending => break,
+            }
+        }
+        Poll::Ready(any)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
