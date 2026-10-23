@@ -41,17 +41,17 @@
   const dividers = $derived(dayDividers(items.map(timeOf), new Date()));
 
   // The timeline stays at the newest message while the reader is there; it
-  // does not move when they have scrolled up to read older ones.
+  // does not move when they have scrolled up to read older ones. Where the
+  // reader is comes from scrolling, not from measuring during an update: by
+  // then a tall new message may already be in the page.
   let scroller = $state<HTMLElement | null>(null);
   let atEnd = true;
-  $effect.pre(() => {
-    void items;
-    if (scroller) {
-      atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
-    }
-  });
+  function scrolled() {
+    if (scroller) atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  }
   $effect(() => {
-    void items;
+    // An emptied timeline is a room being opened: it starts at the newest.
+    if (items.length === 0) atEnd = true;
     if (scroller && atEnd) scroller.scrollTop = scroller.scrollHeight;
   });
 </script>
@@ -62,7 +62,7 @@
     <Icon name="hash" class="hash" />
     <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
   </header>
-  <div class="scroller" bind:this={scroller}>
+  <div class="scroller" bind:this={scroller} onscroll={scrolled}>
     <div class="stream">
       <button type="button" disabled={!hasOlder || loading} class="older" onclick={onolder}>
         {loading

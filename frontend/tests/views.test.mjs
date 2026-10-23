@@ -550,6 +550,6 @@ test('a pending message shows when it was queued on this device', () => {
       onallow: () => {}
     }
   }).body;
-  assert.equal((html.match(/<time datetime="2026-01-01T09:00:00\.000Z" title="Sent from this device /g) ?? []).length, 1);
+  assert.equal((html.match(/<time datetime="2026-01-01T09:00:00\.000Z" title="Queued on this device /g) ?? []).length, 1);
   assert.equal((html.match(/Waiting to send…/g) ?? []).length, 2);
 });

@@ -111,7 +111,7 @@
           <p dir="auto">{message.body}</p>
           <p class="note" role={message.state === 'failed' || message.state === 'unknown' ? 'alert' : null}>
             {#if queued}
-              <time datetime={queued.toISOString()} title={'Sent from this device ' + fullTime(queued)}
+              <time datetime={queued.toISOString()} title={'Queued on this device ' + fullTime(queued)}
                 >{clockTime(queued)}</time
               > ·
             {/if}
