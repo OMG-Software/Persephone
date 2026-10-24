@@ -44,9 +44,11 @@ pub(crate) fn read_image_file(
     super::unix::read_image_file(path, budgets)
 }
 
-/// Plan "macOS", Media worker: the worker's `sandbox_init` profile.
+/// The contained media worker next to the core: the broker's rlimit
+/// launcher and the worker's pure-computation sandbox, confirmed with
+/// `sandbox_check` before input is sent (ADR-0011).
 pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {
-    Arc::new(media::NoWorker)
+    Arc::new(media::contained::ContainedWorker::next_to_core())
 }
 
 /// Plan "macOS", UI launch: kill-on-exit, no memory cap.

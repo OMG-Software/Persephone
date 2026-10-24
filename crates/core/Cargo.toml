@@ -56,9 +56,11 @@ wiremock = "=0.6.5"
 # Linux and macOS: open flags for reading a picked image (O_NOFOLLOW).
 libc = "=0.2.191"
 
-[target.'cfg(windows)'.dependencies]
-# The contained media worker exists only on Windows (ADR-0003, ADR-0009).
+[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
+# The contained media worker (ADR-0003, ADR-0009, ADR-0010, ADR-0011).
 persephone-media-broker = { path = "../media-broker" }
+
+[target.'cfg(windows)'.dependencies]
 # Storage_FileSystem: the share mode and reparse-point flags for reading a
 # picked image; UI_Controls_Dialogs: the native file dialog (GetOpenFileNameW).
 windows-sys = { version = "=0.61.2", features = [

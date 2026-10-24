@@ -7,11 +7,12 @@ This process handles one encoded image and returns one bounded pixel or failure 
 - Use budgeted input framing and the embedded WebAssembly guest. Do not add a native decode fallback or runtime download of decoder code.
 - Keep the decoder fixed at worker build time through `build.rs`. `PERSEPHONE_MEDIA_GUEST` selects a build input, not a runtime capability.
 - Validate output through the sandbox and frame writer before publication. Preserve explicit exit codes and failure categories used by the broker.
-- Coordinate containment bits and checks in `src/containment.rs` with broker launch controls and Windows integration tests. A self-check does not prove complete OS isolation or network denial.
+- Coordinate containment bits and checks in `src/containment.rs` with broker launch controls and integration tests. A self-check does not prove complete OS isolation or network denial.
+- Keep the Linux seccomp allowlist minimal and measured. When worker or dependency code changes, rebuild with `--features syscall-trap`, run every operation and failure path, and add only calls that a trap reports. Never enable that feature in a shipped build.
 
 ## Checks
 
 - Build the release guest first: `cargo build --locked --release -p persephone-media-decoder --target wasm32-unknown-unknown`.
-- `cargo test --locked -p persephone-media-worker` checks the worker package; it does not by itself test a broker launch under containment.
-- `python tools/dev.py rust` builds the workspace and runs the broker's real-worker integration tests on Windows.
+- `cargo test --locked -p persephone-media-worker` checks the worker package and runs `tests/containment_probe.rs` on Linux and macOS. It does not by itself test a broker launch under containment.
+- `python tools/dev.py rust` builds the workspace and runs the broker's real-worker integration tests on Windows, Linux and macOS.
 - Keep the separate `python tools/dev.py sandbox` platform probe result distinct from worker integration results. Do not turn a failed containment gate into a pass.
