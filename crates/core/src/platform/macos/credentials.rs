@@ -13,7 +13,8 @@
 
 use super::main_loop::main_thread;
 use crate::credentials::{
-    CredentialSource, Credentials, PromptError, SecretPrompt, checked_secret, from_wide,
+    CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, MAX_USERNAME_CHARS,
+    PromptError, SecretPrompt, checked_secret, from_wide,
 };
 use crate::prompt_text::{self, SecretText};
 use objc2::{
@@ -33,8 +34,15 @@ pub const FIRST_BUTTON: isize = 1000;
 /// `NSAlertSecondButtonReturn`.
 pub const SECOND_BUTTON: isize = 1001;
 /// Longest field text read at all, in UTF-16 units; longer text is refused
-/// before it is copied. Each shared limit is at most a quarter of this.
+/// before it is copied.
 pub const MAX_FIELD_UNITS: usize = 4096;
+// A character is at most two UTF-16 units, so every text within a shared
+// limit fits the read.
+const _: () = assert!(
+    MAX_FIELD_UNITS >= 2 * MAX_PASSWORD_CHARS
+        && MAX_FIELD_UNITS >= 2 * MAX_RECOVERY_KEY_CHARS
+        && MAX_FIELD_UNITS >= 2 * MAX_USERNAME_CHARS
+);
 /// The recovery key window's way to copy the key.
 pub const COPY_HINT: &str = "Select the key and press Command+C to copy it.";
 /// Width of the fields under the message, in points.
@@ -354,9 +362,7 @@ pub fn ask_to_retry() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credentials::{
-        MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, MAX_USERNAME_CHARS, NewPassphrase,
-    };
+    use crate::credentials::NewPassphrase;
 
     fn answer(response: isize, fields: &[&str]) -> Answer {
         Answer {
@@ -477,7 +483,6 @@ mod tests {
     /// exactly, and text over the read limit is refused before any copy.
     #[test]
     fn given_field_text_then_it_is_read_within_the_limit() {
-        assert!(MAX_FIELD_UNITS >= 2 * MAX_PASSWORD_CHARS);
         let read = units(&NSString::from_str("pä😀")).unwrap();
         assert_eq!(read.as_slice(), "pä😀".encode_utf16().collect::<Vec<_>>());
         assert!(units(&NSString::from_str("")).unwrap().is_empty());
