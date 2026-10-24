@@ -1,13 +1,20 @@
-//! Persephone media worker (ADR-0003).
+//! Persephone media worker (ADR-0003, ADR-0009).
 //!
-//! One process decodes one image. Before reading any input the worker checks
-//! that it is running with the containment its broker is required to apply;
-//! if any check fails it reports which, reads nothing, and exits. It then reads
-//! one encoded-image frame from stdin, decodes it in the WebAssembly sandbox,
-//! and writes exactly one frame to stdout: RGBA pixels, or a failure message.
+//! One process runs one operation on one image. Before reading any input the
+//! worker checks that it is running with the containment its broker is
+//! required to apply; if any check fails it reports which, reads nothing, and
+//! exits. It then reads one request from stdin: a control frame that names the
+//! operation ([`WorkerOperation`]), then one encoded-image frame. It runs the
+//! operation in the WebAssembly sandbox and writes its reply to stdout:
+//!
+//! * decode: one RGBA pixel frame followed by one [`PixelInfo`] control frame
+//!   with the EXIF orientation;
+//! * strip: one encoded-image frame with the stripped file;
+//! * on failure, instead: one failure control frame.
 
 use persephone_media_protocol::{
-    FrameHeader, FrameKind, ResourceBudgets, WorkerFailure, read_frame, write_frame,
+    FrameHeader, FrameKind, PixelInfo, ResourceBudgets, WorkerFailure, WorkerOperation, read_frame,
+    write_frame,
 };
 use persephone_media_sandbox::{Limits, Sandbox, SandboxError};
 use std::{io, process::ExitCode};
@@ -17,7 +24,7 @@ mod containment;
 /// The decoder guest, fixed at build time by build.rs.
 static GUEST: &[u8] = include_bytes!(env!("PERSEPHONE_MEDIA_GUEST_PATH"));
 
-const EXIT_DECODED: u8 = 0;
+const EXIT_DONE: u8 = 0;
 const EXIT_FAILURE_REPORTED: u8 = 1;
 const EXIT_UNREPORTABLE: u8 = 2;
 const EXIT_CONTAINMENT: u8 = 3;
@@ -27,33 +34,72 @@ fn main() -> ExitCode {
     if missing != 0 {
         return report(WorkerFailure::ContainmentCheck(missing), EXIT_CONTAINMENT);
     }
-    match decode_request() {
-        Ok(()) => ExitCode::from(EXIT_DECODED),
+    match handle_request() {
+        Ok(()) => ExitCode::from(EXIT_DONE),
         Err(failure) => report(failure, EXIT_FAILURE_REPORTED),
     }
 }
 
-fn decode_request() -> Result<(), WorkerFailure> {
-    // Budgets bound the request body before it is allocated.
+fn handle_request() -> Result<(), WorkerFailure> {
+    // Budgets bound each request body before it is allocated.
     let budgets = ResourceBudgets::default();
-    let request =
-        read_frame(&mut io::stdin().lock(), &budgets).map_err(|_| WorkerFailure::BadRequest)?;
+    let mut stdin = io::stdin().lock();
+    let operation = read_frame(&mut stdin, &budgets).map_err(|_| WorkerFailure::BadRequest)?;
+    if operation.header().kind != FrameKind::Control {
+        return Err(WorkerFailure::BadRequest);
+    }
+    let operation = WorkerOperation::decode(operation.body()).ok_or(WorkerFailure::BadRequest)?;
+    let request = read_frame(&mut stdin, &budgets).map_err(|_| WorkerFailure::BadRequest)?;
     if request.header().kind != FrameKind::EncodedImage {
         return Err(WorkerFailure::BadRequest);
     }
+    drop(stdin);
     let sandbox = Sandbox::new(GUEST).map_err(|_| WorkerFailure::ModuleRejected)?;
+    match operation {
+        WorkerOperation::Decode => decode(&sandbox, request.body()),
+        WorkerOperation::Strip => strip(&sandbox, request.body()),
+    }
+}
+
+fn decode(sandbox: &Sandbox, encoded: &[u8]) -> Result<(), WorkerFailure> {
     // Pixels go to stdout straight from guest memory; the worker never holds a
     // second copy of the output.
     let (written, _) = sandbox
-        .decode_with(request.body(), &Limits::default(), |width, height, rgba| {
+        .decode_with(
+            encoded,
+            &Limits::default(),
+            |width, height, orientation, rgba| {
+                let header = FrameHeader {
+                    kind: FrameKind::RgbaPixels,
+                    length: rgba.len() as u64,
+                    width,
+                    height,
+                };
+                let info = PixelInfo::new(orientation).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "orientation out of range")
+                })?;
+                let mut stdout = io::stdout().lock();
+                // write_frame applies the receiver's validation before sending.
+                write_frame(&mut stdout, header, rgba)?;
+                write_frame(&mut stdout, PixelInfo::header(), &info.encode())
+            },
+        )
+        .map_err(failure_for)?;
+    written.map_err(|_| WorkerFailure::InvalidOutput)
+}
+
+fn strip(sandbox: &Sandbox, encoded: &[u8]) -> Result<(), WorkerFailure> {
+    // The sandbox has checked that the stripped file is not longer than the
+    // input, so it fits one encoded-image frame.
+    let (written, _) = sandbox
+        .strip_with(encoded, &Limits::for_strip(), |stripped| {
             let header = FrameHeader {
-                kind: FrameKind::RgbaPixels,
-                length: rgba.len() as u64,
-                width,
-                height,
+                kind: FrameKind::EncodedImage,
+                length: stripped.len() as u64,
+                width: 0,
+                height: 0,
             };
-            // write_frame applies the receiver's validation before sending.
-            write_frame(&mut io::stdout().lock(), header, rgba)
+            write_frame(&mut io::stdout().lock(), header, stripped)
         })
         .map_err(failure_for)?;
     written.map_err(|_| WorkerFailure::InvalidOutput)

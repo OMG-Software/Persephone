@@ -35,6 +35,47 @@ fn png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A little-endian EXIF APP1 segment whose IFD0 holds Orientation.
+fn exif_segment(orientation: u16) -> Vec<u8> {
+    let mut payload = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    payload.extend_from_slice(&orientation.to_le_bytes());
+    payload.extend_from_slice(&[0; 6]);
+    let mut segment = vec![0xff, 0xe1];
+    segment.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+    segment.extend_from_slice(&payload);
+    segment
+}
+
+/// The baseline fixture with `segments` inserted after SOI.
+fn solid_jpeg_with(segments: &[Vec<u8>]) -> Vec<u8> {
+    let fixture = include_bytes!("fixtures/solid-16x8-baseline.jpg");
+    let mut out = fixture[..2].to_vec();
+    for segment in segments {
+        out.extend_from_slice(segment);
+    }
+    out.extend_from_slice(&fixture[2..]);
+    out
+}
+
+/// `png` with one extra chunk after IHDR.
+fn png_with_chunk(png: &[u8], kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut chunk = (data.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
+    let crc = crc32(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = png[..33].to_vec();
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[33..]);
+    out
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 fn small_limits() -> Limits {
     Limits {
         fuel: 1_000_000,
@@ -57,8 +98,81 @@ fn given_png_when_decoded_in_sandbox_then_rgba_matches_source() {
         .unwrap()
         .decode(&png(3, 2, &source), &Limits::default())
         .unwrap();
-    assert_eq!((image.width, image.height), (3, 2));
+    assert_eq!((image.width, image.height, image.orientation), (3, 2, 1));
     assert_eq!(image.rgba, source);
+}
+
+#[test]
+fn given_jpeg_with_exif_orientation_when_decoded_in_sandbox_then_orientation_is_reported() {
+    let sandbox = Sandbox::new(&guest_wasm()).unwrap();
+    for orientation in [1, 6, 8] {
+        let image = sandbox
+            .decode(
+                &solid_jpeg_with(&[exif_segment(orientation)]),
+                &Limits::default(),
+            )
+            .unwrap();
+        assert_eq!(image.orientation, orientation as u8);
+    }
+    let invalid = sandbox
+        .decode(&solid_jpeg_with(&[exif_segment(9)]), &Limits::default())
+        .unwrap();
+    assert_eq!(invalid.orientation, 1);
+}
+
+#[test]
+fn given_jpeg_with_metadata_when_stripped_in_sandbox_then_metadata_is_gone_and_pixels_hold() {
+    let sandbox = Sandbox::new(&guest_wasm()).unwrap();
+    let comment = vec![0xff, 0xfe, 0, 8, b's', b'e', b'c', b'r', b'e', b't'];
+    let input = solid_jpeg_with(&[exif_segment(6), comment]);
+    let stripped = sandbox.strip(&input, &Limits::for_strip()).unwrap();
+    assert!(stripped.len() < input.len());
+    assert!(!contains(&stripped, b"secret"));
+    assert!(!contains(&stripped, b"JFIF"));
+    let original = sandbox.decode(&input, &Limits::default()).unwrap();
+    let copy = sandbox.decode(&stripped, &Limits::default()).unwrap();
+    assert_eq!(copy, original);
+    assert_eq!(copy.orientation, 6);
+}
+
+#[test]
+fn given_png_with_text_chunk_when_stripped_in_sandbox_then_only_image_chunks_remain() {
+    let clean = png(2, 2, &[3; 16]);
+    let input = png_with_chunk(&clean, b"tEXt", b"Comment\0secret");
+    let stripped = Sandbox::new(&guest_wasm())
+        .unwrap()
+        .strip(&input, &Limits::for_strip())
+        .unwrap();
+    assert_eq!(stripped, clean);
+}
+
+#[test]
+fn given_unsupported_or_malformed_input_when_stripped_in_sandbox_then_guest_refuses() {
+    let sandbox = Sandbox::new(&guest_wasm()).unwrap();
+    assert_eq!(
+        sandbox.strip(b"GIF89a....", &Limits::for_strip()),
+        Err(SandboxError::GuestRejected(1))
+    );
+    let input = solid_jpeg_with(&[exif_segment(6)]);
+    assert_eq!(
+        sandbox.strip(&input[..input.len() - 2], &Limits::for_strip()),
+        Err(SandboxError::GuestRejected(2))
+    );
+    // An unknown critical chunk: the PNG decoder or the strip refuses it.
+    let critical = png_with_chunk(&png(1, 1, &[0; 4]), b"ABCD", b"x");
+    let result = sandbox.strip(&critical, &Limits::for_strip());
+    assert!(
+        matches!(result, Err(SandboxError::GuestRejected(2 | 7))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn given_strip_limits_then_only_fuel_differs_from_decode_limits() {
+    let (decode, strip) = (Limits::default(), Limits::for_strip());
+    assert_eq!(strip.fuel, decode.fuel * 2);
+    assert_eq!(strip.max_memory_bytes, decode.max_memory_bytes);
+    assert_eq!(strip.max_input_bytes, decode.max_input_bytes);
 }
 
 #[test]
@@ -158,8 +272,9 @@ fn given_built_guest_then_its_linear_memory_is_fixed_at_the_sandbox_cap() {
 
 // --- Import allowlist -------------------------------------------------------
 
-const VALID_EXPORTS: &str =
-    r#"(memory (export "memory") 1) (func (export "decode") (result i32) i32.const 0)"#;
+const VALID_EXPORTS: &str = r#"(memory (export "memory") 1)
+    (func (export "decode") (result i32) i32.const 0)
+    (func (export "strip") (result i32) i32.const 0)"#;
 
 #[test]
 fn given_wasi_or_unknown_imports_then_module_is_refused_before_instantiation() {
@@ -182,6 +297,10 @@ fn given_allowed_name_with_wrong_signature_or_kind_then_module_is_refused() {
     for import in [
         r#"(import "persephone" "input_len" (func (result i64)))"#,
         r#"(import "persephone" "read_input" (func (param i32) (result i32)))"#,
+        // The decode-only signature from before orientation was reported.
+        r#"(import "persephone" "write_output" (func (param i32 i32 i32 i32) (result i32)))"#,
+        r#"(import "persephone" "write_stripped" (func (param i32 i32 i32) (result i32)))"#,
+        r#"(import "persephone" "write_stripped" (func (param i32 i32)))"#,
         r#"(import "persephone" "input_len" (memory 1))"#,
         r#"(import "persephone" "input_len" (global i32))"#,
         r#"(import "persephone" "input_len" (table 1 funcref))"#,
@@ -212,9 +331,17 @@ fn given_every_allowed_import_then_module_is_accepted() {
 #[test]
 fn given_missing_or_mistyped_exports_then_module_is_refused() {
     for module in [
-        r#"(module (func (export "decode") (result i32) i32.const 0))"#,
+        r#"(module (func (export "decode") (result i32) i32.const 0)
+                   (func (export "strip") (result i32) i32.const 0))"#,
         r#"(module (memory (export "memory") 1))"#,
-        r#"(module (memory (export "memory") 1) (func (export "decode") (param i32) (result i32) i32.const 0))"#,
+        r#"(module (memory (export "memory") 1) (func (export "decode") (result i32) i32.const 0))"#,
+        r#"(module (memory (export "memory") 1) (func (export "strip") (result i32) i32.const 0))"#,
+        r#"(module (memory (export "memory") 1)
+                   (func (export "decode") (param i32) (result i32) i32.const 0)
+                   (func (export "strip") (result i32) i32.const 0))"#,
+        r#"(module (memory (export "memory") 1)
+                   (func (export "decode") (result i32) i32.const 0)
+                   (func (export "strip") (result i64) i64.const 0))"#,
     ] {
         let result = sandbox(module);
         assert!(
@@ -229,7 +356,8 @@ fn given_invalid_wasm_then_module_is_refused_by_validation() {
     // Type error: returns i64 from an i32 function. Rejected only if wasmi's
     // `validate` feature is enabled.
     let result = sandbox(
-        r#"(module (memory (export "memory") 1) (func (export "decode") (result i32) i64.const 0))"#,
+        r#"(module (memory (export "memory") 1) (func (export "decode") (result i32) i64.const 0)
+                   (func (export "strip") (result i32) i32.const 0))"#,
     );
     assert!(
         matches!(result, Err(SandboxError::InvalidModule(_))),
@@ -247,7 +375,8 @@ fn given_invalid_wasm_then_module_is_refused_by_validation() {
 fn given_infinite_loop_then_fuel_stops_it() {
     let sandbox = sandbox(
         r#"(module (memory (export "memory") 1)
-             (func (export "decode") (result i32) (loop $forever (br $forever)) i32.const 0))"#,
+             (func (export "decode") (result i32) (loop $forever (br $forever)) i32.const 0)
+             (func (export "strip") (result i32) i32.const 0))"#,
     )
     .unwrap();
     assert_eq!(
@@ -263,7 +392,8 @@ fn given_memory_growth_past_cap_then_growth_fails_inside_the_guest() {
         r#"(module (memory (export "memory") 1)
              (func (export "decode") (result i32)
                (if (result i32) (i32.eq (memory.grow (i32.const 4096)) (i32.const -1))
-                 (then i32.const 77) (else i32.const 0))))"#,
+                 (then i32.const 77) (else i32.const 0)))
+             (func (export "strip") (result i32) i32.const 0))"#,
     )
     .unwrap();
     let limits = Limits {
@@ -278,9 +408,11 @@ fn given_memory_growth_past_cap_then_growth_fails_inside_the_guest() {
 
 #[test]
 fn given_initial_memory_over_cap_then_instantiation_fails() {
-    let sandbox =
-        sandbox(r#"(module (memory (export "memory") 64) (func (export "decode") (result i32) i32.const 0))"#)
-            .unwrap();
+    let sandbox = sandbox(
+        r#"(module (memory (export "memory") 64) (func (export "decode") (result i32) i32.const 0)
+                     (func (export "strip") (result i32) i32.const 0))"#,
+    )
+    .unwrap();
     let limits = Limits {
         max_memory_bytes: 16 * 65536,
         ..small_limits()
@@ -297,7 +429,8 @@ fn given_trap_or_unbounded_recursion_then_host_reports_a_trap() {
         let sandbox = sandbox(&format!(
             r#"(module (memory (export "memory") 1)
                  (func $recurse (result i32) call $recurse)
-                 (func (export "decode") (result i32) {body}))"#
+                 (func (export "decode") (result i32) {body})
+                 (func (export "strip") (result i32) i32.const 0))"#
         ))
         .unwrap();
         let result = sandbox.decode(&[], &Limits::default());
@@ -310,42 +443,98 @@ fn given_trap_or_unbounded_recursion_then_host_reports_a_trap() {
 
 // --- Output validation --------------------------------------------------------
 
-fn output_module(body: &str) -> Sandbox {
+/// A module whose `decode` and `strip` exports run the given bodies; both
+/// output imports are declared.
+fn output_module(decode: &str, strip: &str) -> Sandbox {
     sandbox(&format!(
         r#"(module
-             (import "persephone" "write_output" (func $out (param i32 i32 i32 i32) (result i32)))
+             (import "persephone" "write_output" (func $out (param i32 i32 i32 i32 i32) (result i32)))
+             (import "persephone" "write_stripped" (func $stripped (param i32 i32) (result i32)))
              (memory (export "memory") 1)
-             (func (export "decode") (result i32) {body} drop i32.const 0))"#
+             (func (export "decode") (result i32) {decode} drop i32.const 0)
+             (func (export "strip") (result i32) {strip} drop i32.const 0))"#
     ))
     .unwrap()
 }
+
+const NOTHING: &str = "(i32.const 0)";
 
 #[test]
 fn given_guest_output_breaking_host_rules_then_decode_fails_even_if_guest_reports_success() {
     for (body, why) in [
         (
-            "(call $out (i32.const 2) (i32.const 2) (i32.const 0) (i32.const 15))",
+            "(call $out (i32.const 2) (i32.const 2) (i32.const 0) (i32.const 15) (i32.const 1))",
             "length mismatch",
         ),
         (
-            "(call $out (i32.const 9000) (i32.const 1) (i32.const 0) (i32.const 36000))",
+            "(call $out (i32.const 9000) (i32.const 1) (i32.const 0) (i32.const 36000) (i32.const 1))",
             "dimension",
         ),
         (
-            "(call $out (i32.const 0) (i32.const 1) (i32.const 0) (i32.const 0))",
+            "(call $out (i32.const 0) (i32.const 1) (i32.const 0) (i32.const 0) (i32.const 1))",
             "zero",
         ),
         (
-            "(call $out (i32.const 2) (i32.const 2) (i32.const 65530) (i32.const 16))",
+            "(call $out (i32.const 2) (i32.const 2) (i32.const 65530) (i32.const 16) (i32.const 1))",
             "out of bounds",
         ),
         (
-            "(drop (call $out (i32.const 1) (i32.const 1) (i32.const 0) (i32.const 4))) \
-             (call $out (i32.const 1) (i32.const 1) (i32.const 0) (i32.const 4))",
+            "(drop (call $out (i32.const 1) (i32.const 1) (i32.const 0) (i32.const 4) (i32.const 1))) \
+             (call $out (i32.const 1) (i32.const 1) (i32.const 0) (i32.const 4) (i32.const 1))",
             "written twice",
         ),
+        (
+            "(call $out (i32.const 1) (i32.const 1) (i32.const 0) (i32.const 4) (i32.const 0))",
+            "orientation zero",
+        ),
+        (
+            "(call $out (i32.const 1) (i32.const 1) (i32.const 0) (i32.const 4) (i32.const 9))",
+            "orientation nine",
+        ),
+        (
+            "(call $out (i32.const 1) (i32.const 1) (i32.const 0) (i32.const 4) (i32.const 0x106))",
+            "orientation past u8",
+        ),
+        (
+            "(call $stripped (i32.const 0) (i32.const 1))",
+            "strip output during decode",
+        ),
     ] {
-        let result = output_module(body).decode(&[], &small_limits());
+        let result = output_module(body, NOTHING).decode(&[7; 8], &small_limits());
+        assert!(
+            matches!(result, Err(SandboxError::InvalidOutput(_))),
+            "{why}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn given_guest_strip_output_breaking_host_rules_then_strip_fails_even_if_guest_reports_success() {
+    for (body, why) in [
+        (
+            "(call $stripped (i32.const 0) (i32.const 9))",
+            "longer than input",
+        ),
+        ("(call $stripped (i32.const 0) (i32.const 0))", "empty"),
+        (
+            "(call $stripped (i32.const 65530) (i32.const 8))",
+            "out of bounds",
+        ),
+        (
+            "(call $stripped (i32.const -1) (i32.const 8))",
+            "pointer wraps",
+        ),
+        (
+            "(drop (call $stripped (i32.const 0) (i32.const 4))) \
+             (call $stripped (i32.const 0) (i32.const 4))",
+            "written twice",
+        ),
+        (
+            "(call $out (i32.const 1) (i32.const 1) (i32.const 0) (i32.const 4) (i32.const 1))",
+            "pixel output during strip",
+        ),
+    ] {
+        let result = output_module(NOTHING, body).strip(&[7; 8], &small_limits());
         assert!(
             matches!(result, Err(SandboxError::InvalidOutput(_))),
             "{why}: {result:?}"
@@ -355,14 +544,29 @@ fn given_guest_output_breaking_host_rules_then_decode_fails_even_if_guest_report
 
 #[test]
 fn given_valid_output_then_it_is_returned_and_success_without_output_is_refused() {
-    let image =
-        output_module("(call $out (i32.const 1) (i32.const 2) (i32.const 0) (i32.const 8))")
-            .decode(&[], &small_limits())
-            .unwrap();
-    assert_eq!((image.width, image.height, image.rgba.len()), (1, 2, 8));
+    let module = output_module(
+        "(call $out (i32.const 1) (i32.const 2) (i32.const 0) (i32.const 8) (i32.const 7))",
+        "(call $stripped (i32.const 0) (i32.const 8))",
+    );
+    let image = module.decode(&[], &small_limits()).unwrap();
+    assert_eq!(
+        (
+            image.width,
+            image.height,
+            image.orientation,
+            image.rgba.len()
+        ),
+        (1, 2, 7, 8)
+    );
+    // Guest memory starts zeroed; the module does not copy its input there.
+    assert_eq!(module.strip(&[5; 8], &small_limits()).unwrap(), [0; 8]);
     let silent = sandbox(&format!("(module {VALID_EXPORTS})")).unwrap();
     assert_eq!(
         silent.decode(&[], &small_limits()),
+        Err(SandboxError::NoOutput)
+    );
+    assert_eq!(
+        silent.strip(&[1], &small_limits()),
         Err(SandboxError::NoOutput)
     );
 }
@@ -373,12 +577,17 @@ fn given_read_input_with_bad_range_then_host_refuses_the_copy() {
         r#"(module
              (import "persephone" "read_input" (func $read (param i32 i32) (result i32)))
              (memory (export "memory") 1)
-             (func (export "decode") (result i32) (call $read (i32.const 65535) (i32.const 4))))"#,
+             (func (export "decode") (result i32) (call $read (i32.const 65535) (i32.const 4)))
+             (func (export "strip") (result i32) (call $read (i32.const 65535) (i32.const 4))))"#,
     )
     .unwrap();
     // Out-of-bounds destination: the host returns 3 and copies nothing.
     assert_eq!(
         sandbox.decode(&[1, 2, 3, 4], &small_limits()),
+        Err(SandboxError::GuestRejected(3))
+    );
+    assert_eq!(
+        sandbox.strip(&[1, 2, 3, 4], &small_limits()),
         Err(SandboxError::GuestRejected(3))
     );
 }

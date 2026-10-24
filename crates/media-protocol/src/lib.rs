@@ -456,6 +456,96 @@ impl WorkerFailure {
     }
 }
 
+/// Version byte of the worker request message.
+pub const WORKER_REQUEST_VERSION: u8 = 1;
+/// Version byte of the pixel information message.
+pub const PIXEL_INFO_VERSION: u8 = 1;
+const WORKER_REQUEST_LEN: usize = 2;
+const PIXEL_INFO_LEN: usize = 2;
+
+/// The operation a media worker runs on the encoded image that follows.
+///
+/// A request is two frames: a control frame with this 2-byte body (version,
+/// operation), then one `EncodedImage` frame. A decode replies with an
+/// `RgbaPixels` frame followed by a [`PixelInfo`] control frame; a strip
+/// replies with one `EncodedImage` frame. Either may instead reply with one
+/// [`WorkerFailure`] control frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum WorkerOperation {
+    /// Decode to RGBA pixels and report the EXIF orientation.
+    Decode = 1,
+    /// Remove metadata and return the stripped encoded file.
+    Strip = 2,
+}
+
+impl WorkerOperation {
+    pub fn encode(self) -> [u8; WORKER_REQUEST_LEN] {
+        [WORKER_REQUEST_VERSION, self as u8]
+    }
+
+    pub fn decode(body: &[u8]) -> Option<Self> {
+        match body {
+            [WORKER_REQUEST_VERSION, 1] => Some(Self::Decode),
+            [WORKER_REQUEST_VERSION, 2] => Some(Self::Strip),
+            _ => None,
+        }
+    }
+
+    /// The control frame header for this message.
+    pub fn header() -> FrameHeader {
+        FrameHeader {
+            kind: FrameKind::Control,
+            length: WORKER_REQUEST_LEN as u64,
+            width: 0,
+            height: 0,
+        }
+    }
+}
+
+/// Facts about decoded pixels that the 17-byte `RgbaPixels` header cannot
+/// carry. The worker sends it as a control frame directly after the pixel
+/// frame, so the pixel header keeps its meaning for every other user. Body:
+/// version and the EXIF orientation (1 to 8). The pixels are not rotated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PixelInfo {
+    orientation: u8,
+}
+
+impl PixelInfo {
+    /// Returns `None` for an orientation outside 1 to 8.
+    pub fn new(orientation: u8) -> Option<Self> {
+        (1..=8)
+            .contains(&orientation)
+            .then_some(Self { orientation })
+    }
+
+    pub fn orientation(self) -> u8 {
+        self.orientation
+    }
+
+    pub fn encode(self) -> [u8; PIXEL_INFO_LEN] {
+        [PIXEL_INFO_VERSION, self.orientation]
+    }
+
+    pub fn decode(body: &[u8]) -> Option<Self> {
+        match body {
+            [PIXEL_INFO_VERSION, orientation] => Self::new(*orientation),
+            _ => None,
+        }
+    }
+
+    /// The control frame header for this message.
+    pub fn header() -> FrameHeader {
+        FrameHeader {
+            kind: FrameKind::Control,
+            length: PIXEL_INFO_LEN as u64,
+            width: 0,
+            height: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +803,35 @@ mod tests {
         ] {
             assert_eq!(WorkerFailure::decode(body), None);
         }
+    }
+
+    #[test]
+    fn given_worker_requests_when_encoded_then_decode_round_trips_strictly() {
+        for operation in [WorkerOperation::Decode, WorkerOperation::Strip] {
+            assert_eq!(
+                WorkerOperation::decode(&operation.encode()),
+                Some(operation)
+            );
+        }
+        assert_eq!(WorkerOperation::header().length, 2);
+        for body in [&[1u8, 0][..], &[1, 3], &[2, 1], &[1], &[1, 1, 0], &[]] {
+            assert_eq!(WorkerOperation::decode(body), None, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn given_pixel_info_then_only_versioned_orientations_one_to_eight_are_accepted() {
+        for orientation in 1..=8 {
+            let info = PixelInfo::new(orientation).unwrap();
+            assert_eq!(PixelInfo::decode(&info.encode()), Some(info));
+            assert_eq!(info.orientation(), orientation);
+        }
+        assert_eq!(PixelInfo::new(0), None);
+        assert_eq!(PixelInfo::new(9), None);
+        for body in [&[1u8, 0][..], &[1, 9], &[2, 1], &[1], &[1, 1, 0], &[]] {
+            assert_eq!(PixelInfo::decode(body), None, "{body:?}");
+        }
+        assert!(FrameHeader::decode(PixelInfo::header().encode()).is_ok());
     }
 
     #[test]

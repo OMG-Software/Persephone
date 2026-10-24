@@ -1,13 +1,19 @@
 //! Untrusted image decoder, built as a `wasm32-unknown-unknown` guest for the
 //! `persephone-media-sandbox` host (ADR-0003).
 //!
-//! The guest's only capabilities are three host imports in the `persephone`
-//! module: `input_len`, `read_input` and `write_output`. It has no WASI, so it
-//! cannot open sockets or files, read clocks or the environment, or start
-//! processes. The decoding logic below is ordinary Rust, so host tests can also
-//! exercise it natively.
+//! The guest exports two operations, `decode` and `strip` (ADR-0009). Its only
+//! capabilities are four host imports in the `persephone` module: `input_len`,
+//! `read_input`, `write_output` (decoded pixels) and `write_stripped` (the
+//! stripped file). It has no WASI, so it cannot open sockets or files, read
+//! clocks or the environment, or start processes. The logic below is ordinary
+//! Rust, so host tests can also exercise it natively.
 
 use std::io::Cursor;
+
+mod exif;
+mod strip;
+
+pub use strip::{strip, strip_in_place};
 
 /// Largest encoded input the guest accepts (ADR-0003 starting budget).
 pub const MAX_INPUT_BYTES: usize = 20 * 1024 * 1024;
@@ -19,7 +25,8 @@ pub use persephone_media_protocol::MAX_PIXELS;
 /// Allocation ceiling handed to the PNG decoder for its internal buffers.
 const PNG_INTERNAL_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
-/// Status codes returned by the exported `decode` function. Zero is success.
+/// Status codes returned by the exported `decode` and `strip` functions. Zero
+/// is success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Status {
@@ -30,12 +37,20 @@ pub enum Status {
     InputTooLarge = 4,
     HostRejectedInput = 5,
     HostRejectedOutput = 6,
+    /// Strip found valid but unsupported structure, such as an unknown
+    /// critical PNG chunk or a JPEG marker outside the kept set.
+    UnsupportedStructure = 7,
+    /// The stripped copy did not decode to the same pixels, dimensions and
+    /// orientation as the original.
+    StripMismatch = 8,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Rgba {
     pub width: u32,
     pub height: u32,
+    /// EXIF orientation, 1 to 8. The pixels are not rotated. Always 1 for PNG.
+    pub orientation: u8,
     pub pixels: Vec<u8>,
 }
 
@@ -106,7 +121,7 @@ fn decode_png(input: &[u8]) -> Result<Rgba, Status> {
     };
     frame.truncate(output.line_size * height as usize);
     let pixels = widen_to_rgba(frame, channels, rgba_len)?;
-    finish(width, height, pixels, rgba_len)
+    finish(width, height, 1, pixels, rgba_len)
 }
 
 /// Expands 8-bit samples with `channels` per pixel to RGBA in place. Pixels
@@ -171,38 +186,66 @@ fn decode_jpeg(input: &[u8]) -> Result<Rgba, Status> {
     let height = u32::try_from(height).map_err(|_| Status::TooLarge)?;
     let rgba_len = check_dimensions(width, height)?;
     let pixels = decoder.decode().map_err(|_| Status::Malformed)?;
-    finish(width, height, pixels, rgba_len)
+    finish(
+        width,
+        height,
+        strip::jpeg_orientation(input),
+        pixels,
+        rgba_len,
+    )
 }
 
-fn finish(width: u32, height: u32, pixels: Vec<u8>, rgba_len: usize) -> Result<Rgba, Status> {
+fn finish(
+    width: u32,
+    height: u32,
+    orientation: u8,
+    pixels: Vec<u8>,
+    rgba_len: usize,
+) -> Result<Rgba, Status> {
     if pixels.len() != rgba_len {
         return Err(Status::Malformed);
     }
     Ok(Rgba {
         width,
         height,
+        orientation,
         pixels,
     })
 }
 
 #[cfg(target_arch = "wasm32")]
 mod guest {
-    use super::{MAX_INPUT_BYTES, Status, decode as decode_image};
+    use super::{MAX_INPUT_BYTES, Status, decode as decode_image, strip_in_place};
 
     #[link(wasm_import_module = "persephone")]
     unsafe extern "C" {
         fn input_len() -> u32;
         fn read_input(destination: *mut u8, length: u32) -> i32;
-        fn write_output(width: u32, height: u32, source: *const u8, length: u32) -> i32;
+        fn write_output(
+            width: u32,
+            height: u32,
+            source: *const u8,
+            length: u32,
+            orientation: u32,
+        ) -> i32;
+        fn write_stripped(source: *const u8, length: u32) -> i32;
     }
 
-    /// Reads the input from the host, decodes it and hands RGBA pixels back.
+    /// Reads the input from the host, decodes it and hands RGBA pixels and
+    /// the EXIF orientation back.
     #[unsafe(no_mangle)]
     pub extern "C" fn decode() -> i32 {
-        run().unwrap_or_else(|status| status) as i32
+        run_decode().unwrap_or_else(|status| status) as i32
     }
 
-    fn run() -> Result<Status, Status> {
+    /// Reads the input from the host, strips its metadata in place, checks
+    /// that the pixels are unchanged and hands the stripped file back.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn strip() -> i32 {
+        run_strip().unwrap_or_else(|status| status) as i32
+    }
+
+    fn read_all() -> Result<Vec<u8>, Status> {
         // SAFETY: the host import takes no arguments.
         let length = unsafe { input_len() } as usize;
         if length > MAX_INPUT_BYTES {
@@ -213,6 +256,11 @@ mod guest {
         if unsafe { read_input(input.as_mut_ptr(), length as u32) } != 0 {
             return Err(Status::HostRejectedInput);
         }
+        Ok(input)
+    }
+
+    fn run_decode() -> Result<Status, Status> {
+        let input = read_all()?;
         let image = decode_image(&input)?;
         drop(input);
         // SAFETY: `pixels` is a readable buffer of exactly the given length.
@@ -222,6 +270,7 @@ mod guest {
                 image.height,
                 image.pixels.as_ptr(),
                 image.pixels.len() as u32,
+                u32::from(image.orientation),
             )
         };
         if written != 0 {
@@ -230,7 +279,20 @@ mod guest {
         // The host reads these pixels from guest memory after `decode`
         // returns. Freeing them would let the allocator write its bookkeeping
         // into the region first, so the buffer is deliberately leaked; each
-        // instance performs one decode and is then discarded.
+        // instance performs one operation and is then discarded.
+        std::mem::forget(image);
+        Ok(Status::Ok)
+    }
+
+    fn run_strip() -> Result<Status, Status> {
+        let mut image = read_all()?;
+        strip_in_place(&mut image)?;
+        // SAFETY: `image` is a readable buffer of exactly the given length.
+        let written = unsafe { write_stripped(image.as_ptr(), image.len() as u32) };
+        if written != 0 {
+            return Err(Status::HostRejectedOutput);
+        }
+        // Leaked for the same reason as the decoded pixels above.
         std::mem::forget(image);
         Ok(Status::Ok)
     }
@@ -261,6 +323,7 @@ mod tests {
             Rgba {
                 width: 2,
                 height: 1,
+                orientation: 1,
                 pixels: vec![1, 2, 3, 255, 4, 5, 6, 255]
             }
         );
