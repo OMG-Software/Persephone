@@ -61,7 +61,11 @@ The lock keeps its current steps, then adds a restart:
    unchanged.
 3. When the result would be `restart_required` (all stores closed and a client
    ran), keep the `profile.lock` file handle open. Do not release it with the
-   stores. Today [`Stores::close`](../../crates/core/src/store.rs) releases it.
+   stores. Today [`Stores::close`](../../crates/core/src/store.rs) consumes
+   the `Stores`, and with it the handle. Instead, `Stores::close` returns the
+   handle as a profile-lock value. `Session::lock` gives that value to the
+   core's exit path, which owns it until the process ends. Nothing drops it
+   while the process runs, and nothing can take it again in that process.
 4. Start a successor core process from the same executable. The successor
    gets no keys, tokens or store handles. It waits, for a bounded time, until
    it can take the exclusive `profile.lock`.
@@ -70,9 +74,19 @@ The lock keeps its current steps, then adds a restart:
    old process's last handle closes. The successor uses this release as its
    signal that the old process has stopped.
 6. The successor starts a new UI and opens the profile as at a normal start.
-   After a lock, the profile asks for the passphrase (ADR-0006). After a
-   sign-out, the next start wipes the profile, as the
-   [sign-out flow](../evidence/sign-out.md) already does.
+   The old core passes no outcome to it. Only the durable files in the
+   profile select what happens, as after a crash:
+   * A `signed-out` marker selects the wipe. The
+     [sign-out flow](../evidence/sign-out.md) writes it before it asks the
+     homeserver to revoke the session, and a reset writes it too. The wipe
+     deletes the marker last, so an interrupted wipe repeats. A marker that
+     does not record a confirmed revocation still reports
+     `session_not_revoked`.
+   * No marker and a missing key opens as `key_missing`. This is the case
+     where sign-out deleted the key but could not write the marker. It never
+     opens as a new or signed-in profile.
+   * No marker and a present key selects the lock path: the profile asks for
+     the passphrase (ADR-0006).
 
 Limits:
 
@@ -122,9 +136,10 @@ Limits:
 
 Use real encrypted stores and disposable homeservers. Prove:
 
-* GIVEN a lock after a client ran WHEN the core restarts THEN the successor
-  opens the profile only after the old process exited, and no two cores hold
-  the profile at the same time.
+* GIVEN a lock after a client ran WHEN the stores have closed and the old core
+  is still running THEN another process cannot take `profile.lock`, and it
+  can take it only after the old process exited. No two cores hold the
+  profile at the same time.
 * GIVEN an old core that does not exit WHEN the successor's deadline passes
   THEN the successor reports `profile_in_use` and does not open the stores.
 * GIVEN the core is ended at controlled points (sync response processing,
@@ -134,6 +149,16 @@ Use real encrypted stores and disposable homeservers. Prove:
   message is sent twice, and sync resumes without missing events.
 * GIVEN a sign-out WHEN the core restarts THEN the profile is wiped and a
   fresh signed-out profile opens.
+* GIVEN the core is ended at each step of a sign-out (marker `revoking`
+  written, marker `revoked` or `not-revoked` written, key deleted, stores
+  closed) WHEN it starts again THEN it wipes the profile, and reports
+  `session_not_revoked` unless the marker recorded a confirmed revocation.
+  It never asks for the passphrase or opens the old stores.
+* GIVEN the core is ended during a lock, with no marker and the key present,
+  WHEN it starts again THEN it asks for the passphrase and does not wipe the
+  profile.
+* GIVEN no marker and a missing key WHEN the core starts THEN the profile
+  opens as `key_missing`, not as a new or signed-in profile.
 * GIVEN repeated lock, restart and unlock cycles THEN the identities, keys
   and store isolation stay correct.
 * The UI and worker processes do not hold the profile lock handle.
