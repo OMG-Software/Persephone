@@ -172,7 +172,12 @@ change. Each version shows the date of its last update at the top.
 
 ## Contact
 
-Ask questions about this policy in the repository's
+To report a privacy or security problem privately, use GitHub's
+[private vulnerability reporting](https://github.com/OMG-Software/Persephone/security/advisories/new).
+Only you and the project's maintainers can see the report. You need a GitHub
+account. The [security policy](SECURITY.md) says what to include.
+
+Ask general questions about this policy in the repository's
 [issue tracker](https://github.com/OMG-Software/Persephone/issues). Issues are
 public. Do not put personal data, chat content or security details in an
 issue.
