@@ -14,12 +14,16 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
+  import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
   import { mergeNewest } from './timeline';
   import {
     allowUnencrypted,
     appStatus,
+    discardImage,
     discardMessage,
+    pickImage,
+    sendImage,
     lockSession,
     pendingMessages,
     retryMessage,
@@ -78,9 +82,19 @@
   let pending = $state<PendingMessage[]>([]);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
   // core also refuses until the consent is recorded.
-  let confirmingPlain = $state<{ roomId: string; body: string | null; retryId: number | null } | null>(
-    null
-  );
+  // `image` is true when the question is about sending the attached image.
+  let confirmingPlain = $state<{
+    roomId: string;
+    body: string | null;
+    retryId: number | null;
+    image: boolean;
+  } | null>(null);
+  // A picked image waiting for Send or Cancel. The core holds it under the
+  // preview's handle until it is sent, discarded, or the session locks.
+  let imageDraft = $state<ImageDraft | null>(null);
+  let attaching = $state(false);
+  let sendingImage = $state(false);
+  let imageError = $state<string | null>(null);
   let draftVersion = $state(0);
   // The composer's unsent text, kept here so it outlives the composer.
   let draft = $state('');
@@ -302,6 +316,11 @@
     contactAsked = null;
     identityAsked = null;
     confirmingPlain = null;
+    // The core dropped every image handle with the session.
+    imageDraft = null;
+    attaching = false;
+    sendingImage = false;
+    imageError = null;
     confirmedRooms = new Set();
     selected = null;
     rooms = null;
@@ -569,6 +588,9 @@
 
   async function open(roomId: string) {
     const generation = sessionGeneration;
+    // An attached image belongs to the room it was picked for.
+    if (imageDraft && imageDraft.roomId !== roomId) cancelImage();
+    imageError = null;
     selected = roomId;
     items = [];
     pending = [];
@@ -667,7 +689,7 @@
     const roomId = selected;
     if (!roomId) return false;
     if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(roomId)) {
-      confirmingPlain = { roomId, body, retryId: null };
+      confirmingPlain = { roomId, body, retryId: null, image: false };
       return false;
     }
     return queue(roomId, body, sessionGeneration);
@@ -690,6 +712,71 @@
       draftVersion += 1;
     }
     if (asked.retryId !== null) changeMessage(retryMessage, asked.retryId);
+    if (asked.image && imageDraft?.roomId === asked.roomId) {
+      await queueImage(asked.roomId, imageDraft.preview.handle, generation);
+    }
+  }
+
+  // Opens the core's file dialog. A draft that arrives after the room or the
+  // session changed is dropped at once.
+  async function attachImage() {
+    const roomId = selected;
+    if (!roomId || attaching || imageDraft) return;
+    const generation = sessionGeneration;
+    attaching = true;
+    imageError = null;
+    try {
+      const pick = await pickImage(roomId);
+      if (pick.kind !== 'draft') return;
+      if (current(roomId, generation) && !imageDraft) {
+        imageDraft = { roomId, preview: pick.preview, size: pick.size, mime: pick.mime };
+      } else {
+        discardImage(pick.preview.handle).catch(() => {});
+      }
+    } catch (reason) {
+      if (current(roomId, generation)) imageError = attachErrorText(reason);
+    } finally {
+      if (generation === sessionGeneration) attaching = false;
+    }
+  }
+
+  function cancelImage() {
+    const draft = imageDraft;
+    imageDraft = null;
+    imageError = null;
+    // A lock already dropped it; nothing else needs doing.
+    if (draft) discardImage(draft.preview.handle).catch(() => {});
+  }
+
+  // Sending an image asks for consent in a room that is not encrypted, as
+  // text does; the core also refuses until the consent is recorded.
+  async function sendAttached() {
+    const draft = imageDraft;
+    if (!draft || draft.roomId !== selected || sendingImage) return;
+    if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(draft.roomId)) {
+      confirmingPlain = { roomId: draft.roomId, body: null, retryId: null, image: true };
+      return;
+    }
+    await queueImage(draft.roomId, draft.preview.handle, sessionGeneration);
+  }
+
+  async function queueImage(roomId: string, handle: string, generation: number) {
+    if (sendingImage) return;
+    sendingImage = true;
+    imageError = null;
+    try {
+      await sendImage(roomId, handle);
+      if (!current(roomId, generation)) return;
+      // The core took the draft into its outbox.
+      if (imageDraft?.preview.handle === handle) imageDraft = null;
+      await loadPending(roomId, generation);
+    } catch (reason) {
+      if (!current(roomId, generation)) return;
+      if (String(reason) === 'not_found' && imageDraft?.preview.handle === handle) imageDraft = null;
+      imageError = sendImageErrorText(reason);
+    } finally {
+      if (generation === sessionGeneration) sendingImage = false;
+    }
   }
 
   async function changeMessage(change: (localId: number) => Promise<void>, localId: number) {
@@ -931,6 +1018,7 @@
         {#if selectedRoom}
           <Timeline
             title={selectedRoom.displayName ?? selectedRoom.roomId}
+            roomId={selectedRoom.roomId}
             encryption={selectedRoom.encryption}
             {items}
             hasOlder={nextCursor !== null}
@@ -973,7 +1061,9 @@
               <div class="confirm" role="alertdialog" aria-labelledby="plain-question">
                 <p id="plain-question">
                   This room is not encrypted: the homeserver and anyone with access to it can read
-                  what you send here. Send unencrypted messages in this room?
+                  what you send here. {confirmingPlain.image
+                    ? 'Send unencrypted messages in this room, starting with this image?'
+                    : 'Send unencrypted messages in this room?'}
                 </p>
                 <button type="button" class="danger" onclick={confirmPlain}>Send unencrypted</button>
                 <button type="button" class="secondary" onclick={() => (confirmingPlain = null)}>
@@ -992,7 +1082,14 @@
               onretry={(localId) => changeMessage(retryMessage, localId)}
               ondiscard={(localId) => changeMessage(discardMessage, localId)}
               onallow={(localId) =>
-                (confirmingPlain = { roomId: selectedRoom.roomId, body: null, retryId: localId })}
+                (confirmingPlain = { roomId: selectedRoom.roomId, body: null, retryId: localId, image: false })}
+              {imageDraft}
+              {attaching}
+              {sendingImage}
+              {imageError}
+              onattach={attachImage}
+              onsendimage={sendAttached}
+              oncancelimage={cancelImage}
             />
           {/if}
         {:else}

@@ -13,26 +13,36 @@
 //! (the core drops those subscriptions too) and the page's session channel
 //! gets `"session"`, so the page clears what it shows. When rooms are added or
 //! change, the session channel gets `"rooms"` and the page fetches the list.
+//!
+//! Images (ADR-0009) cross as opaque handles. The page fetches a loaded or
+//! picked image's pixels one band at a time with `image_band`, which answers
+//! with a raw binary IPC response (never JSON numbers or base64): an 8-byte
+//! prefix holding the band's width and then its row count, each a
+//! little-endian `u32`, followed by exactly `width * rows * 4` RGBA bytes.
 
 pub mod core_link;
 
-use core_link::{CoreError, CoreLink};
+use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
-    AccountStatus, AppStatus, ContactStatus, PendingMessage, RoomIdentityChanges, RoomList,
-    SecurityStatus, StoreState, TimelinePage,
+    AccountStatus, AppStatus, ContactStatus, ImagePick, ImageView, PendingMessage,
+    RoomIdentityChanges, RoomList, SecurityStatus, StoreState, TimelinePage,
 };
 use persephone_core_protocol::{
-    Call, ErrorCode, Event, MAX_CURSOR_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
-    MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_USER_ID_BYTES,
+    Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES, MAX_EVENT_ID_BYTES,
+    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES,
+    MAX_USER_ID_BYTES,
 };
 use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use tauri::{
     Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder,
-    ipc::Channel,
+    ipc::{Channel, Response},
     webview::{NewWindowResponse, PageLoadEvent},
 };
 
@@ -48,6 +58,7 @@ const INVALID_ARGUMENT: &str = "invalid_argument";
 const NOT_FOUND: &str = "not_found";
 const LIMIT_EXCEEDED: &str = "limit_exceeded";
 const LOCKED: &str = "locked";
+const REJECTED: &str = "rejected";
 
 fn page_error(error: CoreError) -> String {
     match error {
@@ -55,7 +66,10 @@ fn page_error(error: CoreError) -> String {
         CoreError::Core(ErrorCode::NotFound) => NOT_FOUND,
         CoreError::Core(ErrorCode::LimitExceeded) => LIMIT_EXCEEDED,
         CoreError::Core(ErrorCode::Locked) => LOCKED,
-        _ => UNAVAILABLE,
+        CoreError::Core(ErrorCode::Rejected) => REJECTED,
+        CoreError::Core(ErrorCode::Unavailable | ErrorCode::Internal)
+        | CoreError::Unavailable
+        | CoreError::BadReply => UNAVAILABLE,
     }
     .to_string()
 }
@@ -421,6 +435,144 @@ async fn accept_identity(
     relay(core.inner(), Call::AcceptIdentity { room_id, user_id }).await
 }
 
+/// True for an image handle in its only form: exactly 32 lowercase hex
+/// characters. The core checks it again.
+fn valid_handle(handle: &str) -> bool {
+    handle.len() == IMAGE_HANDLE_BYTES
+        && handle
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Downloads, decrypts and decodes the image of an `m.image` event in the
+/// core's contained worker, only when the user asks. Replies with an image
+/// view: an opaque handle, the shown size and the band count.
+#[tauri::command]
+async fn load_image(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+) -> Result<ImageView, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || event_id.len() > MAX_EVENT_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::LoadImage { room_id, event_id }).await
+}
+
+/// Most `image_band` calls the page may have running at once. Each holds one
+/// band of at most `MAX_BAND_BYTES` (1 MiB) in this process until Tauri
+/// hands it to the page, so this bounds that memory.
+pub const MAX_BANDS_IN_FLIGHT: usize = 4;
+
+/// Counts running `image_band` calls.
+#[derive(Default)]
+struct BandsInFlight(AtomicUsize);
+
+/// A slot in [`BandsInFlight`], given back when dropped.
+struct BandSlot<'a>(&'a AtomicUsize);
+
+impl BandsInFlight {
+    fn take(&self) -> Option<BandSlot<'_>> {
+        let mut running = self.0.load(Ordering::Acquire);
+        while running < MAX_BANDS_IN_FLIGHT {
+            match self.0.compare_exchange_weak(
+                running,
+                running + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(BandSlot(&self.0)),
+                Err(now) => running = now,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for BandSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Length of the prefix before a band's pixels in the raw response.
+pub const BAND_PREFIX_BYTES: usize = 8;
+
+/// The raw response for one band: width and row count as little-endian
+/// `u32`, then the RGBA bytes.
+fn band_response(band: Band) -> Vec<u8> {
+    let mut body = Vec::with_capacity(BAND_PREFIX_BYTES + band.pixels.len());
+    body.extend_from_slice(&band.width.to_le_bytes());
+    body.extend_from_slice(&band.rows.to_le_bytes());
+    body.extend_from_slice(&band.pixels);
+    body
+}
+
+/// One band of rows of a loaded or picked image, as a raw binary response
+/// (see the module documentation for its layout).
+#[tauri::command]
+async fn image_band(
+    core: State<'_, CoreLink>,
+    bands: State<'_, BandsInFlight>,
+    handle: String,
+    band: u32,
+) -> Result<Response, String> {
+    if !valid_handle(&handle) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    let Some(_slot) = bands.take() else {
+        return Err(LIMIT_EXCEEDED.to_string());
+    };
+    let core = core.inner().clone();
+    let band = tauri::async_runtime::spawn_blocking(move || core.image_band(handle, band))
+        .await
+        .map_err(|_| UNAVAILABLE.to_string())?
+        .map_err(page_error)?;
+    Ok(Response::new(band_response(band)))
+}
+
+/// Drops a loaded image and its pixels in the core.
+#[tauri::command]
+async fn release_image(core: State<'_, CoreLink>, handle: String) -> Result<(), String> {
+    if !valid_handle(&handle) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::ReleaseImage { handle }).await
+}
+
+/// Asks the user for a PNG or JPEG file in the core's own file dialog. No
+/// path crosses: the reply is a draft (a stripped copy and its preview) or
+/// `cancelled`.
+#[tauri::command]
+async fn pick_image(core: State<'_, CoreLink>, room_id: String) -> Result<ImagePick, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::PickImage { room_id }).await
+}
+
+/// Queues a picked image by its draft handle, with the same checks as text.
+#[tauri::command]
+async fn send_image(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    handle: String,
+) -> Result<PendingMessage, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || !valid_handle(&handle) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SendImage { room_id, handle }).await
+}
+
+/// Drops a picked image that was not sent.
+#[tauri::command]
+async fn discard_image(core: State<'_, CoreLink>, handle: String) -> Result<(), String> {
+    if !valid_handle(&handle) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::DiscardImage { handle }).await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -461,6 +613,7 @@ pub fn configure<R: Runtime>(
     builder
         .manage(core)
         .manage(subscriptions)
+        .manage(BandsInFlight::default())
         .invoke_handler(tauri::generate_handler![
             app_status,
             room_list,
@@ -489,7 +642,13 @@ pub fn configure<R: Runtime>(
             contact_status,
             verify_contact,
             identity_changes,
-            accept_identity
+            accept_identity,
+            load_image,
+            image_band,
+            release_image,
+            pick_image,
+            send_image,
+            discard_image
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
@@ -555,6 +714,65 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN `MAX_BANDS_IN_FLIGHT` running band calls WHEN another starts
+    /// THEN it gets no slot, until one of the running calls ends.
+    #[test]
+    fn given_bands_in_flight_then_only_a_bounded_number_run_at_once() {
+        let bands = BandsInFlight::default();
+        let slots: Vec<_> = (0..MAX_BANDS_IN_FLIGHT)
+            .map(|_| bands.take().expect("a free slot"))
+            .collect();
+        assert!(bands.take().is_none());
+        drop(slots.into_iter().next());
+        assert!(bands.take().is_some());
+    }
+
+    #[test]
+    fn given_image_handles_then_only_32_lowercase_hex_characters_pass() {
+        assert!(valid_handle("0123456789abcdef0123456789abcdef"));
+        for bad in [
+            "",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789abcdef0123456789abcde ",
+            "0123456789abcdef0123456789abc\u{e9}",
+        ] {
+            assert!(!valid_handle(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn given_a_band_then_its_response_is_width_rows_and_pixels() {
+        let body = band_response(Band {
+            width: 0x0102_0304,
+            rows: 2,
+            pixels: vec![7; 8],
+        });
+        assert_eq!(&body[..8], &[4, 3, 2, 1, 2, 0, 0, 0]);
+        assert_eq!(&body[8..], &[7; 8]);
+    }
+
+    #[test]
+    fn given_core_errors_then_each_page_error_is_a_fixed_code() {
+        for (error, page) in [
+            (CoreError::Core(ErrorCode::Rejected), "rejected"),
+            (CoreError::Core(ErrorCode::LimitExceeded), "limit_exceeded"),
+            (CoreError::Core(ErrorCode::NotFound), "not_found"),
+            (CoreError::Core(ErrorCode::Locked), "locked"),
+            (
+                CoreError::Core(ErrorCode::InvalidArgument),
+                "invalid_argument",
+            ),
+            (CoreError::Core(ErrorCode::Unavailable), "core_unavailable"),
+            (CoreError::Core(ErrorCode::Internal), "core_unavailable"),
+            (CoreError::Unavailable, "core_unavailable"),
+            (CoreError::BadReply, "core_unavailable"),
+        ] {
+            assert_eq!(page_error(error), page);
+        }
+    }
 
     #[test]
     fn given_urls_then_only_the_bundled_app_origin_is_navigable() {

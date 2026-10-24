@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-release-image"
+description = "Enables the release_image command without any pre-configured scope."
+commands.allow = ["release_image"]
+
+[[permission]]
+identifier = "deny-release-image"
+description = "Denies the release_image command without any pre-configured scope."
+commands.deny = ["release_image"]

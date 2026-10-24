@@ -7,6 +7,9 @@ import type {
   AccountStatus,
   AppStatus,
   ContactStatus,
+  ImageMime,
+  ImagePick,
+  ImageView,
   PendingMessage,
   RoomIdentityChanges,
   SignInError,
@@ -16,11 +19,15 @@ import type {
   TimelineItem,
   TimelinePage
 } from '../../../crates/contracts/generated/contracts';
+import { parseBand, type Band } from '../image';
 
 export type {
   AccountStatus,
   AppStatus,
   ContactStatus,
+  ImageMime,
+  ImagePick,
+  ImageView,
   RoomIdentityChanges,
   PendingMessage,
   RoomList,
@@ -214,4 +221,46 @@ export function identityChanges(roomId: string): Promise<RoomIdentityChanges> {
  */
 export function acceptIdentity(roomId: string, userId: string): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('accept_identity', { roomId, userId });
+}
+
+/**
+ * Downloads, decrypts and decodes the image of an `m.image` event in the
+ * core's contained worker. Call it only when the user asks (ADR-0009). The
+ * reply names the pixels by an opaque handle; release it when done.
+ */
+export function loadImage(roomId: string, eventId: string): Promise<ImageView> {
+  return invoke<ImageView>('load_image', { roomId, eventId });
+}
+
+/**
+ * One band of rows of a loaded or picked image. The host answers with raw
+ * bytes, never JSON: width and rows as little-endian u32, then the RGBA
+ * pixels. Rejects with `bad_image` when the answer is not exactly that.
+ */
+export async function imageBand(handle: string, band: number): Promise<Band> {
+  return parseBand(await invoke<unknown>('image_band', { handle, band }));
+}
+
+/** Drops a loaded image's pixels in the core. */
+export function releaseImage(handle: string): Promise<void> {
+  return invoke<void>('release_image', { handle });
+}
+
+/**
+ * Asks the user for a PNG or JPEG file in the core's own file dialog; no path
+ * reaches this page. The reply is a draft (a copy without metadata, and its
+ * preview) or `cancelled`. It arrives when the dialog closes.
+ */
+export function pickImage(roomId: string): Promise<ImagePick> {
+  return invoke<ImagePick>('pick_image', { roomId });
+}
+
+/** Queues a picked image, by its draft handle, like `sendMessage`. */
+export function sendImage(roomId: string, handle: string): Promise<PendingMessage> {
+  return invoke<PendingMessage>('send_image', { roomId, handle });
+}
+
+/** Drops a picked image that was not sent. */
+export function discardImage(handle: string): Promise<void> {
+  return invoke<void>('discard_image', { handle });
 }

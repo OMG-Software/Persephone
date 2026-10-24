@@ -5,7 +5,7 @@
     name,
     class: extra = ''
   }: {
-    name: 'search' | 'hash' | 'settings' | 'lock' | 'send' | 'back' | 'shield';
+    name: 'search' | 'hash' | 'settings' | 'lock' | 'send' | 'back' | 'shield' | 'image';
     class?: string;
   } = $props();
 </script>
@@ -31,5 +31,9 @@
   {:else if name === 'shield'}
     <path d="M12 3 4 6v6c0 4.5 3.4 8 8 9 4.6-1 8-4.5 8-9V6Z" />
     <path d="m9 12 2 2 4-4" />
+  {:else if name === 'image'}
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <circle cx="9" cy="10" r="1.5" />
+    <path d="m21 16-5-5-9 8" />
   {/if}
 </svg>

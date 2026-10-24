@@ -39,6 +39,12 @@ fn main() {
             "verify_contact",
             "identity_changes",
             "accept_identity",
+            "load_image",
+            "image_band",
+            "release_image",
+            "pick_image",
+            "send_image",
+            "discard_image",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

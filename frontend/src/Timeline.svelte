@@ -6,11 +6,13 @@
   } from '../../crates/contracts/generated/contracts';
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
+  import ImageMessage from './ImageMessage.svelte';
   import Message from './Message.svelte';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
 
   let {
     title,
+    roomId = '',
     encryption = 'unknown',
     items,
     hasOlder,
@@ -23,6 +25,8 @@
     onverify = () => {}
   }: {
     title: string;
+    // The room the items come from; images are loaded from it.
+    roomId?: string;
     encryption?: RoomEncryption;
     items: TimelineItem[];
     hasOlder: boolean;
@@ -127,6 +131,8 @@
             {/if}
             {#if item.kind === 'message'}
               <Message name={item.sender} body={item.body} time={item.origin_server_ts} />
+            {:else if item.kind === 'image'}
+              <ImageMessage {roomId} {item} />
             {:else if item.kind === 'notice'}
               {@const date = toDate(item.origin_server_ts)}
               <p class="notice">

@@ -3,8 +3,8 @@
 
 use persephone_core_protocol::{Call, ErrorCode, Event};
 use persephone_desktop::{
-    MAIN_WINDOW, Subscriptions, configure, context,
-    core_link::{CoreError, CoreLink, CoreTransport},
+    BAND_PREFIX_BYTES, MAIN_WINDOW, Subscriptions, configure, context,
+    core_link::{Band, CoreError, CoreLink, CoreTransport},
     create_main_window,
 };
 use std::sync::{
@@ -92,6 +92,56 @@ impl CoreTransport for FakeCore {
                     "roomId": room_id, "truncated": false, "changes": [], "pinned": true
                 })),
             },
+            Call::LoadImage { event_id, .. } => match event_id.as_str() {
+                "$image" => Ok(serde_json::json!({
+                    "handle": HANDLE, "width": 3, "height": 5, "bands": 2, "bandRows": 4
+                })),
+                "$bad" => Err(CoreError::Core(ErrorCode::Rejected)),
+                "$busy" => Err(CoreError::Core(ErrorCode::LimitExceeded)),
+                // A view carrying a field outside the contract.
+                _ => Ok(serde_json::json!({
+                    "handle": HANDLE, "width": 1, "height": 1, "bands": 1, "bandRows": 1,
+                    "url": "mxc://example.invalid/m"
+                })),
+            },
+            // Answered with pixels, through `image_band`; the UI never sends
+            // it as an ordinary call.
+            Call::ImageBand { .. } => Err(CoreError::BadReply),
+            Call::ReleaseImage { handle } | Call::DiscardImage { handle } => {
+                if handle == HANDLE {
+                    Ok(serde_json::Value::Null)
+                } else {
+                    Err(CoreError::Core(ErrorCode::NotFound))
+                }
+            }
+            Call::PickImage { room_id } => match room_id.as_str() {
+                "!r:example.invalid" => Ok(serde_json::json!({
+                    "kind": "draft", "size": 48_213, "mime": "image/png",
+                    "preview": {"handle": HANDLE, "width": 3, "height": 5, "bands": 2, "bandRows": 4}
+                })),
+                "!cancel:example.invalid" => Ok(serde_json::json!({"kind": "cancelled"})),
+                // A draft carrying the file's path is refused by the contract.
+                "!path:example.invalid" => Ok(serde_json::json!({
+                    "kind": "draft", "size": 1, "mime": "image/png", "path": "C:\\Users\\a\\x.png",
+                    "preview": {"handle": HANDLE, "width": 1, "height": 1, "bands": 1, "bandRows": 1}
+                })),
+                _ => Err(CoreError::Core(ErrorCode::Unavailable)),
+            },
+            Call::SendImage { room_id, handle } => {
+                let mut queued = serde_json::json!({
+                    "localId": 3, "roomId": room_id, "kind": "image", "body": "", "state": "queued",
+                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
+                });
+                match (room_id.as_str(), handle == HANDLE) {
+                    ("!full:example.invalid", _) => Err(CoreError::Core(ErrorCode::LimitExceeded)),
+                    (_, true) => Ok(queued),
+                    // A reply carrying the draft handle is refused by the contract.
+                    (_, false) => {
+                        queued["handle"] = handle.into();
+                        Ok(queued)
+                    }
+                }
+            }
             Call::AcceptIdentity { .. } => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "enabled", "operation": "waiting_for_confirmation",
                 "error": null, "canSetUpRecovery": false, "verification": null
@@ -109,12 +159,12 @@ impl CoreTransport for FakeCore {
             // A reply carrying a secret is refused by the contract.
             Call::SendMessage { room_id, body } => match body.as_str() {
                 "hello" => Ok(serde_json::json!({
-                    "localId": 1, "roomId": room_id, "body": body, "state": "queued",
+                    "localId": 1, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
                     "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
                 })),
                 // A reply carrying the transaction ID is refused by the contract.
                 _ => Ok(serde_json::json!({
-                    "localId": 2, "roomId": room_id, "body": body, "state": "queued",
+                    "localId": 2, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
                     "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64, "transactionId": "t"
                 })),
             },
@@ -151,7 +201,32 @@ impl CoreTransport for FakeCore {
             },
         }
     }
+
+    /// Band 0 of [`HANDLE`] is 4 rows of 3 pixels, band 1 the last row.
+    fn image_band(&self, handle: String, band: u32) -> Result<Band, CoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.available {
+            return Err(CoreError::Unavailable);
+        }
+        if handle != HANDLE {
+            return Err(CoreError::Core(ErrorCode::NotFound));
+        }
+        let rows = match band {
+            0 => 4,
+            1 => 1,
+            _ => return Err(CoreError::Core(ErrorCode::InvalidArgument)),
+        };
+        let pixels = (0..3 * rows * 4).map(|byte| byte as u8).collect();
+        Ok(Band {
+            width: 3,
+            rows,
+            pixels,
+        })
+    }
 }
+
+/// A well-formed image handle the fake core knows.
+const HANDLE: &str = "0123456789abcdef0123456789abcdef";
 
 fn app_with(core: CoreLink) -> tauri::App<MockRuntime> {
     configure(mock_builder(), core, Arc::default())
@@ -364,7 +439,13 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-contact-status",
             "allow-verify-contact",
             "allow-identity-changes",
-            "allow-accept-identity"
+            "allow-accept-identity",
+            "allow-load-image",
+            "allow-image-band",
+            "allow-release-image",
+            "allow-pick-image",
+            "allow-send-image",
+            "allow-discard-image"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -876,5 +957,284 @@ fn given_identity_change_commands_then_only_the_ids_cross() {
         core.calls.load(Ordering::SeqCst),
         calls,
         "oversized IDs never crossed"
+    );
+}
+
+fn invoke_on(
+    window: &tauri::WebviewWindow<MockRuntime>,
+    cmd: &str,
+    origin: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
+    get_ipc_response(window, request(cmd, origin, args))
+        .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+}
+
+/// The arguments of each image command with a bad handle or an oversized
+/// ID; none of them may reach the core.
+fn bad_image_arguments() -> Vec<(&'static str, serde_json::Value)> {
+    let long_id = "!".repeat(256);
+    let mut cases = vec![
+        (
+            "load_image",
+            serde_json::json!({"roomId": long_id, "eventId": "$image"}),
+        ),
+        (
+            "load_image",
+            serde_json::json!({"roomId": "!r:example.invalid", "eventId": "$".repeat(256)}),
+        ),
+        ("pick_image", serde_json::json!({"roomId": long_id})),
+        (
+            "send_image",
+            serde_json::json!({"roomId": long_id, "handle": HANDLE}),
+        ),
+    ];
+    for handle in [
+        String::new(),
+        HANDLE.to_uppercase(),
+        HANDLE[..31].to_owned(),
+        format!("{HANDLE}0"),
+        // The right length, but not hex.
+        "0123456789abcdef0123456789abcdeg".to_owned(),
+        // The right byte length with a multi-byte character.
+        format!("{}\u{e9}", &HANDLE[..30]),
+        "../../../../../../../Windows/x.png".to_owned(),
+    ] {
+        cases.push((
+            "image_band",
+            serde_json::json!({"handle": handle, "band": 0}),
+        ));
+        cases.push(("release_image", serde_json::json!({"handle": handle})));
+        cases.push(("discard_image", serde_json::json!({"handle": handle})));
+        cases.push((
+            "send_image",
+            serde_json::json!({"roomId": "!r:example.invalid", "handle": handle}),
+        ));
+    }
+    cases
+}
+
+/// GIVEN the image commands WHEN called from the app THEN views and drafts
+/// are relayed and checked against the contracts, the core's codes reach the
+/// page as fixed strings (`rejected` among them), and a reply outside the
+/// contract (an extra URL, file path or handle) is refused.
+#[test]
+fn given_image_commands_then_handles_cross_and_replies_are_checked() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args| invoke_on(&window, cmd, app_origin(), args);
+    let room = "!r:example.invalid";
+    let load = |event: &str| {
+        invoke(
+            "load_image",
+            serde_json::json!({"roomId": room, "eventId": event}),
+        )
+    };
+    assert_eq!(
+        load("$image"),
+        Ok(
+            serde_json::json!({"handle": HANDLE, "width": 3, "height": 5, "bands": 2, "bandRows": 4})
+        )
+    );
+    assert_eq!(load("$bad").unwrap_err(), "rejected");
+    assert_eq!(load("$busy").unwrap_err(), "limit_exceeded");
+    assert_eq!(load("$odd").unwrap_err(), "core_unavailable");
+
+    let draft = invoke("pick_image", serde_json::json!({"roomId": room})).unwrap();
+    assert_eq!(draft["kind"], "draft");
+    assert_eq!(draft["preview"]["handle"], HANDLE);
+    assert_eq!(draft["mime"], "image/png");
+    assert_eq!(
+        invoke(
+            "pick_image",
+            serde_json::json!({"roomId": "!cancel:example.invalid"})
+        ),
+        Ok(serde_json::json!({"kind": "cancelled"}))
+    );
+    assert_eq!(
+        invoke(
+            "pick_image",
+            serde_json::json!({"roomId": "!path:example.invalid"})
+        )
+        .unwrap_err(),
+        "core_unavailable",
+        "a file path never reaches the page"
+    );
+    assert_eq!(
+        invoke(
+            "pick_image",
+            serde_json::json!({"roomId": "!other:example.invalid"})
+        )
+        .unwrap_err(),
+        "core_unavailable"
+    );
+
+    let queued = invoke(
+        "send_image",
+        serde_json::json!({"roomId": room, "handle": HANDLE}),
+    )
+    .unwrap();
+    assert_eq!(queued["kind"], "image");
+    assert_eq!(queued["body"], "");
+    assert_eq!(
+        invoke(
+            "send_image",
+            serde_json::json!({"roomId": "!full:example.invalid", "handle": HANDLE})
+        )
+        .unwrap_err(),
+        "limit_exceeded"
+    );
+    assert_eq!(
+        invoke(
+            "send_image",
+            serde_json::json!({"roomId": room, "handle": "fedcba9876543210fedcba9876543210"})
+        )
+        .unwrap_err(),
+        "core_unavailable",
+        "a reply carrying the handle is refused"
+    );
+
+    for cmd in ["release_image", "discard_image"] {
+        assert_eq!(
+            invoke(cmd, serde_json::json!({"handle": HANDLE})),
+            Ok(serde_json::Value::Null),
+            "{cmd}"
+        );
+        assert_eq!(
+            invoke(
+                cmd,
+                serde_json::json!({"handle": "fedcba9876543210fedcba9876543210"})
+            )
+            .unwrap_err(),
+            "not_found",
+            "{cmd}"
+        );
+    }
+}
+
+/// GIVEN an image band WHEN the page asks for it THEN it is a raw binary
+/// response, never JSON: width and rows as little-endian `u32`, then exactly
+/// `width * rows * 4` RGBA bytes. A short last band keeps the layout; a
+/// missing image or band is a fixed error.
+#[test]
+fn given_an_image_band_then_the_page_gets_raw_bytes_with_width_and_rows() {
+    let app = app();
+    let window = create_main_window(&app).unwrap();
+    let band = |handle: &str, band: u32| {
+        get_ipc_response(
+            &window,
+            request(
+                "image_band",
+                app_origin(),
+                serde_json::json!({"handle": handle, "band": band}),
+            ),
+        )
+    };
+    assert_eq!(BAND_PREFIX_BYTES, 8);
+    for (index, rows) in [(0u32, 4u32), (1, 1)] {
+        let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = band(HANDLE, index) else {
+            panic!("band {index} is not a raw response");
+        };
+        assert_eq!(u32::from_le_bytes(body[0..4].try_into().unwrap()), 3);
+        assert_eq!(u32::from_le_bytes(body[4..8].try_into().unwrap()), rows);
+        let pixels = &body[BAND_PREFIX_BYTES..];
+        assert_eq!(pixels.len(), (3 * rows * 4) as usize, "band {index}");
+        assert!(
+            pixels.iter().enumerate().all(|(i, byte)| *byte == i as u8),
+            "band {index} bytes are unchanged"
+        );
+    }
+    assert_eq!(
+        band("fedcba9876543210fedcba9876543210", 0).unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(band(HANDLE, 9).unwrap_err(), "invalid_argument");
+    // A band index outside u32 is refused by the argument type.
+    for args in [
+        serde_json::json!({"handle": HANDLE, "band": -1}),
+        serde_json::json!({"handle": HANDLE, "band": 4_294_967_296_u64}),
+        serde_json::json!({"handle": HANDLE, "band": "0"}),
+        serde_json::json!({"handle": HANDLE}),
+    ] {
+        assert!(
+            get_ipc_response(&window, request("image_band", app_origin(), args.clone())).is_err(),
+            "{args}"
+        );
+    }
+}
+
+/// GIVEN malformed handles or oversized room or event IDs WHEN any image
+/// command is called THEN the UI refuses it without calling the core.
+#[test]
+fn given_bad_image_arguments_then_the_ui_refuses_without_calling_the_core() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    for (cmd, args) in bad_image_arguments() {
+        assert_eq!(
+            invoke_on(&window, cmd, app_origin(), args.clone()).unwrap_err(),
+            "invalid_argument",
+            "{cmd} {args}"
+        );
+    }
+    assert_eq!(core.calls.load(Ordering::SeqCst), 0);
+}
+
+/// GIVEN the image commands WHEN called from a remote origin THEN each is
+/// denied by the capability before the core is reached.
+#[test]
+fn given_image_commands_from_a_remote_origin_then_they_are_denied() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let room = "!r:example.invalid";
+    for (cmd, args) in [
+        (
+            "load_image",
+            serde_json::json!({"roomId": room, "eventId": "$image"}),
+        ),
+        (
+            "image_band",
+            serde_json::json!({"handle": HANDLE, "band": 0}),
+        ),
+        ("release_image", serde_json::json!({"handle": HANDLE})),
+        ("pick_image", serde_json::json!({"roomId": room})),
+        (
+            "send_image",
+            serde_json::json!({"roomId": room, "handle": HANDLE}),
+        ),
+        ("discard_image", serde_json::json!({"handle": HANDLE})),
+    ] {
+        assert!(
+            get_ipc_response(&window, request(cmd, app_origin(), args.clone())).is_ok(),
+            "{cmd} is allowed from the app"
+        );
+        let calls = core.calls.load(Ordering::SeqCst);
+        for origin in ["https://example.org", "http://localhost:1420"] {
+            assert!(
+                get_ipc_response(&window, request(cmd, origin, args.clone())).is_err(),
+                "{cmd} from {origin}"
+            );
+        }
+        assert_eq!(core.calls.load(Ordering::SeqCst), calls, "{cmd}");
+    }
+}
+
+/// GIVEN an unreachable core WHEN a band is asked for THEN the page gets the
+/// generic error and no bytes.
+#[test]
+fn given_unreachable_core_then_an_image_band_is_a_generic_error() {
+    let app = app_with(FakeCore::new(false));
+    let window = create_main_window(&app).unwrap();
+    assert_eq!(
+        invoke_on(
+            &window,
+            "image_band",
+            app_origin(),
+            serde_json::json!({"handle": HANDLE, "band": 0})
+        )
+        .unwrap_err(),
+        "core_unavailable"
     );
 }
