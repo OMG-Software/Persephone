@@ -112,26 +112,11 @@ fn main() -> ExitCode {
     run(options)
 }
 
-/// Stack for the `core-main` thread: the size of the macOS main thread's,
-/// whose work it takes over.
-#[cfg(target_os = "macos")]
-const CORE_MAIN_STACK_BYTES: usize = 8 * 1024 * 1024;
-
 /// Runs [`run`] on the `core-main` thread and keeps the main thread for the
 /// AppKit run loop (`platform::macos::run_main_loop`).
 #[cfg(target_os = "macos")]
 fn macos_main(options: Options) -> ExitCode {
-    let core_main = thread::Builder::new()
-        .name("core-main".into())
-        .stack_size(CORE_MAIN_STACK_BYTES)
-        .spawn(move || run(options));
-    match core_main {
-        Ok(core_main) => persephone_core::platform::macos::run_main_loop(core_main),
-        Err(error) => {
-            eprintln!("persephone: cannot start the core thread: {error}");
-            ExitCode::from(1)
-        }
-    }
+    persephone_core::platform::macos::run_main_loop(move || run(options))
 }
 
 /// The core's work: open the profile (asking for its passphrase), serve the
@@ -303,5 +288,59 @@ fn demo(core: &Core) {
             "@demo:example.invalid",
             format!("Live demo message {n}"),
         );
+    }
+}
+
+/// The window watch with the macOS UI tree. WKWebView's processes are XPC
+/// services outside the UI's process group, so the tree's count is
+/// unreadable and the watch judges the window by readiness only
+/// (`platform::macos::ui`).
+#[cfg(all(test, target_os = "macos"))]
+mod macos_watch_tests {
+    use super::ui_watch::{Failure, READY_TIMEOUT, Watch};
+    use persephone_core::{
+        platform::macos::ui::{ProcessGroup, spawn_in_group},
+        ui_host::UiTree,
+    };
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+
+    /// GIVEN a UI running in its own group WHEN the watch observes it THEN a
+    /// ready page never fails, and a page that never sends a request fails
+    /// only after the timeout, as on Windows.
+    #[test]
+    fn given_the_macos_ui_tree_then_the_watch_judges_readiness_only() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 60"]);
+        let mut child = spawn_in_group(command).expect("start /bin/sh");
+        let tree = ProcessGroup::of(&child);
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+
+        let mut ready = Watch::new(start);
+        for second in 0..600 {
+            assert_eq!(
+                ready.observe(at(second), true, tree.active_processes().ok()),
+                None
+            );
+        }
+        let mut waiting = Watch::new(start);
+        let before = READY_TIMEOUT.as_secs() - 1;
+        assert_eq!(
+            waiting.observe(at(before), false, tree.active_processes().ok()),
+            None
+        );
+        assert_eq!(
+            waiting.observe(
+                at(READY_TIMEOUT.as_secs()),
+                false,
+                tree.active_processes().ok()
+            ),
+            Some(Failure::NotReady)
+        );
+        assert!(tree.terminate(Duration::from_secs(10)));
+        child.wait().expect("reap the UI stand-in");
     }
 }

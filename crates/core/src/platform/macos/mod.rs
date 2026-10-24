@@ -1,39 +1,47 @@
-//! The macOS platform layer. Not implemented yet: every seam fails closed
-//! exactly as before the platform split. The plan's "macOS" section fills
-//! each function; until then the profile stays locked, prompts and the file
-//! dialog are refused, no media worker runs and the UI is not started.
+//! The macOS platform layer (ADR-0011): a Keychain item for the wrapping
+//! secret, `NSAlert` prompts and an `NSOpenPanel` on the main thread, and
+//! the UI in its own process group, killed with the core. Nothing here has
+//! been seen to work with a real user, display or Keychain prompt; macOS is
+//! built and tested on CI only.
 //!
 //! AppKit windows must be created on the process main thread, so on macOS
 //! the core binary keeps that thread free: its usual work runs on a
 //! `core-main` thread, and the main thread runs [`run_main_loop`]. Prompts
 //! reach the main thread through [`main_thread`].
 
+pub mod credentials;
+pub mod main_loop;
+pub mod pick;
+pub mod ui;
+pub mod vault;
+
+pub use main_loop::{main_thread, run_main_loop};
+
 use crate::{
-    credentials::{self, CredentialSource},
+    credentials::CredentialSource,
     media::{self, Encoded, ImageWorker},
-    pick::{self, ImagePicker},
-    ui_host::{self, UiHost},
-    vault::{self, KeyProtector},
+    pick::ImagePicker,
+    ui_host::UiHost,
+    vault::KeyProtector,
 };
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::ResourceBudgets;
-use std::{path::Path, process::ExitCode, sync::Arc, thread::JoinHandle};
+use std::{path::Path, sync::Arc};
 
-/// Plan "macOS", Vault: a Keychain generic password holding the wrapping
-/// secret.
+/// The store key's outer layer: the shared XChaCha20-Poly1305 wrap under a
+/// secret kept in the user's default keychain.
 pub(crate) fn key_protector() -> Arc<dyn KeyProtector> {
-    Arc::new(vault::Unsupported)
+    Arc::new(super::unix::Wrapped(
+        vault::KeychainStore::default_keychain(),
+    ))
 }
 
-/// Plan "macOS", Prompts and picker: `NSAlert` with `NSSecureTextField`, on
-/// the main thread.
 pub(crate) fn credential_source() -> Box<dyn CredentialSource> {
-    Box::new(credentials::Unsupported)
+    Box::new(credentials::NativePrompt)
 }
 
-/// Plan "macOS", Prompts and picker: `NSOpenPanel` limited to PNG and JPEG.
 pub(crate) fn image_picker() -> Box<dyn ImagePicker> {
-    Box::new(pick::NoPicker)
+    Box::new(pick::NativePanel)
 }
 
 /// Plan "macOS", Prompts and picker: the same read rules as Linux.
@@ -51,27 +59,7 @@ pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {
     Arc::new(media::contained::ContainedWorker::next_to_core())
 }
 
-/// Plan "macOS", UI launch: kill-on-exit, no memory cap.
+/// Kill-on-exit, no memory cap (accepted residual risk, ADR-0011).
 pub(crate) fn ui_host() -> Box<dyn UiHost> {
-    Box::new(ui_host::Unsupported)
-}
-
-/// Runs `task` on the process main thread and returns its result, blocking
-/// the calling thread until it finishes. Prompts and panels use this, since
-/// AppKit requires its windows on the main thread.
-///
-/// Placeholder until plan "macOS", Prompts and picker: there is no AppKit
-/// run loop yet, so `task` runs inline on the calling thread.
-pub fn main_thread<R: Send>(task: impl FnOnce() -> R + Send) -> R {
-    task()
-}
-
-/// Runs the main thread's loop until `core_main` (the core's usual work)
-/// finishes, and returns its exit code; 101, like a panic in `main`, if it
-/// panicked.
-///
-/// Placeholder until plan "macOS", Prompts and picker: the AppKit run loop
-/// replaces this join; for now the main thread only waits.
-pub fn run_main_loop(core_main: JoinHandle<ExitCode>) -> ExitCode {
-    core_main.join().unwrap_or(ExitCode::from(101))
+    Box::new(ui::GroupHost)
 }

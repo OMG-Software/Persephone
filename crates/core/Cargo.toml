@@ -56,6 +56,49 @@ wiremock = "=0.6.5"
 # Linux and macOS: open flags for reading a picked image (O_NOFOLLOW).
 libc = "=0.2.191"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# ADR-0011. All are already in the lock through the Tauri and TLS stacks.
+# The Keychain vault: core-foundation builds the SecItem queries,
+# security-framework(-sys) names the keychain and its constants.
+core-foundation = { version = "=0.10.1", default-features = false, features = ["link"] }
+security-framework = { version = "=3.7.0", default-features = false }
+security-framework-sys = { version = "=2.17.0", default-features = false }
+# The AppKit run loop on the main thread, its prompts (NSAlert with text
+# fields) and the file panel (NSOpenPanel); dispatch2 hands work to the main
+# queue.
+dispatch2 = { version = "=0.3.1", default-features = false, features = ["std"] }
+objc2 = { version = "=0.6.5", default-features = false, features = ["std"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSGeometry",
+  "NSRange",
+  "NSString",
+  "NSURL",
+  "objc2-core-foundation",
+] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "objc2-core-foundation",
+  "NSAlert",
+  "NSApplication",
+  "NSButton",
+  "NSControl",
+  "NSEvent",
+  "NSGraphicsContext",
+  "NSMenu",
+  "NSMenuItem",
+  "NSOpenPanel",
+  "NSPanel",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSSavePanel",
+  "NSSecureTextField",
+  "NSTextField",
+  "NSView",
+  "NSWindow",
+] }
+
 [target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
 # The contained media worker (ADR-0003, ADR-0009, ADR-0010, ADR-0011).
 persephone-media-broker = { path = "../media-broker" }
