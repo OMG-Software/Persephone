@@ -1,4 +1,11 @@
-import type { AppStatus, RoomSummary, TimelineItem } from "../generated/contracts.js";
+import type {
+  AppStatus,
+  ImagePick,
+  ImageView,
+  PendingMessage,
+  RoomSummary,
+  TimelineItem,
+} from "../generated/contracts.js";
 
 const account = { state: "signed_out", userId: null, error: null } as const;
 
@@ -54,6 +61,42 @@ const bigTime: TimelineItem = {
   origin_server_ts: 1n,
 };
 
+const bigImageSize: TimelineItem = {
+  kind: "image",
+  event_id: "$e",
+  sender: "@a:s",
+  origin_server_ts: null,
+  name: "n",
+  // @ts-expect-error sizes are JavaScript numbers, not bigint
+  size: 1n,
+  width: null,
+  height: null,
+  encrypted: true,
+};
+
+const unknownMime: ImagePick = {
+  kind: "draft",
+  preview: { handle: "h", width: 1, height: 1, bands: 1, bandRows: 1 },
+  size: 1,
+  // @ts-expect-error only PNG and JPEG are sent
+  mime: "image/gif",
+};
+
+// @ts-expect-error the band height is required to place each band
+const missingBandRows: ImageView = { handle: "h", width: 1, height: 1, bands: 1 };
+
+const missingKind: PendingMessage = {
+  localId: 1,
+  roomId: "!r:s",
+  // @ts-expect-error a pending message says whether it is text or an image
+  kind: "file",
+  body: "",
+  state: "queued",
+  eventId: null,
+  failure: null,
+  queuedAt: 0,
+};
+
 // @ts-expect-error the store state is required
 const missingStore: AppStatus = { version: "0", milestone: "P1", account };
 
@@ -64,3 +107,7 @@ void missingStore;
 void unknownAccountState;
 void unknownNotice;
 void bigTime;
+void bigImageSize;
+void unknownMime;
+void missingBandRows;
+void missingKind;

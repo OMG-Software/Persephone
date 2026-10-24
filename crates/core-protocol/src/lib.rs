@@ -7,9 +7,16 @@
 //! malformed header before allocating the body. This crate deliberately does
 //! not depend on the core, so the UI's dependency graph contains no SDK, store
 //! or key code.
+//!
+//! One call has a second kind of reply: `image_band` is answered by a
+//! [`PixelReply`] control frame followed at once by exactly one `RgbaPixels`
+//! frame of at most [`MAX_BAND_BYTES`] ([`send_pixel_reply`]). The UI reads
+//! the core's frames with [`receive_from_core`], which checks the pixel
+//! frame's header against its reply before it allocates the body.
 
 use persephone_media_protocol::{
-    FrameError, FrameHeader, FrameKind, ResourceBudgets, read_frame, write_frame,
+    FrameError, FrameHeader, FrameKind, MAX_DIMENSION, MIB, RGBA_BYTES_PER_PIXEL, ReceivedFrame,
+    ResourceBudgets, read_frame, write_frame,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
@@ -138,7 +145,50 @@ pub enum Call {
         room_id: String,
         user_id: String,
     },
+    /// Download, decrypt and decode the image of this `m.image` event in the
+    /// contained worker (ADR-0009). Replies with an image view: an opaque
+    /// handle, the shown size and the number of pixel bands. Nothing is
+    /// fetched until the user asks.
+    LoadImage {
+        room_id: String,
+        event_id: String,
+    },
+    /// One band of rows of a loaded or picked image. Answered by a
+    /// [`PixelReply`] and one pixel frame, or by an ordinary error reply.
+    ImageBand {
+        handle: String,
+        band: u32,
+    },
+    /// Drop a loaded image and its pixels.
+    ReleaseImage {
+        handle: String,
+    },
+    /// Ask the user for a PNG or JPEG file to send in this room, in the
+    /// core's own file dialog; the page never names a path. Replies with a
+    /// draft (a stripped copy and its preview) or `cancelled`.
+    PickImage {
+        room_id: String,
+    },
+    /// Queue a picked image (by its draft handle) for this room. Replies with
+    /// the queued message, like `SendMessage`.
+    SendImage {
+        room_id: String,
+        handle: String,
+    },
+    /// Drop a picked image that was not sent.
+    DiscardImage {
+        handle: String,
+    },
 }
+
+/// Longest event ID either side accepts in a call (the Matrix limit).
+pub const MAX_EVENT_ID_BYTES: usize = 255;
+
+/// The exact length of an image handle: 128 random bits as lowercase hex.
+pub const IMAGE_HANDLE_BYTES: usize = 32;
+
+/// Most pixel bytes in the one `RgbaPixels` frame after a [`PixelReply`].
+pub const MAX_BAND_BYTES: u64 = MIB;
 
 /// Longest user ID either side accepts in a call (the Matrix limit).
 pub const MAX_USER_ID_BYTES: usize = 255;
@@ -212,6 +262,9 @@ pub enum ErrorCode {
     LimitExceeded,
     /// The session is locked (or locking); protected views are unavailable.
     Locked,
+    /// The image was refused: too large, malformed, not PNG or JPEG, or it
+    /// failed its integrity check. Trying again gives the same answer.
+    Rejected,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -227,6 +280,64 @@ pub struct Reply {
     pub id: u32,
     pub outcome: Outcome,
 }
+
+/// Announces the pixel frame that follows it: `rows` rows of `width` RGBA
+/// pixels, band number `band` of the image, for request `id`. On the wire it
+/// is `{"pixel_reply":{...}}` in a control frame.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PixelReply {
+    pub id: u32,
+    pub width: u32,
+    pub rows: u32,
+    pub band: u32,
+}
+
+impl PixelReply {
+    /// The pixel frame header this reply announces, or `None` when the band
+    /// is empty, too wide or over [`MAX_BAND_BYTES`].
+    pub fn frame_header(&self) -> Option<FrameHeader> {
+        if self.width == 0 || self.rows == 0 || self.width > MAX_DIMENSION {
+            return None;
+        }
+        let length = u64::from(self.width)
+            .checked_mul(u64::from(self.rows))?
+            .checked_mul(RGBA_BYTES_PER_PIXEL)
+            .filter(|bytes| *bytes <= MAX_BAND_BYTES)?;
+        Some(FrameHeader {
+            kind: FrameKind::RgbaPixels,
+            length,
+            width: self.width,
+            height: self.rows,
+        })
+    }
+}
+
+/// A [`PixelReply`] and its pixel frame. The frame keeps its budget
+/// reservation until it is dropped.
+pub struct PixelBand {
+    pub reply: PixelReply,
+    pub pixels: ReceivedFrame,
+}
+
+/// What the UI reads from the core: a message, or a band of pixels.
+pub enum FromCore {
+    Message(CoreMessage),
+    Pixels(PixelBand),
+}
+
+/// Every control message from the core: [`CoreMessage`]'s two forms and the
+/// pixel reply, in the same externally tagged form.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum Wire<R, P> {
+    Reply(R),
+    Event(Event),
+    PixelReply(P),
+}
+
+/// The fixed frame header length of `persephone-media-protocol`.
+const FRAME_HEADER_LEN: usize = 17;
 
 #[derive(Debug)]
 pub enum ReceiveError {
@@ -267,6 +378,81 @@ pub fn receive<R: Read, T: DeserializeOwned>(
         return Err(ReceiveError::UnexpectedKind);
     }
     serde_json::from_slice(frame.body()).map_err(|_| ReceiveError::Malformed)
+}
+
+fn frame_error(error: FrameError) -> ReceiveError {
+    match error {
+        FrameError::Io(_) => ReceiveError::Closed,
+        other => ReceiveError::Frame(other),
+    }
+}
+
+/// Writes a [`PixelReply`] and then its pixel frame. Everything is checked
+/// before anything is written: `pixels` must be exactly `width * rows` RGBA
+/// pixels and at most [`MAX_BAND_BYTES`]. The caller holds its output lock
+/// across this call, so no other frame comes between the two.
+pub fn send_pixel_reply<W: Write>(
+    writer: &mut W,
+    reply: &PixelReply,
+    pixels: &[u8],
+) -> io::Result<()> {
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
+    let header = reply
+        .frame_header()
+        .ok_or_else(|| invalid("pixel band outside the band limit"))?;
+    if u64::try_from(pixels.len()).ok() != Some(header.length) {
+        return Err(invalid("pixel band length does not match its reply"));
+    }
+    FrameHeader::decode(header.encode())
+        .map_err(|_| invalid("pixel frame header fails receiver validation"))?;
+    let body = serde_json::to_vec(&Wire::<(), &PixelReply>::PixelReply(reply))
+        .map_err(io::Error::other)?;
+    let control = FrameHeader {
+        kind: FrameKind::Control,
+        length: body.len() as u64,
+        width: 0,
+        height: 0,
+    };
+    write_frame(writer, control, &body)?;
+    write_frame(writer, header, pixels)
+}
+
+/// Reads one message or pixel band from the core (the UI side). After a
+/// [`PixelReply`], the next frame must be an `RgbaPixels` frame whose width,
+/// height and length match it. That header is checked before the body is
+/// allocated, and the body is read with the budgeted reader. A reply over the
+/// band limit is refused without reading the frame that follows.
+pub fn receive_from_core<R: Read>(
+    reader: &mut R,
+    budgets: &ResourceBudgets,
+) -> Result<FromCore, ReceiveError> {
+    let frame = read_frame(reader, budgets).map_err(frame_error)?;
+    if frame.header().kind != FrameKind::Control {
+        return Err(ReceiveError::UnexpectedKind);
+    }
+    let reply = match serde_json::from_slice::<Wire<Reply, PixelReply>>(frame.body()) {
+        Ok(Wire::Reply(reply)) => return Ok(FromCore::Message(CoreMessage::Reply(reply))),
+        Ok(Wire::Event(event)) => return Ok(FromCore::Message(CoreMessage::Event(event))),
+        Ok(Wire::PixelReply(reply)) => reply,
+        Err(_) => return Err(ReceiveError::Malformed),
+    };
+    drop(frame);
+    let expected = reply.frame_header().ok_or(ReceiveError::Malformed)?;
+    let mut wire = [0; FRAME_HEADER_LEN];
+    reader
+        .read_exact(&mut wire)
+        .map_err(|_| ReceiveError::Closed)?;
+    let header = FrameHeader::decode(wire).map_err(ReceiveError::Frame)?;
+    if header.kind != FrameKind::RgbaPixels {
+        return Err(ReceiveError::UnexpectedKind);
+    }
+    if header != expected {
+        return Err(ReceiveError::Malformed);
+    }
+    // The header was checked; give it back to the budgeted reader together
+    // with the body that follows it.
+    let pixels = read_frame(&mut (&wire[..]).chain(reader), budgets).map_err(frame_error)?;
+    Ok(FromCore::Pixels(PixelBand { reply, pixels }))
 }
 
 #[cfg(test)]
@@ -507,6 +693,297 @@ mod tests {
             Err(ReceiveError::Frame(FrameError::TooLarge))
         ));
         assert_eq!(reader.position(), 17);
+    }
+
+    /// GIVEN the image calls WHEN sent THEN they cross in the documented wire
+    /// form and round trip; missing, extra, null or wrongly typed fields are
+    /// refused.
+    #[test]
+    fn given_image_calls_then_they_have_a_strict_wire_form() {
+        let budgets = ResourceBudgets::default();
+        let handle = "0123456789abcdef0123456789abcdef";
+        for (call, wire) in [
+            (
+                Call::LoadImage {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                },
+                r#"{"id":1,"call":{"command":"load_image","room_id":"!r:s","event_id":"$e"}}"#
+                    .to_owned(),
+            ),
+            (
+                Call::ImageBand {
+                    handle: handle.into(),
+                    band: 3,
+                },
+                format!(
+                    r#"{{"id":1,"call":{{"command":"image_band","handle":"{handle}","band":3}}}}"#
+                ),
+            ),
+            (
+                Call::ReleaseImage {
+                    handle: handle.into(),
+                },
+                format!(r#"{{"id":1,"call":{{"command":"release_image","handle":"{handle}"}}}}"#),
+            ),
+            (
+                Call::PickImage {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"pick_image","room_id":"!r:s"}}"#.to_owned(),
+            ),
+            (
+                Call::SendImage {
+                    room_id: "!r:s".into(),
+                    handle: handle.into(),
+                },
+                format!(
+                    r#"{{"id":1,"call":{{"command":"send_image","room_id":"!r:s","handle":"{handle}"}}}}"#
+                ),
+            ),
+            (
+                Call::DiscardImage {
+                    handle: handle.into(),
+                },
+                format!(r#"{{"id":1,"call":{{"command":"discard_image","handle":"{handle}"}}}}"#),
+            ),
+        ] {
+            let request = Request { id: 1, call };
+            let mut sent = Vec::new();
+            send(&mut sent, &request).unwrap();
+            assert_eq!(String::from_utf8(sent[17..].to_vec()).unwrap(), wire);
+            let mut reader = Cursor::new(sent);
+            assert_eq!(
+                receive::<_, Request>(&mut reader, &budgets).unwrap(),
+                request
+            );
+        }
+        for body in [
+            &br#"{"id":1,"call":{"command":"load_image","room_id":"!r:s"}}"#[..],
+            br#"{"id":1,"call":{"command":"load_image","room_id":"!r:s","event_id":null}}"#,
+            br#"{"id":1,"call":{"command":"load_image","room_id":"!r:s","event_id":"$e","url":"mxc://s/m"}}"#,
+            br#"{"id":1,"call":{"command":"image_band","handle":"h"}}"#,
+            br#"{"id":1,"call":{"command":"image_band","handle":"h","band":-1}}"#,
+            br#"{"id":1,"call":{"command":"image_band","handle":"h","band":4294967296}}"#,
+            br#"{"id":1,"call":{"command":"image_band","handle":"h","band":"0"}}"#,
+            br#"{"id":1,"call":{"command":"image_band","handle":"h","band":0,"rows":9}}"#,
+            br#"{"id":1,"call":{"command":"release_image"}}"#,
+            br#"{"id":1,"call":{"command":"pick_image"}}"#,
+            br#"{"id":1,"call":{"command":"pick_image","room_id":"!r:s","path":"C:\\x.png"}}"#,
+            br#"{"id":1,"call":{"command":"send_image","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"send_image","handle":"h"}}"#,
+            br#"{"id":1,"call":{"command":"send_image","room_id":"!r:s","handle":"h","filename":"a.png"}}"#,
+            br#"{"id":1,"call":{"command":"discard_image","handle":1}}"#,
+            br#"{"id":1,"call":{"command":"decode_image","bytes":"AAAA"}}"#,
+        ] {
+            let mut reader = Cursor::new(frame(FrameKind::Control, body));
+            assert!(
+                matches!(
+                    receive::<_, Request>(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+        // The new error code's wire form.
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::Rejected).unwrap(),
+            r#""rejected""#
+        );
+    }
+
+    fn pixels_frame(width: u32, height: u32, body: &[u8]) -> Vec<u8> {
+        let mut wire = FrameHeader {
+            kind: FrameKind::RgbaPixels,
+            length: body.len() as u64,
+            width,
+            height,
+        }
+        .encode()
+        .to_vec();
+        wire.extend_from_slice(body);
+        wire
+    }
+
+    fn pixel_reply_frame(reply: &str) -> Vec<u8> {
+        frame(FrameKind::Control, reply.as_bytes())
+    }
+
+    /// GIVEN a pixel reply between an event and a reply WHEN the UI reads THEN
+    /// it gets the event, the band with its pixels and the reply, in order;
+    /// the documented wire form is used, and the old reader refuses it.
+    #[test]
+    fn given_a_pixel_reply_then_the_band_arrives_whole_between_messages() {
+        let mut wire = Vec::new();
+        send(&mut wire, &CoreMessage::Event(Event::SecurityChanged {})).unwrap();
+        let reply = PixelReply {
+            id: 9,
+            width: 2,
+            rows: 3,
+            band: 1,
+        };
+        let pixels: Vec<u8> = (0..24).collect();
+        let start = wire.len();
+        send_pixel_reply(&mut wire, &reply, &pixels).unwrap();
+        let documented = r#"{"pixel_reply":{"id":9,"width":2,"rows":3,"band":1}}"#;
+        let body = start + 17;
+        assert_eq!(
+            String::from_utf8_lossy(&wire[body..body + documented.len()]),
+            documented
+        );
+        assert_eq!(
+            wire[body + documented.len()],
+            FrameKind::RgbaPixels as u8,
+            "the pixel frame follows at once"
+        );
+        send(
+            &mut wire,
+            &CoreMessage::Reply(Reply {
+                id: 10,
+                outcome: Outcome::Ok(serde_json::Value::Null),
+            }),
+        )
+        .unwrap();
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(wire.clone());
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Ok(FromCore::Message(CoreMessage::Event(
+                Event::SecurityChanged {}
+            )))
+        ));
+        match receive_from_core(&mut reader, &budgets) {
+            Ok(FromCore::Pixels(band)) => {
+                assert_eq!(band.reply, reply);
+                assert_eq!(band.pixels.body(), &pixels[..]);
+                assert_eq!(band.pixels.header().width, 2);
+                assert_eq!(band.pixels.header().height, 3);
+            }
+            _ => panic!("expected a pixel band"),
+        }
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Ok(FromCore::Message(CoreMessage::Reply(Reply { id: 10, .. })))
+        ));
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Err(ReceiveError::Closed)
+        ));
+        // A reader that knows only messages refuses the pixel reply.
+        let mut reader = Cursor::new(wire[start..].to_vec());
+        assert!(matches!(
+            receive::<_, CoreMessage>(&mut reader, &budgets),
+            Err(ReceiveError::Malformed)
+        ));
+    }
+
+    /// GIVEN pixel frames that do not match their reply WHEN read THEN each is
+    /// refused, and the pixel body is never read.
+    #[test]
+    fn given_a_mismatched_or_missing_pixel_frame_then_receive_refuses() {
+        let budgets = ResourceBudgets::default();
+        let reply = r#"{"pixel_reply":{"id":1,"width":2,"rows":2,"band":0}}"#;
+        let body = [7u8; 16];
+        for (follower, expected) in [
+            // Another width, height, or both.
+            (pixels_frame(4, 1, &body), "malformed"),
+            (pixels_frame(1, 4, &body), "malformed"),
+            // A control or encoded frame instead of pixels.
+            (frame(FrameKind::Control, b"{}"), "kind"),
+            (frame(FrameKind::EncodedImage, &body), "kind"),
+            // Nothing at all, or a cut-off header.
+            (Vec::new(), "closed"),
+            (pixels_frame(2, 2, &body)[..9].to_vec(), "closed"),
+        ] {
+            let mut wire = pixel_reply_frame(reply);
+            let header_end = wire.len() + 17;
+            wire.extend_from_slice(&follower);
+            let mut reader = Cursor::new(wire);
+            let result = receive_from_core(&mut reader, &budgets);
+            let matched = match (expected, &result) {
+                ("malformed", Err(ReceiveError::Malformed)) => {
+                    reader.position() == header_end as u64
+                }
+                ("kind", Err(ReceiveError::UnexpectedKind)) => {
+                    reader.position() == header_end as u64
+                }
+                ("closed", Err(ReceiveError::Closed)) => true,
+                _ => false,
+            };
+            assert!(matched, "{expected}: {:?}", result.err());
+        }
+        // A truncated body is the core closing mid-frame.
+        let mut wire = pixel_reply_frame(reply);
+        wire.extend_from_slice(&pixels_frame(2, 2, &body)[..25]);
+        assert!(matches!(
+            receive_from_core(&mut Cursor::new(wire), &budgets),
+            Err(ReceiveError::Closed)
+        ));
+    }
+
+    /// GIVEN a pixel reply over the band limit, empty, too wide or with extra
+    /// fields WHEN read THEN it is refused before the next frame is touched;
+    /// WHEN the core tries to send one THEN nothing is written.
+    #[test]
+    fn given_an_oversized_or_malformed_pixel_reply_then_nothing_crosses() {
+        let budgets = ResourceBudgets::default();
+        for reply in [
+            // 1024 x 257 x 4 is just over 1 MiB.
+            r#"{"pixel_reply":{"id":1,"width":1024,"rows":257,"band":0}}"#,
+            r#"{"pixel_reply":{"id":1,"width":0,"rows":1,"band":0}}"#,
+            r#"{"pixel_reply":{"id":1,"width":1,"rows":0,"band":0}}"#,
+            r#"{"pixel_reply":{"id":1,"width":8193,"rows":1,"band":0}}"#,
+            r#"{"pixel_reply":{"id":1,"width":1,"rows":1,"band":0,"x":0}}"#,
+            r#"{"pixel_reply":{"id":1,"width":1,"rows":1}}"#,
+        ] {
+            let mut wire = pixel_reply_frame(reply);
+            let end = wire.len() as u64;
+            wire.extend_from_slice(&pixels_frame(1, 1, &[0; 4]));
+            let mut reader = Cursor::new(wire);
+            assert!(
+                matches!(
+                    receive_from_core(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{reply}"
+            );
+            assert_eq!(reader.position(), end, "{reply}");
+        }
+        // The largest band that fits: 1024 x 256.
+        let largest = PixelReply {
+            id: 1,
+            width: 1024,
+            rows: 256,
+            band: 0,
+        };
+        let mut wire = Vec::new();
+        send_pixel_reply(&mut wire, &largest, &vec![1; 1024 * 256 * 4]).unwrap();
+        assert!(matches!(
+            receive_from_core(&mut Cursor::new(wire), &budgets),
+            Ok(FromCore::Pixels(_))
+        ));
+        for (reply, length) in [
+            (
+                PixelReply {
+                    rows: 257,
+                    ..largest
+                },
+                1024 * 257 * 4,
+            ),
+            (PixelReply { rows: 2, ..largest }, 1024 * 4),
+            (
+                PixelReply {
+                    width: 0,
+                    ..largest
+                },
+                0,
+            ),
+        ] {
+            let mut wire = Vec::new();
+            assert!(send_pixel_reply(&mut wire, &reply, &vec![0; length]).is_err());
+            assert!(wire.is_empty(), "{reply:?}");
+        }
     }
 
     #[test]

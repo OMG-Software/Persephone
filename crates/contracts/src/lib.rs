@@ -96,6 +96,15 @@ pub enum SendFailure {
     Failed,
 }
 
+/// What a message the user sent holds.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingKind {
+    Text,
+    /// One image; `body` is empty. The pixels are not repeated here.
+    Image,
+}
+
 /// A message the user sent from this device in this session. Only the body
 /// the user typed is held; nothing is kept after a lock or restart.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -103,6 +112,7 @@ pub enum SendFailure {
 pub struct PendingMessage {
     pub local_id: u32,
     pub room_id: String,
+    pub kind: PendingKind,
     pub body: String,
     pub state: PendingState,
     pub event_id: Option<String>,
@@ -138,6 +148,68 @@ pub enum TimelineItem {
         #[ts(type = "number | null")]
         origin_server_ts: Option<UnixMillis>,
     },
+    /// An `m.image` event. Nothing is fetched until the user asks
+    /// (`load_image`, ADR-0009). Every field comes from the sender and is
+    /// untrusted: `name` is projected like a display name; `size`, `width`
+    /// and `height` are the sender's claims, for layout only, and are none
+    /// when absent or out of range.
+    Image {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        name: String,
+        /// Declared file size in bytes.
+        size: Option<u32>,
+        /// Declared width and height, both set or both none.
+        width: Option<u32>,
+        height: Option<u32>,
+        /// The file is end-to-end encrypted.
+        encrypted: bool,
+    },
+}
+
+/// The kind of an image the user picked to send.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+pub enum ImageMime {
+    #[serde(rename = "image/png")]
+    Png,
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+}
+
+/// Reply of `load_image`, and the preview of a picked image: pixels the core
+/// holds under an opaque handle. The page fetches them with `image_band`,
+/// bands `0..bands`; band `n` starts at row `n * bandRows`, and only the last
+/// may be shorter. The handle stops working after `release_image`, a lock or
+/// a sign-out.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ImageView {
+    pub handle: String,
+    /// The shown size, at most 2048 x 2048, after the EXIF orientation.
+    pub width: u32,
+    pub height: u32,
+    pub bands: u32,
+    pub band_rows: u32,
+}
+
+/// Reply of `pick_image`.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImagePick {
+    /// A stripped copy of the chosen file, ready to send with `send_image`
+    /// (the preview's handle) or drop with `discard_image`. The preview is
+    /// decoded from the stripped copy, so it shows what will be sent.
+    Draft {
+        preview: ImageView,
+        /// The stripped copy's size in bytes.
+        size: u32,
+        mime: ImageMime,
+    },
+    /// The user closed the dialog without choosing a file.
+    Cancelled {},
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -503,9 +575,56 @@ pub fn sample_timeline_page() -> TimelinePage {
                 notice: NoticeKind::Undecryptable,
                 origin_server_ts: None,
             },
+            TimelineItem::Image {
+                event_id: "$image".into(),
+                sender: "@alice:server.invalid".into(),
+                origin_server_ts: UnixMillis::new(1_767_258_060_000),
+                name: "cat <script>.png".into(),
+                size: Some(48_213),
+                width: Some(640),
+                height: Some(480),
+                encrypted: true,
+            },
             TimelineItem::Gap { next_cursor: None },
         ],
         next_cursor: Some("cursor-2".into()),
+    }
+}
+
+pub fn sample_image_view() -> ImageView {
+    ImageView {
+        handle: "0123456789abcdef0123456789abcdef".into(),
+        width: 2048,
+        height: 1536,
+        bands: 12,
+        band_rows: 128,
+    }
+}
+
+pub fn sample_image_pick() -> ImagePick {
+    ImagePick::Draft {
+        preview: ImageView {
+            handle: "fedcba9876543210fedcba9876543210".into(),
+            width: 640,
+            height: 480,
+            bands: 1,
+            band_rows: 409,
+        },
+        size: 48_213,
+        mime: ImageMime::Jpeg,
+    }
+}
+
+pub fn sample_pending_image() -> PendingMessage {
+    PendingMessage {
+        local_id: 3,
+        room_id: "!example:server.invalid".into(),
+        kind: PendingKind::Image,
+        body: String::new(),
+        state: PendingState::Sending,
+        event_id: None,
+        failure: None,
+        queued_at: UnixMillis::saturating(1_767_258_120_000),
     }
 }
 
@@ -533,11 +652,15 @@ pub fn generated_typescript() -> String {
         format!("export {}", RoomSummary::decl(&config)),
         format!("export {}", PendingState::decl(&config)),
         format!("export {}", SendFailure::decl(&config)),
+        format!("export {}", PendingKind::decl(&config)),
         format!("export {}", PendingMessage::decl(&config)),
         format!("export {}", RoomList::decl(&config)),
         format!("export {}", NoticeKind::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),
+        format!("export {}", ImageMime::decl(&config)),
+        format!("export {}", ImageView::decl(&config)),
+        format!("export {}", ImagePick::decl(&config)),
     ]
     .join("\n\n")
         + "\n\n";

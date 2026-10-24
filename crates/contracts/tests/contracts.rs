@@ -124,7 +124,7 @@ fn serde_enforces_javascript_safe_range_for_times() {
 
     let pending = |queued_at: &str| {
         format!(
-            r#"{{"localId":1,"roomId":"!r:s","body":"b","state":"queued","eventId":null,"failure":null,"queuedAt":{queued_at}}}"#
+            r#"{{"localId":1,"roomId":"!r:s","kind":"text","body":"b","state":"queued","eventId":null,"failure":null,"queuedAt":{queued_at}}}"#
         )
     };
     assert!(serde_json::from_str::<persephone_contracts::PendingMessage>(&pending("0")).is_ok());
@@ -177,4 +177,102 @@ fn room_list_rejects_unknown_fields() {
     assert!(
         serde_json::from_str::<RoomList>(r#"{"rooms":[],"truncated":false,"cursor":"x"}"#).is_err()
     );
+}
+
+#[test]
+fn image_fixtures_match_checked_in_json() {
+    use persephone_contracts::{sample_image_pick, sample_image_view, sample_pending_image};
+    for (value, fixture) in [
+        (
+            serde_json::to_value(sample_image_view()).unwrap(),
+            include_str!("../fixtures/image-view.json"),
+        ),
+        (
+            serde_json::to_value(sample_image_pick()).unwrap(),
+            include_str!("../fixtures/image-pick.json"),
+        ),
+        (
+            serde_json::to_value(sample_pending_image()).unwrap(),
+            include_str!("../fixtures/pending-image.json"),
+        ),
+    ] {
+        assert_eq!(
+            value,
+            serde_json::from_str::<serde_json::Value>(fixture).unwrap()
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(persephone_contracts::ImagePick::Cancelled {}).unwrap(),
+        serde_json::json!({"kind": "cancelled"})
+    );
+}
+
+/// GIVEN image DTOs WHEN read THEN unknown fields, tags and MIME types, a
+/// missing kind, and sizes outside JavaScript-safe u32 are refused.
+#[test]
+fn image_contracts_reject_unknown_fields_and_out_of_range_values() {
+    use persephone_contracts::{ImagePick, ImageView, PendingMessage, TimelineItem};
+    let image = |extra: &str| {
+        format!(
+            r#"{{"kind":"image","event_id":"$e","sender":"@a:s","origin_server_ts":null,"name":"n","size":1,"width":2,"height":3,"encrypted":false{extra}}}"#
+        )
+    };
+    assert!(serde_json::from_str::<TimelineItem>(&image("")).is_ok());
+    for extra in [r#","url":"mxc://s/m""#, r#","thumbnail":null"#] {
+        assert!(serde_json::from_str::<TimelineItem>(&image(extra)).is_err());
+    }
+    let sized = |size: &str| {
+        format!(
+            r#"{{"kind":"image","event_id":"$e","sender":"@a:s","origin_server_ts":null,"name":"n","size":{size},"width":null,"height":null,"encrypted":true}}"#
+        )
+    };
+    assert!(serde_json::from_str::<TimelineItem>(&sized("null")).is_ok());
+    assert!(serde_json::from_str::<TimelineItem>(&sized("4294967295")).is_ok());
+    for invalid in ["4294967296", "-1", "1.5", "\"1\""] {
+        assert!(
+            serde_json::from_str::<TimelineItem>(&sized(invalid)).is_err(),
+            "{invalid}"
+        );
+    }
+
+    let view = r#"{"handle":"h","width":1,"height":1,"bands":1,"bandRows":1}"#;
+    assert!(serde_json::from_str::<ImageView>(view).is_ok());
+    for invalid in [
+        r#"{"handle":"h","width":1,"height":1,"bands":1}"#,
+        r#"{"handle":"h","width":1,"height":1,"bands":1,"bandRows":1,"path":"C:\x"}"#,
+        r#"{"handle":"h","width":-1,"height":1,"bands":1,"bandRows":1}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<ImageView>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+
+    let draft = |mime: &str, extra: &str| {
+        format!(r#"{{"kind":"draft","preview":{view},"size":10,"mime":"{mime}"{extra}}}"#)
+    };
+    assert!(serde_json::from_str::<ImagePick>(&draft("image/png", "")).is_ok());
+    for invalid in [
+        draft("image/gif", ""),
+        draft("png", ""),
+        draft("image/jpeg", r#","filename":"x.jpg""#),
+        r#"{"kind":"cancelled","path":"x"}"#.to_owned(),
+        r#"{"kind":"chosen"}"#.to_owned(),
+        r#"{"preview":null}"#.to_owned(),
+    ] {
+        assert!(
+            serde_json::from_str::<ImagePick>(&invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(serde_json::from_str::<ImagePick>(r#"{"kind":"cancelled"}"#).is_ok());
+
+    let pending = |kind: &str| {
+        format!(
+            r#"{{"localId":1,"roomId":"!r:s","kind":{kind},"body":"","state":"queued","eventId":null,"failure":null,"queuedAt":0}}"#
+        )
+    };
+    assert!(serde_json::from_str::<PendingMessage>(&pending(r#""image""#)).is_ok());
+    assert!(serde_json::from_str::<PendingMessage>(&pending(r#""file""#)).is_err());
+    assert!(serde_json::from_str::<PendingMessage>(&pending("null")).is_err());
 }

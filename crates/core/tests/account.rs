@@ -635,6 +635,12 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                 TimelineItem::Notice {
                     event_id, notice, ..
                 } => format!("{event_id}:{notice:?}"),
+                TimelineItem::Image {
+                    event_id,
+                    name,
+                    encrypted,
+                    ..
+                } => format!("{event_id}:image:{name}:{encrypted}"),
                 TimelineItem::Gap { .. } => "gap".into(),
             })
             .collect();
@@ -642,7 +648,7 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
             shown,
             [
                 format!("$secret:{:?}", NoticeKind::Undecryptable),
-                format!("$image:{:?}", NoticeKind::Unsupported),
+                "$image:image:cat.png:false".to_string(),
                 "$text=Hello from <script>alert(1)</script>".to_string(),
             ]
         );
@@ -2062,4 +2068,478 @@ fn given_no_changed_identity_then_nothing_is_listed_or_accepted() {
     // Stops the sync loop: the mock server goes back to a shared pool.
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// The synthetic 16 x 8 JPEG of the sandbox fixtures.
+#[cfg(windows)]
+const JPEG: &[u8] = include_bytes!("../../media-sandbox/tests/fixtures/solid-16x8-baseline.jpg");
+
+#[cfg(windows)]
+fn image_event(id: &str, content: Value) -> Value {
+    json!({"type":"m.room.message","room_id":ROOM,"sender":USER,"event_id":id,"origin_server_ts":9,"content":content})
+}
+
+/// A core with the real contained worker in a temporary profile; the
+/// worker binary is built by `tools/dev.py rust` before the tests.
+#[cfg(windows)]
+fn core_with_worker(dir: &Path) -> Core {
+    use persephone_core::media::contained::ContainedWorker;
+    let worker = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(|deps| deps.parent())
+        .unwrap()
+        .join("persephone-media-worker.exe");
+    assert!(
+        worker.is_file(),
+        "worker binary missing at {}",
+        worker.display()
+    );
+    // One profile per core: a temporary profile is deleted when dropped, and
+    // tests run at once in this process.
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let profile = persephone_media_broker::AppContainerProfile::temporary(&format!(
+        "Persephone.MediaWorker.AccountTest.{}.{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    make_core(dir, Fixed::new(Ok(())))
+        .with_image_worker(Arc::new(ContainedWorker::with_profile(worker, profile)))
+}
+
+/// GIVEN a signed-in account and `m.image` events (plain, encrypted with the
+/// SDK's attachment encryptor, tampered, declared too large) WHEN the page
+/// loads them THEN the plain and encrypted files are fetched through the
+/// authenticated media API with the access token, decrypted, decoded in the
+/// contained worker and kept under a handle; the tampered file fails its
+/// hash check; the oversized one is refused without any download; and after
+/// a lock every handle is gone.
+#[cfg(windows)]
+#[test]
+fn given_image_events_then_load_image_fetches_decrypts_and_decodes_them() {
+    use matrix_sdk_crypto::AttachmentEncryptor;
+    use persephone_contracts::ImageView;
+    use std::io::Read;
+
+    let server = Homeserver::signed_in();
+    let mut cursor = std::io::Cursor::new(JPEG.to_vec());
+    let mut encryptor = AttachmentEncryptor::new(&mut cursor);
+    let mut encrypted = Vec::new();
+    encryptor.read_to_end(&mut encrypted).unwrap();
+    let info = serde_json::to_value(encryptor.finish()).unwrap();
+    let mut file = info.as_object().unwrap().clone();
+    file.insert("url".into(), json!("mxc://synthetic.test/secret"));
+    let mut tampered = encrypted.clone();
+    tampered[40] ^= 1;
+    let mut tampered_file = file.clone();
+    tampered_file.insert("url".into(), json!("mxc://synthetic.test/tampered"));
+    let events = [
+        (
+            "plain",
+            image_event(
+                "$plain",
+                json!({"msgtype":"m.image","body":"cat.jpg","url":"mxc://synthetic.test/cat"}),
+            ),
+        ),
+        (
+            "secret",
+            image_event(
+                "$secret",
+                json!({"msgtype":"m.image","body":"x","file":file}),
+            ),
+        ),
+        (
+            "tampered",
+            image_event(
+                "$tampered",
+                json!({"msgtype":"m.image","body":"x","file":tampered_file}),
+            ),
+        ),
+        (
+            "huge",
+            image_event(
+                "$huge",
+                json!({"msgtype":"m.image","body":"x","url":"mxc://synthetic.test/huge","info":{"size":21 * 1024 * 1024}}),
+            ),
+        ),
+    ];
+    server.runtime.block_on(async {
+        for (name, event) in events {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(event))
+                .mount(&server.server)
+                .await;
+        }
+        for (media, body) in [
+            ("cat", JPEG.to_vec()),
+            ("secret", encrypted.clone()),
+            ("tampered", tampered),
+            ("huge", JPEG.to_vec()),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/_matrix/client/v1/media/download/synthetic.test/{media}"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .mount(&server.server)
+                .await;
+        }
+    });
+    let dir = TempDir::new().unwrap();
+    let core = core_with_worker(dir.path());
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("the room", || {
+        matches!(
+            call(
+                &core,
+                Call::Subscribe {
+                    room_id: ROOM.into()
+                }
+            ),
+            Outcome::Ok(_)
+        )
+    });
+    let load = |event: &str| {
+        call(
+            &core,
+            Call::LoadImage {
+                room_id: ROOM.into(),
+                event_id: event.into(),
+            },
+        )
+    };
+    let plain: ImageView = value(load("$plain"));
+    assert_eq!((plain.width, plain.height, plain.bands), (16, 8, 1));
+    let secret: ImageView = value(load("$secret"));
+    assert_eq!((secret.width, secret.height), (16, 8));
+    assert_ne!(plain.handle, secret.handle);
+    assert_eq!(load("$tampered"), Outcome::Error(ErrorCode::Rejected));
+    assert_eq!(load("$huge"), Outcome::Error(ErrorCode::Rejected));
+    assert_eq!(
+        server.requests_to("/_matrix/client/v1/media/download/synthetic.test/huge"),
+        0,
+        "a declared size over the cap is refused before downloading"
+    );
+    assert_eq!(load("$missing"), Outcome::Error(ErrorCode::NotFound));
+    let requests = server
+        .runtime
+        .block_on(server.server.received_requests())
+        .unwrap_or_default();
+    let download = requests
+        .iter()
+        .find(|request| {
+            request
+                .url
+                .path()
+                .ends_with("/media/download/synthetic.test/cat")
+        })
+        .expect("the plain image was downloaded");
+    assert_eq!(
+        download
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+
+    assert_eq!(
+        call(
+            &core,
+            Call::ReleaseImage {
+                handle: plain.handle.clone()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    assert_eq!(
+        call(
+            &core,
+            Call::ReleaseImage {
+                handle: secret.handle
+            }
+        ),
+        Outcome::Error(ErrorCode::NotFound),
+        "a lock drops every handle"
+    );
+    assert_eq!(load("$plain"), Outcome::Error(ErrorCode::Locked));
+}
+
+/// Picks one fixed file instead of showing the dialog.
+#[cfg(windows)]
+struct PickFile(std::path::PathBuf);
+
+#[cfg(windows)]
+impl persephone_core::pick::ImagePicker for PickFile {
+    fn pick(&self) -> Result<Option<std::path::PathBuf>, ErrorCode> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+/// The fixture JPEG with a comment that must not be sent, and orientation 6.
+#[cfg(windows)]
+fn jpeg_with_comment() -> Vec<u8> {
+    let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    exif.extend_from_slice(&6u16.to_le_bytes());
+    exif.extend_from_slice(&[0; 6]);
+    let mut out = JPEG[..2].to_vec();
+    out.extend_from_slice(&[0xff, 0xe1]);
+    out.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&exif);
+    out.extend_from_slice(&[0xff, 0xfe, 0, 8]);
+    out.extend_from_slice(b"secret");
+    out.extend_from_slice(&JPEG[2..]);
+    out
+}
+
+#[cfg(windows)]
+impl Homeserver {
+    /// The upload endpoint, and the media configuration the SDK reads
+    /// before an upload (it refuses a file over the server's limit).
+    fn upload_endpoint(&self) {
+        self.runtime.block_on(async {
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/(media/v3|client/v1/media)/config$"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"m.upload.size": 52428800})),
+                )
+                .mount(&self.server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"^/_matrix/(media/v3|client/v1/media)/upload$"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"content_uri": "mxc://synthetic.test/uploaded"})),
+                )
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    fn upload_bodies(&self) -> Vec<Vec<u8>> {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "POST"
+                    && request.url.path().contains("media")
+                    && request.url.path().ends_with("/upload")
+            })
+            .map(|request| request.body.clone())
+            .collect()
+    }
+}
+
+#[cfg(windows)]
+fn image_core(server: &Homeserver, dir: &Path, picked: &Path) -> Core {
+    let core = core_with_worker(dir).with_picker(Arc::new(PickFile(picked.to_path_buf())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    core
+}
+
+#[cfg(windows)]
+fn pick_draft(core: &Core, room_id: &str) -> persephone_contracts::ImageView {
+    match value(call(
+        core,
+        Call::PickImage {
+            room_id: room_id.into(),
+        },
+    )) {
+        persephone_contracts::ImagePick::Draft { preview, .. } => preview,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// GIVEN a picked JPEG with a comment, in a room that is not encrypted WHEN
+/// it is sent THEN nothing is uploaded before consent; after consent and a
+/// retry the stripped copy is uploaded (no comment) and the event carries
+/// the shown size, the MIME type and the generic name only; a second image
+/// waits while the first is unsent; the picked file is unchanged.
+#[cfg(windows)]
+#[test]
+fn given_a_picked_image_then_send_image_uploads_only_the_stripped_copy() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(200);
+    server.upload_endpoint();
+    let dir = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let picked = files.path().join("holiday photo.jpg");
+    let original = jpeg_with_comment();
+    fs::write(&picked, &original).unwrap();
+    let core = image_core(&server, dir.path(), &picked);
+    wait_for("the plain room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN)
+    });
+    let preview = pick_draft(&core, PLAIN);
+    assert_eq!((preview.width, preview.height), (8, 16), "rotated");
+    assert_eq!(
+        call(
+            &core,
+            Call::SendImage {
+                room_id: ROOM.into(),
+                handle: preview.handle.clone()
+            }
+        ),
+        Outcome::Error(ErrorCode::NotFound),
+        "a draft is sent only in the room it was picked for"
+    );
+    let queued: PendingMessage = value(call(
+        &core,
+        Call::SendImage {
+            room_id: PLAIN.into(),
+            handle: preview.handle.clone(),
+        },
+    ));
+    assert_eq!(queued.kind, persephone_contracts::PendingKind::Image);
+    wait_for("the confirmation request", || {
+        pending(&core, PLAIN)[0].state == PendingState::Failed
+    });
+    assert_eq!(
+        pending(&core, PLAIN)[0].failure,
+        Some(SendFailure::ConfirmationRequired)
+    );
+    assert!(
+        server.upload_bodies().is_empty(),
+        "nothing uploaded before consent"
+    );
+
+    // A second image waits while the first is unsent; its draft stays.
+    let second = pick_draft(&core, PLAIN);
+    assert_eq!(
+        call(
+            &core,
+            Call::SendImage {
+                room_id: PLAIN.into(),
+                handle: second.handle.clone()
+            }
+        ),
+        Outcome::Error(ErrorCode::LimitExceeded)
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::DiscardImage {
+                handle: second.handle
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+
+    assert_eq!(
+        call(
+            &core,
+            Call::AllowUnencrypted {
+                room_id: PLAIN.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::RetryMessage {
+                local_id: queued.local_id
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    wait_for("the send", || {
+        pending(&core, PLAIN)[0].state == PendingState::Sent
+    });
+    let uploads = server.upload_bodies();
+    assert_eq!(uploads.len(), 1);
+    assert!(uploads[0].starts_with(&[0xff, 0xd8]), "a JPEG");
+    assert!(uploads[0].len() < original.len());
+    assert!(!uploads[0].windows(6).any(|w| w == b"secret"), "stripped");
+    let sends = server.sends();
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0].contains("/send/m.room.message/"), "{}", sends[0]);
+    let event = server.bodies_to(&sends[0]).remove(0);
+    assert_eq!(event["msgtype"], "m.image");
+    assert_eq!(event["body"], "image.jpg");
+    assert_eq!(event["url"], "mxc://synthetic.test/uploaded");
+    assert_eq!(event["info"]["w"], 8);
+    assert_eq!(event["info"]["h"], 16);
+    assert_eq!(event["info"]["size"], uploads[0].len());
+    assert_eq!(event["info"]["mimetype"], "image/jpeg");
+    assert!(!event.to_string().contains("holiday"), "{event}");
+    assert!(event.get("thumbnail_url").is_none());
+    assert!(event["info"].get("thumbnail_info").is_none());
+    assert_eq!(
+        fs::read(&picked).unwrap(),
+        original,
+        "the file is unchanged"
+    );
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN an encrypted room and a device that is not verified WHEN an image
+/// is sent THEN it fails as `device_not_verified` with no event sent, and
+/// anything the SDK uploaded first is ciphertext, never the image itself.
+#[cfg(windows)]
+#[test]
+fn given_an_encrypted_room_then_an_image_is_never_uploaded_in_plain() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(200);
+    server.upload_endpoint();
+    let dir = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let picked = files.path().join("photo.jpg");
+    fs::write(&picked, jpeg_with_comment()).unwrap();
+    let core = image_core(&server, dir.path(), &picked);
+    wait_for("the encrypted room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == ROOM)
+    });
+    let preview = pick_draft(&core, ROOM);
+    let queued: PendingMessage = value(call(
+        &core,
+        Call::SendImage {
+            room_id: ROOM.into(),
+            handle: preview.handle,
+        },
+    ));
+    assert_eq!(queued.kind, persephone_contracts::PendingKind::Image);
+    wait_for("the send to end", || {
+        pending(&core, ROOM)[0].state == PendingState::Failed
+    });
+    assert_eq!(
+        pending(&core, ROOM)[0].failure,
+        Some(SendFailure::DeviceNotVerified)
+    );
+    assert!(server.sends().is_empty(), "no event: {:?}", server.sends());
+    for upload in server.upload_bodies() {
+        assert!(
+            !upload.starts_with(&[0xff, 0xd8]),
+            "the upload is not a JPEG"
+        );
+        assert!(
+            !upload.windows(8).any(|w| w == &JPEG[2..10]),
+            "no plain JPEG bytes"
+        );
+    }
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    assert!(
+        pending(&core, ROOM).is_empty(),
+        "the queued image is dropped"
+    );
 }

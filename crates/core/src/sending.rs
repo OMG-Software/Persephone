@@ -15,13 +15,20 @@
 //!   without retries (`account.rs`), so nothing is retried behind the user.
 //! * Consent is a list of room IDs in an encrypted crypto-store custom value,
 //!   at most [`MAX_CONSENTED_ROOMS`].
+//! * An image goes through the same checks, then the SDK's attachment send:
+//!   the SDK uploads it encrypted in an encrypted room (and fails rather than
+//!   upload it in plain), and sends the event with the image's size, MIME
+//!   type and a generic file name, without a thumbnail. A retry uploads the
+//!   file again but sends the event with the same transaction ID.
 
 use crate::identities;
+use crate::media::ImageUpload;
 use crate::outbox::SendOutcome;
 use crate::store::Stores;
 use matrix_sdk::{
-    Client, HttpError, RoomState,
-    ruma::{OwnedTransactionId, RoomId, events::room::message::RoomMessageEventContent},
+    Client, HttpError, Room, RoomState,
+    attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo},
+    ruma::{OwnedTransactionId, RoomId, UInt, events::room::message::RoomMessageEventContent},
 };
 use matrix_sdk_crypto::{OlmError, SessionRecipientCollectionError, store::CryptoStore};
 use persephone_contracts::SendFailure;
@@ -32,6 +39,42 @@ pub const CONSENT_KEY: &str = "persephone.plaintext_rooms.v1";
 pub const MAX_CONSENTED_ROOMS: usize = 200;
 const MAX_CONSENT_BYTES: usize = 64 * 1024;
 
+/// The joined room to send in, once the checks every message passes have
+/// passed; otherwise how the send ended.
+async fn checked_room(
+    client: &Client,
+    room_id: &str,
+    consented: bool,
+) -> Result<Room, SendOutcome> {
+    let Ok(room_id) = RoomId::parse(room_id) else {
+        return Err(SendOutcome::Failed(SendFailure::Failed));
+    };
+    let Some(room) = client
+        .get_room(&room_id)
+        .filter(|room| room.state() == RoomState::Joined)
+    else {
+        return Err(SendOutcome::Failed(SendFailure::NotJoined));
+    };
+    let encrypted = match room.latest_encryption_state().await {
+        // Never treated as "not encrypted": consent must not send plain text
+        // into a room whose encryption is not known.
+        Ok(state) if state.is_unknown() => return Err(SendOutcome::Failed(SendFailure::Failed)),
+        Ok(state) => state.is_encrypted(),
+        Err(error) => return Err(classify(&error)),
+    };
+    if !encrypted && !consented {
+        return Err(SendOutcome::Failed(SendFailure::ConfirmationRequired));
+    }
+    if encrypted {
+        match identities::changed_members(&room).await {
+            Some(changed) if changed.is_empty() => {}
+            Some(_) => return Err(SendOutcome::Failed(SendFailure::IdentityChanged)),
+            None => return Err(SendOutcome::Failed(SendFailure::Failed)),
+        }
+    }
+    Ok(room)
+}
+
 /// Sends `body` as a text message with `transaction_id`.
 pub async fn send(
     client: &Client,
@@ -40,38 +83,61 @@ pub async fn send(
     transaction_id: OwnedTransactionId,
     consented: bool,
 ) -> SendOutcome {
-    let Ok(room_id) = RoomId::parse(room_id) else {
-        return SendOutcome::Failed(SendFailure::Failed);
+    let room = match checked_room(client, room_id, consented).await {
+        Ok(room) => room,
+        Err(outcome) => return outcome,
     };
-    let Some(room) = client
-        .get_room(&room_id)
-        .filter(|room| room.state() == RoomState::Joined)
-    else {
-        return SendOutcome::Failed(SendFailure::NotJoined);
-    };
-    let encrypted = match room.latest_encryption_state().await {
-        // Never treated as "not encrypted": consent must not send plain text
-        // into a room whose encryption is not known.
-        Ok(state) if state.is_unknown() => return SendOutcome::Failed(SendFailure::Failed),
-        Ok(state) => state.is_encrypted(),
-        Err(error) => return classify(&error),
-    };
-    if !encrypted && !consented {
-        return SendOutcome::Failed(SendFailure::ConfirmationRequired);
-    }
-    if encrypted {
-        match identities::changed_members(&room).await {
-            Some(changed) if changed.is_empty() => {}
-            Some(_) => return SendOutcome::Failed(SendFailure::IdentityChanged),
-            None => return SendOutcome::Failed(SendFailure::Failed),
-        }
-    }
     match room
         .send(RoomMessageEventContent::text_plain(body))
         .with_transaction_id(transaction_id)
         .await
     {
         Ok(result) => SendOutcome::Sent(result.response.event_id.to_string()),
+        Err(error) => classify(&error),
+    }
+}
+
+/// Parses a MIME type into whatever type the SDK's attachment send names,
+/// without this crate depending on that type's crate directly.
+fn parse_mime<T: std::str::FromStr>(text: &str) -> Option<T> {
+    text.parse().ok()
+}
+
+/// Sends a stripped image with `transaction_id`, after the same checks as
+/// [`send`]. The width and height are the image's as shown; no thumbnail,
+/// caption or original file name is sent.
+pub async fn send_image(
+    client: &Client,
+    room_id: &str,
+    image: &ImageUpload,
+    transaction_id: OwnedTransactionId,
+    consented: bool,
+) -> SendOutcome {
+    let room = match checked_room(client, room_id, consented).await {
+        Ok(room) => room,
+        Err(outcome) => return outcome,
+    };
+    // The SDK takes its own copy; it is reserved like the upload.
+    let Ok((data, _reservation)) = image.copy_for_send() else {
+        return SendOutcome::Failed(SendFailure::Failed);
+    };
+    let Some(mime) = parse_mime(image.mime_type()) else {
+        return SendOutcome::Failed(SendFailure::Failed);
+    };
+    let (width, height) = image.size();
+    let info = AttachmentInfo::Image(BaseImageInfo {
+        width: Some(UInt::from(width)),
+        height: Some(UInt::from(height)),
+        size: UInt::try_from(data.len() as u64).ok(),
+        blurhash: None,
+        is_animated: Some(false),
+    });
+    let config = AttachmentConfig::new().txn_id(transaction_id).info(info);
+    match room
+        .send_attachment(image.file_name(), &mime, data, config)
+        .await
+    {
+        Ok(response) => SendOutcome::Sent(response.event_id.to_string()),
         Err(error) => classify(&error),
     }
 }

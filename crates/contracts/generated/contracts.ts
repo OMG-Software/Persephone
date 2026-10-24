@@ -96,7 +96,9 @@ export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
 export type SendFailure = "confirmation_required" | "device_not_verified" | "identity_changed" | "not_joined" | "rejected" | "failed";
 
-export type PendingMessage = { localId: number, roomId: string, body: string, state: PendingState, eventId: string | null, failure: SendFailure | null, 
+export type PendingKind = "text" | "image";
+
+export type PendingMessage = { localId: number, roomId: string, kind: PendingKind, body: string, state: PendingState, eventId: string | null, failure: SendFailure | null, 
 /**
  * When it was queued on this device, by this computer's clock.
  */
@@ -116,9 +118,39 @@ origin_server_ts: number | null, } | { "kind": "gap", next_cursor: string | null
 /**
  * As for messages.
  */
-origin_server_ts: number | null, };
+origin_server_ts: number | null, } | { "kind": "image", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, name: string, 
+/**
+ * Declared file size in bytes.
+ */
+size: number | null, 
+/**
+ * Declared width and height, both set or both none.
+ */
+width: number | null, height: number | null, 
+/**
+ * The file is end-to-end encrypted.
+ */
+encrypted: boolean, };
 
 export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, };
+
+export type ImageMime = "image/png" | "image/jpeg";
+
+export type ImageView = { handle: string, 
+/**
+ * The shown size, at most 2048 x 2048, after the EXIF orientation.
+ */
+width: number, height: number, bands: number, bandRows: number, };
+
+export type ImagePick = { "kind": "draft", preview: ImageView, 
+/**
+ * The stripped copy's size in bytes.
+ */
+size: number, mime: ImageMime, } | { "kind": "cancelled", };
 
 export const roomSummaryFixture = {
   "roomId": "!example:server.invalid",
@@ -144,6 +176,17 @@ export const timelinePageFixture = {
       "sender": "@bob:server.invalid",
       "notice": "undecryptable",
       "origin_server_ts": null
+    },
+    {
+      "kind": "image",
+      "event_id": "$image",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258060000,
+      "name": "cat <script>.png",
+      "size": 48213,
+      "width": 640,
+      "height": 480,
+      "encrypted": true
     },
     {
       "kind": "gap",

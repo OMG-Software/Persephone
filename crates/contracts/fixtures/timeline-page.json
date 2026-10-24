@@ -16,6 +16,17 @@
       "origin_server_ts": null
     },
     {
+      "kind": "image",
+      "event_id": "$image",
+      "sender": "@alice:server.invalid",
+      "origin_server_ts": 1767258060000,
+      "name": "cat <script>.png",
+      "size": 48213,
+      "width": 640,
+      "height": 480,
+      "encrypted": true
+    },
+    {
       "kind": "gap",
       "next_cursor": null
     }

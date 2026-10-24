@@ -376,7 +376,9 @@ mod tests {
                 .iter()
                 .map(|item| match item {
                     TimelineItem::Message { event_id, .. } => event_id.clone(),
-                    TimelineItem::Gap { .. } | TimelineItem::Notice { .. } => unreachable!(),
+                    TimelineItem::Gap { .. }
+                    | TimelineItem::Notice { .. }
+                    | TimelineItem::Image { .. } => unreachable!(),
                 })
                 .collect();
             seen.splice(0..0, ids);
@@ -404,7 +406,9 @@ mod tests {
                     TimelineItem::Message {
                         origin_server_ts, ..
                     } => origin_server_ts.map(UnixMillis::get),
-                    TimelineItem::Gap { .. } | TimelineItem::Notice { .. } => unreachable!(),
+                    TimelineItem::Gap { .. }
+                    | TimelineItem::Notice { .. }
+                    | TimelineItem::Image { .. } => unreachable!(),
                 })
                 .collect()
         };
