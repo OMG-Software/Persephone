@@ -137,9 +137,9 @@ case. Remove the old device from another Matrix client.
 GitHub Pages hosts the project website. The website's pages:
 
 * set no cookies;
-* has no analytics, no scripts and no tracking;
-* loads no fonts, images or other files from third parties;
-* tells your browser not to send a referrer when you follow a link.
+* have no analytics, no scripts and no tracking;
+* load no fonts, images or other files from third parties;
+* tell your browser not to send a referrer when you follow a link.
 
 GitHub can process technical data, such as your IP address, when you visit
 the website. See the
