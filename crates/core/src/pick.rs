@@ -10,11 +10,11 @@
 //!   (no other process can open it for writing meanwhile), without following
 //!   a reparse point. It refuses a reparse point (symbolic link or junction),
 //!   a directory, anything that is not a plain file, an empty file and one
-//!   larger than [`MAX_ENCODED_BYTES`]. The buffer is reserved before it is
+//!   larger than [`MAX_ENCODED_BYTES`](crate::media::MAX_ENCODED_BYTES). The buffer is reserved before it is
 //!   allocated, and the read fails if the length differs from the size
 //!   checked first. The file is never written.
 
-use crate::media::{Encoded, MAX_ENCODED_BYTES};
+use crate::media::Encoded;
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::ResourceBudgets;
 use std::path::{Path, PathBuf};
@@ -57,9 +57,8 @@ pub fn read_image_file(path: &Path, budgets: &ResourceBudgets) -> Result<Encoded
 
 #[cfg(windows)]
 mod windows {
-    use super::{
-        Encoded, ErrorCode, ImagePicker, MAX_ENCODED_BYTES, Path, PathBuf, ResourceBudgets,
-    };
+    use super::{Encoded, ErrorCode, ImagePicker, Path, PathBuf, ResourceBudgets};
+    use crate::media::MAX_ENCODED_BYTES;
     use std::{
         ffi::OsString,
         fs::OpenOptions,
@@ -275,6 +274,7 @@ mod dev_tests {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use crate::media::MAX_ENCODED_BYTES;
     use persephone_media_protocol::{BudgetClass, MIB};
     use std::io::Write;
 
