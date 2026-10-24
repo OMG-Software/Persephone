@@ -88,6 +88,7 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 | `windows` | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
 | `macos-latest` | `macos-latest` (arm64) | Preinstalled Xcode tools | 3.14 (setup-python) |
 | `ubuntu-latest` | `ubuntu-latest` (24.04) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config` | 3.14 (setup-python) |
+| `ubuntu-24.04-arm` | `ubuntu-24.04-arm` (arm64) | As `ubuntu-latest`; rustup from `sh.rustup.rs` if the image lacks it | 3.14 (setup-python) |
 | `debian-13` | `debian:trixie` container | `apt-get`: build tools, `libwebkit2gtk-4.1-dev` | Distribution `python3` |
 | `arch` | `archlinux:base-devel` container | `pacman -Syu`: `webkit2gtk-4.1` | Distribution `python` |
 | `fedora-44` | `fedora:44` container | `dnf`: build tools, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
@@ -95,8 +96,8 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 
 - **Containers.** Container images are pinned by digest in the workflow. Containers install Rust with rustup from `sh.rustup.rs` and Node.js with setup-node.
 - **Packages are not pinned.** Packages come from each distribution's current repositories, so only the base image is fixed. Arch supports only full upgrades, so its job always builds against the current rolling release.
-- **Off Windows, only build and tests are covered.** There is no vault, credential prompt, UI containment or worker containment there. These fail closed (`unsupported`), and the core refuses to start the UI. A passing non-Windows job therefore shows that the code builds and its tests pass, not that the application runs or is contained on that OS. No job launches the application, on Windows either.
-- **Tests that are not compiled off Windows.** The AppContainer probe, DPAPI, the native-prompt and the contained-worker tests compile only on Windows. This is why Windows runs 41 more Rust tests.
+- **Off Windows, CI covers build and tests only.** Linux and macOS have worker containment (seccomp on Linux, Seatbelt on macOS; ADR-0010, ADR-0011), and its probe and contained-worker tests run in their jobs. macOS also has its Keychain vault, prompts, file dialog and UI host (CI-tested only, never run with a display). The Linux vault, prompts, file dialog and UI host are still being built and fail closed (`unsupported`), so the core refuses to start the UI there. No job launches the application on any OS.
+- **Tests that compile on one OS only.** The AppContainer probe, DPAPI and the native Windows prompts run only on Windows; seccomp probes only on Linux; Keychain, AppKit and Seatbelt tests only on macOS. Test counts therefore differ between jobs.
 
 Run 39785251911 at `04c0538` passed every job:
 
@@ -106,6 +107,13 @@ Run 39785251911 at `04c0538` passed every job:
 | `macos-latest`, `ubuntu-latest`, `debian-13`, `arch`, `fedora-44`, `opensuse-leap-16.0` | 194 (163 + 31) each | 16 each | 15 (2 + 13) each |
 
 On every job, `cargo fmt`, Clippy with `-D warnings` (default and development feature), the contract drift check and the TypeScript check also passed. Each job took 8 to 17 minutes. The `#[cfg(unix)]` directory sync in `crates/core/src/store.rs` compiles on Linux and macOS, and the sign-out and store tests that use it pass there.
+
+### Release builds
+
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) builds,
+signs and checksums the installers. A `v*` tag creates a draft pre-release; a
+manual run builds unsigned artifacts only. [Release guide](release.md) lists
+the secrets, how to cut a release and how users verify the files.
 
 ## Disposable homeservers
 

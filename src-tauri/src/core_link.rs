@@ -325,11 +325,40 @@ fn take_stdio() -> io::Result<(File, File)> {
     Ok((File::from(from_core), File::from(to_core)))
 }
 
-#[cfg(not(windows))]
+/// Moves the core's pipes off descriptors 0 and 1 to new close-on-exec
+/// descriptors, and points 0 and 1 at `/dev/null`, so that the web view's
+/// child processes inherit nothing that reaches the core.
+#[cfg(unix)]
 fn take_stdio() -> io::Result<(File, File)> {
-    // Linux and macOS handling of the inherited descriptors is not built yet.
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    fn take(fd: libc::c_int, null: &File) -> io::Result<OwnedFd> {
+        // SAFETY: duplicates an open descriptor to the lowest free number
+        // above 2, with close-on-exec; the result is owned only here.
+        let moved = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        if moved < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `moved` is a new descriptor that nothing else owns.
+        let moved = unsafe { OwnedFd::from_raw_fd(moved) };
+        // SAFETY: both descriptors are open; dup2 replaces `fd` atomically.
+        if unsafe { libc::dup2(null.as_raw_fd(), fd) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(moved)
+    }
+
+    let null_in = File::open("/dev/null")?;
+    let null_out = File::options().write(true).open("/dev/null")?;
+    let from_core = take(libc::STDIN_FILENO, &null_in)?;
+    let to_core = take(libc::STDOUT_FILENO, &null_out)?;
+    Ok((File::from(from_core), File::from(to_core)))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn take_stdio() -> io::Result<(File, File)> {
     Err(io::Error::other(
-        "the core channel is implemented for Windows only",
+        "the core channel is implemented for Windows, Linux and macOS only",
     ))
 }
 

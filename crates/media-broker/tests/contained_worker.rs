@@ -1,11 +1,11 @@
-//! End-to-end runs of the real media worker under the broker's containment.
-//! `cargo test --workspace` builds the worker binary these tests launch.
-#![cfg(windows)]
+//! End-to-end runs of the real media worker under the broker's containment
+//! on Windows, Linux and macOS. `python tools/dev.py rust` builds the worker
+//! binary these tests launch.
+#![cfg(any(windows, target_os = "linux", target_os = "macos"))]
 
-use persephone_media_broker::{
-    AppContainerProfile, Mitigations, RunError, WORKER_EXIT_CONTAINMENT, WorkerPolicy, run_decode,
-    run_strip,
-};
+#[cfg(any(windows, target_os = "linux"))]
+use persephone_media_broker::WORKER_EXIT_CONTAINMENT;
+use persephone_media_broker::{ContainmentProfile, RunError, WorkerPolicy, run_decode, run_strip};
 use persephone_media_protocol::{FrameKind, ResourceBudgets, WorkerFailure};
 use std::{
     path::PathBuf,
@@ -15,10 +15,21 @@ use std::{
 };
 
 /// Self-check bits the worker reports (crates/media-worker/src/containment.rs).
+#[cfg(windows)]
 const MISSING_APPCONTAINER: u32 = 1 << 0;
+#[cfg(windows)]
 const MISSING_JOB: u32 = 1 << 1;
+#[cfg(windows)]
 const MISSING_DYNAMIC_CODE_BLOCK: u32 = 1 << 2;
+#[cfg(windows)]
 const MISSING_WIN32K_LOCKDOWN: u32 = 1 << 3;
+#[cfg(target_os = "linux")]
+const MISSING_NO_NEW_PRIVS: u32 = 1 << 5;
+/// A control frame's header and a worker failure body.
+const FAILURE_FRAME_BYTES: usize = 17 + 6;
+/// A control frame's header and the `WorkerReady` body.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const READY_FRAME_BYTES: usize = 17 + 2;
 
 fn worker_exe() -> PathBuf {
     // tests run from target/<profile>/deps; the worker binary is one level up.
@@ -27,7 +38,10 @@ fn worker_exe() -> PathBuf {
         .parent()
         .and_then(|deps| deps.parent())
         .unwrap()
-        .join("persephone-media-worker.exe");
+        .join(format!(
+            "persephone-media-worker{}",
+            std::env::consts::EXE_SUFFIX
+        ));
     assert!(
         path.is_file(),
         "worker binary missing at {}; run `cargo test --workspace` or build persephone-media-worker",
@@ -36,14 +50,14 @@ fn worker_exe() -> PathBuf {
     path
 }
 
-fn profile() -> AppContainerProfile {
+fn profile() -> ContainmentProfile {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let name = format!(
         "Persephone.MediaWorker.Test.{}.{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
-    AppContainerProfile::temporary(&name).unwrap()
+    ContainmentProfile::temporary(&name).unwrap()
 }
 
 fn png(width: u32, height: u32) -> (Vec<u8>, Vec<u8>) {
@@ -230,21 +244,81 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-/// The worker must refuse when launched without the broker's containment.
-#[test]
-fn given_worker_started_without_containment_then_it_refuses_before_reading_input() {
-    let output = Command::new(worker_exe())
+/// Runs the worker directly, without the broker's launcher, with stdin at
+/// end of file.
+fn run_worker_directly() -> std::process::Output {
+    Command::new(worker_exe())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(WORKER_EXIT_CONTAINMENT as i32));
-    let reply = &output.stdout;
-    assert_eq!(reply.len(), 17 + 6, "one control frame and nothing else");
+        .unwrap()
+}
+
+/// The containment failure in a reply that is exactly one failure frame.
+/// macOS has no test that expects one: its worker sandboxes itself.
+#[cfg(any(windows, target_os = "linux"))]
+fn containment_mask(reply: &[u8]) -> u32 {
+    assert_eq!(
+        reply.len(),
+        FAILURE_FRAME_BYTES,
+        "one control frame and nothing else"
+    );
     assert_eq!(reply[0], FrameKind::Control as u8);
     let Some(WorkerFailure::ContainmentCheck(mask)) = WorkerFailure::decode(&reply[17..]) else {
         panic!("expected a containment failure, got {reply:?}");
     };
+    mask
+}
+
+/// GIVEN a worker started without the launcher (no `no_new_privs`) WHEN it
+/// starts THEN it refuses before reading input. If this test process itself
+/// runs with `no_new_privs` (some containers), the worker's own checks pass,
+/// so it contains itself, reports ready and then finds no request.
+#[cfg(target_os = "linux")]
+#[test]
+fn given_worker_started_without_launcher_then_it_refuses_before_reading_input() {
+    let inherited = std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .any(|line| line.split_whitespace().collect::<Vec<_>>() == ["NoNewPrivs:", "1"]);
+    let output = run_worker_directly();
+    if inherited {
+        assert_ready_then_bad_request(&output);
+    } else {
+        assert_eq!(output.status.code(), Some(WORKER_EXIT_CONTAINMENT as i32));
+        assert_eq!(containment_mask(&output.stdout), MISSING_NO_NEW_PRIVS);
+    }
+}
+
+/// GIVEN a worker started without the launcher on macOS WHEN it starts THEN
+/// it applies its own sandbox, reports ready, and refuses the missing
+/// request; the launcher's rlimits cannot be checked from inside.
+#[cfg(target_os = "macos")]
+#[test]
+fn given_worker_started_without_launcher_then_it_sandboxes_itself_and_reads_no_image() {
+    assert_ready_then_bad_request(&run_worker_directly());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_ready_then_bad_request(output: &std::process::Output) {
+    use persephone_media_protocol::WorkerReady;
+    let reply = &output.stdout;
+    assert_eq!(reply.len(), READY_FRAME_BYTES + FAILURE_FRAME_BYTES);
+    assert!(WorkerReady::matches(&reply[17..READY_FRAME_BYTES]));
+    assert_eq!(
+        WorkerFailure::decode(&reply[READY_FRAME_BYTES + 17..]),
+        Some(WorkerFailure::BadRequest)
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+/// The worker must refuse when launched without the broker's containment.
+#[cfg(windows)]
+#[test]
+fn given_worker_started_without_containment_then_it_refuses_before_reading_input() {
+    let output = run_worker_directly();
+    assert_eq!(output.status.code(), Some(WORKER_EXIT_CONTAINMENT as i32));
+    let mask = containment_mask(&output.stdout);
     for bit in [
         MISSING_APPCONTAINER,
         MISSING_DYNAMIC_CODE_BLOCK,
@@ -259,8 +333,10 @@ fn given_worker_started_without_containment_then_it_refuses_before_reading_input
 
 /// Positive controls: dropping either mitigation must make the self-check
 /// fail, which shows the check observes the real process policy.
+#[cfg(windows)]
 #[test]
 fn given_a_missing_mitigation_then_contained_worker_refuses_with_that_bit() {
+    use persephone_media_broker::Mitigations;
     let (encoded, _) = png(4, 4);
     for (mitigations, expected) in [
         (
@@ -372,12 +448,18 @@ fn given_deadline_shorter_than_the_operation_then_broker_terminates_worker() {
     }
 }
 
+/// macOS does not enforce an address-space limit, so this runs on Windows
+/// (Job committed memory) and Linux (`RLIMIT_AS`) only.
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn given_memory_limit_below_decode_needs_then_worker_does_not_produce_pixels() {
     let (encoded, _) = png(1024, 1024);
+    // A 1-megapixel decode peaked at about 19 MB committed in a debug worker
+    // on Windows. On Linux the limit is on address space, where the guest
+    // reserves its whole 176 MiB linear-memory cap when it is instantiated.
+    let limit = if cfg!(windows) { 12 } else { 128 };
     let policy = WorkerPolicy {
-        // A 1-megapixel decode peaked at about 19 MB in a debug worker.
-        memory_limit_bytes: 12 * 1024 * 1024,
+        memory_limit_bytes: limit * 1024 * 1024,
         ..WorkerPolicy::default()
     };
     let run = run_decode(

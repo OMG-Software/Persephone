@@ -24,7 +24,7 @@ rust-version = "1.96"
 publish = false
 
 # Keep SDK development builds useful without duplicating full debug/incremental
-# artifacts across each package. Release settings are unchanged.
+# artifacts across each package.
 [profile.dev]
 debug = 1
 incremental = false
@@ -32,3 +32,11 @@ incremental = false
 [profile.test]
 debug = 1
 incremental = false
+
+# Release builds: thin cross-crate LTO, one codegen unit, and no debug
+# information in the shipped binaries (symbol names stay). Panics unwind, as
+# before. This also applies to the release WebAssembly guest.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

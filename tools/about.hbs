@@ -1,0 +1,26 @@
+Persephone third-party notices
+==============================
+
+Persephone is licensed under GPL-3.0-only. It includes the Rust crates listed
+below, under the licences shown with their full texts. This file is generated
+by cargo-about from Cargo.lock with tools/about.toml. The bundled frontend's
+npm dependencies are not listed here.
+
+Licences used
+-------------
+{{#each overview}}
+- {{{name}}} ({{count}})
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+--------------------------------------------------------------------------------
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} <{{{crate.repository}}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

@@ -1,0 +1,1146 @@
+# Builds Persephone release bundles for Windows x64, Linux x64 and arm64, and
+# universal macOS, and publishes them as a draft GitHub pre-release.
+#
+# - A pushed `v*` tag is a release run. The tag must equal every manifest
+#   version (tools/release.py check-tag), every signing secret must exist,
+#   Windows and macOS files are signed, SHA256SUMS is signed with cosign
+#   (keyless) and GPG, each file gets a build-provenance attestation, and a
+#   draft pre-release is created. The owner reviews and publishes it by hand.
+# - workflow_dispatch is a dry run. Signing, cosign, GPG and attestations are
+#   skipped, every artifact name ends in `-unsigned`, and no release is made.
+#   SHA256SUMS and the SBOM are still produced.
+#
+# Signing secrets live in the `release` environment, which only tag runs use
+# (see docs/release.md). A job that compiles or runs dependency code (cargo
+# and its build scripts, npm, the Tauri CLI and bundler, msiexec on a built
+# MSI) never has a secret: on a shared runner that code could change the
+# scripts, configuration or binaries before a secret arrives, and step-scoped
+# `env` does not prevent that. Only preflight, windows-sign-binaries,
+# windows-sign-installers, macos-sign and checksums have secrets. They run
+# only the pinned actions, this repository's own scripts from a checkout of
+# the tag, and OS tools (signtool; security, codesign, notarytool, stapler,
+# hdiutil, spctl; sha256sum, gpg) plus the cosign and syft releases that
+# their pinned actions install. Built files reach them only as artifacts,
+# downloaded into the runner's temporary directory. The files they sign were
+# made by jobs without secrets, so a signature shows that this workflow
+# produced a file, not that its dependencies were safe.
+# Actions are pinned to full commit SHAs with the tag noted alongside, as in
+# check.yml. Tools are installed at exact versions.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: "1.99.1"
+  NODE_VERSION: "24.15.0"
+  PYTHON_VERSION: "3.14"
+  # tauri-cli 2.12.3 was released with tauri 2.12.4 and tauri-build 2.7.3 and
+  # uses the same tauri-utils 2.10 configuration schema as Cargo.lock.
+  TAURI_CLI_VERSION: "2.12.3"
+  CARGO_ABOUT_VERSION: "0.9.2"
+  COSIGN_VERSION: "v3.1.3"
+  SYFT_VERSION: "v1.54.1"
+  # RFC 3161 timestamp server for Windows signatures. The protocol runs over
+  # HTTP; the timestamp authority signs its response and signtool checks it.
+  WINDOWS_TIMESTAMP_URL: "http://timestamp.digicert.com"
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: ${{ github.workspace }}/.local/cache/cargo
+  npm_config_cache: ${{ github.workspace }}/.local/cache/npm
+  PERSEPHONE_MEDIA_GUEST: ${{ github.workspace }}/.local/build/rust/wasm32-unknown-unknown/release/persephone_media_decoder.wasm
+  # Empty on a tag; "-unsigned" on a dry run.
+  SUFFIX: ${{ github.event_name != 'push' && '-unsigned' || '' }}
+
+jobs:
+  # The same check as check.yml plus the dependency audit, the tag/version
+  # match and the third-party notices that every bundle includes.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Check that the tag matches every version
+        if: github.event_name == 'push'
+        run: python tools/release.py check-tag "$GITHUB_REF_NAME"
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(python -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Tauri prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .local/cache/cargo/registry/index
+            .local/cache/cargo/registry/cache
+            .local/cache/cargo/git/db
+            .local/cache/npm
+          key: release-gate-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: release-gate-
+
+      - name: Install frontend dependencies
+        run: python tools/dev.py bootstrap
+
+      - name: Check
+        run: python tools/dev.py check
+
+      - name: Audit dependencies
+        run: python tools/dev.py audit
+
+      - name: Generate third-party notices
+        run: |
+          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --root "$RUNNER_TEMP/tools"
+          mkdir -p .local/release/notices
+          "$RUNNER_TEMP/tools/bin/cargo-about" generate --locked --fail --workspace \
+            -c tools/about.toml -o .local/release/notices/THIRD-PARTY-NOTICES.txt tools/about.hbs
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notices
+          path: .local/release/notices/THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+
+  # Fails a tag run before anything is built when a signing secret is missing.
+  # It reads the secrets only to test that they are not empty.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    steps:
+      - name: Require every signing secret
+        if: github.event_name == 'push'
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          missing=0
+          for name in WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD \
+            APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_API_KEY APPLE_API_ISSUER APPLE_API_PRIVATE_KEY \
+            GPG_PRIVATE_KEY GPG_PASSPHRASE; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing signing secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Dry run
+        if: github.event_name != 'push'
+        run: echo "Dry run (workflow_dispatch). Signing is skipped and artifact names end in -unsigned."
+
+  # Windows runs in five jobs so that no job that builds or bundles has a
+  # secret: build (no secrets) -> sign the executables -> bundle (no secrets)
+  # -> sign the installers -> verify (no secrets). A dry run skips the signing
+  # and verifying jobs and uploads the unsigned installers from the bundle job.
+  windows-build:
+    needs: [gate, preflight]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TRIPLE: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target "wasm32-unknown-unknown,$env:TRIPLE"
+          "RUSTUP_TOOLCHAIN=$env:RUST_TOOLCHAIN" >> $env:GITHUB_ENV
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .local/cache/cargo/registry/index
+            .local/cache/cargo/registry/cache
+            .local/cache/cargo/git/db
+            .local/cache/npm
+          key: release-windows-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: release-windows-
+
+      - name: Install the Tauri CLI
+        run: |
+          cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: .local/release/notices
+
+      - name: Build the frontend, decoder guest, core and media worker
+        run: |
+          python tools/dev.py bootstrap
+          (cd frontend && npm run build)
+          cargo build --locked --release -p persephone-media-decoder --target wasm32-unknown-unknown
+          cargo build --locked --release --target "$TRIPLE" \
+            -p persephone-core --bin persephone -p persephone-media-worker --bin persephone-media-worker
+          mkdir -p src-tauri/binaries
+          for name in persephone persephone-media-worker; do
+            cp ".local/build/rust/$TRIPLE/release/$name.exe" "src-tauri/binaries/$name-$TRIPLE.exe"
+          done
+          python tools/release.py bundle-config --notices .local/release/notices/THIRD-PARTY-NOTICES.txt \
+            --output .local/release/tauri.release.json
+
+      - name: Build the UI
+        working-directory: src-tauri
+        run: cargo tauri build --target "$TRIPLE" --no-bundle --config ../.local/release/tauri.release.json -- --locked
+
+      # windows-bundle runs this same Tauri CLI build, so it compiles nothing.
+      - name: Collect the unsigned executables and the Tauri CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/stage/exes" "$RUNNER_TEMP/stage/tauri-cli"
+          cp "src-tauri/binaries/persephone-$TRIPLE.exe" "$RUNNER_TEMP/stage/exes/persephone.exe"
+          cp "src-tauri/binaries/persephone-media-worker-$TRIPLE.exe" "$RUNNER_TEMP/stage/exes/persephone-media-worker.exe"
+          cp ".local/build/rust/$TRIPLE/release/persephone-ui.exe" "$RUNNER_TEMP/stage/exes/persephone-ui.exe"
+          cp "$RUNNER_TEMP/tools/bin/cargo-tauri.exe" "$RUNNER_TEMP/stage/tauri-cli/cargo-tauri.exe"
+          ls -l "$RUNNER_TEMP/stage/exes" "$RUNNER_TEMP/stage/tauri-cli"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: stage-windows-exes-unsigned
+          path: ${{ runner.temp }}/stage/exes/
+          if-no-files-found: error
+          retention-days: 1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: stage-windows-tauri-cli
+          path: ${{ runner.temp }}/stage/tauri-cli/
+          if-no-files-found: error
+          retention-days: 1
+
+  # Signs the three executables before the bundler packs them. This job
+  # builds nothing: it runs tools/sign_windows.ps1, which runs signtool.
+  windows-sign-binaries:
+    if: github.event_name == 'push'
+    needs: [windows-build]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: release
+    outputs:
+      subject: ${{ steps.sign.outputs.subject }}
+      thumbprint: ${{ steps.sign.outputs.thumbprint }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stage-windows-exes-unsigned
+          path: ${{ runner.temp }}/exes
+
+      - name: Sign and verify the executables
+        id: sign
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_SIGNATURE_STATE: ${{ runner.temp }}/windows-signature.txt
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'exes'
+          $names = @('persephone-media-worker.exe', 'persephone-ui.exe', 'persephone.exe')
+          $found = @(Get-ChildItem -LiteralPath $dir -Recurse -Force | ForEach-Object { $_.FullName.Substring($dir.Length + 1) })
+          if ($found.Count -ne $names.Count -or (Compare-Object $found $names)) { throw "unexpected files to sign: $($found -join ', ')" }
+          & ./tools/sign_windows.ps1 @($names | ForEach-Object { Join-Path $dir $_ })
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: stage-windows-exes-signed
+          path: ${{ runner.temp }}/exes/
+          if-no-files-found: error
+          retention-days: 1
+
+  # Packs the executables into the NSIS and MSI installers without compiling
+  # or signing anything. The Tauri CLI comes from windows-build. The bundler
+  # downloads NSIS and WiX and runs them; this job has no secrets.
+  windows-bundle:
+    needs: [windows-build, windows-sign-binaries]
+    if: >-
+      ${{ !cancelled() && needs.windows-build.result == 'success' &&
+      ((github.event_name == 'push' && needs.windows-sign-binaries.result == 'success') ||
+      (github.event_name != 'push' && needs.windows-sign-binaries.result == 'skipped')) }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      TRIPLE: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # The bundler runs `cargo metadata --no-deps` to find the target
+      # directory. Nothing is compiled.
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          "RUSTUP_TOOLCHAIN=$env:RUST_TOOLCHAIN" >> $env:GITHUB_ENV
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: .local/release/notices
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ github.event_name == 'push' && 'stage-windows-exes-signed' || 'stage-windows-exes-unsigned' }}
+          path: ${{ runner.temp }}/exes
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stage-windows-tauri-cli
+          path: ${{ runner.temp }}/tools/bin
+
+      - name: Place the executables where the bundler expects them
+        run: |
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          exes="$RUNNER_TEMP/exes"
+          found=$(cd "$exes" && find . -mindepth 1 | LC_ALL=C sort | tr '\n' ' ')
+          [ "$found" = "./persephone-media-worker.exe ./persephone-ui.exe ./persephone.exe " ] \
+            || { echo "::error::unexpected executables: $found"; exit 1; }
+          release=".local/build/rust/$TRIPLE/release"
+          [ ! -e "$release" ] || { echo "::error::$release already exists"; exit 1; }
+          mkdir -p src-tauri/binaries "$release"
+          cp "$exes/persephone.exe" "src-tauri/binaries/persephone-$TRIPLE.exe"
+          cp "$exes/persephone-media-worker.exe" "src-tauri/binaries/persephone-media-worker-$TRIPLE.exe"
+          cp "$exes/persephone-ui.exe" "$release/persephone-ui.exe"
+          python tools/release.py bundle-config --notices .local/release/notices/THIRD-PARTY-NOTICES.txt \
+            --output .local/release/tauri.release.json
+
+      # `tauri bundle` packs a prebuilt app and does not run cargo build.
+      # --no-binary-patching stops it from rewriting persephone-ui.exe with
+      # the bundle type, which would break its signature; that marker is used
+      # only by the updater, which Persephone does not have.
+      - name: Bundle without compiling or signing
+        working-directory: src-tauri
+        run: cargo tauri bundle --target "$TRIPLE" --bundles nsis,msi --no-sign --no-binary-patching --config ../.local/release/tauri.release.json
+
+      - name: Check that bundling changed no executable and compiled nothing
+        run: |
+          release=".local/build/rust/$TRIPLE/release"
+          expected=$(cd "$RUNNER_TEMP/exes" && sha256sum persephone.exe persephone-media-worker.exe persephone-ui.exe | cut -d' ' -f1)
+          actual=$(sha256sum "src-tauri/binaries/persephone-$TRIPLE.exe" \
+            "src-tauri/binaries/persephone-media-worker-$TRIPLE.exe" "$release/persephone-ui.exe" | cut -d' ' -f1)
+          echo "$actual"
+          [ "$expected" = "$actual" ] || { echo "::error::the bundler changed an executable"; exit 1; }
+          for dir in deps build incremental .fingerprint; do
+            [ ! -e "$release/$dir" ] || { echo "::error::the bundler compiled code ($release/$dir exists)"; exit 1; }
+          done
+
+      - name: Collect the installers
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          for file in .local/build/rust/$TRIPLE/release/bundle/nsis/*.exe .local/build/rust/$TRIPLE/release/bundle/msi/*.msi; do
+            name=$(basename "$file")
+            cp "$file" "$RUNNER_TEMP/out/${name%.*}$SUFFIX.${name##*.}"
+          done
+          ls -l "$RUNNER_TEMP/out"
+
+      # A tag run hands the installers to windows-sign-installers; a dry run
+      # uploads them as the final, unsigned Windows artifact.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ github.event_name == 'push' && 'stage-windows-installers-unsigned' || format('persephone-windows-x64{0}', env.SUFFIX) }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          # 0 is the repository's default retention.
+          retention-days: ${{ github.event_name == 'push' && 1 || 0 }}
+
+  # Signs the NSIS and MSI installers and checks their own signatures. It
+  # does not open them: extracting an MSI with msiexec runs the MSI's own
+  # actions, so windows-verify does that without secrets.
+  windows-sign-installers:
+    if: github.event_name == 'push'
+    needs: [windows-bundle]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stage-windows-installers-unsigned
+          path: ${{ runner.temp }}/installers
+
+      - name: Sign and verify the installers
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_SIGNATURE_STATE: ${{ runner.temp }}/windows-signature.txt
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'installers'
+          $all = @(Get-ChildItem -LiteralPath $dir -Recurse -Force)
+          $nsis = @(Get-ChildItem -LiteralPath $dir -File -Force -Filter '*-setup.exe')
+          $msi = @(Get-ChildItem -LiteralPath $dir -File -Force -Filter '*.msi')
+          if ($all.Count -ne 2 -or $nsis.Count -ne 1 -or $msi.Count -ne 1) {
+            throw "expected one NSIS and one MSI installer, found: $(($all | ForEach-Object Name) -join ', ')"
+          }
+          & ./tools/sign_windows.ps1 $nsis[0].FullName $msi[0].FullName
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: stage-windows-installers-signed
+          path: ${{ runner.temp }}/installers/
+          if-no-files-found: error
+          retention-days: 1
+
+  # Extracts both installers and checks every program inside them: each must
+  # be byte-for-byte the executable that windows-sign-binaries signed, and
+  # every signature must come from that job's certificate. A self-signed
+  # certificate passes with signature=self-signed; any other failure fails.
+  # This job has no secrets.
+  windows-verify:
+    if: github.event_name == 'push'
+    needs: [windows-sign-binaries, windows-sign-installers]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      signature: ${{ steps.verify.outputs.signature }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stage-windows-exes-signed
+          path: ${{ runner.temp }}/exes
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stage-windows-installers-signed
+          path: ${{ runner.temp }}/installers
+
+      - name: Verify the signatures
+        id: verify
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_THUMBPRINT: ${{ needs.windows-sign-binaries.outputs.thumbprint }}
+          WINDOWS_SIGNATURE_STATE: ${{ runner.temp }}/windows-signature.txt
+        run: |
+          $signed = Join-Path $env:RUNNER_TEMP 'exes'
+          $installers = Join-Path $env:RUNNER_TEMP 'installers'
+          $nsis = @(Get-ChildItem "$installers/*.exe")
+          $msi = @(Get-ChildItem "$installers/*.msi")
+          if ($nsis.Count -ne 1 -or $msi.Count -ne 1) { throw 'expected one NSIS and one MSI installer' }
+          $extract = Join-Path $env:RUNNER_TEMP 'installer-contents'
+          $admin = Start-Process msiexec.exe -ArgumentList '/a', "`"$($msi[0].FullName)`"", '/qn', "TARGETDIR=`"$extract\msi`"" -Wait -PassThru
+          if ($admin.ExitCode -ne 0) { throw "MSI extraction failed with $($admin.ExitCode)" }
+          7z x -y "-o$extract\nsis" $nsis[0].FullName | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "NSIS extraction failed with $LASTEXITCODE" }
+          $names = 'persephone.exe', 'persephone-ui.exe', 'persephone-media-worker.exe'
+          $files = @($nsis[0].FullName, $msi[0].FullName)
+          foreach ($kind in 'msi', 'nsis') {
+            foreach ($name in $names) {
+              $found = @(Get-ChildItem -Path "$extract\$kind" -Recurse -File -Filter $name)
+              if ($found.Count -ne 1) { throw "$name found $($found.Count) times in the $kind installer" }
+              $expected = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $signed $name)).Hash
+              if ((Get-FileHash -Algorithm SHA256 -LiteralPath $found[0].FullName).Hash -ne $expected) {
+                throw "$name in the $kind installer is not the executable that windows-sign-binaries signed"
+              }
+              $files += $found[0].FullName
+            }
+          }
+          # Other programs come from the bundler's NSIS and WiX downloads.
+          # They are not signed by this workflow; list them for the record.
+          Get-ChildItem -Path $extract -Recurse -File -Include *.exe, *.dll |
+            Where-Object { $names -notcontains $_.Name } |
+            ForEach-Object { Write-Host "Not signed by this workflow: $($_.FullName.Substring($extract.Length + 1))" }
+          & ./tools/sign_windows.ps1 -VerifyOnly @files
+          $signature = if (Select-String -Path $env:WINDOWS_SIGNATURE_STATE -Pattern '^self-signed ' -Quiet) { 'self-signed' } else { 'trusted' }
+          "signature=$signature" >> $env:GITHUB_OUTPUT
+          Write-Host "Windows signature: $signature"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: persephone-windows-x64
+          path: ${{ runner.temp }}/installers/
+          if-no-files-found: error
+
+  linux:
+    name: linux-${{ matrix.arch }}
+    needs: [gate, preflight]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 sets the oldest glibc the bundles support.
+          - arch: x64
+            runner: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            triple: aarch64-unknown-linux-gnu
+    env:
+      TRIPLE: ${{ matrix.triple }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # check.yml's WebKitGTK headers, plus what the AppImage bundler needs:
+      # `file` for linuxdeploy and librsvg2 for the GTK image loaders it copies.
+      # Tauri's .deb and .rpm writers are part of the CLI.
+      - name: Install Tauri prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config file librsvg2-dev
+
+      - name: Install Rust
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "wasm32-unknown-unknown,$TRIPLE"
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .local/cache/cargo/registry/index
+            .local/cache/cargo/registry/cache
+            .local/cache/cargo/git/db
+            .local/cache/npm
+          key: release-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: release-linux-${{ matrix.arch }}-
+
+      - name: Install the Tauri CLI
+        run: |
+          cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: .local/release/notices
+
+      - name: Build the frontend, decoder guest, core and media worker
+        run: |
+          python tools/dev.py bootstrap
+          (cd frontend && npm run build)
+          cargo build --locked --release -p persephone-media-decoder --target wasm32-unknown-unknown
+          cargo build --locked --release --target "$TRIPLE" \
+            -p persephone-core --bin persephone -p persephone-media-worker --bin persephone-media-worker
+          mkdir -p src-tauri/binaries
+          for name in persephone persephone-media-worker; do
+            cp ".local/build/rust/$TRIPLE/release/$name" "src-tauri/binaries/$name-$TRIPLE"
+          done
+          python tools/release.py bundle-config --notices .local/release/notices/THIRD-PARTY-NOTICES.txt \
+            --output .local/release/tauri.release.json
+
+      - name: Build and bundle
+        working-directory: src-tauri
+        run: |
+          cargo tauri build --target "$TRIPLE" --no-bundle --config ../.local/release/tauri.release.json -- --locked
+          cargo tauri bundle --target "$TRIPLE" --bundles appimage,deb,rpm --config ../.local/release/tauri.release.json
+
+      - name: Collect the bundles
+        run: |
+          mkdir -p .local/release/out
+          bundle=".local/build/rust/$TRIPLE/release/bundle"
+          for file in "$bundle"/appimage/*.AppImage "$bundle"/deb/*.deb "$bundle"/rpm/*.rpm; do
+            name=$(basename "$file")
+            cp "$file" ".local/release/out/${name%.*}$SUFFIX.${name##*.}"
+          done
+          ls -l .local/release/out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: persephone-linux-${{ matrix.arch }}${{ env.SUFFIX }}
+          path: .local/release/out/*
+          if-no-files-found: error
+
+  # Builds the universal app with signing off and hands it to macos-sign as
+  # a tar file, which keeps symbolic links and permissions. A dry run also
+  # makes the unsigned disk image here. This job has no secrets.
+  macos-build:
+    needs: [gate, preflight]
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      TRIPLE: universal-apple-darwin
+      # Matches bundle.macOS.minimumSystemVersion for the sidecars too.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      VERSION: ${{ needs.gate.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --target wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .local/cache/cargo/registry/index
+            .local/cache/cargo/registry/cache
+            .local/cache/cargo/git/db
+            .local/cache/npm
+          key: release-macos-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: release-macos-
+
+      - name: Install the Tauri CLI
+        run: |
+          cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: .local/release/notices
+
+      # tauri-build looks for each sidecar under the arch it compiles for, and
+      # the bundler under universal-apple-darwin, so both forms are placed.
+      - name: Build the frontend, decoder guest, core and media worker
+        run: |
+          python tools/dev.py bootstrap
+          (cd frontend && npm run build)
+          cargo build --locked --release -p persephone-media-decoder --target wasm32-unknown-unknown
+          mkdir -p src-tauri/binaries
+          for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked --release --target "$arch" \
+              -p persephone-core --bin persephone -p persephone-media-worker --bin persephone-media-worker
+            for name in persephone persephone-media-worker; do
+              cp ".local/build/rust/$arch/release/$name" "src-tauri/binaries/$name-$arch"
+            done
+          done
+          for name in persephone persephone-media-worker; do
+            lipo -create -output "src-tauri/binaries/$name-$TRIPLE" \
+              "src-tauri/binaries/$name-aarch64-apple-darwin" "src-tauri/binaries/$name-x86_64-apple-darwin"
+            lipo -info "src-tauri/binaries/$name-$TRIPLE"
+          done
+          python tools/release.py bundle-config --notices .local/release/notices/THIRD-PARTY-NOTICES.txt \
+            --output .local/release/tauri.release.json
+
+      - name: Build the UI
+        working-directory: src-tauri
+        run: cargo tauri build --target "$TRIPLE" --no-bundle --config ../.local/release/tauri.release.json -- --locked
+
+      - name: Bundle the app without signing
+        working-directory: src-tauri
+        run: cargo tauri bundle --target "$TRIPLE" --bundles app --no-sign --config ../.local/release/tauri.release.json
+
+      - name: Pack the unsigned app
+        run: |
+          mkdir -p "$RUNNER_TEMP/stage"
+          tar -C ".local/build/rust/$TRIPLE/release/bundle/macos" -cf "$RUNNER_TEMP/stage/Persephone.app.tar" Persephone.app
+          tar -tvf "$RUNNER_TEMP/stage/Persephone.app.tar"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: stage-macos-app
+          path: ${{ runner.temp }}/stage/Persephone.app.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      # The same disk image layout as macos-sign, unsigned.
+      - name: Build the unsigned disk image (dry run)
+        if: github.event_name != 'push'
+        run: |
+          app=".local/build/rust/$TRIPLE/release/bundle/macos/Persephone.app"
+          out="$RUNNER_TEMP/out"
+          base="Persephone_${VERSION}_universal$SUFFIX"
+          mkdir -p "$out" "$RUNNER_TEMP/dmg"
+          ditto -c -k --keepParent "$app" "$out/$base.app.zip"
+          ditto "$app" "$RUNNER_TEMP/dmg/Persephone.app"
+          ln -s /Applications "$RUNNER_TEMP/dmg/Applications"
+          hdiutil create -volname Persephone -srcfolder "$RUNNER_TEMP/dmg" -fs HFS+ -format UDZO -ov "$out/$base.dmg"
+          ls -l "$out"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name != 'push'
+        with:
+          name: persephone-macos-universal${{ env.SUFFIX }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+
+  # Signs, notarizes and staples the app, then builds, signs, notarizes and
+  # staples the disk image. This job builds nothing and does not check out
+  # the repository: it runs only the download action and the OS tools.
+  macos-sign:
+    if: github.event_name == 'push'
+    needs: [gate, macos-build]
+    runs-on: macos-latest
+    timeout-minutes: 120
+    environment: release
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stage-macos-app
+          path: ${{ runner.temp }}/in
+
+      - name: Unpack and check the app
+        run: |
+          tarball="$RUNNER_TEMP/in/Persephone.app.tar"
+          # Every entry must be inside Persephone.app, without `..`.
+          tar -tf "$tarball" > "$RUNNER_TEMP/app-entries.txt"
+          if grep -Ev '^Persephone\.app(/|$)' "$RUNNER_TEMP/app-entries.txt" > /dev/null \
+            || grep -E '(^|/)\.\.(/|$)' "$RUNNER_TEMP/app-entries.txt" > /dev/null; then
+            echo "::error::the app archive has entries outside Persephone.app"; exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/app"
+          tar -xpf "$tarball" -C "$RUNNER_TEMP/app"
+          app="$RUNNER_TEMP/app/Persephone.app"
+          # Symbolic links must stay inside the bundle.
+          while IFS= read -r -d '' link; do
+            case "$(readlink "$link")" in
+              /* | .. | ../* | */.. | */../*) echo "::error::symbolic link leaves the bundle: ${link#"$app"/}"; exit 1 ;;
+            esac
+          done < <(find "$app" -type l -print0)
+          # Exactly the three programs this workflow signs.
+          found=""
+          while IFS= read -r -d '' file; do
+            case "$(file -b "$file")" in *Mach-O*) found="$found ${file#"$app"/}" ;; esac
+          done < <(find "$app" -type f -print0)
+          found=$(printf '%s\n' $found | LC_ALL=C sort | tr '\n' ' ')
+          expected="Contents/MacOS/persephone Contents/MacOS/persephone-media-worker Contents/MacOS/persephone-ui "
+          [ "$found" = "$expected" ] || { echo "::error::unexpected programs in the app: $found"; exit 1; }
+          xattr -cr "$app"
+          echo "APP=$app" >> "$GITHUB_ENV"
+          echo "KEYCHAIN=$RUNNER_TEMP/persephone-signing.keychain-db" >> "$GITHUB_ENV"
+          echo "SIGNING_DIR=$RUNNER_TEMP/apple-signing" >> "$GITHUB_ENV"
+
+      - name: Import the Developer ID certificate into a temporary keychain
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          mkdir -m 700 -p "$SIGNING_DIR"
+          password=$(uuidgen)
+          echo "::add-mask::$password"
+          security create-keychain -p "$password" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$password" "$KEYCHAIN"
+          (umask 077 && printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$SIGNING_DIR/certificate.p12")
+          security import "$SIGNING_DIR/certificate.p12" -k "$KEYCHAIN" -f pkcs12 -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$SIGNING_DIR/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$KEYCHAIN" > /dev/null
+          existing=$(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
+          # shellcheck disable=SC2086 # one keychain path per word
+          security list-keychains -d user -s "$KEYCHAIN" $existing
+          identities=$(security find-identity -v -p codesigning "$KEYCHAIN")
+          grep -F "\"$APPLE_SIGNING_IDENTITY\"" <<< "$identities" > /dev/null \
+            || { echo "::error::APPLE_CERTIFICATE does not hold APPLE_SIGNING_IDENTITY"; exit 1; }
+
+      # Inner code first, then the bundle. --deep is not used for signing.
+      - name: Sign the programs and the app
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          for binary in persephone persephone-media-worker persephone-ui; do
+            codesign --force --options runtime --timestamp --keychain "$KEYCHAIN" \
+              --sign "$APPLE_SIGNING_IDENTITY" "$APP/Contents/MacOS/$binary"
+          done
+          codesign --force --options runtime --timestamp --keychain "$KEYCHAIN" --sign "$APPLE_SIGNING_IDENTITY" "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+
+      - name: Notarize the app and build, sign and notarize the disk image
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          key="$SIGNING_DIR/AuthKey.p8"
+          (umask 077 && printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$key")
+          notarize() {
+            local result="$RUNNER_TEMP/notary.plist" status id
+            xcrun notarytool submit "$1" --key "$key" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
+              --wait --timeout 90m --output-format plist > "$result" || true
+            status=$(plutil -extract status raw -o - "$result" 2>/dev/null || echo unknown)
+            id=$(plutil -extract id raw -o - "$result" 2>/dev/null || true)
+            echo "Notarization of $(basename "$1"): $status ${id:+($id)}"
+            if [ "$status" != Accepted ]; then
+              if [ -n "$id" ]; then
+                xcrun notarytool log "$id" --key "$key" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" || true
+              fi
+              echo "::error::notarization of $(basename "$1") ended with status $status"
+              return 1
+            fi
+          }
+          out="$RUNNER_TEMP/out"
+          base="Persephone_${VERSION}_universal$SUFFIX"
+          mkdir -p "$out" "$RUNNER_TEMP/dmg"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/notarize-app.zip"
+          notarize "$RUNNER_TEMP/notarize-app.zip"
+          xcrun stapler staple "$APP"
+          # The same app as a zip, with its stapled ticket and signatures.
+          ditto -c -k --keepParent "$APP" "$out/$base.app.zip"
+          ditto "$APP" "$RUNNER_TEMP/dmg/Persephone.app"
+          ln -s /Applications "$RUNNER_TEMP/dmg/Applications"
+          hdiutil create -volname Persephone -srcfolder "$RUNNER_TEMP/dmg" -fs HFS+ -format UDZO -ov "$out/$base.dmg"
+          codesign --force --timestamp --keychain "$KEYCHAIN" --sign "$APPLE_SIGNING_IDENTITY" "$out/$base.dmg"
+          notarize "$out/$base.dmg"
+          xcrun stapler staple "$out/$base.dmg"
+          rm -f "$key"
+          echo "DMG=$out/$base.dmg" >> "$GITHUB_ENV"
+
+      - name: Verify the signatures
+        run: |
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          for binary in persephone-ui persephone persephone-media-worker; do
+            details=$(codesign --display --verbose=2 "$APP/Contents/MacOS/$binary" 2>&1)
+            grep 'flags=.*runtime' <<< "$details" > /dev/null || { echo "::error::$binary lacks the hardened runtime"; exit 1; }
+            lipo "$APP/Contents/MacOS/$binary" -verify_arch arm64 x86_64
+          done
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+          codesign --verify --strict --verbose=2 "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+          # The app inside the disk image is the signed, stapled app.
+          mount="$RUNNER_TEMP/mnt"
+          mkdir -p "$mount"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$DMG"
+          status=0
+          codesign --verify --deep --strict --verbose=2 "$mount/Persephone.app" && xcrun stapler validate "$mount/Persephone.app" || status=1
+          hdiutil detach "$mount"
+          exit "$status"
+
+      - name: Remove the keychain and keys
+        if: always()
+        run: |
+          [ -z "${KEYCHAIN:-}" ] || security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/apple-signing"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: persephone-macos-universal
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+
+  # Checksums, SBOM, signatures and attestations over every release file. It
+  # follows the final job of each platform: windows-verify and macos-sign on a
+  # tag, windows-bundle and macos-build on a dry run.
+  checksums:
+    needs: [gate, linux, windows-bundle, windows-verify, macos-build, macos-sign]
+    if: >-
+      ${{ !cancelled() && needs.gate.result == 'success' && needs.linux.result == 'success' &&
+      needs.windows-bundle.result == 'success' && needs.macos-build.result == 'success' &&
+      ((github.event_name == 'push' && needs.windows-verify.result == 'success' && needs.macos-sign.result == 'success') ||
+      (github.event_name != 'push' && needs.windows-verify.result == 'skipped' && needs.macos-sign.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    permissions:
+      contents: read
+      id-token: write # cosign keyless signing and attestations
+      attestations: write
+    outputs:
+      gpg_fingerprint: ${{ steps.gpg.outputs.fingerprint }}
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The SBOM is made from the repository before any built file is
+      # downloaded, so syft reads only the checked-out lockfiles.
+      - name: Prepare the output directory
+        run: mkdir -p dist
+
+      - name: Create the SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/persephone-${{ env.VERSION }}-sbom${{ env.SUFFIX }}.cdx.json
+          syft-version: ${{ env.SYFT_VERSION }}
+          upload-artifact: false
+          upload-release-assets: false
+
+      # Each platform's artifact is downloaded by name into its own directory,
+      # so a build job cannot add files under another platform's name.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persephone-windows-x64${{ env.SUFFIX }}
+          path: ${{ runner.temp }}/artifacts/windows
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persephone-linux-x64${{ env.SUFFIX }}
+          path: ${{ runner.temp }}/artifacts/linux-x64
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persephone-linux-arm64${{ env.SUFFIX }}
+          path: ${{ runner.temp }}/artifacts/linux-arm64
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persephone-macos-universal${{ env.SUFFIX }}
+          path: ${{ runner.temp }}/artifacts/macos
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notices
+          path: ${{ runner.temp }}/artifacts/notices
+
+      - name: Collect the release files
+        run: |
+          collect() {
+            local dir="$RUNNER_TEMP/artifacts/$1" count=0 entry name pattern ok
+            shift
+            while IFS= read -r -d '' entry; do
+              name=${entry#"$dir"/}
+              [ -f "$entry" ] && [ ! -L "$entry" ] && [ "${name#*/}" = "$name" ] \
+                || { echo "::error::unexpected entry in $dir: $name"; exit 1; }
+              ok=0
+              for pattern in "$@"; do
+                # shellcheck disable=SC2254 # the pattern is a glob
+                case "$name" in $pattern) ok=1 ;; esac
+              done
+              [ "$ok" = 1 ] || { echo "::error::unexpected file in $dir: $name"; exit 1; }
+              [ ! -e "dist/$name" ] || { echo "::error::two artifacts contain $name"; exit 1; }
+              mv "$entry" "dist/$name"
+              count=$((count + 1))
+            done < <(find "$dir" -mindepth 1 -print0)
+            [ "$count" -gt 0 ] || { echo "::error::$dir is empty"; exit 1; }
+          }
+          collect windows '*.exe' '*.msi'
+          collect linux-x64 '*.AppImage' '*.deb' '*.rpm'
+          collect linux-arm64 '*.AppImage' '*.deb' '*.rpm'
+          collect macos '*.dmg' '*.app.zip'
+          collect notices THIRD-PARTY-NOTICES.txt
+          ls -l dist
+
+      - name: Create SHA256SUMS
+        working-directory: dist
+        run: |
+          mv THIRD-PARTY-NOTICES.txt "persephone-$VERSION-THIRD-PARTY-NOTICES$SUFFIX.txt"
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | LC_ALL=C sort | xargs -d '\n' sha256sum -- > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: github.event_name == 'push'
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Sign SHA256SUMS with cosign (keyless)
+        if: github.event_name == 'push'
+        working-directory: dist
+        run: |
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+
+      - name: Sign SHA256SUMS with GPG
+        id: gpg
+        if: github.event_name == 'push'
+        working-directory: dist
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 -p "$GNUPGHOME"
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          fingerprint=$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr:/ { print $10; exit }')
+          [ -n "$fingerprint" ] || { echo "::error::GPG_PRIVATE_KEY holds no secret key"; exit 1; }
+          printf '%s' "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+            --local-user "$fingerprint" --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+          gpg --batch --verify SHA256SUMS.asc SHA256SUMS
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Remove the GPG key
+        if: always()
+        run: |
+          gpgconf --homedir "$RUNNER_TEMP/gnupg" --kill all 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/gnupg"
+
+      - name: Attest build provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+          create-storage-record: false
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files${{ env.SUFFIX }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The only job that can write to the repository. Tag runs only.
+  release:
+    if: github.event_name == 'push'
+    needs: [gate, windows-sign-binaries, windows-verify, checksums]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+      WINDOWS_SIGNATURE: ${{ needs.windows-verify.outputs.signature }}
+      WINDOWS_SUBJECT: ${{ needs.windows-sign-binaries.outputs.subject }}
+      WINDOWS_THUMBPRINT: ${{ needs.windows-sign-binaries.outputs.thumbprint }}
+      GPG_FINGERPRINT: ${{ needs.checksums.outputs.gpg_fingerprint }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist
+
+      - name: Write the release notes
+        run: |
+          if [ "$WINDOWS_SIGNATURE" = self-signed ]; then
+            windows="The Windows files are signed with a self-signed certificate. Windows will still show an unknown-publisher warning. Do not add this certificate to your trusted roots. Verify downloads with the signed SHA256SUMS or \`gh attestation verify\`."
+          elif [ "$WINDOWS_SIGNATURE" = trusted ]; then
+            windows="The Windows installers and the programs inside them are Authenticode-signed."
+          else
+            echo "::error::unknown Windows signature state '$WINDOWS_SIGNATURE'"; exit 1
+          fi
+          [ -n "$WINDOWS_THUMBPRINT" ] || { echo "::error::the Windows certificate thumbprint is missing"; exit 1; }
+          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF"
+          cat > notes.md <<EOF
+          **Pre-release. Not for high-risk use.** Persephone has open feasibility and
+          production security gates. A signed build does not mean that the
+          application is ready for users who need strong protection.
+
+          - Windows x64: NSIS installer (per-user) and MSI.
+          - Linux x64 and arm64: AppImage, .deb and .rpm (built on Ubuntu 22.04).
+          - macOS universal (Apple silicon and Intel): .dmg and a zipped app,
+            signed with Developer ID and notarized. **macOS has not been tested
+            live**; it is built and tested in CI only.
+          - There is no automatic update. Install new versions by hand.
+
+          ## Windows signature
+
+          $windows
+
+          Certificate subject: \`$WINDOWS_SUBJECT\`
+          SHA-256 thumbprint: \`$WINDOWS_THUMBPRINT\`
+
+          ## Verify your download
+
+          \`SHA256SUMS\` lists every file in this release. Check it is genuine,
+          then check your file against it.
+
+          \`\`\`sh
+          # cosign (keyless; this workflow's identity)
+          cosign verify-blob --bundle SHA256SUMS.sigstore.json \\
+            --certificate-identity "$identity" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
+
+          # GPG (key fingerprint $GPG_FINGERPRINT)
+          gpg --verify SHA256SUMS.asc SHA256SUMS
+
+          # Your file's checksum
+          sha256sum --ignore-missing -c SHA256SUMS
+
+          # GitHub build provenance
+          gh attestation verify <file> --repo $GITHUB_REPOSITORY
+          \`\`\`
+
+          See docs/release.md in the repository for details.
+          EOF
+          cat notes.md
+
+      - name: Create the draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --draft --prerelease --title "Persephone $VERSION" --notes-file notes.md

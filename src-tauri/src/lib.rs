@@ -21,6 +21,7 @@
 //! little-endian `u32`, followed by exactly `width * rows * 4` RGBA bytes.
 
 pub mod core_link;
+pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
@@ -691,12 +692,12 @@ pub fn context<R: Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
 
-/// Runs the UI. Refuses unless the core started it, because without the core
-/// channel the UI has nothing to relay to.
+/// Runs the UI when the core started it. Started any other way, it becomes a
+/// launcher for the core ([`launcher`]) before any Tauri or channel state
+/// exists, because without the core channel the UI has nothing to relay to.
 pub fn run() {
-    if !std::env::args().any(|arg| arg == STARTED_BY_CORE) {
-        eprintln!("persephone-ui is started by persephone; run persephone instead");
-        std::process::exit(2);
+    if launcher::mode(std::env::args_os(), STARTED_BY_CORE) == launcher::Mode::Launcher {
+        launcher::run();
     }
     let subscriptions = Arc::new(Subscriptions::default());
     let sink = {

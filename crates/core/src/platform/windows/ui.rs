@@ -1,4 +1,5 @@
-//! Windows Job containing the UI process and its web view processes.
+//! The Windows UI host: a Job containing the UI process and its web view
+//! processes.
 //!
 //! The web view can make the UI allocate without a bound the application can
 //! enforce (docs/evidence/ipc-transport.md). The Job caps that memory so a flood
@@ -9,6 +10,7 @@
 //! UI's children, so they are in the Job), and ends the whole tree when a
 //! failed window is replaced.
 
+use crate::ui_host::{StartError, StartedUi, UiHost, UiTree, ui_command, ui_exe};
 use std::{
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
@@ -36,6 +38,49 @@ use windows_sys::Win32::{
 pub const UI_JOB_MEMORY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
 /// Committed memory for any single process in the UI tree.
 pub const UI_PROCESS_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
+
+/// Starts the UI and places it in a [`UiJob`].
+pub struct JobHost;
+
+impl UiHost for JobHost {
+    fn start(&self) -> Result<StartedUi, StartError> {
+        let ui = ui_exe().map_err(|_| StartError::NoExe)?;
+        let mut child = ui_command(&ui)
+            .spawn()
+            .map_err(|error| StartError::Spawn { ui, error })?;
+        // Contain the UI before it creates its web view. The Job holds the UI
+        // and its web view processes; closing it on exit ends anything left.
+        match contain(&child) {
+            Ok(job) => Ok(StartedUi {
+                child,
+                tree: Box::new(UiJob(job)),
+            }),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(StartError::Contain(error))
+            }
+        }
+    }
+
+    fn ask_to_retry(&self) -> bool {
+        ask_to_retry()
+    }
+}
+
+/// The Job holding one UI run. Dropping it closes the Job, and
+/// KILL_ON_JOB_CLOSE ends anything left.
+pub struct UiJob(OwnedHandle);
+
+impl UiTree for UiJob {
+    fn active_processes(&self) -> io::Result<u32> {
+        active_processes(&self.0)
+    }
+
+    fn terminate(&self, timeout: Duration) -> bool {
+        terminate(&self.0, timeout)
+    }
+}
 
 pub fn contain(child: &Child) -> io::Result<OwnedHandle> {
     // SAFETY: an anonymous Job with default security; owned below.

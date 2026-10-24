@@ -1,0 +1,38 @@
+# cargo-about configuration for the third-party notices that ship with each
+# release bundle. The release workflow runs:
+#   cargo about generate --locked --fail --workspace -c tools/about.toml tools/about.hbs
+# `accepted` lists every licence in the current Cargo.lock (in order of
+# preference where a crate offers a choice). Each one is compatible with
+# distribution under GPL-3.0-only. A new licence fails the run until it is
+# reviewed and added here.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "0BSD",
+]
+# The targets the release workflow builds.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+# First-party workspace crates (publish = false) are GPL-3.0-only and are
+# covered by the project licence, not by these notices.
+private = { ignore = true }

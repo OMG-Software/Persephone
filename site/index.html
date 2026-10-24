@@ -36,15 +36,20 @@
         <h1>A Matrix client designed to withstand targeted attacks.</h1>
         <p class="lede">
           Persephone is a <a href="https://matrix.org">Matrix</a> chat client for Windows, Linux and
-          macOS, written in Rust. It's made for everyone, but engineered to withstand a targeted
-          attack, not just everyday threats. Every message, name, link and image is treated as
-          hostile, even after it's decrypted.
+          macOS, written in Rust. It is designed to pair with
+          <a href="https://omg-software.github.io/Merovingian/">Merovingian</a>, a security-first
+          Matrix homeserver, and it is built to work with any homeserver that follows the Matrix
+          standard.
+          It's made for everyone, but engineered to withstand a targeted attack, not just everyday
+          threats. Every message, name, link and image is treated as hostile, even after it's
+          decrypted.
         </p>
         <div class="status" role="note" aria-label="Project status">
           <strong>Not ready for use.</strong>
-          Persephone is in early development: feasibility work (P0) continues alongside the first
-          application milestones. There is no application to download, and none of its security
-          controls are production-ready. Do not use any part of it for real conversations.
+          Persephone is in active development. On Windows, test builds sign in, sync, send and
+          receive encrypted messages and images, and verify contacts, against test servers. Linux
+          and macOS support is being built. No release has been published yet, and no security
+          control has had an independent review. Do not use any part of it for real conversations.
         </div>
         <p class="actions">
           <a class="button" href="https://github.com/OMG-Software/Persephone">View the source</a>
@@ -56,14 +61,14 @@
       <div class="wrap">
         <h2>What the first release is meant to do</h2>
         <ul class="grid four">
-          <li><h3>One account</h3><p>Sign-in to a single Matrix account. Login methods are still being decided.</p></li>
+          <li><h3>One account</h3><p>Sign-in to a single Matrix account with a password. Other login methods are not decided yet.</p></li>
           <li><h3>Rooms and history</h3><p>Room list and message history, using Sliding Sync with a classic sync fallback.</p></li>
-          <li><h3>Text and images</h3><p>Sending and receiving text and images, with stricter media handling.</p></li>
-          <li><h3>Encrypted chats</h3><p>End-to-end encrypted rooms. Verification and recovery behaviour is still being specified.</p></li>
+          <li><h3>Text and images</h3><p>Text and images. Sent images lose their location and other metadata; received images load only when you ask.</p></li>
+          <li><h3>Encrypted chats</h3><p>End-to-end encrypted rooms, emoji verification, key recovery, and a pause when a contact's identity changes.</p></li>
         </ul>
         <p class="note">
-          Interoperability with the <strong>Merovingian</strong> homeserver is a primary acceptance criterion;
-          Synapse and other standard Matrix servers are also targets.
+          Persephone is tested against both <strong>Merovingian</strong> and Synapse, including a
+          server without Sliding Sync, and its encrypted chats are also tested with Element Web.
         </p>
       </div>
     </section>
@@ -71,13 +76,13 @@
     <section id="security">
       <div class="wrap">
         <h2>Security approach</h2>
-        <p class="section-lede">The design assumes a capable adversary who may target one user directly. These are design decisions, not finished features.</p>
+        <p class="section-lede">The design assumes a capable adversary who may target one user directly. Most of these controls are built and tested on Windows; Linux and macOS are in progress, and none has had an independent review.</p>
         <div class="grid two">
           <article>
             <h3>All content is untrusted</h3>
             <p>Message text, display names, links, avatars and attachments are hostile input, before
-            and after decryption. The interface is designed to render them as inert text: no HTML,
-            scripts or automatic link previews.</p>
+            and after decryption. The interface renders them as inert text: no HTML, scripts or
+            automatic link previews.</p>
           </article>
           <article>
             <h3>Cryptography stays in the SDK</h3>
@@ -87,19 +92,19 @@
           </article>
           <article>
             <h3>Images decode in a sandbox with no network</h3>
-            <p>Image decoders run as WebAssembly, planned to sit inside a separately contained process. The module can
-            call only three host functions for its input and output, so it cannot reach sockets,
-            files, clocks or other processes, whatever the operating system allows.
+            <p>Image decoders run as WebAssembly inside a separately contained worker process. The
+            module can call only four host functions for its input and output, so it cannot reach
+            sockets, files, clocks or other processes, whatever the operating system allows.
             <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md">ADR-0003</a></p>
           </article>
           <article>
             <h3>TLS 1.3 only</h3>
-            <p>Every connection will require TLS 1.3. Older protocol versions will be refused.</p>
+            <p>Every connection requires TLS 1.3. Older protocol versions are refused.</p>
           </article>
           <article>
             <h3>Rust owns the logic</h3>
-            <p>The web view is only the interface. Sessions, keys, storage and Matrix traffic are
-            planned to live in the Rust core, behind a narrow, validated command boundary.</p>
+            <p>The web view is only the interface. Sessions, keys, storage and Matrix traffic live in
+            a separate Rust core process, behind a narrow, validated command boundary.</p>
           </article>
           <article>
             <h3>Defence in depth</h3>
@@ -112,11 +117,11 @@
 
     <section id="architecture">
       <div class="wrap">
-        <h2>Planned architecture</h2>
+        <h2>Architecture</h2>
         <p class="section-lede">Three trust zones. Arrows are the only paths data takes.</p>
         <figure class="diagram">
           <svg viewBox="0 0 760 300" role="img" aria-labelledby="arch-title arch-desc">
-            <title id="arch-title">Planned Persephone architecture</title>
+            <title id="arch-title">Persephone architecture</title>
             <desc id="arch-desc">The interface web view sends bounded, validated commands to the Rust
               core, which holds the session, keys and stores and talks to the Matrix homeserver. The
               core sends bounded image bytes to a media worker, an OS-contained process with no keys,
@@ -145,7 +150,7 @@
             <text class="zone-text" x="650" y="98">OS-contained process</text>
             <rect class="inner" x="570" y="128" width="160" height="84" rx="10"/>
             <text class="zone-text" x="650" y="156">WebAssembly decoder</text>
-            <text class="zone-text small" x="650" y="178">3 host functions</text>
+            <text class="zone-text small" x="650" y="178">4 host functions</text>
             <text class="zone-text small" x="650" y="196">no network capability</text>
 
             <line class="flow" x1="212" y1="130" x2="276" y2="130" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
@@ -162,16 +167,16 @@
     <section id="roadmap">
       <div class="wrap">
         <h2>Roadmap</h2>
-        <p class="section-lede">Work on several milestones can run at once, but each is complete only when it meets its own security and compatibility goals. No dates yet.</p>
+        <p class="section-lede">Work on several milestones runs at once, but each is complete only when it meets its own security and compatibility goals on every platform. No milestone is complete yet, and there are no dates.</p>
         <ol class="roadmap">
           <li class="current"><span class="phase">P0</span><div><h3>Feasibility and key decisions</h3><p>In progress.</p></div></li>
-          <li class="current"><span class="phase">P1</span><div><h3>Application scaffold</h3><p>In progress.</p></div></li>
+          <li class="current"><span class="phase">P1</span><div><h3>Application scaffold</h3><p>Built on Windows; Linux and macOS launch in progress.</p></div></li>
           <li class="current"><span class="phase">P2</span><div><h3>Protected storage and media handling</h3><p>In progress.</p></div></li>
-          <li class="current"><span class="phase">P3</span><div><h3>Login, rooms and history</h3><p>Started.</p></div></li>
-          <li><span class="phase">P4</span><div><h3>Encrypted messaging</h3></div></li>
-          <li><span class="phase">P5</span><div><h3>Image messaging</h3></div></li>
-          <li><span class="phase">P6</span><div><h3>Hardening and accessibility</h3></div></li>
-          <li><span class="phase">P7</span><div><h3>Release readiness</h3><p>Including an independent security review.</p></div></li>
+          <li class="current"><span class="phase">P3</span><div><h3>Login, rooms and history</h3><p>Working on Windows; some cases still to test.</p></div></li>
+          <li class="current"><span class="phase">P4</span><div><h3>Encrypted messaging</h3><p>Passes its tests on Windows; manual checks, Linux and macOS remain.</p></div></li>
+          <li class="current"><span class="phase">P5</span><div><h3>Image messaging</h3><p>Working on Windows.</p></div></li>
+          <li class="current"><span class="phase">P6</span><div><h3>Hardening and accessibility</h3><p>Started.</p></div></li>
+          <li class="current"><span class="phase">P7</span><div><h3>Release readiness</h3><p>Started: signed release builds are being set up. Includes an independent security review.</p></div></li>
         </ol>
       </div>
     </section>
@@ -179,9 +184,21 @@
     <section id="progress">
       <div class="wrap">
         <h2>Progress</h2>
-        <div class="placeholder">
-          <p><strong>Coming soon.</strong> Progress updates will be published here as milestones are
-          reached.</p>
+        <p class="section-lede">As of 24 October 2026.</p>
+        <div class="grid two">
+          <article>
+            <h3>Working on Windows</h3>
+            <p>In test builds against Merovingian and Synapse test servers: password sign-in, the
+            room list and history, encrypted messages, emoji verification of devices and contacts,
+            key recovery, the pause on a changed identity, and sending and receiving images.
+            Encrypted messages also work with Element Web.</p>
+          </article>
+          <article>
+            <h3>Next</h3>
+            <p>Linux and macOS support, signed release builds, keyboard and screen-reader checks, and
+            an independent security review. The full status is in the
+            <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/architecture/development-plan.md#milestone-status">development plan</a>.</p>
+          </article>
         </div>
       </div>
     </section>
@@ -192,8 +209,8 @@
         <div class="grid two">
           <article>
             <h3>Source code</h3>
-            <p>Development happens in the open. The repository holds early building blocks and the
-            design records; the desktop application itself does not exist yet.</p>
+            <p>Development happens in the open. The repository holds the desktop application, its
+            tests and the design records.</p>
             <p><a href="https://github.com/OMG-Software/Persephone">github.com/OMG-Software/Persephone</a></p>
           </article>
           <article>
@@ -210,7 +227,7 @@
 
   <footer class="site-footer">
     <div class="wrap">
-      <p>Persephone · GPL-3.0 · This page loads nothing from third parties.</p>
+      <p>Persephone · GPL-3.0 · This page loads nothing from third parties. · <a href="privacy.html">Privacy</a></p>
     </div>
   </footer>
 </body>

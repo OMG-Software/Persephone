@@ -12,6 +12,9 @@
 * [0006 - Require an unlock secret for the local profile](0006-require-an-unlock-secret-for-the-local-profile.md)
 * [0007 - Block sending to a changed contact identity until approved](0007-block-sending-to-a-changed-contact-identity-until-approved.md)
 * [0009 - Strip sent image metadata and load received images on request](0009-strip-sent-image-metadata-and-load-received-images-on-request.md)
+* [0010 - Protect keys and contain processes on Linux](0010-linux-platform-layer.md)
+* [0011 - Protect keys and contain processes on macOS](0011-macos-platform-layer.md)
+* [0012 - Sign releases and publish them as drafts](0012-sign-and-publish-releases-as-drafts.md)
 
 ## Proposed Records
 
