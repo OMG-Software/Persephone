@@ -5,7 +5,7 @@
 
 use crate::{
     LaunchError, Mitigations, WorkerPolicy, WorkerStats,
-    launch::{Launcher, Spawned, Wait, Worker},
+    launch::{Launcher, Readiness, Spawned, Wait, Worker},
 };
 use std::{
     env,
@@ -326,6 +326,8 @@ impl Launcher for AppContainerProfile {
 }
 
 impl Worker for JobWorker {
+    const READINESS: Readiness = Readiness::BeforeStart;
+
     fn wait(&self, timeout: Duration) -> Wait {
         let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
         // SAFETY: waits on the worker's process handle.
@@ -339,6 +341,18 @@ impl Worker for JobWorker {
     fn kill(&self) {
         // SAFETY: terminates every process in the worker's Job.
         unsafe { TerminateJobObject(raw(&self.job), 1) };
+    }
+
+    /// The AppContainer, mitigations and Job are in place before the worker
+    /// runs its first instruction.
+    fn confirm_contained(&self) -> bool {
+        true
+    }
+
+    /// Windows has no signals; the Job's limits end a worker with an exit
+    /// code.
+    fn signalled(&self) -> bool {
+        false
     }
 
     fn stats(&self, elapsed: Duration) -> WorkerStats {

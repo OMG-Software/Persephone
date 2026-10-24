@@ -21,3 +21,26 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_SystemServices",
   "Win32_System_Threading",
 ] }
+
+# Linux: prctl and the seccomp allowlist the worker installs before it reads
+# input (ADR-0010). seccompiler has no default features; `json` stays off.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.191"
+seccompiler = { version = "=0.5.0", default-features = false }
+
+# The probe tests call socket, open and fork directly.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "=0.2.191"
+
+[features]
+# Development only, for measuring the Linux allowlist: a call outside it
+# raises SIGSYS, and the worker writes the call's number to stderr and exits
+# with 159 instead of being killed without a report. The call is still never
+# run. The workspace build never enables it.
+syscall-trap = []
+
+# Runs the production `contain()` in child processes that then try a socket,
+# a file open and a fork; its own `main` starts those children.
+[[test]]
+name = "containment_probe"
+harness = false

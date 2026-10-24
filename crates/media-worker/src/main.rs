@@ -1,25 +1,29 @@
 //! Persephone media worker (ADR-0003, ADR-0009).
 //!
 //! One process runs one operation on one image. Before reading any input the
-//! worker checks that it is running with the containment its broker is
-//! required to apply; if any check fails it reports which, reads nothing, and
-//! exits. It then reads one request from stdin: a control frame that names the
-//! operation ([`WorkerOperation`]), then one encoded-image frame. It runs the
-//! operation in the WebAssembly sandbox and writes its reply to stdout:
+//! worker applies its own part of its containment and checks the part its
+//! broker is required to apply ([`contain`]); if any check fails it reports
+//! which, reads nothing, and exits. On Linux and macOS it then writes one
+//! [`WorkerReady`] frame, so the broker can check the containment from
+//! outside before it sends anything. It then reads one request from stdin: a
+//! control frame that names the operation ([`WorkerOperation`]), then one
+//! encoded-image frame. It runs the operation in the WebAssembly sandbox and
+//! writes its reply to stdout:
 //!
 //! * decode: one RGBA pixel frame followed by one [`PixelInfo`] control frame
 //!   with the EXIF orientation;
 //! * strip: one encoded-image frame with the stripped file;
 //! * on failure, instead: one failure control frame.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use persephone_media_protocol::WorkerReady;
 use persephone_media_protocol::{
     FrameHeader, FrameKind, PixelInfo, ResourceBudgets, WorkerFailure, WorkerOperation, read_frame,
     write_frame,
 };
 use persephone_media_sandbox::{Limits, Sandbox, SandboxError};
+use persephone_media_worker::contain;
 use std::{io, process::ExitCode};
-
-mod containment;
 
 /// The decoder guest, fixed at build time by build.rs.
 static GUEST: &[u8] = include_bytes!(env!("PERSEPHONE_MEDIA_GUEST_PATH"));
@@ -30,9 +34,19 @@ const EXIT_UNREPORTABLE: u8 = 2;
 const EXIT_CONTAINMENT: u8 = 3;
 
 fn main() -> ExitCode {
-    let missing = containment::missing_controls();
+    let missing = contain();
     if missing != 0 {
         return report(WorkerFailure::ContainmentCheck(missing), EXIT_CONTAINMENT);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if write_frame(
+        &mut io::stdout().lock(),
+        WorkerReady::header(),
+        &WorkerReady.encode(),
+    )
+    .is_err()
+    {
+        return ExitCode::from(EXIT_UNREPORTABLE);
     }
     match handle_request() {
         Ok(()) => ExitCode::from(EXIT_DONE),

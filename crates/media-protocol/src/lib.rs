@@ -546,6 +546,41 @@ impl PixelInfo {
     }
 }
 
+/// Version byte of the worker readiness message.
+pub const WORKER_READY_VERSION: u8 = 1;
+const WORKER_READY_LEN: usize = 2;
+const WORKER_READY: [u8; WORKER_READY_LEN] = [WORKER_READY_VERSION, 0];
+
+/// The first frame of a Linux or macOS worker: its containment is in place
+/// and it has read nothing yet. The broker then checks that containment from
+/// outside the worker and sends the request only if the check passes. Body:
+/// version and a zero byte, which no request or [`PixelInfo`] body uses. The
+/// Windows worker does not send it, because its containment is applied
+/// before it runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerReady;
+
+impl WorkerReady {
+    pub fn encode(self) -> [u8; WORKER_READY_LEN] {
+        WORKER_READY
+    }
+
+    /// Whether `body` is exactly the readiness message.
+    pub fn matches(body: &[u8]) -> bool {
+        body == WORKER_READY
+    }
+
+    /// The control frame header for this message.
+    pub fn header() -> FrameHeader {
+        FrameHeader {
+            kind: FrameKind::Control,
+            length: WORKER_READY_LEN as u64,
+            width: 0,
+            height: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,6 +867,20 @@ mod tests {
             assert_eq!(PixelInfo::decode(body), None, "{body:?}");
         }
         assert!(FrameHeader::decode(PixelInfo::header().encode()).is_ok());
+    }
+
+    #[test]
+    fn given_worker_ready_then_only_its_exact_body_matches_and_no_other_message_decodes_it() {
+        let ready = WorkerReady.encode();
+        assert!(WorkerReady::matches(&ready));
+        assert_eq!(WorkerReady::header().length, ready.len() as u64);
+        assert!(FrameHeader::decode(WorkerReady::header().encode()).is_ok());
+        for body in [&[1u8, 1][..], &[2, 0], &[1], &[1, 0, 0], &[]] {
+            assert!(!WorkerReady::matches(body), "{body:?}");
+        }
+        assert_eq!(WorkerOperation::decode(&ready), None);
+        assert_eq!(PixelInfo::decode(&ready), None);
+        assert_eq!(WorkerFailure::decode(&ready), None);
     }
 
     #[test]

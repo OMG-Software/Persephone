@@ -1,15 +1,17 @@
 //! The OS-independent part of one worker run: the pre-launch size check, the
-//! writer and reader threads, the deadline, and the reply checks. Each OS
-//! supplies a [`Launcher`] that starts the worker under its containment.
+//! writer and reader threads, the readiness check, the deadline, and the
+//! reply checks. Each OS supplies a [`Launcher`] that starts the worker under
+//! its containment.
 
 use crate::{DecodedImage, LaunchError, RunError, WorkerPolicy, WorkerRun, WorkerStats};
 use persephone_media_protocol::{
     FrameError, FrameHeader, FrameKind, PixelInfo, ReceivedFrame, ResourceBudgets, WorkerFailure,
-    WorkerOperation, read_frame, write_frame,
+    WorkerOperation, WorkerReady, read_frame, write_frame,
 };
 use std::{
     fs::File,
     path::Path,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -22,8 +24,10 @@ pub(crate) trait Launcher {
     type Worker: Worker;
 
     /// Starts `worker` under the OS containment for `policy`. The worker
-    /// gets only the two pipes; the broker keeps their other ends. The worker
-    /// must not run outside its containment at any time.
+    /// gets only the two pipes; the broker keeps their other ends. With
+    /// [`Readiness::BeforeStart`] the worker must not run outside its
+    /// containment at any time; with [`Readiness::Announced`] it must not be
+    /// sent input before it is confirmed contained.
     fn spawn(
         &self,
         worker: &Path,
@@ -47,13 +51,37 @@ pub(crate) enum Wait {
     Failed,
 }
 
+/// When the broker knows the worker is contained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    /// The containment is complete before the worker runs (Windows).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    BeforeStart,
+    /// The worker contains itself and then sends a [`WorkerReady`] frame;
+    /// the broker checks the containment with [`Worker::confirm_contained`]
+    /// before it sends the request (Linux, macOS).
+    #[cfg_attr(windows, allow(dead_code))]
+    Announced,
+}
+
 /// A running contained worker. Dropping it must end anything left of it.
+/// Only the thread that runs the broker calls these methods.
 pub(crate) trait Worker {
+    const READINESS: Readiness;
+
     /// Waits up to `timeout` for the worker to exit.
     fn wait(&self, timeout: Duration) -> Wait;
 
     /// Ends the worker and anything in its containment, without waiting.
     fn kill(&self);
+
+    /// With [`Readiness::Announced`]: whether the OS shows the worker as
+    /// contained. Called after its ready frame and before any input is sent.
+    fn confirm_contained(&self) -> bool;
+
+    /// Whether the worker was ended by a signal (Unix); such a run has no
+    /// usable reply.
+    fn signalled(&self) -> bool;
 
     /// Measurements after the worker exited (or was killed).
     fn stats(&self, elapsed: Duration) -> WorkerStats;
@@ -110,11 +138,21 @@ struct Reply {
     second: Option<Result<ReceivedFrame, FrameError>>,
 }
 
+/// What the reader thread saw.
+struct Read {
+    reply: Reply,
+    /// False when a worker that announces readiness sent something else
+    /// first; `reply.first` is then that frame, and no request was sent.
+    ready: bool,
+}
+
 /// Launches a fresh contained worker, sends the operation and `encoded`, and
-/// reads its reply. Every path out of this function leaves the worker
-/// terminated: it is killed on deadline, and dropping it on return ends
-/// anything left. The reply is classified by the caller after the worker has
-/// exited.
+/// reads its reply. A worker that announces readiness is sent nothing until
+/// its ready frame arrived and the OS confirmed its containment; if the OS
+/// does not confirm it, it is killed. Every path out of this function leaves
+/// the worker terminated: it is killed on deadline, and dropping it on return
+/// ends anything left. The reply is classified by the caller after the worker
+/// has exited.
 fn run_worker<L: Launcher>(
     launcher: &L,
     worker: &Path,
@@ -138,24 +176,64 @@ fn run_worker<L: Launcher>(
         mut stdout,
     } = launcher.spawn(worker, policy)?;
     let started = Instant::now();
+    let announced = L::Worker::READINESS == Readiness::Announced;
 
-    let (wait, written, reply) = thread::scope(|scope| {
+    let (wait, written, read, refused) = thread::scope(|scope| {
+        // The writer sends nothing until the broker allows it.
+        let (allow, allowed) = mpsc::channel::<()>();
+        let (ready_sender, ready) = mpsc::channel::<bool>();
         let writer = scope.spawn(move || {
-            let written = write_frame(&mut stdin, WorkerOperation::header(), &operation.encode())
-                .and_then(|()| write_frame(&mut stdin, request, encoded))
-                .is_ok();
+            let written = allowed.recv().is_ok()
+                && write_frame(&mut stdin, WorkerOperation::header(), &operation.encode())
+                    .and_then(|()| write_frame(&mut stdin, request, encoded))
+                    .is_ok();
             drop(stdin);
             written
         });
         let reader = scope.spawn(move || {
+            if announced {
+                let first = read_frame(&mut stdout, budgets);
+                let is_ready = matches!(&first, Ok(frame)
+                    if frame.header().kind == FrameKind::Control
+                        && WorkerReady::matches(frame.body()));
+                let _ = ready_sender.send(is_ready);
+                if !is_ready {
+                    let reply = Reply {
+                        first,
+                        second: None,
+                    };
+                    return Read {
+                        reply,
+                        ready: false,
+                    };
+                }
+            }
             let first = read_frame(&mut stdout, budgets);
             let pixels =
                 matches!(&first, Ok(frame) if frame.header().kind == FrameKind::RgbaPixels);
             let second = (operation == WorkerOperation::Decode && pixels)
                 .then(|| read_frame(&mut stdout, budgets));
-            Reply { first, second }
+            Read {
+                reply: Reply { first, second },
+                ready: true,
+            }
         });
-        let wait = match process.wait(policy.wall_deadline) {
+        let mut refused = false;
+        if !announced {
+            let _ = allow.send(());
+        } else if let Ok(true) = ready.recv_timeout(policy.wall_deadline) {
+            if process.confirm_contained() {
+                let _ = allow.send(());
+            } else {
+                refused = true;
+                process.kill();
+            }
+        }
+        // Without a ready frame (a refusal, another frame, end of file or the
+        // deadline) nothing is sent; the reply is classified below.
+        drop(allow);
+        let remaining = policy.wall_deadline.saturating_sub(started.elapsed());
+        let wait = match process.wait(remaining) {
             Wait::Exited => Wait::Exited,
             Wait::TimedOut => {
                 process.kill();
@@ -168,18 +246,42 @@ fn run_worker<L: Launcher>(
             }
         };
         // Both threads finish once the worker's pipe ends are closed.
-        (wait, writer.join().unwrap_or(false), reader.join())
+        (wait, writer.join().unwrap_or(false), reader.join(), refused)
     });
     let stats = process.stats(started.elapsed());
+    let signalled = process.signalled();
     // Dropping the worker ends anything left in its containment.
     drop(process);
 
-    let outcome = if wait == Wait::TimedOut {
+    let outcome = if refused {
+        debug_assert!(!written, "no input before containment is confirmed");
+        Err(RunError::ContainmentNotConfirmed)
+    } else if wait == Wait::TimedOut {
         Err(RunError::DeadlineExceeded)
+    } else if signalled {
+        Err(RunError::AbnormalExit(stats.exit_code))
     } else {
-        check_reply(reply, written, stats.exit_code)
+        match read {
+            Ok(Read {
+                reply,
+                ready: false,
+            }) => Err(before_request(reply.first, stats.exit_code)),
+            Ok(Read { reply, ready: true }) => check_reply(Ok(reply), written, stats.exit_code),
+            Err(panic) => check_reply(Err(panic), written, stats.exit_code),
+        }
     };
     Ok((outcome, stats))
+}
+
+/// The reply of a worker that announces readiness but sent another frame
+/// first, before it had any input: only a failure message is valid.
+fn before_request(first: Result<ReceivedFrame, FrameError>, exit_code: u32) -> RunError {
+    match first {
+        Ok(frame) if frame.header().kind == FrameKind::Control => failure(&frame),
+        Ok(_) => RunError::UnexpectedReply,
+        Err(FrameError::Io(_)) => RunError::AbnormalExit(exit_code),
+        Err(error) => RunError::Protocol(error),
+    }
 }
 
 /// Maps a missing or unreadable first frame to its error; the reply is kept

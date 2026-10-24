@@ -39,9 +39,11 @@ pub(crate) fn read_image_file(
     super::unix::read_image_file(path, budgets)
 }
 
-/// Plan "Linux", Media worker: the broker's seccomp and rlimit launcher.
+/// The contained media worker next to the core: the broker's rlimit
+/// launcher and the worker's seccomp allowlist, confirmed through
+/// `/proc/<pid>/status` before input is sent (ADR-0010).
 pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {
-    Arc::new(media::NoWorker)
+    Arc::new(media::contained::ContainedWorker::next_to_core())
 }
 
 /// Plan "Linux", UI launch: a systemd user scope with `MemoryMax`.

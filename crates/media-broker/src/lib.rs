@@ -11,29 +11,52 @@
 //! mitigations set at creation (dynamic code prohibited, Win32k system calls
 //! disabled, image-load hardening), inherits only its two pipe handles, and
 //! is placed in a Job before it runs. The broker enforces the wall deadline
-//! by terminating the Job. Containment for Linux and macOS is not
-//! implemented, so other platforms export no launcher, no [`run_decode`] and
-//! no [`run_strip`].
+//! by terminating the Job. On Linux and macOS the worker starts with an
+//! empty environment, only its standard descriptors and rlimits, contains
+//! itself (seccomp on Linux, the pure-computation sandbox on macOS) and
+//! reports ready; the broker checks that containment from outside before it
+//! sends any input, and kills the worker's process group on deadline. Other
+//! platforms export no launcher, no [`run_decode`] and no [`run_strip`].
 
 use persephone_media_protocol::{FrameError, ReceivedFrame, WorkerFailure};
 use std::time::Duration;
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 mod launch;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix;
 #[cfg(windows)]
 mod windows;
+#[cfg(target_os = "linux")]
+pub use linux::SeccompContainment;
+#[cfg(target_os = "macos")]
+pub use macos::SeatbeltContainment;
 #[cfg(windows)]
 pub use windows::AppContainerProfile;
 
 /// The OS containment context a worker runs in: on Windows the AppContainer
-/// profile whose SID the worker runs under.
+/// profile whose SID the worker runs under; on Linux and macOS a marker,
+/// since the worker contains itself. Each has
+/// `create_or_open(name)` (Linux and macOS ignore the name) and
+/// `temporary(name)`.
 #[cfg(windows)]
 pub type ContainmentProfile = AppContainerProfile;
+#[cfg(target_os = "linux")]
+pub type ContainmentProfile = SeccompContainment;
+#[cfg(target_os = "macos")]
+pub type ContainmentProfile = SeatbeltContainment;
 
 /// Launches a fresh contained worker, decodes `encoded`, and returns the
 /// validated RGBA pixel frame with its EXIF orientation. The pixel frame keeps
 /// its `WorkerOutput` budget reservation.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub fn run_decode(
     profile: &ContainmentProfile,
     worker: &std::path::Path,
@@ -47,7 +70,7 @@ pub fn run_decode(
 /// Launches a fresh contained worker, strips the metadata from `encoded`, and
 /// returns the stripped file as an `EncodedImage` frame. The frame keeps its
 /// `EncodedInFlight` budget reservation and is never longer than `encoded`.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub fn run_strip(
     profile: &ContainmentProfile,
     worker: &std::path::Path,
@@ -62,15 +85,18 @@ pub fn run_strip(
 pub const WORKER_EXIT_CONTAINMENT: u32 = 3;
 
 /// Limits for one worker run. Each launcher applies them with its OS's
-/// controls (a Job on Windows).
+/// controls: a Job on Windows, rlimits on Linux and macOS.
 #[derive(Clone, Copy, Debug)]
 pub struct WorkerPolicy {
-    /// Limit on the worker's committed memory.
+    /// Limit on the worker's memory: committed memory on Windows, address
+    /// space (`RLIMIT_AS`) on Linux. macOS does not enforce an address-space
+    /// limit; there the decoder guest's memory cap is the bound.
     pub memory_limit_bytes: usize,
     /// Wall-clock deadline from the worker's start; the worker is killed
     /// when it passes.
     pub wall_deadline: Duration,
-    /// Limit on the worker's user-mode CPU time.
+    /// Limit on the worker's CPU time: user mode on Windows; user and system
+    /// time, rounded up to whole seconds, on Linux and macOS.
     pub cpu_time_limit: Duration,
     /// Windows process mitigations; other launchers ignore them.
     pub mitigations: Mitigations,
@@ -131,25 +157,32 @@ pub enum RunError {
     /// the operation does not reply with, pixels without valid pixel
     /// information, or a stripped file longer than the input.
     UnexpectedReply,
-    /// The worker exited without a usable reply.
+    /// The worker exited without a usable reply, or was ended by a signal
+    /// (the detail is then 128 plus the signal number).
     AbnormalExit(u32),
+    /// The worker reported ready, but the OS did not show it as contained
+    /// (Linux: `/proc/<pid>/status`; macOS: `sandbox_check`). It was killed
+    /// before any input was sent.
+    ContainmentNotConfirmed,
     /// The request could not be written to the worker.
     RequestWrite,
 }
 
 /// Measurements the launcher reads after the worker exits (from its Job on
-/// Windows).
+/// Windows, from `wait4` on Linux and macOS).
 #[derive(Clone, Copy, Debug)]
 pub struct WorkerStats {
     /// Wall time from the worker's start to its exit.
     pub elapsed: Duration,
-    /// Peak committed memory of the worker process, in bytes; 0 if the OS
-    /// does not report it.
+    /// Peak memory of the worker process, in bytes: committed memory on
+    /// Windows, resident set on Linux and macOS; 0 if the OS does not report
+    /// it.
     pub peak_process_memory: usize,
     /// User-mode CPU time the worker used.
     pub user_cpu: Duration,
-    /// The worker's exit code as the OS reports it; `u32::MAX` if it could
-    /// not be read.
+    /// The worker's exit code as the OS reports it; on Unix 128 plus the
+    /// signal number after a death by signal; `u32::MAX` if it could not be
+    /// read.
     pub exit_code: u32,
 }
 

@@ -20,5 +20,10 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_Threading",
 ] }
 
+# Linux and macOS: fork-to-exec setup (setsid, prctl, rlimits), wait4 and
+# kill for the worker, and the macOS sandbox_check declaration's types.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "=0.2.191"
+
 [dev-dependencies]
 png = { version = "=0.18.1", default-features = false }

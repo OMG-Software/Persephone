@@ -99,7 +99,9 @@ pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// than the lock's wait for leases, so a stalled server cannot make a lock
 /// time out.
 pub const DOWNLOAD_LOCK_POLL: Duration = Duration::from_millis(250);
-/// Job memory limit of one worker run (the media plan's default).
+/// Memory limit of one worker run (the media plan's default): the Job's
+/// committed-memory limit on Windows, `RLIMIT_AS` on Linux; not enforced on
+/// macOS, where the decoder guest's memory cap is the bound.
 pub const WORKER_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 /// Wall and CPU limit of one decode. Provisional: recorded benchmarks show 5
 /// to 8 s for a 16-megapixel decode in the worker.
@@ -112,7 +114,8 @@ pub const WORKER_EXE: &str = if cfg!(windows) {
 } else {
     "persephone-media-worker"
 };
-/// The AppContainer profile the worker runs in.
+/// The AppContainer profile the worker runs in on Windows; Linux and macOS
+/// have no named profile and ignore it.
 pub const WORKER_PROFILE: &str = "Persephone.MediaWorker";
 /// Bytes decrypted per step; the decrypted bytes overwrite the encrypted
 /// ones in the same buffer.
@@ -509,7 +512,7 @@ pub trait ImageWorker: Send + Sync {
 }
 
 /// No contained worker: every run is `unavailable` (platforms other than
-/// Windows, ADR-0003).
+/// Windows, Linux and macOS; ADR-0003).
 pub struct NoWorker;
 
 impl ImageWorker for NoWorker {
@@ -523,14 +526,15 @@ impl ImageWorker for NoWorker {
 }
 
 /// The platform's worker ([`crate::platform`]): the contained worker next to
-/// the core on Windows, [`NoWorker`] where containment is not implemented.
+/// the core on Windows, Linux and macOS, [`NoWorker`] where containment is
+/// not implemented.
 pub fn platform_worker() -> Arc<dyn ImageWorker> {
     crate::platform::os::image_worker()
 }
 
-/// The Windows contained worker, under its earlier path.
-#[cfg(windows)]
-pub use crate::platform::windows::media as contained;
+/// The contained worker on Windows, Linux and macOS.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub mod contained;
 
 struct Draft {
     room_id: String,
