@@ -173,10 +173,24 @@ fn png_status(error: png::DecodingError) -> Status {
 fn decode_jpeg(input: &[u8]) -> Result<Rgba, Status> {
     use zune_jpeg::zune_core::{colorspace::ColorSpace, options::DecoderOptions};
 
+    // A file cut short must not be shown in part (docs/architecture/
+    // image-messaging.md). The structure check proves that every scan ends
+    // at a marker and that EOI follows. Strict mode turns zune-jpeg's
+    // recovery from bad entropy data (an invalid Huffman code, data that
+    // runs out, an unexpected marker) into an error; without it the decoder
+    // fills the rest of the image with grey and reports success.
+    //
+    // Limit: zune-jpeg zero-fills a scan that ends at a valid marker before
+    // all of its blocks are decoded, in strict mode too, and its public API
+    // does not report this. A file truncated inside a scan and then given a
+    // new EOI can therefore still decode, with wrong blocks at the end. Such
+    // a file needs a deliberate edit; a transfer that stops early has no EOI.
+    strip::check_jpeg_structure(input)?;
     let options = DecoderOptions::default()
         .jpeg_set_out_colorspace(ColorSpace::RGBA)
         .set_max_width(MAX_DIMENSION as usize)
         .set_max_height(MAX_DIMENSION as usize)
+        .set_strict_mode(true)
         // Hand-written unsafe fast paths are not needed inside the sandbox.
         .set_use_unsafe(false);
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(Cursor::new(input), options);
@@ -391,6 +405,133 @@ mod tests {
         let crc = crc32(&png[12..29]);
         png[29..33].copy_from_slice(&crc.to_be_bytes());
         assert_eq!(decode(&png), Err(Status::TooLarge));
+    }
+
+    // --- Truncated and corrupt input -------------------------------------
+
+    const SOLID: &[u8] =
+        include_bytes!("../../media-sandbox/tests/fixtures/solid-16x8-baseline.jpg");
+    const PROGRESSIVE: &[u8] =
+        include_bytes!("../../media-sandbox/tests/fixtures/gradient-33x17-progressive.jpg");
+    const RESTART: &[u8] = include_bytes!("../tests/fixtures/restart-48x32-baseline.jpg");
+    const ADOBE: &[u8] = include_bytes!("../tests/fixtures/cmyk-8x8-adobe.jpg");
+    const JPEGS: [(&str, &[u8]); 4] = [
+        ("baseline", SOLID),
+        ("progressive", PROGRESSIVE),
+        ("restart", RESTART),
+        ("adobe", ADOBE),
+    ];
+
+    /// The decode as it was before strict mode and the structure check:
+    /// used to prove that valid files still give the same pixels.
+    fn lenient_jpeg(input: &[u8]) -> Option<Vec<u8>> {
+        use zune_jpeg::zune_core::{colorspace::ColorSpace, options::DecoderOptions};
+        let options = DecoderOptions::default()
+            .jpeg_set_out_colorspace(ColorSpace::RGBA)
+            .set_use_unsafe(false);
+        zune_jpeg::JpegDecoder::new_with_options(Cursor::new(input), options)
+            .decode()
+            .ok()
+    }
+
+    /// The offset where the entropy-coded data of the first scan starts.
+    fn first_scan_data(jpeg: &[u8]) -> usize {
+        let mut at = 2;
+        loop {
+            assert_eq!(jpeg[at], 0xff);
+            let length = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+            if jpeg[at + 1] == 0xda {
+                return at + 2 + length;
+            }
+            at += 2 + length;
+        }
+    }
+
+    #[test]
+    fn given_valid_jpeg_fixtures_when_decoded_strictly_then_pixels_equal_the_lenient_decode() {
+        for (name, jpeg) in JPEGS {
+            let strict = decode(jpeg).unwrap_or_else(|status| panic!("{name}: {status:?}"));
+            assert_eq!(Some(strict.pixels), lenient_jpeg(jpeg), "{name}");
+            // Bytes after EOI are ignored, as before.
+            let mut trailing = jpeg.to_vec();
+            trailing.extend_from_slice(b"appended bytes");
+            assert_eq!(decode(&trailing), decode(jpeg), "{name}");
+        }
+    }
+
+    /// GIVEN a JPEG cut at any byte after its signature WHEN decoded THEN it
+    /// is refused as malformed, so no partial image is returned.
+    #[test]
+    fn given_jpeg_truncated_anywhere_when_decoded_then_malformed() {
+        for (name, jpeg) in JPEGS {
+            let scan = first_scan_data(jpeg);
+            assert!(scan < jpeg.len() - 2, "{name}");
+            for cut in 3..jpeg.len() {
+                assert_eq!(
+                    decode(&jpeg[..cut]),
+                    Err(Status::Malformed),
+                    "{name} cut at {cut}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn given_jpeg_with_eoi_removed_when_decoded_then_malformed() {
+        for (name, jpeg) in JPEGS {
+            assert!(jpeg.ends_with(&[0xff, 0xd9]), "{name}");
+            assert_eq!(
+                decode(&jpeg[..jpeg.len() - 2]),
+                Err(Status::Malformed),
+                "{name}"
+            );
+        }
+    }
+
+    /// GIVEN garbage in place of part of the first scan WHEN decoded THEN it
+    /// is refused. The garbage is stuffed 0xFF bytes (FF 00): a run of one
+    /// bits that is not a valid Huffman code. The structure is intact, so
+    /// only strict mode catches it; the lenient decode succeeds.
+    #[test]
+    fn given_jpeg_with_garbage_in_its_scan_when_decoded_then_malformed() {
+        for (name, jpeg) in JPEGS {
+            let start = first_scan_data(jpeg);
+            let mut corrupt = jpeg.to_vec();
+            corrupt.splice(start..start + 4, [0xff, 0x00].repeat(8));
+            assert_eq!(decode(&corrupt), Err(Status::Malformed), "{name}");
+            assert!(lenient_jpeg(&corrupt).is_some(), "{name}: lenient decode");
+        }
+    }
+
+    /// GIVEN a PNG cut inside its IDAT chunk, or with a short IDAT that still
+    /// has a valid CRC and IEND WHEN decoded THEN it is refused as malformed.
+    #[test]
+    fn given_png_truncated_inside_idat_when_decoded_then_malformed() {
+        let (width, height) = (32u32, 32u32);
+        let pixels: Vec<u8> = (0..width * height * 4)
+            .map(|i| (i * 7 % 251) as u8)
+            .collect();
+        let png = png_bytes(width, height, png::ColorType::Rgba, &pixels);
+        assert_eq!(decode(&png).unwrap().pixels, pixels);
+        // IHDR ends at byte 33; this encoder writes one IDAT next.
+        assert_eq!(&png[37..41], b"IDAT");
+        let idat_len = u32::from_be_bytes(png[33..37].try_into().unwrap()) as usize;
+        let idat_data = 41;
+        assert!(idat_len > 64);
+        for cut in (idat_data..idat_data + idat_len + 4).step_by(7) {
+            assert_eq!(decode(&png[..cut]), Err(Status::Malformed), "cut at {cut}");
+        }
+        let short = idat_len / 2;
+        let mut rebuilt = png[..33].to_vec();
+        let mut chunk = (short as u32).to_be_bytes().to_vec();
+        chunk.extend_from_slice(b"IDAT");
+        chunk.extend_from_slice(&png[idat_data..idat_data + short]);
+        let crc = crc32(&chunk[4..]);
+        chunk.extend_from_slice(&crc.to_be_bytes());
+        rebuilt.extend_from_slice(&chunk);
+        rebuilt.extend_from_slice(&png[png.len() - 12..]);
+        assert_eq!(&rebuilt[rebuilt.len() - 8..rebuilt.len() - 4], b"IEND");
+        assert_eq!(decode(&rebuilt), Err(Status::Malformed));
     }
 
     fn crc32(bytes: &[u8]) -> u32 {

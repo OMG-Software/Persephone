@@ -322,6 +322,34 @@ fn given_malformed_image_then_contained_worker_reports_guest_status() {
     );
 }
 
+/// GIVEN a received JPEG cut inside its scan (no EOI) WHEN the contained
+/// worker decodes it THEN the worker reports the guest's malformed status and
+/// returns no pixels, instead of a partly grey image.
+#[test]
+fn given_truncated_jpeg_then_contained_worker_fails_without_pixels() {
+    let fixture = include_bytes!("../../media-sandbox/tests/fixtures/solid-16x8-baseline.jpg");
+    // The scan data are bytes 623 to 630, followed by EOI; cut after 627.
+    assert_eq!(&fixture[609..611], &[0xff, 0xda]);
+    let truncated = &fixture[..fixture.len() - 6];
+    let run = run_decode(
+        &profile(),
+        &worker_exe(),
+        truncated,
+        &WorkerPolicy::default(),
+        &ResourceBudgets::default(),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            run.outcome,
+            Err(RunError::Worker(WorkerFailure::GuestRejected(2)))
+        ),
+        "{:?}",
+        run.outcome.err()
+    );
+    assert_eq!(run.stats.exit_code, 1);
+}
+
 #[test]
 fn given_deadline_shorter_than_the_operation_then_broker_terminates_worker() {
     let (encoded, _) = png(1024, 1024);

@@ -1185,8 +1185,11 @@ pub fn media_url(
 /// buffer reserved up front, and refused as soon as it would pass the cap or
 /// the declared length. Between chunks `current` is asked whether the
 /// session is still the one that started: once it is not, the download stops
-/// (`locked`). A body that ends early is `unavailable` (the transfer failed),
-/// as is any other HTTP failure; a 404 is `not_found`.
+/// (`locked`). A body that ends early is `unavailable` (the transfer failed).
+/// A 404 is `not_found`. Any other 4xx except 429, such as 403 or 451, is
+/// `rejected`: the server refuses this file, and asking again gives the same
+/// answer. A 429, a 5xx, any other status and a network failure are
+/// `unavailable`.
 pub async fn download(
     http: &reqwest::Client,
     url: &str,
@@ -1203,6 +1206,8 @@ pub async fn download(
     match response.status().as_u16() {
         200 => {}
         404 => return Err(ErrorCode::NotFound),
+        429 => return Err(ErrorCode::Unavailable),
+        400..=499 => return Err(ErrorCode::Rejected),
         _ => return Err(ErrorCode::Unavailable),
     }
     let declared = response.content_length();

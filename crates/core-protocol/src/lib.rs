@@ -262,8 +262,9 @@ pub enum ErrorCode {
     LimitExceeded,
     /// The session is locked (or locking); protected views are unavailable.
     Locked,
-    /// The image was refused: too large, malformed, not PNG or JPEG, or it
-    /// failed its integrity check. Trying again gives the same answer.
+    /// The image was refused: too large, malformed, not PNG or JPEG, it
+    /// failed its integrity check, or the server refused the file (a 4xx
+    /// status other than 404 or 429). Trying again gives the same answer.
     Rejected,
 }
 

@@ -170,7 +170,8 @@ test('GIVEN more drawn images than the limit WHEN another is admitted THEN the o
 });
 
 test('GIVEN image error codes WHEN shown THEN each is a short fixed message', () => {
-  assert.match(image.loadErrorText('rejected'), /too large, damaged, or not a PNG or JPEG/);
+  assert.match(image.loadErrorText('rejected'), /^This image cannot be shown\. The server refused the file/);
+  assert.doesNotMatch(image.loadErrorText('rejected'), /too large/);
   assert.equal(image.canRetryLoad('rejected'), false, 'the core gives the same answer again');
   assert.equal(image.canRetryLoad('limit_exceeded'), true);
   assert.match(image.loadErrorText('limit_exceeded'), /Other images are loading/);
@@ -178,8 +179,8 @@ test('GIVEN image error codes WHEN shown THEN each is a short fixed message', ()
   assert.match(image.loadErrorText('bad_image'), /not valid/);
   // Unknown or internal text never reaches the page.
   for (const reason of ['core_unavailable', 'C:\\Users\\a\\secret.png', new Error('boom'), undefined]) {
-    assert.match(image.loadErrorText(reason), /^The image could not be loaded\./);
-    assert.match(image.attachErrorText(reason), /^The image could not be attached\./);
+    assert.match(image.loadErrorText(reason), /^The image could not be loaded/);
+    assert.match(image.attachErrorText(reason), /^The image could not be attached/);
     assert.equal(image.sendImageErrorText(reason), 'The image was not queued. Try again.');
   }
   assert.match(image.sendImageErrorText('limit_exceeded'), /An image is already waiting to send/);
@@ -190,6 +191,45 @@ test('GIVEN image error codes WHEN shown THEN each is a short fixed message', ()
   assert.equal(image.formatSize(20_971_520), '21.0 MB');
   assert.equal(image.declaredText(48_213, 640, 480), '640 × 480 · 48 KB');
   assert.equal(image.declaredText(null, null, null), '');
+});
+
+const WINDOWS_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0';
+const LINUX_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko)';
+const MAC_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)';
+
+test('GIVEN an unavailable core or server WHEN the page is on Windows or unknown THEN the text asks to try again without naming a platform', () => {
+  for (const userAgent of [WINDOWS_UA, '', 'Node.js/22']) {
+    assert.equal(image.notWindows(userAgent), false, userAgent);
+    for (const reason of ['unavailable', 'core_unavailable']) {
+      assert.equal(image.loadErrorText(reason, userAgent), 'The image could not be loaded right now. Try again.');
+      assert.equal(image.attachErrorText(reason, userAgent), 'The image could not be attached right now. Try again.');
+      assert.equal(image.canRetryLoad(reason), true);
+    }
+  }
+});
+
+test('GIVEN an unavailable core WHEN the page is on another platform THEN the text says images work on Windows only', () => {
+  for (const userAgent of [LINUX_UA, MAC_UA]) {
+    assert.equal(image.notWindows(userAgent), true, userAgent);
+    assert.equal(
+      image.loadErrorText('core_unavailable', userAgent),
+      'The image could not be loaded. Images work on Windows only for now.'
+    );
+    assert.equal(
+      image.attachErrorText('unavailable', userAgent),
+      'The image could not be attached. Images work on Windows only for now.'
+    );
+  }
+});
+
+test('GIVEN a server refusal WHEN a received image fails as rejected THEN the text says it cannot be shown on every platform', () => {
+  for (const userAgent of [WINDOWS_UA, LINUX_UA]) {
+    const text = image.loadErrorText('rejected', userAgent);
+    assert.match(text, /^This image cannot be shown\./);
+    assert.doesNotMatch(text, /too large|Windows/);
+  }
+  assert.equal(image.canRetryLoad('rejected'), false);
 });
 
 const timeline = (items) =>

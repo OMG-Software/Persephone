@@ -783,9 +783,10 @@ fn given_an_unbounded_body_then_the_download_stops_at_the_cap() {
     assert!(sent < OFFERED / 2, "the server sent {sent} bytes");
 }
 
-/// GIVEN a body cut short, a missing file, a server error, an empty file or
-/// a lock during the download WHEN downloaded THEN each is refused with its
-/// code and nothing stays reserved.
+/// GIVEN a body cut short, a missing file, a server error, an empty file, a
+/// refusal (403, 451), a rate limit (429), a redirect or a lock during the
+/// download WHEN downloaded THEN each is refused with its code and nothing
+/// stays reserved.
 #[test]
 fn given_failed_downloads_then_each_is_refused_with_its_code() {
     let cases: Vec<(&[u8], ErrorCode)> = vec![
@@ -807,6 +808,24 @@ fn given_failed_downloads_then_each_is_refused_with_its_code() {
         ),
         (
             b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ErrorCode::Unavailable,
+        ),
+        // The server refuses this file: asking again gives the same answer.
+        (
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ErrorCode::Rejected,
+        ),
+        (
+            b"HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ErrorCode::Rejected,
+        ),
+        // Rate limits and server faults pass; the page may try again.
+        (
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ErrorCode::Unavailable,
+        ),
+        (
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             ErrorCode::Unavailable,
         ),
     ];

@@ -232,6 +232,69 @@ fn given_hostile_or_unsupported_images_then_guest_refuses_with_its_status() {
     );
 }
 
+/// The offset where the entropy-coded data of the first scan starts.
+fn first_scan_data(jpeg: &[u8]) -> usize {
+    let mut at = 2;
+    loop {
+        assert_eq!(jpeg[at], 0xff);
+        let length = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+        if jpeg[at + 1] == 0xda {
+            return at + 2 + length;
+        }
+        at += 2 + length;
+    }
+}
+
+/// GIVEN a received JPEG cut inside its scan, without its EOI, or with
+/// garbage in its scan, or a PNG cut inside IDAT WHEN the real guest decodes
+/// it THEN the guest refuses it as malformed (status 2) and returns no pixels.
+#[test]
+fn given_truncated_or_corrupt_images_when_decoded_in_sandbox_then_no_partial_image_is_returned() {
+    let sandbox = Sandbox::new(&guest_wasm()).unwrap();
+    let limits = Limits::default();
+    let malformed = Err(SandboxError::GuestRejected(2));
+    for (name, jpeg) in [
+        (
+            "baseline",
+            &include_bytes!("fixtures/solid-16x8-baseline.jpg")[..],
+        ),
+        (
+            "progressive",
+            &include_bytes!("fixtures/gradient-33x17-progressive.jpg")[..],
+        ),
+    ] {
+        assert!(sandbox.decode(jpeg, &limits).is_ok(), "{name}");
+        let scan = first_scan_data(jpeg);
+        let mid_scan = (scan + jpeg.len()) / 2;
+        assert_eq!(
+            sandbox.decode(&jpeg[..mid_scan], &limits),
+            malformed,
+            "{name} mid-scan"
+        );
+        assert_eq!(
+            sandbox.decode(&jpeg[..jpeg.len() - 2], &limits),
+            malformed,
+            "{name} without EOI"
+        );
+        let mut garbage = jpeg.to_vec();
+        garbage.splice(scan..scan + 4, [0xff, 0x00].repeat(8));
+        assert_eq!(
+            sandbox.decode(&garbage, &limits),
+            malformed,
+            "{name} garbage"
+        );
+    }
+    let rgba: Vec<u8> = (0..32 * 32 * 4u32).map(|i| (i * 7 % 251) as u8).collect();
+    let valid = png(32, 32, &rgba);
+    assert_eq!(sandbox.decode(&valid, &limits).unwrap().rgba, rgba);
+    assert_eq!(&valid[37..41], b"IDAT");
+    let idat_len = u32::from_be_bytes(valid[33..37].try_into().unwrap()) as usize;
+    assert_eq!(
+        sandbox.decode(&valid[..41 + idat_len / 2], &limits),
+        malformed
+    );
+}
+
 #[test]
 fn given_real_guest_and_tiny_fuel_then_decode_stops_with_fuel_exhausted() {
     let sandbox = Sandbox::new(&guest_wasm()).unwrap();

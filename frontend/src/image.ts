@@ -113,9 +113,21 @@ export class ShownImages {
 /** The page's one set of drawn timeline images. */
 export const shownImages = new ShownImages();
 
+const currentUserAgent = (): string =>
+  typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string' ? navigator.userAgent : '';
+
+/**
+ * True only when `userAgent` names a platform other than Windows. Images need
+ * the contained media worker, which exists on Windows only for now. An
+ * unknown user agent is not taken as proof of another platform.
+ */
+export function notWindows(userAgent: string = currentUserAgent()): boolean {
+  return !/Windows/.test(userAgent) && /Macintosh|Mac OS X|Linux|X11|BSD|CrOS|Android|iPhone|iPad/.test(userAgent);
+}
+
 // Error codes from the host map to fixed, short messages; nothing else is shown.
 const loadText: Record<string, string> = {
-  rejected: 'This image cannot be shown: it is too large, damaged, or not a PNG or JPEG.',
+  rejected: 'This image cannot be shown. The server refused the file, or the file is damaged or not supported.',
   limit_exceeded: 'Other images are loading. Try again when they finish.',
   not_found: 'This image is no longer available.',
   locked: 'The session is locked.',
@@ -123,8 +135,18 @@ const loadText: Record<string, string> = {
   [BAD_IMAGE]: 'The image data was not valid, so it is not shown.'
 };
 
-export function loadErrorText(reason: unknown): string {
-  return loadText[String(reason)] ?? 'The image could not be loaded. Images work on Windows only for now.';
+/**
+ * The text for a failed load. `unavailable`, `core_unavailable` and any
+ * unknown reason give a generic "try again" text; only a page on another
+ * platform is told that images work on Windows only.
+ */
+export function loadErrorText(reason: unknown, userAgent: string = currentUserAgent()): string {
+  return (
+    loadText[String(reason)] ??
+    (notWindows(userAgent)
+      ? 'The image could not be loaded. Images work on Windows only for now.'
+      : 'The image could not be loaded right now. Try again.')
+  );
 }
 
 /** The core gives the same answer again for a rejected image. */
@@ -140,8 +162,14 @@ const attachText: Record<string, string> = {
   invalid_argument: 'That request was not valid.'
 };
 
-export function attachErrorText(reason: unknown): string {
-  return attachText[String(reason)] ?? 'The image could not be attached. Images work on Windows only for now.';
+/** The text for a failed attach; the fallback follows `loadErrorText`. */
+export function attachErrorText(reason: unknown, userAgent: string = currentUserAgent()): string {
+  return (
+    attachText[String(reason)] ??
+    (notWindows(userAgent)
+      ? 'The image could not be attached. Images work on Windows only for now.'
+      : 'The image could not be attached right now. Try again.')
+  );
 }
 
 const sendText: Record<string, string> = {

@@ -233,6 +233,30 @@ pub(crate) fn jpeg_orientation(input: &[u8]) -> u8 {
     1
 }
 
+/// Checks, without changing `input`, that the JPEG segment structure is
+/// complete: every segment length fits, each scan's entropy-coded data ends at
+/// a marker, at least one scan is present, and the walk reaches EOI. Bytes
+/// after EOI are ignored, as the decoder ignores them. Which markers are
+/// allowed is left to the decoder; this check only proves that the file was
+/// not cut short. Each step moves `at` forward by at least two bytes, so the
+/// walk is bounded by the input length.
+pub(crate) fn check_jpeg_structure(input: &[u8]) -> Result<(), Status> {
+    let mut at = 2;
+    let mut scan_seen = false;
+    loop {
+        let segment = segment_at(input, at)?;
+        match segment.marker {
+            EOI if scan_seen => return Ok(()),
+            EOI => return Err(Status::Malformed),
+            SOS => {
+                scan_seen = true;
+                at = entropy_end(input, segment.end)?;
+            }
+            _ => at = segment.end,
+        }
+    }
+}
+
 fn strip_jpeg(image: &mut Vec<u8>) -> Result<(), Status> {
     let mut read = 2;
     let mut write = 2;
