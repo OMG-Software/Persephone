@@ -31,9 +31,12 @@ macOS can be built and tested only on CI runners, which have no display.
 Chosen options (owner decisions, 24 October 2026, with the design approved in
 the same plan):
 
-* **Vault: Keychain.** A wrapping secret is kept as a generic password that is
-  accessible only while the device is unlocked and only on this device. The
-  store key is wrapped with it and sealed with the passphrase.
+* **Vault: Keychain.** A wrapping secret is kept as a generic password in the
+  user's login keychain, not synchronized. Access follows that keychain's lock
+  state and the item's access list. The data protection keychain, whose
+  "this device only" classes would be stricter, needs a signed entitlement
+  that development builds lack, so it is not used. The store key is wrapped
+  with the secret and sealed with the passphrase.
 * **Prompts: AppKit on the main thread.** On macOS the main thread runs the
   AppKit run loop; the core's other work moves to a separate thread, and its
   prompts are shown on the main thread. The file picker is `NSOpenPanel`, with

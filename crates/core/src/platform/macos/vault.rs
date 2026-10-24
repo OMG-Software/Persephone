@@ -2,8 +2,10 @@
 //! (ADR-0011), used through [`unix::Wrapped`](super::super::unix::Wrapped).
 //!
 //! The item is in the user's default keychain (the login keychain), which
-//! is unlocked while the user is logged in. It is accessible only while the
-//! device is unlocked and only on this device, and it is not synchronized.
+//! is unlocked while the user is logged in. Access follows that keychain's
+//! lock state and the item's access list; the data protection classes
+//! (`kSecAttrAccessible`, such as "this device only") do not apply to a
+//! file-based keychain and are not set. The item is not synchronized.
 //! The Keychain's access list trusts the program that created the item;
 //! another program, or a build with a different signature, gets a Keychain
 //! prompt, and a refusal leaves the profile locked.
@@ -28,7 +30,6 @@ use core_foundation::{
 };
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework_sys::{
-    access_control::kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
     base::{errSecDuplicateItem, errSecItemNotFound, errSecSuccess},
     item::{
         kSecAttrAccount, kSecAttrService, kSecAttrSynchronizable, kSecClass,
@@ -55,7 +56,6 @@ const NO_DEFAULT_KEYCHAIN: OSStatus = -25307; // errSecNoDefaultKeychain
 
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
-    static kSecAttrAccessible: CFStringRef;
     static kSecMatchLimitOne: CFStringRef;
 }
 
@@ -167,12 +167,10 @@ impl SecretStore for KeychainStore {
     ) -> Result<Zeroizing<[u8; SECRET_BYTES]>, VaultError> {
         let keychain = self.keychain()?;
         let mut attributes = item();
+        // No `kSecAttrAccessible`: data protection classes apply only to the
+        // data protection keychain, not to this file-based one.
         // SAFETY: Security's static strings.
         unsafe {
-            attributes.push((
-                key(kSecAttrAccessible),
-                key(kSecAttrAccessibleWhenUnlockedThisDeviceOnly).into_CFType(),
-            ));
             attributes.push((key(kSecUseKeychain), keychain.as_CFType()));
             attributes.push((
                 key(kSecValueData),
