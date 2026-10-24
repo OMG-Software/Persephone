@@ -13,17 +13,27 @@
 //! * All kept messages together take at most [`MAX_KEPT_BYTES`] as JSON, so a
 //!   room's list always fits one reply; old sent messages make room first,
 //!   and a message that does not fit beside the unsent ones is refused.
+//! * At most [`MAX_UNSENT_IMAGES`] image is not yet sent (queued, sending,
+//!   failed or unknown): its stripped bytes stay here for a retry, and are
+//!   dropped once it is sent or discarded. Its entry otherwise behaves like
+//!   a text message, in the same order.
 //! * Memory only: nothing is kept after a lock or restart.
 
+use crate::media::ImageUpload;
 use matrix_sdk::ruma::{OwnedTransactionId, TransactionId};
-use persephone_contracts::{PendingMessage, PendingState, SendFailure, UnixMillis};
-use std::collections::{BTreeSet, VecDeque};
+use persephone_contracts::{PendingKind, PendingMessage, PendingState, SendFailure, UnixMillis};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::Arc,
+};
 use zeroize::Zeroizing;
 
 /// Most messages queued, sending, failed or unknown at once.
 pub const MAX_UNSENT: usize = 16;
 /// Most messages kept, sent ones included.
 pub const MAX_KEPT: usize = 32;
+/// Most images not yet sent at once: each holds up to 20 MiB.
+pub const MAX_UNSENT_IMAGES: usize = 1;
 /// Most bytes all kept messages take as JSON (see [`entry_size`]). This
 /// leaves room for the list's brackets and commas within one bounded view
 /// (`views::MAX_PAGE_BYTES`, 112 KiB).
@@ -33,9 +43,9 @@ pub const MAX_KEPT_BYTES: usize = 100 * 1024;
 /// writes as `\u00XX` (6 bytes); 2 more for the quotes.
 const MAX_EVENT_ID_JSON: usize = 255 * 6 + 2;
 /// What a message takes as JSON besides its body and room ID: the event ID,
-/// and under 160 bytes for the field names, the local ID, the state, the
-/// failure, the queue time and the list's comma.
-const ENTRY_OVERHEAD: usize = MAX_EVENT_ID_JSON + 160;
+/// and under 176 bytes for the field names, the local ID, the kind, the
+/// state, the failure, the queue time and the list's comma.
+const ENTRY_OVERHEAD: usize = MAX_EVENT_ID_JSON + 176;
 
 /// How a send ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,10 +56,20 @@ pub enum SendOutcome {
     Unknown,
 }
 
+/// What a message sends.
+#[derive(Clone)]
+pub enum Content {
+    Text(Zeroizing<String>),
+    /// The stripped image; dropped from the entry once sent.
+    Image(Arc<ImageUpload>),
+}
+
 struct Entry {
     local_id: u32,
     room_id: String,
+    kind: PendingKind,
     body: Zeroizing<String>,
+    image: Option<Arc<ImageUpload>>,
     /// What the message takes as JSON, from [`entry_size`].
     size: usize,
     transaction_id: OwnedTransactionId,
@@ -64,6 +84,7 @@ impl Entry {
         PendingMessage {
             local_id: self.local_id,
             room_id: self.room_id.clone(),
+            kind: self.kind,
             body: self.body.to_string(),
             state: self.state,
             event_id: self.event_id.clone(),
@@ -77,7 +98,7 @@ impl Entry {
 pub struct Job {
     pub local_id: u32,
     pub room_id: String,
-    pub body: Zeroizing<String>,
+    pub content: Content,
     pub transaction_id: OwnedTransactionId,
 }
 
@@ -91,6 +112,32 @@ impl Outbox {
     /// Queues a message, or `None` when [`MAX_UNSENT`] are already unsent or
     /// the message does not fit [`MAX_KEPT_BYTES`] beside the unsent ones.
     pub fn queue(&mut self, room_id: &str, body: Zeroizing<String>) -> Option<PendingMessage> {
+        self.push(room_id, Content::Text(body))
+    }
+
+    /// Queues an image, or `None` when [`MAX_UNSENT_IMAGES`] images are
+    /// already unsent or the limits of [`Outbox::queue`] refuse it.
+    pub fn queue_image(
+        &mut self,
+        room_id: &str,
+        image: Arc<ImageUpload>,
+    ) -> Option<PendingMessage> {
+        let unsent_images = self
+            .entries
+            .iter()
+            .filter(|entry| entry.image.is_some() && entry.state != PendingState::Sent)
+            .count();
+        if unsent_images >= MAX_UNSENT_IMAGES {
+            return None;
+        }
+        self.push(room_id, Content::Image(image))
+    }
+
+    fn push(&mut self, room_id: &str, content: Content) -> Option<PendingMessage> {
+        let (kind, body, image) = match content {
+            Content::Text(body) => (PendingKind::Text, body, None),
+            Content::Image(image) => (PendingKind::Image, Zeroizing::default(), Some(image)),
+        };
         let unsent: Vec<&Entry> = self
             .entries
             .iter()
@@ -121,7 +168,9 @@ impl Outbox {
         let entry = Entry {
             local_id: self.next_id,
             room_id: room_id.to_owned(),
+            kind,
             body,
+            image,
             size,
             transaction_id: TransactionId::new(),
             state: PendingState::Queued,
@@ -163,10 +212,14 @@ impl Outbox {
         let index = self.next_index()?;
         let entry = &mut self.entries[index];
         entry.state = PendingState::Sending;
+        let content = match &entry.image {
+            Some(image) => Content::Image(image.clone()),
+            None => Content::Text(entry.body.clone()),
+        };
         Some(Job {
             local_id: entry.local_id,
             room_id: entry.room_id.clone(),
-            body: entry.body.clone(),
+            content,
             transaction_id: entry.transaction_id.clone(),
         })
     }
@@ -182,6 +235,8 @@ impl Outbox {
                 entry.state = PendingState::Sent;
                 entry.event_id = Some(event_id);
                 entry.failure = None;
+                // Nothing will send it again.
+                entry.image = None;
             }
             SendOutcome::Failed(failure) => {
                 entry.state = PendingState::Failed;
@@ -233,6 +288,13 @@ impl Outbox {
             .map(|entry| entry.transaction_id.clone())
     }
 
+    /// Whether a message still holds its image bytes (for tests).
+    pub fn holds_image(&self, local_id: u32) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.local_id == local_id && entry.image.is_some())
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -281,6 +343,91 @@ mod tests {
         assert_eq!((again.local_id, again.transaction_id), (a1, id), "same ID");
         outbox.finish(a1, SendOutcome::Sent("$a1".into()));
         assert_eq!(outbox.next_job().unwrap().local_id, a2);
+    }
+
+    fn image(budgets: &Arc<persephone_media_protocol::ResourceBudgets>) -> Arc<ImageUpload> {
+        Arc::new(ImageUpload::for_tests(budgets, b"\x89PNG\r\n\x1a\nimage"))
+    }
+
+    /// GIVEN an unsent image WHEN another image is queued THEN it is refused
+    /// whether the first is queued, sending, failed or unknown, while text
+    /// still queues; once the first is sent or discarded another fits.
+    #[test]
+    fn given_an_unsent_image_then_a_second_image_waits_its_turn() {
+        let budgets = Arc::new(persephone_media_protocol::ResourceBudgets::default());
+        let mut outbox = Outbox::default();
+        let first = outbox.queue_image("!a:s", image(&budgets)).unwrap();
+        assert_eq!((first.kind, first.body.as_str()), (PendingKind::Image, ""));
+        assert!(
+            outbox.queue_image("!b:s", image(&budgets)).is_none(),
+            "queued"
+        );
+        assert_eq!(
+            outbox.queue("!a:s", body("text")).unwrap().kind,
+            PendingKind::Text
+        );
+        let job = outbox.next_job().unwrap();
+        assert!(matches!(job.content, Content::Image(_)));
+        assert!(
+            outbox.queue_image("!b:s", image(&budgets)).is_none(),
+            "sending"
+        );
+        outbox.finish(job.local_id, SendOutcome::Unknown);
+        assert!(
+            outbox.queue_image("!b:s", image(&budgets)).is_none(),
+            "unknown"
+        );
+        outbox.retry(job.local_id);
+        let job = outbox.next_job().unwrap();
+        outbox.finish(job.local_id, SendOutcome::Failed(SendFailure::Rejected));
+        assert!(
+            outbox.queue_image("!b:s", image(&budgets)).is_none(),
+            "failed"
+        );
+        outbox.discard(job.local_id);
+        assert!(outbox.queue_image("!b:s", image(&budgets)).is_some());
+    }
+
+    /// GIVEN an image whose delivery is unknown WHEN it is retried THEN the
+    /// same transaction ID and the same bytes go again; once sent, its bytes
+    /// are dropped while its entry stays to match the timeline.
+    #[test]
+    fn given_an_image_retry_then_it_keeps_its_id_and_drops_its_bytes_once_sent() {
+        let budgets = Arc::new(persephone_media_protocol::ResourceBudgets::default());
+        let mut outbox = Outbox::default();
+        let id = outbox
+            .queue_image("!a:s", image(&budgets))
+            .unwrap()
+            .local_id;
+        let first = outbox.next_job().unwrap();
+        let transaction = first.transaction_id.clone();
+        drop(first);
+        outbox.finish(id, SendOutcome::Unknown);
+        assert!(outbox.holds_image(id), "kept for the retry");
+        outbox.retry(id);
+        let again = outbox.next_job().unwrap();
+        assert_eq!(again.transaction_id, transaction);
+        let Content::Image(bytes) = &again.content else {
+            panic!("an image job");
+        };
+        assert_eq!(bytes.bytes(), b"\x89PNG\r\n\x1a\nimage");
+        drop(again);
+        outbox.finish(id, SendOutcome::Sent("$image".into()));
+        assert!(!outbox.holds_image(id));
+        assert_eq!(
+            budgets.class_used(persephone_media_protocol::BudgetClass::EncodedInFlight),
+            0,
+            "the stripped bytes were released"
+        );
+        let view = &outbox.for_room("!a:s")[0];
+        assert_eq!(
+            (view.kind, view.state, view.event_id.as_deref()),
+            (PendingKind::Image, PendingState::Sent, Some("$image"))
+        );
+        // A lock clears the outbox, images included.
+        outbox.queue_image("!a:s", image(&budgets)).unwrap();
+        outbox.clear();
+        assert_eq!(budgets.aggregate_used(), 0);
     }
 
     /// GIVEN states WHEN retrying or discarding THEN only failed and unknown
@@ -408,6 +555,7 @@ mod tests {
         let longest = PendingMessage {
             local_id: u32::MAX,
             room_id: room.clone(),
+            kind: PendingKind::Image,
             body: text.clone(),
             state: PendingState::Unknown,
             event_id: Some(format!("${}", "\u{1}".repeat(254))),

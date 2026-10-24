@@ -6,6 +6,7 @@
 - [Feasibility workbench](planning/feasibility.md): current status, recorded results, and P0 acceptance blockers.
 - [Architecture and development plan](architecture/development-plan.md): current component layout, planned application structure, and implementation sequence.
 - [SDK lifecycle completion contract](architecture/sdk-lifecycle.md): required stop-and-join ownership before lock, logout or store handoff can be approved.
+- [Image messaging design](architecture/image-messaging.md): proposed P5 design for sending and receiving images, pixel transport and limits.
 - [Security design](architecture/security-design.md): proposed threat boundaries, controls, and release gates.
 - [Development guide](development.md): workspace commands, toolchain requirements, and local data layout.
 
@@ -21,6 +22,7 @@
 - [ADR-0006](adr/0006-require-an-unlock-secret-for-the-local-profile.md): a profile passphrase (Argon2id, inside DPAPI) to open the local profile, upgrade of DPAPI-only profiles, and a reset confirmed in the core's window.
 - [ADR-0007](adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md): sending pauses while a contact's identity changed, until the user approves in the core's window or verifies again.
 - [ADR-0008](adr/0008-restart-the-core-process-to-finish-a-lock-after-the-client-ran.md) (proposed): after a client ran, a lock or sign-out finishes by closing the stores and restarting the core process.
+- [ADR-0009](adr/0009-strip-sent-image-metadata-and-load-received-images-on-request.md): sent images lose their metadata in the guest; received images load only when the user asks.
 
 ## Evidence
 
@@ -41,6 +43,9 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Own-device verification](evidence/own-device-verification.md): emoji comparison with another device of the same account, in both directions and with a mismatch; live runs on Merovingian and Synapse, and why a request from an unknown device is lost.
 - [Encrypted text exit runs](evidence/encrypted-text-exit-runs.md): unclear delivery retried once, a new device without keys until signed, withheld keys, and recovery on a clean profile; live runs on Merovingian and Synapse.
 - [Identity changes](evidence/identity-changes.md): sending pauses while a room member's identity changed (ADR-0007) until the user accepts it in the core's window or verifies it; live runs on Merovingian and Synapse.
+- [Image messaging](evidence/image-messaging.md): images sent to and received from Element Web on both servers; click to load, metadata removed, hostile files, classic sync and timing. Element's own display of a sent image was not observed (its service worker did not load), and the truncated-JPEG step failed at `9fbf074`; its fix is covered by automated tests only, not rerun live.
+- [Element Web interoperability](evidence/element-web-interop.md): emoji verification and encrypted text in both directions with Element Web v1.12.32, and a withheld key for an unsigned new Element session; live runs on Merovingian and Synapse.
+- [Native window hand checks](evidence/native-windows-hand-checks.md): the P4 checklist for the core's native windows; not run yet.
 - [Contact verification](evidence/contact-verification.md): emoji comparison with another person in an existing direct-message room, in both directions and with a mismatch; live runs on Merovingian and Synapse, lazy members, `m.direct` refresh and Synapse's message rate limit.
 - [Session owner](evidence/session-owner.md): lock and unlock while running; leases, generation fencing, retained ownership on timeout; real-app walkthrough.
 - [Unlock secret](evidence/unlock-secret.md): profile passphrase with Argon2id inside DPAPI, upgrade of DPAPI-only profiles, wrong-entry limit, native-confirmed reset, Lock help text.

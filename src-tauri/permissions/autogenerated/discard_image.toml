@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-image"
+description = "Enables the discard_image command without any pre-configured scope."
+commands.allow = ["discard_image"]
+
+[[permission]]
+identifier = "deny-discard-image"
+description = "Denies the discard_image command without any pre-configured scope."
+commands.deny = ["discard_image"]

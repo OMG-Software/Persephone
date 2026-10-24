@@ -36,7 +36,8 @@ use crate::contacts;
 use crate::credentials::{CredentialSource, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
 use crate::identities;
-use crate::outbox::Outbox;
+use crate::media::ImageUpload;
+use crate::outbox::{Content, Outbox};
 use crate::passphrase::Unlock;
 use crate::security;
 use crate::sending;
@@ -322,6 +323,12 @@ pub struct Lease {
 impl Lease {
     pub fn stores(&self) -> &Stores {
         self.stores.as_ref().expect("held until the lease drops")
+    }
+
+    /// The session generation this lease was granted in. Results kept beyond
+    /// the lease (such as image handles) are bound to it.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Runs a short update only if the session has not begun to lock since
@@ -792,14 +799,28 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
         }
         let outcome = lease.stores().block_on(async {
             let consented = sending::consented(lease.stores(), &job.room_id).await;
-            sending::send(
-                &client,
-                &job.room_id,
-                &job.body,
-                job.transaction_id.clone(),
-                consented,
-            )
-            .await
+            match &job.content {
+                Content::Text(body) => {
+                    sending::send(
+                        &client,
+                        &job.room_id,
+                        body,
+                        job.transaction_id.clone(),
+                        consented,
+                    )
+                    .await
+                }
+                Content::Image(image) => {
+                    sending::send_image(
+                        &client,
+                        &job.room_id,
+                        image,
+                        job.transaction_id.clone(),
+                        consented,
+                    )
+                    .await
+                }
+            }
         });
         let current = lease.commit(|| ()).is_ok();
         drop(lease);
@@ -1268,6 +1289,37 @@ impl Session {
             listener.outbox_changed(room_id);
         }
         Ok(queued)
+    }
+
+    /// Queues a picked image for the signed-in account, like
+    /// [`Session::send_message`]. `Full` while another image is unsent.
+    pub fn send_image(
+        &self,
+        room_id: &str,
+        image: Arc<ImageUpload>,
+    ) -> Result<PendingMessage, SendRefusal> {
+        if guard(&self.shared.account).is_none() {
+            return Err(SendRefusal::Unavailable);
+        }
+        let queued = {
+            // As for text: nothing queued here outlives a lock.
+            let inner = lock(&self.shared);
+            if inner.state != StoreState::Protected {
+                return Err(SendRefusal::Unavailable);
+            }
+            guard(&self.shared.outbox).queue_image(room_id, image)
+        }
+        .ok_or(SendRefusal::Full)?;
+        if let Some(listener) = self.shared.listener() {
+            listener.outbox_changed(room_id);
+        }
+        Ok(queued)
+    }
+
+    /// The generation of the open session, or `None` while it is not open.
+    /// A lock advances it before anything else.
+    pub fn open_generation(&self) -> Option<u64> {
+        self.shared.open_generation()
     }
 
     /// The room's messages sent from this device in this session.

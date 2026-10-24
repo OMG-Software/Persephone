@@ -3608,6 +3608,7 @@ dependencies = [
  "matrix-sdk-sqlite",
  "persephone-contracts",
  "persephone-core-protocol",
+ "persephone-media-broker",
  "persephone-media-protocol",
  "reqwest",
  "serde",

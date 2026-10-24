@@ -37,7 +37,7 @@ matrix-sdk-base = "=0.19.1"
 matrix-sdk-crypto = "=0.19.1"
 matrix-sdk-sqlite = { version = "=0.19.1", features = ["bundled", "crypto-store"] }
 reqwest = { version = "=0.13.5", default-features = false }
-tokio = { version = "=1.53.3", features = ["rt-multi-thread"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "time"] }
 url = "=2.5.8"
 zeroize = "=1.9.1"
 
@@ -53,14 +53,20 @@ tempfile = "=3.27.0"
 wiremock = "=0.6.5"
 
 [target.'cfg(windows)'.dependencies]
+# The contained media worker exists only on Windows (ADR-0003, ADR-0009).
+persephone-media-broker = { path = "../media-broker" }
+# Storage_FileSystem: the share mode and reparse-point flags for reading a
+# picked image; UI_Controls_Dialogs: the native file dialog (GetOpenFileNameW).
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Credentials",
   "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
   "Win32_System_Com",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
+  "Win32_UI_Controls_Dialogs",
   "Win32_UI_WindowsAndMessaging",
 ] }

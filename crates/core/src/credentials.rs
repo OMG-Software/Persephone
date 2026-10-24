@@ -237,7 +237,7 @@ pub mod dev {
     /// `path`, resolved: it must stay inside the `.local` directory it names
     /// once `..` and links are followed, and an existing one must be a plain
     /// file, not a link.
-    fn local_file(path: &Path) -> Result<PathBuf, PromptError> {
+    pub(crate) fn local_file(path: &Path) -> Result<PathBuf, PromptError> {
         let parts: Vec<Component> = path.components().collect();
         let local_at = parts
             .iter()

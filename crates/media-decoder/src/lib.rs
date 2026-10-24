@@ -1,13 +1,19 @@
 //! Untrusted image decoder, built as a `wasm32-unknown-unknown` guest for the
 //! `persephone-media-sandbox` host (ADR-0003).
 //!
-//! The guest's only capabilities are three host imports in the `persephone`
-//! module: `input_len`, `read_input` and `write_output`. It has no WASI, so it
-//! cannot open sockets or files, read clocks or the environment, or start
-//! processes. The decoding logic below is ordinary Rust, so host tests can also
-//! exercise it natively.
+//! The guest exports two operations, `decode` and `strip` (ADR-0009). Its only
+//! capabilities are four host imports in the `persephone` module: `input_len`,
+//! `read_input`, `write_output` (decoded pixels) and `write_stripped` (the
+//! stripped file). It has no WASI, so it cannot open sockets or files, read
+//! clocks or the environment, or start processes. The logic below is ordinary
+//! Rust, so host tests can also exercise it natively.
 
 use std::io::Cursor;
+
+mod exif;
+mod strip;
+
+pub use strip::{strip, strip_in_place};
 
 /// Largest encoded input the guest accepts (ADR-0003 starting budget).
 pub const MAX_INPUT_BYTES: usize = 20 * 1024 * 1024;
@@ -19,7 +25,8 @@ pub use persephone_media_protocol::MAX_PIXELS;
 /// Allocation ceiling handed to the PNG decoder for its internal buffers.
 const PNG_INTERNAL_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
-/// Status codes returned by the exported `decode` function. Zero is success.
+/// Status codes returned by the exported `decode` and `strip` functions. Zero
+/// is success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Status {
@@ -30,12 +37,20 @@ pub enum Status {
     InputTooLarge = 4,
     HostRejectedInput = 5,
     HostRejectedOutput = 6,
+    /// Strip found valid but unsupported structure, such as an unknown
+    /// critical PNG chunk or a JPEG marker outside the kept set.
+    UnsupportedStructure = 7,
+    /// The stripped copy did not decode to the same pixels, dimensions and
+    /// orientation as the original.
+    StripMismatch = 8,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Rgba {
     pub width: u32,
     pub height: u32,
+    /// EXIF orientation, 1 to 8. The pixels are not rotated. Always 1 for PNG.
+    pub orientation: u8,
     pub pixels: Vec<u8>,
 }
 
@@ -106,7 +121,7 @@ fn decode_png(input: &[u8]) -> Result<Rgba, Status> {
     };
     frame.truncate(output.line_size * height as usize);
     let pixels = widen_to_rgba(frame, channels, rgba_len)?;
-    finish(width, height, pixels, rgba_len)
+    finish(width, height, 1, pixels, rgba_len)
 }
 
 /// Expands 8-bit samples with `channels` per pixel to RGBA in place. Pixels
@@ -158,10 +173,24 @@ fn png_status(error: png::DecodingError) -> Status {
 fn decode_jpeg(input: &[u8]) -> Result<Rgba, Status> {
     use zune_jpeg::zune_core::{colorspace::ColorSpace, options::DecoderOptions};
 
+    // A file cut short must not be shown in part (docs/architecture/
+    // image-messaging.md). The structure check proves that every scan ends
+    // at a marker and that EOI follows. Strict mode turns zune-jpeg's
+    // recovery from bad entropy data (an invalid Huffman code, data that
+    // runs out, an unexpected marker) into an error; without it the decoder
+    // fills the rest of the image with grey and reports success.
+    //
+    // Limit: zune-jpeg zero-fills a scan that ends at a valid marker before
+    // all of its blocks are decoded, in strict mode too, and its public API
+    // does not report this. A file truncated inside a scan and then given a
+    // new EOI can therefore still decode, with wrong blocks at the end. Such
+    // a file needs a deliberate edit; a transfer that stops early has no EOI.
+    strip::check_jpeg_structure(input)?;
     let options = DecoderOptions::default()
         .jpeg_set_out_colorspace(ColorSpace::RGBA)
         .set_max_width(MAX_DIMENSION as usize)
         .set_max_height(MAX_DIMENSION as usize)
+        .set_strict_mode(true)
         // Hand-written unsafe fast paths are not needed inside the sandbox.
         .set_use_unsafe(false);
     let mut decoder = zune_jpeg::JpegDecoder::new_with_options(Cursor::new(input), options);
@@ -171,38 +200,66 @@ fn decode_jpeg(input: &[u8]) -> Result<Rgba, Status> {
     let height = u32::try_from(height).map_err(|_| Status::TooLarge)?;
     let rgba_len = check_dimensions(width, height)?;
     let pixels = decoder.decode().map_err(|_| Status::Malformed)?;
-    finish(width, height, pixels, rgba_len)
+    finish(
+        width,
+        height,
+        strip::jpeg_orientation(input),
+        pixels,
+        rgba_len,
+    )
 }
 
-fn finish(width: u32, height: u32, pixels: Vec<u8>, rgba_len: usize) -> Result<Rgba, Status> {
+fn finish(
+    width: u32,
+    height: u32,
+    orientation: u8,
+    pixels: Vec<u8>,
+    rgba_len: usize,
+) -> Result<Rgba, Status> {
     if pixels.len() != rgba_len {
         return Err(Status::Malformed);
     }
     Ok(Rgba {
         width,
         height,
+        orientation,
         pixels,
     })
 }
 
 #[cfg(target_arch = "wasm32")]
 mod guest {
-    use super::{MAX_INPUT_BYTES, Status, decode as decode_image};
+    use super::{MAX_INPUT_BYTES, Status, decode as decode_image, strip_in_place};
 
     #[link(wasm_import_module = "persephone")]
     unsafe extern "C" {
         fn input_len() -> u32;
         fn read_input(destination: *mut u8, length: u32) -> i32;
-        fn write_output(width: u32, height: u32, source: *const u8, length: u32) -> i32;
+        fn write_output(
+            width: u32,
+            height: u32,
+            source: *const u8,
+            length: u32,
+            orientation: u32,
+        ) -> i32;
+        fn write_stripped(source: *const u8, length: u32) -> i32;
     }
 
-    /// Reads the input from the host, decodes it and hands RGBA pixels back.
+    /// Reads the input from the host, decodes it and hands RGBA pixels and
+    /// the EXIF orientation back.
     #[unsafe(no_mangle)]
     pub extern "C" fn decode() -> i32 {
-        run().unwrap_or_else(|status| status) as i32
+        run_decode().unwrap_or_else(|status| status) as i32
     }
 
-    fn run() -> Result<Status, Status> {
+    /// Reads the input from the host, strips its metadata in place, checks
+    /// that the pixels are unchanged and hands the stripped file back.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn strip() -> i32 {
+        run_strip().unwrap_or_else(|status| status) as i32
+    }
+
+    fn read_all() -> Result<Vec<u8>, Status> {
         // SAFETY: the host import takes no arguments.
         let length = unsafe { input_len() } as usize;
         if length > MAX_INPUT_BYTES {
@@ -213,6 +270,11 @@ mod guest {
         if unsafe { read_input(input.as_mut_ptr(), length as u32) } != 0 {
             return Err(Status::HostRejectedInput);
         }
+        Ok(input)
+    }
+
+    fn run_decode() -> Result<Status, Status> {
+        let input = read_all()?;
         let image = decode_image(&input)?;
         drop(input);
         // SAFETY: `pixels` is a readable buffer of exactly the given length.
@@ -222,6 +284,7 @@ mod guest {
                 image.height,
                 image.pixels.as_ptr(),
                 image.pixels.len() as u32,
+                u32::from(image.orientation),
             )
         };
         if written != 0 {
@@ -230,7 +293,20 @@ mod guest {
         // The host reads these pixels from guest memory after `decode`
         // returns. Freeing them would let the allocator write its bookkeeping
         // into the region first, so the buffer is deliberately leaked; each
-        // instance performs one decode and is then discarded.
+        // instance performs one operation and is then discarded.
+        std::mem::forget(image);
+        Ok(Status::Ok)
+    }
+
+    fn run_strip() -> Result<Status, Status> {
+        let mut image = read_all()?;
+        strip_in_place(&mut image)?;
+        // SAFETY: `image` is a readable buffer of exactly the given length.
+        let written = unsafe { write_stripped(image.as_ptr(), image.len() as u32) };
+        if written != 0 {
+            return Err(Status::HostRejectedOutput);
+        }
+        // Leaked for the same reason as the decoded pixels above.
         std::mem::forget(image);
         Ok(Status::Ok)
     }
@@ -261,6 +337,7 @@ mod tests {
             Rgba {
                 width: 2,
                 height: 1,
+                orientation: 1,
                 pixels: vec![1, 2, 3, 255, 4, 5, 6, 255]
             }
         );
@@ -328,6 +405,133 @@ mod tests {
         let crc = crc32(&png[12..29]);
         png[29..33].copy_from_slice(&crc.to_be_bytes());
         assert_eq!(decode(&png), Err(Status::TooLarge));
+    }
+
+    // --- Truncated and corrupt input -------------------------------------
+
+    const SOLID: &[u8] =
+        include_bytes!("../../media-sandbox/tests/fixtures/solid-16x8-baseline.jpg");
+    const PROGRESSIVE: &[u8] =
+        include_bytes!("../../media-sandbox/tests/fixtures/gradient-33x17-progressive.jpg");
+    const RESTART: &[u8] = include_bytes!("../tests/fixtures/restart-48x32-baseline.jpg");
+    const ADOBE: &[u8] = include_bytes!("../tests/fixtures/cmyk-8x8-adobe.jpg");
+    const JPEGS: [(&str, &[u8]); 4] = [
+        ("baseline", SOLID),
+        ("progressive", PROGRESSIVE),
+        ("restart", RESTART),
+        ("adobe", ADOBE),
+    ];
+
+    /// The decode as it was before strict mode and the structure check:
+    /// used to prove that valid files still give the same pixels.
+    fn lenient_jpeg(input: &[u8]) -> Option<Vec<u8>> {
+        use zune_jpeg::zune_core::{colorspace::ColorSpace, options::DecoderOptions};
+        let options = DecoderOptions::default()
+            .jpeg_set_out_colorspace(ColorSpace::RGBA)
+            .set_use_unsafe(false);
+        zune_jpeg::JpegDecoder::new_with_options(Cursor::new(input), options)
+            .decode()
+            .ok()
+    }
+
+    /// The offset where the entropy-coded data of the first scan starts.
+    fn first_scan_data(jpeg: &[u8]) -> usize {
+        let mut at = 2;
+        loop {
+            assert_eq!(jpeg[at], 0xff);
+            let length = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+            if jpeg[at + 1] == 0xda {
+                return at + 2 + length;
+            }
+            at += 2 + length;
+        }
+    }
+
+    #[test]
+    fn given_valid_jpeg_fixtures_when_decoded_strictly_then_pixels_equal_the_lenient_decode() {
+        for (name, jpeg) in JPEGS {
+            let strict = decode(jpeg).unwrap_or_else(|status| panic!("{name}: {status:?}"));
+            assert_eq!(Some(strict.pixels), lenient_jpeg(jpeg), "{name}");
+            // Bytes after EOI are ignored, as before.
+            let mut trailing = jpeg.to_vec();
+            trailing.extend_from_slice(b"appended bytes");
+            assert_eq!(decode(&trailing), decode(jpeg), "{name}");
+        }
+    }
+
+    /// GIVEN a JPEG cut at any byte after its signature WHEN decoded THEN it
+    /// is refused as malformed, so no partial image is returned.
+    #[test]
+    fn given_jpeg_truncated_anywhere_when_decoded_then_malformed() {
+        for (name, jpeg) in JPEGS {
+            let scan = first_scan_data(jpeg);
+            assert!(scan < jpeg.len() - 2, "{name}");
+            for cut in 3..jpeg.len() {
+                assert_eq!(
+                    decode(&jpeg[..cut]),
+                    Err(Status::Malformed),
+                    "{name} cut at {cut}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn given_jpeg_with_eoi_removed_when_decoded_then_malformed() {
+        for (name, jpeg) in JPEGS {
+            assert!(jpeg.ends_with(&[0xff, 0xd9]), "{name}");
+            assert_eq!(
+                decode(&jpeg[..jpeg.len() - 2]),
+                Err(Status::Malformed),
+                "{name}"
+            );
+        }
+    }
+
+    /// GIVEN garbage in place of part of the first scan WHEN decoded THEN it
+    /// is refused. The garbage is stuffed 0xFF bytes (FF 00): a run of one
+    /// bits that is not a valid Huffman code. The structure is intact, so
+    /// only strict mode catches it; the lenient decode succeeds.
+    #[test]
+    fn given_jpeg_with_garbage_in_its_scan_when_decoded_then_malformed() {
+        for (name, jpeg) in JPEGS {
+            let start = first_scan_data(jpeg);
+            let mut corrupt = jpeg.to_vec();
+            corrupt.splice(start..start + 4, [0xff, 0x00].repeat(8));
+            assert_eq!(decode(&corrupt), Err(Status::Malformed), "{name}");
+            assert!(lenient_jpeg(&corrupt).is_some(), "{name}: lenient decode");
+        }
+    }
+
+    /// GIVEN a PNG cut inside its IDAT chunk, or with a short IDAT that still
+    /// has a valid CRC and IEND WHEN decoded THEN it is refused as malformed.
+    #[test]
+    fn given_png_truncated_inside_idat_when_decoded_then_malformed() {
+        let (width, height) = (32u32, 32u32);
+        let pixels: Vec<u8> = (0..width * height * 4)
+            .map(|i| (i * 7 % 251) as u8)
+            .collect();
+        let png = png_bytes(width, height, png::ColorType::Rgba, &pixels);
+        assert_eq!(decode(&png).unwrap().pixels, pixels);
+        // IHDR ends at byte 33; this encoder writes one IDAT next.
+        assert_eq!(&png[37..41], b"IDAT");
+        let idat_len = u32::from_be_bytes(png[33..37].try_into().unwrap()) as usize;
+        let idat_data = 41;
+        assert!(idat_len > 64);
+        for cut in (idat_data..idat_data + idat_len + 4).step_by(7) {
+            assert_eq!(decode(&png[..cut]), Err(Status::Malformed), "cut at {cut}");
+        }
+        let short = idat_len / 2;
+        let mut rebuilt = png[..33].to_vec();
+        let mut chunk = (short as u32).to_be_bytes().to_vec();
+        chunk.extend_from_slice(b"IDAT");
+        chunk.extend_from_slice(&png[idat_data..idat_data + short]);
+        let crc = crc32(&chunk[4..]);
+        chunk.extend_from_slice(&crc.to_be_bytes());
+        rebuilt.extend_from_slice(&chunk);
+        rebuilt.extend_from_slice(&png[png.len() - 12..]);
+        assert_eq!(&rebuilt[rebuilt.len() - 8..rebuilt.len() - 4], b"IEND");
+        assert_eq!(decode(&rebuilt), Err(Status::Malformed));
     }
 
     fn crc32(bytes: &[u8]) -> u32 {

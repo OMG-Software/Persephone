@@ -1089,6 +1089,179 @@ kbd {
   padding: 6px 4px 0;
 }
 
+/* Images (ADR-0009): a placeholder card until the user loads the image, then
+   a canvas scaled down to fit the timeline, keeping its aspect ratio. */
+.attachment {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  max-width: 28rem;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.file-tile {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.file-tile .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.attachment-text {
+  flex: 1;
+  min-width: 8rem;
+}
+
+.message-body .attachment-name {
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-body .attachment-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink3);
+  font-size: 12px;
+}
+
+.file-enc {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--enc-fg);
+  font-weight: 600;
+}
+
+.file-enc .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.file-plain {
+  color: var(--danger-text);
+  font-weight: 600;
+}
+
+.attachment button {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.image-frame {
+  max-width: 100%;
+}
+
+.image-frame[hidden] {
+  display: none;
+}
+
+.image-view {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.message-body .attachment .note {
+  font-size: 12.5px;
+}
+
+.image-canvas {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.image-frame.preview .image-canvas {
+  max-height: 200px;
+}
+
+.image-draft {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.image-draft > p,
+.image-draft > .image-frame {
+  flex-basis: 100%;
+}
+
+.image-draft-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.image-error {
+  padding: 0 4px 8px;
+}
+
+.pending-image {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink2);
+}
+
+.pending-image .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.attach {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink2);
+}
+
+.attach:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.attach .icon {
+  width: 18px;
+  height: 18px;
+}
+
+.attach:disabled {
+  opacity: 0.45;
+}
+
 /* Centred screens: connecting, locked, sign-in, verification. */
 .centred {
   display: grid;

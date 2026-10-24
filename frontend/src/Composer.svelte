@@ -6,6 +6,8 @@
   } from '../../crates/contracts/generated/contracts';
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
+  import ImageDraftView from './ImageDraft.svelte';
+  import type { ImageDraft } from './image';
   import { isolate } from './people';
   import { clockTime, fullTime, toDate } from './time';
 
@@ -19,7 +21,14 @@
     onsend,
     onretry,
     ondiscard,
-    onallow
+    onallow,
+    imageDraft = null,
+    attaching = false,
+    sendingImage = false,
+    imageError = null,
+    onattach = () => {},
+    onsendimage = () => {},
+    oncancelimage = () => {}
   }: {
     // Messages sent from this device that the timeline does not show yet.
     pending: PendingMessage[];
@@ -36,6 +45,16 @@
     onretry: (localId: number) => void;
     ondiscard: (localId: number) => void;
     onallow: (localId: number) => void;
+    // A picked image waiting for Send or Cancel, and whether the core's file
+    // dialog is open or the image is being queued.
+    imageDraft?: ImageDraft | null;
+    attaching?: boolean;
+    sendingImage?: boolean;
+    // Why the last attach or image send failed, as fixed text.
+    imageError?: string | null;
+    onattach?: () => void;
+    onsendimage?: () => void;
+    oncancelimage?: () => void;
   } = $props();
 
   // The core's limit is 16 KiB of UTF-8; this length is only a first stop.
@@ -108,7 +127,11 @@
       {#each pending as message (message.localId)}
         {@const queued = toDate(message.queuedAt)}
         <li>
-          <p dir="auto">{message.body}</p>
+          {#if message.kind === 'image'}
+            <p class="pending-image"><Icon name="image" />Image</p>
+          {:else}
+            <p dir="auto">{message.body}</p>
+          {/if}
           <p class="note" role={message.state === 'failed' || message.state === 'unknown' ? 'alert' : null}>
             {#if queued}
               <time datetime={queued.toISOString()} title={'Queued on this device ' + fullTime(queued)}
@@ -129,6 +152,21 @@
         </li>
       {/each}
     </ol>
+  {/if}
+
+  {#if imageDraft}
+    {#key imageDraft.preview.handle}
+      <ImageDraftView
+        draft={imageDraft}
+        sending={sendingImage}
+        blocked={blocked !== null}
+        onsend={onsendimage}
+        oncancel={oncancelimage}
+      />
+    {/key}
+  {/if}
+  {#if imageError}
+    <p class="error image-error" role="alert">{imageError}</p>
   {/if}
 
   <form class="composer" class:plain={notEncrypted} bind:this={form} onsubmit={submit}>
@@ -159,6 +197,16 @@
       </div>
     {/if}
     <div class="composer-box">
+      <button
+        type="button"
+        class="attach"
+        aria-label={attaching ? 'Choosing an image…' : 'Attach image'}
+        title="Attach image"
+        disabled={blocked !== null || attaching || imageDraft !== null}
+        onclick={onattach}
+      >
+        <Icon name="image" />
+      </button>
       <label for="composer-text" class="visually-hidden"
         >{notEncrypted ? 'Message (not encrypted)' : 'Message'}</label
       >

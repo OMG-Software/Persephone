@@ -1,13 +1,17 @@
-//! Media broker: runs one decode in a freshly launched, contained media worker
-//! (ADR-0003).
+//! Media broker: runs one decode or one metadata strip in a freshly launched,
+//! contained media worker (ADR-0003, ADR-0009).
 //!
-//! The broker is trusted code in the key-holding process. It sends one encoded
-//! image to the worker and accepts back exactly one bounded frame. On Windows
-//! the worker starts suspended in a zero-capability AppContainer with process
-//! mitigations set at creation (dynamic code prohibited, Win32k system calls
-//! disabled, image-load hardening), inherits only its two pipe handles, and is
-//! placed in a Job before it runs. The broker enforces the wall deadline by
-//! terminating the Job. Containment for Linux and macOS is not implemented.
+//! The broker is trusted code in the key-holding process. It sends one
+//! operation and one encoded image to the worker and accepts back one bounded
+//! reply: pixels with their orientation ([`run_decode`]), a stripped file
+//! ([`run_strip`]), or a failure. Both operations use the same containment,
+//! deadline, exit-code and reply checks. On Windows the worker starts
+//! suspended in a zero-capability AppContainer with process mitigations set at
+//! creation (dynamic code prohibited, Win32k system calls disabled, image-load
+//! hardening), inherits only its two pipe handles, and is placed in a Job
+//! before it runs. The broker enforces the wall deadline by terminating the
+//! Job. Containment for Linux and macOS is not implemented, so other platforms
+//! export no launcher.
 
 use persephone_media_protocol::{FrameError, ReceivedFrame, WorkerFailure};
 use std::time::Duration;
@@ -15,7 +19,7 @@ use std::time::Duration;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{AppContainerProfile, run_worker};
+pub use windows::{AppContainerProfile, run_decode, run_strip};
 
 /// Exit code the worker uses after reporting a failed containment check.
 pub const WORKER_EXIT_CONTAINMENT: u32 = 3;
@@ -79,8 +83,9 @@ pub enum RunError {
     Worker(WorkerFailure),
     /// The worker's reply was not a valid, in-budget frame.
     Protocol(FrameError),
-    /// A control frame that is not a recognised failure message, or a frame
-    /// kind other than pixels or control.
+    /// A control frame that is not a recognised failure message, a frame kind
+    /// the operation does not reply with, pixels without valid pixel
+    /// information, or a stripped file longer than the input.
     UnexpectedReply,
     /// The worker exited without a usable reply.
     AbnormalExit(u32),
@@ -97,8 +102,18 @@ pub struct WorkerStats {
     pub exit_code: u32,
 }
 
-pub struct WorkerRun {
-    /// The validated pixel frame, which keeps its budget reservation.
-    pub outcome: Result<ReceivedFrame, RunError>,
+/// The result of one worker run: [`DecodedImage`] for a decode, or the
+/// stripped file's `EncodedImage` frame for a strip.
+pub struct WorkerRun<T> {
+    pub outcome: Result<T, RunError>,
     pub stats: WorkerStats,
+}
+
+/// A validated decode reply.
+pub struct DecodedImage {
+    /// The `RgbaPixels` frame, which keeps its `WorkerOutput` reservation.
+    pub pixels: ReceivedFrame,
+    /// EXIF orientation, 1 to 8 (1 for PNG). The pixels are not rotated; the
+    /// caller applies the rotation or flip.
+    pub orientation: u8,
 }

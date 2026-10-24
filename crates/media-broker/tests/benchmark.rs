@@ -5,7 +5,7 @@
 //!     --test benchmark -- --ignored --nocapture
 #![cfg(windows)]
 
-use persephone_media_broker::{AppContainerProfile, WorkerPolicy, run_worker};
+use persephone_media_broker::{AppContainerProfile, WorkerPolicy, run_decode};
 use persephone_media_protocol::ResourceBudgets;
 use std::path::PathBuf;
 
@@ -33,7 +33,7 @@ fn benchmark_contained_worker_on_largest_budgeted_images() {
     images.sort();
     for path in images {
         let encoded = std::fs::read(&path).unwrap();
-        let run = run_worker(
+        let run = run_decode(
             &profile,
             &worker,
             &encoded,
@@ -46,7 +46,12 @@ fn benchmark_contained_worker_on_largest_budgeted_images() {
             "{}: {} | wall {} ms | user CPU {} ms | peak {:.1} MiB of {} MiB | exit {}",
             path.file_name().unwrap().to_string_lossy(),
             match &run.outcome {
-                Ok(frame) => format!("{}x{}", frame.header().width, frame.header().height),
+                Ok(image) => format!(
+                    "{}x{} orientation {}",
+                    image.pixels.header().width,
+                    image.pixels.header().height,
+                    image.orientation
+                ),
                 Err(error) => format!("{error:?}"),
             },
             stats.elapsed.as_millis(),

@@ -1,0 +1,12 @@
+{
+  "kind": "draft",
+  "preview": {
+    "handle": "fedcba9876543210fedcba9876543210",
+    "width": 640,
+    "height": 480,
+    "bands": 1,
+    "bandRows": 409
+  },
+  "size": 48213,
+  "mime": "image/jpeg"
+}

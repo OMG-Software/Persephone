@@ -1,0 +1,10 @@
+{
+  "localId": 3,
+  "roomId": "!example:server.invalid",
+  "kind": "image",
+  "body": "",
+  "state": "sending",
+  "eventId": null,
+  "failure": null,
+  "queuedAt": 1767258120000
+}

@@ -544,7 +544,7 @@ support requires actual OS runs, not cross-compilation alone.
 ## Development milestones and acceptance gates
 
 Milestones require explicit acceptance evidence. **No milestone has passed its exit
-gate.** P0, P1 and P2 are in progress and P3 has started; the
+gate.** P0 to P6 are in progress and P7 has not started; the
 [milestone status](#milestone-status) below lists each deliverable. Work can be
 developed in parallel where independent, but feature acceptance follows its gates.
 
@@ -561,7 +561,7 @@ developed in parallel where independent, but feature acceptance follows its gate
 
 ### Milestone status
 
-23 October 2026. This is the single progress summary; other pages link here. A
+24 October 2026. This is the single progress summary; other pages link here. A
 deliverable is **done** when it is built and its own evidence passes, **partial**
 when only part is built or only some platforms or cases pass, and **not
 started** otherwise. A milestone's exit gate is met only when its exit evidence
@@ -572,7 +572,7 @@ above passes; none has.
 | P0 | Frontend, SDK and version candidates | Done | [Versions](../evidence/versions.json), [frontend](../evidence/frontend.md), [dependencies](../evidence/dependencies.md) |
 | P0 | Sync negotiation and concurrency proof | Partial | Sliding/classic selection passes on both servers ([capability fallback](../evidence/capability-fallback.md)); SDK stop-and-join is missing ([lifecycle contract](sdk-lifecycle.md)) |
 | P0 | Credential and store audit | Partial | [Storage](../evidence/storage.md), [protected store](../evidence/protected-store.md) on Windows; Linux/macOS vaults not tested |
-| P0 | Sandbox-launch tests on all OSes | Partial | Windows [contained worker](../evidence/media-worker.md) prototype; no tested Windows policy denies sockets, so decoding runs in a [no-network WebAssembly guest](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md) inside that worker; not yet wired into the app or the Matrix media flow; signing and Linux/macOS not started |
+| P0 | Sandbox-launch tests on all OSes | Partial | Windows [contained worker](../evidence/media-worker.md) prototype; no tested Windows policy denies sockets, so decoding runs in a [no-network WebAssembly guest](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md) inside that worker; on Windows the core now uses it for received and sent images ([image messaging](image-messaging.md)); signing and Linux/macOS not started |
 | P0 | Aggregate resource and IPC design | Done | [Frame protocol](../evidence/media-protocol.md), [IPC measurements and core/UI split](../evidence/ipc-transport.md) ([ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)) |
 | P1 | Workspace, Tauri shell, typed contracts | Done (Windows) | [Tauri shell](../evidence/tauri-shell.md), [contracts](../evidence/contracts.md) |
 | P1 | Bounded views | Done | [Synthetic views](../evidence/mock-views.md), [live updates](../evidence/live-updates.md) |
@@ -583,14 +583,14 @@ above passes; none has.
 | P2 | Vault and storage adapters | Partial | [Protected store](../evidence/protected-store.md): Windows DPAPI only |
 | P2 | Task cancellation | Partial | Cooperative stop between complete operations; SDK tasks not joined, so lock ends `restart_required` once a client ran |
 | P2 | Worker broker | Done (Windows) | [Media worker](../evidence/media-worker.md); Linux/macOS not started |
-| P2 | Pixel transport | Not started | Decoded pixels do not reach the UI yet |
+| P2 | Pixel transport | Done (Windows) | Raw row bands of at most 1 MiB from the core through the UI process to a page canvas ([design](image-messaging.md#pixel-transport), [live run](../evidence/image-messaging.md)); the UI process does not count band responses awaiting delivery to the web view |
 | P2 | Baseline limits | Partial | Frame and page budgets, UI Job limits; no aggregate memory admission across features |
 | P3 | SDK integration | Partial | [Sign-in evidence](../evidence/matrix-sign-in.md): one client in the core over the encrypted stores |
 | P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; [sign-out](../evidence/sign-out.md) revokes the session and deletes the local profile; no SSO or `.well-known` discovery |
 | P3 | Sliding default, classic fallback | Partial | Initial selection passes live on Merovingian, Synapse and classic-only Synapse; no runtime mode switch |
 | P3 | Room and timeline projection | Partial | Room list, history paging, notices and live events; gap and dedup coverage incomplete |
-| P4 | Encrypted text experience | Partial | [Encryption setup](../evidence/encryption-setup.md): key policy ([ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md)), cross-signing and recovery set-up, recovery-key verification; [sending](../evidence/encrypted-sending.md) with consent for unencrypted rooms and delivery states; [own-device verification](../evidence/own-device-verification.md) and [contact verification](../evidence/contact-verification.md) in existing direct-message rooms by comparing emoji, in both directions; [identity changes](../evidence/identity-changes.md) pause sending until accepted or verified ([ADR-0007](../adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md)); [exit runs](../evidence/encrypted-text-exit-runs.md): unclear-delivery retry, new and unsigned devices, withheld keys, recovery on a clean profile. Every listed exit item has passing live runs on Windows against an SDK peer; not yet: another Matrix client, the native windows checked by hand, Linux and macOS |
-| P5 | Image messaging | Not started | The decoder and worker exist (P0, P2) but there is no image flow |
+| P4 | Encrypted text experience | Partial | [Encryption setup](../evidence/encryption-setup.md): key policy ([ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md)), cross-signing and recovery set-up, recovery-key verification; [sending](../evidence/encrypted-sending.md) with consent for unencrypted rooms and delivery states; [own-device verification](../evidence/own-device-verification.md) and [contact verification](../evidence/contact-verification.md) in existing direct-message rooms by comparing emoji, in both directions; [identity changes](../evidence/identity-changes.md) pause sending until accepted or verified ([ADR-0007](../adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md)); [exit runs](../evidence/encrypted-text-exit-runs.md): unclear-delivery retry, new and unsigned devices, withheld keys, recovery on a clean profile. Every listed exit item has passing live runs on Windows against an SDK peer, and [Element Web](../evidence/element-web-interop.md) verified, sent and read encrypted text with Persephone on both servers (24 October 2026; Element uses the same crypto crate). Not yet: the [native window hand checks](../evidence/native-windows-hand-checks.md) (prepared, not run), Linux and macOS |
+| P5 | Image messaging | Partial | [Design](image-messaging.md) and [ADR-0009](../adr/0009-strip-sent-image-metadata-and-load-received-images-on-request.md): metadata stripped in the guest, received images loaded only on request, pixels sent to the page in raw row bands. [Live run](../evidence/image-messaging.md) with Element Web on both servers, Sliding and classic sync: click to load, encrypted and unencrypted send, metadata removed, source unchanged, hostile files refused, lock during a load; a truncated JPEG drew partially and was fixed afterwards (tests only, not rerun live). Not yet: Element's own display of a sent image (its service worker did not load in the test browser), release builds (the debug worker exceeds the time limits at 12 megapixels), Linux and macOS (no contained worker) |
 | P6 | Product and operational hardening | Partial | Keyboard and screen-reader checks not done; failed windows detected and retried on Windows; this host's WebView2 crash dumps all fail inside a third-party overlay hook, not tested with it removed ([window retry](../evidence/window-retry.md)) |
 | P7 | Release readiness | Not started | None |
 

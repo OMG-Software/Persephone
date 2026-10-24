@@ -6,7 +6,8 @@
 //!   (`contacts.rs`), and is named after them when it has no name.
 //! * Each item carries the event's `origin_server_ts`: the time the sender's
 //!   homeserver claims, unchecked. An event without a usable one has none.
-//! * Text messages (text, notice, emote) are shown as messages. Other
+//! * Text messages (text, notice, emote) are shown as messages, and images
+//!   as image items without fetching anything (`media.rs`). Other
 //!   `m.room.message` types become an `unsupported` notice, so nothing
 //!   disappears. An encrypted event that cannot be shown becomes a notice
 //!   saying why: `withheld` (the sender withheld the key from this device),
@@ -137,6 +138,9 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             body: project_body(&emote.body),
             origin_server_ts,
         },
+        MessageType::Image(image) => {
+            crate::media::timeline_item(event_id, sender, origin_server_ts, image)
+        }
         _ => TimelineItem::Notice {
             event_id,
             sender,
@@ -331,6 +335,165 @@ mod tests {
         ] {
             assert_eq!(undecryptable_notice(&reason), NoticeKind::Undecryptable);
         }
+    }
+
+    fn plain_event(content: serde_json::Value) -> TimelineEvent {
+        let event = serde_json::json!({
+            "type": "m.room.message",
+            "event_id": "$image",
+            "sender": "@alice:example.org",
+            "origin_server_ts": 1_767_258_000_000u64,
+            "content": content,
+        });
+        TimelineEvent::from_plaintext(
+            matrix_sdk::ruma::serde::Raw::from_json_string(event.to_string()).unwrap(),
+        )
+    }
+
+    fn image_item(content: serde_json::Value) -> TimelineItem {
+        project(&plain_event(content)).unwrap()
+    }
+
+    /// GIVEN a plain and an encrypted `m.image` WHEN projected THEN each is an
+    /// image item with its declared layout data, its file name, and whether
+    /// the file is encrypted; nothing names the media URL.
+    #[test]
+    fn given_image_events_then_they_become_image_items() {
+        let plain = image_item(serde_json::json!({
+            "msgtype": "m.image",
+            "body": "caption or name",
+            "filename": "cat.png",
+            "url": "mxc://example.org/abc",
+            "info": { "w": 640, "h": 480, "size": 48213, "mimetype": "image/png" },
+        }));
+        let TimelineItem::Image {
+            event_id,
+            sender,
+            origin_server_ts,
+            name,
+            size,
+            width,
+            height,
+            encrypted,
+        } = &plain
+        else {
+            panic!("an image item: {plain:?}");
+        };
+        assert_eq!(
+            (event_id.as_str(), sender.as_str()),
+            ("$image", "@alice:example.org")
+        );
+        assert_eq!(
+            origin_server_ts.map(UnixMillis::get),
+            Some(1_767_258_000_000)
+        );
+        assert_eq!(name, "cat.png");
+        assert_eq!(
+            (*size, *width, *height, *encrypted),
+            (Some(48213), Some(640), Some(480), false)
+        );
+        assert!(!serde_json::to_string(&plain).unwrap().contains("mxc:"));
+
+        let encrypted = image_item(serde_json::json!({
+            "msgtype": "m.image",
+            "body": "photo.jpg",
+            "file": {
+                "url": "mxc://example.org/enc",
+                "key": {
+                    "kty": "oct", "key_ops": ["encrypt", "decrypt"], "alg": "A256CTR",
+                    "k": "b50ACIv6LMn9AfMCFD1POJI_UAFWIclxAN1kWrEO2X8", "ext": true,
+                },
+                "iv": "AK1wyzigZtQAAAABAAAAKK",
+                "hashes": { "sha256": "/NogKqW5bz/m8xHgFiH5haFGjCNVmUIPLzfvOhHdrxY" },
+                "v": "v2",
+            },
+        }));
+        let TimelineItem::Image {
+            name,
+            size,
+            width,
+            encrypted,
+            ..
+        } = &encrypted
+        else {
+            panic!("an image item");
+        };
+        assert_eq!(name, "photo.jpg", "the body names it without a file name");
+        assert_eq!((*size, *width, *encrypted), (None, None, true));
+        assert!(
+            !serde_json::to_string(&encrypted)
+                .unwrap()
+                .contains("b50ACIv6"),
+            "no key"
+        );
+    }
+
+    /// GIVEN hostile names and absurd declared sizes WHEN projected THEN the
+    /// name is bounded inert text, and sizes out of range are dropped: width
+    /// and height only together and within the decoder's limit, the size only
+    /// above zero and within u32.
+    #[test]
+    fn given_hostile_image_metadata_then_it_is_bounded_and_dropped_when_absurd() {
+        let content = |name: &str, info: serde_json::Value| {
+            serde_json::json!({
+                "msgtype": "m.image",
+                "body": name,
+                "url": "mxc://example.org/abc",
+                "info": info,
+            })
+        };
+        let hostile = format!("evil\u{202E}gnp.exe\n<img src=x>{}", "x".repeat(1000));
+        let item = image_item(content(&hostile, serde_json::json!({})));
+        let TimelineItem::Image { name, .. } = &item else {
+            panic!("an image item");
+        };
+        assert!(
+            !name.contains('\u{202E}') && !name.contains('\n'),
+            "{name:?}"
+        );
+        assert!(name.chars().count() <= crate::views::MAX_DISPLAY_NAME_CHARS + 1);
+        assert!(
+            name.starts_with("evil\u{FFFD}gnp.exe <img src=x>"),
+            "{name:?}"
+        );
+
+        for (info, expected) in [
+            (serde_json::json!({ "w": 0, "h": 10 }), (None, None)),
+            (serde_json::json!({ "w": 100000, "h": 10 }), (None, None)),
+            (
+                serde_json::json!({ "w": 8192, "h": 8192 }),
+                (Some(8192), Some(8192)),
+            ),
+            (serde_json::json!({ "w": 10 }), (None, None)),
+            (serde_json::json!({ "h": 10 }), (None, None)),
+        ] {
+            let TimelineItem::Image { width, height, .. } = image_item(content("n", info.clone()))
+            else {
+                panic!("an image item");
+            };
+            assert_eq!((width, height), expected, "{info}");
+        }
+        for (info, expected) in [
+            (serde_json::json!({ "size": 0 }), None),
+            (serde_json::json!({ "size": 4294967296u64 }), None),
+            (serde_json::json!({ "size": 9007199254740991u64 }), None),
+            (
+                serde_json::json!({ "size": 21 * 1024 * 1024 }),
+                Some(21 * 1024 * 1024),
+            ),
+        ] {
+            let TimelineItem::Image { size, .. } = image_item(content("n", info.clone())) else {
+                panic!("an image item");
+            };
+            assert_eq!(size, expected, "{info}");
+        }
+        // An image event without any usable source is not an image.
+        let broken = plain_event(serde_json::json!({ "msgtype": "m.image", "body": "x" }));
+        assert!(!matches!(
+            project(&broken),
+            Some(TimelineItem::Image { .. })
+        ));
+        assert!(crate::media::image_content(&broken).is_none());
     }
 
     #[test]

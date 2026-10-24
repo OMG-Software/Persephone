@@ -11,6 +11,7 @@
 * [0005 - Share room keys only with cross-signed devices](0005-share-room-keys-only-with-cross-signed-devices.md)
 * [0006 - Require an unlock secret for the local profile](0006-require-an-unlock-secret-for-the-local-profile.md)
 * [0007 - Block sending to a changed contact identity until approved](0007-block-sending-to-a-changed-contact-identity-until-approved.md)
+* [0009 - Strip sent image metadata and load received images on request](0009-strip-sent-image-metadata-and-load-received-images-on-request.md)
 
 ## Proposed Records
 

@@ -138,6 +138,17 @@ fn main() -> ExitCode {
     let core = Core::default()
         .with_credentials(source)
         .with_session(session);
+    // The harness answers the image file dialog from a file under `.local`.
+    #[cfg(feature = "dev-disposable-servers")]
+    let core = match env::var_os("PERSEPHONE_DEV_PICK_FILE") {
+        Some(path) => {
+            eprintln!("persephone: DEVELOPMENT BUILD: picked images come from the harness file");
+            core.with_picker(Arc::new(persephone_core::pick::dev::AnswerFile::new(
+                path.into(),
+            )))
+        }
+        None => core,
+    };
     let code = loop {
         match run_ui(&core, options.demo_live) {
             Run::Exit(code) => break code,
