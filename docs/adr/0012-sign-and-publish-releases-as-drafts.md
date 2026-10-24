@@ -56,9 +56,13 @@ Chosen options (owner decisions, 24 October 2026):
   builds unsigned artifacts only, named as unsigned, and creates no release.
 * **Keys:** the owner creates the accounts and adds the secrets in GitHub. A
   tag run fails if a required secret is missing (Windows certificate, Apple or
-  GPG); it never builds a release with an unsigned artifact. The signing job
-  uses a GitHub environment, so the owner can require a review before the
-  secrets are used.
+  GPG); it never builds a release with an unsigned artifact. Signing runs in
+  separate jobs (`windows-sign-binaries`, `windows-sign-installers`,
+  `macos-sign`, and GPG in `checksums`) that build no code and run only the
+  pinned actions, this repository's scripts and the OS signing tools on
+  artifacts from earlier jobs. The jobs that build and bundle have no
+  secrets. Only the signing jobs and the secret check use a GitHub
+  environment, so the owner can require a review before the secrets are used.
 
 ### Positive Consequences
 
