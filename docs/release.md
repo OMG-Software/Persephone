@@ -37,24 +37,97 @@ binary; the core and worker are Tauri sidecars. Each bundle also contains
    [`tools/about.hbs`](../tools/about.hbs)).
 2. `preflight`: on a tag, fails if any signing secret is missing. It names the
    missing secrets and never prints values.
-3. `windows`, `linux` (x64 and arm64), `macos`: build the frontend, the
-   release Wasm decoder guest, the core and worker, then
-   `cargo tauri build --no-bundle` and `cargo tauri bundle`. Signing secrets
-   reach only the bundling and signing steps, after all dependency code has
-   been compiled.
-4. `checksums`: SBOM, `SHA256SUMS`, cosign and GPG signatures, attestations.
-5. `release`: on a tag only, `gh release create --draft --prerelease`. This is
+3. Windows, in five jobs:
+   1. `windows-build` (no secrets): builds the frontend, the release Wasm
+      decoder guest, the core, the worker and the Tauri CLI, then
+      `cargo tauri build --no-bundle`. It uploads the three unsigned
+      executables and the Tauri CLI binary.
+   2. `windows-sign-binaries` (tag only, `release` environment): signs
+      `persephone.exe`, `persephone-ui.exe` and `persephone-media-worker.exe`
+      with [`tools/sign_windows.ps1`](../tools/sign_windows.ps1) and verifies
+      them.
+   3. `windows-bundle` (no secrets): puts the signed executables (the
+      unsigned ones on a dry run) where the bundler expects them, and runs
+      `cargo tauri bundle --no-sign --no-binary-patching` with the CLI from
+      `windows-build`. It then checks that the three executables have the same
+      SHA-256 as before and that nothing was compiled.
+   4. `windows-sign-installers` (tag only, `release` environment): signs the
+      NSIS and MSI installers and verifies their signatures.
+   5. `windows-verify` (tag only, no secrets): extracts both installers,
+      checks that each of the three executables inside is byte-for-byte the
+      one that `windows-sign-binaries` signed, and verifies every signature.
+4. `linux` (x64 and arm64, no secrets): builds and bundles as above in one
+   job. Linux packages are not signed themselves.
+5. macOS, in two jobs:
+   1. `macos-build` (no secrets): builds both architectures, joins them with
+      `lipo`, and bundles an unsigned `.app` with `cargo tauri bundle --no-sign`.
+      It uploads the app as a tar file, which keeps symbolic links and
+      permissions. On a dry run it also makes the unsigned `.dmg` and `.app.zip`.
+   2. `macos-sign` (tag only, `release` environment): see
+      [Apple Developer ID and notarization](#apple-developer-id-and-notarization).
+6. `checksums`: SBOM, `SHA256SUMS`, cosign and GPG signatures, attestations.
+   It downloads each platform's artifact by name and accepts only that
+   platform's file types.
+7. `release`: on a tag only, `gh release create --draft --prerelease`. This is
    the only job with `contents: write`.
+
+#### Which jobs have secrets
+
+A job that compiles or runs dependency code never has a secret. Such code
+(cargo build scripts, npm packages, the Tauri CLI and bundler, the NSIS and
+WiX tools that the bundler downloads, and msiexec on a built MSI) could change
+the signing scripts, configuration or binaries in its runner before a secret
+arrives. Step-scoped `env` does not prevent that, so the separation is by job:
+each job runs on a new runner.
+
+| Job | Secrets |
+| --- | --- |
+| `preflight` | All ten, only to test that they are not empty |
+| `windows-sign-binaries`, `windows-sign-installers` | `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` |
+| `macos-sign` | The six `APPLE_*` secrets |
+| `checksums` | `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` |
+| All other jobs | None |
+
+The jobs with secrets build nothing. They run only:
+
+- the pinned actions (checkout of this repository at the tag, artifact
+  download and upload, and in `checksums` the cosign installer, the SBOM
+  action with syft, and the attestation action);
+- this repository's own scripts from that checkout;
+- OS tools: `signtool` from the Windows SDK; `security`, `codesign`,
+  `xcrun notarytool`, `xcrun stapler`, `hdiutil`, `spctl`, `ditto`, `tar`,
+  `file`, `xattr`, `lipo` and `plutil` on macOS; `sha256sum` and `gpg` on
+  Linux; and the standard shell utilities.
+
+Built files reach these jobs only as artifacts, downloaded into the runner's
+temporary directory, not into the checkout. The signing jobs read them but do
+not run them. `checksums` makes the SBOM before it downloads any artifact.
+
+What is still trusted:
+
+- The OS tools, this repository's scripts, the pinned actions and the tools
+  those actions install.
+- The output of the jobs without secrets. The Tauri bundler in
+  `windows-bundle` and `macos-build` is built from crates.io in
+  `windows-build` and `macos-build` and runs without secrets, but the
+  installers and the app it makes are then signed. A signature shows that
+  this workflow made a file; it does not show that the dependencies that
+  built it were safe.
+- `windows-verify` runs msiexec on the signed MSI without secrets. A
+  malicious MSI could change that job's result, but it cannot reach a secret.
 
 ### Dry runs
 
 Run the workflow by hand (`workflow_dispatch`) to test it. A dry run builds
-every bundle but skips every signing step, cosign, GPG and attestations, and
-creates no release. Every artifact name ends in `-unsigned`. `SHA256SUMS` and
-the SBOM are still produced. A dry run needs no secrets.
+every bundle but skips the `windows-sign-binaries`, `windows-sign-installers`,
+`windows-verify` and `macos-sign` jobs, cosign, GPG and attestations, and
+creates no release. `windows-bundle` then packs the unsigned executables, and
+`macos-build` makes the disk image with the same `hdiutil` command as
+`macos-sign`. Every artifact name ends in `-unsigned`. `SHA256SUMS` and the
+SBOM are still produced. A dry run needs no secrets.
 
 The release-only Tauri settings (`bundle.active`, sidecars, bundled licence
-files, the Windows signing hook) come from
+files) come from
 `python tools/release.py bundle-config`, which the workflow merges with
 `cargo tauri --config`. `src-tauri/tauri.conf.json` holds the other bundle
 settings but keeps `bundle.active` false, as the IPC configuration test
@@ -70,13 +143,15 @@ Do these once. Claude and other agents never handle these keys or secrets.
 
 Create a GitHub environment named `release` (Settings, Environments). Add the
 secrets below as **environment secrets** of `release`, not repository secrets.
-Tag runs use this environment for the `preflight`, `windows`, `macos` and
-`checksums` jobs; dry runs do not use it.
+Tag runs use this environment for the `preflight`, `windows-sign-binaries`,
+`windows-sign-installers`, `macos-sign` and `checksums` jobs; dry runs do not
+use it.
 
 Recommended protection:
 
 - **Required reviewers**: add yourself, so every tag run waits for your
-  approval before a job can read the signing secrets.
+  approval before a job can read the signing secrets. Each of the five jobs
+  asks for approval when it starts.
 - **Deployment branches and tags**: allow only tags that match `v*`.
 - Protect `v*` tags with a tag ruleset, so only maintainers can push them.
 
@@ -104,9 +179,16 @@ example, `gh secret set WINDOWS_CERTIFICATE --env release < certificate.b64`.
 The workflow signs with `signtool` from the Windows SDK on the runner, using
 SHA-256 and an RFC 3161 timestamp from `WINDOWS_TIMESTAMP_URL`
 (`http://timestamp.digicert.com`). It signs `persephone.exe`,
-`persephone-ui.exe`, `persephone-media-worker.exe` and the NSIS uninstaller
-before Tauri packs them, then the NSIS and MSI installers. It then extracts
-both installers and verifies every file with `signtool verify /pa /v`.
+`persephone-ui.exe` and `persephone-media-worker.exe` before Tauri packs them,
+then the NSIS and MSI installers. `windows-verify` then extracts both
+installers and verifies the installers and the three executables inside each
+with `signtool verify /pa /v`.
+
+The NSIS uninstaller and the NSIS plugin DLLs are not signed. NSIS makes the
+uninstaller inside the bundler, and signing it there would need the
+certificate in a job that runs the bundler. The installer's own signature
+covers both when it is downloaded; `windows-verify` lists every other program
+it finds in the installers.
 
 A self-signed certificate is enough for the current releases. Create one on a
 trusted Windows machine:
@@ -148,12 +230,13 @@ exported as a PFX, so it cannot be used through these secrets.
 
 **All Windows signing is in one script.**
 [`tools/sign_windows.ps1`](../tools/sign_windows.ps1) takes a list of files to
-sign (or `-VerifyOnly` to verify them). Tauri calls it through
-`bundle.windows.signCommand` for each file it signs, and the verify step calls
-it for the installers and the programs inside them. To move to a cloud
-signing service (for example Azure Artifact Signing or SignPath) when the
-project qualifies, replace that script and the certificate step, and keep the
-"files to sign" interface.
+sign (or `-VerifyOnly` to verify them). It decodes the certificate itself into
+a directory that only the runner account can read, checks it, and deletes it
+before it exits. The two signing jobs call it to sign; `windows-verify` calls
+it with `-VerifyOnly` for the installers and the programs inside them. The
+Tauri `signCommand` hook is not used. To move to a cloud signing service (for
+example Azure Artifact Signing or SignPath) when the project qualifies,
+replace that script and keep the "files to sign" interface.
 
 ### Apple Developer ID and notarization
 
@@ -168,12 +251,19 @@ project qualifies, replace that script and the certificate step, and keep the
    once). Set `APPLE_API_PRIVATE_KEY` to its contents, `APPLE_API_KEY` to the
    key ID and `APPLE_API_ISSUER` to the issuer ID.
 
-Tauri imports the certificate into a temporary keychain, signs the two
-sidecars, the main binary and the app with the hardened runtime, notarizes
-the app and staples the ticket. The workflow then checks
-`codesign --verify --deep --strict`, the hardened-runtime flag on all three
-binaries, both architectures, `stapler validate` and `spctl --assess`. The
-app uses no entitlements. The `.dmg` contains the notarized, stapled app.
+`macos-sign` does not use Tauri. It unpacks the app and refuses an archive
+with entries outside `Persephone.app`, symbolic links that leave the bundle,
+or programs other than the three it signs. It imports the certificate into a
+temporary keychain. It signs the two sidecars, then the main binary, then the
+bundle, each with `codesign --options runtime --timestamp` and without
+`--deep`. It notarizes the app with `xcrun notarytool` (the API key is written
+to a temporary file), staples the ticket and zips the app. It builds the
+`.dmg` with `hdiutil`, then signs, notarizes and staples it. It then checks
+`codesign --verify --deep --strict` on the app, the hardened-runtime flag on
+all three binaries, both architectures, `stapler validate` and
+`spctl --assess` on the app and the `.dmg`, `codesign --verify --strict` on
+the `.dmg`, and the app inside the mounted `.dmg`. A last step that always
+runs deletes the keychain and the key file. The app uses no entitlements.
 
 ### GPG key
 
@@ -266,7 +356,10 @@ should report a notarized Developer ID source.
 - **Build tools fetched during bundling.** The Tauri CLI downloads NSIS and
   WiX on Windows, and linuxdeploy, its plugins and AppRun on Linux, from
   GitHub. One linuxdeploy plugin is a moving `continuous` release. The
-  attestations record the workflow run, not these tools.
+  attestations record the workflow run, not these tools. These tools run in
+  jobs without secrets, but their output is signed.
+- **Unsigned Windows parts.** The NSIS uninstaller and NSIS plugin DLLs are
+  not Authenticode-signed (see [Windows certificate](#windows-certificate)).
 - **Notices** list the Rust crates only. The bundled frontend's npm
   dependencies are not listed yet.
 - **SBOM** is made from the repository lockfiles. It also lists development
@@ -274,7 +367,9 @@ should report a notarized Developer ID source.
 - **Icons**: `icon.icns` was generated from the 256 px `icon.png`; its larger
   sizes are upscaled.
 - Workflow behaviour is verified only by a run on GitHub. Local checks cover
-  YAML parsing and the `tools/release.py` and `tools/sign_windows.ps1` logic.
+  YAML parsing, the `tools/release.py` logic, and the refusal paths of
+  `tools/sign_windows.ps1` (`tests/tools/test_sign_windows.py`, Windows
+  only). Signing itself needs a timestamp server and is not in the tests.
 
 ## Icons
 
