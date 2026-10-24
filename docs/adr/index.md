@@ -12,6 +12,10 @@
 * [0006 - Require an unlock secret for the local profile](0006-require-an-unlock-secret-for-the-local-profile.md)
 * [0007 - Block sending to a changed contact identity until approved](0007-block-sending-to-a-changed-contact-identity-until-approved.md)
 
+## Proposed Records
+
+* [0008 - Restart the core process to finish a lock after the client ran](0008-restart-the-core-process-to-finish-a-lock-after-the-client-ran.md)
+
 ## Superseded Records
 
 * None
