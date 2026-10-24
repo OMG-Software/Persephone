@@ -154,7 +154,11 @@ Recorded 24 October 2026 from the implementation on `p5/image-messaging`.
 * `ImageView` also carries `bandRows`, so the page can place a short last band.
   A declared `size` is a `u32`.
 * A new error code, `rejected`, covers files that are too large, malformed,
-  not PNG or JPEG, fail the hash check, or that the worker refuses.
+  not PNG or JPEG, fail the hash check, or that the worker refuses, and media
+  that the server refuses (a 4xx status other than 404 or 429).
+* The guest decodes a JPEG only if its structure is complete (every scan ends
+  at a marker, and EOI is present), and with zune-jpeg's strict mode. A
+  transfer that stops early is refused.
 * matrix-sdk 0.19.1 buffers a whole media download without a limit, so the
   core sends the request itself. It uses the authenticated
   `/_matrix/client/v1/media/download` endpoint when the server versions
@@ -175,6 +179,13 @@ Known limits of this implementation:
 * Decoded pixel frames and the SDK's copy of an upload are not zeroed when they
   are dropped.
 * An open file dialog keeps the core from ending until the dialog closes.
+* zune-jpeg 0.5.15 fills the rest of a scan with zeros when it meets a valid
+  marker early, also in strict mode. A file cut inside a scan and then given a
+  new EOI marker therefore decodes with blank final blocks. This needs a
+  deliberately made file; the sender could send such an image anyway.
+* With a debug build of the worker, a 12-megapixel JPEG exceeds both time
+  limits. The release worker fits them (see the
+  [image evidence](../evidence/image-messaging.md#timing)).
 
 ## Required evidence
 

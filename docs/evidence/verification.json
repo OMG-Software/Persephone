@@ -203,6 +203,55 @@
       "network_policy_diagnosis": "missing_capability=NONE in broker and worker for loopback; not a socket-denial proof",
       "cpu_time_limit": "not_demonstrated",
       "evidence": "windows-results.json"
+    },
+    {
+      "name": "element_web_encrypted_text_interop",
+      "command": "manual live run; see docs/evidence/element-web-interop.md",
+      "checked_on": "2026-10-24",
+      "result": "pass",
+      "servers": [
+        "Merovingian 0.12.29",
+        "Synapse 1.163.0"
+      ],
+      "client": "Element Web v1.12.32 (matrix-sdk-crypto 0.19.1)",
+      "source": "e38007b, Windows debug build",
+      "report": "docs/evidence/element-web-interop.md",
+      "not_run": "Linux, macOS, native window hand checks"
+    },
+    {
+      "name": "image_messaging_live_run",
+      "command": "manual live run; see docs/evidence/image-messaging.md",
+      "checked_on": "2026-10-24",
+      "result": "fail",
+      "failed_steps": [
+        "4a truncated JPEG drawn partially (both servers)"
+      ],
+      "servers": [
+        "Merovingian 0.12.29",
+        "Synapse 1.163.0",
+        "Synapse 1.163.0 classic-only"
+      ],
+      "client": "Element Web v1.12.32",
+      "source": "9fbf074, Windows debug build; release media worker for timing",
+      "report": "docs/evidence/image-messaging.md",
+      "fixed_after": "guest JPEG structure check and strict mode, tested by automated tests only; step 4a not rerun live",
+      "not_run": "Element's own display of a sent image (service worker did not load), bad-file sends on Synapse, release app build, Linux, macOS"
+    },
+    {
+      "name": "workspace_check_after_p5_image_messaging",
+      "command": "python tools/dev.py check --offline",
+      "checked_on": "2026-10-24",
+      "exit_code": 0,
+      "rust_tests_passed": 454,
+      "rust_tests_ignored": 2,
+      "frontend_tests_passed": 55,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 13,
+      "total_tests_passed": 524,
+      "source": "p5/image-messaging at 9fbf074 plus the uncommitted truncated-JPEG and error-mapping fixes and doc updates; committed next with this entry",
+      "working_tree_clean": false,
+      "earlier_attempts": "the first run after the fixes failed building aws-lc-sys (LNK1114, cannot overwrite libaws_lc_0_46_0_crypto.a, error 5; no dependency change); the rerun passed",
+      "not_run": "no live homeserver run after the fixes"
     }
   ],
   "checks": [

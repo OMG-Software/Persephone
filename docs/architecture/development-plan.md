@@ -544,7 +544,7 @@ support requires actual OS runs, not cross-compilation alone.
 ## Development milestones and acceptance gates
 
 Milestones require explicit acceptance evidence. **No milestone has passed its exit
-gate.** P0, P1 and P2 are in progress and P3 has started; the
+gate.** P0 to P6 are in progress and P7 has not started; the
 [milestone status](#milestone-status) below lists each deliverable. Work can be
 developed in parallel where independent, but feature acceptance follows its gates.
 
@@ -590,7 +590,7 @@ above passes; none has.
 | P3 | Sliding default, classic fallback | Partial | Initial selection passes live on Merovingian, Synapse and classic-only Synapse; no runtime mode switch |
 | P3 | Room and timeline projection | Partial | Room list, history paging, notices and live events; gap and dedup coverage incomplete |
 | P4 | Encrypted text experience | Partial | [Encryption setup](../evidence/encryption-setup.md): key policy ([ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md)), cross-signing and recovery set-up, recovery-key verification; [sending](../evidence/encrypted-sending.md) with consent for unencrypted rooms and delivery states; [own-device verification](../evidence/own-device-verification.md) and [contact verification](../evidence/contact-verification.md) in existing direct-message rooms by comparing emoji, in both directions; [identity changes](../evidence/identity-changes.md) pause sending until accepted or verified ([ADR-0007](../adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md)); [exit runs](../evidence/encrypted-text-exit-runs.md): unclear-delivery retry, new and unsigned devices, withheld keys, recovery on a clean profile. Every listed exit item has passing live runs on Windows against an SDK peer, and [Element Web](../evidence/element-web-interop.md) verified, sent and read encrypted text with Persephone on both servers (24 October 2026; Element uses the same crypto crate). Not yet: the [native window hand checks](../evidence/native-windows-hand-checks.md) (prepared, not run), Linux and macOS |
-| P5 | Image messaging | Not started | The decoder and worker exist (P0, P2) but there is no image flow |
+| P5 | Image messaging | Partial | [Design](image-messaging.md) and [ADR-0009](../adr/0009-strip-sent-image-metadata-and-load-received-images-on-request.md): metadata stripped in the guest, received images loaded only on request, pixels sent to the page in raw row bands. [Live run](../evidence/image-messaging.md) with Element Web on both servers, Sliding and classic sync: click to load, encrypted and unencrypted send, metadata removed, source unchanged, hostile files refused, lock during a load; a truncated JPEG drew partially and was fixed afterwards (tests only, not rerun live). Not yet: Element's own display of a sent image (its service worker did not load in the test browser), release builds (the debug worker exceeds the time limits at 12 megapixels), Linux and macOS (no contained worker) |
 | P6 | Product and operational hardening | Partial | Keyboard and screen-reader checks not done; failed windows detected and retried on Windows; this host's WebView2 crash dumps all fail inside a third-party overlay hook, not tested with it removed ([window retry](../evidence/window-retry.md)) |
 | P7 | Release readiness | Not started | None |
 
