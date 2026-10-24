@@ -45,6 +45,9 @@ pub const SERVICE: &str = "io.github.omg-software.persephone";
 /// The item's account: what it holds, with a version.
 pub const ACCOUNT: &str = "store-key-wrap-v1";
 
+const SUCCESS: OSStatus = errSecSuccess;
+const NOT_FOUND: OSStatus = errSecItemNotFound;
+const DUPLICATE: OSStatus = errSecDuplicateItem;
 /// Keychain errors that mean there is no keychain to use.
 const NOT_AVAILABLE: OSStatus = -25291; // errSecNotAvailable
 const NO_SUCH_KEYCHAIN: OSStatus = -25294; // errSecNoSuchKeychain
@@ -135,8 +138,8 @@ impl SecretStore for KeychainStore {
         // SAFETY: a valid query; `found` receives an owned reference.
         let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut found) };
         match status {
-            errSecSuccess => {}
-            errSecItemNotFound => return Ok(None),
+            SUCCESS => {}
+            NOT_FOUND => return Ok(None),
             other => return Err(vault_error(other)),
         }
         // SAFETY: `found` is null or an owned reference from the call above.
@@ -180,9 +183,9 @@ impl SecretStore for KeychainStore {
         // SAFETY: valid attributes; no result is asked for.
         let status = unsafe { SecItemAdd(attributes.as_concrete_TypeRef(), ptr::null_mut()) };
         match status {
-            errSecSuccess => Ok(Zeroizing::new(*secret)),
+            SUCCESS => Ok(Zeroizing::new(*secret)),
             // Another process stored one first: use that one.
-            errSecDuplicateItem => self.load()?.ok_or(VaultError::Failed),
+            DUPLICATE => self.load()?.ok_or(VaultError::Failed),
             other => Err(vault_error(other)),
         }
     }
@@ -195,6 +198,14 @@ mod tests {
     use crate::vault::KeyProtector;
     use security_framework::os::macos::keychain::CreateOptions;
     use security_framework_sys::base::SecKeychainRef;
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[link(name = "Security", kind = "framework")]
     unsafe extern "C" {
@@ -250,8 +261,35 @@ mod tests {
         }
     }
 
+    /// Where the Keychain test is, for [`watchdog`].
+    static STEP: Mutex<&str> = Mutex::new("start");
+
+    fn step(name: &'static str) {
+        *STEP.lock().unwrap_or_else(|p| p.into_inner()) = name;
+    }
+
+    /// Ends the test process if a Keychain call waits (for a prompt no one
+    /// can answer on CI) instead of failing, naming the step. Written to the
+    /// raw stderr, which the test harness does not capture.
+    fn watchdog(done: Arc<AtomicBool>) {
+        thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while !done.load(Ordering::Acquire) {
+                if Instant::now() >= deadline {
+                    let step = *STEP.lock().unwrap_or_else(|p| p.into_inner());
+                    let message = format!("keychain test stuck at step: {step}\n");
+                    // SAFETY: writes a valid buffer to file descriptor 2.
+                    unsafe { libc::write(2, message.as_ptr().cast(), message.len()) };
+                    std::process::abort();
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+    }
+
     /// One test, so the process-wide "no user interaction" setting and the
-    /// keychain lock do not race other Keychain tests.
+    /// keychain lock do not race other Keychain tests. User interaction is
+    /// off throughout: a call that would prompt fails instead.
     ///
     /// GIVEN an empty temporary keychain WHEN the secret is stored, stored
     /// again and read THEN the first secret stays; the wrap opens with it;
@@ -259,13 +297,21 @@ mod tests {
     /// and opening fail instead of making a new secret.
     #[test]
     fn given_a_temporary_keychain_then_the_secret_is_stored_once_and_locks_fail_closed() {
+        let done = Arc::new(AtomicBool::new(false));
+        watchdog(done.clone());
+        let quiet = SecKeychain::disable_user_interaction().unwrap();
+        step("create keychain");
         let mut temporary = TemporaryKeychain::new();
         let store = KeychainStore::in_keychain(temporary.keychain.clone());
+        step("load from an empty keychain");
         assert_eq!(store.load(), Ok(None), "empty keychain");
 
+        step("store the first secret");
         let first = [7u8; SECRET_BYTES];
         assert_eq!(*store.store_new(&first).unwrap(), first);
+        step("load the first secret");
         assert_eq!(store.load().unwrap().as_deref(), Some(&first));
+        step("store a second secret");
         let second = [9u8; SECRET_BYTES];
         assert_eq!(
             *store.store_new(&second).unwrap(),
@@ -273,6 +319,7 @@ mod tests {
             "an existing secret is kept"
         );
 
+        step("wrap and unwrap");
         let vault = Wrapped(KeychainStore::in_keychain(temporary.keychain.clone()));
         let blob = vault.protect(b"sealed store key").unwrap();
         assert_eq!(
@@ -280,6 +327,7 @@ mod tests {
             b"sealed store key"
         );
 
+        step("open with another keychain");
         let other = TemporaryKeychain::new();
         let elsewhere = Wrapped(KeychainStore::in_keychain(other.keychain.clone()));
         assert!(
@@ -291,21 +339,27 @@ mod tests {
             Ok(None)
         );
 
-        let quiet = SecKeychain::disable_user_interaction().unwrap();
+        step("lock the keychain");
         // SAFETY: a keychain this test created.
         assert_eq!(
             unsafe { SecKeychainLock(temporary.keychain.as_concrete_TypeRef()) },
             errSecSuccess
         );
+        step("read while locked");
         assert_eq!(store.load(), Err(VaultError::Failed), "locked");
         assert!(matches!(vault.unprotect(&blob), Err(VaultError::Failed)));
         assert!(matches!(vault.protect(b"k"), Err(VaultError::Failed)));
-        drop(quiet);
 
+        step("unlock and read");
         temporary
             .keychain
             .unlock(Some(&temporary.password))
             .unwrap();
         assert_eq!(store.load().unwrap().as_deref(), Some(&first), "unlocked");
+        step("delete the keychains");
+        drop(other);
+        drop(temporary);
+        drop(quiet);
+        done.store(true, Ordering::Release);
     }
 }
