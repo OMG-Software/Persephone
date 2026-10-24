@@ -9,6 +9,7 @@
 - [Image messaging design](architecture/image-messaging.md): proposed P5 design for sending and receiving images, pixel transport and limits.
 - [Security design](architecture/security-design.md): proposed threat boundaries, controls, and release gates.
 - [Development guide](development.md): workspace commands, toolchain requirements, and local data layout.
+- [Release guide](release.md): signing secrets, cutting a draft release, and verifying downloads.
 
 ## Decisions
 

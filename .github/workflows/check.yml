@@ -67,7 +67,8 @@ jobs:
       - name: Check
         run: python tools/dev.py check
 
-  # GitHub-hosted macOS and Ubuntu runners. rustup and a C toolchain are
+  # GitHub-hosted macOS and Ubuntu runners, including arm64 Ubuntu so that the
+  # worker's aarch64 seccomp allowlist is exercised. A C toolchain is
   # preinstalled; Ubuntu adds the WebKitGTK headers Tauri links against.
   hosted:
     name: ${{ matrix.os }}
@@ -76,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -98,6 +99,13 @@ jobs:
 
       - name: Install Rust
         run: |
+          # The arm64 Ubuntu image may not include rustup; install it the
+          # same way as the container jobs when it is missing.
+          if ! command -v rustup >/dev/null; then
+            curl --proto '=https' --tlsv1.3 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
 

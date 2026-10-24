@@ -88,6 +88,7 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 | `windows` | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
 | `macos-latest` | `macos-latest` (arm64) | Preinstalled Xcode tools | 3.14 (setup-python) |
 | `ubuntu-latest` | `ubuntu-latest` (24.04) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config` | 3.14 (setup-python) |
+| `ubuntu-24.04-arm` | `ubuntu-24.04-arm` (arm64) | As `ubuntu-latest`; rustup from `sh.rustup.rs` if the image lacks it | 3.14 (setup-python) |
 | `debian-13` | `debian:trixie` container | `apt-get`: build tools, `libwebkit2gtk-4.1-dev` | Distribution `python3` |
 | `arch` | `archlinux:base-devel` container | `pacman -Syu`: `webkit2gtk-4.1` | Distribution `python` |
 | `fedora-44` | `fedora:44` container | `dnf`: build tools, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
@@ -106,6 +107,13 @@ Run 39785251911 at `04c0538` passed every job:
 | `macos-latest`, `ubuntu-latest`, `debian-13`, `arch`, `fedora-44`, `opensuse-leap-16.0` | 194 (163 + 31) each | 16 each | 15 (2 + 13) each |
 
 On every job, `cargo fmt`, Clippy with `-D warnings` (default and development feature), the contract drift check and the TypeScript check also passed. Each job took 8 to 17 minutes. The `#[cfg(unix)]` directory sync in `crates/core/src/store.rs` compiles on Linux and macOS, and the sign-out and store tests that use it pass there.
+
+### Release builds
+
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) builds,
+signs and checksums the installers. A `v*` tag creates a draft pre-release; a
+manual run builds unsigned artifacts only. [Release guide](release.md) lists
+the secrets, how to cut a release and how users verify the files.
 
 ## Disposable homeservers
 
