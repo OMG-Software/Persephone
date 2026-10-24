@@ -32,8 +32,10 @@
 //! blocked by an open prompt and nothing else can change the stores meanwhile.
 
 use crate::account;
+use crate::contacts;
 use crate::credentials::{CredentialSource, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
+use crate::identities;
 use crate::outbox::Outbox;
 use crate::passphrase::Unlock;
 use crate::security;
@@ -42,8 +44,16 @@ use crate::store::{self, Stores};
 use crate::vault::KeyProtector;
 use crate::verification::{self, Action as VerifyAction, Flow};
 use matrix_sdk::{
-    Client,
-    ruma::{OwnedUserId, events::key::verification::request::ToDeviceKeyVerificationRequestEvent},
+    Client, Room,
+    ruma::{
+        OwnedUserId,
+        events::{
+            GlobalAccountDataEvent,
+            direct::DirectEventContent,
+            key::verification::request::ToDeviceKeyVerificationRequestEvent,
+            room::message::{MessageType, OriginalSyncRoomMessageEvent},
+        },
+    },
 };
 use persephone_contracts::{
     AccountState, AccountStatus, IdentityState, PendingMessage, RecoveryState, SecurityError,
@@ -118,6 +128,10 @@ pub trait SessionListener: Send + Sync {
     /// Room keys arrived for these rooms, so messages there that could not
     /// be decrypted may be readable now.
     fn room_keys_arrived(&self, _rooms: &account::KeyRooms) {}
+    /// The account's direct-message rooms changed (`m.direct`), so the room
+    /// list names different contacts. Account data touches no room, so a
+    /// sync round that brings only this reports no rooms.
+    fn direct_rooms_changed(&self) {}
 }
 
 /// Why a message was not queued.
@@ -159,6 +173,13 @@ enum SecurityCommand {
     },
     /// Start, accept, confirm or cancel a verification with another device.
     Verify(VerifyAction),
+    /// Accept a room member's new identity; the user said yes in the core's
+    /// own window (ADR-0007).
+    AcceptIdentity {
+        room_id: String,
+        user_id: OwnedUserId,
+        was_verified: bool,
+    },
 }
 
 struct SecurityShared {
@@ -433,6 +454,19 @@ fn run_sync(
     let mut engine = None;
     // The SDK's room-key stream, taken once per round; a receiver, not a task.
     let mut keys = None;
+    // The SDK's stream of changed user identities, taken once per round; a
+    // receiver, not a task. Any update may change a room's paused state.
+    let mut identities = None;
+    // Set by the SDK while it processes a round that changed `m.direct`.
+    let direct = Arc::new(AtomicBool::new(false));
+    let noted = direct.clone();
+    let direct_handler = {
+        let _context = runtime.enter();
+        client.add_event_handler(move |_: GlobalAccountDataEvent<DirectEventContent>| {
+            noted.store(true, Ordering::SeqCst);
+            std::future::ready(())
+        })
+    };
     loop {
         let lease = match shared.admit() {
             Ok(lease) => lease,
@@ -456,13 +490,25 @@ fn run_sync(
             if engine.is_none() {
                 engine = Some(account::select_engine(&client).await?);
             }
+            if identities.is_none() {
+                identities = client
+                    .encryption()
+                    .user_identities_stream()
+                    .await
+                    .ok()
+                    .map(Box::pin);
+            }
             let rooms =
                 account::sync_round(&client, engine.as_ref().expect("selected above")).await?;
             let keyed = match keys.as_mut() {
                 Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
                 None => None,
             };
-            Ok::<_, SignInError>((rooms, keyed))
+            let changed = match identities.as_mut() {
+                Some(stream) => account::take_any(stream.as_mut()).await,
+                None => false,
+            };
+            Ok::<_, SignInError>((rooms, keyed, changed))
         });
         let committed = lease.commit(|| ()).is_ok();
         drop(lease);
@@ -470,7 +516,7 @@ fn run_sync(
             break;
         }
         match outcome {
-            Ok((rooms, keyed)) => {
+            Ok((rooms, keyed, identities_changed)) => {
                 backoff = Duration::from_secs(1);
                 if guard(&shared.status).error.is_some() {
                     shared.set_status(signed_in(&user_id, None));
@@ -478,6 +524,12 @@ fn run_sync(
                 if let Some(listener) = shared.listener() {
                     if !rooms.is_empty() {
                         listener.rooms_changed(&rooms);
+                    }
+                    if direct.swap(false, Ordering::SeqCst) {
+                        listener.direct_rooms_changed();
+                    }
+                    if identities_changed {
+                        listener.security_changed();
                     }
                     if let Some(keyed) = keyed.filter(|keyed| !keyed.is_empty()) {
                         listener.room_keys_arrived(&keyed);
@@ -502,6 +554,8 @@ fn run_sync(
         }
     }
     let _context = runtime.enter();
+    client.remove_event_handler(direct_handler);
+    drop(identities);
     drop(keys);
     drop(engine);
     drop(client);
@@ -522,20 +576,36 @@ fn run_security(
     // A recovery-key window can outlive this session; what it reports applies
     // only while the session is still this one.
     let generation = lock(shared).generation;
-    // At most one verification at a time; requests from the account's own
-    // other devices are noted as they arrive during sync.
+    // At most one verification at a time. Requests are noted (sender and
+    // flow ID) as they arrive during sync: from the account's own other
+    // devices, and from the contact of a direct-message room in that room.
     let mut flow: Option<Flow> = None;
-    let incoming: Arc<Mutex<Option<String>>> = Arc::default();
+    let incoming: Arc<Mutex<Option<(OwnedUserId, String)>>> = Arc::default();
     let recorder = incoming.clone();
     let own = user_id.clone();
     let handler = client.add_event_handler(move |event: ToDeviceKeyVerificationRequestEvent| {
         if event.sender == own
             && event.content.transaction_id.as_str().len() <= verification::MAX_FLOW_ID_BYTES
         {
-            *guard(&recorder) = Some(event.content.transaction_id.to_string());
+            *guard(&recorder) = Some((own.clone(), event.content.transaction_id.to_string()));
         }
         std::future::ready(())
     });
+    let recorder = incoming.clone();
+    let own = user_id.clone();
+    let room_handler = client.add_event_handler(
+        move |event: OriginalSyncRoomMessageEvent, room: Room, client: Client| {
+            if let MessageType::VerificationRequest(request) = &event.content.msgtype
+                && request.to == own
+                && event.sender != own
+                && event.event_id.as_str().len() <= verification::MAX_FLOW_ID_BYTES
+                && contacts::contact_of(&client, &room).as_ref() == Some(&event.sender)
+            {
+                *guard(&recorder) = Some((event.sender.clone(), event.event_id.to_string()));
+            }
+            std::future::ready(())
+        },
+    );
     loop {
         if !shared.wait_open(SECURITY_TICK) {
             break;
@@ -563,8 +633,8 @@ fn run_security(
                 // A new request from another device replaces a finished flow.
                 if flow.as_ref().is_none_or(Flow::is_over) {
                     let noted = guard(&incoming).take();
-                    if let Some(flow_id) = noted
-                        && let Some(new) = verification::incoming(&client, &user_id, &flow_id).await
+                    if let Some((sender, flow_id)) = noted
+                        && let Some(new) = verification::incoming(&client, &sender, &flow_id).await
                     {
                         flow = Some(new);
                     }
@@ -608,10 +678,17 @@ fn run_security(
                     }
                     // A request that came in after the start was queued is
                     // kept: replacing it would leave the other device waiting.
-                    Some(SecurityCommand::Verify(VerifyAction::Start))
-                        if flow.as_ref().is_some_and(|flow| !flow.is_over()) =>
-                    {
-                        (None, None)
+                    Some(SecurityCommand::Verify(
+                        VerifyAction::Start | VerifyAction::StartContact(_),
+                    )) if flow.as_ref().is_some_and(|flow| !flow.is_over()) => (None, None),
+                    Some(SecurityCommand::Verify(VerifyAction::StartContact(room_id))) => {
+                        match verification::start_contact(&client, &room_id).await {
+                            Ok(new) => {
+                                flow = Some(new);
+                                (None, None)
+                            }
+                            Err(error) => (Some(error), None),
+                        }
                     }
                     Some(SecurityCommand::Verify(VerifyAction::Start)) => {
                         match verification::start(&client, &user_id).await {
@@ -622,17 +699,28 @@ fn run_security(
                             None => (Some(SecurityError::Failed), None),
                         }
                     }
+                    Some(SecurityCommand::AcceptIdentity {
+                        room_id,
+                        user_id,
+                        was_verified,
+                    }) => (
+                        identities::accept(&client, &room_id, &user_id, was_verified)
+                            .await
+                            .err(),
+                        None,
+                    ),
                     Some(SecurityCommand::Verify(action)) => {
-                        let applied = match flow.as_mut() {
-                            Some(flow) => flow.act(&action).await,
-                            None => false,
+                        let outcome = match flow.as_mut() {
+                            Some(flow) => flow.act(&client, &action).await,
+                            None => Err(SecurityError::Failed),
                         };
-                        ((!applied).then_some(SecurityError::Failed), None)
+                        (outcome.err(), None)
                     }
                     None => (None, None),
                 };
                 if let Some(flow) = flow.as_mut() {
                     flow.drive().await;
+                    flow.refresh_contact(&client).await;
                 }
                 (
                     outcome,
@@ -673,6 +761,7 @@ fn run_security(
     }
     let _context = runtime.enter();
     client.remove_event_handler(handler);
+    client.remove_event_handler(room_handler);
     drop(flow);
     drop(client);
 }
@@ -770,6 +859,10 @@ fn queue_verification(security: &mut SecurityShared, action: VerifyAction) -> bo
     });
     let allowed = match &action {
         VerifyAction::Start => security.status.identity == IdentityState::Unverified && over,
+        // Only a verified device vouches for someone else.
+        VerifyAction::StartContact(_) => {
+            security.status.identity == IdentityState::Verified && over
+        }
         VerifyAction::Accept(id) => flow
             .is_some_and(|flow| &flow.flow_id == id && flow.phase == VerificationPhase::Incoming),
         // A match is confirmed only against the seven emoji shown.
@@ -1285,9 +1378,10 @@ impl Session {
     }
 
     /// Starts, accepts, confirms or cancels a verification with another of
-    /// the account's devices. A new verification is offered only to a device
-    /// that is not verified yet; the others need the current flow's ID and the
-    /// right phase. Returns the status at once.
+    /// the account's devices or with a contact. Verifying this device is
+    /// offered only while it is not verified yet, and verifying a contact only
+    /// once it is; the others need the current flow's ID and the right phase.
+    /// Returns the status at once.
     pub fn verify(&self, action: VerifyAction) -> SecurityStatus {
         let Some(generation) = self.shared.open_generation() else {
             return self.security_status();
@@ -1297,6 +1391,71 @@ impl Session {
         }
         self.shared
             .with_security(generation, |security| queue_verification(security, action));
+        self.security_status()
+    }
+
+    /// Asks in the core's own window whether to accept `user_id`'s new
+    /// identity in `room_id` (ADR-0007), then leaves the command for the
+    /// security thread, which checks the change again before applying it.
+    /// The caller has checked that the change exists and how; the window
+    /// runs on its own thread without a lease, like the secret prompts, and
+    /// an answer given after a lock is dropped. Does nothing while another
+    /// operation runs.
+    pub fn accept_identity(
+        &self,
+        room_id: String,
+        user_id: OwnedUserId,
+        was_verified: bool,
+        source: Arc<dyn CredentialSource>,
+    ) -> SecurityStatus {
+        if guard(&self.shared.account).is_none() {
+            return self.security_status();
+        }
+        let Some(started) = self.shared.open_generation() else {
+            return self.security_status();
+        };
+        let accepted = self.shared.with_security(started, |security| {
+            let free =
+                security.status.operation == SecurityOperation::Idle && security.command.is_none();
+            if free {
+                security.status.operation = SecurityOperation::WaitingForConfirmation;
+                security.status.error = None;
+            }
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
+        }
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-identity-prompt".into())
+            .spawn(move || {
+                let answer = source.confirm_identity_change(user_id.as_str(), was_verified);
+                shared.with_security(started, |security| match answer {
+                    Ok(true) => {
+                        security.command = Some(SecurityCommand::AcceptIdentity {
+                            room_id,
+                            user_id,
+                            was_verified,
+                        });
+                        security.status.operation = SecurityOperation::Working;
+                    }
+                    Ok(false) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(SecurityError::Cancelled);
+                    }
+                    Err(error) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(security_prompt_error(error));
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
+            });
+        }
         self.security_status()
     }
 
@@ -1570,6 +1729,7 @@ mod tests {
             phase,
             emoji,
             other_device: None,
+            contact: None,
         })
     }
 
@@ -1609,6 +1769,43 @@ mod tests {
         assert!(!queue_verification(&mut security, VerifyAction::Start));
     }
 
+    /// GIVEN this device's identity state WHEN the page asks to verify a
+    /// contact THEN only a verified device queues it, and not while another
+    /// flow is open; verifying this device is no longer offered once it is
+    /// verified.
+    #[test]
+    fn given_a_contact_verification_then_only_a_verified_device_queues_it() {
+        let contact = || VerifyAction::StartContact("!dm:s".into());
+        for identity in [
+            IdentityState::Unknown,
+            IdentityState::None,
+            IdentityState::Unverified,
+        ] {
+            let mut security = unverified();
+            security.status.identity = identity;
+            assert!(
+                !queue_verification(&mut security, contact()),
+                "{identity:?}"
+            );
+            assert!(security.command.is_none());
+        }
+        let mut verified = unverified();
+        verified.status.identity = IdentityState::Verified;
+        assert!(!queue_verification(&mut verified, VerifyAction::Start));
+        verified.status.verification = flow(VerificationPhase::Waiting);
+        assert!(
+            !queue_verification(&mut verified, contact()),
+            "a flow is open"
+        );
+        verified.status.verification = flow(VerificationPhase::Done);
+        assert!(queue_verification(&mut verified, contact()));
+        assert!(matches!(
+            verified.command,
+            Some(SecurityCommand::Verify(VerifyAction::StartContact(ref room))) if room == "!dm:s"
+        ));
+        assert_eq!(verified.status.operation, SecurityOperation::Working);
+    }
+
     /// GIVEN each phase WHEN an action arrives THEN only the action for that
     /// flow and phase is queued.
     #[test]
@@ -1640,6 +1837,18 @@ mod tests {
             (
                 VerificationPhase::Compare,
                 VerifyAction::Cancel("other".into()),
+                false,
+            ),
+            // A confirmation the other side never got must not leave the
+            // flow stuck: waiting can be cancelled.
+            (
+                VerificationPhase::Confirmed,
+                VerifyAction::Cancel(id()),
+                true,
+            ),
+            (
+                VerificationPhase::Confirmed,
+                VerifyAction::Confirm(id()),
                 false,
             ),
             (VerificationPhase::Cancelled, VerifyAction::Start, true),

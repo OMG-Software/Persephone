@@ -24,9 +24,9 @@ export type IdentityState = "unknown" | "none" | "unverified" | "verified";
 
 export type RecoveryState = "unknown" | "disabled" | "incomplete" | "enabled";
 
-export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "working";
+export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_confirmation" | "working";
 
-export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "failed";
+export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "failed";
 
 export type VerificationPhase = "incoming" | "waiting" | "compare" | "confirmed" | "done" | "cancelled";
 
@@ -40,7 +40,12 @@ emoji: Array<SasEmoji>,
 /**
  * The other device's name as it reported it (untrusted, projected).
  */
-otherDevice: string | null, };
+otherDevice: string | null, 
+/**
+ * The contact's user ID when this verifies another person (untrusted,
+ * projected); none when it verifies this device.
+ */
+contact: string | null, };
 
 export type SecurityStatus = { identity: IdentityState, recovery: RecoveryState, operation: SecurityOperation, error: SecurityError | null, verification: VerificationView | null, 
 /**
@@ -49,13 +54,43 @@ export type SecurityStatus = { identity: IdentityState, recovery: RecoveryState,
  */
 canSetUpRecovery: boolean, };
 
+export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
+
+export type ContactStatus = { roomId: string, 
+/**
+ * Untrusted, projected like a name.
+ */
+userId: string, trust: ContactTrust, };
+
+export type IdentityChange = { 
+/**
+ * A valid Matrix user ID (printable ASCII, at most 255 bytes), so the
+ * page can name it back to the core; untrusted text all the same.
+ */
+userId: string, 
+/**
+ * This account had verified the old identity.
+ */
+wasVerified: boolean, };
+
+export type RoomIdentityChanges = { roomId: string, changes: Array<IdentityChange>, 
+/**
+ * More members changed than are listed.
+ */
+truncated: boolean, };
+
 export type RoomEncryption = "encrypted" | "not_encrypted" | "unknown";
 
 export type RoomSummary = { roomId: string, displayName: string | null, 
 /**
  * u32 caps this count below JavaScript's exact-integer limit.
  */
-unreadCount: number, encryption: RoomEncryption, };
+unreadCount: number, encryption: RoomEncryption, 
+/**
+ * In a direct-message room with one other person, that person's user ID
+ * (untrusted, projected like a name). Otherwise none.
+ */
+contact: string | null, };
 
 export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
@@ -89,7 +124,8 @@ export const roomSummaryFixture = {
   "roomId": "!example:server.invalid",
   "displayName": null,
   "unreadCount": 4294967295,
-  "encryption": "encrypted"
+  "encryption": "encrypted",
+  "contact": "@alice:server.invalid"
 } as const satisfies RoomSummary;
 
 export const timelinePageFixture = {

@@ -251,6 +251,7 @@ impl Fixtures {
                 unread_count: room.unread,
                 // Synthetic rooms: nothing can be sent to them.
                 encryption: RoomEncryption::Unknown,
+                contact: None,
             })
             .collect();
         RoomList {

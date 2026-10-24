@@ -2,7 +2,8 @@
 //! with the same limits as the synthetic views (`views.rs`).
 //!
 //! * Names and senders go through `views::project_name`; message bodies
-//!   through `views::project_body`.
+//!   through `views::project_body`. A direct-message room names its contact
+//!   (`contacts.rs`), and is named after them when it has no name.
 //! * Each item carries the event's `origin_server_ts`: the time the sender's
 //!   homeserver claims, unchecked. An event without a usable one has none.
 //! * Text messages (text, notice, emote) are shown as messages. Other
@@ -20,6 +21,7 @@
 //!   cursors (`m1.<n>`) for at most `MAX_CURSORS` tokens; an evicted or unknown
 //!   cursor is `not_found`.
 
+use crate::contacts;
 use crate::views::{MAX_PAGE_BYTES, MAX_PAGE_ITEMS, MAX_ROOMS, project_body, project_name};
 use matrix_sdk::{
     Client, EncryptionState, RoomState,
@@ -34,7 +36,8 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    NoticeKind, RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage, UnixMillis,
+    ContactStatus, NoticeKind, RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage,
+    UnixMillis,
 };
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
@@ -199,6 +202,15 @@ impl MatrixViews {
         joined_room(client, room).is_ok()
     }
 
+    /// The other person in a joined direct-message room; `not_found` for any
+    /// other room.
+    pub async fn contact_status(client: &Client, room: &str) -> Result<ContactStatus, ErrorCode> {
+        let joined = joined_room(client, room)?;
+        contacts::status(client, &joined)
+            .await
+            .ok_or(ErrorCode::NotFound)
+    }
+
     pub fn room_list(client: &Client) -> RoomList {
         let mut rooms = client.joined_rooms();
         rooms.sort_by(|a, b| a.room_id().cmp(b.room_id()));
@@ -207,17 +219,26 @@ impl MatrixViews {
             rooms: rooms
                 .into_iter()
                 .take(MAX_ROOMS)
-                .map(|room| RoomSummary {
-                    room_id: room.room_id().to_string(),
-                    display_name: room
-                        .cached_display_name()
-                        .map(|name| project_name(&name.to_string())),
-                    unread_count: u32::try_from(room.num_unread_messages()).unwrap_or(u32::MAX),
-                    encryption: match room.encryption_state() {
-                        EncryptionState::Encrypted => RoomEncryption::Encrypted,
-                        EncryptionState::NotEncrypted => RoomEncryption::NotEncrypted,
-                        EncryptionState::Unknown => RoomEncryption::Unknown,
-                    },
+                .map(|room| {
+                    let contact = contacts::contact_of(client, &room);
+                    RoomSummary {
+                        room_id: room.room_id().to_string(),
+                        // A direct-message room without a name of its own is
+                        // named after its contact, not the SDK's member count.
+                        display_name: match (room.name(), &contact) {
+                            (None, Some(contact)) => Some(contacts::shown(contact)),
+                            _ => room
+                                .cached_display_name()
+                                .map(|name| project_name(&name.to_string())),
+                        },
+                        unread_count: u32::try_from(room.num_unread_messages()).unwrap_or(u32::MAX),
+                        encryption: match room.encryption_state() {
+                            EncryptionState::Encrypted => RoomEncryption::Encrypted,
+                            EncryptionState::NotEncrypted => RoomEncryption::NotEncrypted,
+                            EncryptionState::Unknown => RoomEncryption::Unknown,
+                        },
+                        contact: contact.as_ref().map(|contact| contacts::shown(contact)),
+                    }
                 })
                 .collect(),
             truncated,

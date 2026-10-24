@@ -1,18 +1,26 @@
-//! Verifying this device with another device of the same account, by
-//! comparing emoji (SAS). The security thread (`session.rs`) owns at most one
-//! flow and advances it between other steps, one lease per step.
+//! Verifying by comparing emoji (SAS): this device with another device of the
+//! same account, or this account with a contact. The security thread
+//! (`session.rs`) owns at most one flow and advances it between other steps,
+//! one lease per step.
 //!
-//! * Only the account's own devices: an incoming request from anyone else is
-//!   ignored, and this device only ever asks its own identity.
+//! * This device: it asks the account's own identity, and accepts a request
+//!   sent to the device by the account's own user.
+//! * A contact: the request is a message in an existing direct-message room
+//!   with them (`contacts.rs`), and an incoming one is taken only from the
+//!   contact of the direct-message room it arrived in. A match signs the
+//!   contact's identity with the account's user-signing key, so both starting
+//!   and accepting need this device to hold that key; without it the SDK
+//!   would finish the flow without verifying anyone.
 //! * The flow advances on its own where the protocol needs no decision: it
 //!   starts the comparison once the other device is ready (when this device
 //!   asked) and accepts a comparison the other device starts. Accepting an
 //!   incoming request, confirming a match and cancelling are the user's.
-//! * The page sees a phase, the seven emoji to compare and the other device's
-//!   name (untrusted text, projected like any name). It acts by flow ID, and
-//!   the core refuses an action for any other flow or phase.
+//! * The page sees a phase, the seven emoji to compare, the other device's
+//!   name and, for a contact, their user ID (untrusted text, projected like
+//!   any name). It acts by flow ID, and the core refuses an action for any
+//!   other flow or phase.
 
-use crate::views::project_name;
+use crate::{contacts, views::project_name};
 use matrix_sdk::{
     Client,
     encryption::verification::{
@@ -20,14 +28,17 @@ use matrix_sdk::{
     },
     ruma::UserId,
 };
-use persephone_contracts::{SasEmoji, VerificationPhase, VerificationView};
+use persephone_contracts::{SasEmoji, SecurityError, VerificationPhase, VerificationView};
 
 pub use persephone_core_protocol::MAX_FLOW_ID_BYTES;
 
 /// What the page asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// Verify this device with another of the account's devices.
     Start,
+    /// Verify the contact of this direct-message room.
+    StartContact(String),
     Accept(String),
     Confirm(String),
     Cancel(String),
@@ -36,6 +47,8 @@ pub enum Action {
 pub struct Flow {
     request: VerificationRequest,
     sas: Option<SasVerification>,
+    /// The contact's identity was asked for again after the match.
+    refreshed: bool,
 }
 
 impl Flow {
@@ -82,12 +95,37 @@ impl Flow {
         }
     }
 
-    /// Carries out an action meant for this flow. Returns `false` when it
+    /// Once a contact verification is done, asks the homeserver once for
+    /// the contact's identity. The match signed it with the account's
+    /// user-signing key. In live runs on Merovingian 0.12.29, a contact
+    /// verified right after their identity changed still read as changed
+    /// until the next start, which queries keys again; most likely nothing
+    /// started an earlier keys query (`docs/evidence/identity-changes.md`).
+    pub async fn refresh_contact(&mut self, client: &Client) {
+        if self.refreshed || !self.is_contact() || self.view().phase != VerificationPhase::Done {
+            return;
+        }
+        self.refreshed = true;
+        let _ = client
+            .encryption()
+            .request_user_identity(self.request.other_user_id())
+            .await;
+    }
+
+    /// Whether this flow verifies a contact rather than this device.
+    pub fn is_contact(&self) -> bool {
+        !self.request.is_self_verification()
+    }
+
+    /// Carries out an action meant for this flow. Fails with `Failed` when it
     /// does not apply here.
-    pub async fn act(&mut self, action: &Action) -> bool {
+    pub async fn act(&mut self, client: &Client, action: &Action) -> Result<(), SecurityError> {
         let phase = self.view().phase;
-        match action {
+        let done = match action {
             Action::Accept(id) if id == self.flow_id() && phase == VerificationPhase::Incoming => {
+                if self.is_contact() && !can_sign_contacts(client).await {
+                    return Err(SecurityError::CannotSignContacts);
+                }
                 self.request.accept().await.is_ok()
             }
             Action::Confirm(id) if id == self.flow_id() && phase == VerificationPhase::Compare => {
@@ -107,6 +145,11 @@ impl Flow {
                 }
             }
             _ => false,
+        };
+        if done {
+            Ok(())
+        } else {
+            Err(SecurityError::Failed)
         }
     }
 
@@ -157,8 +200,21 @@ impl Flow {
             phase,
             emoji,
             other_device: other.as_deref().map(project_name),
+            contact: self
+                .is_contact()
+                .then(|| contacts::shown(self.request.other_user_id())),
         }
     }
+}
+
+/// Whether this device holds the account's user-signing key, which a match
+/// with a contact signs their identity with.
+pub async fn can_sign_contacts(client: &Client) -> bool {
+    client
+        .encryption()
+        .cross_signing_status()
+        .await
+        .is_some_and(|status| status.has_user_signing)
 }
 
 /// How many emoji a comparison shows.
@@ -188,14 +244,56 @@ pub async fn start(client: &Client, user_id: &UserId) -> Option<Flow> {
         .await
         .ok()??;
     let request = identity.request_verification().await.ok()?;
-    Some(Flow { request, sas: None })
+    Some(Flow {
+        request,
+        sas: None,
+        refreshed: false,
+    })
 }
 
-/// An incoming request from another of the account's devices.
-pub async fn incoming(client: &Client, user_id: &UserId, flow_id: &str) -> Option<Flow> {
+/// Asks the contact of this direct-message room to verify each other, with a
+/// message in an existing direct-message room with them.
+pub async fn start_contact(client: &Client, room_id: &str) -> Result<Flow, SecurityError> {
+    if !can_sign_contacts(client).await {
+        return Err(SecurityError::CannotSignContacts);
+    }
+    let contact = contacts::verifiable_contact(client, room_id).await?;
+    let encryption = client.encryption();
+    // The store may not hold the contact's keys yet (`contacts.rs`): ask the
+    // homeserver before saying they have no identity.
+    let identity = match encryption
+        .get_user_identity(&contact)
+        .await
+        .map_err(|_| SecurityError::Failed)?
+    {
+        Some(identity) => identity,
+        None => encryption
+            .request_user_identity(&contact)
+            .await
+            .map_err(|_| SecurityError::Failed)?
+            .ok_or(SecurityError::ContactHasNoIdentity)?,
+    };
+    let request = identity
+        .request_verification()
+        .await
+        .map_err(|_| SecurityError::Failed)?;
+    Ok(Flow {
+        request,
+        sas: None,
+        refreshed: false,
+    })
+}
+
+/// An incoming request: from another of the account's devices, or from a
+/// contact (`sender`).
+pub async fn incoming(client: &Client, sender: &UserId, flow_id: &str) -> Option<Flow> {
     let request = client
         .encryption()
-        .get_verification_request(user_id, flow_id)
+        .get_verification_request(sender, flow_id)
         .await?;
-    Some(Flow { request, sas: None })
+    Some(Flow {
+        request,
+        sas: None,
+        refreshed: false,
+    })
 }

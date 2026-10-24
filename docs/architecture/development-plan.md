@@ -561,7 +561,7 @@ developed in parallel where independent, but feature acceptance follows its gate
 
 ### Milestone status
 
-21 October 2026. This is the single progress summary; other pages link here. A
+23 October 2026. This is the single progress summary; other pages link here. A
 deliverable is **done** when it is built and its own evidence passes, **partial**
 when only part is built or only some platforms or cases pass, and **not
 started** otherwise. A milestone's exit gate is met only when its exit evidence
@@ -589,7 +589,7 @@ above passes; none has.
 | P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; [sign-out](../evidence/sign-out.md) revokes the session and deletes the local profile; no SSO or `.well-known` discovery |
 | P3 | Sliding default, classic fallback | Partial | Initial selection passes live on Merovingian, Synapse and classic-only Synapse; no runtime mode switch |
 | P3 | Room and timeline projection | Partial | Room list, history paging, notices and live events; gap and dedup coverage incomplete |
-| P4 | Encrypted text experience | Partial | [Encryption setup](../evidence/encryption-setup.md): key policy ([ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md)), cross-signing and recovery set-up, recovery-key verification; [sending](../evidence/encrypted-sending.md) with consent for unencrypted rooms and delivery states; [own-device verification](../evidence/own-device-verification.md) by comparing emoji, in both directions; verifying other people not built |
+| P4 | Encrypted text experience | Partial | [Encryption setup](../evidence/encryption-setup.md): key policy ([ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md)), cross-signing and recovery set-up, recovery-key verification; [sending](../evidence/encrypted-sending.md) with consent for unencrypted rooms and delivery states; [own-device verification](../evidence/own-device-verification.md) and [contact verification](../evidence/contact-verification.md) in existing direct-message rooms by comparing emoji, in both directions; [identity changes](../evidence/identity-changes.md) pause sending until accepted or verified ([ADR-0007](../adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md)); [exit runs](../evidence/encrypted-text-exit-runs.md): unclear-delivery retry, new and unsigned devices, withheld keys, recovery on a clean profile. Every listed exit item has passing live runs on Windows against an SDK peer; not yet: another Matrix client, the native windows checked by hand, Linux and macOS |
 | P5 | Image messaging | Not started | The decoder and worker exist (P0, P2) but there is no image flow |
 | P6 | Product and operational hardening | Partial | Keyboard and screen-reader checks not done; failed windows detected and retried on Windows; this host's WebView2 crash dumps all fail inside a third-party overlay hook, not tested with it removed ([window retry](../evidence/window-retry.md)) |
 | P7 | Release readiness | Not started | None |

@@ -4,9 +4,10 @@
 #![cfg(feature = "dev-disposable-servers")]
 
 use persephone_contracts::{
-    AccountState, AccountStatus, IdentityState, NoticeKind, PendingMessage, PendingState,
-    RoomEncryption, RoomList, SecurityError, SecurityOperation, SecurityStatus, SendFailure,
-    SignInError, StoreState, TimelineItem, TimelinePage,
+    AccountState, AccountStatus, ContactStatus, ContactTrust, IdentityState, NoticeKind,
+    PendingMessage, PendingState, RoomEncryption, RoomIdentityChanges, RoomList, SecurityError,
+    SecurityOperation, SecurityStatus, SendFailure, SignInError, StoreState, TimelineItem,
+    TimelinePage,
 };
 use persephone_core::{
     Core,
@@ -141,6 +142,32 @@ struct LiveRoom {
     round: AtomicUsize,
     /// Also report `PLAIN`, a room that is not encrypted.
     plain: bool,
+    /// Also report `DM`, a direct-message room with `CONTACT`.
+    dm: bool,
+}
+
+/// A joined, encrypted direct-message room with `CONTACT`; it sorts before
+/// `ROOM`.
+const DM: &str = "!dm:synthetic.test";
+const CONTACT: &str = "@bob:synthetic.test";
+/// Still marked as direct with `CONTACT`, but a third person joined it.
+const GROUP: &str = "!group:synthetic.test";
+
+fn group_state() -> Value {
+    let mut state = dm_state();
+    state.as_array_mut().unwrap().push(json!(
+        {"type":"m.room.member","state_key":"@carol:synthetic.test","sender":"@carol:synthetic.test","event_id":"$gcarol","origin_server_ts":5,"content":{"membership":"join"}}
+    ));
+    state
+}
+
+fn dm_state() -> Value {
+    json!([
+        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$dcreate","origin_server_ts":1,"content":{"creator":USER,"room_version":"11"}},
+        {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$djoin","origin_server_ts":2,"content":{"membership":"join"}},
+        {"type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$dbob","origin_server_ts":3,"content":{"membership":"join"}},
+        {"type":"m.room.encryption","state_key":"","sender":USER,"event_id":"$dencryption","origin_server_ts":4,"content":{"algorithm":"m.megolm.v1.aes-sha2"}}
+    ])
 }
 
 /// A joined room without encryption; it sorts after `ROOM`.
@@ -160,8 +187,15 @@ impl wiremock::Respond for LiveRoom {
         if self.plain {
             rooms[PLAIN] = json!({"state":{"events":plain_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
         }
+        let mut account_data = json!([]);
+        if self.dm {
+            rooms[DM] = json!({"summary":{"m.joined_member_count":2,"m.invited_member_count":0},"state":{"events":dm_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+            rooms[GROUP] = json!({"summary":{"m.joined_member_count":3,"m.invited_member_count":0},"state":{"events":group_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+            account_data = json!([{"type":"m.direct","content":{CONTACT:[DM, GROUP]}}]);
+        }
         ResponseTemplate::new(200).set_body_json(json!({
             "next_batch": format!("classic-{n}"),
+            "account_data":{"events":account_data},
             "rooms":{"join":rooms},
             "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
         }))
@@ -220,6 +254,7 @@ impl Homeserver {
                 .respond_with(LiveRoom {
                     round: AtomicUsize::new(0),
                     plain: false,
+                    dm: false,
                 })
                 .mount(&server)
                 .await;
@@ -325,6 +360,7 @@ impl Homeserver {
                 .respond_with(LiveRoom {
                     round: AtomicUsize::new(0),
                     plain: true,
+                    dm: false,
                 })
                 .with_priority(1)
                 .mount(&self.server)
@@ -365,6 +401,32 @@ impl Homeserver {
                     ResponseTemplate::new(status)
                         .set_body_json(json!({"errcode": "M_UNKNOWN", "error": "refused"}))
                 })
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Adds the direct-message room `DM` with `CONTACT` to every sync, with
+    /// both as joined members.
+    fn direct_endpoints(&self) {
+        self.runtime.block_on(async {
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/sync"))
+                .respond_with(LiveRoom {
+                    round: AtomicUsize::new(0),
+                    plain: false,
+                    dm: true,
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]*dm[^/]*/members$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": [
+                    {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$djoin","origin_server_ts":2,"content":{"membership":"join"}},
+                    {"type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$dbob","origin_server_ts":3,"content":{"membership":"join"}}
+                ]})))
+                .with_priority(1)
                 .mount(&self.server)
                 .await;
         });
@@ -1834,6 +1896,170 @@ fn given_no_flow_then_verification_actions_change_nothing() {
             );
         }
     }
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a direct-message room with a contact who has no identity, and a
+/// room still marked direct with them that a third person joined WHEN the
+/// page lists rooms and asks about the contact THEN only the two-person room
+/// names the contact, and their trust is `no_identity`; any other room has no
+/// contact, and a bad room ID is refused.
+#[test]
+fn given_a_direct_room_then_its_contact_and_their_trust_are_shown() {
+    let server = Homeserver::signed_in();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut list = RoomList {
+        rooms: Vec::new(),
+        truncated: false,
+    };
+    wait_for("the direct room and its contact", || {
+        list = value(call(&core, Call::RoomList {}));
+        list.rooms
+            .iter()
+            .any(|room| room.room_id == DM && room.contact.is_some())
+    });
+    assert!(
+        list.rooms.iter().any(|room| room.room_id == GROUP),
+        "the group room is listed"
+    );
+    for room in &list.rooms {
+        let expected = (room.room_id == DM).then(|| CONTACT.to_owned());
+        assert_eq!(room.contact, expected, "{}", room.room_id);
+    }
+    let dm = list.rooms.iter().find(|room| room.room_id == DM).unwrap();
+    assert_eq!(
+        dm.display_name.as_deref(),
+        Some(CONTACT),
+        "an unnamed direct room is named after its contact"
+    );
+    let status: ContactStatus = value(call(&core, Call::ContactStatus { room_id: DM.into() }));
+    assert_eq!(status.room_id, DM);
+    assert_eq!(status.user_id, CONTACT);
+    assert_eq!(status.trust, ContactTrust::NoIdentity);
+    for other in [ROOM, GROUP] {
+        assert_eq!(
+            call(
+                &core,
+                Call::ContactStatus {
+                    room_id: other.into()
+                }
+            ),
+            Outcome::Error(ErrorCode::NotFound),
+            "{other}"
+        );
+    }
+    for bad in [String::new(), "dm".into(), format!("!{}", "x".repeat(255))] {
+        assert_eq!(
+            call(
+                &core,
+                Call::ContactStatus {
+                    room_id: bad.clone()
+                }
+            ),
+            Outcome::Error(ErrorCode::InvalidArgument),
+            "{bad}"
+        );
+    }
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a device that is not verified WHEN the page asks to verify the
+/// contact of a direct-message room THEN nothing is queued and nothing is
+/// sent to the room; a bad room ID is refused.
+#[test]
+fn given_an_unverified_device_then_verifying_a_contact_sends_nothing() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let status: SecurityStatus = value(call(&core, Call::VerifyContact { room_id: DM.into() }));
+    assert_eq!(status.operation, SecurityOperation::Idle, "not queued");
+    assert_eq!(status.verification, None);
+    assert_eq!(status.error, None);
+    assert_eq!(
+        call(
+            &core,
+            Call::VerifyContact {
+                room_id: "#alias:synthetic.test".into()
+            }
+        ),
+        Outcome::Error(ErrorCode::InvalidArgument)
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(server.sends().is_empty(), "no request reached the room");
+    assert_eq!(security(&core).verification, None);
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a direct-message room whose contact's identity did not change WHEN
+/// the page asks for the room's changed identities, or asks to accept one
+/// THEN none is listed, accepting is `not_found` and asks nothing, and bad
+/// room or user IDs are refused (ADR-0007).
+#[test]
+fn given_no_changed_identity_then_nothing_is_listed_or_accepted() {
+    let server = Homeserver::signed_in();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the direct room", || {
+        let list: RoomList = value(call(&core, Call::RoomList {}));
+        list.rooms.iter().any(|room| room.room_id == DM)
+    });
+    let changes: RoomIdentityChanges =
+        value(call(&core, Call::IdentityChanges { room_id: DM.into() }));
+    assert_eq!(changes.room_id, DM);
+    assert!(changes.changes.is_empty());
+    assert!(!changes.truncated);
+    assert_eq!(
+        call(
+            &core,
+            Call::IdentityChanges {
+                room_id: "!unknown:synthetic.test".into()
+            }
+        ),
+        Outcome::Error(ErrorCode::NotFound)
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::AcceptIdentity {
+                room_id: DM.into(),
+                user_id: CONTACT.into()
+            }
+        ),
+        Outcome::Error(ErrorCode::NotFound),
+        "nothing to accept"
+    );
+    assert_eq!(security(&core).operation, SecurityOperation::Idle);
+    for (room_id, user_id) in [
+        ("dm", CONTACT.to_owned()),
+        (DM, "bob".to_owned()),
+        (DM, format!("@{}:synthetic.test", "b".repeat(250))),
+    ] {
+        assert_eq!(
+            call(
+                &core,
+                Call::AcceptIdentity {
+                    room_id: room_id.into(),
+                    user_id
+                }
+            ),
+            Outcome::Error(ErrorCode::InvalidArgument),
+            "{room_id}"
+        );
+    }
+    // Stops the sync loop: the mock server goes back to a shared pool.
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
 }

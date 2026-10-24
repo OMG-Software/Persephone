@@ -1,5 +1,9 @@
 <script lang="ts">
-  import type { RoomEncryption, TimelineItem } from '../../crates/contracts/generated/contracts';
+  import type {
+    ContactStatus,
+    RoomEncryption,
+    TimelineItem
+  } from '../../crates/contracts/generated/contracts';
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
   import Message from './Message.svelte';
@@ -12,7 +16,11 @@
     hasOlder,
     loading,
     error,
-    onolder
+    onolder,
+    contact = null,
+    canVerify = false,
+    verifying = false,
+    onverify = () => {}
   }: {
     title: string;
     encryption?: RoomEncryption;
@@ -21,7 +29,23 @@
     loading: boolean;
     error: string | null;
     onolder: () => void;
+    // The other person in a direct-message room, if this is one.
+    contact?: ContactStatus | null;
+    // This device may vouch for the contact (it is verified itself).
+    canVerify?: boolean;
+    verifying?: boolean;
+    onverify?: () => void;
   } = $props();
+
+  // Fixed text per trust level; the core sends codes only.
+  const trustText: Record<string, string> = {
+    verified: 'Verified',
+    unverified: 'Not verified',
+    changed: 'Identity changed',
+    verified_changed: 'Identity changed since you verified them',
+    no_identity: 'Has not set up encryption',
+    unknown: 'Checking…'
+  };
 
   const startsWithGap = $derived(items[0]?.kind === 'gap');
   // Fixed text per notice; the core sends codes only.
@@ -59,8 +83,27 @@
 <section class="timeline" aria-labelledby="timeline-heading">
   <header class="chat-header">
     <EncryptionIcon {encryption} size="large" />
-    <Icon name="hash" class="hash" />
-    <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
+    {#if contact}
+      <div class="room-title">
+        <h2 id="timeline-heading">
+          <bdi>{title}</bdi>
+          {#if contact.trust === 'verified'}
+            <span class="verified-shield"><Icon name="shield" /></span>
+          {/if}
+        </h2>
+        <p class="contact-id">
+          <bdi>{contact.userId}</bdi> · {trustText[contact.trust] ?? trustText.unknown}
+        </p>
+      </div>
+      {#if contact.trust === 'unverified' && canVerify}
+        <button type="button" class="secondary header-action" disabled={verifying} onclick={onverify}>
+          Verify <span class="visually-hidden"><bdi>{contact.userId}</bdi></span>
+        </button>
+      {/if}
+    {:else}
+      <Icon name="hash" class="hash" />
+      <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
+    {/if}
   </header>
   <div class="scroller" bind:this={scroller} onscroll={scrolled}>
     <div class="stream">

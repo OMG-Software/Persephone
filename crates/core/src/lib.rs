@@ -20,8 +20,10 @@
 //! and the signed-in Matrix client otherwise.
 
 pub mod account;
+pub mod contacts;
 pub mod credentials;
 pub mod homeserver;
+pub mod identities;
 pub mod matrix_views;
 pub mod outbox;
 pub mod passphrase;
@@ -40,7 +42,8 @@ use matrix_views::MatrixViews;
 use persephone_contracts::{AccountStatus, AppStatus, RoomList, StoreState};
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES,
-    MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, Outcome, ReceiveError, Reply, Request, receive, send,
+    MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, MAX_USER_ID_BYTES, Outcome, ReceiveError, Reply, Request,
+    receive, send,
 };
 use persephone_media_protocol::ResourceBudgets;
 use serde::Serialize;
@@ -116,9 +119,13 @@ impl Hub {
     /// event when `list` is set (a sync round can add rooms or change names
     /// and counts; a synthetic demo message cannot).
     fn mark_changed(&self, rooms: &[String], list: bool) {
+        self.mark_list_changed(rooms, list && !rooms.is_empty());
+    }
+
+    fn mark_list_changed(&self, rooms: &[String], list: bool) {
         let mut notifications = lock(&self.notifications);
         let mut any = false;
-        if list && !rooms.is_empty() && !notifications.room_list_changed {
+        if list && !notifications.room_list_changed {
             notifications.room_list_changed = true;
             any = true;
         }
@@ -140,6 +147,10 @@ impl SessionListener for Hub {
 
     fn session_changed(&self) {
         self.announce_session_change();
+    }
+
+    fn direct_rooms_changed(&self) {
+        self.mark_list_changed(&[], true);
     }
 
     fn outbox_changed(&self, room_id: &str) {
@@ -382,6 +393,18 @@ impl Core {
             Call::CancelVerification { flow_id } => {
                 self.verify(flow_id, verification::Action::Cancel)
             }
+            Call::ContactStatus { room_id } => self.contact_status(room_id),
+            Call::IdentityChanges { room_id } => self.identity_changes(room_id),
+            Call::AcceptIdentity { room_id, user_id } => self.accept_identity(room_id, user_id),
+            Call::VerifyContact { room_id } => {
+                if valid_room_id(room_id) {
+                    ok(&self
+                        .session
+                        .verify(verification::Action::StartContact(room_id.clone())))
+                } else {
+                    Outcome::Error(ErrorCode::InvalidArgument)
+                }
+            }
             Call::SignOut {} => match self
                 .session
                 .sign_out(LOCK_TIMEOUT, || self.hub.announce_session_change())
@@ -432,6 +455,68 @@ impl Core {
             return Outcome::Error(ErrorCode::InvalidArgument);
         }
         ok(&self.session.verify(action(flow_id.to_owned())))
+    }
+
+    fn contact_status(&self, room_id: &str) -> Outcome {
+        if !valid_room_id(room_id) {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        let status = match self.source() {
+            Source::Locked => Err(ErrorCode::Locked),
+            // Synthetic rooms have no contacts.
+            Source::Fixtures | Source::SignedOut => Err(ErrorCode::NotFound),
+            Source::Matrix(lease, client) => lease
+                .stores()
+                .block_on(MatrixViews::contact_status(&client, room_id)),
+        };
+        match status {
+            Ok(status) => ok(&status),
+            Err(code) => Outcome::Error(code),
+        }
+    }
+
+    fn identity_changes(&self, room_id: &str) -> Outcome {
+        if !valid_room_id(room_id) {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        let changes = match self.source() {
+            Source::Locked => Err(ErrorCode::Locked),
+            Source::Fixtures | Source::SignedOut => Err(ErrorCode::NotFound),
+            Source::Matrix(lease, client) => lease
+                .stores()
+                .block_on(identities::room_changes(&client, room_id)),
+        };
+        match changes {
+            Ok(changes) => ok(&changes),
+            Err(code) => Outcome::Error(code),
+        }
+    }
+
+    /// Asks the core's own window to accept a member's new identity, if that
+    /// member's identity changed in this room; `not_found` otherwise.
+    fn accept_identity(&self, room_id: &str, user_id: &str) -> Outcome {
+        let user = (user_id.len() <= MAX_USER_ID_BYTES)
+            .then(|| matrix_sdk::ruma::UserId::parse(user_id).ok())
+            .flatten();
+        let Some(user) = user.filter(|_| valid_room_id(room_id)) else {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        };
+        let changed = match self.source() {
+            Source::Locked => return Outcome::Error(ErrorCode::Locked),
+            Source::Fixtures | Source::SignedOut => None,
+            Source::Matrix(lease, client) => lease
+                .stores()
+                .block_on(identities::find(&client, room_id, &user)),
+        };
+        match changed {
+            Some(changed) => ok(&self.session.accept_identity(
+                room_id.to_owned(),
+                changed.user_id,
+                changed.was_verified,
+                self.credentials.clone(),
+            )),
+            None => Outcome::Error(ErrorCode::NotFound),
+        }
     }
 
     fn changed(&self, done: bool) -> Outcome {
@@ -695,5 +780,21 @@ mod tests {
             ["!a:s", "!c:s"]
         );
         assert!(!notifications.room_list_changed);
+    }
+
+    /// GIVEN no room changed WHEN the account's direct-message rooms change
+    /// THEN only the room list is fetched again, so a room that just became
+    /// a direct-message room shows its contact; an empty sync round alone
+    /// refreshes nothing.
+    #[test]
+    fn given_direct_rooms_change_then_only_the_room_list_is_fetched_again() {
+        let hub = Hub::default();
+        lock(&hub.notifications).subscribed.insert("!a:s".into());
+        hub.rooms_changed(&[]);
+        assert!(!lock(&hub.notifications).room_list_changed);
+        hub.direct_rooms_changed();
+        let notifications = lock(&hub.notifications);
+        assert!(notifications.room_list_changed);
+        assert!(notifications.pending.is_empty(), "no room content changed");
     }
 }

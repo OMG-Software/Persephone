@@ -26,6 +26,10 @@
     "allow-verify-this-device",
     "allow-accept-verification",
     "allow-confirm-verification",
-    "allow-cancel-verification"
+    "allow-cancel-verification",
+    "allow-contact-status",
+    "allow-verify-contact",
+    "allow-identity-changes",
+    "allow-accept-identity"
   ]
 }

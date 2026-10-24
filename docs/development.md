@@ -134,7 +134,17 @@ The composer sends text in the open room. The live sending check uses a second S
 
 "Verify with another device" in Settings, Security & encryption, compares emoji with another device of the same account on its own verification screen; that screen also opens to accept a request from one. For the live check, the same peer signs in as the first account (`login alice`), restores its keys from the development recovery-key file (`recover <file>`), waits until it knows the new Persephone device (`wait-new-device <seconds>`), and then accepts (`verify-accept <seconds>`) or asks (`verify-request <device id> <seconds>`), followed by `verify-confirm`, `verify-mismatch` or `verify-wait <seconds>`. See the [own-device verification evidence](evidence/own-device-verification.md).
 
+In a direct-message room, the header names the contact and how far the account trusts them; on a verified device, "Verify" asks the contact to compare emoji, and a request from them opens the same verification screen. Requests go only to an existing direct-message room the contact is still in. For the live check, the peer as Bob sets up cross-signing (`login bob`, `bootstrap`) and creates a direct-message room (`create dm <user>`); the first account's own peer device joins and marks it (`login alice`, `alice-join-dm <room>`), because Persephone cannot accept invitations yet. Bob waits until he knows the account's devices (`wait-devices bob <user> <count> <seconds>`), then accepts (`contact-accept <seconds>`) or asks (`contact-request <user> <seconds>`), followed by `verify-confirm`, `verify-mismatch` or `verify-wait <seconds>`; `trust <bob|alice> <user>` reports whether a client sees a user as verified. See the [contact verification evidence](evidence/contact-verification.md).
+
+While a member of an encrypted room has a changed identity, the room shows that sending is paused, and the core refuses every send there (ADR-0007). "Accept new identity…" asks in the core's own window; with `PERSEPHONE_DEV_PROFILE`, `PERSEPHONE_DEV_IDENTITY_ANSWER_FILE` (a path inside `.local`, read each time) answers it: `yes` accepts, anything else declines. For the live check, the peer replaces Bob's identity with `reset-identity [<user>]`, naming a user Bob had verified so that his client withdraws that verification. See the [identity changes evidence](evidence/identity-changes.md).
+
+The remaining P4 runs also use `count <bob|bob2> <room> <seconds> <text>`, which counts the decrypted messages with that text and lists the ones that could not be decrypted, and `sign-devices`, which has Bob sign his own unsigned devices. See the [encrypted text exit runs](evidence/encrypted-text-exit-runs.md).
+
 ## Recorded verification
+
+After pausing sends on identity changes (ADR-0007), `python tools/dev.py check --offline` passed all 378 tests (324 Rust, 39 frontend, 2 server-registration and 13 development-controller tests). See the [identity changes evidence](evidence/identity-changes.md).
+
+After adding contact verification, `python tools/dev.py check --offline` passed all 372 tests (319 Rust, 38 frontend, 2 server-registration and 13 development-controller tests). See the [contact verification evidence](evidence/contact-verification.md).
 
 After adding the profile passphrase (ADR-0006), `python tools/dev.py check --offline` passed all 342 tests (306 Rust, 21 frontend, 2 server-registration and 13 development-controller tests). See the [unlock secret evidence](evidence/unlock-secret.md).
 

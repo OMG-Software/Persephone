@@ -35,6 +35,10 @@ fn main() {
             "accept_verification",
             "confirm_verification",
             "cancel_verification",
+            "contact_status",
+            "verify_contact",
+            "identity_changes",
+            "accept_identity",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

@@ -662,6 +662,102 @@ kbd {
   white-space: nowrap;
 }
 
+.chat-header .room-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-header .room-title h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-header .room-title h2 bdi {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.verified-shield {
+  display: inline-flex;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--accent);
+}
+
+.verified-shield .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.contact-id {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity-changes {
+  margin: 8px 20px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--danger);
+  border-radius: 8px;
+}
+
+.identity-changes h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.identity-changes p {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
+.identity-changes ul {
+  margin-top: 8px;
+}
+
+.identity-changes li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.identity-changes .who {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.identity-changes .was-verified {
+  font-family: inherit;
+  color: var(--ink3);
+}
+
+.identity-changes .actions {
+  display: flex;
+  gap: 8px;
+}
+
+.contact-error {
+  margin: 8px 20px 0;
+}
+
+.chat-header .header-action {
+  flex: none;
+  margin-left: auto;
+}
+
 .scroller {
   flex: 1;
   min-height: 0;
