@@ -23,6 +23,9 @@
 - [ADR-0007](adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md): sending pauses while a contact's identity changed, until the user approves in the core's window or verifies again.
 - [ADR-0008](adr/0008-restart-the-core-process-to-finish-a-lock-after-the-client-ran.md) (proposed): after a client ran, a lock or sign-out finishes by closing the stores and restarting the core process.
 - [ADR-0009](adr/0009-strip-sent-image-metadata-and-load-received-images-on-request.md): sent images lose their metadata in the guest; received images load only when the user asks.
+- [ADR-0010](adr/0010-linux-platform-layer.md): Linux keeps the store key in Secret Service, shows prompts with GTK in the core, caps the UI with a systemd scope, and confines the worker with seccomp.
+- [ADR-0011](adr/0011-macos-platform-layer.md): macOS keeps the store key in Keychain, shows prompts with AppKit on the main thread, and confines the worker with Seatbelt; the UI's memory is not capped (accepted risk).
+- [ADR-0012](adr/0012-sign-and-publish-releases-as-drafts.md): release artifacts are signed (PFX for Windows, Developer ID for macOS, cosign and GPG checksums) and published as drafts.
 
 ## Evidence
 
