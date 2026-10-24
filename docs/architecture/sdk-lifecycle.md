@@ -82,3 +82,12 @@ be obtained, but it needs a separate architecture decision and validation of
 persistence under cancellation/termination, blocking tasks and platform behavior.
 Tokio `shutdown_timeout`/`shutdown_background` may leave work running and are
 not a completion acknowledgement. These alternatives were not implemented here.
+
+[ADR-0008](../adr/0008-restart-the-core-process-to-finish-a-lock-after-the-client-ran.md)
+(proposed, 24 October 2026) evaluates the process route. A lock or sign-out
+after a client ran would close the stores as today, keep the profile lock,
+start a successor core and exit. The successor opens the profile only after
+the OS released that lock. This does not satisfy the completion surface above,
+and it does not permit a reopen in the same process. The
+[upstream status review](../evidence/sdk-lifecycle.md#upstream-status-and-production-configuration-review)
+found no supported SDK contract on 24 October 2026.

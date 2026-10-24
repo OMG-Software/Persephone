@@ -126,3 +126,102 @@ changed. The preceding real-homeserver compatibility/restart evidence remains
 separate. Persistent store handoff, complete SDK shutdown, queued sends,
 backup-child drain, remote logout failure, key erasure, crash recovery and native
 Linux/macOS packaging remain unverified. **P0 remains open.**
+
+## Upstream status and production configuration review
+
+Added 24 October 2026. This is a source and upstream review. It is not a rerun:
+no test, build or homeserver ran, and [sdk-lifecycle.json](sdk-lifecycle.json)
+still records only the 20 October run. The pinned versions are unchanged
+(matrix-sdk 0.19.1, Tokio 1.53.3, from the root `Cargo.lock`). Sources were
+read from the local Cargo registry on Windows. The `client/mod.rs` hash matches
+the one recorded on 20 October.
+
+| Source (0.19.1 unless stated) | SHA-256 |
+| --- | --- |
+| `matrix-sdk/src/client/mod.rs` | `1ce41dc51c9f6eb98e0f7464490fbe72bfb80d1ed558e3ddcc657e72e753d675` |
+| `matrix-sdk/src/client/builder/mod.rs` | `f58934f0608c92d3263c21f45fb9642d46ffd36aba3ef9b342b68cecf4f31d08` |
+| `matrix-sdk-base/src/client.rs` | `5b1a8264e098b25c4ec785cc304d68ca0b7199adba53d7e5ccdf435aacdc6d99` |
+| `matrix-sdk-sqlite/src/connection.rs` | `893957181ce82046d0375a934a2f1782c6485b447ffb281e25b964b6a0627de6` |
+| `matrix-sdk-sqlite/src/crypto_store.rs` | `33f4d434c17b8da20fde72f0add8edcb37076d413bf6e7b776c715f7e6330d24` |
+| `matrix-sdk-common/src/task_monitor.rs` | `a8edf17ff5adfe0b67579e7537f5d46c97008cdc72b6023295d96ba578fff25b` |
+| `tokio-1.53.3/src/runtime/runtime.rs` | `67b4fae038519f2cfb85e57d8a3b0dbcfbb38a1b0875d67742854039ade1b0d7` |
+
+### Upstream status
+
+* crates.io and GitHub releases list 0.19.1 (18 September 2026) as the newest
+  `matrix-sdk` release.
+* The 370 commits on upstream `main` since 18 September contain no stop-and-join
+  operation. The nearest changes expose `WeakClient` for tasks that an embedder
+  defines (`b0436dabd`) and abort one send-queue listener when the client goes
+  away (`01d4faa90`). Both are cleanup by abort, not a join.
+* [matrix-org/matrix-rust-sdk#7302](https://github.com/matrix-org/matrix-rust-sdk/issues/7302)
+  (open, 16 October 2026) reports the same gap: `SyncService::stop` returns while
+  a detached task still processes a sliding sync response, and `Client::pause`
+  can then close the stores under it. The draft
+  [matrix-org/matrix-rust-sdk#7301](https://github.com/matrix-org/matrix-rust-sdk/pull/7301)
+  reproduces it. [matrix-org/matrix-rust-sdk#7300](https://github.com/matrix-org/matrix-rust-sdk/issues/7300)
+  reports that event cache store errors during sync are swallowed. No fix was
+  proposed on 24 October.
+* The pause and resume work ([matrix-org/matrix-rust-sdk#6495](https://github.com/matrix-org/matrix-rust-sdk/pull/6495),
+  merged 12 May 2026) targets iOS backgrounding. Its author wrote that the SDK,
+  not the app, should coordinate the sync service, send queue and pause. This
+  is a stated direction, not a commitment.
+
+### Pinned close and task semantics
+
+Observed in source:
+
+* `BaseClient::close_stores` closes the state, event cache, media and crypto
+  stores in that order. Each SQLite close waits for the write in flight, runs a
+  WAL checkpoint and takes the connections out. Later `read()` and `write()`
+  calls fail with `StoreClosed`. Nothing waits for SDK tasks.
+* `close_connections` waits at most 5 s for read connections to drain. When
+  the deadline passes, it logs a warning and returns. The store's `close()`
+  then returns `Ok`. So a successful close does not prove that every SQLite
+  connection and file lock was released.
+* `close_connection` describes itself as best effort: a cloned connection
+  `Arc` or a held write guard keeps the connection alive.
+* `TaskMonitor` and `BackgroundTaskHandle` hold only an `AbortHandle`, with
+  `abort` and `is_finished`. There is no join. The encryption tasks in
+  `encryption/tasks.rs` use `spawn` directly, not the monitor.
+* Tokio's `Runtime` documentation, in the pinned source, says that dropping a
+  runtime drops each spawned task at its next yield and waits, without a limit,
+  for blocking tasks to return. `Stores::close` drops the stores' runtime. So the
+  core's lock already cancels any remaining SDK async work at an `await` point,
+  and can wait without a limit for blocking SQLite work.
+
+Inferred from source, not tested:
+
+* `write()` clones the write connection `Arc` and releases the store's mutex
+  before it waits for the write lock. On the multi-thread runtime, a close can
+  run in that window. The waiting writer can then write through its clone after
+  the close returned. The window is narrow.
+* The core avoids the #7302 path: [`sync_round`](../../crates/core/src/account.rs)
+  awaits each complete `sync_once()` and never drops it part way. This holds
+  only while no caller adds a timeout or `select!` around it.
+
+### Production configuration gaps
+
+The 20 October tests used a minimal profile. The production client in
+[`build_client`](../../crates/core/src/account.rs) activates two task groups
+from the inventory above:
+
+* **History sharing on invite is on.** `ClientBuilder` sets
+  `enable_share_history_on_invite: true` by default, and `build_client` does
+  not call `with_enable_share_history_on_invite(false)`. The historic
+  key-bundle startup and listener tasks therefore run in production. They have
+  no public join in a release build. The controlled initialization test turned
+  this option off explicitly, so the earlier evidence does not cover these
+  tasks. Whether Persephone should share history on invite is an open product
+  decision. It is not recorded in an ADR.
+* **Backup downloads are on.** `build_client` uses
+  `BackupDownloadStrategy::AfterDecryptionFailure`, which starts the download
+  listener and its children after recovery is set up. The children can keep a
+  strong `Client`, and dropping the listener does not join them. This is a
+  deliberate recovery choice.
+
+Neither gap changes the current result: the session already ends
+`restart_required` after a client ran and does not reopen the stores. Both
+must be in the scope of any future drain or restart evidence.
+[ADR-0008](../adr/0008-restart-the-core-process-to-finish-a-lock-after-the-client-ran.md)
+(proposed) uses these findings. **P0 remains open.**
