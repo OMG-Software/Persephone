@@ -39,6 +39,7 @@ pub mod outbox;
 pub mod passphrase;
 pub mod pick;
 pub mod platform;
+pub mod prompt_text;
 pub mod security;
 pub mod sending;
 pub mod session;

@@ -1,13 +1,12 @@
 //! The Windows credential dialogs: CredUI for the sign-in password and
 //! secrets, and message boxes for the recovery key, the reset warning and
-//! identity changes. Shared texts, limits and checks are in
-//! [`crate::credentials`].
+//! identity changes. Shared limits and checks are in [`crate::credentials`],
+//! and the words in [`crate::prompt_text`].
 
 use crate::credentials::{
-    CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, NewPassphrase,
-    PromptError, SecretPrompt, checked_secret, from_wide,
+    CredentialSource, Credentials, PromptError, SecretPrompt, checked_secret, from_wide,
 };
-use crate::passphrase::MIN_PASSPHRASE_CHARS;
+use crate::prompt_text;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::{
     Foundation::{ERROR_CANCELLED, ERROR_INSUFFICIENT_BUFFER, GetLastError},
@@ -147,123 +146,21 @@ fn prompt(caption: &str, message: &str, user: Option<&str>) -> Result<Credential
 
 impl CredentialSource for NativePrompt {
     fn ask(&self, host: &str) -> Result<Credentials, PromptError> {
-        prompt(
-            "Sign in to Persephone",
-            &format!(
-                "Enter your Matrix username and password for {host}. \
-                 Only Persephone's core sees the password."
-            ),
-            None,
-        )
+        let (caption, message) = prompt_text::sign_in(host);
+        prompt(caption, &message, None)
     }
 
     fn ask_secret(&self, request: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
         // Only the password field is used; the username shown is fixed
         // text, and the secret is used only for the signed-in account.
-        let (secret, max) = match request {
-            SecretPrompt::Password { user_id, host } => (
-                prompt(
-                    "Set up encryption in Persephone",
-                    &format!(
-                        "Enter the password for {user_id} on {host} to set up \
-                         encryption for this account. Only Persephone's core sees it."
-                    ),
-                    Some(user_id),
-                )?
-                .password,
-                MAX_PASSWORD_CHARS,
-            ),
-            SecretPrompt::RecoveryKey { user_id } => (
-                prompt(
-                    "Verify this device with your recovery key",
-                    &format!(
-                        "Type the recovery key for {user_id} in the password field. \
-                         Only Persephone's core sees it."
-                    ),
-                    Some("Recovery key"),
-                )?
-                .password,
-                MAX_RECOVERY_KEY_CHARS,
-            ),
-            SecretPrompt::Passphrase { retry } => (
-                prompt(
-                    "Unlock Persephone",
-                    if retry {
-                        "That passphrase was not correct. Type the passphrase for \
-                         Persephone on this computer in the password field. Only \
-                         Persephone's core sees it."
-                    } else {
-                        "Type the passphrase for Persephone on this computer in the \
-                         password field. Only Persephone's core sees it."
-                    },
-                    Some("Profile passphrase"),
-                )?
-                .password,
-                MAX_PASSWORD_CHARS,
-            ),
-            SecretPrompt::NewPassphrase(step) => {
-                let choose = format!(
-                    "Choose a passphrase of at least {MIN_PASSPHRASE_CHARS} characters \
-                     and type it in the password field. Persephone asks for it each \
-                     time it opens. If you forget it, you must reset this computer's \
-                     profile and sign in again; encrypted history comes back only from \
-                     key backup."
-                );
-                let message = match step {
-                    NewPassphrase::Choose => choose,
-                    NewPassphrase::Upgrade => format!(
-                        "Persephone now protects this computer's profile with a \
-                         passphrase. {choose}"
-                    ),
-                    NewPassphrase::Confirm => {
-                        "Type the same passphrase again to confirm it.".to_owned()
-                    }
-                    NewPassphrase::TooShort => {
-                        format!("That passphrase was too short. {choose}")
-                    }
-                    NewPassphrase::Mismatch => {
-                        format!("The two passphrases were different. {choose}")
-                    }
-                };
-                (
-                    prompt(
-                        "Protect Persephone on this computer",
-                        &message,
-                        Some("New profile passphrase"),
-                    )?
-                    .password,
-                    MAX_PASSWORD_CHARS,
-                )
-            }
-        };
-        checked_secret(secret, max)
+        let text = prompt_text::secret(&request);
+        let secret = prompt(text.caption, &text.message, text.field)?.password;
+        checked_secret(secret, text.max_chars)
     }
 
     fn confirm_reset(&self) -> Result<bool, PromptError> {
-        let caption = wide("Reset Persephone on this computer?");
-        let text = wide(
-            "This deletes Persephone's profile on this computer: its messages, \
-             keys and sign-in. It cannot be undone.\n\n\
-             Your account stays on the server. This device stays signed in there \
-             until you remove it from another client. Encrypted history comes back \
-             only from key backup, with your recovery key.\n\n\
-             Delete the profile and choose a new passphrase?",
-        );
-        // SAFETY: both strings are NUL-terminated and live for the call.
-        // "No" is the default button.
-        let answer = unsafe {
-            MessageBoxW(
-                null_mut(),
-                text.as_ptr(),
-                caption.as_ptr(),
-                MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
-            )
-        };
-        match answer {
-            IDYES => Ok(true),
-            IDNO => Ok(false),
-            _ => Err(PromptError::Failed),
-        }
+        let (caption, message) = prompt_text::RESET;
+        yes_or_no(caption, message)
     }
 
     fn confirm_identity_change(
@@ -271,60 +168,15 @@ impl CredentialSource for NativePrompt {
         user_id: &str,
         was_verified: bool,
     ) -> Result<bool, PromptError> {
-        // The caller passes a valid Matrix user ID: printable ASCII only,
-        // so it cannot reorder or hide the surrounding text.
-        if user_id.len() > 255 || !user_id.bytes().all(|b| b.is_ascii_graphic()) {
-            return Err(PromptError::Invalid);
-        }
-        let caption = wide("A contact's identity changed");
-        let before = if was_verified {
-            "You verified this person before. Their encryption identity is now a \
-             different one, so it is no longer verified."
-        } else {
-            "This person's encryption identity is not the one Persephone saw \
-             before."
-        };
-        let after = if was_verified {
-            "Accepting withdraws your verification of the old identity. You \
-             can then verify the new one by comparing emoji."
-        } else {
-            "You can also verify them by comparing emoji instead."
-        };
-        let text = wide(&format!(
-            "{user_id}\n\n{before}\n\n\
-             This happens when they reset their encryption, for example after \
-             losing their devices. It also happens when someone who controls \
-             the server tries to read your messages.\n\n\
-             Persephone sends nothing in rooms with this person until you \
-             decide. Ask them in person or on a call you trust whether they \
-             reset their encryption.\n\n{after}\n\n\
-             Accept the new identity and send to it?"
-        ));
-        // SAFETY: both strings are NUL-terminated and live for the call.
-        // "No" is the default button.
-        let answer = unsafe {
-            MessageBoxW(
-                null_mut(),
-                text.as_ptr(),
-                caption.as_ptr(),
-                MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
-            )
-        };
-        match answer {
-            IDYES => Ok(true),
-            IDNO => Ok(false),
-            _ => Err(PromptError::Failed),
-        }
+        let (caption, message) = prompt_text::identity_change(user_id, was_verified)?;
+        yes_or_no(caption, &message)
     }
 
     fn show_recovery_key(&self, user_id: &str, key: &str) -> Result<(), PromptError> {
-        let caption = wide("Your Persephone recovery key");
-        let text = Zeroizing::new(wide(&format!(
-            "This is the recovery key for {user_id}. Write it down or save it \
-             somewhere safe now: Persephone does not keep it, and it is shown \
-             only once. You need it to read your encrypted messages on a new \
-             device.\n\n{key}\n\nPress Ctrl+C to copy this message."
-        )));
+        let (caption, message) =
+            prompt_text::recovery_key(user_id, key, Some("Press Ctrl+C to copy this message."));
+        let caption = wide(caption);
+        let text = Zeroizing::new(wide(&message));
         // SAFETY: both strings are NUL-terminated and live for the call;
         // no owner window, as with the credential dialog.
         let answer = unsafe {
@@ -340,6 +192,26 @@ impl CredentialSource for NativePrompt {
         } else {
             Err(PromptError::Failed)
         }
+    }
+}
+
+/// A warning with Yes and No, where "No" is the default button.
+fn yes_or_no(caption: &str, message: &str) -> Result<bool, PromptError> {
+    let caption = wide(caption);
+    let text = wide(message);
+    // SAFETY: both strings are NUL-terminated and live for the call.
+    let answer = unsafe {
+        MessageBoxW(
+            null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+    };
+    match answer {
+        IDYES => Ok(true),
+        IDNO => Ok(false),
+        _ => Err(PromptError::Failed),
     }
 }
 
