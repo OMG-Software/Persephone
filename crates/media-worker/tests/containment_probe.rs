@@ -5,9 +5,11 @@
 //! (`persephone_media_worker::contain()`, after the launcher's part on Linux:
 //! `no_new_privs`) or applies nothing, and then tries one thing:
 //!
-//! * open a socket, open `/etc/hosts`, or fork: with the containment, Linux
-//!   kills the child with SIGSYS and macOS refuses with `EPERM`; without it,
-//!   each one succeeds, which shows the probe can detect the difference;
+//! * connect to a TCP listener that the parent opens on loopback, open
+//!   `/etc/hosts`, or fork: with the containment, Linux kills the child with
+//!   SIGSYS (at `socket`) and macOS refuses with `EPERM` (Seatbelt checks the
+//!   connection, not the creation of the socket); without it, each one
+//!   succeeds, which shows the probe can detect the difference;
 //! * nothing but write to stdout and exit: this must still work with the
 //!   containment, so the filter does not just kill everything.
 //!
@@ -54,9 +56,13 @@ mod probe {
 
     pub fn main() -> ExitCode {
         let args: Vec<String> = env::args().skip(1).collect();
-        if args.first().map(String::as_str) == Some(CHILD) && args.len() == 3 {
-            child(&args[1], &args[2]);
+        if args.first().map(String::as_str) == Some(CHILD) && args.len() == 4 {
+            child(&args[1], &args[2], &args[3]);
         }
+        // A listener for the network probe; connections queue in its
+        // backlog, so nothing needs to accept them.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
         let denied = if cfg!(target_os = "linux") {
             Outcome::KilledBySigsys
         } else {
@@ -79,7 +85,7 @@ mod probe {
         ];
         let mut failed = 0;
         for (policy, attempt, expected) in cases {
-            let (actual, stdout) = run_child(policy, attempt);
+            let (actual, stdout) = run_child(policy, attempt, &port);
             let pass = actual == expected && (attempt != "nothing" || stdout == b"ok");
             println!(
                 "probe {policy}/{attempt}: expected {expected:?}, got {actual:?} ... {}",
@@ -89,6 +95,7 @@ mod probe {
                 failed += 1;
             }
         }
+        drop(listener);
         println!(
             "containment probes: {} passed; {failed} failed",
             cases.len() - failed
@@ -100,9 +107,9 @@ mod probe {
         }
     }
 
-    fn run_child(policy: &str, attempt: &str) -> (Outcome, Vec<u8>) {
+    fn run_child(policy: &str, attempt: &str, port: &str) -> (Outcome, Vec<u8>) {
         let output = Command::new(env::current_exe().unwrap())
-            .args([CHILD, policy, attempt])
+            .args([CHILD, policy, attempt, port])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -121,7 +128,7 @@ mod probe {
         (outcome, output.stdout)
     }
 
-    fn child(policy: &str, attempt: &str) -> ! {
+    fn child(policy: &str, attempt: &str, port: &str) -> ! {
         if policy == "contained" {
             // The launcher's part of the Linux containment; the broker sets
             // it in the worker before exec.
@@ -135,9 +142,15 @@ mod probe {
             }
         }
         let result = match attempt {
-            // SAFETY: plain system calls; a created socket or process is
-            // cleaned up by the exit below.
-            "socket" => unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) },
+            // `socket` then `connect`: Linux's filter stops the first, and
+            // Seatbelt refuses the second.
+            "socket" => {
+                let port: u16 = port.parse().unwrap_or(0);
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(_) => 0,
+                    Err(error) => errno_exit(error.raw_os_error().unwrap_or(0)),
+                }
+            }
             "file" => match std::fs::File::open("/etc/hosts") {
                 Ok(_) => 0,
                 Err(error) => {

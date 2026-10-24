@@ -1,6 +1,7 @@
 //! The macOS platform layer (ADR-0011): a Keychain item for the wrapping
-//! secret, `NSAlert` prompts and an `NSOpenPanel` on the main thread, and
-//! the UI in its own process group, killed with the core. Nothing here has
+//! secret, `NSAlert` prompts and an `NSOpenPanel` on the main thread, the UI
+//! in its own process group, killed with the core, the shared Unix read rules
+//! for a picked image, and the media worker in its Seatbelt sandbox. Nothing here has
 //! been seen to work with a real user, display or Keychain prompt; macOS is
 //! built and tested on CI only.
 //!

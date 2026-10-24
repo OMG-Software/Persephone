@@ -96,8 +96,8 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 
 - **Containers.** Container images are pinned by digest in the workflow. Containers install Rust with rustup from `sh.rustup.rs` and Node.js with setup-node.
 - **Packages are not pinned.** Packages come from each distribution's current repositories, so only the base image is fixed. Arch supports only full upgrades, so its job always builds against the current rolling release.
-- **Off Windows, only build and tests are covered.** There is no vault, credential prompt, UI containment or worker containment there. These fail closed (`unsupported`), and the core refuses to start the UI. A passing non-Windows job therefore shows that the code builds and its tests pass, not that the application runs or is contained on that OS. No job launches the application, on Windows either.
-- **Tests that are not compiled off Windows.** The AppContainer probe, DPAPI, the native-prompt and the contained-worker tests compile only on Windows. This is why Windows runs 41 more Rust tests.
+- **Off Windows, CI covers build and tests only.** Linux and macOS have worker containment (seccomp on Linux, Seatbelt on macOS; ADR-0010, ADR-0011), and its probe and contained-worker tests run in their jobs. macOS also has its Keychain vault, prompts, file dialog and UI host (CI-tested only, never run with a display). The Linux vault, prompts, file dialog and UI host are still being built and fail closed (`unsupported`), so the core refuses to start the UI there. No job launches the application on any OS.
+- **Tests that compile on one OS only.** The AppContainer probe, DPAPI and the native Windows prompts run only on Windows; seccomp probes only on Linux; Keychain, AppKit and Seatbelt tests only on macOS. Test counts therefore differ between jobs.
 
 Run 39785251911 at `04c0538` passed every job:
 

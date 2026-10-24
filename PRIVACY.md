@@ -26,13 +26,18 @@ This policy does not apply to:
 
 ## What the project collects
 
-The project collects no data about you.
+The app and the project collect no data about you on their own.
 
 * The app has no telemetry, no analytics and no usage statistics.
 * The app does not upload crash reports.
 * The app does not check for updates. You install a new version by hand.
 * The app contacts no server that the project operates. The project operates
   no such server.
+
+The project receives only what you choose to send it: a public issue or
+pull request, or a private vulnerability report. The maintainers can read a
+private report, and GitHub stores it. Send only what the report needs (see
+[Contact](#contact)).
 
 ## What the app sends, and to whom
 

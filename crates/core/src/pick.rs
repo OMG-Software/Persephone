@@ -133,7 +133,7 @@ mod dev_tests {
 /// The read rules every platform's read must meet. They run where a read is
 /// implemented; the Windows-only cases (share mode, reparse points) are in
 /// `platform::windows::pick`.
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use crate::media::MAX_ENCODED_BYTES;

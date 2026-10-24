@@ -44,7 +44,8 @@ the same plan):
   and the UI ends when the core ends.
 * **Worker: Seatbelt.** The worker applies the pure-computation sandbox profile
   to itself before it reads input, with rlimits and an empty environment.
-  This works with the hardened runtime of a notarized app.
+  It is expected to work with the hardened runtime of a notarized app; that
+  is not verified yet, because no signed and notarized build has run.
 * **Verification: CI only.** macOS releases are marked as not tested live
   until someone runs the live checks on a Mac.
 

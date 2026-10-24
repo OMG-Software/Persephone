@@ -1,7 +1,8 @@
-//! The Linux platform layer. Not implemented yet: every seam fails closed
-//! exactly as before the platform split. The plan's "Linux" section fills
-//! each function; until then the profile stays locked, prompts and the file
-//! dialog are refused, no media worker runs and the UI is not started.
+//! The Linux platform layer (ADR-0010). Implemented: reading a picked image
+//! file (the shared Unix read rules) and the contained media worker (seccomp,
+//! checked by the broker before any input). Not implemented yet, and failing
+//! closed: the vault (the profile stays locked), the prompts and the file
+//! dialog (refused), and the UI host (the UI is not started).
 
 use crate::{
     credentials::{self, CredentialSource},

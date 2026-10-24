@@ -3,9 +3,9 @@
 //! binary these tests launch.
 #![cfg(any(windows, target_os = "linux", target_os = "macos"))]
 
-use persephone_media_broker::{
-    ContainmentProfile, RunError, WORKER_EXIT_CONTAINMENT, WorkerPolicy, run_decode, run_strip,
-};
+#[cfg(any(windows, target_os = "linux"))]
+use persephone_media_broker::WORKER_EXIT_CONTAINMENT;
+use persephone_media_broker::{ContainmentProfile, RunError, WorkerPolicy, run_decode, run_strip};
 use persephone_media_protocol::{FrameKind, ResourceBudgets, WorkerFailure};
 use std::{
     path::PathBuf,
@@ -255,6 +255,8 @@ fn run_worker_directly() -> std::process::Output {
 }
 
 /// The containment failure in a reply that is exactly one failure frame.
+/// macOS has no test that expects one: its worker sandboxes itself.
+#[cfg(any(windows, target_os = "linux"))]
 fn containment_mask(reply: &[u8]) -> u32 {
     assert_eq!(
         reply.len(),
