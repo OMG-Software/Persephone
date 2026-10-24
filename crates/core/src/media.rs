@@ -107,7 +107,11 @@ pub const DECODE_TIME_LIMIT: Duration = Duration::from_secs(20);
 /// Wall and CPU limit of one strip, which decodes twice.
 pub const STRIP_TIME_LIMIT: Duration = Duration::from_secs(40);
 /// The worker executable, next to the core's own.
-pub const WORKER_EXE: &str = "persephone-media-worker.exe";
+pub const WORKER_EXE: &str = if cfg!(windows) {
+    "persephone-media-worker.exe"
+} else {
+    "persephone-media-worker"
+};
 /// The AppContainer profile the worker runs in.
 pub const WORKER_PROFILE: &str = "Persephone.MediaWorker";
 /// Bytes decrypted per step; the decrypted bytes overwrite the encrypted
@@ -518,151 +522,15 @@ impl ImageWorker for NoWorker {
     }
 }
 
-/// The platform's worker: the contained worker next to the core on Windows,
-/// [`NoWorker`] elsewhere.
+/// The platform's worker ([`crate::platform`]): the contained worker next to
+/// the core on Windows, [`NoWorker`] where containment is not implemented.
 pub fn platform_worker() -> Arc<dyn ImageWorker> {
-    #[cfg(windows)]
-    return Arc::new(contained::ContainedWorker::next_to_core());
-    #[cfg(not(windows))]
-    return Arc::new(NoWorker);
+    crate::platform::os::image_worker()
 }
 
+/// The Windows contained worker, under its earlier path.
 #[cfg(windows)]
-pub mod contained {
-    //! The media broker's contained worker (Windows only).
-
-    use super::{
-        DECODE_TIME_LIMIT, DecodedPixels, ImageWorker, STRIP_TIME_LIMIT, WORKER_EXE,
-        WORKER_MEMORY_BYTES, WORKER_PROFILE, guard,
-    };
-    use persephone_core_protocol::ErrorCode;
-    use persephone_media_broker::{
-        AppContainerProfile, LaunchError, Mitigations, RunError, WorkerPolicy, run_decode,
-        run_strip,
-    };
-    use persephone_media_protocol::{ReceivedFrame, ResourceBudgets, WorkerFailure};
-    use std::{
-        path::PathBuf,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
-
-    pub struct ContainedWorker {
-        exe: PathBuf,
-        profile: Mutex<Option<Arc<AppContainerProfile>>>,
-    }
-
-    fn policy(limit: Duration) -> WorkerPolicy {
-        WorkerPolicy {
-            memory_limit_bytes: WORKER_MEMORY_BYTES,
-            wall_deadline: limit,
-            cpu_time_limit: limit,
-            mitigations: Mitigations::default(),
-        }
-    }
-
-    fn launch_error(error: LaunchError) -> ErrorCode {
-        match error {
-            LaunchError::InputTooLarge => ErrorCode::Rejected,
-            LaunchError::Api { .. } => ErrorCode::Unavailable,
-        }
-    }
-
-    /// Failures of the environment are `unavailable`; anything the input can
-    /// cause is `rejected`.
-    fn run_error(error: RunError) -> ErrorCode {
-        match error {
-            RunError::Worker(
-                WorkerFailure::ContainmentCheck(_)
-                | WorkerFailure::ModuleRejected
-                | WorkerFailure::Instantiation,
-            ) => ErrorCode::Unavailable,
-            _ => ErrorCode::Rejected,
-        }
-    }
-
-    impl ContainedWorker {
-        /// The worker executable next to the running core.
-        pub fn next_to_core() -> Self {
-            let exe = std::env::current_exe()
-                .ok()
-                .and_then(|core| core.parent().map(|dir| dir.join(WORKER_EXE)))
-                .unwrap_or_else(|| PathBuf::from(WORKER_EXE));
-            Self::at(exe)
-        }
-
-        /// The worker at `exe`, in the product's AppContainer profile, which
-        /// is created on first use and kept.
-        pub fn at(exe: PathBuf) -> Self {
-            Self {
-                exe,
-                profile: Mutex::new(None),
-            }
-        }
-
-        /// The worker at `exe` in a given profile (tests use a temporary
-        /// one).
-        pub fn with_profile(exe: PathBuf, profile: AppContainerProfile) -> Self {
-            Self {
-                exe,
-                profile: Mutex::new(Some(Arc::new(profile))),
-            }
-        }
-
-        fn profile(&self) -> Result<Arc<AppContainerProfile>, ErrorCode> {
-            let mut profile = guard(&self.profile);
-            if let Some(profile) = profile.as_ref() {
-                return Ok(profile.clone());
-            }
-            let created = Arc::new(
-                AppContainerProfile::create_or_open(WORKER_PROFILE)
-                    .map_err(|_| ErrorCode::Unavailable)?,
-            );
-            *profile = Some(created.clone());
-            Ok(created)
-        }
-    }
-
-    impl ImageWorker for ContainedWorker {
-        fn decode(
-            &self,
-            encoded: &[u8],
-            budgets: &ResourceBudgets,
-        ) -> Result<DecodedPixels, ErrorCode> {
-            let profile = self.profile()?;
-            let run = run_decode(
-                &profile,
-                &self.exe,
-                encoded,
-                &policy(DECODE_TIME_LIMIT),
-                budgets,
-            )
-            .map_err(launch_error)?;
-            let image = run.outcome.map_err(run_error)?;
-            Ok(DecodedPixels {
-                frame: image.pixels,
-                orientation: image.orientation,
-            })
-        }
-
-        fn strip(
-            &self,
-            encoded: &[u8],
-            budgets: &ResourceBudgets,
-        ) -> Result<ReceivedFrame, ErrorCode> {
-            let profile = self.profile()?;
-            let run = run_strip(
-                &profile,
-                &self.exe,
-                encoded,
-                &policy(STRIP_TIME_LIMIT),
-                budgets,
-            )
-            .map_err(launch_error)?;
-            run.outcome.map_err(run_error)
-        }
-    }
-}
+pub use crate::platform::windows::media as contained;
 
 struct Draft {
     room_id: String,

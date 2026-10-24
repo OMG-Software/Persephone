@@ -8,7 +8,8 @@ This crate is the application entry process. ADR-0004 assigns sessions, SDK work
 - Keep room subscriptions bounded. Coalesce change notifications and fetch content through bounded calls. A slow UI must not create an unbounded event queue.
 - Review lock order, wakeups, writer failure, pipe closure, and thread completion together when changing the serving loop. Do not infer full shutdown from a dropped handle or task status.
 - Keep protocol violations fatal to the affected UI connection. Return bounded public error codes instead of internal diagnostics.
-- Preserve UI process supervision and Windows Job ownership in `src/main.rs` and `src/ui_job.rs`. Unsupported platforms need measured equivalent controls before security claims.
+- Preserve UI process supervision and Windows Job ownership in `src/main.rs`, `src/ui_host.rs` and `src/platform/windows/ui.rs`. Unsupported platforms need measured equivalent controls before security claims.
+- Keep per-OS code in `src/platform/<os>/` behind the traits in `vault.rs`, `credentials.rs`, `pick.rs`, `media.rs` and `ui_host.rs`. An OS without an implemented layer fails closed.
 - Coordinate commands and events with `crates/core-protocol`, `src-tauri/src/core_link.rs`, the Tauri command surface, and frontend bridge.
 
 ## Checks

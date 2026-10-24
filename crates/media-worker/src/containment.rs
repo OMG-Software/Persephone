@@ -1,5 +1,10 @@
 //! Self-check of the containment the broker must apply. Each failed check sets
 //! one bit; the worker decodes nothing unless the result is zero.
+//!
+//! Each OS has its own checks and bits. Bits 0 to 4 are Windows (unchanged
+//! since ADR-0003); bits 5 and 6 are reserved for Linux and bit 7 for macOS,
+//! for the plan's "Linux" and "macOS" media-worker controls. Bits 8 to 30 are
+//! free. Bit 31 means the OS has no implemented containment.
 
 /// The process token is not an AppContainer token.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -16,18 +21,55 @@ pub const MISSING_WIN32K_LOCKDOWN: u32 = 1 << 3;
 /// A check could not be evaluated; treated as missing.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub const CHECK_FAILED: u32 = 1 << 4;
+/// Linux, reserved: `no_new_privs` is not set (`NoNewPrivs` in
+/// `/proc/self/status`). Not checked yet.
+#[allow(dead_code)]
+pub const MISSING_NO_NEW_PRIVS: u32 = 1 << 5;
+/// Linux, reserved: the seccomp allowlist is not installed (`Seccomp: 2`).
+/// Not checked yet.
+#[allow(dead_code)]
+pub const MISSING_SECCOMP: u32 = 1 << 6;
+/// macOS, reserved: the `sandbox_init` pure-computation profile is not
+/// applied. Not checked yet.
+#[allow(dead_code)]
+pub const MISSING_SANDBOX: u32 = 1 << 7;
 /// Containment is not implemented for this operating system.
 #[cfg_attr(windows, allow(dead_code))]
 pub const UNSUPPORTED_PLATFORM: u32 = 1 << 31;
 
-#[cfg(not(windows))]
+/// The bits of the controls missing on this OS; zero only when every one is
+/// in place.
 pub fn missing_controls() -> u32 {
-    UNSUPPORTED_PLATFORM
+    #[cfg(windows)]
+    return windows::missing_controls();
+    #[cfg(target_os = "linux")]
+    return linux::missing_controls();
+    #[cfg(target_os = "macos")]
+    return macos::missing_controls();
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    return UNSUPPORTED_PLATFORM;
 }
 
-#[cfg(windows)]
-pub fn missing_controls() -> u32 {
-    windows::missing_controls()
+/// Plan "Linux", Media worker: will check `MISSING_NO_NEW_PRIVS` and
+/// `MISSING_SECCOMP`. Until then nothing is decoded.
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::UNSUPPORTED_PLATFORM;
+
+    pub fn missing_controls() -> u32 {
+        UNSUPPORTED_PLATFORM
+    }
+}
+
+/// Plan "macOS", Media worker: will check `MISSING_SANDBOX`. Until then
+/// nothing is decoded.
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::UNSUPPORTED_PLATFORM;
+
+    pub fn missing_controls() -> u32 {
+        UNSUPPORTED_PLATFORM
+    }
 }
 
 #[cfg(windows)]
