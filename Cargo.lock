@@ -3602,6 +3602,7 @@ dependencies = [
  "chacha20poly1305",
  "futures-core",
  "getrandom 0.4.3",
+ "libc",
  "matrix-sdk",
  "matrix-sdk-base",
  "matrix-sdk-crypto",
@@ -3634,6 +3635,7 @@ dependencies = [
 name = "persephone-desktop"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "persephone-contracts",
  "persephone-core-protocol",
  "persephone-media-protocol",

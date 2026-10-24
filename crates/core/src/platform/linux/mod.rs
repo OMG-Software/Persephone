@@ -32,8 +32,11 @@ pub(crate) fn image_picker() -> Box<dyn ImagePicker> {
 
 /// Plan "Linux", Prompts and picker: the read rules with `O_NOFOLLOW` and
 /// `fstat`.
-pub(crate) fn read_image_file(_: &Path, _: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
-    Err(ErrorCode::Unavailable)
+pub(crate) fn read_image_file(
+    path: &Path,
+    budgets: &ResourceBudgets,
+) -> Result<Encoded, ErrorCode> {
+    super::unix::read_image_file(path, budgets)
 }
 
 /// Plan "Linux", Media worker: the broker's seccomp and rlimit launcher.

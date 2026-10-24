@@ -31,6 +31,10 @@ tauri = { version = "=2.12.4", default-features = false, features = [
   "custom-protocol",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# Linux and macOS: moving the core channel off descriptors 0 and 1.
+libc = "=0.2.191"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",

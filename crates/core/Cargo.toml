@@ -52,6 +52,10 @@ dev-disposable-servers = []
 tempfile = "=3.27.0"
 wiremock = "=0.6.5"
 
+[target.'cfg(unix)'.dependencies]
+# Linux and macOS: open flags for reading a picked image (O_NOFOLLOW).
+libc = "=0.2.191"
+
 [target.'cfg(windows)'.dependencies]
 # The contained media worker exists only on Windows (ADR-0003, ADR-0009).
 persephone-media-broker = { path = "../media-broker" }

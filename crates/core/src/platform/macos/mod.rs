@@ -37,8 +37,11 @@ pub(crate) fn image_picker() -> Box<dyn ImagePicker> {
 }
 
 /// Plan "macOS", Prompts and picker: the same read rules as Linux.
-pub(crate) fn read_image_file(_: &Path, _: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
-    Err(ErrorCode::Unavailable)
+pub(crate) fn read_image_file(
+    path: &Path,
+    budgets: &ResourceBudgets,
+) -> Result<Encoded, ErrorCode> {
+    super::unix::read_image_file(path, budgets)
 }
 
 /// Plan "macOS", Media worker: the worker's `sandbox_init` profile.
