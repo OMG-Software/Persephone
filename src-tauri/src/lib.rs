@@ -459,12 +459,14 @@ async fn load_image(
     relay(core.inner(), Call::LoadImage { room_id, event_id }).await
 }
 
-/// Most `image_band` calls the page may have running at once. Each holds one
-/// band of at most `MAX_BAND_BYTES` (1 MiB) in this process until Tauri
-/// hands it to the page, so this bounds that memory.
+/// Most `image_band` calls the page may have running at once. This bounds
+/// only the concurrent core `image_band` calls and the bands (each at most
+/// `MAX_BAND_BYTES`, 1 MiB) they hold while they run. A slot is given back
+/// when the command returns its `Response`; a body that Tauri has not yet
+/// delivered to the web view is not counted.
 pub const MAX_BANDS_IN_FLIGHT: usize = 4;
 
-/// Counts running `image_band` calls.
+/// Counts running `image_band` calls, up to the return of their `Response`.
 #[derive(Default)]
 struct BandsInFlight(AtomicUsize);
 
@@ -520,6 +522,8 @@ async fn image_band(
     if !valid_handle(&handle) {
         return Err(INVALID_ARGUMENT.to_string());
     }
+    // Held until this returns: the `Response` that Tauri then delivers to
+    // the page is no longer counted.
     let Some(_slot) = bands.take() else {
         return Err(LIMIT_EXCEEDED.to_string());
     };
@@ -716,16 +720,21 @@ mod tests {
     use super::*;
 
     /// GIVEN `MAX_BANDS_IN_FLIGHT` running band calls WHEN another starts
-    /// THEN it gets no slot, until one of the running calls ends.
+    /// THEN it gets no slot; WHEN exactly one running call ends THEN exactly
+    /// one new call gets a slot.
     #[test]
     fn given_bands_in_flight_then_only_a_bounded_number_run_at_once() {
         let bands = BandsInFlight::default();
-        let slots: Vec<_> = (0..MAX_BANDS_IN_FLIGHT)
+        let mut slots: Vec<_> = (0..MAX_BANDS_IN_FLIGHT)
             .map(|_| bands.take().expect("a free slot"))
             .collect();
         assert!(bands.take().is_none());
-        drop(slots.into_iter().next());
-        assert!(bands.take().is_some());
+        drop(slots.pop());
+        let freed = bands.take();
+        assert!(freed.is_some());
+        assert!(bands.take().is_none());
+        drop(freed);
+        drop(slots);
     }
 
     #[test]

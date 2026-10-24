@@ -239,14 +239,23 @@ fn image_contracts_reject_unknown_fields_and_out_of_range_values() {
     assert!(serde_json::from_str::<ImageView>(view).is_ok());
     for invalid in [
         r#"{"handle":"h","width":1,"height":1,"bands":1}"#,
-        r#"{"handle":"h","width":1,"height":1,"bands":1,"bandRows":1,"path":"C:\x"}"#,
+        r#"{"handle":"h","width":1,"height":1,"bands":1,"bandRows":1,"path":"C:\\x"}"#,
         r#"{"handle":"h","width":-1,"height":1,"bands":1,"bandRows":1}"#,
     ] {
+        // Each case is well-formed JSON, so it is the schema that refuses it.
         assert!(
-            serde_json::from_str::<ImageView>(invalid).is_err(),
+            serde_json::from_str::<serde_json::Value>(invalid).is_ok(),
             "{invalid}"
         );
+        let error = serde_json::from_str::<ImageView>(invalid).unwrap_err();
+        assert!(error.is_data(), "{invalid}: {error}");
     }
+    let with_path = r#"{"handle":"h","width":1,"height":1,"bands":1,"bandRows":1,"path":"C:\\x"}"#;
+    let error = serde_json::from_str::<ImageView>(with_path).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown field `path`"),
+        "{error}"
+    );
 
     let draft = |mime: &str, extra: &str| {
         format!(r#"{{"kind":"draft","preview":{view},"size":10,"mime":"{mime}"{extra}}}"#)

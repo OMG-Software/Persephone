@@ -179,6 +179,11 @@ Known limits of this implementation:
 * Decoded pixel frames and the SDK's copy of an upload are not zeroed when they
   are dropped.
 * An open file dialog keeps the core from ending until the dialog closes.
+* The UI process limits concurrent `image_band` calls to the core (four), but
+  it does not count band responses that wait for delivery to the web view. A
+  page that asks for bands faster than it reads them can make the UI process
+  hold more. This affects only the UI process, which has its own memory limit
+  (ADR-0004); the core's budgets are unchanged.
 * zune-jpeg 0.5.15 fills the rest of a scan with zeros when it meets a valid
   marker early, also in strict mode. A file cut inside a scan and then given a
   new EOI marker therefore decodes with blank final blocks. This needs a

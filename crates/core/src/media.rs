@@ -90,9 +90,15 @@ pub const MAX_DRAFTS: usize = 1;
 /// loaded image is dropped to make room.
 pub const MAX_HANDLES: usize = 32;
 /// Longest a download may take, from request to the last byte. A lock waits
-/// for a download in progress (it holds a lease), but the download stops at
-/// its next chunk once the lock began.
+/// for a download in progress (it holds a lease), but the download checks for
+/// a lock every `DOWNLOAD_LOCK_POLL` while it waits for the response headers
+/// or the next chunk, and stops (`locked`) once the lock began, even when the
+/// server sends nothing.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often a download in progress checks whether a lock began. Much shorter
+/// than the lock's wait for leases, so a stalled server cannot make a lock
+/// time out.
+pub const DOWNLOAD_LOCK_POLL: Duration = Duration::from_millis(250);
 /// Job memory limit of one worker run (the media plan's default).
 pub const WORKER_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 /// Wall and CPU limit of one decode. Provisional: recorded benchmarks show 5
@@ -1183,10 +1189,11 @@ pub fn media_url(
 /// Downloads at most `cap` bytes from `url`. A `Content-Length` over the cap
 /// is refused before the body is read; the body is read in chunks into a
 /// buffer reserved up front, and refused as soon as it would pass the cap or
-/// the declared length. Between chunks `current` is asked whether the
-/// session is still the one that started: once it is not, the download stops
-/// (`locked`). A body that ends early is `unavailable` (the transfer failed).
-/// A 404 is `not_found`. Any other 4xx except 429, such as 403 or 451, is
+/// the declared length. After each chunk, and every `DOWNLOAD_LOCK_POLL`
+/// while the request or a chunk is still awaited, `current` is asked whether
+/// the session is still the one that started: once it is not, the download
+/// stops (`locked`) without waiting for the server. A body that ends early
+/// is `unavailable` (the transfer failed). A 404 is `not_found`. Any other 4xx except 429, such as 403 or 451, is
 /// `rejected`: the server refuses this file, and asking again gives the same
 /// answer. A 429, a 5xx, any other status and a network failure are
 /// `unavailable`.
@@ -1202,7 +1209,9 @@ pub async fn download(
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
-    let mut response = request.send().await.map_err(|_| ErrorCode::Unavailable)?;
+    let mut response = until_locked(request.send(), current)
+        .await?
+        .map_err(|_| ErrorCode::Unavailable)?;
     match response.status().as_u16() {
         200 => {}
         404 => return Err(ErrorCode::NotFound),
@@ -1215,7 +1224,10 @@ pub async fn download(
         return Err(ErrorCode::Rejected);
     }
     let mut encoded = Encoded::reserve(budgets, declared.unwrap_or(cap))?;
-    while let Some(chunk) = response.chunk().await.map_err(|_| ErrorCode::Unavailable)? {
+    while let Some(chunk) = until_locked(response.chunk(), current)
+        .await?
+        .map_err(|_| ErrorCode::Unavailable)?
+    {
         if !current() {
             return Err(ErrorCode::Locked);
         }
@@ -1226,6 +1238,28 @@ pub async fn download(
         return Err(ErrorCode::Unavailable);
     }
     Ok(encoded)
+}
+
+/// Awaits `future`, asking `current` every `DOWNLOAD_LOCK_POLL` whether the
+/// session is still the one that started; once it is not, `future` is
+/// dropped and the result is `locked`. The same pinned `future` is polled
+/// across ticks, so no progress depends on it being cancellation-safe.
+async fn until_locked<F: std::future::Future>(
+    future: F,
+    current: &(dyn Fn() -> bool + Sync),
+) -> Result<F::Output, ErrorCode> {
+    let mut future = std::pin::pin!(future);
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut future => return Ok(output),
+            () = tokio::time::sleep(DOWNLOAD_LOCK_POLL) => {
+                if !current() {
+                    return Err(ErrorCode::Locked);
+                }
+            }
+        }
+    }
 }
 
 /// Reads a buffer that is being decrypted in place: bytes are taken from

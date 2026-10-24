@@ -561,7 +561,7 @@ developed in parallel where independent, but feature acceptance follows its gate
 
 ### Milestone status
 
-23 October 2026. This is the single progress summary; other pages link here. A
+24 October 2026. This is the single progress summary; other pages link here. A
 deliverable is **done** when it is built and its own evidence passes, **partial**
 when only part is built or only some platforms or cases pass, and **not
 started** otherwise. A milestone's exit gate is met only when its exit evidence
@@ -572,7 +572,7 @@ above passes; none has.
 | P0 | Frontend, SDK and version candidates | Done | [Versions](../evidence/versions.json), [frontend](../evidence/frontend.md), [dependencies](../evidence/dependencies.md) |
 | P0 | Sync negotiation and concurrency proof | Partial | Sliding/classic selection passes on both servers ([capability fallback](../evidence/capability-fallback.md)); SDK stop-and-join is missing ([lifecycle contract](sdk-lifecycle.md)) |
 | P0 | Credential and store audit | Partial | [Storage](../evidence/storage.md), [protected store](../evidence/protected-store.md) on Windows; Linux/macOS vaults not tested |
-| P0 | Sandbox-launch tests on all OSes | Partial | Windows [contained worker](../evidence/media-worker.md) prototype; no tested Windows policy denies sockets, so decoding runs in a [no-network WebAssembly guest](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md) inside that worker; not yet wired into the app or the Matrix media flow; signing and Linux/macOS not started |
+| P0 | Sandbox-launch tests on all OSes | Partial | Windows [contained worker](../evidence/media-worker.md) prototype; no tested Windows policy denies sockets, so decoding runs in a [no-network WebAssembly guest](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md) inside that worker; on Windows the core now uses it for received and sent images ([image messaging](image-messaging.md)); signing and Linux/macOS not started |
 | P0 | Aggregate resource and IPC design | Done | [Frame protocol](../evidence/media-protocol.md), [IPC measurements and core/UI split](../evidence/ipc-transport.md) ([ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)) |
 | P1 | Workspace, Tauri shell, typed contracts | Done (Windows) | [Tauri shell](../evidence/tauri-shell.md), [contracts](../evidence/contracts.md) |
 | P1 | Bounded views | Done | [Synthetic views](../evidence/mock-views.md), [live updates](../evidence/live-updates.md) |
@@ -583,7 +583,7 @@ above passes; none has.
 | P2 | Vault and storage adapters | Partial | [Protected store](../evidence/protected-store.md): Windows DPAPI only |
 | P2 | Task cancellation | Partial | Cooperative stop between complete operations; SDK tasks not joined, so lock ends `restart_required` once a client ran |
 | P2 | Worker broker | Done (Windows) | [Media worker](../evidence/media-worker.md); Linux/macOS not started |
-| P2 | Pixel transport | Not started | Decoded pixels do not reach the UI yet |
+| P2 | Pixel transport | Done (Windows) | Raw row bands of at most 1 MiB from the core through the UI process to a page canvas ([design](image-messaging.md#pixel-transport), [live run](../evidence/image-messaging.md)); the UI process does not count band responses awaiting delivery to the web view |
 | P2 | Baseline limits | Partial | Frame and page budgets, UI Job limits; no aggregate memory admission across features |
 | P3 | SDK integration | Partial | [Sign-in evidence](../evidence/matrix-sign-in.md): one client in the core over the encrypted stores |
 | P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; [sign-out](../evidence/sign-out.md) revokes the session and deletes the local profile; no SSO or `.well-known` discovery |

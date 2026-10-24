@@ -148,6 +148,23 @@ python -I devices.py <profile.json> <server> alice list|delete <device id>
 wsl -d Ubuntu-24.04 -u root -- kill -TERM <runner pid>
 ```
 
+The archive commands above are recorded as they ran. After `cd there`, their
+`.local/...` paths no longer resolve from the repository root, and they do not
+create the key, keyring and unpack directories. To repeat the download, key
+check and unpack, run these from the repository root instead (added
+24 October 2026, not run as written):
+
+```text
+mkdir -p .local/element-web/download-v1.12.32 .local/element-web/key .local/element-web/gnupg .local/element-web/unpacked-v1.12.32
+curl -fsSL --proto =https --tlsv1.2 -o .local/element-web/download-v1.12.32/element-v1.12.32.tar.gz https://github.com/element-hq/element-web/releases/download/v1.12.32/element-v1.12.32.tar.gz
+curl -fsSL --proto =https --tlsv1.2 -o .local/element-web/download-v1.12.32/element-v1.12.32.tar.gz.asc https://github.com/element-hq/element-web/releases/download/v1.12.32/element-v1.12.32.tar.gz.asc
+curl -fsSL --proto =https --tlsv1.2 -o .local/element-web/key/element-release-key.asc https://packages.element.io/element-release-key.asc
+chmod 700 .local/element-web/gnupg
+gpg --homedir .local/element-web/gnupg --import .local/element-web/key/element-release-key.asc
+gpg --homedir .local/element-web/gnupg --verify .local/element-web/download-v1.12.32/element-v1.12.32.tar.gz.asc .local/element-web/download-v1.12.32/element-v1.12.32.tar.gz
+tar -xzf .local/element-web/download-v1.12.32/element-v1.12.32.tar.gz -C .local/element-web/unpacked-v1.12.32 --no-same-owner
+```
+
 Raw output, the scripts, the Element configuration and Persephone
 screenshots are in `.local/runs/p4-element-01` (`merovingian`, `synapse`,
 `merovingian-run`, `synapse-run`, `scripts`). The Element sessions' browser

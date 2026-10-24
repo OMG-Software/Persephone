@@ -7,6 +7,7 @@ use std::{
     io::{Cursor, Write},
     net::TcpListener,
     sync::atomic::AtomicBool,
+    time::Instant,
 };
 
 fn budgets() -> Arc<ResourceBudgets> {
@@ -854,6 +855,59 @@ fn given_failed_downloads_then_each_is_refused_with_its_code() {
     let locked = AtomicBool::new(true);
     let (result, _) = fetch_with(&url, None, 1024, &|| !locked.load(Ordering::SeqCst));
     assert_eq!(result.err(), Some(ErrorCode::Locked));
+    served.join().unwrap();
+}
+
+/// Keeps a connection open without sending anything until the client closes
+/// it, or for at most 10 s, so the server thread always ends.
+fn stall_until_closed(stream: &mut std::net::TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut byte = [0u8; 1];
+    let _ = stream.read(&mut byte);
+}
+
+/// Locks a download 0.5 s after it starts, and checks that it stops with
+/// `locked` long before `DOWNLOAD_TIMEOUT`, with nothing left reserved.
+fn assert_locked_promptly(url: &str) {
+    let start = Instant::now();
+    let (result, budgets) = fetch_with(url, None, 1024, &|| {
+        start.elapsed() < Duration::from_millis(500)
+    });
+    let elapsed = start.elapsed();
+    assert_eq!(result.err(), Some(ErrorCode::Locked));
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    assert_eq!(budgets.aggregate_used(), 0);
+}
+
+/// GIVEN a server that sends the headers and then stalls WHEN a lock begins
+/// during the download THEN the download stops with `locked` within a few
+/// polls, without waiting for a chunk or the 60 s timeout.
+#[test]
+fn given_a_stalled_body_when_a_lock_begins_then_the_download_stops_promptly() {
+    let (url, served) = server(|stream| {
+        write(
+            stream,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n",
+        );
+        stall_until_closed(stream);
+        0
+    });
+    assert_locked_promptly(&url);
+    served.join().unwrap();
+}
+
+/// GIVEN a server that accepts the request but never answers WHEN a lock
+/// begins THEN the download stops with `locked` within a few polls, without
+/// waiting for headers or the 60 s timeout.
+#[test]
+fn given_no_response_headers_when_a_lock_begins_then_the_download_stops_promptly() {
+    let (url, served) = server(|stream| {
+        stall_until_closed(stream);
+        0
+    });
+    assert_locked_promptly(&url);
     served.join().unwrap();
 }
 
