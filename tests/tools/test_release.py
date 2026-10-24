@@ -333,15 +333,6 @@ class BundleConfigTests(TempTree):
                                      notices.resolve(): "THIRD-PARTY-NOTICES.txt"})
         self.assertNotIn("windows", bundle)
 
-    def test_windows_signing_hook_runs_the_single_signing_script(self):
-        notices = self.root / "notices.txt"
-        notices.write_text("notices\n", encoding="utf-8")
-        hook = release.bundle_config(release.ROOT, notices, windows_sign=True)["bundle"]["windows"]["signCommand"]
-        self.assertEqual(hook["cmd"], "pwsh")
-        self.assertEqual(Path(hook["args"][-2]), (release.ROOT / "tools/sign_windows.ps1").resolve())
-        self.assertTrue(Path(hook["args"][-2]).is_file())
-        self.assertEqual(hook["args"][-1], "%1")
-
     def test_missing_notices_are_refused(self):
         output = self.root / "tauri.release.json"
         code, _, stderr = run_main(["bundle-config", "--notices", str(self.root / "absent.txt"), "--output", str(output)], release.ROOT)

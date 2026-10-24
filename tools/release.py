@@ -9,10 +9,10 @@ with `cargo metadata --locked --offline` that the lockfile is still valid.
 `check-tag vX.Y.Z[-pre]` exits 1 and lists each manifest whose version differs
 from the tag. The release workflow runs it before it builds anything.
 
-`bundle-config --notices FILE --output FILE [--windows-sign]` writes the
-release-only Tauri configuration (sidecars, bundled licence files and, for
-signed Windows builds, the signing hook) that the workflow merges with
-`cargo tauri --config`.
+`bundle-config --notices FILE --output FILE` writes the release-only Tauri
+configuration (sidecars and bundled licence files) that the workflow merges
+with `cargo tauri --config`. It never adds a signing hook: signing runs in
+separate jobs that build nothing (see docs/release.md).
 
 The edits change only the version strings. Each edit is verified by parsing
 the file again and comparing it with the expected document, so formatting and
@@ -302,7 +302,7 @@ def cargo_lock_is_valid(root):
 SIDECARS = ("binaries/persephone", "binaries/persephone-media-worker")
 
 
-def bundle_config(root, notices, windows_sign=False):
+def bundle_config(root, notices):
     """The release-only Tauri configuration that `cargo tauri --config` merges.
 
     It stays out of tauri.conf.json because tauri-build copies `externalBin`
@@ -324,12 +324,6 @@ def bundle_config(root, notices, windows_sign=False):
             },
         }
     }
-    if windows_sign:
-        # Tauri runs this for each file it signs, with %1 replaced by the path.
-        script = str((root / "tools/sign_windows.ps1").resolve())
-        config["bundle"]["windows"] = {
-            "signCommand": {"cmd": "pwsh", "args": ["-NoProfile", "-NonInteractive", "-File", script, "%1"]}
-        }
     return config
 
 
@@ -341,11 +335,10 @@ def main(argv=None, root=ROOT):
     bundle = commands.add_parser("bundle-config", help="write the release-only Tauri configuration")
     bundle.add_argument("--notices", required=True, help="third-party notices file to bundle")
     bundle.add_argument("--output", required=True, help="JSON file for `cargo tauri --config`")
-    bundle.add_argument("--windows-sign", action="store_true", help="sign Windows files with tools/sign_windows.ps1")
     args = parser.parse_args(argv)
     try:
         if args.command == "bundle-config":
-            config = bundle_config(root, args.notices, args.windows_sign)
+            config = bundle_config(root, args.notices)
             output = Path(args.output)
             output.parent.mkdir(parents=True, exist_ok=True)
             _write(output, json.dumps(config, indent=2) + "\n")
