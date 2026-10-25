@@ -1163,10 +1163,14 @@ jobs:
   # Replaces the rolling `latest` pre-release and tag with this main build.
   # Main runs only. The files are the unsigned dry-run files; no job of a main
   # run uses the `release` environment or its secrets. The concurrency group
-  # runs main builds one at a time, so the newest merge is published last.
+  # runs main builds one at a time, and the tip check below publishes only the
+  # newest. Without a status function, `if` adds success(), which is false
+  # because a main run skips windows-verify and macos-sign before checksums.
   latest:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [gate, checksums]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.gate.result == 'success' && needs.checksums.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
