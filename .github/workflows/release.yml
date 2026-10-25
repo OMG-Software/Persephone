@@ -122,7 +122,9 @@ jobs:
 
       - name: Generate third-party notices
         run: |
-          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --root "$RUNNER_TEMP/tools"
+          # The cargo-about binary needs its `cli` feature; without it cargo
+          # install builds the library, installs nothing and still exits 0.
+          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli --root "$RUNNER_TEMP/tools"
           mkdir -p .local/release/notices
           "$RUNNER_TEMP/tools/bin/cargo-about" generate --locked --fail --workspace \
             -c tools/about.toml -o .local/release/notices/THIRD-PARTY-NOTICES.txt tools/about.hbs
