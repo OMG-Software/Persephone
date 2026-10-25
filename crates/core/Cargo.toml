@@ -1,6 +1,6 @@
 [package]
 name = "persephone-core"
-version = "0.0.0"
+version = "0.0.1"
 description = "Key-holding core process: application entry point; starts and serves the keyless UI (ADR-0004)"
 edition.workspace = true
 license.workspace = true

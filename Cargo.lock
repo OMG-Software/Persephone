@@ -3587,7 +3587,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "persephone-contracts"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-core"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -3631,7 +3631,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-core-protocol"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "persephone-media-protocol",
  "serde",
@@ -3640,7 +3640,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-desktop"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "persephone-contracts",
@@ -3655,7 +3655,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-media-broker"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "persephone-media-protocol",
@@ -3665,7 +3665,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-media-decoder"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "persephone-media-protocol",
  "png 0.18.1",
@@ -3674,11 +3674,11 @@ dependencies = [
 
 [[package]]
 name = "persephone-media-protocol"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "persephone-media-sandbox"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "persephone-media-decoder",
  "persephone-media-protocol",
@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-media-worker"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "libc",
  "persephone-media-protocol",
@@ -3700,7 +3700,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-test-matrix"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-test-storage"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "matrix-sdk-base",
  "matrix-sdk-crypto",
@@ -3735,7 +3735,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-test-windows"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "windows-sys 0.61.2",
 ]

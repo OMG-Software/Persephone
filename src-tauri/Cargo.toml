@@ -1,6 +1,6 @@
 [package]
 name = "persephone-desktop"
-version = "0.0.0"
+version = "0.0.1"
 description = "Persephone UI process: keyless Tauri host relaying an explicit command allowlist to the core"
 edition.workspace = true
 license.workspace = true

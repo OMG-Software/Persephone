@@ -1,6 +1,6 @@
 [package]
 name = "persephone-media-worker"
-version = "0.0.0"
+version = "0.0.1"
 description = "Contained media worker process: verifies its own containment, then decodes one image in the WebAssembly sandbox"
 edition.workspace = true
 license.workspace = true

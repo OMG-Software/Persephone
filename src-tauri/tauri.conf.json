@@ -1,6 +1,6 @@
 {
   "productName": "Persephone",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "identifier": "io.github.omg-software.persephone",
   "build": {
     "frontendDist": "../.local/build/frontend"
@@ -54,7 +54,7 @@
         "installMode": "currentUser"
       },
       "wix": {
-        "version": "0.0.0",
+        "version": "0.0.1",
         "upgradeCode": "6c3031c6-7503-5143-9dc0-8b5ef49ea8d1"
       }
     },

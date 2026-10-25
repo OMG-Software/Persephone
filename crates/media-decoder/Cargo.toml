@@ -1,6 +1,6 @@
 [package]
 name = "persephone-media-decoder"
-version = "0.0.0"
+version = "0.0.1"
 description = "Untrusted image decoder compiled to a WebAssembly guest with no host capabilities beyond its I/O imports"
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "persephone-core-protocol"
-version = "0.0.0"
+version = "0.0.1"
 description = "Messages between the keyless UI process and the key-holding core (ADR-0004)"
 edition.workspace = true
 license.workspace = true
