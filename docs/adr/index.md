@@ -19,6 +19,7 @@
 ## Proposed Records
 
 * [0008 - Restart the core process to finish a lock after the client ran](0008-restart-the-core-process-to-finish-a-lock-after-the-client-ran.md)
+* [0013 - Open a default profile when none is given](0013-open-a-default-profile-when-none-is-given.md)
 
 ## Superseded Records
 

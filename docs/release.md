@@ -27,7 +27,9 @@ has a GitHub build-provenance attestation.
 Each bundle installs `persephone` (the core), `persephone-ui` and
 `persephone-media-worker` side by side. `persephone-ui` is the bundle's main
 binary; the core and worker are Tauri sidecars. Each bundle also contains
-`LICENSE.txt` and `THIRD-PARTY-NOTICES.txt`.
+`LICENSE.txt` and `THIRD-PARTY-NOTICES.txt`. The installed app keeps its
+encrypted profile in the default profile folder (ADR-0013), outside both the
+install directory and the web view's data folder.
 
 ### Jobs
 

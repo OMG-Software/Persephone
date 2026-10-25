@@ -201,6 +201,39 @@ fn given_no_profile_then_nothing_is_admitted_and_lock_or_unlock_change_nothing()
     assert_eq!(session.unlock(), StoreState::NotConfigured);
 }
 
+/// GIVEN no usable default profile directory THEN the session is configured,
+/// so the views stay locked instead of synthetic, and nothing opens it.
+#[test]
+fn given_no_default_profile_directory_then_the_session_stays_unavailable() {
+    let session = Session::unavailable();
+    assert!(session.is_configured());
+    assert_eq!(session.state(), StoreState::StoreUnavailable);
+    assert_eq!(session.admit().err(), Some(AdmissionError::Locked));
+    assert_eq!(session.unlock(), StoreState::StoreUnavailable);
+    assert_eq!(session.reset_profile(), StoreState::StoreUnavailable);
+    assert_eq!(
+        session.lock(LONG, || panic!("nothing to announce")).0,
+        StoreState::StoreUnavailable
+    );
+}
+
+/// GIVEN a profile in directories that do not exist yet THEN each directory
+/// created for it is private to the user, and an existing parent keeps its
+/// mode.
+#[cfg(unix)]
+#[test]
+fn given_a_new_profile_path_then_the_created_directories_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = root.path().join("vendor").join("profile");
+    let _session = open(&dir);
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&root.path().join("vendor")), 0o700);
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(mode(root.path()), 0o755);
+}
+
 /// A lease that ends while a lock waits must never make the lock fail. The
 /// lease used to wake the locker before releasing its reference to the
 /// stores, so the locker could find them still shared and report

@@ -27,6 +27,7 @@
 - [ADR-0010](adr/0010-linux-platform-layer.md): Linux keeps the store key in Secret Service, shows prompts with GTK in the core, caps the UI with a systemd scope, and confines the worker with seccomp.
 - [ADR-0011](adr/0011-macos-platform-layer.md): macOS keeps the store key in Keychain, shows prompts with AppKit on the main thread, and confines the worker with Seatbelt; the UI's memory is not capped (accepted risk).
 - [ADR-0012](adr/0012-sign-and-publish-releases-as-drafts.md): release artifacts are signed (PFX for Windows, Developer ID for macOS, cosign and GPG checksums) and published as drafts.
+- [ADR-0013](adr/0013-open-a-default-profile-when-none-is-given.md) (proposed): with no `--profile`, the core opens a fixed per-user local profile folder; synthetic rooms only with `--demo`.
 
 ## Evidence
 
