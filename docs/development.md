@@ -25,7 +25,7 @@ tests/
   tools/, servers/                 # Python tests for the tools and server harness
 frontend/                          # Bundled Svelte UI and typed host bridge
 tools/
-  dev.py                           # Repository check and run entry point
+  dev.py                           # Repository check, build and run entry point
   matrix_restart.py                # Disposable Rust worker restart controller
   matrix_capabilities.py           # Controlled sync-capability integration runner
   audit_dependencies.py            # OSV Rust dependency audit
@@ -62,6 +62,8 @@ Install Python, Rust/Cargo, and Node.js with npm available on `PATH`, plus the W
 ```powershell
 python tools/dev.py bootstrap
 python tools/dev.py check
+python tools/dev.py build
+python tools/dev.py build --release
 python tools/dev.py rust
 python tools/dev.py frontend
 python tools/dev.py contracts
@@ -80,6 +82,8 @@ cargo install --locked --root .local/tools/cargo-llvm-cov cargo-llvm-cov --versi
 Then add `.local/tools/cargo-llvm-cov/bin` to `PATH`. The contained media worker cannot write a coverage profile, so it runs uninstrumented and its own package's tests are left out of `coverage`; `check` still runs them.
 
 `check` runs Rust formatting, workspace tests and Clippy, frontend check/build/tests (the tests write the frontend TypeScript's line coverage to `.local/coverage/frontend/lcov.info`; the SonarQube workflow runs `frontend` for it), generated-contract drift/TypeScript checks, disposable-server registration tests, and restart-controller tests. It does not run live homeservers, the native containment program or dependency audit. `audit` queries OSV and needs network access; it cannot run offline. Add `--offline` to supported Cargo, frontend, contract, bootstrap, or sandbox commands when using cached dependencies.
+
+`build` compiles the application without running tests: the frontend, the release decoder guest (the media worker embeds it in every profile), then `persephone`, `persephone-media-worker` and `persephone-ui`. Without `--release` the executables go to `.local/build/rust/debug`; with it, to `.local/build/rust/release`. Start the app with `persephone.exe` (or `persephone`) from that directory. `build` uses the default features, so it accepts only `https://` homeservers (see [Signing the app in to a disposable server](#signing-the-app-in-to-a-disposable-server)). It does not make installers or sign anything; see [release builds](#release-builds).
 
 The Windows containment run is deliberately separate. On Windows it currently exits 1 because the zero-capability AppContainer worker is not network-denied: an endpoint-observed differential shows its packets reach the local TCP stack. The run also prints a comparative LPAC result, which does not change the gate. On other operating systems the command exits 2 because this program requires Windows; equivalent Linux and macOS coverage remains open. The unresolved gate is recorded in the [feasibility workbench](planning/feasibility.md) and [Windows sandbox evidence](evidence/windows-sandbox.md).
 
