@@ -1,20 +1,23 @@
-/* Persephone design tokens (design handoff, "Design tokens"). The CSP allows
-   only bundled styles and no font downloads, so Geist is used only when it is
-   installed locally; system fonts are the fallback. */
+/* Persephone design tokens. The palette, type, and corner radii follow the
+   OMG Software project page (omg-software.org/projects/persephone): warm
+   near-black surfaces, warm off-white text, and an orange accent. The dark
+   theme uses the site colours directly. The light theme keeps the same hues
+   with a darker orange so accent text and white-on-accent stay at 4.5:1 or
+   more. The CSP allows no font downloads, so only installed fonts are used. */
 :root {
-  --bg: #fbfaf8;
-  --panel: #f4f3f0;
-  --rail: #ebe9e5;
-  --line: #e3e0da;
-  --ink: #1d1c1a;
-  --ink2: #5a574f;
-  --ink3: #76726a;
-  --accent: #1d7a5a;
-  --accent-soft: #ddefe6;
+  --bg: #f8f7f3;
+  --panel: #efeee8;
+  --rail: #e6e5de;
+  --line: #d9d8d0;
+  --ink: #151616;
+  --ink2: #53574b;
+  --ink3: #626558;
+  --accent: #a8461a;
+  --accent-soft: #fbe4d7;
   --accent-ink: #ffffff;
-  --hover: #eceae5;
+  --hover: #e8e7e0;
   --card: #ffffff;
-  --sel: #e3e1db;
+  --sel: #e0dfd7;
   --enc-bg: #ddefe6;
   --enc-fg: #1d7a5a;
   --warn-bg: #fdecea;
@@ -31,11 +34,12 @@
   --ok: #4fc89b;
   --attention: #e5b454;
   --match: #f7e3a6;
-  --scrim: rgba(29, 28, 26, 0.38);
+  --scrim: rgba(21, 22, 22, 0.42);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-modal: 0 24px 80px rgba(0, 0, 0, 0.25);
-  --font: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --mono: 'Geist Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Consolas, monospace;
+  --radius: 4px;
+  --font: Arial, Helvetica, 'Liberation Sans', sans-serif;
+  --mono: Consolas, 'Cascadia Mono', 'SF Mono', 'Liberation Mono', 'Courier New', monospace;
 
   color: var(--ink);
   background: var(--bg);
@@ -48,25 +52,31 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #17181a;
-    --panel: #1d1e21;
-    --rail: #121315;
-    --line: #2b2d31;
-    --ink: #ecebe7;
-    --ink2: #a9a69f;
-    --ink3: #8d8a83;
-    --accent: #4fc89b;
-    --accent-soft: #1d3a2f;
-    --accent-ink: #0e1a14;
-    --hover: #25272b;
-    --card: #212327;
-    --sel: #2c2e33;
+    --bg: #151616;
+    --panel: #1b1c1b;
+    --rail: #111211;
+    --line: #343632;
+    --ink: #efeee8;
+    --ink2: #a6a8a0;
+    --ink3: #94978d;
+    --accent: #ff8954;
+    --accent-soft: #392a21;
+    --accent-ink: #191a17;
+    --hover: #242522;
+    --card: #1f201e;
+    --sel: #2b2c29;
     --enc-bg: #1d3a2f;
     --enc-fg: #4fc89b;
     --warn-bg: #3a1a18;
     --warn-ink: #ffb4ab;
     --danger-text: #ff6b5e;
+    --scrim: rgba(0, 0, 0, 0.55);
   }
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 
 * {
@@ -168,7 +178,7 @@ button:disabled {
   height: 38px;
   padding: 0 16px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: var(--radius);
   font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
@@ -209,7 +219,7 @@ button:disabled {
 .wide {
   width: 100%;
   height: 44px;
-  border-radius: 10px;
+  border-radius: var(--radius);
 }
 
 .link {
@@ -230,7 +240,7 @@ button:disabled {
   height: 34px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink2);
 }
@@ -249,7 +259,7 @@ kbd {
   flex: none;
   padding: 1px 5px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius);
   color: var(--ink3);
   font-family: var(--mono);
   font-size: 11px;
@@ -308,7 +318,7 @@ kbd {
   place-items: center;
   width: 18px;
   height: 18px;
-  border-radius: 5px;
+  border-radius: var(--radius);
 }
 
 .enc-icon svg {
@@ -365,7 +375,7 @@ kbd {
 .enc-icon.large {
   width: 30px;
   height: 30px;
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 
 .enc-icon.large svg {
@@ -398,7 +408,7 @@ kbd {
   max-width: min(22rem, calc(100vw - 2rem));
   padding: 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-card);
   color: var(--ink);
@@ -470,7 +480,7 @@ kbd {
   height: 36px;
   padding: 0 8px 0 10px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius);
   background: var(--bg);
   color: var(--ink3);
   font-size: 13.5px;
@@ -511,7 +521,7 @@ kbd {
   height: 32px;
   padding: 0 8px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink2);
   font-size: 14px;
@@ -554,7 +564,7 @@ kbd {
   min-width: 20px;
   height: 18px;
   padding: 0 6px;
-  border-radius: 9px;
+  border-radius: var(--radius);
   background: var(--line);
   color: var(--ink);
   font-size: 11px;
@@ -574,7 +584,7 @@ kbd {
   margin: 0 12px 12px;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--card);
   font-size: 13px;
   line-height: 1.4;
@@ -706,7 +716,7 @@ kbd {
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-left: 3px solid var(--danger);
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 
 .identity-changes h3 {
@@ -779,7 +789,7 @@ kbd {
   margin: 4px 0 8px;
   padding: 4px 12px;
   border: 1px solid var(--line);
-  border-radius: 13px;
+  border-radius: var(--radius);
   background: var(--card);
   color: var(--ink2);
   font-size: 12.5px;
@@ -800,7 +810,7 @@ kbd {
   grid-template-columns: 36px minmax(0, 1fr);
   column-gap: 12px;
   padding: 6px 8px;
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 
 .message:hover {
@@ -938,7 +948,7 @@ kbd {
   height: 26px;
   padding: 0 10px;
   border: 1px solid var(--line);
-  border-radius: 13px;
+  border-radius: var(--radius);
   background: var(--card);
   font-size: 12.5px;
 }
@@ -951,7 +961,7 @@ kbd {
   margin: 0 20px 10px;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-card);
   font-size: 13.5px;
@@ -970,7 +980,7 @@ kbd {
   padding: 9px 12px;
   border: 1.5px solid var(--danger);
   border-bottom: none;
-  border-radius: 12px 12px 0 0;
+  border-radius: var(--radius) var(--radius) 0 0;
   background: var(--warn-bg);
   color: var(--warn-ink);
   font-size: 13px;
@@ -1003,14 +1013,14 @@ kbd {
   min-height: 48px;
   padding: 6px 8px 6px 12px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-card);
 }
 
 .composer.plain .composer-box {
   border: 1.5px solid var(--danger);
-  border-radius: 0 0 12px 12px;
+  border-radius: 0 0 var(--radius) var(--radius);
 }
 
 .composer-box:focus-within {
@@ -1070,7 +1080,7 @@ kbd {
   height: 32px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--accent);
   color: var(--accent-ink);
 }
@@ -1099,7 +1109,7 @@ kbd {
   max-width: 28rem;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--card);
 }
 
@@ -1109,7 +1119,7 @@ kbd {
   place-items: center;
   width: 36px;
   height: 36px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -1162,7 +1172,7 @@ kbd {
 .attachment button {
   height: 30px;
   padding: 0 12px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-size: 13px;
 }
 
@@ -1190,7 +1200,7 @@ kbd {
   height: auto;
   max-height: 420px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
 }
 
 .image-frame.preview .image-canvas {
@@ -1205,7 +1215,7 @@ kbd {
   margin-bottom: 8px;
   padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--card);
 }
 
@@ -1244,7 +1254,7 @@ kbd {
   height: 32px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink2);
 }
@@ -1286,7 +1296,7 @@ kbd {
   width: min(100%, 400px);
   padding: 36px;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-card);
 }
@@ -1344,7 +1354,7 @@ kbd {
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--panel);
 }
 
@@ -1374,7 +1384,7 @@ kbd {
   height: 42px;
   padding: 0 12px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius);
   outline: none;
   background: var(--bg);
   font-size: 14px;
@@ -1389,7 +1399,7 @@ kbd {
 dialog {
   padding: 0;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-modal);
   color: var(--ink);
@@ -1425,7 +1435,7 @@ dialog::backdrop {
   gap: 4px 12px;
   padding: 14px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius);
   cursor: pointer;
 }
 
@@ -1515,7 +1525,7 @@ dialog::backdrop {
   gap: 10px;
   height: 40px;
   padding: 0 10px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   cursor: pointer;
   font-size: 14px;
 }
@@ -1547,7 +1557,7 @@ dialog::backdrop {
 }
 
 mark {
-  border-radius: 3px;
+  border-radius: var(--radius);
   background: var(--match);
   color: #1d1c1a;
 }
@@ -1618,7 +1628,7 @@ mark {
   width: min(100%, 560px);
   padding: 36px;
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-card);
 }
@@ -1650,7 +1660,7 @@ mark {
   align-items: center;
   gap: 6px;
   padding: 12px 4px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: var(--panel);
   color: var(--ink2);
   font-size: 11.5px;
@@ -1692,7 +1702,7 @@ mark {
   height: 32px;
   padding: 0 8px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink2);
   font-size: 13.5px;
@@ -1769,7 +1779,7 @@ mark {
   gap: 4px;
   padding: 16px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--card);
 }
 
@@ -1809,7 +1819,7 @@ mark {
   gap: 12px;
   padding: 20px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius);
   background: var(--card);
   color: var(--ink2);
   font-size: 14px;
