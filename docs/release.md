@@ -145,7 +145,10 @@ notes name the commit and the workflow run.
   approval and never reads a signing secret.
 - The concurrency group runs main builds one at a time and keeps only the
   newest waiting run. The newest merge is therefore published last, but a
-  merge that was superseded while it waited is never published.
+  merge that was superseded while it waited is never published. Manual dry
+  runs use a separate group, so they never replace a waiting main build.
+- The `latest` job publishes only if the run's commit is still the tip of
+  `main`. A re-run of an older main build therefore leaves `latest` as it is.
 - Between the delete and the new release there is no `latest` release for a
   short time. A failed run before the `latest` job leaves the previous build
   in place. A failure inside the `latest` job can leave no `latest` release

@@ -40,8 +40,10 @@ on:
 permissions:
   contents: read
 
+# The event name keeps a manual dry run on main from replacing a waiting main
+# build, which would then never be published.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -1196,9 +1198,15 @@ jobs:
           cat notes.md
 
       # Deleting first leaves no release for a short time, but never a release
-      # that mixes files from two builds.
+      # that mixes files from two builds. A re-run of an older main build keeps
+      # its old commit, so publish only while that commit is still main's tip.
       - name: Replace the latest pre-release
         run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice::main is at $tip, not $GITHUB_SHA; latest is not replaced"
+            exit 0
+          fi
           if gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release delete latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
           fi
