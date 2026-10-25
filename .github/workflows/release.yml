@@ -9,6 +9,9 @@
 # - workflow_dispatch is a dry run. Signing, cosign, GPG and attestations are
 #   skipped, every artifact name ends in `-unsigned`, and no release is made.
 #   SHA256SUMS and the SBOM are still produced.
+# - A push to main (every merged pull request) builds as a dry run does, and
+#   the `latest` job then replaces the rolling `latest` pre-release and tag
+#   with that build. These files are unsigned and have no attestations.
 #
 # Signing secrets live in the `release` environment, which only tag runs use
 # (see docs/release.md). A job that compiles or runs dependency code (cargo
@@ -30,15 +33,21 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Runs of one group run one at a time. `queue: max` keeps every waiting run
+# instead of only the newest, so a re-run of an older main build cannot cancel
+# a newer one. The event name keeps manual dry runs out of the main builds'
+# queue. The latest job's tip check makes only the newest main build publish.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
+  queue: max
 
 env:
   RUST_TOOLCHAIN: "1.99.1"
@@ -58,7 +67,7 @@ env:
   npm_config_cache: ${{ github.workspace }}/.local/cache/npm
   PERSEPHONE_MEDIA_GUEST: ${{ github.workspace }}/.local/build/rust/wasm32-unknown-unknown/release/persephone_media_decoder.wasm
   # Empty on a tag; "-unsigned" on a dry run.
-  SUFFIX: ${{ github.event_name != 'push' && '-unsigned' || '' }}
+  SUFFIX: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') && '-unsigned' || '' }}
 
 jobs:
   # The same check as check.yml plus the dependency audit, the tag/version
@@ -78,7 +87,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Check that the tag matches every version
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         run: python tools/release.py check-tag "$GITHUB_REF_NAME"
 
       - name: Read the version
@@ -138,10 +147,10 @@ jobs:
   preflight:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    environment: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'release' || '' }}
     steps:
       - name: Require every signing secret
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -167,8 +176,8 @@ jobs:
           exit "$missing"
 
       - name: Dry run
-        if: github.event_name != 'push'
-        run: echo "Dry run (workflow_dispatch). Signing is skipped and artifact names end in -unsigned."
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}
+        run: echo "Unsigned build ($GITHUB_EVENT_NAME on $GITHUB_REF). Signing is skipped and artifact names end in -unsigned."
 
   # Windows runs in five jobs so that no job that builds or bundles has a
   # secret: build (no secrets) -> sign the executables -> bundle (no secrets)
@@ -267,7 +276,7 @@ jobs:
   # Signs the three executables before the bundler packs them. This job
   # builds nothing: it runs tools/sign_windows.ps1, which runs signtool.
   windows-sign-binaries:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [windows-build]
     runs-on: windows-latest
     timeout-minutes: 30
@@ -313,8 +322,10 @@ jobs:
     needs: [windows-build, windows-sign-binaries]
     if: >-
       ${{ !cancelled() && needs.windows-build.result == 'success' &&
-      ((github.event_name == 'push' && needs.windows-sign-binaries.result == 'success') ||
-      (github.event_name != 'push' && needs.windows-sign-binaries.result == 'skipped')) }}
+      ((github.event_name == 'push' && github.ref_type == 'tag' &&
+      needs.windows-sign-binaries.result == 'success') ||
+      (!(github.event_name == 'push' && github.ref_type == 'tag') &&
+      needs.windows-sign-binaries.result == 'skipped')) }}
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -346,7 +357,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: ${{ github.event_name == 'push' && 'stage-windows-exes-signed' || 'stage-windows-exes-unsigned' }}
+          name: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'stage-windows-exes-signed' || 'stage-windows-exes-unsigned' }}
           path: ${{ runner.temp }}/exes
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -403,17 +414,17 @@ jobs:
       # uploads them as the final, unsigned Windows artifact.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ github.event_name == 'push' && 'stage-windows-installers-unsigned' || format('persephone-windows-x64{0}', env.SUFFIX) }}
+          name: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'stage-windows-installers-unsigned' || format('persephone-windows-x64{0}', env.SUFFIX) }}
           path: ${{ runner.temp }}/out/
           if-no-files-found: error
           # 0 is the repository's default retention.
-          retention-days: ${{ github.event_name == 'push' && 1 || 0 }}
+          retention-days: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 1 || 0 }}
 
   # Signs the NSIS and MSI installers and checks their own signatures. It
   # does not open them: extracting an MSI with msiexec runs the MSI's own
   # actions, so windows-verify does that without secrets.
   windows-sign-installers:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [windows-bundle]
     runs-on: windows-latest
     timeout-minutes: 30
@@ -457,7 +468,7 @@ jobs:
   # certificate passes with signature=self-signed; any other failure fails.
   # This job has no secrets.
   windows-verify:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [windows-sign-binaries, windows-sign-installers]
     runs-on: windows-latest
     timeout-minutes: 30
@@ -729,7 +740,7 @@ jobs:
 
       # The same disk image layout as macos-sign, unsigned.
       - name: Build the unsigned disk image (dry run)
-        if: github.event_name != 'push'
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}
         run: |
           app=".local/build/rust/$TRIPLE/release/bundle/macos/Persephone.app"
           out="$RUNNER_TEMP/out"
@@ -742,7 +753,7 @@ jobs:
           ls -l "$out"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: github.event_name != 'push'
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}
         with:
           name: persephone-macos-universal${{ env.SUFFIX }}
           path: ${{ runner.temp }}/out/
@@ -752,7 +763,7 @@ jobs:
   # staples the disk image. This job builds nothing and does not check out
   # the repository: it runs only the download action and the OS tools.
   macos-sign:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [gate, macos-build]
     runs-on: macos-latest
     timeout-minutes: 120
@@ -911,17 +922,19 @@ jobs:
 
   # Checksums, SBOM, signatures and attestations over every release file. It
   # follows the final job of each platform: windows-verify and macos-sign on a
-  # tag, windows-bundle and macos-build on a dry run.
+  # tag, windows-bundle and macos-build on a dry run or a main build.
   checksums:
     needs: [gate, linux, windows-bundle, windows-verify, macos-build, macos-sign]
     if: >-
       ${{ !cancelled() && needs.gate.result == 'success' && needs.linux.result == 'success' &&
       needs.windows-bundle.result == 'success' && needs.macos-build.result == 'success' &&
-      ((github.event_name == 'push' && needs.windows-verify.result == 'success' && needs.macos-sign.result == 'success') ||
-      (github.event_name != 'push' && needs.windows-verify.result == 'skipped' && needs.macos-sign.result == 'skipped')) }}
+      ((github.event_name == 'push' && github.ref_type == 'tag' &&
+      needs.windows-verify.result == 'success' && needs.macos-sign.result == 'success') ||
+      (!(github.event_name == 'push' && github.ref_type == 'tag') &&
+      needs.windows-verify.result == 'skipped' && needs.macos-sign.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    environment: ${{ github.event_name == 'push' && github.ref_type == 'tag' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write # cosign keyless signing and attestations
@@ -1013,12 +1026,12 @@ jobs:
           cat SHA256SUMS
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Sign SHA256SUMS with cosign (keyless)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         working-directory: dist
         run: |
           cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
@@ -1028,7 +1041,7 @@ jobs:
 
       - name: Sign SHA256SUMS with GPG
         id: gpg
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         working-directory: dist
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
@@ -1051,7 +1064,7 @@ jobs:
           rm -rf "$RUNNER_TEMP/gnupg"
 
       - name: Attest build provenance
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS
@@ -1063,9 +1076,9 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # The only job that can write to the repository. Tag runs only.
+  # With latest, the only jobs that can write to the repository. Tag runs only.
   release:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [gate, windows-sign-binaries, windows-verify, checksums]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1144,3 +1157,65 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
             --draft --prerelease --title "Persephone $VERSION" --notes-file notes.md
+
+  # Replaces the rolling `latest` pre-release and tag with this main build.
+  # Main runs only. The files are the unsigned dry-run files; no job of a main
+  # run uses the `release` environment or its secrets. The concurrency group
+  # runs main builds one at a time, so the newest merge is published last.
+  latest:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [gate, checksums]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files-unsigned
+          path: dist
+
+      - name: Write the release notes
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          cat > notes.md <<EOF
+          **Development build. Unsigned. Not for high-risk use.** This is the
+          newest build of \`main\`, replaced after every merge. It is not a
+          release. Persephone has open feasibility and production security gates.
+
+          - Commit: \`$GITHUB_SHA\` (version $VERSION)
+          - Workflow run: $run_url
+
+          The Windows and macOS files are not signed or notarized, and no file
+          has a build-provenance attestation. Windows and macOS will warn about
+          them or refuse to open them. \`SHA256SUMS\` is not signed: it shows that
+          a download is complete, not who made it. For signed files, use a
+          versioned release.
+
+          File names change with the version, so link to this page, not to a file.
+          See docs/release.md in the repository for details.
+          EOF
+          cat notes.md
+
+      # Deleting first leaves no release for a short time, but never a release
+      # that mixes files from two builds. A re-run of an older main build keeps
+      # its old commit, so publish only while that commit is still main's tip.
+      - name: Replace the latest pre-release
+        run: |
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice::main is at $tip, not $GITHUB_SHA; latest is not replaced"
+            exit 0
+          fi
+          if gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release delete latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/latest" > /dev/null 2>&1; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/latest"
+          fi
+          gh release create latest dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --prerelease --latest=false --title "Persephone latest ($VERSION, ${GITHUB_SHA:0:7})" \
+            --notes-file notes.md
