@@ -1,6 +1,6 @@
 [package]
 name = "persephone-media-broker"
-version = "0.0.0"
+version = "0.0.1"
 description = "Launches the media worker under OS containment and enforces its deadline and resource limits"
 edition.workspace = true
 license.workspace = true
