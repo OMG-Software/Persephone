@@ -137,7 +137,7 @@
 
   // Fixed text per store state; the core sends codes only.
   const storeText: Record<StoreState, string> = {
-    not_configured: 'No local profile: nothing is stored',
+    not_configured: 'Demo rooms with synthetic data: nothing is stored',
     protected: 'Local store protected',
     locked: 'Local store locked',
     locking: 'Locking: work in progress is finishing',

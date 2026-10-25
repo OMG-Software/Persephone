@@ -19,11 +19,13 @@
 //! thread.
 //!
 //! Options:
+//! * No option opens (or creates) the default profile (ADR-0013,
+//!   [`store::default_dir`]). If the OS gives no directory for it, the window
+//!   starts `store_unavailable`; nothing falls back to synthetic data.
 //! * `--profile <dir>` opens (or creates) the encrypted profile in `<dir>`.
-//!   Without it nothing is stored.
-//! * `--demo-live` posts a synthetic message to the planning room every few
-//!   seconds, standing in for incoming Matrix events until the SDK is
-//!   integrated.
+//! * `--demo` serves synthetic rooms instead of a profile. Nothing is stored.
+//! * `--demo-live`, only with `--demo`, posts a synthetic message to the
+//!   planning room every few seconds.
 
 // Release builds are GUI-subsystem binaries with no console window; stderr
 // diagnostics then go nowhere unless the parent redirects them.
@@ -36,6 +38,7 @@ use persephone_core::{
     passphrase::Unlock,
     serve,
     session::Session,
+    store,
     ui_host::{self, StartedUi, UiHost, UiTree},
     vault,
 };
@@ -77,9 +80,11 @@ enum Verdict {
     Close,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct Options {
+    /// The profile to open; `None` means the default one, unless `demo`.
     profile: Option<PathBuf>,
+    demo: bool,
     demo_live: bool,
 }
 
@@ -87,6 +92,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Options, String> {
     let mut options = Options::default();
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--demo") => options.demo = true,
             Some("--demo-live") => options.demo_live = true,
             Some("--profile") if options.profile.is_none() => {
                 let dir = args.next().ok_or("--profile needs a directory")?;
@@ -95,6 +101,12 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Options, String> {
             _ => return Err(format!("unexpected argument {}", arg.to_string_lossy())),
         }
     }
+    if options.demo && options.profile.is_some() {
+        return Err("--demo and --profile cannot be used together".into());
+    }
+    if options.demo_live && !options.demo {
+        return Err("--demo-live needs --demo".into());
+    }
     Ok(options)
 }
 
@@ -102,7 +114,9 @@ fn main() -> ExitCode {
     let options = match parse(env::args_os().skip(1)) {
         Ok(options) => options,
         Err(error) => {
-            eprintln!("persephone: {error}\nusage: persephone [--profile <dir>] [--demo-live]");
+            eprintln!(
+                "persephone: {error}\nusage: persephone [--profile <dir> | --demo [--demo-live]]"
+            );
             return ExitCode::from(2);
         }
     };
@@ -142,10 +156,14 @@ fn run(options: Options) -> ExitCode {
         None => source,
     };
     // The passphrase is asked here, in the core's own window, before the UI
-    // starts (ADR-0006).
-    let session = match options.profile {
-        Some(dir) => Session::open(dir, vault::platform(), Unlock::new(source.clone())),
-        None => Session::not_configured(),
+    // starts (ADR-0006). Synthetic data only when asked for (ADR-0013).
+    let session = if options.demo {
+        Session::not_configured()
+    } else {
+        match options.profile.or_else(store::default_dir) {
+            Some(dir) => Session::open(dir, vault::platform(), Unlock::new(source.clone())),
+            None => Session::unavailable(),
+        }
     };
     let state = session.state();
     if !matches!(state, StoreState::Protected | StoreState::NotConfigured) {
@@ -288,6 +306,70 @@ fn demo(core: &Core) {
             "@demo:example.invalid",
             format!("Live demo message {n}"),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Options, parse};
+    use std::{ffi::OsString, path::PathBuf};
+
+    fn parsed(args: &[&str]) -> Result<Options, String> {
+        parse(args.iter().map(OsString::from))
+    }
+
+    /// GIVEN no option THEN the default profile is opened (no profile path,
+    /// no demo); GIVEN `--profile` THEN that directory.
+    #[test]
+    fn given_no_option_or_a_profile_then_a_real_profile_is_opened() {
+        assert_eq!(parsed(&[]), Ok(Options::default()));
+        assert_eq!(
+            parsed(&["--profile", "dir"]),
+            Ok(Options {
+                profile: Some(PathBuf::from("dir")),
+                ..Options::default()
+            })
+        );
+    }
+
+    /// GIVEN `--demo`, with or without `--demo-live`, THEN synthetic rooms
+    /// are served and no profile is named.
+    #[test]
+    fn given_demo_then_synthetic_rooms_are_served() {
+        let demo = Options {
+            demo: true,
+            ..Options::default()
+        };
+        assert_eq!(parsed(&["--demo"]), Ok(demo));
+        for args in [&["--demo", "--demo-live"][..], &["--demo-live", "--demo"]] {
+            assert_eq!(
+                parsed(args),
+                Ok(Options {
+                    demo: true,
+                    demo_live: true,
+                    ..Options::default()
+                }),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// GIVEN demo options mixed with a profile, `--demo-live` alone, a second
+    /// profile, a missing directory or an unknown option THEN parsing fails.
+    #[test]
+    fn given_conflicting_or_unknown_options_then_parsing_fails() {
+        for args in [
+            &["--demo", "--profile", "dir"][..],
+            &["--profile", "dir", "--demo"],
+            &["--demo-live"],
+            &["--profile", "dir", "--demo-live"],
+            &["--profile", "a", "--profile", "b"],
+            &["--profile"],
+            &["--Demo"],
+            &["dir"],
+        ] {
+            assert!(parsed(args).is_err(), "{args:?}");
+        }
     }
 }
 

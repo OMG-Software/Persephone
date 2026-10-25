@@ -27,7 +27,9 @@ has a GitHub build-provenance attestation.
 Each bundle installs `persephone` (the core), `persephone-ui` and
 `persephone-media-worker` side by side. `persephone-ui` is the bundle's main
 binary; the core and worker are Tauri sidecars. Each bundle also contains
-`LICENSE.txt` and `THIRD-PARTY-NOTICES.txt`.
+`LICENSE.txt` and `THIRD-PARTY-NOTICES.txt`. The installed app keeps its
+encrypted profile in the default profile folder (ADR-0013), outside both the
+install directory and the web view's data folder.
 
 ### Jobs
 
@@ -68,8 +70,9 @@ binary; the core and worker are Tauri sidecars. Each bundle also contains
 6. `checksums`: SBOM, `SHA256SUMS`, cosign and GPG signatures, attestations.
    It downloads each platform's artifact by name and accepts only that
    platform's file types.
-7. `release`: on a tag only, `gh release create --draft --prerelease`. This is
-   the only job with `contents: write`.
+7. `release`: on a tag only, `gh release create --draft --prerelease`.
+8. `latest`: on a push to `main` only, see [Latest builds](#latest-builds).
+   `release` and `latest` are the only jobs with `contents: write`.
 
 #### Which jobs have secrets
 
@@ -126,6 +129,39 @@ creates no release. `windows-bundle` then packs the unsigned executables, and
 `macos-sign`. Every artifact name ends in `-unsigned`. `SHA256SUMS` and the
 SBOM are still produced. A dry run needs no secrets.
 
+A tag run is a push of a `v*` tag. A `workflow_dispatch` run is always a dry
+run, also when it is started from a tag.
+
+### Latest builds
+
+Every push to `main` (each merged pull request; see
+[Branch protection](#branch-protection)) builds the same unsigned files as a
+dry run. The `latest` job then deletes the `latest` pre-release and its tag
+and creates them again at the pushed commit, with that build's files. Its
+notes name the commit and the workflow run.
+
+- The files are not signed or notarized and have no attestations. Windows and
+  macOS warn about them or refuse to open them. `SHA256SUMS` is not signed, so
+  it detects an incomplete download, not a changed file.
+- No main run uses the `release` environment, so a merge never asks for
+  approval and never reads a signing secret.
+- The concurrency group runs main builds one at a time. With `queue: max`,
+  every waiting run stays in the queue (up to 100), so no main build is
+  cancelled, including by a re-run of an older one. Manual dry runs use a
+  separate group.
+- The `latest` job publishes only if the run's commit is still the tip of
+  `main`. A build that a newer merge overtook, or a re-run of an older build,
+  therefore leaves `latest` as it is. Each merge is still built in full, so a
+  quick series of merges costs one full build each.
+- Between the delete and the new release there is no `latest` release for a
+  short time. A failed run before the `latest` job leaves the previous build
+  in place. A failure inside the `latest` job can leave no `latest` release
+  until the next merge.
+- File names contain the version and `-unsigned`, so link to
+  `releases/tag/latest`, not to a file.
+- The release is a pre-release, so GitHub never shows it as the latest
+  release.
+
 The release-only Tauri settings (`bundle.active`, sidecars, bundled licence
 files) come from
 `python tools/release.py bundle-config`, which the workflow merges with
@@ -144,8 +180,8 @@ Do these once. Claude and other agents never handle these keys or secrets.
 Create a GitHub environment named `release` (Settings, Environments). Add the
 secrets below as **environment secrets** of `release`, not repository secrets.
 Tag runs use this environment for the `preflight`, `windows-sign-binaries`,
-`windows-sign-installers`, `macos-sign` and `checksums` jobs; dry runs do not
-use it.
+`windows-sign-installers`, `macos-sign` and `checksums` jobs; dry runs and
+main builds do not use it.
 
 Recommended protection:
 
@@ -154,6 +190,19 @@ Recommended protection:
   asks for approval when it starts.
 - **Deployment branches and tags**: allow only tags that match `v*`.
 - Protect `v*` tags with a tag ruleset, so only maintainers can push them.
+
+### Branch protection
+
+The repository ruleset `Protect main` applies to the default branch with no
+bypass actors, so it binds administrators too. It requires a pull request for
+every change (no approving review is required), and it blocks force pushes and
+deletion of the branch. It requires no status checks.
+
+Check it with:
+
+```sh
+gh api repos/OMG-Software/Persephone/rules/branches/main
+```
 
 ### Secrets
 

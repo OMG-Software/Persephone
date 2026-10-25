@@ -1,8 +1,9 @@
-//! The Linux platform layer (ADR-0010). Implemented: reading a picked image
-//! file (the shared Unix read rules) and the contained media worker (seccomp,
-//! checked by the broker before any input). Not implemented yet, and failing
-//! closed: the vault (the profile stays locked), the prompts and the file
-//! dialog (refused), and the UI host (the UI is not started).
+//! The Linux platform layer (ADR-0010). Implemented: the default profile
+//! directory, reading a picked image file (the shared Unix read rules) and
+//! the contained media worker (seccomp, checked by the broker before any
+//! input). Not implemented yet, and failing closed: the vault (the profile
+//! stays locked), the prompts and the file dialog (refused), and the UI host
+//! (the UI is not started).
 
 use crate::{
     credentials::{self, CredentialSource},
@@ -13,7 +14,27 @@ use crate::{
 };
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::ResourceBudgets;
-use std::{path::Path, sync::Arc};
+use std::{
+    env,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+/// The default profile (ADR-0013): `persephone/profile` under the XDG data
+/// directory.
+pub(crate) fn default_profile_dir() -> Option<PathBuf> {
+    data_home(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
+        .map(|base| base.join("persephone").join("profile"))
+}
+
+/// `$XDG_DATA_HOME`, else `$HOME/.local/share`. The XDG Base Directory rules
+/// ignore a relative `XDG_DATA_HOME`; a missing or relative `HOME` gives
+/// `None`.
+fn data_home(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    super::unix::absolute(xdg_data_home)
+        .or_else(|| super::unix::absolute(home).map(|home| home.join(".local").join("share")))
+}
 
 /// Plan "Linux", Vault: a Secret Service item holding the wrapping secret.
 pub(crate) fn key_protector() -> Arc<dyn KeyProtector> {
@@ -50,4 +71,34 @@ pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {
 /// Plan "Linux", UI launch: a systemd user scope with `MemoryMax`.
 pub(crate) fn ui_host() -> Box<dyn UiHost> {
     Box::new(ui_host::Unsupported)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+        data_home(xdg.map(OsString::from), home.map(OsString::from))
+    }
+
+    /// GIVEN an absolute XDG_DATA_HOME THEN it is used; GIVEN a missing,
+    /// empty or relative one THEN `$HOME/.local/share` is used; GIVEN no
+    /// usable HOME either THEN there is no default.
+    #[test]
+    fn given_xdg_and_home_values_then_the_data_directory_follows_the_xdg_rules() {
+        assert_eq!(
+            data(Some("/xdg"), Some("/home/a")),
+            Some(PathBuf::from("/xdg"))
+        );
+        for xdg in [None, Some(""), Some("relative/xdg")] {
+            assert_eq!(
+                data(xdg, Some("/home/a")),
+                Some(PathBuf::from("/home/a/.local/share")),
+                "{xdg:?}"
+            );
+        }
+        for home in [None, Some(""), Some("home/a")] {
+            assert_eq!(data(None, home), None, "{home:?}");
+        }
+    }
 }

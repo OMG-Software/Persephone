@@ -66,21 +66,30 @@ impl Flow {
 
     /// Advances the steps that need no decision.
     pub async fn drive(&mut self) {
-        if self.sas.is_none() {
-            match self.request.state() {
-                VerificationRequestState::Ready { .. } if self.request.we_started() => {
-                    if let Ok(Some(sas)) = self.request.start_sas().await {
-                        self.sas = Some(sas);
-                    }
+        match self.request.state() {
+            VerificationRequestState::Ready { .. }
+                if self.sas.is_none() && self.request.we_started() =>
+            {
+                if let Ok(Some(sas)) = self.request.start_sas().await {
+                    self.sas = Some(sas);
                 }
-                VerificationRequestState::Transitioned { verification } => {
-                    self.sas = verification.sas();
-                }
-                _ => {}
             }
+            // Follow the comparison the request runs now, not the first one
+            // seen: when both devices start at once, the SDK keeps the start
+            // of the lexicographically smaller user or device and replaces
+            // ours with it.
+            VerificationRequestState::Transitioned { verification } => {
+                if let Some(sas) = verification.sas() {
+                    self.sas = Some(sas);
+                }
+            }
+            _ => {}
         }
+        // `Started` is a comparison the other device proposed that nothing
+        // has accepted yet; a start of ours is `Created`. The SDK's
+        // `we_started` names who sent the request, not who started the
+        // comparison, so it cannot tell these apart.
         if let Some(sas) = &self.sas
-            && !sas.we_started()
             && matches!(sas.state(), SasState::Started { .. })
         {
             let _ = sas.accept().await;

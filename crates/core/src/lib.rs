@@ -15,9 +15,10 @@
 //! before the UI reads has one pending notification. Pending state is
 //! therefore bounded by the number of subscriptions, whatever the UI's speed.
 //!
-//! Views come from one of four sources: synthetic fixtures when no profile was
-//! given; nothing while the session is locked; an empty list while signed out;
-//! and the signed-in Matrix client otherwise.
+//! Views come from one of four sources: synthetic fixtures when the core runs
+//! with `--demo` (an unconfigured session); nothing while the session is
+//! locked or its profile is unavailable; an empty list while signed out; and
+//! the signed-in Matrix client otherwise.
 //!
 //! Most calls are answered in turn by the request loop. Two can take long and
 //! run on their own thread, so the loop keeps serving: `load_image` (download

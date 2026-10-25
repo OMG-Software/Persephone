@@ -303,6 +303,8 @@ impl Shared {
 
 pub struct Session {
     profile: Option<PathBuf>,
+    /// False only for [`Session::not_configured`], the synthetic views.
+    configured: bool,
     protector: Arc<dyn KeyProtector>,
     unlock: Unlock,
     shared: Arc<Shared>,
@@ -925,6 +927,19 @@ impl Session {
         )
     }
 
+    /// A session whose profile directory could not be found. It stays
+    /// `store_unavailable`: nothing can unlock, and the views stay locked
+    /// instead of showing synthetic data.
+    pub fn unavailable() -> Self {
+        Self::with_state(
+            None,
+            Arc::new(crate::vault::Unsupported),
+            Unlock::new(Arc::new(crate::credentials::Unsupported)),
+            StoreState::StoreUnavailable,
+            None,
+        )
+    }
+
     /// Opens the profile in `dir`, asking for its passphrase (or a new one)
     /// through `unlock` before returning; on failure the session starts locked
     /// with the reason as its state. A saved account is restored by
@@ -951,6 +966,7 @@ impl Session {
     ) -> Self {
         Self {
             profile,
+            configured: state != StoreState::NotConfigured,
             protector,
             unlock,
             shared: Arc::new(Shared {
@@ -980,10 +996,10 @@ impl Session {
         guard(&self.shared.status).clone()
     }
 
-    /// Whether a profile was given at all. Without one, the core serves only
+    /// False only for [`Session::not_configured`]: the core then serves only
     /// synthetic data and there is nothing to protect.
     pub fn is_configured(&self) -> bool {
-        self.profile.is_some()
+        self.configured
     }
 
     pub fn set_listener(&self, listener: Arc<dyn SessionListener>) {
