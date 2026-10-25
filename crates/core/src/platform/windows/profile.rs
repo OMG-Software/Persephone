@@ -25,6 +25,8 @@ pub fn default_dir() -> Option<PathBuf> {
 }
 
 fn local_app_data() -> Option<PathBuf> {
+    // COM for the known-folder lookup; released after the path is freed.
+    let _apartment = super::Apartment::enter();
     let mut path: PWSTR = null_mut();
     // SAFETY: the GUID is a valid known folder, a null token means the
     // current user, and `path` receives a CoTaskMemAlloc string that is freed

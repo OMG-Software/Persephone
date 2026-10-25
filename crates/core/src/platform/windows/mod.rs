@@ -19,6 +19,36 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use windows_sys::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+};
+
+/// COM on the calling thread, for shell calls, until dropped. A thread whose
+/// COM is already set up in another model (`RPC_E_CHANGED_MODE`) keeps it, and
+/// nothing is released.
+pub(crate) struct Apartment(bool);
+
+impl Apartment {
+    pub(crate) fn enter() -> Self {
+        // SAFETY: no reserved argument; balanced by `drop` on success.
+        let result = unsafe {
+            CoInitializeEx(
+                std::ptr::null(),
+                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+            )
+        };
+        Self(result >= 0)
+    }
+}
+
+impl Drop for Apartment {
+    fn drop(&mut self) {
+        if self.0 {
+            // SAFETY: pairs with the successful CoInitializeEx above.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
 
 pub(crate) fn default_profile_dir() -> Option<PathBuf> {
     profile::default_dir()

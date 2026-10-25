@@ -21,9 +21,6 @@ use windows_sys::Win32::{
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_SHARE_READ,
     },
-    System::Com::{
-        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
-    },
     UI::Controls::Dialogs::{
         CommDlgExtendedError, GetOpenFileNameW, OFN_DONTADDTORECENT, OFN_EXPLORER,
         OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_NODEREFERENCELINKS,
@@ -65,36 +62,12 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-/// COM for the dialog's shell views, on this thread only.
-struct Apartment(bool);
-
-impl Apartment {
-    fn enter() -> Self {
-        // SAFETY: no reserved argument; balanced by `drop` on success.
-        let result = unsafe {
-            CoInitializeEx(
-                std::ptr::null(),
-                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
-            )
-        };
-        Self(result >= 0)
-    }
-}
-
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        if self.0 {
-            // SAFETY: pairs with the successful CoInitializeEx above.
-            unsafe { CoUninitialize() };
-        }
-    }
-}
-
 pub struct NativeDialog;
 
 impl ImagePicker for NativeDialog {
     fn pick(&self) -> Result<Option<PathBuf>, ErrorCode> {
-        let _apartment = Apartment::enter();
+        // COM for the dialog's shell views.
+        let _apartment = super::Apartment::enter();
         let filter: Vec<u16> = "PNG or JPEG image\0*.png;*.jpg;*.jpeg\0\0"
             .encode_utf16()
             .collect();

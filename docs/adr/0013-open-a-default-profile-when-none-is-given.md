@@ -67,7 +67,9 @@ UI has no part in it, and it keeps the profile apart from installed files.
 
 ### Positive Consequences
 
-* Installed and directly started builds open a real profile and can sign in.
+* Installed and directly started builds open a real profile. On Windows and
+  macOS they can then sign in; Linux cannot until its vault and UI host exist
+  (ADR-0010).
 * The profile is not in the per-user install directory
   (`%LOCALAPPDATA%\Persephone` for the NSIS installer) or the web view's data
   folder (`%LOCALAPPDATA%\io.github.omg-software.persephone`).
