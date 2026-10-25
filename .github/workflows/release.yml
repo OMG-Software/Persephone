@@ -40,11 +40,14 @@ on:
 permissions:
   contents: read
 
-# The event name keeps a manual dry run on main from replacing a waiting main
-# build, which would then never be published.
+# Runs of one group run one at a time. `queue: max` keeps every waiting run
+# instead of only the newest, so a re-run of an older main build cannot cancel
+# a newer one. The event name keeps manual dry runs out of the main builds'
+# queue. The latest job's tip check makes only the newest main build publish.
 concurrency:
   group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
+  queue: max
 
 env:
   RUST_TOOLCHAIN: "1.99.1"

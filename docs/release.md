@@ -143,12 +143,14 @@ notes name the commit and the workflow run.
   it detects an incomplete download, not a changed file.
 - No main run uses the `release` environment, so a merge never asks for
   approval and never reads a signing secret.
-- The concurrency group runs main builds one at a time and keeps only the
-  newest waiting run. The newest merge is therefore published last, but a
-  merge that was superseded while it waited is never published. Manual dry
-  runs use a separate group, so they never replace a waiting main build.
+- The concurrency group runs main builds one at a time. With `queue: max`,
+  every waiting run stays in the queue (up to 100), so no main build is
+  cancelled, including by a re-run of an older one. Manual dry runs use a
+  separate group.
 - The `latest` job publishes only if the run's commit is still the tip of
-  `main`. A re-run of an older main build therefore leaves `latest` as it is.
+  `main`. A build that a newer merge overtook, or a re-run of an older build,
+  therefore leaves `latest` as it is. Each merge is still built in full, so a
+  quick series of merges costs one full build each.
 - Between the delete and the new release there is no `latest` release for a
   short time. A failed run before the `latest` job leaves the previous build
   in place. A failure inside the `latest` job can leave no `latest` release
