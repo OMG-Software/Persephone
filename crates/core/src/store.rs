@@ -48,9 +48,9 @@ use matrix_sdk_sqlite::{
 };
 use persephone_contracts::StoreState;
 use std::{
-    fs::{self, File, OpenOptions, TryLockError},
+    fs::{self, DirBuilder, File, OpenOptions, TryLockError},
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 use tokio::runtime::Runtime;
 use zeroize::Zeroizing;
@@ -428,9 +428,27 @@ fn open_error(error: OpenStoreError) -> StoreState {
     }
 }
 
+/// The profile opened when none is given (ADR-0013): a fixed folder under
+/// the OS's per-user local data directory. `None` when the OS gives no usable
+/// directory; the caller must then fail closed, not fall back to another
+/// location or to synthetic data.
+pub fn default_dir() -> Option<PathBuf> {
+    crate::platform::os::default_profile_dir()
+}
+
+/// Creates `dir` and its missing parents. On Unix the new directories are
+/// private to the user (0700); existing ones keep their mode.
+fn create_profile_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
+}
+
 /// Takes the profile's exclusive lock, creating the directory if needed.
 fn lock_profile(dir: &Path) -> Result<File, StoreState> {
-    fs::create_dir_all(dir).map_err(|_| StoreState::StoreUnavailable)?;
+    create_profile_dir(dir).map_err(|_| StoreState::StoreUnavailable)?;
     let lock = OpenOptions::new()
         .read(true)
         .write(true)

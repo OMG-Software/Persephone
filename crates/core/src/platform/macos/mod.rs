@@ -27,7 +27,24 @@ use crate::{
 };
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::ResourceBudgets;
-use std::{path::Path, sync::Arc};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+/// The default profile (ADR-0013):
+/// `~/Library/Application Support/OMG-Software/Persephone/profile`. A
+/// missing or relative `HOME` gives `None`.
+pub(crate) fn default_profile_dir() -> Option<PathBuf> {
+    super::unix::absolute(env::var_os("HOME")).map(|home| {
+        home.join("Library")
+            .join("Application Support")
+            .join("OMG-Software")
+            .join("Persephone")
+            .join("profile")
+    })
+}
 
 /// The store key's outer layer: the shared XChaCha20-Poly1305 wrap under a
 /// secret kept in the user's default keychain.

@@ -105,7 +105,8 @@ persephone-media-broker = { path = "../media-broker" }
 
 [target.'cfg(windows)'.dependencies]
 # Storage_FileSystem: the share mode and reparse-point flags for reading a
-# picked image; UI_Controls_Dialogs: the native file dialog (GetOpenFileNameW).
+# picked image; UI_Controls_Dialogs: the native file dialog (GetOpenFileNameW);
+# UI_Shell: the default profile's base folder (SHGetKnownFolderPath).
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
@@ -117,5 +118,6 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_System_JobObjects",
   "Win32_System_Threading",
   "Win32_UI_Controls_Dialogs",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

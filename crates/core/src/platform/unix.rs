@@ -7,8 +7,20 @@ use crate::vault::{KeyProtector, VaultError};
 use chacha20poly1305::{AeadInOut, Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Tag};
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::ResourceBudgets;
-use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{
+    ffi::OsString,
+    fs::OpenOptions,
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+};
 use zeroize::Zeroizing;
+
+/// The path in an environment value, only when it is absolute. A missing,
+/// empty or relative value gives `None`, so a default profile never resolves
+/// against the working directory.
+pub fn absolute(value: Option<OsString>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|path| path.is_absolute())
+}
 
 /// Reads a picked image file once, without writing it. The last path
 /// component must not be a symbolic link (`O_NOFOLLOW`), the open file must
@@ -148,6 +160,19 @@ impl<S: SecretStore> KeyProtector for Wrapped<S> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// GIVEN environment values WHEN read as a base directory THEN only an
+    /// absolute path is used.
+    #[test]
+    fn given_an_environment_value_then_only_an_absolute_path_is_used() {
+        assert_eq!(
+            absolute(Some("/home/a".into())),
+            Some(PathBuf::from("/home/a"))
+        );
+        for value in [None, Some(""), Some("home/a"), Some("./a"), Some("~/a")] {
+            assert_eq!(absolute(value.map(OsString::from)), None, "{value:?}");
+        }
+    }
 
     /// A store in memory; `fail` makes every call fail, like a locked or
     /// unreachable keyring.

@@ -9,12 +9,13 @@
 //! calls the matching function of [`os`], the module for the target OS:
 //!
 //! * `key_protector`, `credential_source`, `image_picker`, `read_image_file`,
-//!   `image_worker` and `ui_host`.
+//!   `image_worker` and `ui_host`;
+//! * `default_profile_dir`, through [`store::default_dir`](crate::store::default_dir).
 //!
 //! An OS whose layer is not implemented returns the fail-closed stand-ins:
 //! the vault refuses (`Unsupported`), prompts and the file dialog are
-//! unsupported or unavailable, there is no media worker (`NoWorker`), and the
-//! UI is not started.
+//! unsupported or unavailable, there is no media worker (`NoWorker`), the
+//! UI is not started, and there is no default profile directory.
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -46,7 +47,14 @@ mod other {
     };
     use persephone_core_protocol::ErrorCode;
     use persephone_media_protocol::ResourceBudgets;
-    use std::{path::Path, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+
+    pub(crate) fn default_profile_dir() -> Option<PathBuf> {
+        None
+    }
 
     pub(crate) fn key_protector() -> Arc<dyn KeyProtector> {
         Arc::new(vault::Unsupported)

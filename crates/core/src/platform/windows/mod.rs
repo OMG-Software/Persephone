@@ -1,9 +1,11 @@
 //! The Windows platform layer: DPAPI, CredUI prompts, the file dialog and
-//! read, the contained media worker, and the UI's Job.
+//! read, the contained media worker, the UI's Job, and the default profile
+//! directory.
 
 pub mod credentials;
 pub mod media;
 pub mod pick;
+pub mod profile;
 pub mod ui;
 pub mod vault;
 
@@ -13,7 +15,14 @@ use crate::{
 };
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::ResourceBudgets;
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+pub(crate) fn default_profile_dir() -> Option<PathBuf> {
+    profile::default_dir()
+}
 
 pub(crate) fn key_protector() -> Arc<dyn KeyProtector> {
     Arc::new(vault::Dpapi::new())
