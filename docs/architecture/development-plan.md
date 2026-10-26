@@ -72,59 +72,19 @@ additional processes only for a demonstrated security or operational need.
 
 ## Current repository layout
 
-The repository currently contains two shared Rust building blocks, integration
-and platform test programs, a static frontend, and the development tools. These
-components remain feasibility work; no desktop application has been scaffolded.
-
-```text
-Cargo.toml                         # Workspace for shared crates and test programs
-Cargo.lock                         # Single committed Cargo resolution
-.cargo/config.toml                 # Rust build output under .local/build/rust
-crates/
-  contracts/                       # Shared DTO and contract-generation code
-  media-broker/                    # Contained-worker launcher (Windows prototype)
-  media-decoder/                   # PNG/JPEG decoder, wasm32 guest
-  media-protocol/                  # Shared byte-budget and framed protocol code
-  media-sandbox/                   # wasmi host for the decoder guest
-  media-worker/                    # Contained worker binary
-tests/
-  matrix/                          # Matrix sync and encrypted-messaging integration tests
-  storage/                         # Encrypted-store and credential API tests
-  platform/windows/                # Windows containment test program
-frontend/                           # Svelte static UI feasibility implementation
-tools/
-  dev.py                           # Repository checks and run entry point
-  matrix_restart.py                # Disposable Rust worker restart controller
-  matrix_capabilities.py           # Controlled sync-capability integration runner
-  audit_dependencies.py            # OSV Rust dependency audit
-  servers/                         # Disposable Merovingian/Synapse harness
-docs/
-  adr/                             # Accepted and proposed decisions
-  architecture/                    # Architecture and security plans
-  evidence/                        # Run records and verification artifacts
-  planning/                         # Project plan and feasibility status
-  research/                         # Framework security research
-.local/
-  cache/cargo/                      # Cargo download cache
-  cache/npm/                        # npm cache
-  build/rust/                       # Cargo build output
-  build/frontend/                   # Frontend build output
-  runs/                             # New synthetic test profiles and output
-  servers/merovingian/              # Local Merovingian helper binary
-  servers/synapse/                  # Isolated Synapse virtual environment
-```
-
-`contracts` and `media-protocol` are shared building blocks, but remain
-provisional and are not security-approved application components. The test
-programs exercise bounded scenarios; their results do not establish production
-protections or close the P0 phase. The frontend builds static assets and is not
-wired to a Tauri application. See the [development guide](../development.md) for
-current commands and toolchain details.
+The [development guide](../development.md) holds the current component layout,
+commands and toolchain. Until 26 October 2026 this section held the
+20 October feasibility layout, from before the core, the Tauri UI and the
+media flow were built; see the file's Git history for it.
 
 ## Planned application layout
 
-Extend the existing frontend and shared crates toward the layout below in P1
-and later. The Tauri host, application core and media worker do not exist yet:
+This is the target layout written before P1. The Tauri host, the core and the
+media worker now exist, with some differences: the core-to-UI protocol is its
+own crate (`crates/core-protocol`), generated DTO types stay in
+`crates/contracts/generated`, and the frontend components are not yet split
+into `components/` and `features/`. The [development guide](../development.md)
+shows the current layout.
 
 ```text
 frontend/
@@ -155,7 +115,8 @@ broker; it starts the Tauri UI process, which holds no secrets and relays each
 allowed command to the core as one bounded frame.
 
 Dependency direction: frontend consumes generated contracts through its bridge;
-the Tauri host depends on contracts/core; core depends on contracts and the SDK;
+the Tauri host depends only on contracts and the core and media protocols, never
+on core itself (ADR-0004); core depends on contracts, the protocols and the SDK;
 the worker depends on its protocol and chosen decoders, never core or Tauri.
 The SDK, filesystem, clock, credential facility, and media launcher are concrete
 adapters behind narrow seams for behavioral tests. Avoid abstracting every
@@ -544,7 +505,7 @@ support requires actual OS runs, not cross-compilation alone.
 ## Development milestones and acceptance gates
 
 Milestones require explicit acceptance evidence. **No milestone has passed its exit
-gate.** P0 to P6 are in progress and P7 has not started; the
+gate.** P0 to P7 are in progress; the
 [milestone status](#milestone-status) below lists each deliverable. Work can be
 developed in parallel where independent, but feature acceptance follows its gates.
 
@@ -561,7 +522,8 @@ developed in parallel where independent, but feature acceptance follows its gate
 
 ### Milestone status
 
-24 October 2026. This is the single progress summary; other pages link here. A
+24 October 2026, updated 26 October 2026 (default profile, new conversations,
+release workflow). This is the single progress summary; other pages link here. A
 deliverable is **done** when it is built and its own evidence passes, **partial**
 when only part is built or only some platforms or cases pass, and **not
 started** otherwise. A milestone's exit gate is met only when its exit evidence
@@ -577,7 +539,7 @@ above passes; none has.
 | P1 | Workspace, Tauri shell, typed contracts | Done (Windows) | [Tauri shell](../evidence/tauri-shell.md), [contracts](../evidence/contracts.md) |
 | P1 | Bounded views | Done | [Synthetic views](../evidence/mock-views.md), [live updates](../evidence/live-updates.md) |
 | P1 | Explicit permissions and CSP | Done | [Tauri shell](../evidence/tauri-shell.md): allowlist, capability, CSP, navigation and IPC denial tests |
-| P1 | Production asset build | Partial | Frontend build checked; no release or packaged app run |
+| P1 | Production asset build | Partial | Frontend build checked. The [release workflow](../release.md) builds unsigned packages for every OS on each merge; no packaged-app check is recorded |
 | P1 | Three-OS CI | Partial | [CI](../development.md#continuous-integration) builds and tests on Windows, macOS, Ubuntu, Debian, Arch, Fedora and openSUSE, and all jobs pass. Off Windows the app does not launch: there is no core channel, vault, prompt or containment, so these fail closed. No launch or packaged-app check runs on any OS |
 | P2 | Session owner | Partial | [Session owner](../evidence/session-owner.md): leases, lock and unlock; [sign-out](../evidence/sign-out.md) deletes the key at once and leaves the store files to the next start, because SDK tasks are not joined |
 | P2 | Vault and storage adapters | Partial | [Protected store](../evidence/protected-store.md): Windows DPAPI only |
@@ -586,13 +548,13 @@ above passes; none has.
 | P2 | Pixel transport | Done (Windows) | Raw row bands of at most 1 MiB from the core through the UI process to a page canvas ([design](image-messaging.md#pixel-transport), [live run](../evidence/image-messaging.md)); the UI process does not count band responses awaiting delivery to the web view |
 | P2 | Baseline limits | Partial | Frame and page budgets, UI Job limits; no aggregate memory admission across features |
 | P3 | SDK integration | Partial | [Sign-in evidence](../evidence/matrix-sign-in.md): one client in the core over the encrypted stores |
-| P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; [sign-out](../evidence/sign-out.md) revokes the session and deletes the local profile; no SSO or `.well-known` discovery |
+| P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; [sign-out](../evidence/sign-out.md) revokes the session and deletes the local profile; with no `--profile`, the core opens a per-user default profile ([ADR-0013](../adr/0013-open-a-default-profile-when-none-is-given.md), still proposed); no SSO or `.well-known` discovery |
 | P3 | Sliding default, classic fallback | Partial | Initial selection passes live on Merovingian, Synapse and classic-only Synapse; no runtime mode switch |
 | P3 | Room and timeline projection | Partial | Room list, history paging, notices and live events; gap and dedup coverage incomplete |
-| P4 | Encrypted text experience | Partial | [Encryption setup](../evidence/encryption-setup.md): key policy ([ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md)), cross-signing and recovery set-up, recovery-key verification; [sending](../evidence/encrypted-sending.md) with consent for unencrypted rooms and delivery states; [own-device verification](../evidence/own-device-verification.md) and [contact verification](../evidence/contact-verification.md) in existing direct-message rooms by comparing emoji, in both directions; [identity changes](../evidence/identity-changes.md) pause sending until accepted or verified ([ADR-0007](../adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md)); [exit runs](../evidence/encrypted-text-exit-runs.md): unclear-delivery retry, new and unsigned devices, withheld keys, recovery on a clean profile. Every listed exit item has passing live runs on Windows against an SDK peer, and [Element Web](../evidence/element-web-interop.md) verified, sent and read encrypted text with Persephone on both servers (24 October 2026; Element uses the same crypto crate). Not yet: the [native window hand checks](../evidence/native-windows-hand-checks.md) (prepared, not run), Linux and macOS |
+| P4 | Encrypted text experience | Partial | [Encryption setup](../evidence/encryption-setup.md): key policy ([ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md)), cross-signing and recovery set-up, recovery-key verification; [sending](../evidence/encrypted-sending.md) with consent for unencrypted rooms and delivery states; [own-device verification](../evidence/own-device-verification.md) and [contact verification](../evidence/contact-verification.md) in existing direct-message rooms by comparing emoji, in both directions; [identity changes](../evidence/identity-changes.md) pause sending until accepted or verified ([ADR-0007](../adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md)); [exit runs](../evidence/encrypted-text-exit-runs.md): unclear-delivery retry, new and unsigned devices, withheld keys, recovery on a clean profile. New encrypted direct conversations by Matrix ID, optional directory search, and accepting or declining direct-message invitations ([ADR-0014](../adr/0014-start-encrypted-direct-conversations-by-matrix-id.md), 26 October 2026) have automated tests only; no live run is recorded. Every listed exit item has passing live runs on Windows against an SDK peer, and [Element Web](../evidence/element-web-interop.md) verified, sent and read encrypted text with Persephone on both servers (24 October 2026; Element uses the same crypto crate). Not yet: the [native window hand checks](../evidence/native-windows-hand-checks.md) (prepared, not run), Linux and macOS |
 | P5 | Image messaging | Partial | [Design](image-messaging.md) and [ADR-0009](../adr/0009-strip-sent-image-metadata-and-load-received-images-on-request.md): metadata stripped in the guest, received images loaded only on request, pixels sent to the page in raw row bands. [Live run](../evidence/image-messaging.md) with Element Web on both servers, Sliding and classic sync: click to load, encrypted and unencrypted send, metadata removed, source unchanged, hostile files refused, lock during a load; a truncated JPEG drew partially and was fixed afterwards (tests only, not rerun live). Not yet: Element's own display of a sent image (its service worker did not load in the test browser), release builds (the debug worker exceeds the time limits at 12 megapixels), Linux and macOS (no contained worker) |
 | P6 | Product and operational hardening | Partial | Keyboard and screen-reader checks not done; failed windows detected and retried on Windows; this host's WebView2 crash dumps all fail inside a third-party overlay hook, not tested with it removed ([window retry](../evidence/window-retry.md)) |
-| P7 | Release readiness | Not started | None |
+| P7 | Release readiness | Partial | Signed draft-release workflow ([ADR-0012](../adr/0012-sign-and-publish-releases-as-drafts.md), [release guide](../release.md)) with SBOM and third-party notices; a dry run of the `p7/release-cargo-about-cli` branch passed on 25 October 2026 (run 40174476995). The `v0.0.1` tag run (40233921317) stopped at `preflight` because the Apple and GPG signing secrets are not set, so no signed release exists. [Security policy](../../SECURITY.md) for private reports. Not started: update plan, independent security review, compatibility report |
 
 Feasibility checks do not grant permission to ship unverified controls.
 P3 can use disposable test fixtures while P4 is underway, but an unencrypted

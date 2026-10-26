@@ -9,6 +9,16 @@ The workflow is [`.github/workflows/release.yml`](../.github/workflows/release.y
 > high-risk use. A passing release run shows that the bundles were built,
 > signed and checksummed. It does not show that the application is safe.
 
+## Current state
+
+26 October 2026. No signed release exists. The `v0.0.1` tag run (40233921317)
+stopped at `preflight` because these signing secrets are not set:
+`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+`APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY`, `GPG_PRIVATE_KEY`
+and `GPG_PASSPHRASE`. The `v0.0.1` pre-release on GitHub was made by hand to
+test the tag and has no files. The only downloads are the unsigned
+[latest builds](#latest-builds).
+
 ## What a release run produces
 
 | Platform | Runner | Files |
@@ -161,6 +171,9 @@ notes name the commit and the workflow run.
   `releases/tag/latest`, not to a file.
 - The release is a pre-release, so GitHub never shows it as the latest
   release.
+- To see which build is installed, compare the revision in the app's version
+  line with the commit in the release notes. The revision is the commit's
+  first 12 hex digits.
 
 The release-only Tauri settings (`bundle.active`, sidecars, bundled licence
 files) come from

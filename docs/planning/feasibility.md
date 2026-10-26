@@ -6,9 +6,11 @@ assumptions into bounded checks. They do not constitute the P1 application
 scaffold and must not handle real chats.
 
 The [verification ledger](../evidence/verification.json) records passing,
-failing and unrun checks with source hashes. The current root workspace check
-passed 175 tests (152 Rust, 8 frontend, 2 server-registration and 13 controller tests), along with formatting, Clippy,
-TypeScript, generated-contract drift, and frontend build checks. The dependency
+failing and unrun checks with source hashes. Its last workspace check entry
+(`workspace_check_after_bounded_views`, undated) passed 175 tests, along with
+formatting, Clippy, TypeScript, generated-contract drift, and frontend build
+checks. Later CI results are in the
+[Development guide](../development.md#continuous-integration). The dependency
 audit completed against the single root lockfile. The recorded live smoke passed
 on both disposable homeservers; the native sandbox gate remains a failure, now
 for a decisive reason: the tested Windows worker configurations are not
@@ -32,8 +34,8 @@ commands and paths.
 | Encrypted message capability | [Native Sliding Sync and classic regression](../evidence/encrypted-sliding-sync.md): independent users, mutual SAS device verification, exact decrypted sync callbacks in both directions, key/identity/trust continuity after transition and both logouts pass on both servers | Simulated trusted out-of-band comparison; [normal-process restart](../evidence/encrypted-restart.md) passes; human UI, cross-signing, crash recovery and product sharing policy pending |
 | SDK concurrency/lifecycle | Both servers pass sync/history/key-query scheduling and completed-operation switch; [retained task ownership and SDK barrier tests](../evidence/sdk-lifecycle.md) cover timeout, cancelled waits, stale callbacks and cooperative frame completion | Pinned task inventory exposes gaps in public SDK completion APIs; full lock/logout/store handoff remains blocked. Tracked completion, pause and outer cancellation do not establish SDK-wide drain. [Core session owner](../evidence/session-owner.md): lock/unlock while running with leases, generation fencing and retained ownership on timeout. The core now runs an SDK client ([sign-in evidence](../evidence/matrix-sign-in.md)); because the full SDK drain is still blocked, a session whose client ran locks to `restart_required` |
 | Credential/store protection | [7 storage tests](../evidence/storage.md): generated Olm account signatures and configured crypto/state/event/media/send-queue markers absent in encrypted DB/WAL/SHM, with a positive plaintext control; wrong key fails; no-key path permits plaintext writes | [Missing-key guard and separate-process key/trust recovery](../evidence/encrypted-restart.md) pass in the fixture; production unlock, broader records/artifacts, corruption/crashes and other OS vaults pending. [Core-owned profile](../evidence/protected-store.md): DPAPI-wrapped random key, exclusive profile lock, missing/unreadable/rejected keys leave the profile locked and unchanged; same-user access, unlock prompt, lock/logout and Linux/macOS vaults pending |
-| OS media containment | [Windows test program](../evidence/windows-sandbox.md): environment fixed, 26 regression tests pass; current native run verifies paths, exact file denials, token, child/allocation limits and broker deadline. [Endpoint-observed network differential](../evidence/windows-sandbox.md#network-denial-differential) is decisive across three worker policies | **No tested Windows policy denies the kernel socket.** Zero-capability AppContainer is not network-denied: worker packets reach the TCP stack (closed ports refuse it), listener-side filtering blocks observed connections and datagrams, and port state leaks; it opens the AFD device. LPAC breaks Winsock initialization but still opens the AFD device. An AppContainer + restricted token (write-restricted, untrusted integrity) cannot initialize at all (`STATUS_DLL_INIT_FAILED`), yielding no running worker. Socket-denying configuration or residual-risk decision, CPU-time cap, signed packaging/Linux/macOS pending |
-| WebAssembly decoder sandbox | [ADR-0003](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md), [evidence](../evidence/wasm-decoder.md): `wasmi 2.0.0` guest with exactly three host imports; 22 tests cover WASI/foreign imports, signatures, validation, fuel, memory caps, traps and output violations; 16 MP decodes byte-identical to native | Not yet inside the OS worker or the media flow; worst 16 MP decode 7.2 s of the 10 s deadline on this host (3× faster with tail-call dispatch); memory budgets need reconciling; decoder/host fuzzing and Linux/macOS pending |
+| OS media containment | [Windows test program](../evidence/windows-sandbox.md): environment fixed, 26 regression tests pass; current native run verifies paths, exact file denials, token, child/allocation limits and broker deadline. [Endpoint-observed network differential](../evidence/windows-sandbox.md#network-denial-differential) is decisive across three worker policies | **No tested Windows policy denies the kernel socket.** Zero-capability AppContainer is not network-denied: worker packets reach the TCP stack (closed ports refuse it), listener-side filtering blocks observed connections and datagrams, and port state leaks; it opens the AFD device. LPAC breaks Winsock initialization but still opens the AFD device. An AppContainer + restricted token (write-restricted, untrusted integrity) cannot initialize at all (`STATUS_DLL_INIT_FAILED`), yielding no running worker. Socket-denying configuration or residual-risk decision, CPU-time cap and signed packaging pending. Linux (seccomp) and macOS (Seatbelt) worker containment is built and CI-tested only ([ADR-0010](../adr/0010-linux-platform-layer.md), [ADR-0011](../adr/0011-macos-platform-layer.md)) |
+| WebAssembly decoder sandbox | [ADR-0003](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md), [evidence](../evidence/wasm-decoder.md): `wasmi 2.0.0` guest with exactly three host imports when recorded (a fourth, `write_stripped`, was added on 24 October 2026 for [metadata stripping](../architecture/image-messaging.md#guest-operations)); 22 tests cover WASI/foreign imports, signatures, validation, fuel, memory caps, traps and output violations; 16 MP decodes byte-identical to native | Runs inside the contained worker, which the core uses for received and sent images on Windows ([image messaging](../evidence/image-messaging.md)); worst 16 MP decode 7.2 s of the 10 s deadline on this host (3× faster with tail-call dispatch); memory budgets need reconciling; decoder/host fuzzing and Linux/macOS pending |
 | Contained media worker | [Evidence](../evidence/media-worker.md): worker self-checks AppContainer, Job, dynamic-code and Win32k policies before reading input; broker limits inheritance to two pipes, enforces the deadline and reads Job peak memory; 8 new broker tests | All 4000 × 4000 test images peak at 178–194 MiB of 256 MiB; a maximum-size progressive 4:4:4 JPEG exceeds the 10 s deadline (decision pending); worker syscall/file/handle probing, CPU-limit demonstration, packaging and Linux/macOS pending |
 | Aggregate resources and framed IPC | [10 dependency-free tests](../evidence/media-protocol.md) pass | Candidate budgets only; Tauri pre-body cap and real process/copy measurements pending |
 | Public DTO generation | [4 Rust tests, generated fixtures and TypeScript checks](../evidence/contracts.md) pass with explicit `ts-rs 12.0.1` | Candidate feasible; runtime validation and actual Tauri command wiring pending |
@@ -87,16 +89,18 @@ Minimum supported OS/CPU versions remain undecided until packaged tests exist.
    ([ADR-0003](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md)):
    untrusted decoding runs as a WebAssembly module with no network capability,
    inside the OS-contained worker prototype, with the OS-level residual risk
-   documented. The worker is not yet wired into the app or the Matrix media
-   flow.
-   Remaining: CPU accounting, packaged behavior, signed helper policies and
-   equivalent denial and resource tests on Linux/macOS.
+   documented. On Windows the core now uses the worker for received and sent
+   images ([image messaging](../architecture/image-messaging.md)).
+   Remaining: CPU accounting, packaged behavior, signed helper policies, and
+   live denial and resource tests on Linux/macOS, where the containment is
+   CI-tested only.
 3. [Maintenance disposition](../evidence/dependencies.md#maintenance-disposition-and-compiled-graph-review)
    is recorded: `derivative` is unreachable for our features, and `anymap2` is
    retained until the next matrix-sdk release adopts upstream's merged anymap3
-   switch. TLS 1.3 only is decided and tested. Resolve the Linux/macOS graphs,
-   review file-level licenses in `aws-lc-sys` and bundled SQLite, and produce
-   an SBOM.
+   switch. TLS 1.3 only is decided and tested. Each release build now produces
+   an SBOM (syft) and third-party notices (cargo-about); see the
+   [release guide](../release.md). Remaining: resolve the Linux/macOS graphs
+   and review file-level licenses in `aws-lc-sys` and bundled SQLite.
 4. Done: the DTOs are wired into the Tauri commands, transport containment is
    the core/UI split ([ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)),
    and the P1 shell and later slices are built; see the

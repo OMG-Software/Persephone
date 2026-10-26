@@ -41,7 +41,7 @@
 | `tools/` | Development checks, dependency audit, and disposable-server controllers |
 | `docs/` | Requirements, ADRs, plans, and reproducible evidence |
 | `site/` | Static public project page |
-| `.github/` | GitHub Pages deployment workflow |
+| `.github/` | CI, release, SonarQube and GitHub Pages workflows |
 
 ## Build and verification
 

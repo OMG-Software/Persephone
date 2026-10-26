@@ -19,7 +19,9 @@ passes.
 
 The guest in `crates/media-decoder` gains one operation, and the decode
 operation gains one output. Both change the ABI together with the sandbox
-allowlist (`crates/media-sandbox`) and the worker (`crates/media-worker`).
+allowlist (`crates/media-sandbox`) and the worker (`crates/media-worker`). As
+built, the guest's host imports are `input_len`, `read_input`, `write_output`
+and `write_stripped`; the last returns the stripped copy.
 
 * **Decode** (existing). It also reports the EXIF orientation (1 to 8, or 1
   when absent or invalid) of a JPEG. The host applies the rotation or flip to

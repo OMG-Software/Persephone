@@ -13,7 +13,7 @@ crates/
   core/                            # Key-holding core; entry binary `persephone`
   core-protocol/                   # UI-to-core messages (bounded frames)
   contracts/                       # Shared DTO and contract-generation code
-  media-broker/                    # Launches the contained media worker (Windows)
+  media-broker/                    # Launches the contained media worker (Windows, Linux, macOS)
   media-decoder/                   # PNG/JPEG decoder built as a wasm32 guest
   media-protocol/                  # Shared byte-budget and framed protocol code
   media-sandbox/                   # wasmi host: import allowlist and resource limits
@@ -22,24 +22,30 @@ tests/
   matrix/                          # Matrix sync and encrypted-message integration tests
   storage/                         # Encrypted-store and credential API tests
   platform/windows/                # Windows containment test program
-frontend/                          # Svelte static UI feasibility implementation
+  tools/, servers/                 # Python tests for the tools and server harness
+frontend/                          # Bundled Svelte UI and typed host bridge
 tools/
   dev.py                           # Repository check and run entry point
   matrix_restart.py                # Disposable Rust worker restart controller
   matrix_capabilities.py           # Controlled sync-capability integration runner
   audit_dependencies.py            # OSV Rust dependency audit
+  release.py                       # Release version, tag check and bundle configuration
+  sign_windows.ps1                 # Windows signing step of the release workflow
+  about.toml, about.hbs            # cargo-about third-party notice configuration
   servers/                         # Disposable Merovingian/Synapse harness
 docs/
   adr/                             # Accepted and proposed decisions
   architecture/                    # Architecture and security plans
   evidence/                        # Run records and verification artifacts
   planning/                        # Project plan and feasibility status
-  research/                         # Framework security research
+  research/                        # Framework security research
+site/                              # Static project page (GitHub Pages)
+.github/workflows/                 # CI, release, SonarQube and Pages workflows
 .local/
   cache/cargo/                     # Cargo download cache
   cache/npm/                       # npm cache
   build/rust/                      # Cargo build output
-  build/frontend/                 # Frontend build output
+  build/frontend/                  # Frontend build output
   runs/                            # New synthetic test profiles and output
   servers/merovingian/             # Local Merovingian helper binary
   servers/synapse/                 # Isolated Synapse virtual environment
@@ -99,7 +105,9 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 - **Off Windows, CI covers build and tests only.** Linux and macOS have worker containment (seccomp on Linux, Seatbelt on macOS; ADR-0010, ADR-0011), and its probe and contained-worker tests run in their jobs. macOS also has its Keychain vault, prompts, file dialog and UI host (CI-tested only, never run with a display). The Linux vault, prompts, file dialog and UI host are still being built and fail closed (`unsupported`), so the core refuses to start the UI there. No job launches the application on any OS.
 - **Tests that compile on one OS only.** The AppContainer probe, DPAPI and the native Windows prompts run only on Windows; seccomp probes only on Linux; Keychain, AppKit and Seatbelt tests only on macOS. Test counts therefore differ between jobs.
 
-Run 39785251911 at `04c0538` passed every job:
+Other workflows: [`sonar.yml`](../.github/workflows/sonar.yml) sends the source to SonarQube Cloud for static analysis on pushes to `main` and same-repository pull requests; it builds and runs nothing. [`pages.yml`](../.github/workflows/pages.yml) deploys `site/`.
+
+Run 39785251911 at `04c0538` (22 October 2026) passed every job it had. The `ubuntu-24.04-arm` job was added later and has no recorded result here:
 
 | Jobs | Rust tests (workspace + development feature) | Frontend | Python |
 | --- | --- | --- | --- |
@@ -112,8 +120,14 @@ On every job, `cargo fmt`, Clippy with `-D warnings` (default and development fe
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) builds,
 signs and checksums the installers. A `v*` tag creates a draft pre-release; a
-manual run builds unsigned artifacts only. [Release guide](release.md) lists
-the secrets, how to cut a release and how users verify the files.
+manual run builds unsigned artifacts only. Each push to `main` replaces the
+unsigned `latest` pre-release. [Release guide](release.md) lists the secrets,
+how to cut a release and how users verify the files.
+
+The app's version line shows the build's revision: the first 12 hex digits of
+the checked-out commit, or `unknown` ([`crates/core/build.rs`](../crates/core/build.rs)).
+It does not show uncommitted changes. Without a usable Git checkout of this
+source tree, the build uses `GITHUB_SHA`.
 
 ## Disposable homeservers
 

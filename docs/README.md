@@ -6,8 +6,8 @@
 - [Feasibility workbench](planning/feasibility.md): current status, recorded results, and P0 acceptance blockers.
 - [Architecture and development plan](architecture/development-plan.md): current component layout, planned application structure, and implementation sequence.
 - [SDK lifecycle completion contract](architecture/sdk-lifecycle.md): required stop-and-join ownership before lock, logout or store handoff can be approved.
-- [Image messaging design](architecture/image-messaging.md): proposed P5 design for sending and receiving images, pixel transport and limits.
-- [Security design](architecture/security-design.md): proposed threat boundaries, controls, and release gates.
+- [Image messaging design](architecture/image-messaging.md): P5 design for sending and receiving images, pixel transport and limits; built on Windows.
+- [Security design](architecture/security-design.md): proposed threat boundaries, controls, and release gates, and why the web view is the more secure design.
 - [Development guide](development.md): workspace commands, toolchain requirements, and local data layout.
 - [Release guide](release.md): signing secrets, cutting a draft release, and verifying downloads.
 
@@ -27,7 +27,8 @@
 - [ADR-0010](adr/0010-linux-platform-layer.md): Linux keeps the store key in Secret Service, shows prompts with GTK in the core, caps the UI with a systemd scope, and confines the worker with seccomp.
 - [ADR-0011](adr/0011-macos-platform-layer.md): macOS keeps the store key in Keychain, shows prompts with AppKit on the main thread, and confines the worker with Seatbelt; the UI's memory is not capped (accepted risk).
 - [ADR-0012](adr/0012-sign-and-publish-releases-as-drafts.md): release artifacts are signed (PFX for Windows, Developer ID for macOS, cosign and GPG checksums) and published as drafts.
-- [ADR-0013](adr/0013-open-a-default-profile-when-none-is-given.md) (proposed): with no `--profile`, the core opens a fixed per-user local profile folder; synthetic rooms only with `--demo`.
+- [ADR-0013](adr/0013-open-a-default-profile-when-none-is-given.md) (proposed; already implemented, owner decision pending): with no `--profile`, the core opens a fixed per-user local profile folder; synthetic rooms only with `--demo`.
+- [ADR-0014](adr/0014-start-encrypted-direct-conversations-by-matrix-id.md): start an encrypted direct conversation by exact Matrix ID, with user-directory search behind a switch that is off by default; accept or decline direct-message invitations; refuse people without a cross-signing identity.
 
 ## Evidence
 
@@ -56,11 +57,24 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Unlock secret](evidence/unlock-secret.md): profile passphrase with Argon2id inside DPAPI, upgrade of DPAPI-only profiles, wrong-entry limit, native-confirmed reset, Lock help text.
 - [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.
 - [Live room updates](evidence/live-updates.md): content-free, coalescing core events for subscribed rooms; reply routing; real-app walkthrough including page reloads.
-- [Web view to host IPC size](evidence/ipc-transport.md): measured 9× host allocation for page payloads up to 256 MiB; decision pending.
+- [Web view to host IPC size](evidence/ipc-transport.md): measured 9× host allocation for page payloads up to 256 MiB, which led to the core/UI split ([ADR-0004](adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)); after the split, floods leave the core's memory unchanged.
 - [Tauri shell and IPC permissions](evidence/tauri-shell.md): one allowlisted command, strict CSP, navigation and window policy; mock-runtime and real web view checks.
 - [Contained media worker](evidence/media-worker.md): self-checking worker under AppContainer, Job and mitigations; memory and deadline results.
 - [WebAssembly decoder sandbox](evidence/wasm-decoder.md): import allowlist, memory/fuel limits, hostile-module tests and 16-megapixel benchmark.
 - [SDK task ownership and cooperative stop](evidence/sdk-lifecycle.md): retained Rust task ownership, controlled SDK barriers and the unresolved full SDK shutdown contract.
+
+Earlier P0 probes (19 and 20 October 2026; historical run records with pre-restructure paths):
+
+- [Windows platform sandbox](evidence/windows-sandbox.md): AppContainer worker containment and the network-denial differential that leaves the native sandbox gate failing.
+- [Storage and credentials](evidence/storage.md): encrypted SDK store coverage, wrong-key failure without a silent reset, and a no-key open that still permits plaintext writes.
+- [Matrix SDK and synchronization](evidence/matrix-sync.md): Matrix Rust SDK 0.19.1 sync behavior against disposable Merovingian and Synapse.
+- [Encrypted-message smoke](evidence/encrypted-messaging.md): first encrypted send and decrypt, superseded by the independent-recipient test.
+- [Cooperative sync drain](evidence/sync-lifecycle.md): first stop-and-drain probe of SDK sync work.
+- [Tauri IPC source review](evidence/tauri-ipc.md): Tauri 2.12.4 parsing and allocation order, and payload tracing.
+- [Frontend feasibility](evidence/frontend.md): Svelte escaping, static build and dependency checks.
+- [Contract generation](evidence/contracts.md): Rust DTOs exported to TypeScript with `ts-rs`, with drift checks.
+- [Resource admission and worker IPC](evidence/media-protocol.md): byte budgets and the framed worker protocol.
+- [Rust dependencies and advisories](evidence/dependencies.md): OSV audit of the root lockfile and the maintenance disposition.
 
 ## Research
 
