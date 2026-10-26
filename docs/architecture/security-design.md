@@ -106,12 +106,14 @@ question is what a hostile message or a compromised renderer can cause outside
 its intended authority. In Persephone, the web view design gives a better
 answer to that question, for these reasons.
 
-1. **The process that draws hostile content has nothing to steal.** The web
-   view runs in `persephone-ui`, which has no keys, tokens or store handles
+1. **The process that draws hostile content holds no secrets.** The web view
+   runs in `persephone-ui`, which has no keys, tokens or store handles
    ([ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)).
-   A bug in text layout, fonts or markup can reach only that process. In the
-   native toolkits we evaluated, the UI draws in the same process as the
-   application logic, unless the application builds this split itself.
+   A bug in text layout, fonts or markup gets only that process's authority:
+   it can read the messages that the UI shows and use the operations that the
+   UI is allowed, but it cannot read keys, tokens or stores. In the native
+   toolkits we evaluated, the UI draws in the same process as the application
+   logic, unless the application builds this split itself.
 2. **Rendering has two layers of containment.** The web engine runs page
    content in its own restricted renderer process. On Windows, the core also
    puts the UI process and all its web view processes in a Job with a memory
@@ -153,8 +155,9 @@ The argument has these limits:
   interface.
 - The web view is only as safe as the installed engine. Each OS needs a
   patched engine, and Persephone does not yet check the engine version.
-- The renderer sandbox is the vendor's control, and Persephone has not tested
-  it. All the controls above are verified on Windows only.
+- The renderer sandbox and engine updates are vendor controls that Persephone
+  has not tested. The controls that Persephone tests are verified on Windows
+  only.
 
 ## Feasibility and release gates
 
