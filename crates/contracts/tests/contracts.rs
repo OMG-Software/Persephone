@@ -141,6 +141,7 @@ fn serde_enforces_javascript_safe_range_for_times() {
 fn app_status_serializes_camel_case_and_rejects_unknown_fields() {
     let status = AppStatus {
         version: "0.0.0".into(),
+        revision: "0123456789ab".into(),
         milestone: "P1".into(),
         store: StoreState::KeyMissing,
         account: AccountStatus {
@@ -152,17 +153,18 @@ fn app_status_serializes_camel_case_and_rejects_unknown_fields() {
     assert_eq!(
         serde_json::to_value(&status).unwrap(),
         serde_json::json!({
-            "version": "0.0.0", "milestone": "P1", "store": "key_missing",
+            "version": "0.0.0", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing",
             "account": {"state": "sign_in_failed", "userId": null, "error": "invalid_credentials"}
         })
     );
     let account = r#""account":{"state":"signed_out","userId":null,"error":null}"#;
     for invalid in [
-        format!(r#"{{"version":"0","milestone":"P1","store":"protected",{account},"extra":1}}"#),
-        r#"{"version":"0","milestone":"P1","store":"protected"}"#.to_string(),
-        format!(r#"{{"version":"0","milestone":"P1","store":"plaintext",{account}}}"#),
-        r#"{"version":"0","milestone":"P1","store":"protected","account":{"state":"signed_in","userId":"@a:s","error":null,"accessToken":"x"}}"#.to_string(),
-        r#"{"version":"0","milestone":"P1","store":"protected","account":{"state":"logged_in","userId":null,"error":null}}"#.to_string(),
+        format!(r#"{{"version":"0","revision":"unknown","milestone":"P1","store":"protected",{account},"extra":1}}"#),
+        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected"}"#.to_string(),
+        format!(r#"{{"version":"0","milestone":"P1","store":"protected",{account}}}"#),
+        format!(r#"{{"version":"0","revision":"unknown","milestone":"P1","store":"plaintext",{account}}}"#),
+        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected","account":{"state":"signed_in","userId":"@a:s","error":null,"accessToken":"x"}}"#.to_string(),
+        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected","account":{"state":"logged_in","userId":null,"error":null}}"#.to_string(),
     ] {
         assert!(
             serde_json::from_str::<AppStatus>(&invalid).is_err(),

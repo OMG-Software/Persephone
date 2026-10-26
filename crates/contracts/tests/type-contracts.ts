@@ -29,6 +29,7 @@ const invalidName: RoomSummary = {
 
 const unknownStore: AppStatus = {
   version: "0",
+  revision: "unknown",
   milestone: "P1",
   // @ts-expect-error only the core's store codes are valid
   store: "plaintext",
@@ -37,6 +38,7 @@ const unknownStore: AppStatus = {
 
 const unknownAccountState: AppStatus = {
   version: "0",
+  revision: "unknown",
   milestone: "P1",
   store: "protected",
   // @ts-expect-error only the core's account states are valid
@@ -98,12 +100,16 @@ const missingKind: PendingMessage = {
 };
 
 // @ts-expect-error the store state is required
-const missingStore: AppStatus = { version: "0", milestone: "P1", account };
+const missingStore: AppStatus = { version: "0", revision: "unknown", milestone: "P1", account };
+
+// @ts-expect-error the revision is required
+const missingRevision: AppStatus = { version: "0", milestone: "P1", store: "protected", account };
 
 void invalidTag;
 void invalidName;
 void unknownStore;
 void missingStore;
+void missingRevision;
 void unknownAccountState;
 void unknownNotice;
 void bigTime;

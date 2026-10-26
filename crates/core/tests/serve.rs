@@ -1,7 +1,7 @@
 //! The core's request loop, driven over in-memory streams.
 
 use persephone_contracts::AppStatus;
-use persephone_core::{Core, MILESTONE, ServeEnd, views::Fixtures};
+use persephone_core::{Core, MILESTONE, REVISION, ServeEnd, views::Fixtures};
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_SUBSCRIPTIONS, Outcome, Reply, Request, receive, send,
 };
@@ -71,6 +71,32 @@ fn given_requests_then_each_gets_a_matching_typed_reply_until_the_ui_closes() {
         let status: AppStatus = serde_json::from_value(value).unwrap();
         assert_eq!(status.milestone, MILESTONE);
         assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(status.revision, REVISION);
+    }
+}
+
+/// GIVEN a core built from a Git checkout
+/// WHEN its revision is read
+/// THEN it is the checked-out commit, shortened; without Git it is "unknown"
+/// or a commit ID from CI, and never anything else.
+#[test]
+fn given_a_build_then_the_revision_names_the_checked_out_commit() {
+    let head = std::process::Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8(output.stdout).unwrap().trim().to_owned());
+    match head {
+        Some(head) => assert_eq!(REVISION, &head[..12]),
+        None => assert!(
+            REVISION == "unknown"
+                || (REVISION.len() == 12
+                    && REVISION
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))),
+            "{REVISION}"
+        ),
     }
 }
 

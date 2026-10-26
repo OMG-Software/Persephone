@@ -292,6 +292,9 @@ pub enum StoreState {
 pub struct AppStatus {
     /// The application version, from the desktop crate's manifest.
     pub version: String,
+    /// The commit the core was built from: its first 12 hex digits, or
+    /// "unknown". It does not show uncommitted changes.
+    pub revision: String,
     /// The current development milestone, e.g. "P1".
     pub milestone: String,
     pub store: StoreState,
