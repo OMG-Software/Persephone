@@ -141,10 +141,10 @@ answer to that question, for these reasons.
 | Keyless UI process | Persephone (ADR-0004) | Implemented on Windows. macOS built and CI-tested only. Linux UI host not built; the core fails closed | [Core/UI split](../evidence/ipc-transport.md#after-the-coreui-split) |
 | UI memory limit and kill-on-close | Persephone, Windows Job | Windows only. macOS has no Job equivalent: the UI's memory is not capped (accepted residual risk, [ADR-0011](../adr/0011-macos-platform-layer.md)) | [Core/UI split](../evidence/ipc-transport.md#after-the-coreui-split) |
 | Renderer process sandbox | Web engine vendor | Not tested by Persephone | [WebView2 process model](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model) |
-| CSP, navigation and new-window blocks | Persephone configuration of Tauri | Verified in WebView2 | [Tauri shell](../evidence/tauri-shell.md) |
+| CSP, navigation and new-window blocks | Persephone configuration of Tauri | Checked in WebView2 by a manual DevTools probe (inline script, `eval`, external `fetch`, navigation, `window.open`), not an automated test | [Tauri shell](../evidence/tauri-shell.md) |
 | Escaped text, no raw HTML | Persephone frontend | Frontend tests render hostile strings as text and reject raw HTML insertion in source | [Frontend](../evidence/frontend.md), [Tauri shell](../evidence/tauri-shell.md) |
 | Images decoded outside the web engine | Persephone media worker (ADR-0003) | Implemented on Windows. The guest has no network access; the worker process is not network-denied | [Image messaging](../evidence/image-messaging.md), [Windows sandbox](../evidence/windows-sandbox.md) |
-| Command allowlist and core-side validation | Persephone, Tauri capabilities | Unregistered commands, Tauri plugin commands, remote origins and forged invoke keys refused in mock-runtime tests and the real web view | [Tauri shell](../evidence/tauri-shell.md) |
+| Command allowlist and core-side validation | Persephone, Tauri capabilities | Unregistered commands, Tauri plugin commands, remote origins and forged invoke keys refused in mock-runtime tests. In the real web view, only a plugin command (`window\|close`) was tried, and it was denied | [Tauri shell](../evidence/tauri-shell.md) |
 | Engine updates | Microsoft (Evergreen WebView2) | Tauri's default install mode; not checked in a packaged build | [WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution) |
 
 The argument has these limits:

@@ -68,9 +68,11 @@ membership. This is how Matrix works, and the app cannot change it.
 
 ### Starting a conversation
 
-When you start a conversation and you already have an encrypted conversation
-with only that person, the app opens it and sends no request to start a new
-one. Otherwise, the app needs the person's cross-signing identity. If the app
+When you start a conversation, the app first looks for an encrypted room that
+you have joined, that is marked as a direct conversation with that person, and
+whose only members are the two of you (the person joined or invited). If it
+finds one, it opens it and sends no request to start a new one. Otherwise, the
+app needs the person's cross-signing identity. If the app
 does not have it yet, it sends the Matrix ID that you enter to your homeserver
 to ask for it. Only if the person has a cross-signing identity does the app
 ask the homeserver to create an encrypted room and to invite them. Having

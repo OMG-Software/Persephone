@@ -62,6 +62,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Contained media worker](evidence/media-worker.md): self-checking worker under AppContainer, Job and mitigations; memory and deadline results.
 - [WebAssembly decoder sandbox](evidence/wasm-decoder.md): import allowlist, memory/fuel limits, hostile-module tests and 16-megapixel benchmark.
 - [SDK task ownership and cooperative stop](evidence/sdk-lifecycle.md): retained Rust task ownership, controlled SDK barriers and the unresolved full SDK shutdown contract.
+- [Rust dependencies and advisories](evidence/dependencies.md): OSV audits of the root lockfile (latest entry 23 October 2026), the maintenance disposition, compiled-graph reviews, and a historical per-package inventory.
 
 Earlier P0 probes (19 and 20 October 2026; historical run records with pre-restructure paths):
 
@@ -74,7 +75,6 @@ Earlier P0 probes (19 and 20 October 2026; historical run records with pre-restr
 - [Frontend feasibility](evidence/frontend.md): Svelte escaping, static build and dependency checks.
 - [Contract generation](evidence/contracts.md): Rust DTOs exported to TypeScript with `ts-rs`, with drift checks.
 - [Resource admission and worker IPC](evidence/media-protocol.md): byte budgets and the framed worker protocol.
-- [Rust dependencies and advisories](evidence/dependencies.md): OSV audit of the root lockfile and the maintenance disposition.
 
 ## Research
 
