@@ -1,8 +1,9 @@
 //! Direct-message conversations: starting one with a user, answering an
 //! invitation to one, and the homeserver's user directory.
 //!
-//! * Starting opens an existing direct-message room with just that user when
-//!   there is one (`contacts::contact_of`). Otherwise the user must have a
+//! * Starting opens an existing encrypted direct-message room with just that
+//!   user when there is one (`contacts::contact_of`); an unencrypted one is
+//!   never reused. Otherwise the user must have a
 //!   cross-signing identity, because room keys go only to cross-signed
 //!   devices (ADR-0005) and they could not read anything; then the SDK
 //!   creates an encrypted room (`Client::create_dm`: encryption in the
@@ -22,7 +23,7 @@ use crate::{
     views::{MAX_ROOMS, project_name},
 };
 use matrix_sdk::{
-    Client, Room, RoomState,
+    Client, EncryptionState, Room, RoomState,
     ruma::{OwnedUserId, RoomId, UserId},
 };
 use persephone_contracts::{ConversationStart, InviteList, InviteSummary, UserMatch, UserSearch};
@@ -133,7 +134,7 @@ pub async fn start(client: &Client, user: &UserId) -> Result<ConversationStart, 
     if client.user_id() == Some(user) {
         return Err(ErrorCode::InvalidArgument);
     }
-    if let Some(room) = existing(client, user) {
+    if let Some(room) = existing(client, user).await {
         return Ok(ConversationStart::Existing {
             room_id: room.room_id().to_string(),
         });
@@ -161,12 +162,26 @@ pub async fn start(client: &Client, user: &UserId) -> Result<ConversationStart, 
     }
 }
 
-/// A joined direct-message room whose members are just this account and
-/// `user` (joined or invited).
-fn existing(client: &Client, user: &UserId) -> Option<Room> {
-    client
-        .get_dm_rooms(user)
-        .find(|room| contacts::contact_of(client, room).as_deref() == Some(user))
+/// A joined, encrypted direct-message room whose members are just this
+/// account and `user` (joined or invited). An unencrypted room is skipped, so
+/// starting creates an encrypted one instead.
+async fn existing(client: &Client, user: &UserId) -> Option<Room> {
+    for room in client.get_dm_rooms(user) {
+        if contacts::contact_of(client, &room).as_deref() == Some(user) && encrypted(&room).await {
+            return Some(room);
+        }
+    }
+    None
+}
+
+/// Whether the room is encrypted. A state not known yet is asked of the
+/// homeserver; a failure to tell counts as not encrypted.
+async fn encrypted(room: &Room) -> bool {
+    let state = match room.encryption_state() {
+        EncryptionState::Unknown => room.latest_encryption_state().await.ok(),
+        known => Some(known),
+    };
+    matches!(state, Some(EncryptionState::Encrypted))
 }
 
 /// Searches the homeserver's user directory, leaving out this account.

@@ -130,6 +130,9 @@
   // and a failed newer request leaves the newest successful one in place.
   let roomsRequest = 0;
   let roomsShown = 0;
+  // The same for the invitation list.
+  let invitesRequest = 0;
+  let invitesShown = 0;
   let signingIn = $state(false);
   // Advanced on every session change. Replies to calls made before the change
   // are discarded, so nothing from a locked session is shown again.
@@ -308,9 +311,13 @@
   // the next change tries again.
   async function refreshInvites() {
     const generation = sessionGeneration;
+    const request = ++invitesRequest;
     try {
       const list = await inviteList();
-      if (generation === sessionGeneration) invites = list;
+      if (generation === sessionGeneration && request > invitesShown) {
+        invites = list;
+        invitesShown = request;
+      }
     } catch {
       // Kept as it was.
     }

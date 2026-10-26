@@ -35,7 +35,7 @@
 
   const failures: Record<string, string> = {
     invalid_argument: 'That is not a Matrix ID you can start a conversation with.',
-    unavailable: 'The homeserver could not be reached.',
+    core_unavailable: 'The homeserver could not be reached.',
     limit_exceeded: 'Another conversation is being started. Try again in a moment.',
     locked: 'The session is locked.',
     not_found: 'Sign in to start a conversation.'
@@ -51,20 +51,27 @@
       moreMatches = false;
       return;
     }
-    const timer = setTimeout(async () => {
+    let timer: ReturnType<typeof setTimeout>;
+    // The core runs one search at a time: while an earlier one is still
+    // running, this one waits and tries again instead of failing.
+    const search = async () => {
       try {
         const found = await searchUsers(term);
         if (request === searchRequest) {
           matches = found.users;
           moreMatches = found.truncated;
         }
-      } catch {
-        if (request === searchRequest) {
+      } catch (reason) {
+        if (request !== searchRequest) return;
+        if (String(reason) === 'limit_exceeded') {
+          timer = setTimeout(search, SEARCH_DELAY_MS);
+        } else {
           matches = [];
           searchFailed = true;
         }
       }
-    }, SEARCH_DELAY_MS);
+    };
+    timer = setTimeout(search, SEARCH_DELAY_MS);
     return () => clearTimeout(timer);
   });
 

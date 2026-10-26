@@ -41,8 +41,9 @@ with these owner decisions from the same day:
 
 * Starting a conversation uses the SDK's `Client::create_dm`: encryption in
   the room's initial state, the trusted private chat preset, the person
-  invited and the room marked direct. An existing direct-message room with
-  just that person is opened instead of creating another.
+  invited and the room marked direct. An existing encrypted direct-message
+  room with just that person is opened instead of creating another; an
+  unencrypted one is never reused.
 * The core refuses to start a conversation with someone who has no
   cross-signing identity (`no_identity`), after asking the homeserver for
   their keys. Nothing is created.
