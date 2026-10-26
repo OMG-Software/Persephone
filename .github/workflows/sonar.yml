@@ -1,0 +1,46 @@
+# Sends the source to SonarQube Cloud for static analysis on pushes to main
+# and on pull requests from this repository. It builds and runs nothing; the
+# analysis settings are in sonar-project.properties at the repository root.
+# Pull requests from forks get no SONAR_TOKEN, so the job is skipped for them.
+# The project must use CI-based analysis: Automatic Analysis is turned off in
+# SonarQube Cloud. Actions are pinned to full commit SHAs; the tag each was
+# taken from is noted alongside.
+name: SonarQube
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonar-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sonarqube:
+    name: SonarQube
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so issues can be attributed to the commits that added them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Cache SonarQube packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
