@@ -12,8 +12,11 @@ passes.
 * PNG and JPEG only, still images only. An APNG shows its default image.
 * One image per message, as `m.image`. No captions, galleries, thumbnails or
   blurhash in this release.
-* Windows only, because the contained worker exists only on Windows. On other
-  platforms both flows fail closed with `unavailable`.
+* The core uses the contained worker on Windows, Linux and macOS, but only
+  Windows is verified live. On Linux the core does not start the UI yet (no
+  vault, prompts or file dialog), so neither flow can be reached there. macOS
+  has its file dialog and worker, tested in CI only. On a platform without a
+  contained worker, both flows fail closed with `unavailable`.
 
 ## Guest operations
 

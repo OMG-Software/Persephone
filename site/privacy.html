@@ -122,9 +122,10 @@
         invite them. Having encryption keys without a cross-signing identity is not enough. The invitation
         also reaches the person's homeserver, as any Matrix invitation does.</p>
         <p>Search for people is off each time you open the dialog. If you turn it on, the app sends
-        what you type to your homeserver's user directory, 0.4 seconds after you stop typing, once
-        you have typed at least two characters. Your homeserver can keep a record of these
-        searches. Results show names and Matrix IDs as text. The app fetches no avatars.</p>
+        what you type, without leading or trailing spaces, to your homeserver's user directory. It
+        sends it 0.4 seconds after you stop typing, once it is at least two characters long. Your
+        homeserver can keep a record of these searches. Results show names and Matrix IDs as text.
+        The app fetches no avatars.</p>
         <p>When you accept a direct-message invitation, the app joins the room. When you decline it,
         the app leaves the room. Your homeserver and the person who invited you can see either
         answer.</p>
