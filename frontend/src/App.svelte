@@ -5,6 +5,7 @@
   import Icon from './Icon.svelte';
   import IdentityChanges from './IdentityChanges.svelte';
   import JumpPalette from './JumpPalette.svelte';
+  import NewConversation from './NewConversation.svelte';
   import Security from './Security.svelte';
   import Settings, { type SettingsTab } from './Settings.svelte';
   import Sidebar from './Sidebar.svelte';
@@ -42,6 +43,9 @@
     acceptIdentity,
     signOut,
     roomList,
+    inviteList,
+    acceptInvite,
+    declineInvite,
     signIn,
     subscribeRoom,
     timelinePage,
@@ -50,6 +54,7 @@
     watchSession,
     type AppStatus,
     type ContactStatus,
+    type InviteList,
     type RoomIdentityChanges,
     type PendingMessage,
     type RoomList as Rooms,
@@ -114,6 +119,10 @@
   let view = $state<'chat' | 'settings'>('chat');
   let settingsTab = $state<SettingsTab>('security');
   let paletteOpen = $state(false);
+  let newConversationOpen = $state(false);
+  // Direct-message invitations, and the one being answered.
+  let invites = $state<InviteList | null>(null);
+  let inviteBusy = $state<string | null>(null);
   // A finished or cancelled verification stays on screen until this is its ID.
   let dismissedFlow = $state<string | null>(null);
   // A room-list reply replaces the list only if it is newer than the one
@@ -121,6 +130,9 @@
   // and a failed newer request leaves the newest successful one in place.
   let roomsRequest = 0;
   let roomsShown = 0;
+  // The same for the invitation list.
+  let invitesRequest = 0;
+  let invitesShown = 0;
   let signingIn = $state(false);
   // Advanced on every session change. Replies to calls made before the change
   // are discarded, so nothing from a locked session is shown again.
@@ -292,6 +304,52 @@
     } catch (reason) {
       if (generation === sessionGeneration) error = describe(reason);
     }
+    refreshInvites();
+  }
+
+  // Invitations change with the room list. A failure keeps the last list;
+  // the next change tries again.
+  async function refreshInvites() {
+    const generation = sessionGeneration;
+    const request = ++invitesRequest;
+    try {
+      const list = await inviteList();
+      if (generation === sessionGeneration && request > invitesShown) {
+        invites = list;
+        invitesShown = request;
+      }
+    } catch {
+      // Kept as it was.
+    }
+  }
+
+  async function answerInvite(roomId: string, accept: boolean) {
+    if (inviteBusy) return;
+    const generation = sessionGeneration;
+    inviteBusy = roomId;
+    try {
+      await (accept ? acceptInvite(roomId) : declineInvite(roomId));
+      if (generation !== sessionGeneration) return;
+      await refreshRooms();
+      if (accept && generation === sessionGeneration) open(roomId);
+    } catch (reason) {
+      if (generation === sessionGeneration) {
+        error =
+          String(reason) === 'not_found'
+            ? 'That invitation is no longer pending.'
+            : describe(reason);
+        refreshInvites();
+      }
+    } finally {
+      if (generation === sessionGeneration) inviteBusy = null;
+    }
+  }
+
+  // A conversation was started or found: show it in the list and open it.
+  async function openConversation(roomId: string) {
+    const generation = sessionGeneration;
+    await refreshRooms();
+    if (generation === sessionGeneration) open(roomId);
   }
 
   // The session changed: drop everything shown from it. Pending fetches see
@@ -302,6 +360,9 @@
     confirmingSignOut = false;
     view = 'chat';
     paletteOpen = false;
+    newConversationOpen = false;
+    invites = null;
+    inviteBusy = null;
     dismissedFlow = null;
     draft = '';
     // Nothing from the old session stays in the header while the new status loads.
@@ -470,6 +531,7 @@
     } catch {
       // The next change or session event tries again.
     }
+    refreshInvites();
   }
 
   async function startSignIn(homeserver: string) {
@@ -994,6 +1056,11 @@
         onselect={open}
         onsearch={() => (paletteOpen = rooms !== null)}
         onsettings={() => openSettings('security')}
+        {invites}
+        {inviteBusy}
+        onnewconversation={signedIn ? () => (newConversationOpen = true) : undefined}
+        onaccept={(roomId) => answerInvite(roomId, true)}
+        ondecline={(roomId) => answerInvite(roomId, false)}
       >
         {#snippet notice()}
           {#if signedIn && (security?.identity === 'none' || security?.identity === 'unverified')}
@@ -1108,6 +1175,9 @@
       </div>
       {#if paletteOpen && rooms}
         <JumpPalette rooms={rooms.rooms} onselect={open} onclose={() => (paletteOpen = false)} />
+      {/if}
+      {#if newConversationOpen && signedIn}
+        <NewConversation onopen={openConversation} onclose={() => (newConversationOpen = false)} />
       {/if}
     </div>
   {:else}

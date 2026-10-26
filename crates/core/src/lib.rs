@@ -31,6 +31,7 @@
 
 pub mod account;
 pub mod contacts;
+pub mod conversations;
 pub mod credentials;
 pub mod homeserver;
 pub mod identities;
@@ -226,6 +227,10 @@ pub struct Core {
     /// Shared by the frame reader and the images, under one aggregate limit.
     budgets: Arc<ResourceBudgets>,
     media: MediaService,
+    /// Starting a conversation or answering an invitation, one at a time.
+    conversation: conversations::Busy,
+    /// One user-directory search at a time.
+    search: conversations::Busy,
 }
 
 /// A call that runs on its own thread; it returns the reply's outcome.
@@ -308,6 +313,8 @@ impl Core {
             hub: Arc::default(),
             media: MediaService::new(budgets.clone(), media::platform_worker()),
             budgets,
+            conversation: conversations::Busy::default(),
+            search: conversations::Busy::default(),
         }
     }
 
@@ -385,6 +392,13 @@ impl Core {
                 Err(code) => error(code),
             },
             Call::PickImage { room_id } => match self.pick_image(room_id) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
+            Call::AcceptInvite { .. }
+            | Call::DeclineInvite { .. }
+            | Call::StartConversation { .. }
+            | Call::SearchUsers { .. } => match self.conversation_call(&request.call) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
@@ -543,7 +557,141 @@ impl Core {
                 refused(self.media.discard(self.media_generation(), handle))
             }
             Call::SendImage { room_id, handle } => self.send_image(room_id, handle),
+            Call::InviteList {} => self.invite_list(),
+            Call::AcceptInvite { .. }
+            | Call::DeclineInvite { .. }
+            | Call::StartConversation { .. }
+            | Call::SearchUsers { .. } => match self.conversation_call(call) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
         }
+    }
+
+    fn invite_list(&self) -> Outcome {
+        match self.source() {
+            Source::Locked => Outcome::Error(ErrorCode::Locked),
+            // Synthetic data and a signed-out session have no invitations.
+            Source::Fixtures | Source::SignedOut => ok(&persephone_contracts::InviteList {
+                invites: Vec::new(),
+                truncated: false,
+            }),
+            Source::Matrix(lease, client) => {
+                bounded(&lease.stores().block_on(conversations::invite_list(&client)))
+            }
+        }
+    }
+
+    /// Admits a conversation call: its argument is checked first, then it
+    /// takes its kind's slot (one at a time) and runs later under a lease of
+    /// the session admitted now. A lock, unlock or sign-in in between makes
+    /// it `locked`: it never runs under another session or account. A change
+    /// to the rooms also announces a room-list change.
+    fn conversation_call<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
+        enum Work {
+            Accept(String),
+            Decline(String),
+            Start(matrix_sdk::ruma::OwnedUserId),
+            Search(String),
+        }
+        let work = match call {
+            Call::AcceptInvite { room_id } if valid_room_id(room_id) => {
+                Work::Accept(room_id.clone())
+            }
+            Call::DeclineInvite { room_id } if valid_room_id(room_id) => {
+                Work::Decline(room_id.clone())
+            }
+            Call::StartConversation { user_id } => {
+                Work::Start(conversations::parse_user(user_id).ok_or(ErrorCode::InvalidArgument)?)
+            }
+            Call::SearchUsers { term } if conversations::valid_term(term) => {
+                Work::Search(term.clone())
+            }
+            _ => return Err(ErrorCode::InvalidArgument),
+        };
+        // Synthetic data has no homeserver.
+        if !self.session.is_configured() {
+            return Err(ErrorCode::NotFound);
+        }
+        let generation = match self.session.with_client() {
+            Ok(Some((lease, client))) => {
+                let generation = lease.generation();
+                {
+                    let _context = lease.stores().runtime().enter();
+                    drop(client);
+                }
+                drop(lease);
+                generation
+            }
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let slot = match work {
+            Work::Search(_) => self.search.begin()?,
+            _ => self.conversation.begin()?,
+        };
+        Ok(Box::new(move || {
+            let _slot = slot;
+            let outcome = match &work {
+                Work::Accept(room_id) => self
+                    .with_matrix(generation, async |client| {
+                        conversations::accept(&client, room_id).await
+                    })
+                    .map(|()| serde_json::Value::Null),
+                Work::Decline(room_id) => self
+                    .with_matrix(generation, async |client| {
+                        conversations::decline(&client, room_id).await
+                    })
+                    .map(|()| serde_json::Value::Null),
+                Work::Start(user) => self
+                    .with_matrix(generation, async |client| {
+                        conversations::start(&client, user).await
+                    })
+                    .and_then(|start| serde_json::to_value(start).map_err(|_| ErrorCode::Internal)),
+                Work::Search(term) => self
+                    .with_matrix(generation, async |client| {
+                        conversations::search(&client, term).await
+                    })
+                    .and_then(|found| serde_json::to_value(found).map_err(|_| ErrorCode::Internal)),
+            };
+            if outcome.is_ok() && !matches!(work, Work::Search(_)) {
+                self.hub.mark_list_changed(&[], true);
+            }
+            match outcome {
+                Ok(value) => Outcome::Ok(value),
+                Err(code) => Outcome::Error(code),
+            }
+        }))
+    }
+
+    /// Runs `work` with the signed-in client under a lease of the session in
+    /// `generation`, and drops the client inside the stores' runtime before
+    /// the lease ends. Another generation (the session locked, or another
+    /// sign-in, since the call was admitted) is `locked`, and `work` does not
+    /// run.
+    fn with_matrix<T>(
+        &self,
+        generation: u64,
+        work: impl AsyncFnOnce(matrix_sdk::Client) -> Result<T, ErrorCode>,
+    ) -> Result<T, ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let result = if lease.generation() == generation {
+            lease.stores().block_on(work(client.clone()))
+        } else {
+            Err(ErrorCode::Locked)
+        };
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        result
     }
 
     /// Runs when a lock or sign-out has closed admission and advanced the
@@ -1173,6 +1321,74 @@ mod tests {
                 ErrorCode::NotFound,
             ),
             (Call::ImageBand { handle, band: 0 }, ErrorCode::Unavailable),
+        ] {
+            let reply = core.handle(&Request {
+                id: 1,
+                call: call.clone(),
+            });
+            assert_eq!(reply.outcome, Outcome::Error(expected), "{call:?}");
+        }
+    }
+
+    /// GIVEN no Matrix session (synthetic data) WHEN conversation calls arrive
+    /// THEN malformed arguments are invalid, the invitation list is empty and
+    /// everything else is not found: nothing reaches a homeserver.
+    #[test]
+    fn given_no_matrix_session_then_conversation_calls_are_refused() {
+        let core = Core::default();
+        let reply = core.handle(&Request {
+            id: 1,
+            call: Call::InviteList {},
+        });
+        assert_eq!(
+            reply.outcome,
+            Outcome::Ok(serde_json::json!({"invites": [], "truncated": false}))
+        );
+        for (call, expected) in [
+            (
+                Call::StartConversation {
+                    user_id: "@bob:s".into(),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::StartConversation {
+                    user_id: "bob".into(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::StartConversation {
+                    user_id: format!("@{}:s", "b".repeat(MAX_USER_ID_BYTES)),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::AcceptInvite {
+                    room_id: "!r:s".into(),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::DeclineInvite {
+                    room_id: "#alias:s".into(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::SearchUsers { term: "bob".into() },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::SearchUsers { term: " ".into() },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::SearchUsers {
+                    term: "b".repeat(persephone_core_protocol::MAX_SEARCH_TERM_BYTES + 1),
+                },
+                ErrorCode::InvalidArgument,
+            ),
         ] {
             let reply = core.handle(&Request {
                 id: 1,

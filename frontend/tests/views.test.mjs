@@ -12,6 +12,8 @@ let ServerPicker;
 let Verification;
 let JumpPalette;
 let IdentityChanges;
+let Invites;
+let NewConversation;
 let render;
 
 before(async () => {
@@ -29,6 +31,8 @@ before(async () => {
   ({ default: Verification } = await vite.ssrLoadModule('/src/Verification.svelte'));
   ({ default: JumpPalette } = await vite.ssrLoadModule('/src/JumpPalette.svelte'));
   ({ default: IdentityChanges } = await vite.ssrLoadModule('/src/IdentityChanges.svelte'));
+  ({ default: Invites } = await vite.ssrLoadModule('/src/Invites.svelte'));
+  ({ default: NewConversation } = await vite.ssrLoadModule('/src/NewConversation.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -691,4 +695,40 @@ test('GIVEN members whose identity changed WHEN the room shows THEN sending is p
   assert.match(failed, /<p role="alert" class="error">That identity change is no longer listed\.<\/p>/);
   assert.doesNotMatch(one, /class="error"/, 'no failure, no error line');
   assert.match(asking, /<button[^>]*disabled/);
+});
+
+test('GIVEN direct-message invitations WHEN listed THEN inviters are isolated, escaped text with Accept and Decline', () => {
+  const invites = [
+    { roomId: '!a:example.invalid', inviter: '@mallory:example.invalid', inviterName: hostileName },
+    { roomId: '!b:example.invalid', inviter: '@bob:example.invalid', inviterName: null }
+  ];
+  const props = { invites, truncated: true, busy: null, onaccept: () => {}, ondecline: () => {} };
+  const html = render(Invites, { props }).body;
+
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /<bdi class="invite-name">&lt;img src=x onerror=alert\(1\)>(?:<!--[^>]*-->)*<\/bdi>/);
+  assert.match(html, /<bdi class="invite-id">@mallory:example\.invalid(?:<!--[^>]*-->)*<\/bdi>/);
+  assert.match(
+    html,
+    /<bdi class="invite-name">@bob:example\.invalid(?:<!--[^>]*-->)*<\/bdi>/,
+    'without a name the inviter ID is the name'
+  );
+  assert.equal((html.match(/>Accept</g) ?? []).length, 2);
+  assert.equal((html.match(/>Decline</g) ?? []).length, 2);
+  assert.doesNotMatch(html, /disabled/, 'nothing is being answered');
+  assert.match(html, /Showing the first 2 invitations\./);
+
+  const busy = render(Invites, { props: { ...props, busy: '!a:example.invalid' } }).body;
+  assert.equal((busy.match(/disabled/g) ?? []).length, 4, 'one answer at a time');
+});
+
+test('GIVEN the new-conversation dialog WHEN it opens THEN directory search is off and nothing can start yet', () => {
+  const html = render(NewConversation, { props: { onopen: () => {}, onclose: () => {} } }).body;
+
+  assert.match(html, /<dialog class="picker new-conversation" aria-labelledby="new-conversation-heading"/);
+  assert.match(html, /<input id="new-conversation-id" class="field" type="text"[^>]*maxlength="255"/);
+  assert.match(html, /<input type="checkbox" role="switch"(?![^>]*checked)[^>]*>/, 'directory search starts off');
+  assert.match(html, /Off: nothing is sent until you press Start\./);
+  assert.doesNotMatch(html, /Directory matches/);
+  assert.match(html, /<button type="submit" class="primary" disabled/, 'no Matrix ID yet');
 });

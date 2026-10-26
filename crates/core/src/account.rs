@@ -234,6 +234,8 @@ pub async fn sync_round(client: &Client, engine: &Engine) -> Result<Vec<String>,
                 .joined
                 .keys()
                 .chain(response.rooms.left.keys())
+                // A new invitation changes the invitation list.
+                .chain(response.rooms.invited.keys())
                 .map(ToString::to_string)
                 .collect())
         }
