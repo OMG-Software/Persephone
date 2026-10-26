@@ -16,6 +16,11 @@ export type AppStatus = {
  */
 version: string, 
 /**
+ * The commit the core was built from: its first 12 hex digits, or
+ * "unknown". It does not show uncommitted changes.
+ */
+revision: string, 
+/**
  * The current development milestone, e.g. "P1".
  */
 milestone: string, store: StoreState, account: AccountStatus, };

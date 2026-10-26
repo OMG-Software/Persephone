@@ -927,7 +927,8 @@
           <h2 id="session-heading">Session</h2>
           <div class="panel">
             <p role="status">
-              Rust host {status.version} · {status.milestone} · {storeText[status.store] ??
+              Persephone {status.version} · revision <span class="mono">{status.revision}</span> ·
+              {status.milestone} · {storeText[status.store] ??
                 'Local store state unknown'}
               {#if signedIn && status.account.userId}
                 · Signed in as <bdi>{status.account.userId}</bdi>

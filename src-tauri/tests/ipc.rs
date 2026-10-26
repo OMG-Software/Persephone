@@ -41,7 +41,7 @@ impl CoreTransport for FakeCore {
         }
         match call {
             Call::AppStatus {} => Ok(
-                serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}}),
+                serde_json::json!({"version": "9.9.9", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}}),
             ),
             Call::RoomList {} => Ok(serde_json::json!({
                 "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2, "encryption": "encrypted"}],
@@ -276,7 +276,7 @@ fn given_allowed_command_from_app_origin_then_typed_status_is_returned() {
     // The reply is the core's answer, relayed and shape-checked by the UI.
     assert_eq!(
         reply,
-        serde_json::json!({"version": "9.9.9", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}})
+        serde_json::json!({"version": "9.9.9", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}})
     );
 }
 

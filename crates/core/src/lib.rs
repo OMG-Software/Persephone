@@ -74,6 +74,9 @@ use std::{
 
 pub const MILESTONE: &str = "P1";
 
+/// The commit this core was built from (`build.rs`).
+pub const REVISION: &str = env!("PERSEPHONE_REVISION");
+
 /// Longest a `lock_session` call waits for admitted work before replying
 /// `locking`; the UI may call again to resume the wait. Covers one sync round.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
@@ -410,6 +413,7 @@ impl Core {
         match call {
             Call::AppStatus {} => ok(&AppStatus {
                 version: env!("CARGO_PKG_VERSION").into(),
+                revision: REVISION.into(),
                 milestone: MILESTONE.into(),
                 store: self.session.state(),
                 account: self.account(),
