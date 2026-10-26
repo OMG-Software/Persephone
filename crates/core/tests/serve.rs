@@ -84,6 +84,9 @@ fn given_requests_then_each_gets_a_matching_typed_reply_until_the_ui_closes() {
 fn given_a_build_then_the_revision_names_the_checked_out_commit() {
     let git = |args: &[&str]| {
         std::process::Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
             .arg("-C")
             .arg(env!("CARGO_MANIFEST_DIR"))
             .args(args)

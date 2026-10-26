@@ -50,14 +50,18 @@ fn own_checkout(dir: &str) -> bool {
     }
 }
 
-/// One line of Git's output, or `None` when Git is missing or fails.
+/// Variables that make Git use another repository or worktree than the one
+/// around `-C`, such as those a Git hook sets for its own repository.
+const GIT_LOCATION: [&str; 3] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
+
+/// One line of Git's output, or `None` when Git is missing or fails. Git
+/// finds the repository from `dir` alone, never from inherited variables.
 fn git(dir: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    for name in GIT_LOCATION {
+        command.env_remove(name);
+    }
+    let output = command.arg("-C").arg(dir).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
