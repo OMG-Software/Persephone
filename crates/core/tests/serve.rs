@@ -75,19 +75,28 @@ fn given_requests_then_each_gets_a_matching_typed_reply_until_the_ui_closes() {
     }
 }
 
-/// GIVEN a core built from a Git checkout
+/// GIVEN a core built from this Git checkout
 /// WHEN its revision is read
-/// THEN it is the checked-out commit, shortened; without Git it is "unknown"
-/// or a commit ID from CI, and never anything else.
+/// THEN it is the checked-out commit, shortened; outside this checkout (no
+/// Git, or another repository around a source archive) it is "unknown" or a
+/// commit ID from CI, never another repository's commit.
 #[test]
 fn given_a_build_then_the_revision_names_the_checked_out_commit() {
-    let head = std::process::Command::new("git")
-        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8(output.stdout).unwrap().trim().to_owned());
-    match head {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(env!("CARGO_MANIFEST_DIR"))
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8(output.stdout).unwrap().trim().to_owned())
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let own = git(&["rev-parse", "--show-toplevel"])
+        .and_then(|top| std::fs::canonicalize(top).ok())
+        .is_some_and(|top| Some(top) == std::fs::canonicalize(root).ok());
+    match git(&["rev-parse", "HEAD"]).filter(|_| own) {
         Some(head) => assert_eq!(REVISION, &head[..12]),
         None => assert!(
             REVISION == "unknown"

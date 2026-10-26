@@ -1,8 +1,9 @@
 //! Records the commit the core is built from as `PERSEPHONE_REVISION`, which
 //! `app_status` reports: the first 12 hex digits of the commit ID, or
 //! `unknown`. It names the checked-out commit only; uncommitted changes are
-//! not shown. Without a usable Git checkout (a source archive, or a container
-//! where Git refuses the directory) it falls back to `GITHUB_SHA`.
+//! not shown. Without a usable Git checkout of this source tree (a source
+//! archive, perhaps inside another repository, or a container where Git
+//! refuses the directory) it falls back to `GITHUB_SHA`.
 
 use std::{path::Path, process::Command};
 
@@ -10,12 +11,18 @@ const LENGTH: usize = 12;
 
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").expect("set by Cargo");
-    let revision = git(&dir, &["rev-parse", "HEAD"])
+    let own = own_checkout(&dir);
+    let revision = own
+        .then(|| git(&dir, &["rev-parse", "HEAD"]))
+        .flatten()
         .or_else(|| std::env::var("GITHUB_SHA").ok())
         .and_then(|id| short(&id))
         .unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=PERSEPHONE_REVISION={revision}");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    if !own {
+        return;
+    }
     // Run again when the checked-out commit changes: HEAD itself (another
     // branch), the branch it names (a new commit) and packed refs.
     let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string()];
@@ -27,6 +34,19 @@ fn main() {
             let path = Path::new(&dir).join(path);
             println!("cargo:rerun-if-changed={}", path.display());
         }
+    }
+}
+
+/// Whether Git's worktree for `dir` is this source tree, whose root is two
+/// levels above this crate. Git looks upwards for a repository, so a source
+/// archive unpacked inside another repository would otherwise report that
+/// repository's commit.
+fn own_checkout(dir: &str) -> bool {
+    let root = Path::new(dir).join("..").join("..");
+    let top = git(dir, &["rev-parse", "--show-toplevel"]);
+    match (top.map(std::fs::canonicalize), std::fs::canonicalize(root)) {
+        (Some(Ok(top)), Ok(root)) => top == root,
+        _ => false,
     }
 }
 
