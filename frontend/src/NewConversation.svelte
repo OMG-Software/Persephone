@@ -55,6 +55,7 @@
     // The core runs one search at a time: while an earlier one is still
     // running, this one waits and tries again instead of failing.
     const search = async () => {
+      if (request !== searchRequest) return;
       try {
         const found = await searchUsers(term);
         if (request === searchRequest) {
@@ -72,7 +73,12 @@
       }
     };
     timer = setTimeout(search, SEARCH_DELAY_MS);
-    return () => clearTimeout(timer);
+    // A new term, the switch turned off, or the dialog closing ends this
+    // search: no reply is shown and no retry is sent.
+    return () => {
+      clearTimeout(timer);
+      searchRequest += 1;
+    };
   });
 
   async function start(event: SubmitEvent) {
