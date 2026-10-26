@@ -7,9 +7,12 @@ import type {
   AccountStatus,
   AppStatus,
   ContactStatus,
+  ConversationStart,
   ImageMime,
   ImagePick,
   ImageView,
+  InviteList,
+  InviteSummary,
   PendingMessage,
   RoomIdentityChanges,
   SignInError,
@@ -17,7 +20,9 @@ import type {
   SecurityStatus,
   StoreState,
   TimelineItem,
-  TimelinePage
+  TimelinePage,
+  UserMatch,
+  UserSearch
 } from '../../../crates/contracts/generated/contracts';
 import { parseBand, type Band } from '../image';
 
@@ -25,9 +30,12 @@ export type {
   AccountStatus,
   AppStatus,
   ContactStatus,
+  ConversationStart,
   ImageMime,
   ImagePick,
   ImageView,
+  InviteList,
+  InviteSummary,
   RoomIdentityChanges,
   PendingMessage,
   RoomList,
@@ -35,7 +43,9 @@ export type {
   SignInError,
   StoreState,
   TimelineItem,
-  TimelinePage
+  TimelinePage,
+  UserMatch,
+  UserSearch
 };
 
 export function appStatus(): Promise<AppStatus> {
@@ -263,4 +273,36 @@ export function sendImage(roomId: string, handle: string): Promise<PendingMessag
 /** Drops a picked image that was not sent. */
 export function discardImage(handle: string): Promise<void> {
   return invoke<void>('discard_image', { handle });
+}
+
+/** Direct-message invitations the account has not answered. */
+export function inviteList(): Promise<InviteList> {
+  return invoke<InviteList>('invite_list');
+}
+
+/** Joins the room of a direct-message invitation. */
+export function acceptInvite(roomId: string): Promise<void> {
+  return invoke<void>('accept_invite', { roomId });
+}
+
+/** Refuses a direct-message invitation. */
+export function declineInvite(roomId: string): Promise<void> {
+  return invoke<void>('decline_invite', { roomId });
+}
+
+/**
+ * Opens a conversation with a user: an existing direct-message room with just
+ * them, or a new encrypted one they are invited to. The core refuses a user
+ * without a cross-signing identity.
+ */
+export function startConversation(userId: string): Promise<ConversationStart> {
+  return invoke<ConversationStart>('start_conversation', { userId });
+}
+
+/**
+ * Searches the homeserver's user directory. The homeserver sees every term:
+ * call this only while the user has turned directory search on.
+ */
+export function searchUsers(term: string): Promise<UserSearch> {
+  return invoke<UserSearch>('search_users', { term });
 }

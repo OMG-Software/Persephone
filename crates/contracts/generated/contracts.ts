@@ -111,6 +111,28 @@ queuedAt: number, };
 
 export type RoomList = { rooms: Array<RoomSummary>, truncated: boolean, };
 
+export type InviteSummary = { roomId: string, 
+/**
+ * The user ID of whoever sent the invitation.
+ */
+inviter: string, 
+/**
+ * The inviter's display name in that room, if they set one.
+ */
+inviterName: string | null, };
+
+export type InviteList = { invites: Array<InviteSummary>, truncated: boolean, };
+
+export type ConversationStart = { "kind": "existing", roomId: string, } | { "kind": "created", roomId: string, } | { "kind": "no_identity", } | { "kind": "refused", };
+
+export type UserMatch = { userId: string, 
+/**
+ * The display name the directory gave, projected like any name.
+ */
+displayName: string | null, };
+
+export type UserSearch = { users: Array<UserMatch>, truncated: boolean, };
+
 export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported";
 
 export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, 

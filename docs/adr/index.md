@@ -15,6 +15,7 @@
 * [0010 - Protect keys and contain processes on Linux](0010-linux-platform-layer.md)
 * [0011 - Protect keys and contain processes on macOS](0011-macos-platform-layer.md)
 * [0012 - Sign releases and publish them as drafts](0012-sign-and-publish-releases-as-drafts.md)
+* [0014 - Start encrypted direct conversations by Matrix ID](0014-start-encrypted-direct-conversations-by-matrix-id.md)
 
 ## Proposed Records
 

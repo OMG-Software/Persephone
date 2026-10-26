@@ -199,6 +199,37 @@ impl CoreTransport for FakeCore {
                 (_, Some(_)) => Err(CoreError::Core(ErrorCode::InvalidArgument)),
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },
+            Call::InviteList {} => Ok(serde_json::json!({
+                "invites": [{"roomId": "!inv:example.invalid", "inviter": "@bob:example.invalid", "inviterName": "<b>Bob</b>"}],
+                "truncated": false
+            })),
+            Call::AcceptInvite { room_id } | Call::DeclineInvite { room_id } => {
+                match room_id.as_str() {
+                    "!inv:example.invalid" => Ok(serde_json::Value::Null),
+                    _ => Err(CoreError::Core(ErrorCode::NotFound)),
+                }
+            }
+            Call::StartConversation { user_id } => match user_id.as_str() {
+                "@bob:example.invalid" => {
+                    Ok(serde_json::json!({"kind": "created", "roomId": "!new:example.invalid"}))
+                }
+                "@nokeys:example.invalid" => Ok(serde_json::json!({"kind": "no_identity"})),
+                // An outcome outside the contract must not reach the page.
+                _ => Ok(
+                    serde_json::json!({"kind": "created_unencrypted", "roomId": "!x:example.invalid"}),
+                ),
+            },
+            Call::SearchUsers { term } => match term.as_str() {
+                "bob" => Ok(serde_json::json!({
+                    "users": [{"userId": "@bob:example.invalid", "displayName": "Bob"}],
+                    "truncated": false
+                })),
+                // A match carrying a field the contract does not have.
+                _ => Ok(serde_json::json!({
+                    "users": [{"userId": "@a:example.invalid", "displayName": null, "avatarUrl": "mxc://x/y"}],
+                    "truncated": false
+                })),
+            },
         }
     }
 
@@ -445,7 +476,12 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-release-image",
             "allow-pick-image",
             "allow-send-image",
-            "allow-discard-image"
+            "allow-discard-image",
+            "allow-invite-list",
+            "allow-accept-invite",
+            "allow-decline-invite",
+            "allow-start-conversation",
+            "allow-search-users"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -898,6 +934,85 @@ fn given_contact_commands_then_only_the_room_id_crosses() {
         core.calls.load(Ordering::SeqCst),
         calls,
         "oversized room IDs never crossed"
+    );
+}
+
+/// Conversation commands relay only their one argument, refuse an oversized
+/// one before the core, and refuse a reply outside the contract: an
+/// unencrypted outcome or a directory match with an avatar URL never reaches
+/// the page.
+#[test]
+fn given_conversation_commands_then_one_argument_crosses_and_replies_are_checked() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let invites = invoke("invite_list", serde_json::json!({})).unwrap();
+    assert_eq!(invites["invites"][0]["inviterName"], "<b>Bob</b>");
+    for cmd in ["accept_invite", "decline_invite"] {
+        assert!(
+            invoke(cmd, serde_json::json!({"roomId": "!inv:example.invalid"})).is_ok(),
+            "{cmd}"
+        );
+        assert_eq!(
+            invoke(cmd, serde_json::json!({"roomId": "!gone:example.invalid"})).unwrap_err(),
+            "not_found",
+            "{cmd}"
+        );
+    }
+    assert_eq!(
+        invoke(
+            "start_conversation",
+            serde_json::json!({"userId": "@bob:example.invalid"})
+        )
+        .unwrap(),
+        serde_json::json!({"kind": "created", "roomId": "!new:example.invalid"})
+    );
+    assert_eq!(
+        invoke(
+            "start_conversation",
+            serde_json::json!({"userId": "@nokeys:example.invalid"})
+        )
+        .unwrap()["kind"],
+        "no_identity"
+    );
+    assert!(
+        invoke(
+            "start_conversation",
+            serde_json::json!({"userId": "@odd:example.invalid"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        invoke("search_users", serde_json::json!({"term": "bob"})).unwrap()["users"][0]["userId"],
+        "@bob:example.invalid"
+    );
+    assert!(invoke("search_users", serde_json::json!({"term": "a"})).is_err());
+    let calls = core.calls.load(Ordering::SeqCst);
+    for (cmd, args) in [
+        (
+            "accept_invite",
+            serde_json::json!({"roomId": "!".repeat(256)}),
+        ),
+        (
+            "decline_invite",
+            serde_json::json!({"roomId": "!".repeat(256)}),
+        ),
+        (
+            "start_conversation",
+            serde_json::json!({"userId": "@".repeat(256)}),
+        ),
+        ("search_users", serde_json::json!({"term": "b".repeat(257)})),
+    ] {
+        assert_eq!(invoke(cmd, args).unwrap_err(), "invalid_argument", "{cmd}");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized arguments never crossed"
     );
 }
 

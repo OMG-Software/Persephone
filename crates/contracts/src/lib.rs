@@ -244,6 +244,65 @@ pub struct RoomList {
     pub truncated: bool,
 }
 
+/// An invitation to a direct-message room that this account has not
+/// answered. Names are the inviter's word, projected like any name.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct InviteSummary {
+    pub room_id: String,
+    /// The user ID of whoever sent the invitation.
+    pub inviter: String,
+    /// The inviter's display name in that room, if they set one.
+    pub inviter_name: Option<String>,
+}
+
+/// Reply of `invite_list`: direct-message invitations only, capped like the
+/// room list.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct InviteList {
+    pub invites: Vec<InviteSummary>,
+    pub truncated: bool,
+}
+
+/// Reply of `start_conversation`.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConversationStart {
+    /// A direct-message room with just this person already existed; nothing
+    /// was created.
+    #[serde(rename_all = "camelCase")]
+    Existing { room_id: String },
+    /// A new encrypted direct-message room was created and the person was
+    /// invited to it.
+    #[serde(rename_all = "camelCase")]
+    Created { room_id: String },
+    /// The person has no cross-signing identity, so they could not read
+    /// encrypted messages (ADR-0005). Nothing was created.
+    NoIdentity {},
+    /// The homeserver refused: for example the user does not exist, or the
+    /// server does not allow the invitation. Nothing was created.
+    Refused {},
+}
+
+/// One match from the homeserver's user directory.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct UserMatch {
+    pub user_id: String,
+    /// The display name the directory gave, projected like any name.
+    pub display_name: Option<String>,
+}
+
+/// Reply of `search_users`. `truncated` says whether the homeserver had more
+/// matches than were sent.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct UserSearch {
+    pub users: Vec<UserMatch>,
+    pub truncated: bool,
+}
+
 /// State of the local encrypted store. Codes only: no paths, key material or
 /// error text reach the UI.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -658,6 +717,11 @@ pub fn generated_typescript() -> String {
         format!("export {}", PendingKind::decl(&config)),
         format!("export {}", PendingMessage::decl(&config)),
         format!("export {}", RoomList::decl(&config)),
+        format!("export {}", InviteSummary::decl(&config)),
+        format!("export {}", InviteList::decl(&config)),
+        format!("export {}", ConversationStart::decl(&config)),
+        format!("export {}", UserMatch::decl(&config)),
+        format!("export {}", UserSearch::decl(&config)),
         format!("export {}", NoticeKind::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),

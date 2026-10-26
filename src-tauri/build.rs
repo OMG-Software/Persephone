@@ -45,6 +45,11 @@ fn main() {
             "pick_image",
             "send_image",
             "discard_image",
+            "invite_list",
+            "accept_invite",
+            "decline_invite",
+            "start_conversation",
+            "search_users",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes

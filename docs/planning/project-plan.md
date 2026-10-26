@@ -19,6 +19,7 @@ its earlier broad milestones are replaced by that plan's P0–P7 acceptance gate
 - Support general Matrix homeservers, with Merovingian tested first.
 - Prefer compatible Sliding Sync by default; fall back to regular `/sync` when unavailable, as recorded in accepted [ADR-0001](../adr/0001-prefer-sliding-sync-with-classic-sync-fallback.md). Merovingian and Synapse are the first integration targets.
 - First usable release: login, one account, room list, message history, sending text and images, and end-to-end encrypted chats.
+- Start an encrypted direct conversation by exact Matrix ID, with user-directory search behind a switch that is off by default, and accept or decline direct-message invitations; refuse people without a cross-signing identity. Owner decision, 26 October 2026; see [ADR-0014](../adr/0014-start-encrypted-direct-conversations-by-matrix-id.md).
 - Treat security as a first-class architectural requirement for high-risk users: include targeted attacks, metadata exposure, and stricter media handling.
 - Use TLS 1.3 only for every network connection; refuse TLS 1.2 and earlier. Owner decision, 20 October 2026.
 - Treat messages as untrusted, including after decryption. Apply the same policy to server-supplied names, links, avatars, attachments, and other event data.

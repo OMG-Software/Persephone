@@ -1,6 +1,6 @@
 use persephone_contracts::{
-    AccountState, AccountStatus, AppStatus, RoomList, SignInError, StoreState,
-    generated_typescript, sample_room_summary, sample_timeline_page,
+    AccountState, AccountStatus, AppStatus, ConversationStart, InviteList, RoomList, SignInError,
+    StoreState, UserSearch, generated_typescript, sample_room_summary, sample_timeline_page,
 };
 
 #[test]
@@ -286,4 +286,70 @@ fn image_contracts_reject_unknown_fields_and_out_of_range_values() {
     assert!(serde_json::from_str::<PendingMessage>(&pending(r#""image""#)).is_ok());
     assert!(serde_json::from_str::<PendingMessage>(&pending(r#""file""#)).is_err());
     assert!(serde_json::from_str::<PendingMessage>(&pending("null")).is_err());
+}
+
+/// GIVEN conversation replies WHEN read THEN only the documented outcomes and
+/// fields pass: no unencrypted outcome, no avatar URL, no extra invite data.
+#[test]
+fn conversation_replies_keep_their_documented_shape() {
+    assert_eq!(
+        serde_json::to_value(ConversationStart::Created {
+            room_id: "!r:s".into()
+        })
+        .unwrap(),
+        serde_json::json!({"kind": "created", "roomId": "!r:s"})
+    );
+    assert_eq!(
+        serde_json::to_value(ConversationStart::NoIdentity {}).unwrap(),
+        serde_json::json!({"kind": "no_identity"})
+    );
+    for valid in [
+        r#"{"kind":"existing","roomId":"!r:s"}"#,
+        r#"{"kind":"created","roomId":"!r:s"}"#,
+        r#"{"kind":"no_identity"}"#,
+        r#"{"kind":"refused"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<ConversationStart>(valid).is_ok(),
+            "{valid}"
+        );
+    }
+    for invalid in [
+        r#"{"kind":"created"}"#,
+        r#"{"kind":"created","room_id":"!r:s"}"#,
+        r#"{"kind":"created","roomId":"!r:s","encrypted":false}"#,
+        r#"{"kind":"created_unencrypted","roomId":"!r:s"}"#,
+        r#"{"kind":"no_identity","userId":"@b:s"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<ConversationStart>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+
+    assert!(
+        serde_json::from_str::<UserSearch>(
+            r#"{"users":[{"userId":"@b:s","displayName":null}],"truncated":false}"#
+        )
+        .is_ok()
+    );
+    assert!(serde_json::from_str::<UserSearch>(
+        r#"{"users":[{"userId":"@b:s","displayName":null,"avatarUrl":"mxc://s/m"}],"truncated":false}"#
+    )
+    .is_err());
+
+    assert!(serde_json::from_str::<InviteList>(
+        r#"{"invites":[{"roomId":"!r:s","inviter":"@b:s","inviterName":null}],"truncated":false}"#
+    )
+    .is_ok());
+    for invalid in [
+        r#"{"invites":[{"roomId":"!r:s","inviter":"@b:s","inviterName":null,"reason":"hi"}],"truncated":false}"#,
+        r#"{"invites":[{"roomId":"!r:s","inviterName":null}],"truncated":false}"#,
+        r#"{"invites":[]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<InviteList>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
 }

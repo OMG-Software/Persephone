@@ -25,13 +25,14 @@ pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
-    AccountStatus, AppStatus, ContactStatus, ImagePick, ImageView, PendingMessage,
-    RoomIdentityChanges, RoomList, SecurityStatus, StoreState, TimelinePage,
+    AccountStatus, AppStatus, ContactStatus, ConversationStart, ImagePick, ImageView, InviteList,
+    PendingMessage, RoomIdentityChanges, RoomList, SecurityStatus, StoreState, TimelinePage,
+    UserSearch,
 };
 use persephone_core_protocol::{
     Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES, MAX_EVENT_ID_BYTES,
     MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES,
-    MAX_USER_ID_BYTES,
+    MAX_SEARCH_TERM_BYTES, MAX_USER_ID_BYTES,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -578,6 +579,52 @@ async fn discard_image(core: State<'_, CoreLink>, handle: String) -> Result<(), 
     relay::<()>(core.inner(), Call::DiscardImage { handle }).await
 }
 
+/// Direct-message invitations the account has not answered.
+#[tauri::command]
+async fn invite_list(core: State<'_, CoreLink>) -> Result<InviteList, String> {
+    relay(core.inner(), Call::InviteList {}).await
+}
+
+/// Joins the room of a direct-message invitation.
+#[tauri::command]
+async fn accept_invite(core: State<'_, CoreLink>, room_id: String) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::AcceptInvite { room_id }).await
+}
+
+/// Refuses a direct-message invitation.
+#[tauri::command]
+async fn decline_invite(core: State<'_, CoreLink>, room_id: String) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::DeclineInvite { room_id }).await
+}
+
+/// Opens or creates an encrypted direct-message conversation with a user.
+#[tauri::command]
+async fn start_conversation(
+    core: State<'_, CoreLink>,
+    user_id: String,
+) -> Result<ConversationStart, String> {
+    if user_id.len() > MAX_USER_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::StartConversation { user_id }).await
+}
+
+/// Searches the homeserver's user directory. The page calls this only while
+/// directory search is turned on.
+#[tauri::command]
+async fn search_users(core: State<'_, CoreLink>, term: String) -> Result<UserSearch, String> {
+    if term.len() > MAX_SEARCH_TERM_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SearchUsers { term }).await
+}
+
 /// Drops every subscription when the page (re)loads: the new page holds none
 /// of the old channels, and the core's slots would otherwise stay taken.
 fn reset_subscriptions(core: &CoreLink, subscriptions: &Subscriptions) {
@@ -653,7 +700,12 @@ pub fn configure<R: Runtime>(
             release_image,
             pick_image,
             send_image,
-            discard_image
+            discard_image,
+            invite_list,
+            accept_invite,
+            decline_invite,
+            start_conversation,
+            search_users
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

@@ -179,7 +179,34 @@ pub enum Call {
     DiscardImage {
         handle: String,
     },
+    /// Direct-message invitations this account has not answered.
+    InviteList {},
+    /// Join the direct-message room of this invitation.
+    AcceptInvite {
+        room_id: String,
+    },
+    /// Refuse this direct-message invitation (leave the room).
+    DeclineInvite {
+        room_id: String,
+    },
+    /// Open a direct-message conversation with this user: an existing room
+    /// with just them, or a new encrypted room they are invited to. Refused
+    /// when they have no cross-signing identity (ADR-0005).
+    StartConversation {
+        user_id: String,
+    },
+    /// Search the homeserver's user directory. The page sends this only when
+    /// the user has turned directory search on: the server sees every term.
+    SearchUsers {
+        term: String,
+    },
 }
+
+/// Longest user-directory search term either side accepts, in bytes.
+pub const MAX_SEARCH_TERM_BYTES: usize = 256;
+
+/// Most matches a user-directory search returns.
+pub const MAX_SEARCH_RESULTS: usize = 10;
 
 /// Longest event ID either side accepts in a call (the Matrix limit).
 pub const MAX_EVENT_ID_BYTES: usize = 255;
@@ -604,6 +631,51 @@ mod tests {
         }
     }
 
+    /// GIVEN the conversation calls WHEN sent THEN only the room ID, user ID
+    /// or search term crosses, in the documented wire form.
+    #[test]
+    fn given_conversation_calls_then_only_their_one_argument_crosses() {
+        let budgets = ResourceBudgets::default();
+        for (call, wire) in [
+            (
+                Call::InviteList {},
+                r#"{"id":1,"call":{"command":"invite_list"}}"#,
+            ),
+            (
+                Call::AcceptInvite {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"accept_invite","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::DeclineInvite {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"decline_invite","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::StartConversation {
+                    user_id: "@b:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"start_conversation","user_id":"@b:s"}}"#,
+            ),
+            (
+                Call::SearchUsers { term: "bob".into() },
+                r#"{"id":1,"call":{"command":"search_users","term":"bob"}}"#,
+            ),
+        ] {
+            let request = Request { id: 1, call };
+            let mut sent = Vec::new();
+            send(&mut sent, &request).unwrap();
+            assert_eq!(String::from_utf8(sent[17..].to_vec()).unwrap(), wire);
+            let mut reader = Cursor::new(sent);
+            assert_eq!(
+                receive::<_, Request>(&mut reader, &budgets).unwrap(),
+                request
+            );
+        }
+    }
+
     #[test]
     fn given_unknown_command_field_or_kind_then_receive_refuses() {
         let budgets = ResourceBudgets::default();
@@ -654,6 +726,15 @@ mod tests {
             br#"{"id":1,"call":{"command":"accept_identity","user_id":"@b:s"}}"#,
             br#"{"id":1,"call":{"command":"accept_identity","room_id":"!r:s","user_id":"@b:s","confirmed":true}}"#,
             br#"{"id":1,"call":{"command":"pin_identity","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"invite_list","all":true}}"#,
+            br#"{"id":1,"call":{"command":"accept_invite"}}"#,
+            br#"{"id":1,"call":{"command":"decline_invite","room_id":"!r:s","ban":true}}"#,
+            br#"{"id":1,"call":{"command":"start_conversation"}}"#,
+            br#"{"id":1,"call":{"command":"start_conversation","user_id":"@b:s","encrypted":false}}"#,
+            br#"{"id":1,"call":{"command":"start_conversation","user_id":"@b:s","invite":["@c:s"]}}"#,
+            br#"{"id":1,"call":{"command":"search_users"}}"#,
+            br#"{"id":1,"call":{"command":"search_users","term":"b","limit":500}}"#,
+            br#"{"id":1,"call":{"command":"create_room","name":"x"}}"#,
             b"not json",
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));

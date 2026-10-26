@@ -1474,6 +1474,118 @@ dialog::backdrop {
   margin-top: 4px;
 }
 
+/* New conversation */
+.new-conversation label[for] {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.switch-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.directory-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.directory-match {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  text-align: start;
+}
+
+.directory-match:hover {
+  background: var(--hover);
+}
+
+.match-name,
+.match-id {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.match-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.match-id {
+  color: var(--ink3);
+  font-size: 12.5px;
+}
+
+/* Direct-message invitations in the sidebar */
+.invites {
+  margin-bottom: 8px;
+}
+
+.invite {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  font-size: 13px;
+}
+
+.invite-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.invite-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invite-id,
+.invite-what {
+  overflow: hidden;
+  color: var(--ink3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invite-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.invite-actions .secondary {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
 /* Search and jump palette */
 .palette {
   width: min(calc(100% - 32px), 660px);
