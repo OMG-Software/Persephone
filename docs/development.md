@@ -120,9 +120,10 @@ On every job, `cargo fmt`, Clippy with `-D warnings` (default and development fe
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) builds,
 signs and checksums the installers. A `v*` tag creates a draft pre-release; a
-manual run builds unsigned artifacts only. Each push to `main` replaces the
-unsigned `latest` pre-release. [Release guide](release.md) lists the secrets,
-how to cut a release and how users verify the files.
+manual run builds unsigned artifacts only. Each push to `main` builds the
+unsigned files, and the `latest` pre-release is replaced only if that commit
+is still the tip of `main` when the build ends. [Release guide](release.md)
+lists the secrets, how to cut a release and how users verify the files.
 
 The app's version line shows the build's revision: the first 12 hex digits of
 the checked-out commit, or `unknown` ([`crates/core/build.rs`](../crates/core/build.rs)).

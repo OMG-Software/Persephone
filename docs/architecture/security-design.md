@@ -116,9 +116,13 @@ answer to that question, for these reasons.
    logic, unless the application builds this split itself.
 2. **Rendering has two layers of containment.** The web engine runs page
    content in its own restricted renderer process. On Windows, the core also
-   puts the UI process and all its web view processes in a Job with a memory
-   limit and kill-on-close. In measured floods of 64 to 256 MiB, the UI
-   stopped at its limit and the core's memory did not change.
+   assigns the UI process to a Job with a memory limit and kill-on-close; the
+   web view processes that the UI starts after that are in the Job too. In
+   measured floods of 64 to 256 MiB, the UI stopped at its limit and the
+   core's memory did not change. The core assigns the UI just after starting
+   it, not before it runs (`crates/core/src/platform/windows/ui.rs`), so
+   nothing guarantees that a web view process started in that short interval
+   is in the Job.
 3. **Only bundled code runs.** The homeserver and other users send data, never
    code. The Content Security Policy blocks inline scripts, string evaluation
    and external fetches. Navigation and new windows are blocked.
@@ -139,7 +143,7 @@ answer to that question, for these reasons.
 | Control | Provided by | State | Evidence |
 | --- | --- | --- | --- |
 | Keyless UI process | Persephone (ADR-0004) | Implemented on Windows. macOS built and CI-tested only. Linux UI host not built; the core fails closed | [Core/UI split](../evidence/ipc-transport.md#after-the-coreui-split) |
-| UI memory limit and kill-on-close | Persephone, Windows Job | Windows only. macOS has no Job equivalent: the UI's memory is not capped (accepted residual risk, [ADR-0011](../adr/0011-macos-platform-layer.md)) | [Core/UI split](../evidence/ipc-transport.md#after-the-coreui-split) |
+| UI memory limit and kill-on-close | Persephone, Windows Job | Windows only. The UI is assigned to the Job just after it starts, not started suspended inside it. macOS has no Job equivalent: the UI's memory is not capped (accepted residual risk, [ADR-0011](../adr/0011-macos-platform-layer.md)) | [Core/UI split](../evidence/ipc-transport.md#after-the-coreui-split) |
 | Renderer process sandbox | Web engine vendor | Not tested by Persephone | [WebView2 process model](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model) |
 | CSP, navigation and new-window blocks | Persephone configuration of Tauri | Checked in WebView2 by a manual DevTools probe (inline script, `eval`, external `fetch`, navigation, `window.open`), not an automated test | [Tauri shell](../evidence/tauri-shell.md) |
 | Escaped text, no raw HTML | Persephone frontend | Frontend tests render hostile strings as text and reject raw HTML insertion in source | [Frontend](../evidence/frontend.md), [Tauri shell](../evidence/tauri-shell.md) |
