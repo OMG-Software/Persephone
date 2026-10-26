@@ -1,5 +1,7 @@
 //! Starting a conversation with the real SDK against a small mocked
-//! homeserver: one direct-message room with Bob, encrypted or not. Bob has no
+//! homeserver: one direct-message room marked direct for Bob, encrypted or
+//! not, with the members sync gives (the same list answers a member-list
+//! request, for clients that load members lazily). Bob has no
 //! cross-signing identity, so a start that does not reuse the room ends at
 //! `no_identity` and creates nothing; `existing` therefore means the room was
 //! reused. Plain HTTP on loopback, used by these test clients only.
@@ -27,30 +29,25 @@ fn state_event(kind: &str, key: &str, sender: &str, content: Value) -> Value {
     })
 }
 
-/// A sync with the direct-message room `ROOM`: this account and Bob joined,
-/// marked direct for Bob, with `m.room.encryption` in its state when
-/// `encrypted`.
-fn sync_reply(encrypted: bool) -> Value {
-    let mut state = vec![
-        state_event(
-            "m.room.create",
-            "",
-            "@alice:synthetic.test",
-            json!({ "room_version": "11" }),
-        ),
-        state_event(
-            "m.room.member",
-            "@alice:synthetic.test",
-            "@alice:synthetic.test",
-            json!({ "membership": "join" }),
-        ),
-        state_event(
-            "m.room.member",
-            "@bob:synthetic.test",
-            "@bob:synthetic.test",
-            json!({ "membership": "join" }),
-        ),
-    ];
+/// Join events for `members`.
+fn joined(members: &[&str]) -> Vec<Value> {
+    members
+        .iter()
+        .map(|user| state_event("m.room.member", user, user, json!({ "membership": "join" })))
+        .collect()
+}
+
+/// A sync with the direct-message room `ROOM`: `members` joined (two, as the
+/// summary counts), marked direct for Bob, with `m.room.encryption` in its
+/// state when `encrypted`.
+fn sync_reply(encrypted: bool, members: &[&str]) -> Value {
+    let mut state = vec![state_event(
+        "m.room.create",
+        "",
+        "@alice:synthetic.test",
+        json!({ "room_version": "11" }),
+    )];
+    state.extend(joined(members));
     if encrypted {
         state.push(state_event(
             "m.room.encryption",
@@ -74,7 +71,7 @@ fn sync_reply(encrypted: bool) -> Value {
 }
 
 /// A signed-in client after one sync with the direct-message room.
-async fn synced(server: &MockServer, encrypted: bool) -> Client {
+async fn synced(server: &MockServer, encrypted: bool, members: &[&str]) -> Client {
     Mock::given(method("GET"))
         .and(path("/_matrix/client/versions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "versions": ["v1.11"] })))
@@ -82,7 +79,7 @@ async fn synced(server: &MockServer, encrypted: bool) -> Client {
         .await;
     Mock::given(method("GET"))
         .and(path("/_matrix/client/v3/sync"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(sync_reply(encrypted)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(sync_reply(encrypted, members)))
         .mount(server)
         .await;
     Mock::given(method("POST"))
@@ -123,6 +120,18 @@ async fn synced(server: &MockServer, encrypted: bool) -> Client {
     client
 }
 
+/// Answers a member-list request with the same members as sync.
+async fn member_list(server: &MockServer, members: &[&str]) {
+    let chunk = joined(members);
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "chunk": chunk })))
+        .mount(server)
+        .await;
+}
+
+const ALICE_AND_BOB: [&str; 2] = ["@alice:synthetic.test", "@bob:synthetic.test"];
+
 /// Answers the room's encryption state lookup with `reply`, and expects it
 /// `times` times.
 async fn lookup(server: &MockServer, reply: ResponseTemplate, times: u64) {
@@ -136,16 +145,19 @@ async fn lookup(server: &MockServer, reply: ResponseTemplate, times: u64) {
         .await;
 }
 
-/// Starts a conversation with Bob after one sync, and checks the room's
-/// encryption state as the SDK reported it before the start.
+/// Starts a conversation with Bob after one sync, with the room's member list
+/// as `members`, and checks the room's encryption state as the SDK reported
+/// it before the start.
 fn start_with_bob(
     encrypted: bool,
+    members: &[&str],
     reply: Option<ResponseTemplate>,
 ) -> (EncryptionState, ConversationStart) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let server = MockServer::start().await;
-        let client = synced(&server, encrypted).await;
+        member_list(&server, members).await;
+        let client = synced(&server, encrypted, members).await;
         match reply {
             Some(reply) => lookup(&server, reply, 1).await,
             // The state is known: nothing may ask the homeserver.
@@ -173,7 +185,7 @@ fn existing() -> ConversationStart {
 /// Bob starts THEN that room is reused, without asking the homeserver.
 #[test]
 fn given_an_encrypted_direct_room_then_it_is_reused() {
-    let (state, start) = start_with_bob(true, None);
+    let (state, start) = start_with_bob(true, &ALICE_AND_BOB, None);
     assert!(matches!(state, EncryptionState::Encrypted));
     assert_eq!(start, existing());
 }
@@ -185,7 +197,7 @@ fn given_an_encrypted_direct_room_then_it_is_reused() {
 fn given_an_unencrypted_direct_room_then_it_is_not_reused() {
     let not_found = ResponseTemplate::new(404)
         .set_body_json(json!({ "errcode": "M_NOT_FOUND", "error": "no encryption" }));
-    let (state, start) = start_with_bob(false, Some(not_found));
+    let (state, start) = start_with_bob(false, &ALICE_AND_BOB, Some(not_found));
     assert!(matches!(state, EncryptionState::Unknown));
     assert_eq!(start, ConversationStart::NoIdentity {});
 }
@@ -196,7 +208,7 @@ fn given_an_unencrypted_direct_room_then_it_is_not_reused() {
 fn given_an_unknown_state_the_homeserver_calls_encrypted_then_the_room_is_reused() {
     let encrypted =
         ResponseTemplate::new(200).set_body_json(json!({ "algorithm": "m.megolm.v1.aes-sha2" }));
-    let (state, start) = start_with_bob(false, Some(encrypted));
+    let (state, start) = start_with_bob(false, &ALICE_AND_BOB, Some(encrypted));
     assert!(matches!(state, EncryptionState::Unknown));
     assert_eq!(start, existing());
 }
@@ -206,7 +218,21 @@ fn given_an_unknown_state_the_homeserver_calls_encrypted_then_the_room_is_reused
 /// is not reused (fail closed).
 #[test]
 fn given_an_unknown_state_the_homeserver_cannot_tell_then_the_room_is_not_reused() {
-    let (state, start) = start_with_bob(false, Some(ResponseTemplate::new(500)));
+    let (state, start) = start_with_bob(false, &ALICE_AND_BOB, Some(ResponseTemplate::new(500)));
     assert!(matches!(state, EncryptionState::Unknown));
+    assert_eq!(start, ConversationStart::NoIdentity {});
+}
+
+/// GIVEN an encrypted room still marked direct for Bob, with two members
+/// WHEN those members are Alice and Carol (Bob left, Carol joined, the direct
+/// mark stayed) THEN the room is not reused.
+#[test]
+fn given_a_direct_room_someone_else_joined_then_it_is_not_reused() {
+    let (state, start) = start_with_bob(
+        true,
+        &["@alice:synthetic.test", "@carol:synthetic.test"],
+        None,
+    );
+    assert!(matches!(state, EncryptionState::Encrypted));
     assert_eq!(start, ConversationStart::NoIdentity {});
 }

@@ -583,8 +583,10 @@ impl Core {
     }
 
     /// Admits a conversation call: its argument is checked first, then it
-    /// takes its kind's slot (one at a time) and runs later under a lease.
-    /// A change to the rooms also announces a room-list change.
+    /// takes its kind's slot (one at a time) and runs later under a lease of
+    /// the session admitted now. A lock, unlock or sign-in in between makes
+    /// it `locked`: it never runs under another session or account. A change
+    /// to the rooms also announces a room-list change.
     fn conversation_call<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
         enum Work {
             Accept(String),
@@ -607,11 +609,24 @@ impl Core {
             }
             _ => return Err(ErrorCode::InvalidArgument),
         };
-        match self.source() {
-            Source::Locked => return Err(ErrorCode::Locked),
-            Source::Fixtures | Source::SignedOut => return Err(ErrorCode::NotFound),
-            Source::Matrix(..) => {}
+        // Synthetic data has no homeserver.
+        if !self.session.is_configured() {
+            return Err(ErrorCode::NotFound);
         }
+        let generation = match self.session.with_client() {
+            Ok(Some((lease, client))) => {
+                let generation = lease.generation();
+                {
+                    let _context = lease.stores().runtime().enter();
+                    drop(client);
+                }
+                drop(lease);
+                generation
+            }
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
         let slot = match work {
             Work::Search(_) => self.search.begin()?,
             _ => self.conversation.begin()?,
@@ -620,16 +635,24 @@ impl Core {
             let _slot = slot;
             let outcome = match &work {
                 Work::Accept(room_id) => self
-                    .with_matrix(async |client| conversations::accept(&client, room_id).await)
+                    .with_matrix(generation, async |client| {
+                        conversations::accept(&client, room_id).await
+                    })
                     .map(|()| serde_json::Value::Null),
                 Work::Decline(room_id) => self
-                    .with_matrix(async |client| conversations::decline(&client, room_id).await)
+                    .with_matrix(generation, async |client| {
+                        conversations::decline(&client, room_id).await
+                    })
                     .map(|()| serde_json::Value::Null),
                 Work::Start(user) => self
-                    .with_matrix(async |client| conversations::start(&client, user).await)
+                    .with_matrix(generation, async |client| {
+                        conversations::start(&client, user).await
+                    })
                     .and_then(|start| serde_json::to_value(start).map_err(|_| ErrorCode::Internal)),
                 Work::Search(term) => self
-                    .with_matrix(async |client| conversations::search(&client, term).await)
+                    .with_matrix(generation, async |client| {
+                        conversations::search(&client, term).await
+                    })
                     .and_then(|found| serde_json::to_value(found).map_err(|_| ErrorCode::Internal)),
             };
             if outcome.is_ok() && !matches!(work, Work::Search(_)) {
@@ -642,10 +665,14 @@ impl Core {
         }))
     }
 
-    /// Runs `work` with the signed-in client under a lease, and drops the
-    /// client inside the stores' runtime before the lease ends.
+    /// Runs `work` with the signed-in client under a lease of the session in
+    /// `generation`, and drops the client inside the stores' runtime before
+    /// the lease ends. Another generation (the session locked, or another
+    /// sign-in, since the call was admitted) is `locked`, and `work` does not
+    /// run.
     fn with_matrix<T>(
         &self,
+        generation: u64,
         work: impl AsyncFnOnce(matrix_sdk::Client) -> Result<T, ErrorCode>,
     ) -> Result<T, ErrorCode> {
         let (lease, client) = match self.session.with_client() {
@@ -654,7 +681,11 @@ impl Core {
             Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
             Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
         };
-        let result = lease.stores().block_on(work(client.clone()));
+        let result = if lease.generation() == generation {
+            lease.stores().block_on(work(client.clone()))
+        } else {
+            Err(ErrorCode::Locked)
+        };
         {
             let _context = lease.stores().runtime().enter();
             drop(client);
