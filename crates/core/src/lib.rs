@@ -44,6 +44,7 @@ pub mod pick;
 pub mod platform;
 pub mod profiles;
 pub mod prompt_text;
+pub mod room_settings;
 pub mod security;
 pub mod sending;
 pub mod session;
@@ -241,6 +242,11 @@ pub struct Core {
     display_name: conversations::Busy,
     /// One device-list request at a time.
     devices: conversations::Busy,
+    /// Reading a room's settings, listing its members, and changing it, each
+    /// one at a time.
+    room_settings: conversations::Busy,
+    room_members: conversations::Busy,
+    room_change: conversations::Busy,
     /// The local profiles beside the open one; `None` for synthetic data or
     /// a profile without a directory.
     profiles: Option<profiles::Profiles>,
@@ -357,6 +363,9 @@ impl Core {
             search: conversations::Busy::default(),
             display_name: conversations::Busy::default(),
             devices: conversations::Busy::default(),
+            room_settings: conversations::Busy::default(),
+            room_members: conversations::Busy::default(),
+            room_change: conversations::Busy::default(),
             profiles: None,
             long_calls: AtomicUsize::new(0),
         }
@@ -459,7 +468,10 @@ impl Core {
             | Call::InviteUser { .. }
             | Call::DisplayName {}
             | Call::SetDisplayName { .. }
-            | Call::DeviceList {} => match self.homeserver_call(&request.call) {
+            | Call::DeviceList {}
+            | Call::RoomSettings { .. }
+            | Call::RoomMembers { .. }
+            | Call::ChangeRoom { .. } => match self.homeserver_call(&request.call) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
@@ -666,7 +678,10 @@ impl Core {
             | Call::InviteUser { .. }
             | Call::DisplayName {}
             | Call::SetDisplayName { .. }
-            | Call::DeviceList {} => match self.homeserver_call(call) {
+            | Call::DeviceList {}
+            | Call::RoomSettings { .. }
+            | Call::RoomMembers { .. }
+            | Call::ChangeRoom { .. } => match self.homeserver_call(call) {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
@@ -713,6 +728,9 @@ impl Core {
             DisplayName,
             SetDisplayName(String),
             Devices,
+            RoomSettings(String),
+            RoomMembers(String, String),
+            ChangeRoom(String, room_settings::Change),
         }
         let user =
             |user_id: &str| conversations::parse_user(user_id).ok_or(ErrorCode::InvalidArgument);
@@ -741,6 +759,18 @@ impl Core {
                 Work::SetDisplayName(name.clone())
             }
             Call::DeviceList {} => Work::Devices,
+            Call::RoomSettings { room_id } if valid_room_id(room_id) => {
+                Work::RoomSettings(room_id.clone())
+            }
+            Call::RoomMembers { room_id, filter }
+                if valid_room_id(room_id) && room_settings::valid_filter(filter) =>
+            {
+                Work::RoomMembers(room_id.clone(), filter.clone())
+            }
+            Call::ChangeRoom { room_id, change } if valid_room_id(room_id) => Work::ChangeRoom(
+                room_id.clone(),
+                room_settings::Change::parse(change).ok_or(ErrorCode::InvalidArgument)?,
+            ),
             _ => return Err(ErrorCode::InvalidArgument),
         };
         // Synthetic data has no homeserver.
@@ -765,6 +795,9 @@ impl Core {
             Work::Search(_) => self.search.begin()?,
             Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
             Work::Devices => self.devices.begin()?,
+            Work::RoomSettings(_) => self.room_settings.begin()?,
+            Work::RoomMembers(..) => self.room_members.begin()?,
+            Work::ChangeRoom(..) => self.room_change.begin()?,
             _ => self.conversation.begin()?,
         };
         Ok(Box::new(move || {
@@ -808,6 +841,24 @@ impl Core {
                         Outcome::Ok(value) => Ok(value),
                         Outcome::Error(code) => Err(code),
                     }),
+                Work::RoomSettings(room_id) => self
+                    .with_matrix(generation, async |client| {
+                        room_settings::settings(&client, room_id).await
+                    })
+                    .and_then(|settings| match bounded(&settings) {
+                        Outcome::Ok(value) => Ok(value),
+                        Outcome::Error(code) => Err(code),
+                    }),
+                Work::RoomMembers(room_id, filter) => {
+                    json(self.with_matrix(generation, async |client| {
+                        room_settings::members(&client, room_id, filter).await
+                    }))
+                }
+                Work::ChangeRoom(room_id, change) => self
+                    .with_matrix(generation, async |client| {
+                        room_settings::change(&client, room_id, change).await
+                    })
+                    .map(|()| serde_json::Value::Null),
             };
             let rooms_changed = matches!(
                 work,
@@ -1693,6 +1744,81 @@ mod tests {
             .outcome,
             Outcome::Ok(serde_json::json!({"profiles": [], "canAdd": false}))
         );
+    }
+
+    /// GIVEN no Matrix session WHEN the room settings calls arrive THEN bad
+    /// arguments, inside the change too, are `invalid_argument` before
+    /// anything else, and valid ones are `not_found`: synthetic data has no
+    /// homeserver.
+    #[test]
+    fn given_no_matrix_session_then_room_settings_calls_are_refused() {
+        use persephone_contracts::{JoinRule, PowerLevel, RoomChange};
+        let core = Core::default();
+        let change = |change| Call::ChangeRoom {
+            room_id: "!r:s".into(),
+            change,
+        };
+        for (call, expected) in [
+            (
+                Call::RoomSettings {
+                    room_id: "!r:s".into(),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::RoomSettings {
+                    room_id: "#alias:s".into(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::RoomMembers {
+                    room_id: "!r:s".into(),
+                    filter: String::new(),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::RoomMembers {
+                    room_id: "!r:s".into(),
+                    filter: "b\nb".into(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (change(RoomChange::Leave {}), ErrorCode::NotFound),
+            (
+                Call::ChangeRoom {
+                    room_id: "r".into(),
+                    change: RoomChange::Leave {},
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                change(RoomChange::JoinRule {
+                    rule: JoinRule::Restricted,
+                }),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                change(RoomChange::Kick {
+                    user_id: "bob".into(),
+                }),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                change(RoomChange::MemberLevel {
+                    user_id: "@b:s".into(),
+                    level: PowerLevel::new(100).unwrap(),
+                }),
+                ErrorCode::NotFound,
+            ),
+        ] {
+            let reply = core.handle(&Request {
+                id: 1,
+                call: call.clone(),
+            });
+            assert_eq!(reply.outcome, Outcome::Error(expected), "{call:?}");
+        }
     }
 
     /// GIVEN profiles beside the open one WHEN the UI lists, adds or switches

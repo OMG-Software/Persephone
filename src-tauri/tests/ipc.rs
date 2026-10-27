@@ -272,6 +272,56 @@ impl CoreTransport for FakeCore {
                 "profiles": [{"slot": 1, "active": true}, {"slot": 2, "active": false}],
                 "canAdd": true
             })),
+            Call::RoomSettings { room_id } => {
+                let mut settings = serde_json::json!({
+                    "roomId": room_id, "name": "<b>Plans</b>", "topic": "a\nb",
+                    "canonicalAlias": "#plans:example.invalid", "altAliases": [],
+                    "localAliases": null, "joinRule": "invite", "historyVisibility": "shared",
+                    "guestAccess": false, "encryption": "encrypted", "published": null,
+                    "roomVersion": "11", "direct": false, "notifications": "default",
+                    "levels": [{"key": "ban", "level": 50}], "ownLevel": null,
+                    "may": {"name": true, "topic": true, "canonicalAlias": true,
+                        "joinRules": true, "historyVisibility": true, "guestAccess": true,
+                        "encryption": false, "powerLevels": true, "invite": true,
+                        "kick": true, "ban": true}
+                });
+                match room_id.as_str() {
+                    "!r:example.invalid" => Ok(settings),
+                    // A level JavaScript cannot hold exactly is refused.
+                    "!big:example.invalid" => {
+                        settings["levels"][0]["level"] = 9_007_199_254_740_992_u64.into();
+                        Ok(settings)
+                    }
+                    // A field outside the contract is refused.
+                    "!extra:example.invalid" => {
+                        settings["serverAcl"] = serde_json::json!({"allow": ["*"]});
+                        Ok(settings)
+                    }
+                    _ => Err(CoreError::Core(ErrorCode::NotFound)),
+                }
+            }
+            Call::RoomMembers { room_id, filter } => match filter.as_str() {
+                "" => Ok(serde_json::json!({
+                    "roomId": room_id, "truncated": false,
+                    "members": [{"userId": "@bob:example.invalid", "displayName": "<i>Bob</i>",
+                        "membership": "join", "level": 50, "own": false, "canKick": true,
+                        "canBan": true, "canUnban": false, "canChangeLevel": true}]
+                })),
+                // A membership outside the contract is refused.
+                _ => Ok(serde_json::json!({
+                    "roomId": room_id, "truncated": false,
+                    "members": [{"userId": "@bob:example.invalid", "displayName": null,
+                        "membership": "leave", "level": 0, "own": false, "canKick": false,
+                        "canBan": false, "canUnban": false, "canChangeLevel": false}]
+                })),
+            },
+            Call::ChangeRoom { room_id, change } => match (room_id.as_str(), change) {
+                ("!r:example.invalid", _) => Ok(serde_json::Value::Null),
+                (_, persephone_contracts::RoomChange::Leave {}) => {
+                    Err(CoreError::Core(ErrorCode::NotFound))
+                }
+                _ => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
             Call::AddProfile {} => Ok(serde_json::Value::Null),
             Call::SwitchProfile { slot } => match slot {
                 2 => Ok(serde_json::Value::Null),
@@ -531,6 +581,9 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-search-users",
             "allow-create-room",
             "allow-invite-user",
+            "allow-room-settings",
+            "allow-room-members",
+            "allow-change-room",
             "allow-display-name",
             "allow-set-display-name",
             "allow-device-list",
@@ -1201,6 +1254,135 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         core.calls.load(Ordering::SeqCst),
         calls,
         "oversized arguments never crossed"
+    );
+}
+
+/// Room settings commands relay a room ID, a filter or one change of a closed
+/// set; oversized arguments and unknown change kinds never reach the core,
+/// and replies outside the contract are refused.
+#[test]
+fn given_room_settings_commands_then_bounded_changes_cross_and_replies_are_checked() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let settings = invoke(
+        "room_settings",
+        serde_json::json!({"roomId": "!r:example.invalid"}),
+    )
+    .unwrap();
+    assert_eq!(settings["name"], "<b>Plans</b>");
+    assert_eq!(settings["ownLevel"], serde_json::Value::Null);
+    for room in ["!big:example.invalid", "!extra:example.invalid"] {
+        assert_eq!(
+            invoke("room_settings", serde_json::json!({ "roomId": room })).unwrap_err(),
+            "core_unavailable",
+            "{room}"
+        );
+    }
+    let members = invoke(
+        "room_members",
+        serde_json::json!({"roomId": "!r:example.invalid", "filter": ""}),
+    )
+    .unwrap();
+    assert_eq!(members["members"][0]["canKick"], true);
+    assert_eq!(
+        invoke(
+            "room_members",
+            serde_json::json!({"roomId": "!r:example.invalid", "filter": "left"}),
+        )
+        .unwrap_err(),
+        "core_unavailable"
+    );
+    for change in [
+        serde_json::json!({"kind": "name", "name": "Plans"}),
+        serde_json::json!({"kind": "join_rule", "rule": "knock"}),
+        serde_json::json!({"kind": "canonical_alias", "alias": null, "altAliases": ["#a:s"]}),
+        serde_json::json!({"kind": "level", "key": "kick", "level": 50}),
+        serde_json::json!({"kind": "member_level", "userId": "@b:s", "level": -1}),
+        serde_json::json!({"kind": "encryption"}),
+    ] {
+        assert_eq!(
+            invoke(
+                "change_room",
+                serde_json::json!({"roomId": "!r:example.invalid", "change": change.clone()}),
+            )
+            .unwrap(),
+            serde_json::Value::Null,
+            "{change}"
+        );
+    }
+    assert_eq!(
+        invoke(
+            "change_room",
+            serde_json::json!({"roomId": "!s:example.invalid", "change": {"kind": "ban", "userId": "@b:s"}}),
+        )
+        .unwrap_err(),
+        "rejected"
+    );
+    assert_eq!(
+        invoke(
+            "change_room",
+            serde_json::json!({"roomId": "!s:example.invalid", "change": {"kind": "leave"}}),
+        )
+        .unwrap_err(),
+        "not_found"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    let room = "!r:example.invalid";
+    for (cmd, args) in [
+        (
+            "room_settings",
+            serde_json::json!({"roomId": "!".repeat(256)}),
+        ),
+        (
+            "room_members",
+            serde_json::json!({"roomId": room, "filter": "b".repeat(257)}),
+        ),
+        (
+            "change_room",
+            serde_json::json!({"roomId": room, "change": {"kind": "name", "name": "x".repeat(256)}}),
+        ),
+        (
+            "change_room",
+            serde_json::json!({"roomId": room, "change": {"kind": "topic", "topic": "x".repeat(4097)}}),
+        ),
+        (
+            "change_room",
+            serde_json::json!({"roomId": room, "change": {"kind": "kick", "userId": "@".repeat(256)}}),
+        ),
+        (
+            "change_room",
+            serde_json::json!({"roomId": room, "change": {"kind": "canonical_alias", "alias": null,
+                "altAliases": vec!["#a:s"; 51]}}),
+        ),
+    ] {
+        assert_eq!(invoke(cmd, args).unwrap_err(), "invalid_argument", "{cmd}");
+    }
+    // Kinds and fields outside the closed set fail to deserialize before
+    // the handler runs.
+    for change in [
+        serde_json::json!({"kind": "state", "type": "m.room.server_acl", "content": {}}),
+        serde_json::json!({"kind": "leave", "forget": true}),
+        serde_json::json!({"kind": "level", "key": "ban", "level": 9_007_199_254_740_992_u64}),
+        serde_json::json!({"kind": "canonical_alias", "altAliases": []}),
+    ] {
+        assert!(
+            invoke(
+                "change_room",
+                serde_json::json!({"roomId": room, "change": change.clone()}),
+            )
+            .is_err(),
+            "{change}"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "refused arguments never crossed"
     );
 }
 

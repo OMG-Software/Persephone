@@ -137,6 +137,97 @@ export type RoomCreation = { "kind": "created", roomId: string, } | { "kind": "n
 
 export type RoomInvite = { "kind": "invited", } | { "kind": "no_identity", } | { "kind": "refused", };
 
+export type JoinRule = "invite" | "knock" | "public" | "restricted" | "knock_restricted" | "private" | "other";
+
+export type HistoryVisibility = "invited" | "joined" | "shared" | "world_readable" | "other";
+
+export type RoomNotifications = "default" | "all" | "mentions" | "mute";
+
+export type LevelKey = "users_default" | "events_default" | "state_default" | "invite" | "kick" | "ban" | "redact" | "notify_room" | "name" | "topic" | "avatar" | "canonical_alias" | "join_rules" | "history_visibility" | "guest_access" | "encryption" | "power_levels" | "server_acl" | "tombstone" | "pinned_events";
+
+export type RoomLevel = { key: LevelKey, level: number, };
+
+export type RoomPermissions = { name: boolean, topic: boolean, 
+/**
+ * The main and published addresses.
+ */
+canonicalAlias: boolean, joinRules: boolean, historyVisibility: boolean, guestAccess: boolean, encryption: boolean, powerLevels: boolean, invite: boolean, kick: boolean, ban: boolean, };
+
+export type RoomSettings = { roomId: string, name: string | null, 
+/**
+ * Line breaks kept, like a message body.
+ */
+topic: string | null, 
+/**
+ * The main address (`m.room.canonical_alias`).
+ */
+canonicalAlias: string | null, 
+/**
+ * The other published addresses.
+ */
+altAliases: Array<string>, 
+/**
+ * Addresses on this account's homeserver that lead to the room; none
+ * when the homeserver did not say.
+ */
+localAliases: Array<string> | null, joinRule: JoinRule, historyVisibility: HistoryVisibility, 
+/**
+ * Guests (accounts without a password) may join.
+ */
+guestAccess: boolean, encryption: RoomEncryption, 
+/**
+ * Listed in this homeserver's public room directory; none when the
+ * homeserver did not say.
+ */
+published: boolean | null, 
+/**
+ * Untrusted, projected like a name.
+ */
+roomVersion: string | null, 
+/**
+ * Marked as a direct-message room.
+ */
+direct: boolean, notifications: RoomNotifications, 
+/**
+ * Every [`LevelKey`], in [`LevelKey::ALL`] order, with the level now in
+ * effect.
+ */
+levels: Array<RoomLevel>, 
+/**
+ * This account's level; none for a creator of a room whose version
+ * gives creators every permission.
+ */
+ownLevel: number | null, may: RoomPermissions, };
+
+export type Membership = "join" | "invite" | "knock" | "ban";
+
+export type RoomMember = { 
+/**
+ * The member's ID unchanged when it is valid, visible ASCII; otherwise
+ * projected, and every `can` field is false.
+ */
+userId: string, displayName: string | null, membership: Membership, 
+/**
+ * None for a creator with every permission.
+ */
+level: number | null, 
+/**
+ * This account.
+ */
+own: boolean, 
+/**
+ * Hints for the page, by the room's power levels.
+ */
+canKick: boolean, canBan: boolean, canUnban: boolean, canChangeLevel: boolean, };
+
+export type RoomMembers = { roomId: string, members: Array<RoomMember>, 
+/**
+ * More members matched than are listed.
+ */
+truncated: boolean, };
+
+export type RoomChange = { "kind": "name", name: string, } | { "kind": "topic", topic: string, } | { "kind": "join_rule", rule: JoinRule, } | { "kind": "history_visibility", visibility: HistoryVisibility, } | { "kind": "guest_access", allowed: boolean, } | { "kind": "encryption", } | { "kind": "published", published: boolean, } | { "kind": "add_alias", alias: string, } | { "kind": "remove_alias", alias: string, } | { "kind": "canonical_alias", alias: string | null, altAliases: Array<string>, } | { "kind": "level", key: LevelKey, level: number, } | { "kind": "member_level", userId: string, level: number, } | { "kind": "kick", userId: string, } | { "kind": "ban", userId: string, } | { "kind": "unban", userId: string, } | { "kind": "notifications", mode: RoomNotifications, } | { "kind": "leave", };
+
 export type DisplayName = { displayName: string | null, };
 
 export type DeviceSummary = { deviceId: string, displayName: string | null, 

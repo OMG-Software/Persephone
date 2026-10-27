@@ -14,15 +14,26 @@ import type {
   DisplayName,
   ImageMime,
   ImagePick,
+  HistoryVisibility,
   ImageView,
   InviteList,
   InviteSummary,
+  JoinRule,
+  LevelKey,
+  Membership,
   PendingMessage,
   ProfileList,
   ProfileSlot,
+  RoomChange,
   RoomCreation,
   RoomIdentityChanges,
   RoomInvite,
+  RoomLevel,
+  RoomMember,
+  RoomMembers,
+  RoomNotifications,
+  RoomPermissions,
+  RoomSettings,
   SignInError,
   RoomList,
   SecurityStatus,
@@ -45,14 +56,25 @@ export type {
   DisplayName,
   ImageMime,
   ImagePick,
+  HistoryVisibility,
   ImageView,
   InviteList,
   InviteSummary,
+  JoinRule,
+  LevelKey,
+  Membership,
   ProfileList,
   ProfileSlot,
+  RoomChange,
   RoomCreation,
   RoomIdentityChanges,
   RoomInvite,
+  RoomLevel,
+  RoomMember,
+  RoomMembers,
+  RoomNotifications,
+  RoomPermissions,
+  RoomSettings,
   PendingMessage,
   RoomList,
   SecurityStatus,
@@ -335,6 +357,32 @@ export function createRoom(name: string, invite: string[]): Promise<RoomCreation
 /** Invites one person to a joined room. */
 export function inviteUser(roomId: string, userId: string): Promise<RoomInvite> {
   return invoke<RoomInvite>('invite_user', { roomId, userId });
+}
+
+/**
+ * A joined room's settings: name, topic, addresses, access, encryption,
+ * notifications and power levels, with what this account may change. The
+ * permissions are hints; the homeserver decides.
+ */
+export function roomSettings(roomId: string): Promise<RoomSettings> {
+  return invoke<RoomSettings>('room_settings', { roomId });
+}
+
+/**
+ * A joined room's members (joined, invited, asking to join or banned) whose
+ * ID or display name contains `filter`; an empty filter lists everyone, up to
+ * the core's limit.
+ */
+export function roomMembers(roomId: string, filter: string): Promise<RoomMembers> {
+  return invoke<RoomMembers>('room_members', { roomId, filter });
+}
+
+/**
+ * Changes one setting of a joined room, or acts on one member. Rejects with
+ * `rejected` when the homeserver refuses, for example for lack of permission.
+ */
+export function changeRoom(roomId: string, change: RoomChange): Promise<void> {
+  return invoke<void>('change_room', { roomId, change });
 }
 
 /** This account's display name, as the homeserver has it. */

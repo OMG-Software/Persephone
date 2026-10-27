@@ -3633,6 +3633,7 @@ dependencies = [
 name = "persephone-core-protocol"
 version = "0.0.1"
 dependencies = [
+ "persephone-contracts",
  "persephone-media-protocol",
  "serde",
  "serde_json",

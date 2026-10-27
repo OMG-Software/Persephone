@@ -2050,3 +2050,304 @@ mark {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
+
+/* Room settings (handoff 1i): a modal with a tab rail. Only its body
+   scrolls. */
+.room-settings {
+  width: min(calc(100% - 32px), 900px);
+  height: min(calc(100% - 32px), 620px);
+  max-width: none;
+  max-height: none;
+  overflow: hidden;
+}
+
+.room-settings h4,
+.room-settings h5,
+.room-settings fieldset,
+.room-settings dl,
+.room-settings dd {
+  margin: 0;
+}
+
+.room-settings fieldset {
+  min-width: 0;
+}
+
+.room-settings-frame {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+.room-settings-rail {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 16px;
+  width: 220px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.room-settings-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.room-settings-title bdi {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-settings-rail nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.room-settings-rail nav .room-row {
+  height: 34px;
+}
+
+.room-settings-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+}
+
+.room-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.room-settings-head h3 {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.room-settings .panel h4,
+.room-settings legend {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.room-settings legend {
+  float: left;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+.room-settings h5 {
+  margin-top: 4px;
+  color: var(--ink3);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.room-settings textarea.field {
+  height: auto;
+  padding: 8px 10px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
+.room-settings .confirm {
+  margin: 0;
+}
+
+/* Questions and results stay in view below a long list. */
+.room-settings-feedback {
+  position: sticky;
+  bottom: -24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 -24px -24px;
+  padding: 12px 24px 24px;
+  border-top: 1px solid var(--line);
+  background: var(--card);
+}
+
+.address-list,
+.member-list,
+.level-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.address-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.address-list bdi {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.address-tags {
+  display: flex;
+  gap: 4px;
+  margin-right: auto;
+}
+
+.people-tools .field {
+  width: 100%;
+}
+
+.member-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 4px;
+}
+
+.member-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.member-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.member-name bdi,
+.member-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-id {
+  color: var(--ink3);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.member-role {
+  color: var(--ink2);
+  font-size: 13px;
+}
+
+.member-actions {
+  grid-column: 2 / -1;
+}
+
+.member-actions:empty {
+  display: none;
+}
+
+.member-actions .secondary,
+.member-actions .danger,
+.level-custom .secondary {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.level-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+.level-row label {
+  font-size: 13.5px;
+}
+
+.level-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.level-picker select.field {
+  width: auto;
+  min-width: 140px;
+  height: 32px;
+}
+
+.level-custom {
+  display: flex;
+  gap: 6px;
+}
+
+.level-custom .field {
+  width: 120px;
+  height: 30px;
+  font-family: var(--mono);
+}
+
+.details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  font-size: 13.5px;
+}
+
+.details dt {
+  color: var(--ink3);
+}
+
+.details dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.selectable {
+  user-select: text;
+}
+
+.chat-header .header-settings {
+  flex: none;
+}
+
+@media (max-width: 760px) {
+  .room-settings-frame {
+    flex-direction: column;
+  }
+
+  .room-settings-rail {
+    width: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .room-settings-rail nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}

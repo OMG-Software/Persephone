@@ -3,6 +3,8 @@ import type {
   ImagePick,
   ImageView,
   PendingMessage,
+  RoomChange,
+  RoomSettings,
   RoomSummary,
   TimelineItem,
 } from "../generated/contracts.js";
@@ -99,6 +101,24 @@ const missingKind: PendingMessage = {
   queuedAt: 0,
 };
 
+const unknownChange: RoomChange = {
+  // @ts-expect-error only the closed set of room changes is valid
+  kind: "state",
+  type: "m.room.server_acl",
+};
+
+const wrongChangeField: RoomChange = {
+  kind: "kick",
+  // @ts-expect-error the Serde camelCase property is userId
+  user_id: "@b:s",
+};
+
+// @ts-expect-error the main address is required, though it may be null
+const missingMainAddress: RoomChange = { kind: "canonical_alias", altAliases: [] };
+
+// @ts-expect-error only the known join rules are valid
+const unknownJoinRule: RoomSettings["joinRule"] = "open";
+
 // @ts-expect-error the store state is required
 const missingStore: AppStatus = { version: "0", revision: "unknown", milestone: "P1", account };
 
@@ -117,3 +137,7 @@ void bigImageSize;
 void unknownMime;
 void missingBandRows;
 void missingKind;
+void unknownChange;
+void wrongChangeField;
+void missingMainAddress;
+void unknownJoinRule;

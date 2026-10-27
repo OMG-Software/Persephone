@@ -11,6 +11,7 @@
   import NewConversation from './NewConversation.svelte';
   import NewRoom from './NewRoom.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
+  import RoomSettings from './RoomSettings.svelte';
   import Security from './Security.svelte';
   import Settings, { type SettingsTab } from './Settings.svelte';
   import Sidebar from './Sidebar.svelte';
@@ -132,6 +133,10 @@
   let newRoomOpen = $state(false);
   // The room the invite dialog is open for.
   let invitingTo = $state<string | null>(null);
+  // The room whose settings are open, and a count of change notifications
+  // for the selected room, which the settings read again on.
+  let roomSettingsOf = $state<string | null>(null);
+  let roomChanges = $state(0);
   // This account's settings, from its encrypted profile; the defaults until
   // they load and while no account is signed in.
   let settings = $state<AccountSettings>(DEFAULT_SETTINGS);
@@ -394,6 +399,7 @@
     newConversationOpen = false;
     newRoomOpen = false;
     invitingTo = null;
+    roomSettingsOf = null;
     invites = null;
     inviteBusy = null;
     dismissedFlow = null;
@@ -666,7 +672,10 @@
       }
       if (!current(roomId, generation)) return;
       try {
-        const stop = await subscribeRoom(roomId, () => refresh(roomId, generation));
+        const stop = await subscribeRoom(roomId, () => {
+          roomChanges += 1;
+          refresh(roomId, generation);
+        });
         if (current(roomId, generation)) {
           live = { roomId, stop };
         } else {
@@ -686,6 +695,7 @@
     // An attached image belongs to the room it was picked for.
     if (imageDraft && imageDraft.roomId !== roomId) cancelImage();
     imageError = null;
+    if (roomSettingsOf !== roomId) roomSettingsOf = null;
     selected = roomId;
     items = [];
     pending = [];
@@ -884,6 +894,20 @@
       if (current(roomId, generation)) error = describe(reason);
     }
     if (current(roomId, generation)) loadPending(roomId, generation);
+  }
+
+  // The user left the room from its settings: nothing of it stays shown.
+  function leftRoom() {
+    roomSettingsOf = null;
+    if (imageDraft) cancelImage();
+    selected = null;
+    items = [];
+    pending = [];
+    contact = null;
+    changes = null;
+    nextCursor = null;
+    error = null;
+    refreshRooms();
   }
 
   // Messages the timeline already shows are not listed again.
@@ -1190,6 +1214,7 @@
             oninvite={signedIn && !selectedRoom.contact
               ? () => (invitingTo = selectedRoom.roomId)
               : undefined}
+            onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
@@ -1281,6 +1306,15 @@
           roomId={invitingTo}
           roomName={selectedRoom.displayName ?? selectedRoom.roomId}
           onclose={() => (invitingTo = null)}
+        />
+      {/if}
+      {#if roomSettingsOf && signedIn && selectedRoom?.roomId === roomSettingsOf}
+        <RoomSettings
+          roomId={roomSettingsOf}
+          roomName={selectedRoom.displayName ?? selectedRoom.roomId}
+          changes={roomChanges}
+          onleft={leftRoom}
+          onclose={() => (roomSettingsOf = null)}
         />
       {/if}
     </div>

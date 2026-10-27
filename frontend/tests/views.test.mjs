@@ -15,6 +15,8 @@ let IdentityChanges;
 let Invites;
 let NewConversation;
 let NewRoom;
+let RoomSettings;
+let LevelPicker;
 let render;
 
 before(async () => {
@@ -35,6 +37,8 @@ before(async () => {
   ({ default: Invites } = await vite.ssrLoadModule('/src/Invites.svelte'));
   ({ default: NewConversation } = await vite.ssrLoadModule('/src/NewConversation.svelte'));
   ({ default: NewRoom } = await vite.ssrLoadModule('/src/NewRoom.svelte'));
+  ({ default: RoomSettings } = await vite.ssrLoadModule('/src/RoomSettings.svelte'));
+  ({ default: LevelPicker } = await vite.ssrLoadModule('/src/LevelPicker.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -772,6 +776,47 @@ test('GIVEN a room with an invite action WHEN the header shows THEN it offers In
     }).body;
   assert.match(header(() => {}), /<button type="button" class="secondary header-action">Invite<\/button>/);
   assert.doesNotMatch(header(undefined), />Invite</);
+});
+
+test('GIVEN a room with a settings action WHEN the header shows THEN it offers a labelled settings button, and only then', () => {
+  const header = (onsettings) =>
+    render(Timeline, {
+      props: { title: 'general', items: [], hasOlder: false, loading: false, error: null, onolder: () => {}, onsettings }
+    }).body;
+  assert.match(header(() => {}), /<button type="button" class="icon-button header-settings" aria-label="Room settings"/);
+  assert.doesNotMatch(header(undefined), /Room settings/);
+});
+
+test('GIVEN the room settings WHEN they open THEN the room name is isolated text, the tabs show and nothing is changeable before they load', () => {
+  const html = render(RoomSettings, {
+    props: { roomId: '!r:example.invalid', roomName: hostileName, changes: 0, onleft: () => {}, onclose: () => {} }
+  }).body;
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /<dialog class="room-settings" aria-labelledby="room-settings-heading"/);
+  assert.match(html, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  for (const tab of ['General', 'People', 'Notifications', 'Security &amp; privacy', 'Advanced']) {
+    assert.match(html, new RegExp(String.raw`class="room-row"[^>]*>\s*${tab}\s*</button>`), tab);
+  }
+  assert.match(html, /aria-current="page"[^>]*>\s*General/);
+  assert.match(html, /aria-label="Close room settings"/);
+  assert.match(html, /role="status"[^>]*>Loading the room's settings…/);
+  assert.doesNotMatch(html, /Save name|Leave room|Turn on encryption/);
+});
+
+test('GIVEN a level WHEN the picker shows THEN it names the roles this account may give and the current level', () => {
+  const picker = (level, own, disabled = false) =>
+    render(LevelPicker, {
+      props: { id: 'p', label: 'Role of <b>Bob</b>', level, own, disabled, onpick: () => {} }
+    }).body;
+  const moderator = picker(0, 50);
+  assert.match(moderator, /aria-label="Role of &lt;b>Bob&lt;\/b>"/);
+  assert.doesNotMatch(moderator, />Admin</, 'not above this account');
+  assert.match(moderator, /<option value="50"[^>]*>Moderator<\/option>/);
+  assert.match(moderator, /<option value="0"[^>]*selected[^>]*>Member<\/option>/);
+  assert.match(moderator, /<option value="custom"[^>]*>Custom…<\/option>/);
+  assert.match(picker(75, null), /<option value="75"[^>]*selected[^>]*>Level 75<\/option>/);
+  assert.match(picker(0, 100, true), /<select id="p" class="field" aria-label="[^"]*" disabled="">/);
+  assert.doesNotMatch(moderator, /disabled/);
 });
 
 test('GIVEN Enter to send on or off WHEN the composer shows THEN its key shortcut says which keys send', () => {

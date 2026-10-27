@@ -449,3 +449,72 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         );
     }
 }
+
+/// GIVEN power levels WHEN read THEN only whole numbers JavaScript holds
+/// exactly are accepted, in settings and in changes alike.
+#[test]
+fn power_levels_stay_within_javascript_exact_range() {
+    use persephone_contracts::{PowerLevel, RoomChange, RoomLevel};
+    assert_eq!(
+        PowerLevel::new(PowerLevel::MAX).map(PowerLevel::get),
+        Some((1 << 53) - 1)
+    );
+    assert!(PowerLevel::new(PowerLevel::MAX + 1).is_none());
+    assert!(PowerLevel::new(PowerLevel::MIN - 1).is_none());
+    assert!(
+        serde_json::from_str::<RoomLevel>(r#"{"key":"ban","level":-9007199254740991}"#).is_ok()
+    );
+    for invalid in [
+        r#"{"key":"ban","level":9007199254740992}"#,
+        r#"{"key":"ban","level":-9007199254740992}"#,
+        r#"{"key":"ban","level":50.5}"#,
+        r#"{"key":"ban","level":"50"}"#,
+        r#"{"key":"m.room.ban","level":50}"#,
+        r#"{"key":"ban","level":50,"event":"m.room.ban"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RoomLevel>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(
+        serde_json::from_str::<RoomChange>(
+            r#"{"kind":"member_level","userId":"@b:s","level":1e20}"#
+        )
+        .is_err()
+    );
+}
+
+/// GIVEN room changes WHEN read THEN only the closed set of kinds and their
+/// own fields is accepted; a required field may not be left out, even when it
+/// may be null.
+#[test]
+fn room_changes_are_a_closed_set() {
+    use persephone_contracts::RoomChange;
+    for valid in [
+        r#"{"kind":"name","name":""}"#,
+        r#"{"kind":"encryption"}"#,
+        r#"{"kind":"leave"}"#,
+        r##"{"kind":"canonical_alias","alias":null,"altAliases":[]}"##,
+        r#"{"kind":"notifications","mode":"mentions"}"#,
+        r#"{"kind":"history_visibility","visibility":"world_readable"}"#,
+    ] {
+        assert!(serde_json::from_str::<RoomChange>(valid).is_ok(), "{valid}");
+    }
+    for invalid in [
+        r#"{}"#,
+        r#"{"kind":"encryption","enabled":false}"#,
+        r#"{"kind":"leave","forget":true}"#,
+        r#"{"kind":"canonical_alias","altAliases":[]}"#,
+        r#"{"kind":"canonical_alias","alias":null,"alt_aliases":[]}"#,
+        r#"{"kind":"kick","user_id":"@b:s"}"#,
+        r#"{"kind":"state","type":"m.room.server_acl","content":{}}"#,
+        r#"{"kind":"join_rule","rule":"open"}"#,
+        r#"{"kind":"notifications","mode":"loud"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RoomChange>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
