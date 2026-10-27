@@ -4,17 +4,25 @@
 // do not validate it; the Rust side checks reply shapes and owns authorization.
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
+  AccountSettings,
   AccountStatus,
   AppStatus,
   ContactStatus,
   ConversationStart,
+  DeviceList,
+  DeviceSummary,
+  DisplayName,
   ImageMime,
   ImagePick,
   ImageView,
   InviteList,
   InviteSummary,
   PendingMessage,
+  ProfileList,
+  ProfileSlot,
+  RoomCreation,
   RoomIdentityChanges,
+  RoomInvite,
   SignInError,
   RoomList,
   SecurityStatus,
@@ -27,16 +35,24 @@ import type {
 import { parseBand, type Band } from '../image';
 
 export type {
+  AccountSettings,
   AccountStatus,
   AppStatus,
   ContactStatus,
   ConversationStart,
+  DeviceList,
+  DeviceSummary,
+  DisplayName,
   ImageMime,
   ImagePick,
   ImageView,
   InviteList,
   InviteSummary,
+  ProfileList,
+  ProfileSlot,
+  RoomCreation,
   RoomIdentityChanges,
+  RoomInvite,
   PendingMessage,
   RoomList,
   SecurityStatus,
@@ -275,17 +291,17 @@ export function discardImage(handle: string): Promise<void> {
   return invoke<void>('discard_image', { handle });
 }
 
-/** Direct-message invitations the account has not answered. */
+/** Room invitations the account has not answered, direct-message or not. */
 export function inviteList(): Promise<InviteList> {
   return invoke<InviteList>('invite_list');
 }
 
-/** Joins the room of a direct-message invitation. */
+/** Joins the room of an invitation. */
 export function acceptInvite(roomId: string): Promise<void> {
   return invoke<void>('accept_invite', { roomId });
 }
 
-/** Refuses a direct-message invitation. */
+/** Refuses an invitation. */
 export function declineInvite(roomId: string): Promise<void> {
   return invoke<void>('decline_invite', { roomId });
 }
@@ -305,4 +321,61 @@ export function startConversation(userId: string): Promise<ConversationStart> {
  */
 export function searchUsers(term: string): Promise<UserSearch> {
   return invoke<UserSearch>('search_users', { term });
+}
+
+/**
+ * Creates an encrypted, invite-only room with this name and invites these
+ * people. The core refuses, creating nothing, when one of them has no
+ * cross-signing identity.
+ */
+export function createRoom(name: string, invite: string[]): Promise<RoomCreation> {
+  return invoke<RoomCreation>('create_room', { name, invite });
+}
+
+/** Invites one person to a joined room. */
+export function inviteUser(roomId: string, userId: string): Promise<RoomInvite> {
+  return invoke<RoomInvite>('invite_user', { roomId, userId });
+}
+
+/** This account's display name, as the homeserver has it. */
+export function displayName(): Promise<DisplayName> {
+  return invoke<DisplayName>('display_name');
+}
+
+/** Sets this account's display name; an empty name removes it. */
+export function setDisplayName(name: string): Promise<DisplayName> {
+  return invoke<DisplayName>('set_display_name', { name });
+}
+
+/** This account's settings, kept in its encrypted profile. */
+export function accountSettings(): Promise<AccountSettings> {
+  return invoke<AccountSettings>('account_settings');
+}
+
+/** Replaces this account's settings; every setting is sent. */
+export function setAccountSettings(settings: AccountSettings): Promise<void> {
+  return invoke<void>('set_account_settings', { enterSends: settings.enterSends });
+}
+
+/** The devices (sessions) signed in to this account. */
+export function deviceList(): Promise<DeviceList> {
+  return invoke<DeviceList>('device_list');
+}
+
+/** The local profiles (accounts) on this computer, by slot number only. */
+export function profileList(): Promise<ProfileList> {
+  return invoke<ProfileList>('profile_list');
+}
+
+/**
+ * Makes a new profile and switches to it. The core then closes this window,
+ * locks the stores and starts again with the new profile.
+ */
+export function addProfile(): Promise<void> {
+  return invoke<void>('add_profile');
+}
+
+/** Switches to the profile in this slot, as `addProfile` does. */
+export function switchProfile(slot: number): Promise<void> {
+  return invoke<void>('switch_profile', { slot });
 }

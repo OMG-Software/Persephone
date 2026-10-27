@@ -244,19 +244,23 @@ pub struct RoomList {
     pub truncated: bool,
 }
 
-/// An invitation to a direct-message room that this account has not
-/// answered. Names are the inviter's word, projected like any name.
+/// An invitation to a room that this account has not answered. Names are the
+/// inviter's word, projected like any name.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct InviteSummary {
     pub room_id: String,
-    /// The user ID of whoever sent the invitation.
-    pub inviter: String,
+    /// The room's name, from the invitation's room state, if it has one.
+    pub room_name: Option<String>,
+    /// Whether the inviter marked it as a direct-message invitation.
+    pub direct: bool,
+    /// The user ID of whoever sent the invitation, when the invitation says.
+    pub inviter: Option<String>,
     /// The inviter's display name in that room, if they set one.
     pub inviter_name: Option<String>,
 }
 
-/// Reply of `invite_list`: direct-message invitations only, capped like the
+/// Reply of `invite_list`: every pending room invitation, capped like the
 /// room list.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -283,6 +287,101 @@ pub enum ConversationStart {
     /// The homeserver refused: for example the user does not exist, or the
     /// server does not allow the invitation. Nothing was created.
     Refused {},
+}
+
+/// Reply of `create_room`.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RoomCreation {
+    /// A new encrypted room was created and everyone named was invited.
+    #[serde(rename_all = "camelCase")]
+    Created { room_id: String },
+    /// This person has no cross-signing identity (ADR-0005). Nothing was
+    /// created.
+    #[serde(rename_all = "camelCase")]
+    NoIdentity { user_id: String },
+    /// The homeserver refused. Nothing was created.
+    Refused {},
+}
+
+/// Reply of `invite_user`.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RoomInvite {
+    Invited {},
+    /// The room is encrypted and this person has no cross-signing identity
+    /// (ADR-0005). Nobody was invited.
+    NoIdentity {},
+    /// The homeserver refused: for example the user does not exist, is
+    /// already in the room, or this account may not invite.
+    Refused {},
+}
+
+/// Reply of `display_name`: this account's display name, projected like any
+/// name.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DisplayName {
+    pub display_name: Option<String>,
+}
+
+/// One device (session) signed in to this account. The homeserver's word:
+/// the ID and name are projected like any name. No IP address crosses.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeviceSummary {
+    pub device_id: String,
+    pub display_name: Option<String>,
+    /// When the homeserver last saw the device, by the homeserver's clock.
+    #[ts(type = "number | null")]
+    pub last_seen: Option<UnixMillis>,
+    /// This device.
+    pub current: bool,
+    /// Whether this account's cross-signing identity signed the device, as
+    /// this device's store knows it.
+    pub verified: bool,
+}
+
+/// Reply of `device_list`: this device first, then the most recently seen.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeviceList {
+    pub devices: Vec<DeviceSummary>,
+    pub truncated: bool,
+}
+
+/// Reply of `account_settings`: this account's settings, kept in its
+/// encrypted profile. A setting never saved has its default.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AccountSettings {
+    /// Enter sends a message; otherwise it starts a new line. On by default.
+    pub enter_sends: bool,
+}
+
+impl Default for AccountSettings {
+    fn default() -> Self {
+        Self { enter_sends: true }
+    }
+}
+
+/// One local profile (account) on this computer. Only its slot number:
+/// nothing about the account is kept outside its encrypted store.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProfileSlot {
+    pub slot: u32,
+    /// The profile open now.
+    pub active: bool,
+}
+
+/// Reply of `profile_list`, in slot order. Empty with synthetic data.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProfileList {
+    pub profiles: Vec<ProfileSlot>,
+    /// Whether a free slot is left for `add_profile`.
+    pub can_add: bool,
 }
 
 /// One match from the homeserver's user directory.
@@ -720,6 +819,14 @@ pub fn generated_typescript() -> String {
         format!("export {}", InviteSummary::decl(&config)),
         format!("export {}", InviteList::decl(&config)),
         format!("export {}", ConversationStart::decl(&config)),
+        format!("export {}", RoomCreation::decl(&config)),
+        format!("export {}", RoomInvite::decl(&config)),
+        format!("export {}", DisplayName::decl(&config)),
+        format!("export {}", DeviceSummary::decl(&config)),
+        format!("export {}", DeviceList::decl(&config)),
+        format!("export {}", AccountSettings::decl(&config)),
+        format!("export {}", ProfileSlot::decl(&config)),
+        format!("export {}", ProfileList::decl(&config)),
         format!("export {}", UserMatch::decl(&config)),
         format!("export {}", UserSearch::decl(&config)),
         format!("export {}", NoticeKind::decl(&config)),

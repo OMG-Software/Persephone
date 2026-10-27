@@ -28,6 +28,14 @@ test('only the bridge module talks to the Tauri host', async () => {
   assert.deepEqual(offenders, []);
 });
 
+test('no source keeps data in web storage: settings belong to the account', async () => {
+  const src = new URL('../src/', import.meta.url);
+  for (const file of await sourceFiles(src)) {
+    const text = await readFile(file, 'utf8');
+    assert.doesNotMatch(text, /localStorage|sessionStorage|indexedDB|document\.cookie/, file.pathname);
+  }
+});
+
 test('no source uses raw HTML insertion', async () => {
   const src = new URL('../src/', import.meta.url);
   for (const file of await sourceFiles(src)) {

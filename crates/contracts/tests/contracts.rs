@@ -1,5 +1,6 @@
 use persephone_contracts::{
-    AccountState, AccountStatus, AppStatus, ConversationStart, InviteList, RoomList, SignInError,
+    AccountSettings, AccountState, AccountStatus, AppStatus, ConversationStart, DeviceList,
+    DisplayName, InviteList, ProfileList, RoomCreation, RoomInvite, RoomList, SignInError,
     StoreState, UserSearch, generated_typescript, sample_room_summary, sample_timeline_page,
 };
 
@@ -338,17 +339,112 @@ fn conversation_replies_keep_their_documented_shape() {
     )
     .is_err());
 
-    assert!(serde_json::from_str::<InviteList>(
-        r#"{"invites":[{"roomId":"!r:s","inviter":"@b:s","inviterName":null}],"truncated":false}"#
-    )
-    .is_ok());
+    // A direct invitation, and one to a named room over federation whose
+    // inviter the invitation did not say.
+    for valid in [
+        r#"{"invites":[{"roomId":"!r:s","roomName":null,"direct":true,"inviter":"@b:s","inviterName":null}],"truncated":false}"#,
+        r#"{"invites":[{"roomId":"!r:t","roomName":"Plans","direct":false,"inviter":null,"inviterName":null}],"truncated":false}"#,
+    ] {
+        assert!(serde_json::from_str::<InviteList>(valid).is_ok(), "{valid}");
+    }
     for invalid in [
-        r#"{"invites":[{"roomId":"!r:s","inviter":"@b:s","inviterName":null,"reason":"hi"}],"truncated":false}"#,
-        r#"{"invites":[{"roomId":"!r:s","inviterName":null}],"truncated":false}"#,
+        r#"{"invites":[{"roomId":"!r:s","roomName":null,"direct":true,"inviter":"@b:s","inviterName":null,"reason":"hi"}],"truncated":false}"#,
+        r#"{"invites":[{"roomId":"!r:s","inviter":"@b:s","inviterName":null}],"truncated":false}"#,
+        r#"{"invites":[{"roomId":"!r:s","roomName":null,"inviter":null,"inviterName":null}],"truncated":false}"#,
         r#"{"invites":[]}"#,
     ] {
         assert!(
             serde_json::from_str::<InviteList>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+/// GIVEN the room, account and profile replies WHEN read THEN the documented
+/// shapes pass, and extra fields (an IP address, a path, an unencrypted room)
+/// or missing ones are refused.
+#[test]
+fn room_account_and_profile_replies_keep_their_documented_shape() {
+    for valid in [
+        r#"{"kind":"created","roomId":"!r:s"}"#,
+        r#"{"kind":"no_identity","userId":"@b:s"}"#,
+        r#"{"kind":"refused"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RoomCreation>(valid).is_ok(),
+            "{valid}"
+        );
+    }
+    for invalid in [
+        r#"{"kind":"created","roomId":"!r:s","encrypted":false}"#,
+        r#"{"kind":"no_identity"}"#,
+        r#"{"kind":"existing","roomId":"!r:s"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<RoomCreation>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    for valid in [
+        r#"{"kind":"invited"}"#,
+        r#"{"kind":"no_identity"}"#,
+        r#"{"kind":"refused"}"#,
+    ] {
+        assert!(serde_json::from_str::<RoomInvite>(valid).is_ok(), "{valid}");
+    }
+    assert!(serde_json::from_str::<RoomInvite>(r#"{"kind":"invited","userId":"@b:s"}"#).is_err());
+
+    assert!(serde_json::from_str::<DisplayName>(r#"{"displayName":null}"#).is_ok());
+    assert!(
+        serde_json::from_str::<DisplayName>(r#"{"displayName":"A","avatarUrl":"mxc://s/m"}"#)
+            .is_err()
+    );
+
+    assert!(serde_json::from_str::<DeviceList>(
+        r#"{"devices":[{"deviceId":"D","displayName":null,"lastSeen":1,"current":true,"verified":false}],"truncated":false}"#
+    )
+    .is_ok());
+    for invalid in [
+        r#"{"devices":[{"deviceId":"D","displayName":null,"lastSeen":1,"current":true,"verified":false,"lastSeenIp":"192.0.2.1"}],"truncated":false}"#,
+        r#"{"devices":[{"deviceId":"D","displayName":null,"lastSeen":9007199254740992,"current":true,"verified":false}],"truncated":false}"#,
+        r#"{"devices":[{"deviceId":"D","displayName":null,"lastSeen":1,"verified":false}],"truncated":false}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<DeviceList>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+
+    assert!(AccountSettings::default().enter_sends);
+    assert_eq!(
+        serde_json::to_string(&AccountSettings { enter_sends: false }).unwrap(),
+        r#"{"enterSends":false}"#
+    );
+    for invalid in [
+        r#"{}"#,
+        r#"{"enterSends":null}"#,
+        r#"{"enterSends":"true"}"#,
+        r#"{"enterSends":true,"userId":"@a:s"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<AccountSettings>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+
+    assert!(
+        serde_json::from_str::<ProfileList>(
+            r#"{"profiles":[{"slot":1,"active":true}],"canAdd":true}"#
+        )
+        .is_ok()
+    );
+    for invalid in [
+        r#"{"profiles":[{"slot":1,"active":true,"path":"C:\x"}],"canAdd":true}"#,
+        r#"{"profiles":[{"slot":1,"active":true,"userId":"@a:s"}],"canAdd":true}"#,
+        r#"{"profiles":[{"slot":-1,"active":true}],"canAdd":true}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<ProfileList>(invalid).is_err(),
             "{invalid}"
         );
     }

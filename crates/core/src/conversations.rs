@@ -1,5 +1,6 @@
-//! Direct-message conversations: starting one with a user, answering an
-//! invitation to one, and the homeserver's user directory.
+//! Conversations: starting a direct-message one with a user, creating a named
+//! room and inviting people to it, answering an invitation, and the
+//! homeserver's user directory.
 //!
 //! * Starting opens an existing encrypted direct-message room with just that
 //!   user when there is one: marked direct for them (`contacts::contact_of`)
@@ -11,9 +12,13 @@
 //!   anything; then the SDK creates an encrypted room (`Client::create_dm`:
 //!   encryption in the initial state, the trusted private chat preset) and
 //!   invites them. There is no unencrypted variant.
-//! * Only invitations marked direct are listed and answered here. The
-//!   inviter's name is the homeserver's word, projected like any name.
-//!   Accepting joins the room, which the SDK then marks as direct.
+//! * A created room is encrypted from its first state event and invite-only
+//!   (the private chat preset). Everyone invited, to a new room or to an
+//!   encrypted joined one, must have a cross-signing identity, as above.
+//! * Every pending invitation is listed and may be answered: direct or not,
+//!   from this homeserver or over federation. The inviter's name and the
+//!   room's name are the homeserver's word, projected like any name. A
+//!   direct invitation is joined as a direct room, which the SDK marks so.
 //! * A user ID sent as an identifier (a directory match the page may start a
 //!   conversation with, an inviter) is sent unchanged, never projected: a
 //!   projection could cut a valid ID short. Only IDs within the Matrix limit
@@ -32,11 +37,18 @@ use crate::{
 };
 use matrix_sdk::{
     Client, EncryptionState, Room, RoomMemberships, RoomState,
-    ruma::{OwnedUserId, RoomId, UserId},
+    ruma::{
+        OwnedUserId, RoomId, UserId,
+        api::client::room::create_room,
+        events::{InitialStateEvent, room::encryption::RoomEncryptionEventContent},
+    },
 };
-use persephone_contracts::{ConversationStart, InviteList, InviteSummary, UserMatch, UserSearch};
+use persephone_contracts::{
+    ConversationStart, InviteList, InviteSummary, RoomCreation, RoomInvite, UserMatch, UserSearch,
+};
 use persephone_core_protocol::{
-    ErrorCode, MAX_SEARCH_RESULTS, MAX_SEARCH_TERM_BYTES, MAX_USER_ID_BYTES,
+    ErrorCode, MAX_INVITEES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_RESULTS, MAX_SEARCH_TERM_BYTES,
+    MAX_USER_ID_BYTES,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -85,63 +97,171 @@ pub fn valid_term(term: &str) -> bool {
         && !term.chars().any(char::is_control)
 }
 
-/// Direct-message invitations, in room ID order, at most [`MAX_ROOMS`].
+/// Pending invitations, in room ID order, at most [`MAX_ROOMS`].
 pub async fn invite_list(client: &Client) -> InviteList {
     let mut rooms = client.invited_rooms();
     rooms.sort_by(|a, b| a.room_id().cmp(b.room_id()));
+    let truncated = rooms.len() > MAX_ROOMS;
     let mut invites = Vec::new();
-    let mut truncated = false;
-    for room in rooms {
-        let Some(invite) = direct_invite(&room).await else {
-            continue;
-        };
-        if invites.len() == MAX_ROOMS {
-            truncated = true;
-            break;
+    for room in rooms.into_iter().take(MAX_ROOMS) {
+        if let Some(invite) = invite(&room).await {
+            invites.push(invite);
         }
-        invites.push(invite);
     }
     InviteList { invites, truncated }
 }
 
-/// The invitation of an invited room marked direct, or `None`.
-async fn direct_invite(room: &Room) -> Option<InviteSummary> {
-    if room.state() != RoomState::Invited || !room.is_direct().await.ok()? {
+/// The invitation of an invited room, or `None` for another room. An
+/// invitation whose details cannot be read is still listed: the stripped
+/// state a remote homeserver sends may lack the inviter's member event, and
+/// the room ID alone is enough to answer it.
+async fn invite(room: &Room) -> Option<InviteSummary> {
+    if room.state() != RoomState::Invited {
         return None;
     }
-    let details = room.invite_details().await.ok()?;
+    let details = room.invite_details().await.ok();
     Some(InviteSummary {
         room_id: room.room_id().to_string(),
-        inviter: identifier(&details.inviter_id)
-            .unwrap_or_else(|| project_name(details.inviter_id.as_str())),
+        room_name: room.name().map(|name| project_name(&name)),
+        direct: room.is_direct().await.unwrap_or(false),
+        inviter: details.as_ref().map(|details| {
+            identifier(&details.inviter_id)
+                .unwrap_or_else(|| project_name(details.inviter_id.as_str()))
+        }),
         inviter_name: details
-            .inviter
+            .and_then(|details| details.inviter)
             .and_then(|inviter| inviter.display_name().map(project_name)),
     })
 }
 
-/// The invited direct-message room `room_id`, or `not_found`.
-async fn invited_room(client: &Client, room_id: &str) -> Result<Room, ErrorCode> {
-    let room = RoomId::parse(room_id)
+/// The invited room `room_id`, or `not_found`.
+fn invited_room(client: &Client, room_id: &str) -> Result<Room, ErrorCode> {
+    RoomId::parse(room_id)
         .ok()
         .and_then(|id| client.get_room(&id))
-        .ok_or(ErrorCode::NotFound)?;
-    match direct_invite(&room).await {
-        Some(_) => Ok(room),
-        None => Err(ErrorCode::NotFound),
-    }
+        .filter(|room| room.state() == RoomState::Invited)
+        .ok_or(ErrorCode::NotFound)
 }
 
-/// Joins the room of a direct-message invitation.
+/// Joins the room of an invitation.
 pub async fn accept(client: &Client, room_id: &str) -> Result<(), ErrorCode> {
-    let room = invited_room(client, room_id).await?;
+    let room = invited_room(client, room_id)?;
     room.join().await.map_err(|error| request_error(&error))
 }
 
-/// Refuses a direct-message invitation by leaving its room.
+/// Refuses an invitation by leaving its room.
 pub async fn decline(client: &Client, room_id: &str) -> Result<(), ErrorCode> {
-    let room = invited_room(client, room_id).await?;
+    let room = invited_room(client, room_id)?;
     room.leave().await.map_err(|error| request_error(&error))
+}
+
+/// A room name the page sent, if it is not blank, within the limit and free
+/// of control characters.
+pub fn valid_room_name(name: &str) -> bool {
+    name.len() <= MAX_ROOM_NAME_BYTES
+        && !name.trim().is_empty()
+        && !name.chars().any(char::is_control)
+}
+
+/// The people a `create_room` call names, if each is a valid user ID, there
+/// are at most [`MAX_INVITEES`] and none is named twice.
+pub fn parse_invitees(invite: &[String]) -> Option<Vec<OwnedUserId>> {
+    if invite.len() > MAX_INVITEES {
+        return None;
+    }
+    let mut users: Vec<OwnedUserId> = Vec::with_capacity(invite.len());
+    for user_id in invite {
+        let user = parse_user(user_id)?;
+        if users.contains(&user) {
+            return None;
+        }
+        users.push(user);
+    }
+    Some(users)
+}
+
+/// Whether `user` has a cross-signing identity. The store may not follow
+/// them yet, so the homeserver is asked before saying no.
+async fn has_identity(client: &Client, user: &UserId) -> Result<bool, ErrorCode> {
+    let encryption = client.encryption();
+    match encryption.get_user_identity(user).await {
+        Ok(Some(_)) => Ok(true),
+        Ok(None) => encryption
+            .request_user_identity(user)
+            .await
+            .map(|identity| identity.is_some())
+            .map_err(|_| ErrorCode::Unavailable),
+        Err(_) => Err(ErrorCode::Unavailable),
+    }
+}
+
+/// Creates an encrypted, invite-only room named `name` and invites `invite`
+/// to it. Everyone invited must have a cross-signing identity, because room
+/// keys go only to cross-signed devices (ADR-0005); otherwise nothing is
+/// created. Inviting this account itself is `invalid_argument`.
+pub async fn create_room(
+    client: &Client,
+    name: &str,
+    invite: Vec<OwnedUserId>,
+) -> Result<RoomCreation, ErrorCode> {
+    if invite.iter().any(|user| client.user_id() == Some(user)) {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    for user in &invite {
+        if !has_identity(client, user).await? {
+            return Ok(RoomCreation::NoIdentity {
+                user_id: identifier(user).unwrap_or_else(|| project_name(user.as_str())),
+            });
+        }
+    }
+    let mut request = create_room::v3::Request::new();
+    request.name = Some(name.to_owned());
+    request.invite = invite;
+    // Invite-only, history visible to members; invitees are not made
+    // administrators, as the trusted preset would.
+    request.preset = Some(create_room::v3::RoomPreset::PrivateChat);
+    request.initial_state = vec![
+        InitialStateEvent::with_empty_state_key(
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        )
+        .to_raw_any(),
+    ];
+    match client.create_room(request).await {
+        Ok(room) => Ok(RoomCreation::Created {
+            room_id: room.room_id().to_string(),
+        }),
+        Err(error) if error.client_api_error_kind().is_some() => Ok(RoomCreation::Refused {}),
+        Err(_) => Err(ErrorCode::Unavailable),
+    }
+}
+
+/// Invites `user` to the joined room `room_id`. In an encrypted room (or one
+/// whose state is not known) they must have a cross-signing identity.
+pub async fn invite_user(
+    client: &Client,
+    room_id: &str,
+    user: &UserId,
+) -> Result<RoomInvite, ErrorCode> {
+    let room = RoomId::parse(room_id)
+        .ok()
+        .and_then(|id| client.get_room(&id))
+        .filter(|room| room.state() == RoomState::Joined)
+        .ok_or(ErrorCode::NotFound)?;
+    if client.user_id() == Some(user) {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    let plain = matches!(
+        room.latest_encryption_state().await,
+        Ok(EncryptionState::NotEncrypted)
+    );
+    if !plain && !has_identity(client, user).await? {
+        return Ok(RoomInvite::NoIdentity {});
+    }
+    match room.invite_user_by_id(user).await {
+        Ok(()) => Ok(RoomInvite::Invited {}),
+        Err(error) if error.client_api_error_kind().is_some() => Ok(RoomInvite::Refused {}),
+        Err(_) => Err(ErrorCode::Unavailable),
+    }
 }
 
 /// Opens or creates a direct-message conversation with `user` (see the
@@ -156,18 +276,7 @@ pub async fn start(client: &Client, user: &UserId) -> Result<ConversationStart, 
             room_id: room.room_id().to_string(),
         });
     }
-    let encryption = client.encryption();
-    // The store may not follow this user yet: ask the homeserver before
-    // saying they have no identity.
-    let identity = match encryption.get_user_identity(user).await {
-        Ok(Some(identity)) => Some(identity),
-        Ok(None) => encryption
-            .request_user_identity(user)
-            .await
-            .map_err(|_| ErrorCode::Unavailable)?,
-        Err(_) => return Err(ErrorCode::Unavailable),
-    };
-    if identity.is_none() {
+    if !has_identity(client, user).await? {
         return Ok(ConversationStart::NoIdentity {});
     }
     match client.create_dm(user).await {

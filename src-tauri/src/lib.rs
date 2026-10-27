@@ -25,14 +25,16 @@ pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
-    AccountStatus, AppStatus, ContactStatus, ConversationStart, ImagePick, ImageView, InviteList,
-    PendingMessage, RoomIdentityChanges, RoomList, SecurityStatus, StoreState, TimelinePage,
+    AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart, DeviceList,
+    DisplayName, ImagePick, ImageView, InviteList, PendingMessage, ProfileList, RoomCreation,
+    RoomIdentityChanges, RoomInvite, RoomList, SecurityStatus, StoreState, TimelinePage,
     UserSearch,
 };
 use persephone_core_protocol::{
-    Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES, MAX_EVENT_ID_BYTES,
-    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES,
-    MAX_SEARCH_TERM_BYTES, MAX_USER_ID_BYTES,
+    Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES, MAX_DISPLAY_NAME_BYTES,
+    MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES,
+    MAX_MESSAGE_BYTES, MAX_PROFILES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES,
+    MAX_USER_ID_BYTES,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -579,13 +581,13 @@ async fn discard_image(core: State<'_, CoreLink>, handle: String) -> Result<(), 
     relay::<()>(core.inner(), Call::DiscardImage { handle }).await
 }
 
-/// Direct-message invitations the account has not answered.
+/// Room invitations the account has not answered.
 #[tauri::command]
 async fn invite_list(core: State<'_, CoreLink>) -> Result<InviteList, String> {
     relay(core.inner(), Call::InviteList {}).await
 }
 
-/// Joins the room of a direct-message invitation.
+/// Joins the room of an invitation.
 #[tauri::command]
 async fn accept_invite(core: State<'_, CoreLink>, room_id: String) -> Result<(), String> {
     if room_id.len() > MAX_ROOM_ID_BYTES {
@@ -594,7 +596,7 @@ async fn accept_invite(core: State<'_, CoreLink>, room_id: String) -> Result<(),
     relay::<()>(core.inner(), Call::AcceptInvite { room_id }).await
 }
 
-/// Refuses a direct-message invitation.
+/// Refuses an invitation.
 #[tauri::command]
 async fn decline_invite(core: State<'_, CoreLink>, room_id: String) -> Result<(), String> {
     if room_id.len() > MAX_ROOM_ID_BYTES {
@@ -623,6 +625,92 @@ async fn search_users(core: State<'_, CoreLink>, term: String) -> Result<UserSea
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(core.inner(), Call::SearchUsers { term }).await
+}
+
+/// Creates an encrypted room with a name and invites people to it.
+#[tauri::command]
+async fn create_room(
+    core: State<'_, CoreLink>,
+    name: String,
+    invite: Vec<String>,
+) -> Result<RoomCreation, String> {
+    if name.len() > MAX_ROOM_NAME_BYTES
+        || invite.len() > MAX_INVITEES
+        || invite
+            .iter()
+            .any(|user_id| user_id.len() > MAX_USER_ID_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::CreateRoom { name, invite }).await
+}
+
+/// Invites one person to a joined room.
+#[tauri::command]
+async fn invite_user(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    user_id: String,
+) -> Result<RoomInvite, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || user_id.len() > MAX_USER_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::InviteUser { room_id, user_id }).await
+}
+
+/// This account's display name.
+#[tauri::command]
+async fn display_name(core: State<'_, CoreLink>) -> Result<DisplayName, String> {
+    relay(core.inner(), Call::DisplayName {}).await
+}
+
+/// Sets this account's display name; an empty one removes it.
+#[tauri::command]
+async fn set_display_name(core: State<'_, CoreLink>, name: String) -> Result<DisplayName, String> {
+    if name.len() > MAX_DISPLAY_NAME_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SetDisplayName { name }).await
+}
+
+/// The devices (sessions) signed in to this account.
+#[tauri::command]
+async fn device_list(core: State<'_, CoreLink>) -> Result<DeviceList, String> {
+    relay(core.inner(), Call::DeviceList {}).await
+}
+
+/// This account's settings, from its encrypted profile.
+#[tauri::command]
+async fn account_settings(core: State<'_, CoreLink>) -> Result<AccountSettings, String> {
+    relay(core.inner(), Call::AccountSettings {}).await
+}
+
+/// Replaces this account's settings. Each setting is a required argument.
+#[tauri::command]
+async fn set_account_settings(core: State<'_, CoreLink>, enter_sends: bool) -> Result<(), String> {
+    relay::<()>(core.inner(), Call::SetAccountSettings { enter_sends }).await
+}
+
+/// The local profiles on this computer, by slot number only.
+#[tauri::command]
+async fn profile_list(core: State<'_, CoreLink>) -> Result<ProfileList, String> {
+    relay(core.inner(), Call::ProfileList {}).await
+}
+
+/// Makes a new profile and switches to it: the core then closes this
+/// window and starts again.
+#[tauri::command]
+async fn add_profile(core: State<'_, CoreLink>) -> Result<(), String> {
+    relay::<()>(core.inner(), Call::AddProfile {}).await
+}
+
+/// Switches to the profile in this slot, as `add_profile` does.
+#[tauri::command]
+async fn switch_profile(core: State<'_, CoreLink>, slot: u32) -> Result<(), String> {
+    if !(1..=MAX_PROFILES).contains(&slot) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::SwitchProfile { slot }).await
 }
 
 /// Drops every subscription when the page (re)loads: the new page holds none
@@ -705,7 +793,17 @@ pub fn configure<R: Runtime>(
             accept_invite,
             decline_invite,
             start_conversation,
-            search_users
+            search_users,
+            create_room,
+            invite_user,
+            display_name,
+            set_display_name,
+            device_list,
+            account_settings,
+            set_account_settings,
+            profile_list,
+            add_profile,
+            switch_profile
         ])
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {

@@ -10,7 +10,9 @@
 //!
 //! * `key_protector`, `credential_source`, `image_picker`, `read_image_file`,
 //!   `image_worker` and `ui_host`;
-//! * `default_profile_dir`, through [`store::default_dir`](crate::store::default_dir).
+//! * `default_profile_dir`, through [`store::default_dir`](crate::store::default_dir);
+//! * `start_detached`, which starts the new core of a profile switch
+//!   ([`profiles`](crate::profiles)).
 //!
 //! An OS whose layer is not implemented returns the fail-closed stand-ins:
 //! the vault refuses (`Unsupported`), prompts and the file dialog are
@@ -78,5 +80,9 @@ mod other {
 
     pub(crate) fn ui_host() -> Box<dyn UiHost> {
         Box::new(ui_host::Unsupported)
+    }
+
+    pub(crate) fn start_detached(_: &mut std::process::Command) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
     }
 }

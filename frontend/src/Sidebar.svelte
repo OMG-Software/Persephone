@@ -17,13 +17,14 @@
     onsearch,
     onsettings,
     onnewconversation,
+    onnewroom,
     onaccept = () => {},
     ondecline = () => {},
     notice,
     lock
   }: {
     rooms: Rooms | null;
-    // Direct-message invitations, or null when there are none to show.
+    // Room invitations, or null when there are none to show.
     invites?: InviteList | null;
     // The room whose invitation is being answered, if any.
     inviteBusy?: string | null;
@@ -37,6 +38,8 @@
     onsettings: () => void;
     // Opens the new-conversation dialog; absent when there is no account.
     onnewconversation?: () => void;
+    // Opens the new-room dialog; absent when there is no account.
+    onnewroom?: () => void;
     onaccept?: (roomId: string) => void;
     ondecline?: (roomId: string) => void;
     // Shown above the account footer, such as a prompt to verify this device.
@@ -67,6 +70,11 @@
         onclick={onnewconversation}
       >
         <Icon name="plus" />
+      </button>
+    {/if}
+    {#if onnewroom}
+      <button type="button" class="icon-button" aria-label="New room" title="New room" onclick={onnewroom}>
+        <Icon name="users" />
       </button>
     {/if}
   </div>

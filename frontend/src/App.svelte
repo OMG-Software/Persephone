@@ -1,11 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import markUrl from './assets/mark.svg';
+  import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
+  import Devices from './Devices.svelte';
   import Icon from './Icon.svelte';
   import IdentityChanges from './IdentityChanges.svelte';
+  import InvitePerson from './InvitePerson.svelte';
   import JumpPalette from './JumpPalette.svelte';
   import NewConversation from './NewConversation.svelte';
+  import NewRoom from './NewRoom.svelte';
+  import ProfileSettings from './ProfileSettings.svelte';
   import Security from './Security.svelte';
   import Settings, { type SettingsTab } from './Settings.svelte';
   import Sidebar from './Sidebar.svelte';
@@ -15,10 +20,12 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
+  import { DEFAULT_SETTINGS, SettingsKeeper } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
   import { mergeNewest } from './timeline';
   import {
+    accountSettings,
     allowUnencrypted,
     appStatus,
     discardImage,
@@ -52,6 +59,8 @@
     resetProfile,
     unlockSession,
     watchSession,
+    setAccountSettings,
+    type AccountSettings,
     type AppStatus,
     type ContactStatus,
     type InviteList,
@@ -120,6 +129,20 @@
   let settingsTab = $state<SettingsTab>('security');
   let paletteOpen = $state(false);
   let newConversationOpen = $state(false);
+  let newRoomOpen = $state(false);
+  // The room the invite dialog is open for.
+  let invitingTo = $state<string | null>(null);
+  // This account's settings, from its encrypted profile; the defaults until
+  // they load and while no account is signed in.
+  let settings = $state<AccountSettings>(DEFAULT_SETTINGS);
+  let settingsFailure = $state<string | null>(null);
+  const settingsKeeper = new SettingsKeeper(
+    { load: accountSettings, save: setAccountSettings },
+    (next, failure) => {
+      settings = next;
+      settingsFailure = failure;
+    }
+  );
   // Direct-message invitations, and the one being answered.
   let invites = $state<InviteList | null>(null);
   let inviteBusy = $state<string | null>(null);
@@ -345,6 +368,14 @@
     }
   }
 
+  // Load the account's settings each time an account is signed in, and drop
+  // them when none is. A session change (reset) clears the status, so a new
+  // session always passes through "not signed in" first.
+  $effect(() => {
+    if (signedIn) settingsKeeper.load();
+    else settingsKeeper.clear();
+  });
+
   // A conversation was started or found: show it in the list and open it.
   async function openConversation(roomId: string) {
     const generation = sessionGeneration;
@@ -361,6 +392,8 @@
     view = 'chat';
     paletteOpen = false;
     newConversationOpen = false;
+    newRoomOpen = false;
+    invitingTo = null;
     invites = null;
     inviteBusy = null;
     dismissedFlow = null;
@@ -952,6 +985,7 @@
           <p role="alert" class="error">{error}</p>
         {/if}
         {@render lockButton(false, false)}
+        <Accounts compact />
       </div>
     </div>
   {:else if shellOpen && view === 'settings'}
@@ -961,7 +995,62 @@
       ontab={(tab) => (settingsTab = tab)}
       onback={closeSettings}
     >
-      {#if settingsTab === 'security'}
+      {#if settingsTab === 'profile'}
+        {#if signedIn && status.account.userId}
+          <ProfileSettings userId={status.account.userId} />
+        {:else}
+          <section class="settings-page" aria-labelledby="profile-heading">
+            <h2 id="profile-heading">Profile</h2>
+            <p class="lede">No account is signed in. All rooms and messages here are synthetic test data.</p>
+          </section>
+        {/if}
+      {:else if settingsTab === 'devices'}
+        {#if signedIn}
+          <Devices />
+        {:else}
+          <section class="settings-page" aria-labelledby="devices-heading">
+            <h2 id="devices-heading">Sessions</h2>
+            <p class="lede">No account is signed in, so there are no sessions to list.</p>
+          </section>
+        {/if}
+      {:else if settingsTab === 'preferences'}
+        <section class="settings-page" aria-labelledby="preferences-heading">
+          <h2 id="preferences-heading">Preferences</h2>
+          {#if signedIn}
+            <p class="lede">These settings belong to this account and are kept in its encrypted profile.</p>
+            <div class="panel">
+              <label class="switch-row">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={settings.enterSends}
+                  onchange={(event) =>
+                    settingsKeeper.change({ ...settings, enterSends: event.currentTarget.checked })}
+                />
+                <span>Enter sends the message</span>
+              </label>
+              <p class="note">
+                {settings.enterSends
+                  ? 'Enter sends. Shift+Enter starts a new line.'
+                  : `Enter starts a new line. ${mac ? '⌘Enter' : 'Ctrl+Enter'} sends.`}
+              </p>
+            </div>
+            {#if settingsFailure}
+              <p role="alert" class="error">{settingsFailure}</p>
+            {/if}
+          {:else}
+            <p class="lede">No account is signed in. Settings belong to an account, so there are none to change.</p>
+          {/if}
+        </section>
+      {:else if settingsTab === 'accounts'}
+        <Accounts />
+        {#if !status || status.store === 'not_configured'}
+          <section class="settings-page" aria-labelledby="accounts-demo-heading">
+            <h2 id="accounts-demo-heading">Accounts</h2>
+            <p class="lede">Synthetic data has no accounts. Start Persephone without --demo to add one.</p>
+          </section>
+        {/if}
+      {:else if settingsTab === 'security'}
         {#if signedIn && security}
           <Security
             {security}
@@ -986,7 +1075,7 @@
         {/if}
       {:else}
         <section class="settings-page" aria-labelledby="session-heading">
-          <h2 id="session-heading">Session</h2>
+          <h2 id="session-heading">This session</h2>
           <div class="panel">
             <p role="status">
               Persephone {status.version} · revision <span class="mono">{status.revision}</span> ·
@@ -1059,6 +1148,7 @@
         {invites}
         {inviteBusy}
         onnewconversation={signedIn ? () => (newConversationOpen = true) : undefined}
+        onnewroom={signedIn ? () => (newRoomOpen = true) : undefined}
         onaccept={(roomId) => answerInvite(roomId, true)}
         ondecline={(roomId) => answerInvite(roomId, false)}
       >
@@ -1097,6 +1187,9 @@
             canVerify={security?.identity === 'verified'}
             verifying={securityBusy || (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
             onverify={() => verifyRoomContact(selectedRoom.roomId)}
+            oninvite={signedIn && !selectedRoom.contact
+              ? () => (invitingTo = selectedRoom.roomId)
+              : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
@@ -1158,6 +1251,7 @@
               onattach={attachImage}
               onsendimage={sendAttached}
               oncancelimage={cancelImage}
+              enterSends={settings.enterSends}
             />
           {/if}
         {:else}
@@ -1178,6 +1272,16 @@
       {/if}
       {#if newConversationOpen && signedIn}
         <NewConversation onopen={openConversation} onclose={() => (newConversationOpen = false)} />
+      {/if}
+      {#if newRoomOpen && signedIn}
+        <NewRoom onopen={openConversation} onclose={() => (newRoomOpen = false)} />
+      {/if}
+      {#if invitingTo && signedIn && selectedRoom?.roomId === invitingTo}
+        <InvitePerson
+          roomId={invitingTo}
+          roomName={selectedRoom.displayName ?? selectedRoom.roomId}
+          onclose={() => (invitingTo = null)}
+        />
       {/if}
     </div>
   {:else}
@@ -1228,6 +1332,9 @@
         </div>
         {#if error}
           <p role="alert" class="error">{error}</p>
+        {/if}
+        {#if status.store !== 'locking' && status.store !== 'unlocking'}
+          <Accounts compact />
         {/if}
       </section>
     </div>

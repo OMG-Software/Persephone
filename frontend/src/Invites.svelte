@@ -1,8 +1,9 @@
 <script lang="ts">
   import type { InviteSummary } from '../../crates/contracts/generated/contracts';
 
-  // Direct-message invitations. The inviter's ID and name are their own word:
-  // shown as isolated text, never as a link or markup.
+  // Room invitations, direct-message or not, from any homeserver. The
+  // inviter's ID and name and the room's name are their own word: shown as
+  // isolated text, never as a link or markup.
   let {
     invites,
     truncated,
@@ -27,11 +28,21 @@
         <p class="invite-text">
           {#if invite.inviterName}
             <bdi class="invite-name">{invite.inviterName}</bdi>
-            <bdi class="invite-id">{invite.inviter}</bdi>
-          {:else}
+            {#if invite.inviter}
+              <bdi class="invite-id">{invite.inviter}</bdi>
+            {/if}
+          {:else if invite.inviter}
             <bdi class="invite-name">{invite.inviter}</bdi>
+          {:else}
+            <span class="invite-name">Someone</span>
           {/if}
-          <span class="invite-what">wants to talk with you</span>
+          {#if invite.direct}
+            <span class="invite-what">wants to talk with you</span>
+          {:else if invite.roomName}
+            <span class="invite-what">invited you to <bdi class="invite-room">{invite.roomName}</bdi></span>
+          {:else}
+            <span class="invite-what">invited you to a room</span>
+          {/if}
         </p>
         <div class="invite-actions">
           <button

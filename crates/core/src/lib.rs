@@ -30,6 +30,7 @@
 //! finish, including an open file dialog.
 
 pub mod account;
+pub mod account_details;
 pub mod contacts;
 pub mod conversations;
 pub mod credentials;
@@ -41,10 +42,12 @@ pub mod outbox;
 pub mod passphrase;
 pub mod pick;
 pub mod platform;
+pub mod profiles;
 pub mod prompt_text;
 pub mod security;
 pub mod sending;
 pub mod session;
+pub mod settings;
 pub mod store;
 pub mod ui_host;
 pub mod vault;
@@ -231,6 +234,13 @@ pub struct Core {
     conversation: conversations::Busy,
     /// One user-directory search at a time.
     search: conversations::Busy,
+    /// Reading or setting the display name, one at a time.
+    display_name: conversations::Busy,
+    /// One device-list request at a time.
+    devices: conversations::Busy,
+    /// The local profiles beside the open one; `None` for synthetic data or
+    /// a profile without a directory.
+    profiles: Option<profiles::Profiles>,
 }
 
 /// A call that runs on its own thread; it returns the reply's outcome.
@@ -269,6 +279,11 @@ fn bounded<T: Serialize>(value: &T) -> Outcome {
 /// An event ID the SDK accepts.
 fn valid_event_id(event_id: &str) -> bool {
     event_id.len() <= MAX_EVENT_ID_BYTES && matrix_sdk::ruma::EventId::parse(event_id).is_ok()
+}
+
+/// A long call's result as the reply's JSON value.
+fn json<T: Serialize>(result: Result<T, ErrorCode>) -> Result<serde_json::Value, ErrorCode> {
+    result.and_then(|value| serde_json::to_value(value).map_err(|_| ErrorCode::Internal))
 }
 
 fn refused<T: Serialize>(result: Result<T, ErrorCode>) -> Outcome {
@@ -315,7 +330,22 @@ impl Core {
             budgets,
             conversation: conversations::Busy::default(),
             search: conversations::Busy::default(),
+            display_name: conversations::Busy::default(),
+            devices: conversations::Busy::default(),
+            profiles: None,
         }
+    }
+
+    /// Gives the core the local profiles beside the open one (ADR-0015).
+    pub fn with_profiles(mut self, profiles: profiles::Profiles) -> Self {
+        self.profiles = Some(profiles);
+        self
+    }
+
+    /// The local profiles, if the core has them; a switch the UI asked for
+    /// is read from here.
+    pub fn profiles(&self) -> Option<&profiles::Profiles> {
+        self.profiles.as_ref()
     }
 
     /// Replaces the native file dialog (tests and development builds).
@@ -398,7 +428,12 @@ impl Core {
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::StartConversation { .. }
-            | Call::SearchUsers { .. } => match self.conversation_call(&request.call) {
+            | Call::SearchUsers { .. }
+            | Call::CreateRoom { .. }
+            | Call::InviteUser { .. }
+            | Call::DisplayName {}
+            | Call::SetDisplayName { .. }
+            | Call::DeviceList {} => match self.homeserver_call(&request.call) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
@@ -511,6 +546,21 @@ impl Core {
                     }
                 }
             }
+            Call::AccountSettings {} => match self.session.account_settings() {
+                Ok(Some(settings)) => ok(&settings),
+                Ok(None) => Outcome::Error(ErrorCode::Internal),
+                Err(_) => Outcome::Error(ErrorCode::Locked),
+            },
+            Call::SetAccountSettings { enter_sends } => {
+                let settings = persephone_contracts::AccountSettings {
+                    enter_sends: *enter_sends,
+                };
+                match self.session.set_account_settings(settings) {
+                    Ok(true) => Outcome::Ok(serde_json::Value::Null),
+                    Ok(false) => Outcome::Error(ErrorCode::Internal),
+                    Err(_) => Outcome::Error(ErrorCode::Locked),
+                }
+            }
             Call::SetUpRecovery {} => ok(&self.session.set_up_recovery(self.credentials.clone())),
             Call::VerifyThisDevice {} => ok(&self.session.verify(verification::Action::Start)),
             Call::AcceptVerification { flow_id } => {
@@ -561,9 +611,29 @@ impl Core {
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::StartConversation { .. }
-            | Call::SearchUsers { .. } => match self.conversation_call(call) {
+            | Call::SearchUsers { .. }
+            | Call::CreateRoom { .. }
+            | Call::InviteUser { .. }
+            | Call::DisplayName {}
+            | Call::SetDisplayName { .. }
+            | Call::DeviceList {} => match self.homeserver_call(call) {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
+            },
+            Call::ProfileList {} => ok(&self.profiles.as_ref().map_or(
+                persephone_contracts::ProfileList {
+                    profiles: Vec::new(),
+                    can_add: false,
+                },
+                profiles::Profiles::list,
+            )),
+            Call::AddProfile {} => match &self.profiles {
+                Some(profiles) => refused(profiles.request_new().map(|_| ())),
+                None => Outcome::Error(ErrorCode::NotFound),
+            },
+            Call::SwitchProfile { slot } => match &self.profiles {
+                Some(profiles) => refused(profiles.request_switch(*slot)),
+                None => Outcome::Error(ErrorCode::NotFound),
             },
         }
     }
@@ -582,18 +652,26 @@ impl Core {
         }
     }
 
-    /// Admits a conversation call: its argument is checked first, then it
-    /// takes its kind's slot (one at a time) and runs later under a lease of
-    /// the session admitted now. A lock, unlock or sign-in in between makes
-    /// it `locked`: it never runs under another session or account. A change
-    /// to the rooms also announces a room-list change.
-    fn conversation_call<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
+    /// Admits a call that asks the homeserver: its arguments are checked
+    /// first, then it takes its kind's slot (one at a time) and runs later
+    /// under a lease of the session admitted now. A lock, unlock or sign-in
+    /// in between makes it `locked`: it never runs under another session or
+    /// account. A change to the rooms also announces a room-list change.
+    fn homeserver_call<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
+        use matrix_sdk::ruma::OwnedUserId;
         enum Work {
             Accept(String),
             Decline(String),
-            Start(matrix_sdk::ruma::OwnedUserId),
+            Start(OwnedUserId),
             Search(String),
+            CreateRoom(String, Vec<OwnedUserId>),
+            Invite(String, OwnedUserId),
+            DisplayName,
+            SetDisplayName(String),
+            Devices,
         }
+        let user =
+            |user_id: &str| conversations::parse_user(user_id).ok_or(ErrorCode::InvalidArgument);
         let work = match call {
             Call::AcceptInvite { room_id } if valid_room_id(room_id) => {
                 Work::Accept(room_id.clone())
@@ -601,12 +679,24 @@ impl Core {
             Call::DeclineInvite { room_id } if valid_room_id(room_id) => {
                 Work::Decline(room_id.clone())
             }
-            Call::StartConversation { user_id } => {
-                Work::Start(conversations::parse_user(user_id).ok_or(ErrorCode::InvalidArgument)?)
-            }
+            Call::StartConversation { user_id } => Work::Start(user(user_id)?),
             Call::SearchUsers { term } if conversations::valid_term(term) => {
                 Work::Search(term.clone())
             }
+            Call::CreateRoom { name, invite } if conversations::valid_room_name(name) => {
+                Work::CreateRoom(
+                    name.trim().to_owned(),
+                    conversations::parse_invitees(invite).ok_or(ErrorCode::InvalidArgument)?,
+                )
+            }
+            Call::InviteUser { room_id, user_id } if valid_room_id(room_id) => {
+                Work::Invite(room_id.clone(), user(user_id)?)
+            }
+            Call::DisplayName {} => Work::DisplayName,
+            Call::SetDisplayName { name } if account_details::valid_display_name(name) => {
+                Work::SetDisplayName(name.clone())
+            }
+            Call::DeviceList {} => Work::Devices,
             _ => return Err(ErrorCode::InvalidArgument),
         };
         // Synthetic data has no homeserver.
@@ -629,6 +719,8 @@ impl Core {
         };
         let slot = match work {
             Work::Search(_) => self.search.begin()?,
+            Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
+            Work::Devices => self.devices.begin()?,
             _ => self.conversation.begin()?,
         };
         Ok(Box::new(move || {
@@ -644,18 +736,40 @@ impl Core {
                         conversations::decline(&client, room_id).await
                     })
                     .map(|()| serde_json::Value::Null),
-                Work::Start(user) => self
+                Work::Start(user) => json(self.with_matrix(generation, async |client| {
+                    conversations::start(&client, user).await
+                })),
+                Work::Search(term) => json(self.with_matrix(generation, async |client| {
+                    conversations::search(&client, term).await
+                })),
+                Work::CreateRoom(name, invite) => {
+                    json(self.with_matrix(generation, async |client| {
+                        conversations::create_room(&client, name, invite.clone()).await
+                    }))
+                }
+                Work::Invite(room_id, user) => json(self.with_matrix(generation, async |client| {
+                    conversations::invite_user(&client, room_id, user).await
+                })),
+                Work::DisplayName => json(self.with_matrix(generation, async |client| {
+                    account_details::display_name(&client).await
+                })),
+                Work::SetDisplayName(name) => json(self.with_matrix(generation, async |client| {
+                    account_details::set_display_name(&client, name).await
+                })),
+                Work::Devices => self
                     .with_matrix(generation, async |client| {
-                        conversations::start(&client, user).await
+                        account_details::device_list(&client).await
                     })
-                    .and_then(|start| serde_json::to_value(start).map_err(|_| ErrorCode::Internal)),
-                Work::Search(term) => self
-                    .with_matrix(generation, async |client| {
-                        conversations::search(&client, term).await
-                    })
-                    .and_then(|found| serde_json::to_value(found).map_err(|_| ErrorCode::Internal)),
+                    .and_then(|devices| match bounded(&devices) {
+                        Outcome::Ok(value) => Ok(value),
+                        Outcome::Error(code) => Err(code),
+                    }),
             };
-            if outcome.is_ok() && !matches!(work, Work::Search(_)) {
+            let rooms_changed = matches!(
+                work,
+                Work::Accept(_) | Work::Decline(_) | Work::Start(_) | Work::CreateRoom(..)
+            );
+            if outcome.is_ok() && rooms_changed {
                 self.hub.mark_list_changed(&[], true);
             }
             match outcome {
@@ -1396,6 +1510,168 @@ mod tests {
             });
             assert_eq!(reply.outcome, Outcome::Error(expected), "{call:?}");
         }
+    }
+
+    /// GIVEN no Matrix session WHEN the room and account calls arrive THEN
+    /// bad arguments are `invalid_argument` before anything else, and valid
+    /// ones are `not_found`: synthetic data has no homeserver.
+    #[test]
+    fn given_no_matrix_session_then_room_and_account_calls_are_refused() {
+        use persephone_core_protocol::{MAX_DISPLAY_NAME_BYTES, MAX_INVITEES, MAX_ROOM_NAME_BYTES};
+        let core = Core::default();
+        let many: Vec<String> = (0..=MAX_INVITEES).map(|n| format!("@u{n}:s")).collect();
+        for (call, expected) in [
+            (
+                Call::CreateRoom {
+                    name: "Plans".into(),
+                    invite: vec!["@bob:s".into()],
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::CreateRoom {
+                    name: " ".into(),
+                    invite: Vec::new(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::CreateRoom {
+                    name: "x".repeat(MAX_ROOM_NAME_BYTES + 1),
+                    invite: Vec::new(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::CreateRoom {
+                    name: "Pl\nans".into(),
+                    invite: Vec::new(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::CreateRoom {
+                    name: "Plans".into(),
+                    invite: many,
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::CreateRoom {
+                    name: "Plans".into(),
+                    invite: vec!["@bob:s".into(), "@bob:s".into()],
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::CreateRoom {
+                    name: "Plans".into(),
+                    invite: vec!["bob".into()],
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::InviteUser {
+                    room_id: "!r:s".into(),
+                    user_id: "@bob:s".into(),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::InviteUser {
+                    room_id: "#alias:s".into(),
+                    user_id: "@bob:s".into(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::InviteUser {
+                    room_id: "!r:s".into(),
+                    user_id: "bob".into(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (Call::DisplayName {}, ErrorCode::NotFound),
+            (
+                Call::SetDisplayName { name: "Al".into() },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::SetDisplayName {
+                    name: "a".repeat(MAX_DISPLAY_NAME_BYTES + 1),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::SetDisplayName {
+                    name: "A\u{7}l".into(),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (Call::DeviceList {}, ErrorCode::NotFound),
+            (Call::AccountSettings {}, ErrorCode::Locked),
+            (
+                Call::SetAccountSettings { enter_sends: false },
+                ErrorCode::Locked,
+            ),
+            (Call::AddProfile {}, ErrorCode::NotFound),
+            (Call::SwitchProfile { slot: 2 }, ErrorCode::NotFound),
+        ] {
+            let reply = core.handle(&Request {
+                id: 1,
+                call: call.clone(),
+            });
+            assert_eq!(reply.outcome, Outcome::Error(expected), "{call:?}");
+        }
+        // Synthetic data has no local profiles to list.
+        assert_eq!(
+            core.handle(&Request {
+                id: 1,
+                call: Call::ProfileList {},
+            })
+            .outcome,
+            Outcome::Ok(serde_json::json!({"profiles": [], "canAdd": false}))
+        );
+    }
+
+    /// GIVEN profiles beside the open one WHEN the UI lists, adds or switches
+    /// THEN only slot numbers cross, and one switch waits for the window.
+    #[test]
+    fn given_local_profiles_then_the_ui_lists_and_switches_by_slot_only() {
+        let base = std::env::temp_dir()
+            .join(format!("persephone-core-profiles-{}", std::process::id()))
+            .join("profile");
+        let _ = std::fs::remove_dir_all(base.parent().unwrap());
+        std::fs::create_dir_all(&base).unwrap();
+        let core =
+            Core::default().with_profiles(profiles::Profiles::new(base.clone(), None, 1).unwrap());
+        let call = |call| core.handle(&Request { id: 1, call }).outcome;
+        assert_eq!(
+            call(Call::ProfileList {}),
+            Outcome::Ok(serde_json::json!({
+                "profiles": [{"slot": 1, "active": true}],
+                "canAdd": true
+            }))
+        );
+        assert_eq!(
+            call(Call::SwitchProfile { slot: 1 }),
+            Outcome::Error(ErrorCode::InvalidArgument)
+        );
+        assert_eq!(
+            call(Call::SwitchProfile { slot: 2 }),
+            Outcome::Error(ErrorCode::NotFound)
+        );
+        assert_eq!(core.profiles().unwrap().requested(), None);
+        assert_eq!(
+            call(Call::AddProfile {}),
+            Outcome::Ok(serde_json::Value::Null)
+        );
+        assert_eq!(core.profiles().unwrap().requested(), Some(2));
+        assert_eq!(
+            call(Call::AddProfile {}),
+            Outcome::Error(ErrorCode::LimitExceeded)
+        );
+        let _ = std::fs::remove_dir_all(base.parent().unwrap());
     }
 
     /// A session change drops every subscription and pending room event, so

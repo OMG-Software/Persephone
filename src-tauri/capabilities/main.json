@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "The main window may call the app's view, subscription, session lock, profile reset, sign-in, sign-out, encryption, sending, image and conversation commands and nothing else: no core plugin, event, window, path or webview permissions.",
+  "description": "The main window may call the app's view, subscription, session lock, profile reset, sign-in, sign-out, encryption, sending, image, conversation, room, account and profile commands and nothing else: no core plugin, event, window, path or webview permissions.",
   "windows": ["main"],
   "permissions": [
     "allow-app-status",
@@ -41,6 +41,16 @@
     "allow-accept-invite",
     "allow-decline-invite",
     "allow-start-conversation",
-    "allow-search-users"
+    "allow-search-users",
+    "allow-create-room",
+    "allow-invite-user",
+    "allow-display-name",
+    "allow-set-display-name",
+    "allow-device-list",
+    "allow-account-settings",
+    "allow-set-account-settings",
+    "allow-profile-list",
+    "allow-add-profile",
+    "allow-switch-profile"
   ]
 }

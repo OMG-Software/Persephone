@@ -9,6 +9,7 @@
   import ImageDraftView from './ImageDraft.svelte';
   import type { ImageDraft } from './image';
   import { isolate } from './people';
+  import { composerKey } from './preferences';
   import { clockTime, fullTime, toDate } from './time';
 
   let {
@@ -28,7 +29,8 @@
     imageError = null,
     onattach = () => {},
     onsendimage = () => {},
-    oncancelimage = () => {}
+    oncancelimage = () => {},
+    enterSends = true
   }: {
     // Messages sent from this device that the timeline does not show yet.
     pending: PendingMessage[];
@@ -55,6 +57,9 @@
     onattach?: () => void;
     onsendimage?: () => void;
     oncancelimage?: () => void;
+    // Whether Enter sends (Shift+Enter starts a line) or starts a line
+    // (Ctrl+Enter sends). A setting; on by default.
+    enterSends?: boolean;
   } = $props();
 
   // The core's limit is 16 KiB of UTF-8; this length is only a first stop.
@@ -111,10 +116,9 @@
     }
   }
 
-  // Enter sends and Shift+Enter starts a new line. Not while an input method
-  // is composing text.
+  // See `composerKey` for which keys send.
   function keydown(event: KeyboardEvent) {
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    if (composerKey(event, enterSends) === 'send') {
       event.preventDefault();
       form?.requestSubmit();
     }
@@ -218,6 +222,7 @@
         bind:value={draft}
         disabled={blocked !== null}
         dir="auto"
+        aria-keyshortcuts={enterSends ? 'Enter' : 'Control+Enter Meta+Enter'}
         onkeydown={keydown}
       ></textarea>
       {#if encryption === 'encrypted'}

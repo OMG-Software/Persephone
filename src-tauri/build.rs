@@ -50,6 +50,16 @@ fn main() {
             "decline_invite",
             "start_conversation",
             "search_users",
+            "create_room",
+            "invite_user",
+            "display_name",
+            "set_display_name",
+            "device_list",
+            "account_settings",
+            "set_account_settings",
+            "profile_list",
+            "add_profile",
+            "switch_profile",
         ]));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         attributes = attributes
