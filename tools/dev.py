@@ -41,7 +41,10 @@ def repository_paths(lcov, base, root=ROOT):
                 raise ValueError(f"unexpected source path in {lcov.name}: {source!r}")
             line = f"SF:{prefix}/{source}"
         lines.append(line)
-    lcov.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    # The report's text is written back to the same fixed path; nothing from
+    # it names a file.
+    with lcov.open("w", encoding="utf-8", newline="\n") as report:
+        report.write("\n".join(lines) + "\n")
 
 
 def main():
