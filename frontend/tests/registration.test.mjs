@@ -14,7 +14,7 @@ test('GIVEN usernames WHEN checked THEN only localparts of the allowed character
   }
   assert.equal(usernameProblem('al:example.org'), 'server');
   assert.equal(usernameProblem('a'.repeat(MAX_USERNAME + 1)), 'too_long');
-  for (const invalid of ['a b', 'Al', '@x', 'café', 'a‮b', '<b>']) {
+  for (const invalid of ['a b', 'Al', '@x', 'café', 'a\u202eb', '<b>']) {
     assert.equal(usernameProblem(invalid), 'characters', invalid);
   }
 });
