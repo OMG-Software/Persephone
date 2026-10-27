@@ -53,7 +53,7 @@ async fn restore(client: &Client) {
 
 fn room_state() -> Value {
     json!([
-        {"type":"m.room.create","state_key":"","sender":"@lifecycle:synthetic.test","event_id":"$create","origin_server_ts":1,"content":{"creator":"@lifecycle:synthetic.test","room_version":"11"}},
+        {"type":"m.room.create","state_key":"","sender":"@lifecycle:synthetic.test","event_id":"$create","origin_server_ts":1,"content":{"room_version":"11"}},
         {"type":"m.room.member","state_key":"@lifecycle:synthetic.test","sender":"@lifecycle:synthetic.test","event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}}
     ])
 }
@@ -63,7 +63,7 @@ fn event() -> Value {
 
 async fn server(native: bool) -> MockServer {
     let server = MockServer::start().await;
-    Mock::given(method("GET")).and(path("/_matrix/client/versions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"versions":["v1.15"],"unstable_features":{"org.matrix.simplified_msc3575":true}}))).mount(&server).await;
+    Mock::given(method("GET")).and(path("/_matrix/client/versions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"versions":["v1.19"],"unstable_features":{"org.matrix.simplified_msc3575":true}}))).mount(&server).await;
     for (p, body) in [
         (
             "/_matrix/client/v3/keys/upload",
@@ -85,7 +85,7 @@ async fn server(native: bool) -> MockServer {
             "POST",
             "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
             json!({
-                "pos":"lifecycle-pos","lists":{"rooms":{"count":1,"ops":[{"op":"SYNC","range":[0,0],"room_ids":[ROOM]}]}},
+                "pos":"lifecycle-pos","lists":{"rooms":{"count":1}},
                 "rooms":{ROOM:{"initial":true,"joined_count":1,"invited_count":0,"required_state":room_state(),"timeline":[event()],"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
                 "extensions":{"e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},"to_device":{"events":[],"next_batch":"to-device-pos"}}
             }),

@@ -159,11 +159,18 @@ async fn handle_connection(
             )
         }
         Some((method, path)) if method == "GET" && path == VERSIONS_PATH => {
-            ("200 OK", br#"{"versions":["v1.15"]}"#, false)
+            ("200 OK", br#"{"versions":["v1.19"]}"#, false)
         }
+        // Nothing stored: Matrix v1.19 answers 404 `M_NOT_FOUND`.
+        Some((method, path)) if method == "GET" && path.contains("/account_data/") => (
+            "404 Not Found",
+            br#"{"errcode":"M_NOT_FOUND","error":"Account data not found."}"#,
+            false,
+        ),
+        // An endpoint this fixture does not implement.
         _ => (
             "404 Not Found",
-            br#"{"errcode":"M_NOT_FOUND","error":"fixture endpoint not found"}"#,
+            br#"{"errcode":"M_UNRECOGNIZED","error":"fixture endpoint not implemented"}"#,
             false,
         ),
     };

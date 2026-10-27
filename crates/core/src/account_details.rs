@@ -24,13 +24,20 @@ pub fn valid_display_name(name: &str) -> bool {
     name.len() <= MAX_DISPLAY_NAME_BYTES && !name.chars().any(char::is_control)
 }
 
-/// This account's display name.
+/// This account's display name. The homeserver answers 404 when none is set
+/// (Matrix v1.19, `GET /profile/{userId}/{keyName}`), so that is no name.
 pub async fn display_name(client: &Client) -> Result<DisplayName, ErrorCode> {
-    let name = client
-        .account()
-        .get_display_name()
-        .await
-        .map_err(|error| request_error(&error))?;
+    let name = match client.account().get_display_name().await {
+        Ok(name) => name,
+        Err(error)
+            if error
+                .as_client_api_error()
+                .is_some_and(|api| api.status_code.as_u16() == 404) =>
+        {
+            None
+        }
+        Err(error) => return Err(request_error(&error)),
+    };
     Ok(DisplayName {
         display_name: name.as_deref().map(project_name),
     })

@@ -82,7 +82,7 @@ mod tests {
     #[tokio::test]
     async fn given_native_capability_when_discovered_then_sliding_is_preferred() {
         let server = server(ResponseTemplate::new(200).set_body_json(json!({
-            "versions": ["v1.15"],
+            "versions": ["v1.19"],
             "unstable_features": {"org.matrix.simplified_msc3575": true}
         })))
         .await;
@@ -102,7 +102,7 @@ mod tests {
             json!({"org.matrix.msc4186": true}),
         ] {
             let server = server(ResponseTemplate::new(200).set_body_json(json!({
-                "versions": ["v1.15"], "unstable_features": features
+                "versions": ["v1.19"], "unstable_features": features
             })))
             .await;
             assert_eq!(
@@ -135,7 +135,7 @@ mod tests {
         for body in [
             "{",
             r#"{"versions":"invalid"}"#,
-            r#"{"versions":["v1.15"],"unstable_features":{"org.matrix.simplified_msc3575":"true"}}"#,
+            r#"{"versions":["v1.19"],"unstable_features":{"org.matrix.simplified_msc3575":"true"}}"#,
         ] {
             let server =
                 server(ResponseTemplate::new(200).set_body_raw(body, "application/json")).await;
@@ -152,7 +152,7 @@ mod tests {
         let server = server(
             ResponseTemplate::new(200)
                 .set_delay(Duration::from_secs(1))
-                .set_body_json(json!({"versions":["v1.15"]})),
+                .set_body_json(json!({"versions":["v1.19"]})),
         )
         .await;
         let client = Client::builder()
@@ -192,7 +192,7 @@ mod tests {
             SessionMeta, SessionTokens, authentication::matrix::MatrixSession, config::SyncSettings,
         };
         let server =
-            server(ResponseTemplate::new(200).set_body_json(json!({"versions":["v1.15"]}))).await;
+            server(ResponseTemplate::new(200).set_body_json(json!({"versions":["v1.19"]}))).await;
         Mock::given(method("POST"))
             .and(path("/_matrix/client/v3/keys/upload"))
             .respond_with(
@@ -263,16 +263,16 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::Notify;
         let server = server(ResponseTemplate::new(200).set_body_json(json!({
-            "versions":["v1.15"], "unstable_features":{"org.matrix.simplified_msc3575":true}
+            "versions":["v1.19"], "unstable_features":{"org.matrix.simplified_msc3575":true}
         })))
         .await;
         let room_id = "!p0:synthetic.test";
         Mock::given(method("POST")).and(path("/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "pos":"sliding-position", "lists":{"rooms":{"count":1,"ops":[{"op":"SYNC","range":[0,0],"room_ids":[room_id]}]}},
+                "pos":"sliding-position", "lists":{"rooms":{"count":1}},
                 "rooms":{room_id:{"initial":true,"name":"synthetic","joined_count":1,"invited_count":0,
                     "required_state":[
-                        {"type":"m.room.create","state_key":"","sender":"@p0_alice:synthetic.test","event_id":"$create:synthetic.test","origin_server_ts":1,"content":{"creator":"@p0_alice:synthetic.test","room_version":"11"}},
+                        {"type":"m.room.create","state_key":"","sender":"@p0_alice:synthetic.test","event_id":"$create:synthetic.test","origin_server_ts":1,"content":{"room_version":"11"}},
                         {"type":"m.room.member","state_key":"@p0_alice:synthetic.test","sender":"@p0_alice:synthetic.test","event_id":"$join:synthetic.test","origin_server_ts":2,"content":{"membership":"join"}}
                     ],
                     "timeline":[{"type":"m.room.message","sender":"@p0_alice:synthetic.test","event_id":"$message:synthetic.test","origin_server_ts":3,"content":{"msgtype":"m.text","body":"synthetic"}}],

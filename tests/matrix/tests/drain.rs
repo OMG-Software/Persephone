@@ -221,7 +221,7 @@ async fn given_paused_sdk_handler_when_stop_times_out_then_replacement_waits_for
     Mock::given(method("GET"))
         .and(path("/_matrix/client/versions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "versions": ["v1.15"],
+            "versions": ["v1.19"],
             "unstable_features": {"org.matrix.simplified_msc3575": true}
         })))
         .mount(&server)
@@ -234,14 +234,14 @@ async fn given_paused_sdk_handler_when_stop_times_out_then_replacement_waits_for
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "pos": "drain-position",
-            "lists": {"rooms": {"count": 1, "ops": [{"op": "SYNC", "range": [0, 0], "room_ids": [room_id]}]}},
+            "lists": {"rooms": {"count": 1}},
             "rooms": {room_id: {
                 "initial": true,
                 "name": "synthetic",
                 "joined_count": 1,
                 "invited_count": 0,
                 "required_state": [
-                    {"type": "m.room.create", "state_key": "", "sender": "@p0_alice:synthetic.test", "event_id": "$create:synthetic.test", "origin_server_ts": 1, "content": {"creator": "@p0_alice:synthetic.test", "room_version": "11"}},
+                    {"type": "m.room.create", "state_key": "", "sender": "@p0_alice:synthetic.test", "event_id": "$create:synthetic.test", "origin_server_ts": 1, "content": {"room_version": "11"}},
                     {"type": "m.room.member", "state_key": "@p0_alice:synthetic.test", "sender": "@p0_alice:synthetic.test", "event_id": "$join:synthetic.test", "origin_server_ts": 2, "content": {"membership": "join"}}
                 ],
                 "timeline": [{"type": "m.room.message", "sender": "@p0_alice:synthetic.test", "event_id": "$message:synthetic.test", "origin_server_ts": 3, "content": {"msgtype": "m.text", "body": "synthetic"}}],

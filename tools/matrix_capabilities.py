@@ -235,24 +235,24 @@ class LoopbackGateway:
             def _handle(self):
                 path = self.path
                 if not path.startswith("/_matrix/client/") or urlsplit(path).scheme:
-                    self._response(400, b'{"errcode":"M_BAD_REQUEST"}', "application/json")
+                    self._response(400, b'{"errcode":"M_UNKNOWN","error":"Request target refused"}', "application/json")
                     return
                 if self.headers.get("Transfer-Encoding"):
-                    self._response(400, b'{"errcode":"M_BAD_REQUEST"}', "application/json")
+                    self._response(400, b'{"errcode":"M_UNKNOWN","error":"Request framing refused"}', "application/json")
                     return
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                     if length < 0 or length > MAX_BODY:
                         raise ValueError
                 except ValueError:
-                    self._response(413, b'{"errcode":"M_TOO_LARGE"}', "application/json")
+                    self._response(413, b'{"errcode":"M_TOO_LARGE","error":"Request body too large"}', "application/json")
                     return
                 try:
                     body = self.rfile.read(length) if length else None
                 except OSError:
                     return
                 if body is not None and len(body) != length:
-                    self._response(400, b'{"errcode":"M_BAD_REQUEST"}', "application/json")
+                    self._response(400, b'{"errcode":"M_UNKNOWN","error":"Request body incomplete"}', "application/json")
                     return
 
                 is_versions = self.command == "GET" and path == "/_matrix/client/versions"
@@ -285,7 +285,7 @@ class LoopbackGateway:
                 except (OSError, URLError, HTTPError, TimeoutError, ValueError):
                     with gateway._lock:
                         gateway._counts["upstream_forward_failures"] += 1
-                    self._response(502, b'{"errcode":"M_UNKNOWN"}', "application/json")
+                    self._response(502, b'{"errcode":"M_UNKNOWN","error":"Upstream unavailable"}', "application/json")
                     return
 
                 if is_versions and gateway.scenario in ("absent", "disabled"):
@@ -308,7 +308,7 @@ class LoopbackGateway:
                         payload = json.dumps(version_json, separators=(",", ":")).encode()
                         content_type = "application/json"
                     except (ValueError, TypeError, json.JSONDecodeError):
-                        self._response(502, b'{"errcode":"M_UNKNOWN"}', "application/json")
+                        self._response(502, b'{"errcode":"M_UNKNOWN","error":"Upstream discovery malformed"}', "application/json")
                         return
                 self._response(status, payload, content_type)
 
@@ -350,40 +350,39 @@ class LoopbackGateway:
         if scenario in ("absent", "disabled") and is_native:
             return _json_bytes(404, {"errcode": "M_UNRECOGNIZED", "error": "Unrecognized request"}) + (0,)
         if is_versions:
+            # Each status with the Matrix v1.19 error code it comes with.
             status_by_scenario = {
-                "discovery-http-401": 401,
-                "discovery-http-403": 403,
-                "discovery-http-404": 404,
-                "discovery-http-429": 429,
-                "discovery-http-503": 503,
+                "discovery-http-401": (401, "M_UNKNOWN_TOKEN"),
+                "discovery-http-403": (403, "M_FORBIDDEN"),
+                "discovery-http-404": (404, "M_UNRECOGNIZED"),
+                "discovery-http-429": (429, "M_LIMIT_EXCEEDED"),
+                "discovery-http-503": (503, "M_UNKNOWN"),
             }
             if scenario in status_by_scenario:
-                return _json_bytes(status_by_scenario[scenario], {"errcode": "M_UNRECOGNIZED"}) + (0,)
+                status, errcode = status_by_scenario[scenario]
+                return _json_bytes(status, {"errcode": errcode, "error": "Controlled discovery response"}) + (0,)
             if scenario == "discovery-malformed":
                 return 200, b"{not-json", "application/json", 0
             if scenario == "discovery-wrong-type":
                 return (
                     200,
-                    b'{"versions":["v1.11"],"unstable_features":{"org.matrix.simplified_msc3575":"true"}}',
+                    b'{"versions":["v1.19"],"unstable_features":{"org.matrix.simplified_msc3575":"true"}}',
                     "application/json",
                     0,
                 )
             if scenario == "discovery-timeout":
                 return 200, b"{}", "application/json", 4.0
         if is_native and scenario.startswith("native-"):
-            native_status = {
-                "native-http-401": 401,
-                "native-http-404": 404,
-                "native-http-503": 503,
-                "native-unknown-pos": 400,
+            # M_UNKNOWN_POS is Sliding Sync's own code (MSC4186), not Matrix v1.19's.
+            native = {
+                "native-http-401": (401, "M_UNKNOWN_TOKEN", "Controlled native sync response"),
+                "native-http-404": (404, "M_UNRECOGNIZED", "Controlled native sync response"),
+                "native-http-503": (503, "M_UNKNOWN", "Controlled native sync response"),
+                "native-unknown-pos": (400, "M_UNKNOWN_POS", "Unknown position"),
             }.get(scenario)
-            if native_status is not None:
-                body = (
-                    {"errcode": "M_UNKNOWN_POS", "error": "Unknown position"}
-                    if scenario == "native-unknown-pos"
-                    else {"errcode": "M_UNRECOGNIZED", "error": "Controlled native sync response"}
-                )
-                return _json_bytes(native_status, body) + (0,)
+            if native is not None:
+                status, errcode, error = native
+                return _json_bytes(status, {"errcode": errcode, "error": error}) + (0,)
         return None
 
     def _forward(self, method, path, body, headers):

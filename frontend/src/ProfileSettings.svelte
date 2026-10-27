@@ -3,8 +3,16 @@
   import { displayName, setDisplayName } from './bridge';
 
   // This account's display name, as the homeserver has it. Others see it in
-  // every room; an empty name removes it.
-  let { userId }: { userId: string } = $props();
+  // every room; an empty name removes it. With none set, the field is empty
+  // and nothing is sent until a name is typed.
+  let {
+    userId,
+    onsaved = () => {}
+  }: {
+    userId: string;
+    // The name now set, or null when none is.
+    onsaved?: (name: string | null) => void;
+  } = $props();
 
   // The core's limit, in bytes; this length is only a first stop.
   const MAX_NAME = 256;
@@ -24,19 +32,28 @@
     locked: 'The session is locked.'
   };
 
+  // Reading sends no name, so a refusal there is not about one.
+  const readFailures: Record<string, string> = {
+    core_unavailable: failures.core_unavailable,
+    locked: failures.locked
+  };
+
+  // Only a change is sent: an unset name left empty sends nothing.
+  const changed = $derived(name.trim() !== (current ?? ''));
+
   onMount(async () => {
     try {
       current = (await displayName()).displayName;
       name = current ?? '';
       loaded = true;
     } catch (reason) {
-      failure = failures[String(reason)] ?? 'The display name could not be read.';
+      failure = readFailures[String(reason)] ?? 'The display name could not be read.';
     }
   });
 
   async function save(event: SubmitEvent) {
     event.preventDefault();
-    if (saving) return;
+    if (saving || !changed) return;
     saving = true;
     saved = false;
     failure = null;
@@ -44,6 +61,7 @@
       current = (await setDisplayName(name)).displayName;
       name = current ?? '';
       saved = true;
+      onsaved(current);
     } catch (reason) {
       failure = failures[String(reason)] ?? 'That did not work.';
     } finally {
@@ -67,12 +85,16 @@
       disabled={!loaded || saving}
       bind:value={name}
     />
-    <p class="note">Leave it empty to remove your display name.</p>
+    {#if loaded && current === null}
+      <p class="note">No display name is set, so others see only <bdi>{userId}</bdi>.</p>
+    {:else}
+      <p class="note">Leave it empty to remove your display name.</p>
+    {/if}
     <div class="actions">
       <button
         type="submit"
         class="primary"
-        disabled={!loaded || saving || name.trim() === (current ?? '')}
+        disabled={!loaded || saving || !changed}
       >
         {saving ? 'Saving…' : 'Save'}
       </button>

@@ -202,12 +202,20 @@ pub async fn select_engine(client: &Client) -> Result<Engine, SignInError> {
         .add_list(
             SlidingSyncList::builder("rooms")
                 .sync_mode(SlidingSyncMode::new_growing(50))
+                // The server sends only this state. The room list needs the
+                // first five; the room settings read the rest, and without
+                // the power levels they cannot be shown at all.
                 .required_state(vec![
                     (StateEventType::RoomName, String::new()),
                     (StateEventType::RoomCanonicalAlias, String::new()),
                     (StateEventType::RoomEncryption, String::new()),
                     (StateEventType::RoomCreate, String::new()),
                     (StateEventType::RoomMember, "$ME".into()),
+                    (StateEventType::RoomPowerLevels, String::new()),
+                    (StateEventType::RoomJoinRules, String::new()),
+                    (StateEventType::RoomHistoryVisibility, String::new()),
+                    (StateEventType::RoomTopic, String::new()),
+                    (StateEventType::RoomGuestAccess, String::new()),
                 ])
                 .timeline_limit(20),
         )

@@ -17,6 +17,7 @@ let NewConversation;
 let NewRoom;
 let RoomSettings;
 let LevelPicker;
+let AccountText;
 let render;
 
 before(async () => {
@@ -39,6 +40,7 @@ before(async () => {
   ({ default: NewRoom } = await vite.ssrLoadModule('/src/NewRoom.svelte'));
   ({ default: RoomSettings } = await vite.ssrLoadModule('/src/RoomSettings.svelte'));
   ({ default: LevelPicker } = await vite.ssrLoadModule('/src/LevelPicker.svelte'));
+  ({ default: AccountText } = await vite.ssrLoadModule('/src/AccountText.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -894,4 +896,23 @@ test('GIVEN the new-conversation dialog WHEN it opens THEN directory search is o
   assert.match(html, /Off: nothing is sent until you press Start\./);
   assert.doesNotMatch(html, /Directory matches/);
   assert.match(html, /<button type="submit" class="primary" disabled/, 'no Matrix ID yet');
+});
+
+test('GIVEN no display name WHEN the account label shows THEN only the user ID shows, with no name made from it', () => {
+  const userId = '@alex.moreno:example.invalid';
+  for (const name of [null, '', '   ']) {
+    const html = render(AccountText, { props: { userId, name } }).body;
+    assert.match(html, /<bdi class="account-name" title="@alex\.moreno:example\.invalid">@alex\.moreno:example\.invalid<\/bdi>/);
+    assert.doesNotMatch(html, /account-id/);
+    assert.doesNotMatch(html, />alex\.moreno</);
+  }
+});
+
+test('GIVEN a display name WHEN the account label shows THEN the name is escaped text above the user ID', () => {
+  const html = render(AccountText, {
+    props: { userId: '@alex:example.invalid', name: hostileName }
+  }).body;
+  assert.match(html, /<bdi class="account-name">&lt;img src=x onerror=alert\(1\)>/);
+  assert.match(html, /<bdi class="account-id" title="@alex:example\.invalid">@alex:example\.invalid<\/bdi>/);
+  assert.doesNotMatch(html, /<img/);
 });

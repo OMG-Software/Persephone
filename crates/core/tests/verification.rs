@@ -78,7 +78,7 @@ impl Respond for Homeserver {
         let device = device_of(request);
         let mut state = self.0.lock().unwrap();
         let reply = if path.ends_with("/versions") {
-            json!({ "versions": ["v1.11", "v1.12"] })
+            json!({ "versions": ["v1.19"] })
         } else if path.ends_with("/keys/upload") {
             if let Some(keys) = body.get("device_keys") {
                 state.devices.insert(device.clone(), keys.clone());
@@ -150,9 +150,16 @@ impl Respond for Homeserver {
                 "device_lists": { "changed": [USER], "left": [] },
                 "device_one_time_keys_count": { "signed_curve25519": 50 },
             })
+        } else if path.contains("/account_data/") {
+            // Nothing stored: Matrix v1.19 answers 404 `M_NOT_FOUND`.
+            return ResponseTemplate::new(404).set_body_json(
+                json!({ "errcode": "M_NOT_FOUND", "error": "Account data not found." }),
+            );
         } else {
-            return ResponseTemplate::new(404)
-                .set_body_json(json!({ "errcode": "M_NOT_FOUND", "error": "not here" }));
+            // An endpoint this server does not implement.
+            return ResponseTemplate::new(404).set_body_json(
+                json!({ "errcode": "M_UNRECOGNIZED", "error": "Unrecognized request" }),
+            );
         };
         ResponseTemplate::new(200).set_body_json(reply)
     }

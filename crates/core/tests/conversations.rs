@@ -74,7 +74,7 @@ fn sync_reply(encrypted: bool, members: &[&str]) -> Value {
 async fn synced(server: &MockServer, encrypted: bool, members: &[&str]) -> Client {
     Mock::given(method("GET"))
         .and(path("/_matrix/client/versions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "versions": ["v1.11"] })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "versions": ["v1.19"] })))
         .mount(server)
         .await;
     Mock::given(method("GET"))
@@ -120,9 +120,13 @@ async fn synced(server: &MockServer, encrypted: bool, members: &[&str]) -> Clien
     client
 }
 
-/// Answers a member-list request with the same members as sync.
+/// Answers a member-list request with the same members as sync. Matrix v1.19
+/// returns ClientEvents here, which carry the `room_id` that sync leaves out.
 async fn member_list(server: &MockServer, members: &[&str]) {
-    let chunk = joined(members);
+    let mut chunk = joined(members);
+    for event in &mut chunk {
+        event["room_id"] = json!(ROOM);
+    }
     Mock::given(method("GET"))
         .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "chunk": chunk })))

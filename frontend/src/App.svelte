@@ -31,6 +31,7 @@
     appStatus,
     discardImage,
     discardMessage,
+    displayName,
     pickImage,
     sendImage,
     lockSession,
@@ -387,6 +388,25 @@
   $effect(() => {
     if (signedIn) settingsKeeper.load();
     else settingsKeeper.clear();
+  });
+
+  // The account's display name for its labels. With none set, or none read,
+  // the labels show only the user ID.
+  let ownName = $state<string | null>(null);
+  $effect(() => {
+    const userId = signedIn ? status?.account.userId : null;
+    ownName = null;
+    if (!userId) return;
+    let current = true;
+    displayName().then(
+      (name) => {
+        if (current) ownName = name.displayName;
+      },
+      () => {}
+    );
+    return () => {
+      current = false;
+    };
   });
 
   // A conversation was started or found: show it in the list and open it.
@@ -1048,13 +1068,14 @@
   {:else if shellOpen && view === 'settings'}
     <Settings
       userId={signedIn ? status.account.userId : null}
+      {ownName}
       tab={settingsTab}
       ontab={(tab) => (settingsTab = tab)}
       onback={closeSettings}
     >
       {#if settingsTab === 'profile'}
         {#if signedIn && status.account.userId}
-          <ProfileSettings userId={status.account.userId} />
+          <ProfileSettings userId={status.account.userId} onsaved={(name) => (ownName = name)} />
         {:else}
           <section class="settings-page" aria-labelledby="profile-heading">
             <h2 id="profile-heading">Profile</h2>
@@ -1198,6 +1219,7 @@
         {rooms}
         {selected}
         userId={signedIn ? status.account.userId : null}
+        {ownName}
         {shortcut}
         onselect={open}
         onsearch={() => (paletteOpen = rooms !== null)}

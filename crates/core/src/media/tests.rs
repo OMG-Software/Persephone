@@ -690,6 +690,21 @@ fn write(stream: &mut std::net::TcpStream, bytes: &[u8]) -> bool {
     stream.write_all(bytes).and_then(|_| stream.flush()).is_ok()
 }
 
+/// The start of a download's answer with the headers Matrix v1.19 requires:
+/// the content type and (since v1.12) the disposition.
+const FILE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment\r\n";
+
+/// An error answer with `status` and the body Matrix v1.19 gives every
+/// error: `errcode` and `error`.
+fn matrix_error(status: &str, errcode: &str, headers: &str) -> Vec<u8> {
+    let body = format!(r#"{{"errcode":"{errcode}","error":"Synthetic failure"}}"#);
+    format!(
+        "HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
 /// GIVEN a homeserver answering with the file WHEN it is downloaded THEN the
 /// bytes arrive whole, the request carries the bearer token, and only the
 /// declared length was reserved.
@@ -698,7 +713,7 @@ fn given_a_download_within_the_cap_then_it_arrives_whole_with_the_token() {
     let (url, served) = server(|stream| {
         write(
             stream,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            format!("{FILE}Content-Length: 5\r\nConnection: close\r\n\r\nhello").as_bytes(),
         );
         5
     });
@@ -716,7 +731,7 @@ fn given_a_download_within_the_cap_then_it_arrives_whole_with_the_token() {
     let (url, served) = server(|stream| {
         write(
             stream,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            format!("{FILE}Content-Length: 2\r\nConnection: close\r\n\r\nok").as_bytes(),
         );
         2
     });
@@ -736,11 +751,7 @@ fn given_a_declared_length_over_the_cap_then_the_body_is_never_read() {
         // Announce 21 MiB but send no body; the client must not wait for it.
         write(
             stream,
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                MAX_ENCODED_BYTES + 1
-            )
-            .as_bytes(),
+            format!("{FILE}Content-Length: {}\r\n\r\n", MAX_ENCODED_BYTES + 1).as_bytes(),
         );
         0
     });
@@ -760,7 +771,7 @@ fn given_an_unbounded_body_then_the_download_stops_at_the_cap() {
     let (url, served) = server(|stream| {
         if !write(
             stream,
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            format!("{FILE}Transfer-Encoding: chunked\r\n\r\n").as_bytes(),
         ) {
             return 0;
         }
@@ -790,65 +801,62 @@ fn given_an_unbounded_body_then_the_download_stops_at_the_cap() {
 /// stays reserved.
 #[test]
 fn given_failed_downloads_then_each_is_refused_with_its_code() {
-    let cases: Vec<(&[u8], ErrorCode)> = vec![
+    let cases: Vec<(Vec<u8>, ErrorCode)> = vec![
         (
-            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nonly part",
+            format!("{FILE}Content-Length: 100\r\nConnection: close\r\n\r\nonly part").into_bytes(),
             ErrorCode::Unavailable,
         ),
         (
-            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            matrix_error("404 Not Found", "M_NOT_FOUND", ""),
             ErrorCode::NotFound,
         ),
         (
-            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            matrix_error("500 Internal Server Error", "M_UNKNOWN", ""),
             ErrorCode::Unavailable,
         ),
         (
-            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            format!("{FILE}Content-Length: 0\r\nConnection: close\r\n\r\n").into_bytes(),
             ErrorCode::Rejected,
         ),
+        // Matrix allows only 307 and 308 here; this one is not followed.
         (
-            b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
             ErrorCode::Unavailable,
         ),
         // The server refuses this file: asking again gives the same answer.
         (
-            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            matrix_error("403 Forbidden", "M_FORBIDDEN", ""),
             ErrorCode::Rejected,
         ),
         (
-            b"HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            matrix_error("451 Unavailable For Legal Reasons", "M_FORBIDDEN", ""),
             ErrorCode::Rejected,
         ),
         // Rate limits and server faults pass; the page may try again.
         (
-            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            matrix_error("429 Too Many Requests", "M_LIMIT_EXCEEDED", "Retry-After: 1\r\n"),
             ErrorCode::Unavailable,
         ),
         (
-            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            matrix_error("503 Service Unavailable", "M_UNKNOWN", ""),
             ErrorCode::Unavailable,
         ),
     ];
     for (response, expected) in cases {
+        let shown = String::from_utf8_lossy(&response).into_owned();
         let (url, served) = server(move |stream| {
-            write(stream, response);
+            write(stream, &response);
             0
         });
         let (result, budgets) = fetch_with(&url, None, 1024, &|| true);
-        assert_eq!(
-            result.err(),
-            Some(expected),
-            "{}",
-            String::from_utf8_lossy(response)
-        );
+        assert_eq!(result.err(), Some(expected), "{shown}");
         assert_eq!(budgets.aggregate_used(), 0);
         served.join().unwrap();
     }
     let (url, served) = server(|stream| {
         write(
             stream,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata",
+            format!("{FILE}Content-Length: 4\r\nConnection: close\r\n\r\ndata").as_bytes(),
         );
         4
     });
@@ -889,7 +897,7 @@ fn given_a_stalled_body_when_a_lock_begins_then_the_download_stops_promptly() {
     let (url, served) = server(|stream| {
         write(
             stream,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n",
+            format!("{FILE}Content-Length: 4\r\nConnection: close\r\n\r\n").as_bytes(),
         );
         stall_until_closed(stream);
         0
