@@ -3,7 +3,8 @@
 //! only draws them (`src/platform/<os>/credentials.rs`).
 
 use crate::credentials::{
-    MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, NewPassphrase, PromptError, SecretPrompt,
+    MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, MAX_REGISTRATION_TOKEN_CHARS, NewPassphrase,
+    NewPassword, PromptError, SecretPrompt,
 };
 use crate::passphrase::MIN_PASSPHRASE_CHARS;
 use zeroize::Zeroizing;
@@ -90,6 +91,37 @@ pub fn secret<'a>(request: &SecretPrompt<'a>) -> SecretText<'a> {
                 max_chars: MAX_PASSWORD_CHARS,
             }
         }
+        SecretPrompt::NewAccountPassword {
+            username,
+            host,
+            step,
+        } => {
+            let choose = format!(
+                "Choose a password for the new account {username} on {host} and                  type it in the password field. Only Persephone's core sees it."
+            );
+            SecretText {
+                caption: "Create a Matrix account",
+                message: match step {
+                    NewPassword::Choose => choose,
+                    NewPassword::Confirm => {
+                        "Type the same password again to confirm it.".to_owned()
+                    }
+                    NewPassword::Mismatch => {
+                        format!("The two passwords were different. {choose}")
+                    }
+                },
+                field: Some(username),
+                max_chars: MAX_PASSWORD_CHARS,
+            }
+        }
+        SecretPrompt::RegistrationToken { host } => SecretText {
+            caption: "Create a Matrix account",
+            message: format!(
+                "{host} asks for a registration token to create an account.                  Type the token you were given in the password field. Only                  Persephone's core sees it."
+            ),
+            field: Some("Registration token"),
+            max_chars: MAX_REGISTRATION_TOKEN_CHARS,
+        },
     }
 }
 

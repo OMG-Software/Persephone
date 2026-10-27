@@ -15,7 +15,7 @@
   import Security from './Security.svelte';
   import Settings, { type SettingsTab } from './Settings.svelte';
   import Sidebar from './Sidebar.svelte';
-  import SignIn from './SignIn.svelte';
+  import SignIn, { type SignInForm } from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
   import TipButton from './TipButton.svelte';
   import Verification from './Verification.svelte';
@@ -55,6 +55,7 @@
     acceptInvite,
     declineInvite,
     signIn,
+    register,
     subscribeRoom,
     timelinePage,
     resetProfile,
@@ -162,6 +163,13 @@
   let invitesRequest = 0;
   let invitesShown = 0;
   let signingIn = $state(false);
+  // The sign-in page's server, mode and username. Kept here: every session
+  // change remounts the page, and a refused name must stay to be edited.
+  let signInForm = $state<SignInForm>({
+    homeserver: 'https://matrix.org',
+    mode: 'sign_in',
+    username: ''
+  });
   // Advanced on every session change. Replies to calls made before the change
   // are discarded, so nothing from a locked session is shown again.
   let sessionGeneration = 0;
@@ -592,6 +600,25 @@
     }
   }
 
+  async function startRegister(homeserver: string, username: string) {
+    if (signingIn) return;
+    signingIn = true;
+    const generation = sessionGeneration;
+    try {
+      const account = await register(homeserver, username);
+      if (generation === sessionGeneration && status) status = { ...status, account };
+    } catch (reason) {
+      if (generation === sessionGeneration) {
+        error =
+          String(reason) === 'invalid_argument'
+            ? "Check the username, and use the homeserver's base address, such as https://matrix.example.org."
+            : describe(reason);
+      }
+    } finally {
+      signingIn = false;
+    }
+  }
+
   async function confirmSignOut() {
     if (switching) return;
     confirmingSignOut = false;
@@ -1004,7 +1031,13 @@
   {:else if profileOpen && !signedIn}
     <div class="centred">
       <div class="centred-stack">
-        <SignIn account={status.account} busy={signingIn} onsignin={startSignIn} />
+        <SignIn
+          account={status.account}
+          busy={signingIn}
+          bind:form={signInForm}
+          onsignin={startSignIn}
+          onregister={startRegister}
+        />
         {#if error}
           <p role="alert" class="error">{error}</p>
         {/if}

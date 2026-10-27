@@ -143,31 +143,76 @@ test('notices render as fixed text with an isolated sender, never as content', (
 
 test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
   const signedOut = { state: 'signed_out', userId: null, error: null };
-  const { body: html } = render(SignIn, {
-    props: { account: signedOut, busy: false, onsignin: () => {} }
+  const form = (mode = 'sign_in', username = '') => ({ homeserver: 'https://matrix.org', mode, username });
+  const props = (account, extra = {}) => ({
+    account,
+    busy: false,
+    form: form(),
+    onsignin: () => {},
+    onregister: () => {},
+    ...extra
   });
+  const { body: html } = render(SignIn, { props: props(signedOut) });
   assert.match(html, /Your server/);
   assert.match(html, /<bdi class="server-value">matrix\.org<\/bdi>/, 'matrix.org until changed');
   assert.match(html, />Continue</);
   assert.doesNotMatch(html, /type="password"/i, 'no password field in the page');
   assert.doesNotMatch(html, /<input/, 'the server is chosen in the picker; nothing else is asked');
   assert.match(html, /This page never sees your password/);
+  assert.match(html, /<button type="button" class="link"[^>]*>\s*Create an account\s*<\/button>/);
 
   const failed = render(SignIn, {
-    props: {
-      account: { state: 'sign_in_failed', userId: null, error: 'invalid_credentials' },
-      busy: false,
-      onsignin: () => {}
-    }
+    props: props({ state: 'sign_in_failed', userId: null, error: 'invalid_credentials' })
   }).body;
   assert.match(failed, /role="alert"/);
   assert.match(failed, /did not accept that username and password/);
 
-  const waiting = render(SignIn, {
-    props: { account: { state: 'signing_in', userId: null, error: null }, busy: false, onsignin: () => {} }
-  }).body;
+  const waiting = render(SignIn, { props: props({ state: 'signing_in', userId: null, error: null }) }).body;
   assert.match(waiting, /Waiting for the Windows sign-in window/);
   assert.match(waiting, /<button type="submit" class="primary wide" disabled/);
+});
+
+test('GIVEN the create-account mode WHEN it shows THEN only a username is asked, and its problems and the server\'s answer are clear', () => {
+  const signedOut = { state: 'signed_out', userId: null, error: null };
+  const view = (username, account = signedOut) =>
+    render(SignIn, {
+      props: {
+        account,
+        busy: false,
+        form: { homeserver: 'https://matrix.org', mode: 'register', username },
+        onsignin: () => {},
+        onregister: () => {}
+      }
+    }).body;
+  const empty = view('');
+  assert.match(empty, /<h2 id="sign-in-heading">Create an account<\/h2>/);
+  assert.match(empty, /<input id="register-username" class="field mono" type="text"/);
+  assert.equal((empty.match(/<input/g) ?? []).length, 1, 'the username is the only field');
+  assert.doesNotMatch(empty, /type="password"/i, 'the password goes to a native window');
+  assert.match(empty, /<button type="submit" class="primary wide" disabled[^>]*>\s*Create account/);
+  assert.match(empty, /This page never sees them/);
+
+  const fine = view('  @Newbie ');
+  assert.match(fine, /Your Matrix ID will start with @newbie\./);
+  assert.doesNotMatch(fine, /<button type="submit" class="primary wide" disabled/);
+
+  assert.match(view('newbie:matrix.org'), /without ":" and a server/);
+  assert.match(view('new bie'), /Use only letters, digits/);
+  assert.match(view('<b>x</b>'), /aria-invalid="true"/);
+
+  for (const [error, text] of [
+    ['username_taken', /That username is taken/],
+    ['registration_disabled', /does not let anyone register/],
+    ['token_rejected', /did not accept the registration token/],
+    ['unsupported_registration', /Register in the homeserver's own web page/],
+    ['weak_password', /too weak/],
+    ['future_code', /That did not work\./]
+  ]) {
+    const html = view('newbie', { state: 'sign_in_failed', userId: null, error });
+    assert.match(html, /role="alert"/, error);
+    assert.match(html.replaceAll('&#39;', "'"), text, error);
+  }
+  assert.match(view('newbie', { state: 'signing_in', userId: null, error: null }), /Checking the name/);
 });
 
 test('GIVEN the server picker WHEN another server is chosen THEN it asks only for a URL', () => {

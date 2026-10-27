@@ -44,6 +44,7 @@ pub mod pick;
 pub mod platform;
 pub mod profiles;
 pub mod prompt_text;
+pub mod registration;
 pub mod room_settings;
 pub mod security;
 pub mod sending;
@@ -580,6 +581,10 @@ impl Core {
                 ok(&state)
             }
             Call::SignIn { homeserver } => self.sign_in(homeserver),
+            Call::Register {
+                homeserver,
+                username,
+            } => self.register(homeserver, username),
             Call::SecurityStatus {} => ok(&self.session.security_status()),
             Call::SetUpEncryption {} => {
                 ok(&self.session.set_up_encryption(self.credentials.clone()))
@@ -1064,6 +1069,27 @@ impl Core {
             return Outcome::Error(ErrorCode::InvalidArgument);
         };
         match self.session.sign_in(homeserver, self.credentials.clone()) {
+            Ok(status) => ok(&status),
+            Err(_) => Outcome::Error(ErrorCode::Locked),
+        }
+    }
+
+    /// Like `sign_in`, for a new account; the username is checked here
+    /// before anything is asked.
+    fn register(&self, homeserver: &str, username: &str) -> Outcome {
+        if !self.session.is_configured() {
+            return Outcome::Error(ErrorCode::Unavailable);
+        }
+        if homeserver.len() > MAX_HOMESERVER_URL_BYTES || !registration::valid_username(username) {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        let Ok(homeserver) = Homeserver::parse(homeserver) else {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        };
+        match self
+            .session
+            .register(homeserver, username.to_owned(), self.credentials.clone())
+        {
             Ok(status) => ok(&status),
             Err(_) => Outcome::Error(ErrorCode::Locked),
         }

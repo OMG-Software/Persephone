@@ -21,6 +21,7 @@ fn main() {
             "unlock_session",
             "reset_profile",
             "sign_in",
+            "register",
             "sign_out",
             "security_status",
             "set_up_encryption",

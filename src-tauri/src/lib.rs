@@ -34,7 +34,8 @@ use persephone_core_protocol::{
     Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES, MAX_DISPLAY_NAME_BYTES,
     MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES,
     MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_PROFILES, MAX_ROOM_ID_BYTES,
-    MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_USER_ID_BYTES, room_change_within_limits,
+    MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES,
+    room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -253,6 +254,28 @@ async fn sign_in(core: State<'_, CoreLink>, homeserver: String) -> Result<Accoun
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(core.inner(), Call::SignIn { homeserver }).await
+}
+
+/// Starts registering a new account. Only the homeserver URL and the desired
+/// username cross: the core checks the name, then asks for the password and
+/// any registration token itself, in native prompts.
+#[tauri::command]
+async fn register(
+    core: State<'_, CoreLink>,
+    homeserver: String,
+    username: String,
+) -> Result<AccountStatus, String> {
+    if homeserver.len() > MAX_HOMESERVER_URL_BYTES || username.len() > MAX_USERNAME_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::Register {
+            homeserver,
+            username,
+        },
+    )
+    .await
 }
 
 /// Signs out: the core revokes the session if it can and deletes this
@@ -801,6 +824,7 @@ pub fn configure<R: Runtime>(
             unlock_session,
             reset_profile,
             sign_in,
+            register,
             sign_out,
             security_status,
             set_up_encryption,

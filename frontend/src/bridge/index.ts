@@ -164,6 +164,17 @@ export function signIn(homeserver: string): Promise<AccountStatus> {
 }
 
 /**
+ * Starts registering a new account named `username` (a localpart) on
+ * `homeserver`. Only these two are sent: the core checks the name is free,
+ * then asks for the password and any registration token in its own windows.
+ * The outcome, or why it failed (such as `username_taken`), arrives as a
+ * session change.
+ */
+export function register(homeserver: string, username: string): Promise<AccountStatus> {
+  return invoke<AccountStatus>('register', { homeserver, username });
+}
+
+/**
  * Signs out: the core revokes the session if the homeserver can be reached
  * and deletes this device's local profile, keys first. The outcome arrives as
  * a session change; Persephone must then be restarted to sign in again.

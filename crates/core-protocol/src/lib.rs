@@ -67,6 +67,17 @@ pub enum Call {
     SignIn {
         homeserver: String,
     },
+    /// Register a new account named `username` (a localpart) on this
+    /// homeserver, then sign in to it. The core checks that the name is free
+    /// first, then asks for the password (twice) and, when the homeserver
+    /// needs one, the registration token, in its own windows; nothing secret
+    /// crosses this channel. Replies at once like `SignIn`; the outcome, or
+    /// why it failed (such as `username_taken`), arrives as
+    /// [`Event::SessionChanged`].
+    Register {
+        homeserver: String,
+        username: String,
+    },
     /// Sign out: revoke the session on the homeserver if it can be reached,
     /// then delete this device's local profile (keys first). Replies with the
     /// resulting store state.
@@ -345,6 +356,9 @@ pub const MAX_FLOW_ID_BYTES: usize = 128;
 
 /// Longest message body either side accepts, in bytes (the display limit).
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+
+/// Longest username (localpart) either side accepts when registering.
+pub const MAX_USERNAME_BYTES: usize = 255;
 
 /// Longest homeserver URL either side accepts in a call.
 pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
@@ -783,6 +797,13 @@ mod tests {
                 Call::SearchUsers { term: "bob".into() },
                 r#"{"id":1,"call":{"command":"search_users","term":"bob"}}"#,
             ),
+            (
+                Call::Register {
+                    homeserver: "https://h".into(),
+                    username: "al".into(),
+                },
+                r#"{"id":1,"call":{"command":"register","homeserver":"https://h","username":"al"}}"#,
+            ),
         ] {
             let request = Request { id: 1, call };
             let mut sent = Vec::new();
@@ -1103,6 +1124,10 @@ mod tests {
             br#"{"id":1,"call":{"command":"sign_in"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,
+            br#"{"id":1,"call":{"command":"register","homeserver":"https://h"}}"#,
+            br#"{"id":1,"call":{"command":"register","homeserver":"https://h","username":"al","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"register","homeserver":"https://h","username":"al","token":"x"}}"#,
+            br#"{"id":1,"call":{"command":"register","username":"al"}}"#,
             br#"{"id":1,"call":{"command":"sign_out","keep_data":true}}"#,
             br#"{"id":1,"call":{"command":"security_status","user":"@a:s"}}"#,
             br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,

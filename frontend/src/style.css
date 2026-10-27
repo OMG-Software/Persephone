@@ -2351,3 +2351,17 @@ mark {
     flex-wrap: wrap;
   }
 }
+
+/* Sign-in page: create-an-account mode */
+.auth-card .field-label {
+  margin-bottom: -10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.auth-switch {
+  margin-top: 16px;
+  color: var(--ink2);
+  font-size: 13.5px;
+  text-align: center;
+}

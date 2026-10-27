@@ -822,6 +822,23 @@ pub enum SignInError {
     /// Signed out locally, but the homeserver could not be told: the server
     /// session may stay active until it expires or is revoked elsewhere.
     SessionNotRevoked,
+    /// Registering: someone already has that username.
+    UsernameTaken,
+    /// Registering: the homeserver does not accept that username.
+    InvalidUsername,
+    /// Registering: the username is reserved, for example for a bridge.
+    UsernameReserved,
+    /// Registering: the homeserver does not let anyone register here.
+    RegistrationDisabled,
+    /// Registering: the homeserver did not accept the registration token.
+    TokenRejected,
+    /// Registering: the homeserver thinks the password is too weak.
+    WeakPassword,
+    /// Registering: the homeserver asks for a step Persephone cannot do,
+    /// such as an email address, a captcha or accepting its terms.
+    UnsupportedRegistration,
+    /// Too many attempts; the homeserver asks to wait.
+    RateLimited,
     /// Anything else.
     Failed,
 }

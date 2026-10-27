@@ -33,12 +33,13 @@
 
 use crate::account;
 use crate::contacts;
-use crate::credentials::{CredentialSource, PromptError, SecretPrompt};
+use crate::credentials::{CredentialSource, NewPassword, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
 use crate::identities;
 use crate::media::ImageUpload;
 use crate::outbox::{Content, Outbox};
 use crate::passphrase::Unlock;
+use crate::registration::{self, Registered};
 use crate::security;
 use crate::sending;
 use crate::settings;
@@ -373,6 +374,119 @@ fn signed_in(user_id: &str, error: Option<SignInError>) -> AccountStatus {
         user_id: (user_id.len() <= 255 && !user_id.chars().any(char::is_control))
             .then(|| user_id.to_owned()),
         error,
+    }
+}
+
+fn prompt_error(error: PromptError) -> SignInError {
+    match error {
+        PromptError::Cancelled => SignInError::Cancelled,
+        PromptError::Unsupported => SignInError::Unsupported,
+        PromptError::Invalid | PromptError::Failed => SignInError::Failed,
+    }
+}
+
+/// Asks for a new account password twice, until both entries match.
+fn new_password(
+    source: &dyn CredentialSource,
+    username: &str,
+    host: &str,
+) -> Result<Zeroizing<String>, SignInError> {
+    let ask = |step| {
+        source
+            .ask_secret(SecretPrompt::NewAccountPassword {
+                username,
+                host,
+                step,
+            })
+            .map_err(prompt_error)
+    };
+    let mut step = NewPassword::Choose;
+    loop {
+        let first = ask(step)?;
+        let second = ask(NewPassword::Confirm)?;
+        if first == second {
+            return Ok(first);
+        }
+        step = NewPassword::Mismatch;
+    }
+}
+
+/// One registration request's result, inside the stores' runtime.
+enum Step {
+    Done(Client, String),
+    Token(Option<String>),
+}
+
+/// The steps of [`Session::register`] on its worker thread. `Err(None)`
+/// means a lock abandoned the attempt. A client that does not become the
+/// account is dropped inside the stores' runtime.
+fn register_account(
+    shared: &Arc<Shared>,
+    started: u64,
+    homeserver: &Homeserver,
+    username: &str,
+    source: &dyn CredentialSource,
+) -> Result<(Lease, Client, String), Option<SignInError>> {
+    let admit = || match shared.admit() {
+        Ok(lease) if lease.generation == started => Ok(lease),
+        _ => Err(None),
+    };
+    let host = homeserver.display_host();
+    // The name first, so a taken one is reported before any prompt.
+    let lease = admit()?;
+    shared.client_ran.store(true, Ordering::SeqCst);
+    lease.stores().block_on(async {
+        let client = account::build_client(homeserver, lease.stores()).await?;
+        let checked = registration::check_username(&client, username).await;
+        drop(client);
+        checked
+    })?;
+    lease.commit(|| ()).map_err(|_| None)?;
+    drop(lease);
+    let password = new_password(source, username, &host)?;
+    let mut token: Option<(Zeroizing<String>, Option<String>)> = None;
+    loop {
+        let lease = admit()?;
+        let result = lease.stores().block_on(async {
+            let client = account::build_client(homeserver, lease.stores()).await?;
+            let sent = token
+                .as_ref()
+                .map(|(token, session)| (token.as_str(), session.clone()));
+            match registration::register(
+                &client,
+                homeserver,
+                lease.stores(),
+                username,
+                &password,
+                sent,
+            )
+            .await
+            {
+                Ok(Registered::Done(user_id)) => Ok(Step::Done(client, user_id)),
+                Ok(Registered::NeedsToken(session)) => {
+                    drop(client);
+                    Ok(Step::Token(session))
+                }
+                Err(error) => {
+                    drop(client);
+                    Err(error)
+                }
+            }
+        });
+        match result {
+            Ok(Step::Done(client, user_id)) => return Ok((lease, client, user_id)),
+            // Asked again after a token was sent: it was not accepted.
+            Ok(Step::Token(_)) if token.is_some() => return Err(Some(SignInError::TokenRejected)),
+            Ok(Step::Token(session)) => {
+                lease.commit(|| ()).map_err(|_| None)?;
+                drop(lease);
+                let value = source
+                    .ask_secret(SecretPrompt::RegistrationToken { host: &host })
+                    .map_err(|error| Some(prompt_error(error)))?;
+                token = Some((value, session));
+            }
+            Err(error) => return Err(Some(error)),
+        }
     }
 }
 
@@ -1111,6 +1225,67 @@ impl Session {
                         drop(lease);
                         // After a lock the failure belongs to an abandoned
                         // attempt; report it only while the session is current.
+                        shared.set_status(if current {
+                            failed(error)
+                        } else {
+                            AccountStatus::signed_out()
+                        });
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.shared.set_status(failed(SignInError::Failed));
+        }
+        Ok(self.account_status())
+    }
+
+    /// Starts registering `username` on `homeserver` on a worker thread and
+    /// returns the status at once, like [`Session::sign_in`]. The name is
+    /// checked first; the password and any registration token are asked for
+    /// in the core's own windows, without a lease; each homeserver step holds
+    /// one. A lock in between abandons the attempt. `username` must already
+    /// be valid (`registration::valid_username`).
+    pub fn register(
+        &self,
+        homeserver: Homeserver,
+        username: String,
+        source: Arc<dyn CredentialSource>,
+    ) -> Result<AccountStatus, AdmissionError> {
+        if self.state() != StoreState::Protected {
+            return Err(AdmissionError::Locked);
+        }
+        {
+            let mut status = guard(&self.shared.status);
+            if matches!(
+                status.state,
+                AccountState::SigningIn | AccountState::SignedIn
+            ) {
+                return Ok(status.clone());
+            }
+            *status = AccountStatus {
+                state: AccountState::SigningIn,
+                user_id: None,
+                error: None,
+            };
+        }
+        if let Some(listener) = self.shared.listener() {
+            listener.session_changed();
+        }
+        let shared = self.shared.clone();
+        let started = lock(&self.shared).generation;
+        let spawned = std::thread::Builder::new()
+            .name("core-register".into())
+            .spawn(move || {
+                let outcome = register_account(&shared, started, &homeserver, &username, &*source);
+                match outcome {
+                    Ok((lease, client, user_id)) => install(&shared, lease, client, user_id),
+                    // Abandoned by a lock: nothing to report.
+                    Err(None) => shared.set_status(AccountStatus::signed_out()),
+                    Err(Some(error)) => {
+                        let current = {
+                            let inner = lock(&shared);
+                            inner.generation == started && inner.state == StoreState::Protected
+                        };
                         shared.set_status(if current {
                             failed(error)
                         } else {

@@ -58,6 +58,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.profileList(), 'profile_list', {}],
     [() => bridge.addProfile(), 'add_profile', {}],
     [() => bridge.switchProfile(2), 'switch_profile', { slot: 2 }],
+    [() => bridge.register('https://h', 'al'), 'register', { homeserver: 'https://h', username: 'al' }],
     [() => bridge.roomSettings('!r:s'), 'room_settings', { roomId: '!r:s' }],
     [() => bridge.roomMembers('!r:s', 'bo'), 'room_members', { roomId: '!r:s', filter: 'bo' }],
     [

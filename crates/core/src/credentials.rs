@@ -39,6 +39,9 @@ pub enum PromptError {
 /// Longest recovery key or passphrase accepted.
 pub const MAX_RECOVERY_KEY_CHARS: usize = 1024;
 
+/// Longest registration token accepted (the Matrix limit is 64).
+pub const MAX_REGISTRATION_TOKEN_CHARS: usize = 64;
+
 /// A secret the core asks for after sign-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecretPrompt<'a> {
@@ -51,6 +54,24 @@ pub enum SecretPrompt<'a> {
     Passphrase { retry: bool },
     /// A new profile passphrase.
     NewPassphrase(NewPassphrase),
+    /// The password for an account being registered as `username`.
+    NewAccountPassword {
+        username: &'a str,
+        host: &'a str,
+        step: NewPassword,
+    },
+    /// The registration token the homeserver asks for.
+    RegistrationToken { host: &'a str },
+}
+
+/// Which step of choosing a new account password a prompt is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewPassword {
+    Choose,
+    /// The same password again.
+    Confirm,
+    /// The two entries differed.
+    Mismatch,
 }
 
 /// Which step of choosing a new profile passphrase a prompt is for.
@@ -151,8 +172,8 @@ pub fn from_wide(username: &[u16], password: &[u16]) -> Result<Credentials, Prom
 #[cfg(feature = "dev-disposable-servers")]
 pub mod dev {
     use super::{
-        CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, PromptError,
-        SecretPrompt, checked_secret,
+        CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS,
+        MAX_REGISTRATION_TOKEN_CHARS, PromptError, SecretPrompt, checked_secret,
     };
     use std::path::{Component, Path, PathBuf};
     use zeroize::Zeroizing;
@@ -165,6 +186,9 @@ pub mod dev {
         base_url: String,
         username: String,
         password: String,
+        /// Answers the registration-token prompt for this homeserver.
+        #[serde(default)]
+        registration_token: Option<String>,
     }
 
     pub struct HarnessProfile {
@@ -298,9 +322,18 @@ pub mod dev {
 
         fn ask_secret(&self, prompt: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
             match prompt {
-                SecretPrompt::Password { host, .. } => checked_secret(
+                SecretPrompt::Password { host, .. }
+                | SecretPrompt::NewAccountPassword { host, .. } => checked_secret(
                     Zeroizing::new(self.entry(host)?.password),
                     MAX_PASSWORD_CHARS,
+                ),
+                SecretPrompt::RegistrationToken { host } => checked_secret(
+                    Zeroizing::new(
+                        self.entry(host)?
+                            .registration_token
+                            .ok_or(PromptError::Cancelled)?,
+                    ),
+                    MAX_REGISTRATION_TOKEN_CHARS,
                 ),
                 SecretPrompt::RecoveryKey { .. } => {
                     Self::read_secret(&self.recovery_file()?, MAX_RECOVERY_KEY_CHARS)

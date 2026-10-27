@@ -24,6 +24,7 @@
 * [0013 - Open a default profile when none is given](0013-open-a-default-profile-when-none-is-given.md)
 * [0016 - Create encrypted rooms and answer every invitation](0016-create-encrypted-rooms-and-answer-every-invitation.md)
 * [0017 - Configure joined rooms through one closed change call](0017-configure-joined-rooms-through-one-closed-change-call.md)
+* [0018 - Register accounts with secrets entered in the core](0018-register-accounts-with-secrets-in-the-core.md)
 
 ## Superseded Records
 

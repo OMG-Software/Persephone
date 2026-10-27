@@ -177,6 +177,16 @@ impl CoreTransport for FakeCore {
             Call::RecoverWithKey {} => Ok(
                 serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "recoveryKey": "x"}),
             ),
+            Call::Register { username, .. } => match username.as_str() {
+                "taken" => Ok(
+                    serde_json::json!({"state": "sign_in_failed", "userId": null, "error": "username_taken"}),
+                ),
+                // A reason outside the contract is refused.
+                "odd" => Ok(
+                    serde_json::json!({"state": "sign_in_failed", "userId": null, "error": "password_was_hunter2"}),
+                ),
+                _ => Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null})),
+            },
             Call::SignIn { homeserver } => match homeserver.as_str() {
                 "https://matrix.example.org" => {
                     Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
@@ -550,6 +560,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-unlock-session",
             "allow-reset-profile",
             "allow-sign-in",
+            "allow-register",
             "allow-sign-out",
             "allow-security-status",
             "allow-set-up-encryption",
@@ -870,6 +881,46 @@ fn given_sign_in_then_only_the_homeserver_crosses_and_replies_are_checked() {
     )
     .map(|reply| reply.deserialize::<serde_json::Value>().unwrap());
     assert_eq!(signed_out, Ok(serde_json::json!("restart_required")));
+}
+
+/// Registration relays only the homeserver URL and the username; the reason
+/// a registration failed crosses as a fixed code, and anything else is
+/// refused. No password or token argument exists.
+#[test]
+fn given_register_then_only_the_homeserver_and_username_cross() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |args: serde_json::Value| {
+        get_ipc_response(&window, request("register", app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let homeserver = "https://matrix.example.org";
+    assert_eq!(
+        invoke(serde_json::json!({"homeserver": homeserver, "username": "newbie"})).unwrap()["state"],
+        "signing_in"
+    );
+    assert_eq!(
+        invoke(serde_json::json!({"homeserver": homeserver, "username": "taken"})).unwrap()["error"],
+        "username_taken"
+    );
+    assert_eq!(
+        invoke(serde_json::json!({"homeserver": homeserver, "username": "odd"})).unwrap_err(),
+        "core_unavailable"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"homeserver": "h".repeat(3000), "username": "newbie"}),
+        serde_json::json!({"homeserver": homeserver, "username": "n".repeat(256)}),
+    ] {
+        assert_eq!(invoke(args).unwrap_err(), "invalid_argument");
+    }
+    assert!(invoke(serde_json::json!({"homeserver": homeserver})).is_err());
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "refused arguments never reached the core"
+    );
 }
 
 /// The encryption commands take no arguments and relay codes only: a reply
