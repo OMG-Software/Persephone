@@ -7,7 +7,10 @@
 Technical Story: on 26 October 2026 the owner asked for a way to add more
 Matrix accounts. On 27 October 2026 the owner chose how accounts switch and
 what the switcher may show, and then that every setting Persephone adds is
-kept per account, not per computer.
+kept per account, not per computer. The owner gave these decisions in the
+working session that produced
+[PR #35](https://github.com/OMG-Software/Persephone/pull/35), whose
+description records them.
 
 ## Context and Problem Statement
 
@@ -92,6 +95,7 @@ Chosen options: "one profile per core process, switching by restart" and
 
 ## Links
 
+* Decided in [PR #35](https://github.com/OMG-Software/Persephone/pull/35)
 * Builds on [ADR-0008](0008-restart-the-core-process-to-finish-a-lock-after-the-client-ran.md)
 * Builds on [ADR-0013](0013-open-a-default-profile-when-none-is-given.md)
 * Builds on [ADR-0004](0004-separate-the-key-holding-core-from-the-web-view-process.md)

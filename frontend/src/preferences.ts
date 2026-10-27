@@ -26,6 +26,8 @@ export class SettingsKeeper {
   readonly #show: (settings: AccountSettings, failure: string | null) => void;
   #request = 0;
   #current: AccountSettings = DEFAULT_SETTINGS;
+  // The last save asked for; the next one starts after it settles.
+  #saving: Promise<void> = Promise.resolve();
 
   constructor(
     core: SettingsCore,
@@ -56,8 +58,13 @@ export class SettingsKeeper {
     const request = ++this.#request;
     const previous = this.#current;
     this.#set(next, null);
+    // Saves go one at a time, in the order they were made: two calls in
+    // flight could reach the core in either order and keep the older one.
+    // A failed save does not stop the next.
+    const save = this.#saving.then(() => this.#core.save(next));
+    this.#saving = save.catch(() => {});
     try {
-      await this.#core.save(next);
+      await save;
     } catch {
       if (request === this.#request) this.#set(previous, SAVE_FAILED);
     }
