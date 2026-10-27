@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-account-settings"
+description = "Enables the account_settings command without any pre-configured scope."
+commands.allow = ["account_settings"]
+
+[[permission]]
+identifier = "deny-account-settings"
+description = "Denies the account_settings command without any pre-configured scope."
+commands.deny = ["account_settings"]

@@ -1,22 +1,6 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
-import { createServer } from 'vite';
-
-let vite;
-let time;
-
-before(async () => {
-  vite = await createServer({
-    configFile: './vite.config.js',
-    server: { middlewareMode: true, hmr: false, ws: false },
-    appType: 'custom'
-  });
-  time = await vite.ssrLoadModule('/src/time.ts');
-});
-
-after(async () => {
-  await vite?.close();
-});
+import { test } from 'node:test';
+import * as time from '../src/time.ts';
 
 const utc = { locale: 'en-GB', timeZone: 'UTC' };
 // 2026-01-01 09:00 UTC, the synthetic history's start.

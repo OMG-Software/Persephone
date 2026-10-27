@@ -41,6 +41,7 @@ use crate::outbox::{Content, Outbox};
 use crate::passphrase::Unlock;
 use crate::security;
 use crate::sending;
+use crate::settings;
 use crate::store::{self, Stores};
 use crate::vault::KeyProtector;
 use crate::verification::{self, Action as VerifyAction, Flow};
@@ -57,8 +58,8 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    AccountState, AccountStatus, IdentityState, PendingMessage, RecoveryState, SecurityError,
-    SecurityOperation, SecurityStatus, SignInError, StoreState, VerificationPhase,
+    AccountSettings, AccountState, AccountStatus, IdentityState, PendingMessage, RecoveryState,
+    SecurityError, SecurityOperation, SecurityStatus, SignInError, StoreState, VerificationPhase,
 };
 use std::{
     path::{Path, PathBuf},
@@ -1376,6 +1377,28 @@ impl Session {
             .stores()
             .block_on(sending::allow_plaintext(lease.stores(), room_id));
         Ok(allowed && lease.commit(|| ()).is_ok())
+    }
+
+    /// This account's settings. `Ok(None)` when the store cannot be read.
+    pub fn account_settings(&self) -> Result<Option<AccountSettings>, AdmissionError> {
+        if guard(&self.shared.account).is_none() {
+            return Err(AdmissionError::Locked);
+        }
+        let lease = self.shared.admit()?;
+        Ok(lease.stores().block_on(settings::load(lease.stores())))
+    }
+
+    /// Replaces this account's settings. `Ok(false)` when the store could
+    /// not be written.
+    pub fn set_account_settings(&self, value: AccountSettings) -> Result<bool, AdmissionError> {
+        if guard(&self.shared.account).is_none() {
+            return Err(AdmissionError::Locked);
+        }
+        let lease = self.shared.admit()?;
+        let saved = lease
+            .stores()
+            .block_on(settings::save(lease.stores(), value));
+        Ok(saved && lease.commit(|| ()).is_ok())
     }
 
     /// The account's encryption state; `unknown` without a signed-in account.

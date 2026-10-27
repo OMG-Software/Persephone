@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { after, before, test } from 'node:test';
 import { createServer } from 'vite';
+import * as image from '../src/image.ts';
 
 let vite;
-let image;
 let Timeline;
 let Composer;
 let render;
@@ -15,7 +15,6 @@ before(async () => {
     server: { middlewareMode: true, hmr: false, ws: false },
     appType: 'custom'
   });
-  image = await vite.ssrLoadModule('/src/image.ts');
   ({ default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte'));
   ({ default: Composer } = await vite.ssrLoadModule('/src/Composer.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));

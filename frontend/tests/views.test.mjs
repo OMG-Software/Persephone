@@ -14,6 +14,7 @@ let JumpPalette;
 let IdentityChanges;
 let Invites;
 let NewConversation;
+let NewRoom;
 let render;
 
 before(async () => {
@@ -33,6 +34,7 @@ before(async () => {
   ({ default: IdentityChanges } = await vite.ssrLoadModule('/src/IdentityChanges.svelte'));
   ({ default: Invites } = await vite.ssrLoadModule('/src/Invites.svelte'));
   ({ default: NewConversation } = await vite.ssrLoadModule('/src/NewConversation.svelte'));
+  ({ default: NewRoom } = await vite.ssrLoadModule('/src/NewRoom.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -699,8 +701,14 @@ test('GIVEN members whose identity changed WHEN the room shows THEN sending is p
 
 test('GIVEN direct-message invitations WHEN listed THEN inviters are isolated, escaped text with Accept and Decline', () => {
   const invites = [
-    { roomId: '!a:example.invalid', inviter: '@mallory:example.invalid', inviterName: hostileName },
-    { roomId: '!b:example.invalid', inviter: '@bob:example.invalid', inviterName: null }
+    {
+      roomId: '!a:example.invalid',
+      roomName: null,
+      direct: true,
+      inviter: '@mallory:example.invalid',
+      inviterName: hostileName
+    },
+    { roomId: '!b:example.invalid', roomName: null, direct: true, inviter: '@bob:example.invalid', inviterName: null }
   ];
   const props = { invites, truncated: true, busy: null, onaccept: () => {}, ondecline: () => {} };
   const html = render(Invites, { props }).body;
@@ -720,6 +728,71 @@ test('GIVEN direct-message invitations WHEN listed THEN inviters are isolated, e
 
   const busy = render(Invites, { props: { ...props, busy: '!a:example.invalid' } }).body;
   assert.equal((busy.match(/disabled/g) ?? []).length, 4, 'one answer at a time');
+});
+
+test('GIVEN room invitations over federation WHEN listed THEN the room name is isolated text and a missing inviter is "Someone"', () => {
+  const invites = [
+    {
+      roomId: '!plans:remote.invalid',
+      roomName: hostileName,
+      direct: false,
+      inviter: '@carol:remote.invalid',
+      inviterName: null
+    },
+    { roomId: '!x:remote.invalid', roomName: null, direct: false, inviter: null, inviterName: null }
+  ];
+  const html = render(Invites, {
+    props: { invites, truncated: false, busy: null, onaccept: () => {}, ondecline: () => {} }
+  }).body;
+
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /invited you to <bdi class="invite-room">&lt;img src=x onerror=alert\(1\)>(?:<!--[^>]*-->)*<\/bdi>/);
+  assert.match(html, /<span class="invite-name">Someone<\/span>/);
+  assert.match(html, /invited you to a room/);
+  assert.doesNotMatch(html, /wants to talk with you/, 'neither is a direct invitation');
+  assert.equal((html.match(/>Accept</g) ?? []).length, 2, 'each can be answered');
+});
+
+test('GIVEN the new-room dialog WHEN it opens THEN nothing can be created or added yet, and it says the room is encrypted', () => {
+  const html = render(NewRoom, { props: { onopen: () => {}, onclose: () => {} } }).body;
+
+  assert.match(html, /<dialog class="picker new-room" aria-labelledby="new-room-heading"/);
+  assert.match(html, /<input id="new-room-name" class="field" type="text" maxlength="255"/);
+  assert.match(html, /<input id="new-room-person" class="field" type="text"[^>]*maxlength="255"/);
+  assert.match(html, /<button type="button" class="secondary" disabled[^>]*>Add<\/button>/, 'no Matrix ID yet');
+  assert.match(html, /<button type="submit" class="primary" disabled/, 'no room name yet');
+  assert.match(html, /The room is encrypted and invite-only\./);
+  assert.doesNotMatch(html, /People to invite/);
+});
+
+test('GIVEN a room with an invite action WHEN the header shows THEN it offers Invite, and only then', () => {
+  const header = (oninvite) =>
+    render(Timeline, {
+      props: { title: 'general', items: [], hasOlder: false, loading: false, error: null, onolder: () => {}, oninvite }
+    }).body;
+  assert.match(header(() => {}), /<button type="button" class="secondary header-action">Invite<\/button>/);
+  assert.doesNotMatch(header(undefined), />Invite</);
+});
+
+test('GIVEN Enter to send on or off WHEN the composer shows THEN its key shortcut says which keys send', () => {
+  const composer = (enterSends) =>
+    render(Composer, {
+      props: {
+        pending: [],
+        blocked: null,
+        encryption: 'encrypted',
+        roomName: 'general',
+        draftVersion: 0,
+        onsend: async () => true,
+        onretry: () => {},
+        ondiscard: () => {},
+        onallow: () => {},
+        enterSends
+      }
+    }).body;
+  assert.match(composer(true), /<textarea[^>]*aria-keyshortcuts="Enter"/);
+  assert.match(composer(false), /<textarea[^>]*aria-keyshortcuts="Control\+Enter Meta\+Enter"/);
+  assert.match(composer(undefined), /aria-keyshortcuts="Enter"/, 'on by default');
 });
 
 test('GIVEN the new-conversation dialog WHEN it opens THEN directory search is off and nothing can start yet', () => {

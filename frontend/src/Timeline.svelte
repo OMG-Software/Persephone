@@ -22,7 +22,8 @@
     contact = null,
     canVerify = false,
     verifying = false,
-    onverify = () => {}
+    onverify = () => {},
+    oninvite
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -39,6 +40,8 @@
     canVerify?: boolean;
     verifying?: boolean;
     onverify?: () => void;
+    // Opens the invite dialog; absent where inviting is not offered.
+    oninvite?: () => void;
   } = $props();
 
   // Fixed text per trust level; the core sends codes only.
@@ -107,6 +110,9 @@
     {:else}
       <Icon name="hash" class="hash" />
       <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
+    {/if}
+    {#if oninvite}
+      <button type="button" class="secondary header-action" onclick={oninvite}>Invite</button>
     {/if}
   </header>
   <div class="scroller" bind:this={scroller} onscroll={scrolled}>

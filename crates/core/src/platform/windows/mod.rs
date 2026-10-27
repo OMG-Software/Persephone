@@ -80,3 +80,15 @@ pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {
 pub(crate) fn ui_host() -> Box<dyn UiHost> {
     Box::new(ui::JobHost)
 }
+
+/// Starts a new core for a profile switch, detached from this one as the
+/// launcher starts it: no console and its own process group, so it outlives
+/// this process.
+pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    command
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .map(drop)
+}

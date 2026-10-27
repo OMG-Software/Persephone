@@ -72,3 +72,4 @@ with these owner decisions from the same day:
 
 * Builds on [ADR-0005](0005-share-room-keys-only-with-cross-signed-devices.md)
 * Builds on [ADR-0002](0002-use-sdk-owned-matrix-cryptography-and-explicit-features.md)
+* Invitation rule amended by [ADR-0016](0016-create-encrypted-rooms-and-answer-every-invitation.md) (proposed)

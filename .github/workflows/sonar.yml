@@ -1,6 +1,8 @@
 # Sends the source to SonarQube Cloud for static analysis on pushes to main
-# and on pull requests from this repository. It builds and runs nothing; the
-# analysis settings are in sonar-project.properties at the repository root.
+# and on pull requests from this repository. It first runs the frontend checks
+# (python tools/dev.py frontend), whose Node tests write the LCOV line coverage
+# of the frontend's TypeScript; Rust is not built here. The analysis settings
+# are in sonar-project.properties at the repository root.
 # Pull requests from forks get no SONAR_TOKEN, so the job is skipped for them.
 # The project must use CI-based analysis: Automatic Analysis is turned off in
 # SonarQube Cloud. Actions are pinned to full commit SHAs; the tag each was
@@ -32,6 +34,28 @@ jobs:
           # Full history, so issues can be attributed to the commits that added them.
           fetch-depth: 0
           persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+
+      # Only downloaded npm packages are cached, as in check.yml.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/npm
+          key: npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Install frontend dependencies
+        run: python tools/dev.py bootstrap
+
+      # Writes .local/coverage/frontend/lcov.info.
+      - name: Frontend checks and coverage
+        run: python tools/dev.py frontend
 
       - name: Cache SonarQube packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

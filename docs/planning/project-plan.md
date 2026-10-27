@@ -20,6 +20,8 @@ its earlier broad milestones are replaced by that plan's P0–P7 acceptance gate
 - Prefer compatible Sliding Sync by default; fall back to regular `/sync` when unavailable, as recorded in accepted [ADR-0001](../adr/0001-prefer-sliding-sync-with-classic-sync-fallback.md). Merovingian and Synapse are the first integration targets.
 - First usable release: login, one account, room list, message history, sending text and images, and end-to-end encrypted chats.
 - Start an encrypted direct conversation by exact Matrix ID, with user-directory search behind a switch that is off by default, and accept or decline direct-message invitations; refuse people without a cross-signing identity. Owner decision, 26 October 2026; see [ADR-0014](../adr/0014-start-encrypted-direct-conversations-by-matrix-id.md).
+- Owner requests, 26 October 2026: show every invitation, including ones sent over federation; create encrypted rooms and invite people to them; set the account's display name; list the sessions signed in to the account; a setting for whether Enter sends (on by default). Every setting is kept per account, in that account's encrypted profile (owner decision, 27 October 2026). See proposed [ADR-0016](../adr/0016-create-encrypted-rooms-and-answer-every-invitation.md) for the room and invitation rules.
+- More than one account on a computer: each in its own encrypted profile, one open at a time, switched by restarting the core, with generic labels. Owner decision, 27 October 2026; see [ADR-0015](../adr/0015-keep-accounts-in-separate-profiles-and-switch-by-restart.md). This extends the "one account" scope above.
 - Treat security as a first-class architectural requirement for high-risk users: include targeted attacks, metadata exposure, and stricter media handling.
 - Use TLS 1.3 only for every network connection; refuse TLS 1.2 and earlier. Owner decision, 20 October 2026.
 - Treat messages as untrusted, including after decryption. Apply the same policy to server-supplied names, links, avatars, attachments, and other event data.
@@ -33,8 +35,8 @@ The repository includes the GNU General Public License v3.0; see [LICENSE](../..
 1. Product scope: personal client, small-team client, or broader public release.
 2. UI implementation: frontend framework, exact Tauri/dependency versions, required features, and license compatibility. The choice of Tauri is settled by ADR-0000.
 3. Compatibility baseline: supported Matrix features/versions, the pinned SDK's Sliding Sync variant, mode-switch behavior, and classic fallback; verify against Merovingian, Synapse, and a classic-only/controlled capability deployment.
-4. Later feature priorities: multiple accounts, calls, spaces, threads, and other capabilities beyond the approved first release remain undecided.
-5. Authentication: required login methods, account count, discovery, and session restoration.
+4. Later feature priorities: calls, spaces, threads, and other capabilities beyond the approved first release remain undecided.
+5. Authentication: required login methods, discovery, and session restoration. More than one account is decided (ADR-0015); a limit beyond the current eight local profiles is not.
 6. Encryption: required first-release behavior for device verification, key recovery, and encrypted attachments.
 7. Design: reference applications, layout, themes, accessibility, and keyboard navigation.
 8. Integration environment: current Merovingian revision, disposable test instance, and test accounts.

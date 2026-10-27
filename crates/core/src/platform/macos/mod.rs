@@ -81,3 +81,9 @@ pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {
 pub(crate) fn ui_host() -> Box<dyn UiHost> {
     Box::new(ui::GroupHost)
 }
+
+/// Starts a new core for a profile switch. It is not in the UI's process
+/// group, so ending the old UI does not end it.
+pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Result<()> {
+    command.spawn().map(drop)
+}

@@ -73,6 +73,12 @@ pub(crate) fn ui_host() -> Box<dyn UiHost> {
     Box::new(ui_host::Unsupported)
 }
 
+/// Starts a new core for a profile switch. Linux starts no UI yet, so no
+/// switch is asked for; the start itself works as on macOS.
+pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Result<()> {
+    command.spawn().map(drop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

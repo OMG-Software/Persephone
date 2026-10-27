@@ -113,9 +113,17 @@ export type RoomList = { rooms: Array<RoomSummary>, truncated: boolean, };
 
 export type InviteSummary = { roomId: string, 
 /**
- * The user ID of whoever sent the invitation.
+ * The room's name, from the invitation's room state, if it has one.
  */
-inviter: string, 
+roomName: string | null, 
+/**
+ * Whether the inviter marked it as a direct-message invitation.
+ */
+direct: boolean, 
+/**
+ * The user ID of whoever sent the invitation, when the invitation says.
+ */
+inviter: string | null, 
 /**
  * The inviter's display name in that room, if they set one.
  */
@@ -124,6 +132,47 @@ inviterName: string | null, };
 export type InviteList = { invites: Array<InviteSummary>, truncated: boolean, };
 
 export type ConversationStart = { "kind": "existing", roomId: string, } | { "kind": "created", roomId: string, } | { "kind": "no_identity", } | { "kind": "refused", };
+
+export type RoomCreation = { "kind": "created", roomId: string, } | { "kind": "no_identity", userId: string, } | { "kind": "refused", };
+
+export type RoomInvite = { "kind": "invited", } | { "kind": "no_identity", } | { "kind": "refused", };
+
+export type DisplayName = { displayName: string | null, };
+
+export type DeviceSummary = { deviceId: string, displayName: string | null, 
+/**
+ * When the homeserver last saw the device, by the homeserver's clock.
+ */
+lastSeen: number | null, 
+/**
+ * This device.
+ */
+current: boolean, 
+/**
+ * Whether this account's cross-signing identity signed the device, as
+ * this device's store knows it.
+ */
+verified: boolean, };
+
+export type DeviceList = { devices: Array<DeviceSummary>, truncated: boolean, };
+
+export type AccountSettings = { 
+/**
+ * Enter sends a message; otherwise it starts a new line. On by default.
+ */
+enterSends: boolean, };
+
+export type ProfileSlot = { slot: number, 
+/**
+ * The profile open now.
+ */
+active: boolean, };
+
+export type ProfileList = { profiles: Array<ProfileSlot>, 
+/**
+ * Whether a free slot is left for `add_profile`.
+ */
+canAdd: boolean, };
 
 export type UserMatch = { userId: string, 
 /**

@@ -1947,6 +1947,83 @@ mark {
   box-shadow: none;
 }
 
+/* New room and invite dialogs */
+.new-room label[for],
+.invite-person label[for],
+.panel label[for] {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.field-row {
+  display: flex;
+  gap: 8px;
+}
+
+.field-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.invitees {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.invitees li,
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13.5px;
+}
+
+.invitees bdi {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sessions and accounts */
+.device-list,
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.device-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.badge.ok {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.badge.warn {
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+}
+
+.accounts.compact {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+  text-align: left;
+}
+
 @media (max-width: 760px) {
   .sidebar {
     width: 240px;

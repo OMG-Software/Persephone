@@ -23,6 +23,10 @@
 //!   [`store::default_dir`]). If the OS gives no directory for it, the window
 //!   starts `store_unavailable`; nothing falls back to synthetic data.
 //! * `--profile <dir>` opens (or creates) the encrypted profile in `<dir>`.
+//! * `--account <n>` opens the profile in slot `n` (2 to 8) beside the
+//!   default or given one instead (ADR-0015, [`profiles`]). A profile switch
+//!   from the window closes it, locks the stores as exit does, starts a new
+//!   core with these options for the chosen slot, and exits.
 //! * `--demo` serves synthetic rooms instead of a profile. Nothing is stored.
 //! * `--demo-live`, only with `--demo`, posts a synthetic message to the
 //!   planning room every few seconds.
@@ -36,12 +40,14 @@ use persephone_core::{
     Core, ServeEnd,
     credentials::{self, CredentialSource},
     passphrase::Unlock,
+    profiles::{self, Profiles},
     serve,
     session::Session,
     store,
     ui_host::{self, StartedUi, UiHost, UiTree},
     vault,
 };
+use persephone_core_protocol::MAX_PROFILES;
 use std::{
     env,
     ffi::OsString,
@@ -69,6 +75,8 @@ enum Run {
     Exit(ExitCode),
     /// The window failed and the user asked for a new one.
     Retry,
+    /// The user asked for another profile; the window is closed.
+    Switch(u32),
 }
 
 /// What the window watch decided for one UI run.
@@ -78,12 +86,16 @@ enum Verdict {
     None,
     Retry,
     Close,
+    /// The user asked for another profile, and the window closed.
+    Switch(u32),
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Options {
     /// The profile to open; `None` means the default one, unless `demo`.
     profile: Option<PathBuf>,
+    /// The profile slot beside it (ADR-0015); `None` is slot 1.
+    account: Option<u32>,
     demo: bool,
     demo_live: bool,
 }
@@ -98,11 +110,19 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Options, String> {
                 let dir = args.next().ok_or("--profile needs a directory")?;
                 options.profile = Some(dir.into());
             }
+            Some(profiles::ACCOUNT_OPTION) if options.account.is_none() => {
+                let slot = args
+                    .next()
+                    .and_then(|slot| slot.to_str()?.parse::<u32>().ok())
+                    .filter(|slot| (2..=MAX_PROFILES).contains(slot))
+                    .ok_or("--account needs a slot number from 2 to 8")?;
+                options.account = Some(slot);
+            }
             _ => return Err(format!("unexpected argument {}", arg.to_string_lossy())),
         }
     }
-    if options.demo && options.profile.is_some() {
-        return Err("--demo and --profile cannot be used together".into());
+    if options.demo && (options.profile.is_some() || options.account.is_some()) {
+        return Err("--demo cannot be used with --profile or --account".into());
     }
     if options.demo_live && !options.demo {
         return Err("--demo-live needs --demo".into());
@@ -115,7 +135,7 @@ fn main() -> ExitCode {
         Ok(options) => options,
         Err(error) => {
             eprintln!(
-                "persephone: {error}\nusage: persephone [--profile <dir> | --demo [--demo-live]]"
+                "persephone: {error}\nusage: persephone [--profile <dir>] [--account <n>] | --demo [--demo-live]"
             );
             return ExitCode::from(2);
         }
@@ -157,13 +177,21 @@ fn run(options: Options) -> ExitCode {
     };
     // The passphrase is asked here, in the core's own window, before the UI
     // starts (ADR-0006). Synthetic data only when asked for (ADR-0013).
-    let session = if options.demo {
-        Session::not_configured()
+    let slots = if options.demo {
+        None
     } else {
-        match options.profile.or_else(store::default_dir) {
-            Some(dir) => Session::open(dir, vault::platform(), Unlock::new(source.clone())),
-            None => Session::unavailable(),
-        }
+        options
+            .profile
+            .clone()
+            .or_else(store::default_dir)
+            .and_then(|base| {
+                Profiles::new(base, options.profile.clone(), options.account.unwrap_or(1))
+            })
+    };
+    let session = match &slots {
+        _ if options.demo => Session::not_configured(),
+        Some(slots) => Session::open(slots.dir(), vault::platform(), Unlock::new(source.clone())),
+        None => Session::unavailable(),
     };
     let state = session.state();
     if !matches!(state, StoreState::Protected | StoreState::NotConfigured) {
@@ -173,6 +201,10 @@ fn run(options: Options) -> ExitCode {
     let core = Core::default()
         .with_credentials(source)
         .with_session(session);
+    let core = match slots {
+        Some(slots) => core.with_profiles(slots),
+        None => core,
+    };
     // The harness answers the image file dialog from a file under `.local`.
     #[cfg(feature = "dev-disposable-servers")]
     let core = match env::var_os("PERSEPHONE_DEV_PICK_FILE") {
@@ -185,6 +217,7 @@ fn run(options: Options) -> ExitCode {
         None => core,
     };
     let host = ui_host::platform();
+    let mut switch = None;
     let code = loop {
         match run_ui(&core, &*host, options.demo_live) {
             Run::Exit(code) => break code,
@@ -192,11 +225,25 @@ fn run(options: Options) -> ExitCode {
                 eprintln!("persephone: starting the window again");
                 core.reopen();
             }
+            Run::Switch(slot) => {
+                switch = Some(slot);
+                break ExitCode::SUCCESS;
+            }
         }
     };
     // Exit locks through the same path as a requested lock: admission closes,
     // admitted work finishes, then the stores close.
-    match core.session().lock(EXIT_LOCK_TIMEOUT, || {}).0 {
+    let state = core.session().lock(EXIT_LOCK_TIMEOUT, || {}).0;
+    // A switch starts the new core last, once this one's stores are locked.
+    // The new core opens another profile, so even a lock that did not finish
+    // hands nothing over: this process exits next, and its stores with it.
+    if let (Some(slot), Some(slots)) = (switch, core.profiles())
+        && let Err(error) = slots.start_core(slot)
+    {
+        eprintln!("persephone: cannot start the core for the other profile: {error}");
+        return ExitCode::from(1);
+    }
+    match state {
         StoreState::LockFailed => {
             eprintln!("persephone: a store did not close cleanly");
             ExitCode::from(1)
@@ -248,6 +295,7 @@ fn run_ui(core: &Core, host: &dyn UiHost, demo_live: bool) -> Run {
     // Closing the tree after the wait ends anything left in it.
     drop(tree);
     match (verdict, end, status) {
+        (Verdict::Switch(slot), _, _) => Run::Switch(slot),
         (Verdict::Retry, _, _) => Run::Retry,
         (Verdict::Close, _, _) => Run::Exit(ExitCode::from(1)),
         (Verdict::None, ServeEnd::UiClosed, Ok(status)) if status.success() => {
@@ -275,6 +323,15 @@ fn watch(
             .0;
         if *done {
             return Verdict::None;
+        }
+        if let Some(slot) = core.profiles().and_then(Profiles::requested) {
+            drop(done);
+            eprintln!("persephone: switching to another profile");
+            if !tree.terminate(REPLACE_TIMEOUT) {
+                eprintln!("persephone: the old window did not exit; closing");
+                return Verdict::Close;
+            }
+            return Verdict::Switch(slot);
         }
         let processes = tree.active_processes().ok();
         let Some(failure) = window.observe(Instant::now(), core.ui_ready(), processes) else {
@@ -332,6 +389,27 @@ mod tests {
         );
     }
 
+    /// GIVEN `--account`, alone or with `--profile`, THEN that slot beside the
+    /// default or given profile is opened.
+    #[test]
+    fn given_an_account_slot_then_that_profile_beside_the_base_is_opened() {
+        assert_eq!(
+            parsed(&["--account", "2"]),
+            Ok(Options {
+                account: Some(2),
+                ..Options::default()
+            })
+        );
+        assert_eq!(
+            parsed(&["--account", "8", "--profile", "dir"]),
+            Ok(Options {
+                profile: Some(PathBuf::from("dir")),
+                account: Some(8),
+                ..Options::default()
+            })
+        );
+    }
+
     /// GIVEN `--demo`, with or without `--demo-live`, THEN synthetic rooms
     /// are served and no profile is named.
     #[test]
@@ -364,6 +442,13 @@ mod tests {
             &["--demo-live"],
             &["--profile", "dir", "--demo-live"],
             &["--profile", "a", "--profile", "b"],
+            &["--account"],
+            &["--account", "1"],
+            &["--account", "9"],
+            &["--account", "-2"],
+            &["--account", "two"],
+            &["--account", "2", "--account", "3"],
+            &["--demo", "--account", "2"],
             &["--profile"],
             &["--Demo"],
             &["dir"],

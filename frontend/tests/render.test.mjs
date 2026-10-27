@@ -44,7 +44,7 @@ test('message view contains no raw HTML insertion or attribute spreading', async
 
 test('GIVEN the Lock button WHEN rendered THEN help text describes it and says what Lock does', async () => {
   const { default: TipButton } = await vite.ssrLoadModule('/src/TipButton.svelte');
-  const { LOCK_HELP } = await vite.ssrLoadModule('/src/help.ts');
+  const { LOCK_HELP } = await import('../src/help.ts');
   const { createRawSnippet } = await vite.ssrLoadModule('svelte');
   const { body: html } = render(TipButton, {
     props: {

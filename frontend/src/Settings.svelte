@@ -1,5 +1,11 @@
 <script module lang="ts">
-  export type SettingsTab = 'security' | 'session';
+  export type SettingsTab =
+    | 'profile'
+    | 'security'
+    | 'devices'
+    | 'preferences'
+    | 'accounts'
+    | 'session';
 </script>
 
 <script lang="ts">
@@ -22,8 +28,12 @@
   } = $props();
 
   const tabs: { id: SettingsTab; label: string }[] = [
+    { id: 'profile', label: 'Profile' },
     { id: 'security', label: 'Security & encryption' },
-    { id: 'session', label: 'Session' }
+    { id: 'devices', label: 'Sessions' },
+    { id: 'preferences', label: 'Preferences' },
+    { id: 'accounts', label: 'Accounts' },
+    { id: 'session', label: 'This session' }
   ];
 </script>
 

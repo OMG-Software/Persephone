@@ -179,15 +179,56 @@ pub enum Call {
     DiscardImage {
         handle: String,
     },
-    /// Direct-message invitations this account has not answered.
+    /// Room invitations this account has not answered, direct-message or
+    /// not, from this homeserver or another one.
     InviteList {},
-    /// Join the direct-message room of this invitation.
+    /// Join the room of this invitation.
     AcceptInvite {
         room_id: String,
     },
-    /// Refuse this direct-message invitation (leave the room).
+    /// Refuse this invitation (leave the room).
     DeclineInvite {
         room_id: String,
+    },
+    /// Create an encrypted, invite-only room with this name and invite these
+    /// people (at most [`MAX_INVITEES`]). Refused when one of them has no
+    /// cross-signing identity (ADR-0005); nothing is created then.
+    CreateRoom {
+        name: String,
+        invite: Vec<String>,
+    },
+    /// Invite this person to a joined room. In an encrypted room, refused
+    /// when they have no cross-signing identity.
+    InviteUser {
+        room_id: String,
+        user_id: String,
+    },
+    /// This account's display name, as the homeserver has it.
+    DisplayName {},
+    /// Set this account's display name; an empty name removes it.
+    SetDisplayName {
+        name: String,
+    },
+    /// The devices (sessions) signed in to this account.
+    DeviceList {},
+    /// This account's settings, kept in its encrypted profile.
+    AccountSettings {},
+    /// Replace this account's settings. Every setting is a required field,
+    /// so the page always sends the whole set.
+    SetAccountSettings {
+        /// Enter sends a message; otherwise it starts a new line.
+        enter_sends: bool,
+    },
+    /// The local profiles (accounts) on this computer, by slot number. No
+    /// path or account name crosses.
+    ProfileList {},
+    /// Make a new empty profile and switch to it. Replies at once; the core
+    /// then closes the window, locks the stores and starts again with the new
+    /// profile (ADR-0015).
+    AddProfile {},
+    /// Switch to the profile in this slot, as `AddProfile` does.
+    SwitchProfile {
+        slot: u32,
     },
     /// Open a direct-message conversation with this user: an existing room
     /// with just them, or a new encrypted room they are invited to. Refused
@@ -207,6 +248,18 @@ pub const MAX_SEARCH_TERM_BYTES: usize = 256;
 
 /// Most matches a user-directory search returns.
 pub const MAX_SEARCH_RESULTS: usize = 10;
+
+/// Longest room name either side accepts, in bytes.
+pub const MAX_ROOM_NAME_BYTES: usize = 255;
+
+/// Most people a `create_room` call may invite.
+pub const MAX_INVITEES: usize = 10;
+
+/// Longest display name either side accepts, in bytes.
+pub const MAX_DISPLAY_NAME_BYTES: usize = 256;
+
+/// Most local profiles (slots 1 to this number) on one computer.
+pub const MAX_PROFILES: u32 = 8;
 
 /// Longest event ID either side accepts in a call (the Matrix limit).
 pub const MAX_EVENT_ID_BYTES: usize = 255;
@@ -672,6 +725,105 @@ mod tests {
             assert_eq!(
                 receive::<_, Request>(&mut reader, &budgets).unwrap(),
                 request
+            );
+        }
+    }
+
+    /// GIVEN the room, account and profile calls WHEN sent THEN only their
+    /// documented arguments cross: names, IDs and a slot number, never a path.
+    #[test]
+    fn given_room_account_and_profile_calls_then_they_have_a_strict_wire_form() {
+        let budgets = ResourceBudgets::default();
+        for (call, wire) in [
+            (
+                Call::CreateRoom {
+                    name: "Plans".into(),
+                    invite: vec!["@b:s".into()],
+                },
+                r#"{"id":1,"call":{"command":"create_room","name":"Plans","invite":["@b:s"]}}"#,
+            ),
+            (
+                Call::InviteUser {
+                    room_id: "!r:s".into(),
+                    user_id: "@b:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"invite_user","room_id":"!r:s","user_id":"@b:s"}}"#,
+            ),
+            (
+                Call::DisplayName {},
+                r#"{"id":1,"call":{"command":"display_name"}}"#,
+            ),
+            (
+                Call::SetDisplayName { name: "Al".into() },
+                r#"{"id":1,"call":{"command":"set_display_name","name":"Al"}}"#,
+            ),
+            (
+                Call::DeviceList {},
+                r#"{"id":1,"call":{"command":"device_list"}}"#,
+            ),
+            (
+                Call::AccountSettings {},
+                r#"{"id":1,"call":{"command":"account_settings"}}"#,
+            ),
+            (
+                Call::SetAccountSettings { enter_sends: false },
+                r#"{"id":1,"call":{"command":"set_account_settings","enter_sends":false}}"#,
+            ),
+            (
+                Call::ProfileList {},
+                r#"{"id":1,"call":{"command":"profile_list"}}"#,
+            ),
+            (
+                Call::AddProfile {},
+                r#"{"id":1,"call":{"command":"add_profile"}}"#,
+            ),
+            (
+                Call::SwitchProfile { slot: 2 },
+                r#"{"id":1,"call":{"command":"switch_profile","slot":2}}"#,
+            ),
+        ] {
+            let request = Request { id: 1, call };
+            let mut sent = Vec::new();
+            send(&mut sent, &request).unwrap();
+            assert_eq!(String::from_utf8(sent[17..].to_vec()).unwrap(), wire);
+            let mut reader = Cursor::new(sent);
+            assert_eq!(
+                receive::<_, Request>(&mut reader, &budgets).unwrap(),
+                request
+            );
+        }
+        for body in [
+            &br#"{"id":1,"call":{"command":"create_room","invite":[]}}"#[..],
+            br#"{"id":1,"call":{"command":"create_room","name":"x","invite":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"create_room","name":"x","invite":[],"encrypted":false}}"#,
+            br#"{"id":1,"call":{"command":"create_room","name":"x","invite":[],"preset":"public_chat"}}"#,
+            br#"{"id":1,"call":{"command":"invite_user","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"invite_user","room_id":"!r:s","user_id":"@b:s","reason":"x"}}"#,
+            br#"{"id":1,"call":{"command":"display_name","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"set_display_name"}}"#,
+            br#"{"id":1,"call":{"command":"set_display_name","name":null}}"#,
+            br#"{"id":1,"call":{"command":"device_list","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"delete_device","device_id":"D"}}"#,
+            br#"{"id":1,"call":{"command":"account_settings","slot":2}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings"}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":"false"}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":null}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"theme":"x"}}"#,
+            br#"{"id":1,"call":{"command":"profile_list","all":true}}"#,
+            br#"{"id":1,"call":{"command":"add_profile","dir":"C:\\x"}}"#,
+            br#"{"id":1,"call":{"command":"switch_profile"}}"#,
+            br#"{"id":1,"call":{"command":"switch_profile","slot":-1}}"#,
+            br#"{"id":1,"call":{"command":"switch_profile","slot":"2"}}"#,
+            br#"{"id":1,"call":{"command":"switch_profile","path":"C:\\x"}}"#,
+        ] {
+            let mut reader = Cursor::new(frame(FrameKind::Control, body));
+            assert!(
+                matches!(
+                    receive::<_, Request>(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{}",
+                String::from_utf8_lossy(body)
             );
         }
     }

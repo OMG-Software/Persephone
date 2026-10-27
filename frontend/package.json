@@ -6,7 +6,8 @@
   "scripts": {
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "build": "vite build",
-    "test": "node --test"
+    "test": "node --test",
+    "coverage": "node --test --experimental-test-coverage --test-coverage-include=\"src/**/*.ts\" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=../.local/coverage/frontend/lcov.info"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.4",

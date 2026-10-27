@@ -200,7 +200,10 @@ impl CoreTransport for FakeCore {
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },
             Call::InviteList {} => Ok(serde_json::json!({
-                "invites": [{"roomId": "!inv:example.invalid", "inviter": "@bob:example.invalid", "inviterName": "<b>Bob</b>"}],
+                "invites": [
+                    {"roomId": "!inv:example.invalid", "roomName": null, "direct": true, "inviter": "@bob:example.invalid", "inviterName": "<b>Bob</b>"},
+                    {"roomId": "!fed:remote.invalid", "roomName": "Plans", "direct": false, "inviter": null, "inviterName": null}
+                ],
                 "truncated": false
             })),
             Call::AcceptInvite { room_id } | Call::DeclineInvite { room_id } => {
@@ -229,6 +232,50 @@ impl CoreTransport for FakeCore {
                     "users": [{"userId": "@a:example.invalid", "displayName": null, "avatarUrl": "mxc://x/y"}],
                     "truncated": false
                 })),
+            },
+            Call::CreateRoom { name, invite } => match (name.as_str(), invite.as_slice()) {
+                ("Plans", [user]) if user == "@bob:example.invalid" => {
+                    Ok(serde_json::json!({"kind": "created", "roomId": "!new:example.invalid"}))
+                }
+                ("Plans", [user]) => Ok(serde_json::json!({"kind": "no_identity", "userId": user})),
+                // An outcome outside the contract must not reach the page.
+                _ => {
+                    Ok(serde_json::json!({"kind": "created", "roomId": "!x:s", "encrypted": false}))
+                }
+            },
+            Call::InviteUser { user_id, .. } => match user_id.as_str() {
+                "@bob:example.invalid" => Ok(serde_json::json!({"kind": "invited"})),
+                _ => Ok(serde_json::json!({"kind": "refused"})),
+            },
+            Call::DisplayName {} => Ok(serde_json::json!({"displayName": "<b>Al</b>"})),
+            Call::SetDisplayName { name } => match name.as_str() {
+                "" => Ok(serde_json::json!({"displayName": null})),
+                "Al" => Ok(serde_json::json!({"displayName": "Al"})),
+                _ => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
+            Call::AccountSettings {} => Ok(serde_json::json!({"enterSends": false})),
+            Call::SetAccountSettings { enter_sends } => match enter_sends {
+                true => Ok(serde_json::Value::Null),
+                false => Err(CoreError::Core(ErrorCode::Locked)),
+            },
+            Call::DeviceList {} => Ok(serde_json::json!({
+                "devices": [{
+                    "deviceId": "ME",
+                    "displayName": "<i>Laptop</i>",
+                    "lastSeen": 1_767_258_000_000u64,
+                    "current": true,
+                    "verified": true
+                }],
+                "truncated": false
+            })),
+            Call::ProfileList {} => Ok(serde_json::json!({
+                "profiles": [{"slot": 1, "active": true}, {"slot": 2, "active": false}],
+                "canAdd": true
+            })),
+            Call::AddProfile {} => Ok(serde_json::Value::Null),
+            Call::SwitchProfile { slot } => match slot {
+                2 => Ok(serde_json::Value::Null),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },
         }
     }
@@ -481,7 +528,17 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-accept-invite",
             "allow-decline-invite",
             "allow-start-conversation",
-            "allow-search-users"
+            "allow-search-users",
+            "allow-create-room",
+            "allow-invite-user",
+            "allow-display-name",
+            "allow-set-display-name",
+            "allow-device-list",
+            "allow-account-settings",
+            "allow-set-account-settings",
+            "allow-profile-list",
+            "allow-add-profile",
+            "allow-switch-profile"
         ])
     );
     assert!(capability.get("remote").is_none(), "no remote origins");
@@ -1006,6 +1063,137 @@ fn given_conversation_commands_then_one_argument_crosses_and_replies_are_checked
             serde_json::json!({"userId": "@".repeat(256)}),
         ),
         ("search_users", serde_json::json!({"term": "b".repeat(257)})),
+    ] {
+        assert_eq!(invoke(cmd, args).unwrap_err(), "invalid_argument", "{cmd}");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized arguments never crossed"
+    );
+}
+
+/// Room, account and profile commands relay only their named arguments,
+/// refuse oversized ones (and slots out of range) before the core, and
+/// refuse replies outside the contract: an unencrypted room never reaches
+/// the page, and a device carries no IP address.
+#[test]
+fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let invites = invoke("invite_list", serde_json::json!({})).unwrap();
+    assert_eq!(invites["invites"][1]["direct"], false);
+    assert_eq!(invites["invites"][1]["inviter"], serde_json::Value::Null);
+    assert_eq!(
+        invoke(
+            "create_room",
+            serde_json::json!({"name": "Plans", "invite": ["@bob:example.invalid"]})
+        )
+        .unwrap(),
+        serde_json::json!({"kind": "created", "roomId": "!new:example.invalid"})
+    );
+    assert_eq!(
+        invoke(
+            "create_room",
+            serde_json::json!({"name": "Plans", "invite": ["@nokeys:example.invalid"]})
+        )
+        .unwrap(),
+        serde_json::json!({"kind": "no_identity", "userId": "@nokeys:example.invalid"})
+    );
+    assert!(
+        invoke(
+            "create_room",
+            serde_json::json!({"name": "Other", "invite": []})
+        )
+        .is_err(),
+        "an outcome outside the contract"
+    );
+    assert_eq!(
+        invoke(
+            "invite_user",
+            serde_json::json!({"roomId": "!r:example.invalid", "userId": "@bob:example.invalid"})
+        )
+        .unwrap()["kind"],
+        "invited"
+    );
+    assert_eq!(
+        invoke("display_name", serde_json::json!({})).unwrap()["displayName"],
+        "<b>Al</b>"
+    );
+    assert_eq!(
+        invoke("set_display_name", serde_json::json!({"name": ""})).unwrap()["displayName"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        invoke("set_display_name", serde_json::json!({"name": "Bo"})).unwrap_err(),
+        "rejected"
+    );
+    let devices = invoke("device_list", serde_json::json!({})).unwrap();
+    assert_eq!(devices["devices"][0]["current"], true);
+    assert!(devices["devices"][0].get("lastSeenIp").is_none());
+    assert_eq!(
+        invoke("account_settings", serde_json::json!({})).unwrap(),
+        serde_json::json!({"enterSends": false})
+    );
+    assert!(
+        invoke(
+            "set_account_settings",
+            serde_json::json!({"enterSends": true})
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        invoke(
+            "set_account_settings",
+            serde_json::json!({"enterSends": false})
+        )
+        .unwrap_err(),
+        "locked"
+    );
+    assert_eq!(
+        invoke("profile_list", serde_json::json!({})).unwrap()["profiles"][1]["slot"],
+        2
+    );
+    assert!(invoke("add_profile", serde_json::json!({})).is_ok());
+    assert!(invoke("switch_profile", serde_json::json!({"slot": 2})).is_ok());
+    assert_eq!(
+        invoke("switch_profile", serde_json::json!({"slot": 3})).unwrap_err(),
+        "not_found"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    let many: Vec<String> = (0..11).map(|n| format!("@u{n}:s")).collect();
+    for (cmd, args) in [
+        (
+            "create_room",
+            serde_json::json!({"name": "x".repeat(256), "invite": []}),
+        ),
+        (
+            "create_room",
+            serde_json::json!({"name": "x", "invite": many}),
+        ),
+        (
+            "create_room",
+            serde_json::json!({"name": "x", "invite": ["@".repeat(256)]}),
+        ),
+        (
+            "invite_user",
+            serde_json::json!({"roomId": "!".repeat(256), "userId": "@b:s"}),
+        ),
+        (
+            "invite_user",
+            serde_json::json!({"roomId": "!r:s", "userId": "@".repeat(256)}),
+        ),
+        (
+            "set_display_name",
+            serde_json::json!({"name": "a".repeat(257)}),
+        ),
+        ("switch_profile", serde_json::json!({"slot": 0})),
+        ("switch_profile", serde_json::json!({"slot": 9})),
     ] {
         assert_eq!(invoke(cmd, args).unwrap_err(), "invalid_argument", "{cmd}");
     }
