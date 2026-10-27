@@ -35,8 +35,8 @@ The repository includes the GNU General Public License v3.0; see [LICENSE](../..
 1. Product scope: personal client, small-team client, or broader public release.
 2. UI implementation: frontend framework, exact Tauri/dependency versions, required features, and license compatibility. The choice of Tauri is settled by ADR-0000.
 3. Compatibility baseline: supported Matrix features/versions, the pinned SDK's Sliding Sync variant, mode-switch behavior, and classic fallback; verify against Merovingian, Synapse, and a classic-only/controlled capability deployment.
-4. Later feature priorities: multiple accounts, calls, spaces, threads, and other capabilities beyond the approved first release remain undecided.
-5. Authentication: required login methods, account count, discovery, and session restoration.
+4. Later feature priorities: calls, spaces, threads, and other capabilities beyond the approved first release remain undecided.
+5. Authentication: required login methods, discovery, and session restoration. More than one account is decided (ADR-0015); a limit beyond the current eight local profiles is not.
 6. Encryption: required first-release behavior for device verification, key recovery, and encrypted attachments.
 7. Design: reference applications, layout, themes, accessibility, and keyboard navigation.
 8. Integration environment: current Merovingian revision, disposable test instance, and test accounts.

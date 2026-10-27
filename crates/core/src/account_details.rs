@@ -63,38 +63,49 @@ pub async fn device_list(client: &Client) -> Result<DeviceList, ErrorCode> {
     })?;
     let own_user = client.user_id().ok_or(ErrorCode::NotFound)?.to_owned();
     let own_device = client.device_id().map(ToOwned::to_owned);
-    let encryption = client.encryption();
-    let mut devices = Vec::new();
-    for device in response.devices.iter() {
-        let verified = matches!(
-            encryption.get_device(&own_user, &device.device_id).await,
-            Ok(Some(known)) if known.is_cross_signed_by_owner()
-        );
-        devices.push(DeviceSummary {
-            device_id: project_name(device.device_id.as_str()),
-            display_name: device.display_name.as_deref().map(project_name),
-            last_seen: device
-                .last_seen_ts
-                .map(|seen| UnixMillis::saturating(seen.get().into())),
-            current: own_device.as_deref() == Some(&*device.device_id),
-            verified,
-        });
-    }
-    order(&mut devices);
+    // Ordered and cut to the limit first, so a long answer costs no store
+    // lookup for a device that is not shown.
+    let mut devices: Vec<_> = response
+        .devices
+        .iter()
+        .map(|device| {
+            let summary = DeviceSummary {
+                device_id: project_name(device.device_id.as_str()),
+                display_name: device.display_name.as_deref().map(project_name),
+                last_seen: device
+                    .last_seen_ts
+                    .map(|seen| UnixMillis::saturating(seen.get().into())),
+                current: own_device.as_deref() == Some(&*device.device_id),
+                verified: false,
+            };
+            (summary, &device.device_id)
+        })
+        .collect();
+    devices.sort_by(|(a, _), (b, _)| rank(a, b));
     let truncated = devices.len() > MAX_DEVICES;
     devices.truncate(MAX_DEVICES);
-    Ok(DeviceList { devices, truncated })
+    let encryption = client.encryption();
+    let mut shown = Vec::with_capacity(devices.len());
+    for (mut summary, device_id) in devices {
+        summary.verified = matches!(
+            encryption.get_device(&own_user, device_id).await,
+            Ok(Some(known)) if known.is_cross_signed_by_owner()
+        );
+        shown.push(summary);
+    }
+    Ok(DeviceList {
+        devices: shown,
+        truncated,
+    })
 }
 
 /// This device first, then the most recently seen; unseen devices last, in
-/// ID order.
-fn order(devices: &mut [DeviceSummary]) {
-    devices.sort_by(|a, b| {
-        b.current
-            .cmp(&a.current)
-            .then(b.last_seen.cmp(&a.last_seen))
-            .then(a.device_id.cmp(&b.device_id))
-    });
+/// (projected) ID order.
+fn rank(a: &DeviceSummary, b: &DeviceSummary) -> std::cmp::Ordering {
+    b.current
+        .cmp(&a.current)
+        .then(b.last_seen.cmp(&a.last_seen))
+        .then(a.device_id.cmp(&b.device_id))
 }
 
 /// A refusal from the homeserver is `rejected`; anything else, such as no
@@ -141,14 +152,14 @@ mod tests {
     /// comes first, then the most recently seen, then the unseen by ID.
     #[test]
     fn given_devices_then_this_one_comes_first_then_the_most_recent() {
-        let mut devices = vec![
+        let mut devices = [
             device("B", None, false),
             device("OLD", Some(1_000), false),
             device("A", None, false),
             device("ME", Some(500), true),
             device("NEW", Some(9_000), false),
         ];
-        order(&mut devices);
+        devices.sort_by(rank);
         let ids: Vec<&str> = devices.iter().map(|d| d.device_id.as_str()).collect();
         assert_eq!(ids, ["ME", "NEW", "OLD", "A", "B"]);
     }

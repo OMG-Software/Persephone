@@ -76,6 +76,12 @@ impl Profiles {
         dir_of(&self.base, slot).is_some_and(|dir| dir.is_dir())
     }
 
+    /// Whether anything is at the slot's path, even a file or a broken link:
+    /// a new profile could not be made there.
+    fn occupied(&self, slot: u32) -> bool {
+        dir_of(&self.base, slot).is_none_or(|dir| dir.symlink_metadata().is_ok())
+    }
+
     /// The profiles that exist, and the open one, in slot order.
     pub fn list(&self) -> ProfileList {
         let profiles = (1..=MAX_PROFILES)
@@ -91,9 +97,9 @@ impl Profiles {
         }
     }
 
-    /// The lowest slot with no profile yet.
+    /// The lowest slot with nothing at its path yet.
     fn free_slot(&self) -> Option<u32> {
-        (1..=MAX_PROFILES).find(|&slot| slot != self.active && !self.exists(slot))
+        (1..=MAX_PROFILES).find(|&slot| slot != self.active && !self.occupied(slot))
     }
 
     /// Asks to switch to a new profile in the lowest free slot.
@@ -219,6 +225,27 @@ mod tests {
         );
         assert_eq!(profiles.request_new(), Ok(2));
         assert_eq!(profiles.requested(), Some(2));
+        let _ = std::fs::remove_dir_all(base.parent().unwrap());
+    }
+
+    /// GIVEN a file where slot 2's directory would go WHEN listed THEN it is
+    /// no profile, and WHEN adding THEN slot 2 is skipped: no profile could
+    /// be made there.
+    #[test]
+    fn given_a_file_in_a_slots_place_then_it_is_neither_listed_nor_chosen() {
+        let base = temp_base("file");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(dir_of(&base, 2).unwrap(), b"not a profile").unwrap();
+        let profiles = Profiles::new(base.clone(), None, 1).unwrap();
+        assert_eq!(
+            profiles.list().profiles,
+            vec![ProfileSlot {
+                slot: 1,
+                active: true
+            }]
+        );
+        assert_eq!(profiles.request_switch(2), Err(ErrorCode::NotFound));
+        assert_eq!(profiles.request_new(), Ok(3));
         let _ = std::fs::remove_dir_all(base.parent().unwrap());
     }
 

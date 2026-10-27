@@ -17,7 +17,8 @@
 
   const failures: Record<string, string> = {
     not_found: 'That account no longer exists on this computer.',
-    limit_exceeded: 'No more accounts can be added, or a switch is already starting.',
+    limit_exceeded:
+      'No more accounts can be added, a switch is already starting, or Persephone is still finishing a request. Try again in a moment.',
     invalid_argument: 'That account is already open.'
   };
 

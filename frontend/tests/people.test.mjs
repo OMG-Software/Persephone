@@ -32,3 +32,19 @@ test('avatar colours are stable and one of six', () => {
 test('isolate wraps text in first-strong isolate marks', () => {
   assert.equal(people.isolate('‮abc'), '⁨‮abc⁩');
 });
+
+test('GIVEN a person typed but not added WHEN a room is created THEN they are invited too', () => {
+  const { inviteesWith } = people;
+  assert.deepEqual(inviteesWith(['@a:s'], ' @b:s '), { invite: ['@a:s', '@b:s'] });
+  assert.deepEqual(inviteesWith(['@a:s'], ''), { invite: ['@a:s'] }, 'nothing typed');
+  assert.deepEqual(inviteesWith(['@a:s'], '@a:s'), { invite: ['@a:s'] }, 'already listed');
+});
+
+test('GIVEN typed text that cannot be invited WHEN a room is created THEN it is refused with the reason', () => {
+  const { inviteesWith, MAX_INVITEES } = people;
+  assert.deepEqual(inviteesWith([], 'bob'), { problem: 'not_a_matrix_id' });
+  assert.deepEqual(inviteesWith([], '@bob'), { problem: 'not_a_matrix_id' });
+  assert.deepEqual(inviteesWith([], '@' + 'b'.repeat(255) + ':s'), { problem: 'not_a_matrix_id' });
+  const full = Array.from({ length: MAX_INVITEES }, (_, n) => `@u${n}:s`);
+  assert.deepEqual(inviteesWith(full, '@extra:s'), { problem: 'too_many' });
+});

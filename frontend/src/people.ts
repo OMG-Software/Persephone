@@ -35,6 +35,32 @@ export function avatarColour(userId: string): string {
  * Isolates untrusted text inside a plain string, such as a placeholder or the
  * window title, where no <bdi> element can do it.
  */
+/** Most people a new room may invite: the core's limit. */
+export const MAX_INVITEES = 10;
+const MAX_USER_ID = 255;
+
+/** A first check that text is an exact Matrix user ID; the core decides. */
+export function looksLikeUserId(text: string): boolean {
+  return text.length <= MAX_USER_ID && /^@[^\s:]+:\S+$/.test(text);
+}
+
+/**
+ * The people to invite to a new room, with the one still typed in the person
+ * field. Nothing typed, or someone already listed, changes nothing. Text that
+ * is not a Matrix ID, or a person beyond the limit, is a problem to show: the
+ * room is not created without them.
+ */
+export function inviteesWith(
+  invite: string[],
+  typed: string
+): { invite: string[] } | { problem: 'not_a_matrix_id' | 'too_many' } {
+  const person = typed.trim();
+  if (!person || invite.includes(person)) return { invite };
+  if (!looksLikeUserId(person)) return { problem: 'not_a_matrix_id' };
+  if (invite.length >= MAX_INVITEES) return { problem: 'too_many' };
+  return { invite: [...invite, person] };
+}
+
 export function isolate(text: string): string {
   return '⁨' + text + '⁩';
 }

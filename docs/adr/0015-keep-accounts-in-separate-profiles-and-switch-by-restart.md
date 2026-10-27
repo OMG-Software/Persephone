@@ -53,7 +53,10 @@ Chosen options: "one profile per core process, switching by restart" and
 * A switch closes the window, then locks the stores through the exit path,
   then starts a new core for the chosen slot as the last step before this
   core exits. The new core asks for that profile's passphrase, or for a new
-  one, in its own window. Only one switch can wait.
+  one, in its own window. Only one switch can wait. A switch is refused
+  while an image or homeserver call is still running, and no such call
+  starts once a switch waits, so the old core never waits on a request
+  before it exits.
 * Nothing names an account outside its encrypted store. The UI shows
   "Account 1", "Account 2", and so on.
 * Settings belong to the account (owner decision, 27 October 2026). The core

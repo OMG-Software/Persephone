@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { createRoom } from './bridge';
+  import { MAX_INVITEES, inviteesWith, looksLikeUserId } from './people';
 
   // Creates an encrypted, invite-only room with a name and invites people to
   // it by their exact Matrix IDs. The core creates nothing when one of them
@@ -16,7 +17,6 @@
   // The core's limits; these are only a first stop.
   const MAX_NAME = 255;
   const MAX_USER_ID = 255;
-  const MAX_INVITEES = 10;
 
   let name = $state('');
   let person = $state('');
@@ -25,8 +25,6 @@
   let failure = $state<string | null>(null);
   let dialog = $state<HTMLDialogElement | null>(null);
 
-  const looksLikeUserId = (text: string) =>
-    text.length <= MAX_USER_ID && /^@[^\s:]+:\S+$/.test(text);
   const roomName = $derived(name.trim());
   const nextPerson = $derived(person.trim());
   const canAdd = $derived(
@@ -62,6 +60,17 @@
   async function create(event: SubmitEvent) {
     event.preventDefault();
     if (creating || !roomName) return;
+    // Someone typed but not added is invited too, or the room waits.
+    const people = inviteesWith(invite, person);
+    if ('problem' in people) {
+      failure =
+        people.problem === 'too_many'
+          ? `A new room can invite at most ${MAX_INVITEES} people. Clear the person field or remove someone.`
+          : 'The person field does not hold a Matrix ID such as @name:example.org. Correct it or clear it.';
+      return;
+    }
+    invite = people.invite;
+    person = '';
     creating = true;
     failure = null;
     try {

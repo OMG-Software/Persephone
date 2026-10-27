@@ -72,7 +72,10 @@ use session::{Session, SessionListener};
 use std::{
     collections::BTreeSet,
     io::{Read, Write},
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -241,6 +244,28 @@ pub struct Core {
     /// The local profiles beside the open one; `None` for synthetic data or
     /// a profile without a directory.
     profiles: Option<profiles::Profiles>,
+    /// Long calls (images, homeserver calls) running on their own threads.
+    /// A profile switch waits for none: it is refused while one runs, and
+    /// none starts once a switch is waiting, so the old core exits without
+    /// waiting on a request that could take until its timeout.
+    long_calls: AtomicUsize,
+}
+
+/// Counts one running long call until it is dropped, with its thread or with
+/// a call that never started.
+struct Running<'a>(&'a AtomicUsize);
+
+impl<'a> Running<'a> {
+    fn start(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// A call that runs on its own thread; it returns the reply's outcome.
@@ -333,6 +358,7 @@ impl Core {
             display_name: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             profiles: None,
+            long_calls: AtomicUsize::new(0),
         }
     }
 
@@ -455,6 +481,30 @@ impl Core {
                 id,
                 outcome: self.outcome(call),
             }),
+        }
+    }
+
+    /// Admits a long call and counts it while it runs; `None` once a profile
+    /// switch is waiting, because the window is about to close.
+    fn admit_long_call(&self) -> Option<Running<'_>> {
+        let switching = self
+            .profiles
+            .as_ref()
+            .is_some_and(|profiles| profiles.requested().is_some());
+        (!switching).then(|| Running::start(&self.long_calls))
+    }
+
+    /// Asks for a profile switch, unless a long call is still running.
+    fn switch(
+        &self,
+        request: impl FnOnce(&profiles::Profiles) -> Result<(), ErrorCode>,
+    ) -> Outcome {
+        match &self.profiles {
+            None => Outcome::Error(ErrorCode::NotFound),
+            Some(_) if self.long_calls.load(Ordering::SeqCst) > 0 => {
+                Outcome::Error(ErrorCode::LimitExceeded)
+            }
+            Some(profiles) => refused(request(profiles)),
         }
     }
 
@@ -627,14 +677,8 @@ impl Core {
                 },
                 profiles::Profiles::list,
             )),
-            Call::AddProfile {} => match &self.profiles {
-                Some(profiles) => refused(profiles.request_new().map(|_| ())),
-                None => Outcome::Error(ErrorCode::NotFound),
-            },
-            Call::SwitchProfile { slot } => match &self.profiles {
-                Some(profiles) => refused(profiles.request_switch(*slot)),
-                None => Outcome::Error(ErrorCode::NotFound),
-            },
+            Call::AddProfile {} => self.switch(|profiles| profiles.request_new().map(|_| ())),
+            Call::SwitchProfile { slot } => self.switch(|profiles| profiles.request_switch(*slot)),
         }
     }
 
@@ -1213,10 +1257,27 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                         }
                         Answer::Later(id, call) => {
                             let output = &output;
+                            // The window is closing for a profile switch: no
+                            // new work, so the old core waits on none.
+                            let Some(running) = core.admit_long_call() else {
+                                drop(call);
+                                let refused = send(
+                                    &mut *lock(output),
+                                    &CoreMessage::Reply(Reply {
+                                        id,
+                                        outcome: Outcome::Error(ErrorCode::Unavailable),
+                                    }),
+                                );
+                                if refused.is_err() {
+                                    break ServeEnd::WriteFailed;
+                                }
+                                continue;
+                            };
                             let spawned = std::thread::Builder::new()
                                 .name("core-long-call".into())
                                 .stack_size(LONG_CALL_STACK_BYTES)
                                 .spawn_scoped(scope, move || {
+                                    let _running = running;
                                     let reply = CoreMessage::Reply(Reply {
                                         id,
                                         outcome: call(),
@@ -1671,6 +1732,38 @@ mod tests {
             call(Call::AddProfile {}),
             Outcome::Error(ErrorCode::LimitExceeded)
         );
+        let _ = std::fs::remove_dir_all(base.parent().unwrap());
+    }
+
+    /// GIVEN a long call running WHEN a switch is asked for THEN it is
+    /// refused; GIVEN a waiting switch WHEN a long call arrives THEN it is
+    /// refused at once, so the old core never waits on one before exiting.
+    #[test]
+    fn given_long_calls_then_a_switch_never_waits_for_one() {
+        let base = std::env::temp_dir()
+            .join(format!("persephone-core-switch-{}", std::process::id()))
+            .join("profile");
+        let _ = std::fs::remove_dir_all(base.parent().unwrap());
+        std::fs::create_dir_all(&base).unwrap();
+        let core =
+            Core::default().with_profiles(profiles::Profiles::new(base.clone(), None, 1).unwrap());
+        let call = |call| core.handle(&Request { id: 1, call }).outcome;
+        {
+            let _running = core.admit_long_call().expect("no switch is waiting");
+            assert_eq!(
+                call(Call::AddProfile {}),
+                Outcome::Error(ErrorCode::LimitExceeded)
+            );
+            assert_eq!(core.profiles().unwrap().requested(), None);
+        }
+        assert_eq!(core.long_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            call(Call::AddProfile {}),
+            Outcome::Ok(serde_json::Value::Null)
+        );
+        // The switch is waiting: no long call is admitted.
+        assert!(core.admit_long_call().is_none());
+        assert_eq!(core.long_calls.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(base.parent().unwrap());
     }
 
