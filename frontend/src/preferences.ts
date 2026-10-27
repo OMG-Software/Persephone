@@ -9,6 +9,12 @@ export const DEFAULT_SETTINGS: AccountSettings = { enterSends: true };
 
 export const SAVE_FAILED = 'The setting could not be saved to this account.';
 
+/** How the keeper reads and writes the settings: the bridge, or a test's fake. */
+export type SettingsCore = {
+  load: () => Promise<AccountSettings>;
+  save: (settings: AccountSettings) => Promise<void>;
+};
+
 /**
  * Keeps the signed-in account's settings in step with the core. A change
  * shows at once and is put back if saving fails. Only the newest request
@@ -16,16 +22,18 @@ export const SAVE_FAILED = 'The setting could not be saved to this account.';
  * after `clear`, is discarded, so one account never sees another's settings.
  */
 export class SettingsKeeper {
+  readonly #core: SettingsCore;
+  readonly #show: (settings: AccountSettings, failure: string | null) => void;
   #request = 0;
   #current: AccountSettings = DEFAULT_SETTINGS;
 
   constructor(
-    private readonly core: {
-      load: () => Promise<AccountSettings>;
-      save: (settings: AccountSettings) => Promise<void>;
-    },
-    private readonly show: (settings: AccountSettings, failure: string | null) => void
-  ) {}
+    core: SettingsCore,
+    show: (settings: AccountSettings, failure: string | null) => void
+  ) {
+    this.#core = core;
+    this.#show = show;
+  }
 
   /** No account is signed in: back to the defaults. */
   clear() {
@@ -37,7 +45,7 @@ export class SettingsKeeper {
   async load() {
     const request = ++this.#request;
     try {
-      const loaded = await this.core.load();
+      const loaded = await this.#core.load();
       if (request === this.#request) this.#set(loaded, null);
     } catch {
       // A change reports its own failure.
@@ -49,7 +57,7 @@ export class SettingsKeeper {
     const previous = this.#current;
     this.#set(next, null);
     try {
-      await this.core.save(next);
+      await this.#core.save(next);
     } catch {
       if (request === this.#request) this.#set(previous, SAVE_FAILED);
     }
@@ -57,7 +65,7 @@ export class SettingsKeeper {
 
   #set(settings: AccountSettings, failure: string | null) {
     this.#current = settings;
-    this.show(settings, failure);
+    this.#show(settings, failure);
   }
 }
 

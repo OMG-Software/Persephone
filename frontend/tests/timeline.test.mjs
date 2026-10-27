@@ -1,23 +1,6 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
-import { createServer } from 'vite';
-
-let vite;
-let mergeNewest;
-let MAX_RETAINED_ITEMS;
-
-before(async () => {
-  vite = await createServer({
-    configFile: './vite.config.js',
-    server: { middlewareMode: true, hmr: false, ws: false },
-    appType: 'custom'
-  });
-  ({ mergeNewest, MAX_RETAINED_ITEMS } = await vite.ssrLoadModule('/src/timeline.ts'));
-});
-
-after(async () => {
-  await vite?.close();
-});
+import { test } from 'node:test';
+import { mergeNewest, MAX_RETAINED_ITEMS } from '../src/timeline.ts';
 
 const message = (n) => ({ kind: 'message', event_id: `$${n}`, sender: '@a:example.invalid', body: `m${n}` });
 const range = (from, to) => Array.from({ length: to - from }, (_, i) => message(from + i));

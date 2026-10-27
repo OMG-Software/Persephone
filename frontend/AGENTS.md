@@ -10,5 +10,6 @@ This area inherits `../AGENTS.md`.
 - Subscribe before the initial fetch. Treat change notifications as invalidations, then fetch bounded pages through the bridge. Do not put message content in notification queues.
 - Keep loading and error states usable. Use semantic controls, keyboard access, and accessible labels. Report native accessibility checks separately from Node rendering tests.
 - Run `python tools/dev.py frontend` from the root. It runs `svelte-check`, Vite build, and Node tests. The build must precede tests because `tests/build.test.mjs` inspects its output.
+- The tests write the line coverage of `src/**/*.ts` to `../.local/coverage/frontend/lcov.info` (`npm run coverage`), which SonarQube reads. Node's coverage sees only modules Node loads itself, so tests import TypeScript modules directly (`../src/x.ts`); load only Svelte components through Vite. Keep `src` TypeScript erasable (`erasableSyntaxOnly`: no parameter properties or enums) and give relative runtime imports their `.ts` extension.
 - Run `python tools/dev.py contracts` for public DTO changes. Check `src-tauri` permissions and core protocol changes when adding a bridge operation.
 - Keep exact dependencies and `package-lock.json` aligned. Use `python tools/dev.py bootstrap` for locked installation; do not use commands that download an unpinned compiler.

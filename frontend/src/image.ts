@@ -90,9 +90,12 @@ export async function assembleImage(
  * shows its placeholder again.
  */
 export class ShownImages {
+  readonly limit: number;
   #shown: { key: symbol; evict: () => void }[] = [];
 
-  constructor(readonly limit: number = MAX_SHOWN_IMAGES) {}
+  constructor(limit: number = MAX_SHOWN_IMAGES) {
+    this.limit = limit;
+  }
 
   admit(evict: () => void): symbol {
     const key = Symbol('image');

@@ -63,7 +63,7 @@ python tools/dev.py audit
 python tools/dev.py sandbox --offline
 ```
 
-`check` runs Rust formatting, workspace tests and Clippy, frontend check/build/tests, generated-contract drift/TypeScript checks, disposable-server registration tests, and restart-controller tests. It does not run live homeservers, the native containment program or dependency audit. `audit` queries OSV and needs network access; it cannot run offline. Add `--offline` to supported Cargo, frontend, contract, bootstrap, or sandbox commands when using cached dependencies.
+`check` runs Rust formatting, workspace tests and Clippy, frontend check/build/tests (the tests write the frontend TypeScript's line coverage to `.local/coverage/frontend/lcov.info`; the SonarQube workflow runs `frontend` for it), generated-contract drift/TypeScript checks, disposable-server registration tests, and restart-controller tests. It does not run live homeservers, the native containment program or dependency audit. `audit` queries OSV and needs network access; it cannot run offline. Add `--offline` to supported Cargo, frontend, contract, bootstrap, or sandbox commands when using cached dependencies.
 
 The Windows containment run is deliberately separate. On Windows it currently exits 1 because the zero-capability AppContainer worker is not network-denied: an endpoint-observed differential shows its packets reach the local TCP stack. The run also prints a comparative LPAC result, which does not change the gate. On other operating systems the command exits 2 because this program requires Windows; equivalent Linux and macOS coverage remains open. The unresolved gate is recorded in the [feasibility workbench](planning/feasibility.md) and [Windows sandbox evidence](evidence/windows-sandbox.md).
 

@@ -32,7 +32,7 @@ import type {
   UserMatch,
   UserSearch
 } from '../../../crates/contracts/generated/contracts';
-import { parseBand, type Band } from '../image';
+import { parseBand, type Band } from '../image.ts';
 
 export type {
   AccountSettings,

@@ -1,22 +1,6 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
-import { createServer } from 'vite';
-
-let vite;
-let preferences;
-
-before(async () => {
-  vite = await createServer({
-    configFile: './vite.config.js',
-    server: { middlewareMode: true, hmr: false, ws: false },
-    appType: 'custom'
-  });
-  preferences = await vite.ssrLoadModule('/src/preferences.ts');
-});
-
-after(async () => {
-  await vite?.close();
-});
+import { test } from 'node:test';
+import * as preferences from '../src/preferences.ts';
 
 const key = (key, more = {}) => ({
   key,

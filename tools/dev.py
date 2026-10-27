@@ -12,11 +12,27 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
 CONTRACTS = ROOT / "crates/contracts"
+# Line coverage of the frontend's TypeScript, for SonarQube
+# (sonar.javascript.lcov.reportPaths).
+FRONTEND_LCOV = ROOT / ".local/coverage/frontend/lcov.info"
 
 
 def run(command, environment, *, cwd=ROOT):
     print("+ " + " ".join(map(str, command)), flush=True)
     subprocess.run(list(map(str, command)), cwd=cwd, env=environment, check=True)
+
+
+def repository_paths(lcov, base, root=ROOT):
+    """Rewrites an LCOV report's source paths, which Node writes relative to
+    the directory the tests ran in, as repository-relative POSIX paths, so
+    the report reads the same on every OS and SonarQube finds each file."""
+    lines = []
+    for line in lcov.read_text(encoding="utf-8").splitlines():
+        if line.startswith("SF:"):
+            source = (base / line[3:].replace("\\", "/")).resolve()
+            line = "SF:" + source.relative_to(root.resolve()).as_posix()
+        lines.append(line)
+    lcov.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def main():
@@ -59,8 +75,13 @@ def main():
         if args.command == "bootstrap":
             run([npm, "ci", "--no-audit", "--no-fund", *(["--offline"] if args.offline else [])], environment, cwd=FRONTEND)
         else:
-            for task in ("check", "build", "test"):
+            for task in ("check", "build"):
                 run([npm, "run", task], environment, cwd=FRONTEND)
+            # The tests, writing an LCOV report; Node needs its folder.
+            FRONTEND_LCOV.parent.mkdir(parents=True, exist_ok=True)
+            FRONTEND_LCOV.unlink(missing_ok=True)
+            run([npm, "run", "coverage"], environment, cwd=FRONTEND)
+            repository_paths(FRONTEND_LCOV, FRONTEND)
     if args.command in ("check", "contracts"):
         run(["cargo", "run", *cargo_flags, "-p", "persephone-contracts", "--bin", "export-contracts", "--", "--check"], environment)
         # Run the pinned local compiler without npx downloading another version.

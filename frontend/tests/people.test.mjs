@@ -1,22 +1,6 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
-import { createServer } from 'vite';
-
-let vite;
-let people;
-
-before(async () => {
-  vite = await createServer({
-    configFile: './vite.config.js',
-    server: { middlewareMode: true, hmr: false, ws: false },
-    appType: 'custom'
-  });
-  people = await vite.ssrLoadModule('/src/people.ts');
-});
-
-after(async () => {
-  await vite?.close();
-});
+import { test } from 'node:test';
+import * as people from '../src/people.ts';
 
 test('GIVEN a Matrix user ID WHEN shown as an avatar THEN it gets one or two letters', () => {
   const { initials, localpart } = people;
