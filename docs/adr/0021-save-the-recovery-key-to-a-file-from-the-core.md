@@ -42,11 +42,13 @@ saved, and never in the page.
   change), the core opens the platform's own Save dialog
   (`GetSaveFileNameW` on Windows, `NSSavePanel` on macOS), which asks before
   replacing a file. Cancel skips saving.
-* The core writes the file itself: the key and a line break only. It opens
-  the file without following a link and checks the handle before emptying
-  it; a link, junction, directory or special file is refused. On Unix the
-  file is readable by its owner only; on Windows it takes its folder's
-  rules. A failed write is `recovery_key_not_saved`; the key was shown.
+* The core writes the file itself: the key and a line break only. A link,
+  junction, directory or special file at the chosen path is refused. The
+  key goes to a new temporary file beside it, is flushed to disk, and only
+  then is renamed over the chosen path, so a failed write leaves an existing
+  file as it was. On Unix the file is readable by its owner only; on
+  Windows it takes its folder's rules. A failed write is
+  `recovery_key_not_saved`; the key was shown.
 * `change_recovery_key` takes no argument. Offered only to a verified device
   whose recovery is enabled, it asks in the core's own window, with "No" as
   the default, whether to make a new key and warns that the old one stops

@@ -132,6 +132,15 @@ async fn timeline_page(
 /// Shows one desktop notification: the room's name, then the sender's.
 pub type Toaster = Box<dyn Fn(&str, &str) + Send + Sync>;
 
+/// What shows desktop notifications once `setup` installs it, and the latest
+/// notification that arrived before then (the core can send one as soon as
+/// the UI starts).
+#[derive(Default)]
+struct Toasts {
+    show: Option<Toaster>,
+    waiting: Option<(String, String)>,
+}
+
 /// The page's channel for each room it subscribed to, and its one session
 /// channel. The core accepts at most `MAX_SUBSCRIPTIONS` rooms, and a room
 /// channel is kept only after the core accepted the room, so this map is
@@ -141,7 +150,7 @@ pub type Toaster = Box<dyn Fn(&str, &str) + Send + Sync>;
 pub struct Subscriptions {
     channels: Mutex<HashMap<String, Channel<()>>>,
     session: Mutex<Option<Channel<&'static str>>>,
-    toaster: Mutex<Option<Toaster>>,
+    toasts: Mutex<Toasts>,
 }
 
 impl Subscriptions {
@@ -157,12 +166,20 @@ impl Subscriptions {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Sets what shows desktop notifications; until then they are dropped.
-    pub fn set_toaster(&self, toaster: Toaster) {
-        *self
-            .toaster
+    fn toasts(&self) -> MutexGuard<'_, Toasts> {
+        self.toasts
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(toaster);
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets what shows desktop notifications, and shows the latest one that
+    /// arrived before it; until then only that one is kept.
+    pub fn set_toaster(&self, toaster: Toaster) {
+        let mut toasts = self.toasts();
+        if let Some((room, sender)) = toasts.waiting.take() {
+            toaster(&room, &sender);
+        }
+        toasts.show = Some(toaster);
     }
 
     /// Forwards a core event to the page. Called on the core reader thread.
@@ -192,15 +209,15 @@ impl Subscriptions {
             }
             // Names only; the core bounds them, and so does this check.
             Event::Notification { room, sender } => {
-                if room.len() <= MAX_NOTIFICATION_NAME_BYTES
-                    && sender.len() <= MAX_NOTIFICATION_NAME_BYTES
-                    && let Some(toaster) = self
-                        .toaster
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .as_ref()
+                if room.len() > MAX_NOTIFICATION_NAME_BYTES
+                    || sender.len() > MAX_NOTIFICATION_NAME_BYTES
                 {
-                    toaster(&room, &sender);
+                    return;
+                }
+                let mut toasts = self.toasts();
+                match &toasts.show {
+                    Some(toaster) => toaster(&room, &sender),
+                    None => toasts.waiting = Some((room, sender)),
                 }
             }
         }

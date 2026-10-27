@@ -16,7 +16,9 @@
     settings: AccountSettings;
     failure: string | null;
     mac: boolean;
-    onchange: (next: AccountSettings) => void;
+    // Only the settings a control changes; the caller lays them over the
+    // stored ones.
+    onchange: (patch: Partial<AccountSettings>) => void;
   } = $props();
 
   let level = $state<NotificationLevel | null>(null);
@@ -71,7 +73,7 @@
         type="checkbox"
         role="switch"
         checked={settings.enterSends}
-        onchange={(event) => onchange({ ...settings, enterSends: event.currentTarget.checked })}
+        onchange={(event) => onchange({ enterSends: event.currentTarget.checked })}
       />
       <span>Enter sends the message</span>
     </label>
@@ -89,7 +91,7 @@
       class="field"
       value={settings.chatTextPercent}
       onchange={(event) =>
-        onchange({ ...settings, chatTextPercent: Number(event.currentTarget.value) })}
+        onchange({ chatTextPercent: Number(event.currentTarget.value) })}
     >
       {#each CHAT_TEXT_SIZES as size (size)}
         <option value={size}>{size}%{size === 100 ? ' (normal)' : ''}</option>
@@ -101,7 +103,7 @@
       class="field"
       value={settings.interfaceTextPercent}
       onchange={(event) =>
-        onchange({ ...settings, interfaceTextPercent: Number(event.currentTarget.value) })}
+        onchange({ interfaceTextPercent: Number(event.currentTarget.value) })}
     >
       {#each INTERFACE_TEXT_SIZES as size (size)}
         <option value={size}>{size}%{size === 100 ? ' (normal)' : ''}</option>
@@ -143,7 +145,7 @@
         role="switch"
         checked={settings.desktopNotifications}
         onchange={(event) =>
-          onchange({ ...settings, desktopNotifications: event.currentTarget.checked })}
+          onchange({ desktopNotifications: event.currentTarget.checked })}
       />
       <span>Show desktop notifications</span>
     </label>

@@ -1115,7 +1115,7 @@
             {settings}
             failure={settingsFailure}
             {mac}
-            onchange={(next) => settingsKeeper.change(next)}
+            onchange={(patch) => settingsKeeper.change(patch)}
           />
         {:else}
           <section class="settings-page" aria-labelledby="preferences-heading">

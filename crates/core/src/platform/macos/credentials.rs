@@ -359,10 +359,7 @@ impl CredentialSource for NativePrompt {
 
     fn choose_recovery_key_file(&self) -> Result<Option<std::path::PathBuf>, PromptError> {
         let (title, suggested) = prompt_text::SAVE_RECOVERY_KEY;
-        super::pick::save_panel(title, suggested).map_err(|error| match error {
-            persephone_core_protocol::ErrorCode::Unavailable => PromptError::Unsupported,
-            _ => PromptError::Failed,
-        })
+        super::pick::save_panel(title, suggested)
     }
 }
 

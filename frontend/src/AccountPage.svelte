@@ -38,12 +38,20 @@
   const phone = $derived(phoneNumber(country, number));
   const canChange = $derived(list?.canChange ?? false);
 
+  // Only the newest listing is shown; a failed one shows its failure, not
+  // an older list.
+  let listRequest = 0;
   async function load() {
+    const request = ++listRequest;
     listFailure = null;
     try {
-      list = await threePids();
+      const listed = await threePids();
+      if (request === listRequest) list = listed;
     } catch (reason) {
-      listFailure = refusalText(reason);
+      if (request === listRequest) {
+        list = null;
+        listFailure = refusalText(reason);
+      }
     }
   }
 
@@ -52,15 +60,22 @@
   async function run(
     kind: NonNullable<typeof busy>,
     action: () => Promise<AccountChange>,
-    report: (code: AccountChange | null, text: string) => void
+    report: (code: AccountChange | null, text: string) => void | Promise<void>
   ) {
     if (busy) return;
     busy = kind;
     try {
-      const code = await action();
-      report(code, changeText(code));
-    } catch (reason) {
-      report(null, refusalText(reason));
+      let code: AccountChange | null = null;
+      let text: string;
+      try {
+        code = await action();
+        text = changeText(code);
+      } catch (reason) {
+        text = refusalText(reason);
+      }
+      // A report that lists the addresses again holds the next change back
+      // until the list is current.
+      await report(code, text);
     } finally {
       busy = null;
     }
@@ -81,9 +96,9 @@
     });
   }
 
-  function addressDone(code: AccountChange | null, text: string) {
+  function addressDone(code: AccountChange | null, text: string): Promise<void> {
     addressResult = { ok: code === 'done' || code === 'token_sent', text };
-    load();
+    return load();
   }
 
   function sendEmailLink(event: SubmitEvent) {
@@ -92,7 +107,7 @@
     addressResult = null;
     run('request', () => requestEmailToken(email.trim()), (code, text) => {
       if (code === 'token_sent') email = '';
-      addressDone(code, code === 'token_sent' ? 'The homeserver sent a link to that address. Open it, then press Add.' : text);
+      return addressDone(code, code === 'token_sent' ? 'The homeserver sent a link to that address. Open it, then press Add.' : text);
     });
   }
 
@@ -103,7 +118,7 @@
     addressResult = null;
     run('request', () => requestPhoneToken(code, digits), (result, text) => {
       if (result === 'token_sent') number = '';
-      addressDone(
+      return addressDone(
         result,
         result === 'token_sent' ? 'The homeserver sent a code to that number. Press Add, then type the code in the window Persephone opens.' : text
       );

@@ -81,35 +81,69 @@ function keeper() {
   return { kept, waiting, shown };
 }
 
+// The account's stored settings in these tests: everything differs from the
+// defaults, so a default written over a stored setting shows.
+const STORED = {
+  enterSends: false,
+  chatTextPercent: 150,
+  interfaceTextPercent: 125,
+  desktopNotifications: true
+};
+const { DEFAULT_SETTINGS } = preferences;
+
 test('GIVEN a signed-in account WHEN its settings load THEN they are shown', async () => {
   const { kept, waiting, shown } = keeper();
   const loading = kept.load();
-  waiting.load[0].resolve({ enterSends: false });
+  waiting.load[0].resolve(STORED);
   await loading;
-  assert.deepEqual(shown.settings, { enterSends: false });
+  assert.deepEqual(shown.settings, STORED);
   assert.equal(shown.failure, null);
 });
 
-test('GIVEN a change made while the settings load WHEN the load finishes later THEN the change stays', async () => {
+test('GIVEN a change made while the settings load WHEN the load finishes THEN only that setting changes and the stored ones are kept', async () => {
   const { kept, waiting, shown } = keeper();
   const loading = kept.load();
-  const changing = kept.change({ enterSends: false });
-  assert.deepEqual(shown.settings, { enterSends: false }, 'shown at once');
+  const changing = kept.change({ chatTextPercent: 90 });
+  assert.equal(shown.settings.chatTextPercent, 90, 'shown at once');
   await tick();
+  assert.equal(waiting.save.length, 0, 'nothing is saved before the stored settings are known');
+  waiting.load[0].resolve(STORED);
+  await loading;
+  assert.deepEqual(shown.settings, { ...STORED, chatTextPercent: 90 });
+  await tick();
+  assert.deepEqual(waiting.save[0].settings, { ...STORED, chatTextPercent: 90 }, 'the stored settings are not overwritten');
   waiting.save[0].resolve();
-  waiting.load[0].resolve({ enterSends: true });
-  await Promise.all([loading, changing]);
-  assert.deepEqual(shown.settings, { enterSends: false });
+  await changing;
+  assert.deepEqual(shown.settings, { ...STORED, chatTextPercent: 90 });
+  assert.equal(shown.failure, null);
 });
 
-test('GIVEN a change WHEN the core refuses to save it THEN the old setting returns with a failure', async () => {
+test('GIVEN a change WHEN the core refuses to save it THEN only that setting returns, with a failure', async () => {
   const { kept, waiting, shown } = keeper();
-  const changing = kept.change({ enterSends: false });
+  const loading = kept.load();
+  waiting.load[0].resolve(STORED);
+  await loading;
+  const changing = kept.change({ enterSends: true });
   await tick();
-  assert.deepEqual(waiting.save[0].settings, { enterSends: false }, 'every setting is sent');
+  assert.deepEqual(waiting.save[0].settings, { ...STORED, enterSends: true }, 'every setting is sent');
   waiting.save[0].reject('locked');
   await changing;
-  assert.deepEqual(shown.settings, preferences.DEFAULT_SETTINGS);
+  assert.deepEqual(shown.settings, STORED);
+  assert.equal(shown.failure, preferences.SAVE_FAILED);
+});
+
+test('GIVEN settings that cannot be read WHEN a change is made THEN they are read again first, and without them nothing is saved', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  waiting.load[0].reject('internal');
+  await loading;
+  const changing = kept.change({ desktopNotifications: true });
+  await tick();
+  assert.equal(waiting.load.length, 2, 'read again before saving');
+  waiting.load[1].reject('internal');
+  await changing;
+  assert.equal(waiting.save.length, 0, 'the defaults are never saved over unread settings');
+  assert.deepEqual(shown.settings, DEFAULT_SETTINGS);
   assert.equal(shown.failure, preferences.SAVE_FAILED);
 });
 
@@ -117,9 +151,9 @@ test('GIVEN an account signed out WHEN its load finishes afterwards THEN the def
   const { kept, waiting, shown } = keeper();
   const loading = kept.load();
   kept.clear();
-  waiting.load[0].resolve({ enterSends: false });
+  waiting.load[0].resolve(STORED);
   await loading;
-  assert.deepEqual(shown.settings, preferences.DEFAULT_SETTINGS);
+  assert.deepEqual(shown.settings, DEFAULT_SETTINGS);
 });
 
 test('GIVEN settings that cannot be read WHEN they load THEN the defaults stay and nothing is reported', async () => {
@@ -133,18 +167,20 @@ test('GIVEN settings that cannot be read WHEN they load THEN the defaults stay a
 
 test('GIVEN two quick changes WHEN saved THEN the second save starts only after the first, in order', async () => {
   const { kept, waiting, shown } = keeper();
-  const first = kept.change({ enterSends: false });
-  const second = kept.change({ enterSends: true });
+  const loading = kept.load();
+  waiting.load[0].resolve(STORED);
+  await loading;
+  const first = kept.change({ enterSends: true });
+  const second = kept.change({ chatTextPercent: 80 });
   await tick();
   assert.equal(waiting.save.length, 1, 'one save at a time');
-  assert.deepEqual(waiting.save[0].settings, { enterSends: false });
+  assert.deepEqual(waiting.save[0].settings, { ...STORED, enterSends: true, chatTextPercent: 80 });
   waiting.save[0].reject('internal');
   await first;
   await tick();
   assert.equal(waiting.save.length, 2, 'a failed save does not stop the next');
-  assert.deepEqual(waiting.save[1].settings, { enterSends: true });
   waiting.save[1].resolve();
   await second;
-  assert.deepEqual(shown.settings, { enterSends: true }, 'the newer change stays');
+  assert.equal(shown.settings.chatTextPercent, 80, 'the newer change stays');
   assert.equal(shown.failure, null);
 });

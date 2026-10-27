@@ -1490,8 +1490,9 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
 }
 
 /// GIVEN a desktop-notification event from the core WHEN it is dispatched
-/// THEN only the toaster sees its names; no page channel gets anything, and
-/// oversized names are dropped.
+/// THEN only the toaster sees its names, the latest one waits for the toaster
+/// to be installed, no page channel gets anything, and oversized names are
+/// dropped.
 #[test]
 fn given_a_notification_event_then_only_the_toaster_sees_it() {
     use std::sync::Mutex;
@@ -1527,19 +1528,22 @@ fn given_a_notification_event_then_only_the_toaster_sees_it() {
         ),
     )
     .unwrap();
-    // Before a toaster is set, a notification is dropped.
-    subscriptions.dispatch(Event::Notification {
-        room: "Plans".into(),
-        sender: "Bob".into(),
-    });
+    // Before a toaster is set, only the latest notification is kept, and
+    // shown once it is.
+    for room in ["Earlier", "Plans"] {
+        subscriptions.dispatch(Event::Notification {
+            room: room.into(),
+            sender: "Bob".into(),
+        });
+    }
     let toasts: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
     let shown = toasts.clone();
     subscriptions.set_toaster(Box::new(move |room, sender| {
         shown.lock().unwrap().push((room.into(), sender.into()));
     }));
     subscriptions.dispatch(Event::Notification {
-        room: "Plans".into(),
-        sender: "Bob".into(),
+        room: "Later".into(),
+        sender: "Ann".into(),
     });
     subscriptions.dispatch(Event::Notification {
         room: "x".repeat(513),
@@ -1547,7 +1551,10 @@ fn given_a_notification_event_then_only_the_toaster_sees_it() {
     });
     assert_eq!(
         *toasts.lock().unwrap(),
-        vec![("Plans".to_owned(), "Bob".to_owned())]
+        vec![
+            ("Plans".to_owned(), "Bob".to_owned()),
+            ("Later".to_owned(), "Ann".to_owned())
+        ]
     );
     assert!(
         delivered.lock().unwrap().is_empty(),
