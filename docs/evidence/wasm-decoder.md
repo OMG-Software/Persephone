@@ -1,5 +1,10 @@
 # WebAssembly decoder sandbox
 
+> Historical run record (20 October 2026). Since 24 October 2026 the guest has a
+> fourth import, `write_stripped`, and runs inside the contained worker that the
+> core uses for images. See [image messaging](../architecture/image-messaging.md#guest-operations)
+> for the current design.
+
 Checked 20 October 2026 on Windows 11 Pro x64 (build 26200), rustc 1.99.1.
 Implements [ADR-0003](../adr/0003-run-untrusted-media-decoding-in-a-webassembly-sandbox.md).
 **Result: the decoder runs as a WebAssembly guest whose only capabilities are

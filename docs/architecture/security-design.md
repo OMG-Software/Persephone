@@ -2,6 +2,8 @@
 
 19 October 2026. Planning only: no controls have been implemented or tested. The high-risk-user objective and Tauri framework choice are confirmed; the ADR's security constraints apply, while detailed mechanisms and defaults remain proposals.
 
+26 October 2026 update: [Why a web view](#why-a-web-view) describes controls as built, with their evidence. The other sections still record the 19 October plan. For current state, use the [milestone status](development-plan.md#milestone-status).
+
 The framework choice is now accepted: [ADR-0000](../adr/0000-use-tauri-for-the-desktop-client.md)
 selects Tauri with a Rust core and locally bundled web UI. The record's security
 constraints govern implementation; detailed mechanisms and verification remain outstanding.
@@ -90,6 +92,78 @@ The earlier Slint-first proposal remains recorded in its research report. ADR-00
 
 Slint has GPLv3, royalty-free, and commercial framework license choices; confirm exact terms and project distribution before adopting it. Rust syntax throughout is a separate preference from using Rust for application logic.
 
+## Why a web view
+
+26 October 2026. This section explains why the web view is the more secure
+design for Persephone as built. It is a design argument from the implemented
+Windows build. It is not a measured ranking against Slint, iced or GTK4 (see
+[UI choices](#ui-choices)). "Implemented" means built and covered by the linked
+evidence. It does not mean that a release gate has passed.
+
+A common belief is that a native toolkit is safer than a web view, because it
+has no web engine. That belief looks only at the parser surface. The deciding
+question is what a hostile message or a compromised renderer can cause outside
+its intended authority. In Persephone, the web view design gives a better
+answer to that question, for these reasons.
+
+1. **The process that draws hostile content holds no secrets.** The web view
+   runs in `persephone-ui`, which has no keys, tokens or store handles
+   ([ADR-0004](../adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)).
+   A bug in text layout, fonts or markup gets only that process's authority:
+   it can read the messages that the UI shows and use the operations that the
+   UI is allowed, but it cannot read keys, tokens or stores. In the native
+   toolkits we evaluated, the UI draws in the same process as the application
+   logic, unless the application builds this split itself.
+2. **Rendering has two layers of containment.** The web engine runs page
+   content in its own restricted renderer process. On Windows, the core also
+   assigns the UI process to a Job with a memory limit and kill-on-close; the
+   web view processes that the UI starts after that are in the Job too. In
+   measured floods, the core's memory did not change. At 64 and 128 MiB the UI
+   stayed alive below its limit; at 256 MiB the renderer, also in the Job,
+   failed to build the message. The core assigns the UI just after starting
+   it, not before it runs (`crates/core/src/platform/windows/ui.rs`), so
+   nothing guarantees that a web view process started in that short interval
+   is in the Job.
+3. **Only bundled code runs.** The homeserver and other users send data, never
+   code. The Content Security Policy blocks inline scripts, string evaluation
+   and external fetches. Navigation and new windows are blocked.
+4. **Received content stays inert.** Messages, names and room data are shown
+   as escaped text, never as raw HTML. Received images never reach the web
+   engine's decoders. The media worker decodes them in a WebAssembly guest,
+   and the page draws the bounded pixels on a canvas
+   ([image messaging](image-messaging.md#pixel-transport)).
+5. **The UI's authority is narrow.** The UI can ask only for named application
+   operations. It has no general shell, filesystem, network or key-export
+   access. Each request reaches the core as one bounded frame, and the core
+   validates it and treats the UI as untrusted. Tauri capabilities are a first
+   filter, not the only boundary.
+6. **The engine is heavily tested and patched.** Browser engines get
+   continuous fuzzing and security updates. On Windows, Persephone uses the
+   Evergreen WebView2 runtime, which Microsoft updates automatically.
+
+| Control | Provided by | State | Evidence |
+| --- | --- | --- | --- |
+| Keyless UI process | Persephone (ADR-0004) | Implemented on Windows. macOS built and CI-tested only. Linux UI host not built; the core fails closed | [Core/UI split](../evidence/ipc-transport.md#after-the-coreui-split) |
+| UI memory limit and kill-on-close | Persephone, Windows Job | Windows only. The UI is assigned to the Job just after it starts, not started suspended inside it. macOS has no Job equivalent: the UI's memory is not capped (accepted residual risk, [ADR-0011](../adr/0011-macos-platform-layer.md)) | [Core/UI split](../evidence/ipc-transport.md#after-the-coreui-split) |
+| Renderer process sandbox | Web engine vendor | Not tested by Persephone | [WebView2 process model](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model) |
+| CSP, navigation and new-window blocks | Persephone configuration of Tauri | Checked in WebView2 by a manual DevTools probe (inline script, `eval`, external `fetch`, navigation, `window.open`), not an automated test | [Tauri shell](../evidence/tauri-shell.md) |
+| Escaped text, no raw HTML | Persephone frontend | Frontend tests render hostile strings as text and reject raw HTML insertion in source | [Frontend](../evidence/frontend.md), [Tauri shell](../evidence/tauri-shell.md) |
+| Images decoded outside the web engine | Persephone media worker (ADR-0003) | Implemented on Windows. The guest has no network access; the worker process is not network-denied | [Image messaging](../evidence/image-messaging.md), [Windows sandbox](../evidence/windows-sandbox.md) |
+| Command allowlist and core-side validation | Persephone, Tauri capabilities | Unregistered commands, Tauri plugin commands, remote origins and forged invoke keys refused in mock-runtime tests. In the real web view, only a plugin command (`window\|close`) was tried, and it was denied | [Tauri shell](../evidence/tauri-shell.md) |
+| Engine updates | Microsoft (Evergreen WebView2) | Tauri's default install mode; not checked in a packaged build | [WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution) |
+
+The argument has these limits:
+
+- A compromised UI can still read the messages it shows, and can misuse the
+  operations it is allowed, such as sending a message. It cannot read the keys.
+- The UI can still be denied service. ADR-0004 protects the core, not the
+  interface.
+- The web view is only as safe as the installed engine. Each OS needs a
+  patched engine, and Persephone does not yet check the engine version.
+- The renderer sandbox and engine updates are vendor controls that Persephone
+  has not tested. The controls that Persephone tests are verified on Windows
+  only.
+
 ## Feasibility and release gates
 
 1. UI prototype: long/hostile timelines, Unicode and bidirectional text, IME, selectable text, keyboard navigation, screen readers, scaling, secure identity presentation, and responsive updates on all three OSes.
@@ -113,3 +187,4 @@ Primary sources checked on 19 October 2026; moving documentation must be recheck
 - [GTK overview](https://docs.gtk.org/gtk4/overview.html) and [accessibility documentation](https://docs.gtk.org/gtk4/section-accessibility.html): native toolkit and accessibility design.
 - [Tauri capabilities](https://tauri.app/security/capabilities/): permission boundaries and stated limitations.
 - [Tauri architecture](https://tauri.app/concept/architecture/) and [CSP](https://tauri.app/security/csp/): webview architecture and web-content restrictions.
+- [WebView2 process model](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model) and [distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution), checked on 26 October 2026: renderer processes and the Evergreen runtime's automatic updates; not tested by Persephone.

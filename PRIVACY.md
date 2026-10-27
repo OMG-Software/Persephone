@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 24 October 2026
+Last updated: 26 October 2026
 
 This policy tells you what data the Persephone project collects, what the
 Persephone app sends and stores, and where other parties process data. It
@@ -65,6 +65,30 @@ start it. Persephone shows a new recovery key once and does not store it.
 The homeserver shares room data with the other servers whose users are in
 the room. The other people in a room receive your messages and can see your
 membership. This is how Matrix works, and the app cannot change it.
+
+### Starting a conversation
+
+When you start a conversation, the app first looks for an encrypted room that
+you have joined, that is marked as a direct conversation with that person, and
+whose only members are the two of you (the person joined or invited). If it
+finds one, it opens it and sends no request to start a new one. Otherwise, the
+app needs the person's cross-signing identity. If the app
+does not have it yet, it sends the Matrix ID that you enter to your homeserver
+to ask for it. Only if the person has a cross-signing identity does the app
+ask the homeserver to create an encrypted room and to invite them. Having
+encryption keys without a cross-signing identity is not enough. The invitation
+also reaches the person's homeserver, as any Matrix invitation does.
+
+Search for people is off each time you open the dialog. If you turn it on, the
+app sends what you type, without leading or trailing spaces, to your
+homeserver's user directory. It sends it 0.4 seconds after you stop typing,
+once it is at least two characters long. Your homeserver can keep a record of
+these searches. Results show names and Matrix IDs as text. The app fetches no
+avatars.
+
+When you accept a direct-message invitation, the app joins the room. When you
+decline it, the app leaves the room. Your homeserver and the person who
+invited you can see either answer.
 
 ### What encryption protects
 

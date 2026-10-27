@@ -1,7 +1,7 @@
 # Project plan
 
 Status: see the [milestone status](../architecture/development-plan.md#milestone-status)
-(no milestone has passed its exit gate; P0 to P2 in progress, P3 started). The
+(no milestone has passed its exit gate; P0 to P7 in progress). The
 [P0 feasibility workbench](feasibility.md) records completed checks and open gates.
 Only the confirmed-requirements section records approved requirements; the remaining design is proposed.
 

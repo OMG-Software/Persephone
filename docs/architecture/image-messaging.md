@@ -12,14 +12,20 @@ passes.
 * PNG and JPEG only, still images only. An APNG shows its default image.
 * One image per message, as `m.image`. No captions, galleries, thumbnails or
   blurhash in this release.
-* Windows only, because the contained worker exists only on Windows. On other
-  platforms both flows fail closed with `unavailable`.
+* The core uses the contained worker on Windows, Linux and macOS, but only
+  Windows is verified live. On Linux the core does not start the UI yet (no
+  vault, prompts or file dialog), so neither flow can be reached there. macOS
+  has its file dialog and worker, tested in CI only. On a platform without a
+  contained worker, both flows fail closed with `unavailable`.
 
 ## Guest operations
 
 The guest in `crates/media-decoder` gains one operation, and the decode
 operation gains one output. Both change the ABI together with the sandbox
-allowlist (`crates/media-sandbox`) and the worker (`crates/media-worker`).
+allowlist (`crates/media-sandbox`) and the worker (`crates/media-worker`). As
+built, the guest's host imports are `input_len`, `read_input`, `write_output`
+and `write_stripped`. The guest calls `write_stripped` with a pointer and a
+length to hand the stripped copy from its memory to the host.
 
 * **Decode** (existing). It also reports the EXIF orientation (1 to 8, or 1
   when absent or invalid) of a JPEG. The host applies the rotation or flip to

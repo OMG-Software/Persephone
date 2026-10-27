@@ -1,6 +1,6 @@
 # Key-holding core
 
-This crate is the application entry process. ADR-0004 assigns sessions, SDK work, keys, stores, and the media broker to this process. Current view fixtures and demo events are synthetic; do not describe them as Matrix integration.
+This crate is the application entry process. ADR-0004 assigns sessions, SDK work, keys, stores, and the media broker to this process. The core runs real Matrix sessions through the SDK. The `--demo` view fixtures and demo events are synthetic; do not describe them as Matrix integration.
 
 - Treat every UI request as hostile. Use the budgeted frame reader before body allocation, strict protocol decoding, and explicit argument validation.
 - Keep bounded projections in `src/views.rs`. Preserve room, item, serialized-byte, name, body, and cursor limits. Truncate text on valid character boundaries.
