@@ -71,6 +71,7 @@
   let tab = $state<Tab>('general');
   let dialog = $state<HTMLDialogElement | null>(null);
   let body = $state<HTMLDivElement | null>(null);
+  let question = $state<HTMLDivElement | null>(null);
   let settings = $state<RoomSettings | null>(null);
   let loadFailure = $state<string | null>(null);
   let busy = $state(false);
@@ -187,7 +188,9 @@
     confirming = null;
     failure = null;
     done = null;
-    if (next === 'people' && members === null) loadMembers();
+    // Read again on every visit: members may have changed meanwhile. The
+    // old list stays shown until the new one arrives.
+    if (next === 'people') loadMembers();
   }
 
   async function apply(change: RoomChange, success = 'Saved.') {
@@ -223,6 +226,12 @@
     done = null;
     confirming = { change, question, action };
   }
+
+  // A question takes focus when it appears, so keyboard and screen-reader
+  // users meet it before anything irreversible happens.
+  $effect(() => {
+    if (confirming && question) question.focus();
+  });
 
   function dismiss() {
     confirming = null;
@@ -840,7 +849,13 @@
       {#if confirming || failure || done}
         <div class="room-settings-feedback">
       {#if confirming}
-        <div class="confirm" role="alertdialog" aria-labelledby="room-settings-question">
+        <div
+          class="confirm"
+          role="alertdialog"
+          aria-labelledby="room-settings-question"
+          tabindex="-1"
+          bind:this={question}
+        >
           <p id="room-settings-question">{confirming.question}</p>
           <button
             type="button"

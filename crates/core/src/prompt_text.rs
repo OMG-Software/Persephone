@@ -97,7 +97,8 @@ pub fn secret<'a>(request: &SecretPrompt<'a>) -> SecretText<'a> {
             step,
         } => {
             let choose = format!(
-                "Choose a password for the new account {username} on {host} and                  type it in the password field. Only Persephone's core sees it."
+                "Choose a password for the new account {username} on {host} and \
+                 type it in the password field. Only Persephone's core sees it."
             );
             SecretText {
                 caption: "Create a Matrix account",
@@ -117,7 +118,9 @@ pub fn secret<'a>(request: &SecretPrompt<'a>) -> SecretText<'a> {
         SecretPrompt::RegistrationToken { host } => SecretText {
             caption: "Create a Matrix account",
             message: format!(
-                "{host} asks for a registration token to create an account.                  Type the token you were given in the password field. Only                  Persephone's core sees it."
+                "{host} asks for a registration token to create an account. \
+                 Type the token you were given in the password field. Only \
+                 Persephone's core sees it."
             ),
             field: Some("Registration token"),
             max_chars: MAX_REGISTRATION_TOKEN_CHARS,
@@ -236,6 +239,65 @@ mod tests {
         );
         let short = secret(&SecretPrompt::NewPassphrase(NewPassphrase::TooShort));
         assert!(short.message.contains(&MIN_PASSPHRASE_CHARS.to_string()));
+        let token = secret(&SecretPrompt::RegistrationToken { host: "b" });
+        assert_eq!(
+            (token.field, token.max_chars),
+            (Some("Registration token"), MAX_REGISTRATION_TOKEN_CHARS)
+        );
+        let account = secret(&SecretPrompt::NewAccountPassword {
+            username: "al",
+            host: "b",
+            step: NewPassword::Mismatch,
+        });
+        assert_eq!(account.field, Some("al"));
+        assert!(
+            account
+                .message
+                .starts_with("The two passwords were different.")
+        );
+    }
+
+    /// GIVEN every secret prompt WHEN its text is built THEN the message has
+    /// no run of spaces or stray line breaks from the source layout.
+    #[test]
+    fn given_secret_prompts_then_messages_have_no_layout_gaps() {
+        let mut prompts = vec![
+            SecretPrompt::Password {
+                user_id: "@a:b",
+                host: "b",
+            },
+            SecretPrompt::RecoveryKey { user_id: "@a:b" },
+            SecretPrompt::Passphrase { retry: false },
+            SecretPrompt::Passphrase { retry: true },
+            SecretPrompt::RegistrationToken { host: "b" },
+        ];
+        for step in [
+            NewPassphrase::Choose,
+            NewPassphrase::Upgrade,
+            NewPassphrase::Confirm,
+            NewPassphrase::TooShort,
+            NewPassphrase::Mismatch,
+        ] {
+            prompts.push(SecretPrompt::NewPassphrase(step));
+        }
+        for step in [
+            NewPassword::Choose,
+            NewPassword::Confirm,
+            NewPassword::Mismatch,
+        ] {
+            prompts.push(SecretPrompt::NewAccountPassword {
+                username: "al",
+                host: "b",
+                step,
+            });
+        }
+        for prompt in prompts {
+            let message = secret(&prompt).message;
+            assert!(
+                !message.contains("  ") && !message.contains('\n'),
+                "{prompt:?}: {message:?}"
+            );
+        }
     }
 
     /// GIVEN a copy hint WHEN the recovery key text is built THEN the hint
