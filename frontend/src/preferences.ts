@@ -5,7 +5,38 @@
 import type { AccountSettings } from './bridge';
 
 /** The settings an account has until its own have loaded. */
-export const DEFAULT_SETTINGS: AccountSettings = { enterSends: true };
+export const DEFAULT_SETTINGS: AccountSettings = {
+  enterSends: true,
+  chatTextPercent: 100,
+  interfaceTextPercent: 100,
+  desktopNotifications: false
+};
+
+/**
+ * The text sizes offered, in percent of the normal size. The core refuses
+ * any size outside 80 to 200 for messages and 80 to 150 for the interface
+ * (the whole interface grows with it, so it stops sooner).
+ */
+export const CHAT_TEXT_SIZES: readonly number[] = [80, 90, 100, 110, 125, 150, 175, 200];
+export const INTERFACE_TEXT_SIZES: readonly number[] = [80, 90, 100, 110, 125, 150];
+
+function within(value: number, sizes: readonly number[]): number {
+  const low = sizes[0];
+  const high = sizes[sizes.length - 1];
+  return Number.isFinite(value) ? Math.min(high, Math.max(low, value)) : 100;
+}
+
+/**
+ * The shell's scale factors for these settings: `interface` zooms the whole
+ * interface, and `chat` sizes message text on its own. Message text is
+ * divided by the interface zoom, so the two settings do not multiply. A size
+ * out of bounds is held to the nearest bound.
+ */
+export function textScale(settings: AccountSettings): { interface: number; chat: number } {
+  const ui = within(settings.interfaceTextPercent, INTERFACE_TEXT_SIZES) / 100;
+  const chat = within(settings.chatTextPercent, CHAT_TEXT_SIZES) / 100;
+  return { interface: ui, chat: chat / ui };
+}
 
 export const SAVE_FAILED = 'The setting could not be saved to this account.';
 

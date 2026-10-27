@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-request-phone-token"
+description = "Enables the request_phone_token command without any pre-configured scope."
+commands.allow = ["request_phone_token"]
+
+[[permission]]
+identifier = "deny-request-phone-token"
+description = "Denies the request_phone_token command without any pre-configured scope."
+commands.deny = ["request_phone_token"]

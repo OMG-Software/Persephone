@@ -20,5 +20,10 @@ export const securityErrorText: Record<SecurityError, string> = {
     'This device cannot vouch for other people yet. Verify it with your recovery key first.',
   not_direct_room:
     'Verification needs a direct-message room that this person is still in. Persephone does not create one or invite them.',
+  cannot_sign_devices:
+    'This device cannot vouch for your other sessions yet. Verify it with your recovery key first.',
+  device_not_found: 'The homeserver no longer lists that session. Refresh the list.',
+  recovery_key_not_saved:
+    'The new recovery key was shown, but saving it to the file failed. Write it down now: it cannot be shown again.',
   failed: 'That did not work.'
 };

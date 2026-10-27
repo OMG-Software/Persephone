@@ -4,6 +4,7 @@
 // do not validate it; the Rust side checks reply shapes and owns authorization.
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
+  AccountChange,
   AccountSettings,
   AccountStatus,
   AppStatus,
@@ -21,6 +22,8 @@ import type {
   JoinRule,
   LevelKey,
   Membership,
+  NotificationLevel,
+  NotificationSettings,
   PendingMessage,
   ProfileList,
   ProfileSlot,
@@ -38,6 +41,9 @@ import type {
   RoomList,
   SecurityStatus,
   StoreState,
+  ThreePid,
+  ThreePidList,
+  ThreePidMedium,
   TimelineItem,
   TimelinePage,
   UserMatch,
@@ -46,6 +52,7 @@ import type {
 import { parseBand, type Band } from '../image.ts';
 
 export type {
+  AccountChange,
   AccountSettings,
   AccountStatus,
   AppStatus,
@@ -63,6 +70,8 @@ export type {
   JoinRule,
   LevelKey,
   Membership,
+  NotificationLevel,
+  NotificationSettings,
   ProfileList,
   ProfileSlot,
   RoomChange,
@@ -80,6 +89,9 @@ export type {
   SecurityStatus,
   SignInError,
   StoreState,
+  ThreePid,
+  ThreePidList,
+  ThreePidMedium,
   TimelineItem,
   TimelinePage,
   UserMatch,
@@ -411,9 +423,83 @@ export function accountSettings(): Promise<AccountSettings> {
   return invoke<AccountSettings>('account_settings');
 }
 
-/** Replaces this account's settings; every setting is sent. */
+/**
+ * Replaces this account's settings; every setting is sent, and nothing else.
+ * Rejects with `invalid_argument` when a text size is out of its bounds.
+ */
 export function setAccountSettings(settings: AccountSettings): Promise<void> {
-  return invoke<void>('set_account_settings', { enterSends: settings.enterSends });
+  return invoke<void>('set_account_settings', {
+    enterSends: settings.enterSends,
+    chatTextPercent: settings.chatTextPercent,
+    interfaceTextPercent: settings.interfaceTextPercent,
+    desktopNotifications: settings.desktopNotifications
+  });
+}
+
+/**
+ * Changes this account's password. The core asks for the current password
+ * and the new one (twice) in its own windows; no password crosses. Resolves
+ * with how it ended. `signOutOthers` signs out every other device.
+ */
+export function changePassword(signOutOthers: boolean): Promise<AccountChange> {
+  return invoke<AccountChange>('change_password', { signOutOthers });
+}
+
+/** This account's email addresses and phone numbers, and any one waiting. */
+export function threePids(): Promise<ThreePidList> {
+  return invoke<ThreePidList>('three_pids');
+}
+
+/** Asks the homeserver to send a confirmation link to this email address. */
+export function requestEmailToken(email: string): Promise<AccountChange> {
+  return invoke<AccountChange>('request_email_token', { email });
+}
+
+/**
+ * Asks the homeserver to send a code to this phone number: a two-letter
+ * country code and the number's digits as dialled in that country.
+ */
+export function requestPhoneToken(country: string, phoneNumber: string): Promise<AccountChange> {
+  return invoke<AccountChange>('request_phone_token', { country, phoneNumber });
+}
+
+/**
+ * Adds the address waiting to be added. The core asks for a phone's code and
+ * the account password in its own windows.
+ */
+export function addThreePid(): Promise<AccountChange> {
+  return invoke<AccountChange>('add_three_pid');
+}
+
+/** Removes an email address or phone number from this account. */
+export function removeThreePid(medium: ThreePidMedium, address: string): Promise<AccountChange> {
+  return invoke<AccountChange>('remove_three_pid', { medium, address });
+}
+
+/**
+ * Asks another of this account's devices, by its ID, to verify each other by
+ * comparing emoji. Progress arrives as security changes.
+ */
+export function verifyDevice(deviceId: string): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('verify_device', { deviceId });
+}
+
+/**
+ * Replaces the recovery key. The core warns, shows the new key and offers to
+ * save it in its own windows; the key never reaches this page.
+ */
+export function changeRecoveryKey(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('change_recovery_key');
+}
+
+/** This account's notification level, from its push rules. */
+export function notificationLevel(): Promise<NotificationSettings> {
+  return invoke<NotificationSettings>('notification_level');
+}
+
+/** Sets this account's notification level in its push rules. */
+export function setNotificationLevel(level: Exclude<NotificationLevel, 'custom'>): Promise<void> {
+  return invoke<void>('set_notification_level', { level });
 }
 
 /** The devices (sessions) signed in to this account. */

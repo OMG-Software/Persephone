@@ -54,7 +54,35 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.setDisplayName('Al'), 'set_display_name', { name: 'Al' }],
     [() => bridge.deviceList(), 'device_list', {}],
     [() => bridge.accountSettings(), 'account_settings', {}],
-    [() => bridge.setAccountSettings({ enterSends: false }), 'set_account_settings', { enterSends: false }],
+    [
+      () =>
+        bridge.setAccountSettings({
+          enterSends: false,
+          chatTextPercent: 120,
+          interfaceTextPercent: 90,
+          desktopNotifications: true
+        }),
+      'set_account_settings',
+      { enterSends: false, chatTextPercent: 120, interfaceTextPercent: 90, desktopNotifications: true }
+    ],
+    [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
+    [() => bridge.threePids(), 'three_pids', {}],
+    [() => bridge.requestEmailToken('a@example.org'), 'request_email_token', { email: 'a@example.org' }],
+    [
+      () => bridge.requestPhoneToken('GB', '07700900123'),
+      'request_phone_token',
+      { country: 'GB', phoneNumber: '07700900123' }
+    ],
+    [() => bridge.addThreePid(), 'add_three_pid', {}],
+    [
+      () => bridge.removeThreePid('email', 'a@example.org'),
+      'remove_three_pid',
+      { medium: 'email', address: 'a@example.org' }
+    ],
+    [() => bridge.verifyDevice('OTHER'), 'verify_device', { deviceId: 'OTHER' }],
+    [() => bridge.changeRecoveryKey(), 'change_recovery_key', {}],
+    [() => bridge.notificationLevel(), 'notification_level', {}],
+    [() => bridge.setNotificationLevel('mentions'), 'set_notification_level', { level: 'mentions' }],
     [() => bridge.profileList(), 'profile_list', {}],
     [() => bridge.addProfile(), 'add_profile', {}],
     [() => bridge.switchProfile(2), 'switch_profile', { slot: 2 }],
@@ -77,8 +105,38 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
 });
 
 test('GIVEN account settings WHEN saved THEN only the known settings cross, never extra fields', async () => {
-  const made = await sent(() => bridge.setAccountSettings({ enterSends: true, theme: 'dark' }));
-  assert.deepEqual(made.args, { enterSends: true });
+  const made = await sent(() =>
+    bridge.setAccountSettings({
+      enterSends: true,
+      chatTextPercent: 100,
+      interfaceTextPercent: 100,
+      desktopNotifications: false,
+      theme: 'dark'
+    })
+  );
+  assert.deepEqual(made.args, {
+    enterSends: true,
+    chatTextPercent: 100,
+    interfaceTextPercent: 100,
+    desktopNotifications: false
+  });
+});
+
+test('GIVEN the account-change calls WHEN made THEN no password, code, key or path argument exists', async () => {
+  const host = await readFile(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  for (const command of [
+    'change_password',
+    'add_three_pid',
+    'change_recovery_key',
+    'request_phone_token',
+    'verify_device'
+  ]) {
+    const names = hostArguments.get(command) ?? [];
+    assert.ok(host.includes(`async fn ${command}(`), command);
+    for (const name of names) {
+      assert.doesNotMatch(name, /password|code|token|key|path|secret/i, `${command}: ${name}`);
+    }
+  }
 });
 
 test('GIVEN a host reply WHEN a call resolves THEN the page gets it unchanged', async () => {

@@ -76,12 +76,15 @@ def main():
         run(["cargo", "build", *cargo_flags, "-p", "persephone-media-worker"], environment)
         run(["cargo", "test", *cargo_flags, "--workspace", "--all-targets"], environment)
         run(["cargo", "clippy", *cargo_flags, "--workspace", "--all-targets", "--", "-D", "warnings"], environment)
-        # Mock-homeserver account and registration tests need plain HTTP to
-        # loopback, which only the development feature accepts. The default
-        # build above is what ships.
+        # Mock-homeserver account, account-settings and registration tests
+        # need plain HTTP to loopback, which only the development feature
+        # accepts. The default build above is what ships.
         dev_core = ["-p", "persephone-core", "--features", "dev-disposable-servers"]
         run(
-            ["cargo", "test", *cargo_flags, *dev_core, "--lib", "--test", "account", "--test", "registration"],
+            [
+                "cargo", "test", *cargo_flags, *dev_core, "--lib",
+                "--test", "account", "--test", "account_settings", "--test", "registration",
+            ],
             environment,
         )
         run(["cargo", "clippy", *cargo_flags, *dev_core, "--all-targets", "--", "-D", "warnings"], environment)

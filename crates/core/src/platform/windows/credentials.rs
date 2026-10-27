@@ -7,6 +7,7 @@ use crate::credentials::{
     CredentialSource, Credentials, PromptError, SecretPrompt, checked_secret, from_wide,
 };
 use crate::prompt_text;
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::{
     Foundation::{ERROR_CANCELLED, ERROR_INSUFFICIENT_BUFFER, GetLastError},
@@ -170,6 +171,16 @@ impl CredentialSource for NativePrompt {
     ) -> Result<bool, PromptError> {
         let (caption, message) = prompt_text::identity_change(user_id, was_verified)?;
         yes_or_no(caption, &message)
+    }
+
+    fn confirm_recovery_key_change(&self) -> Result<bool, PromptError> {
+        let (caption, message) = prompt_text::RECOVERY_KEY_CHANGE;
+        yes_or_no(caption, message)
+    }
+
+    fn choose_recovery_key_file(&self) -> Result<Option<PathBuf>, PromptError> {
+        let (title, suggested) = prompt_text::SAVE_RECOVERY_KEY;
+        super::pick::save_dialog(title, suggested).map_err(|_| PromptError::Failed)
     }
 
     fn show_recovery_key(&self, user_id: &str, key: &str) -> Result<(), PromptError> {

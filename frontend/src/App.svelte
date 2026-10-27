@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import markUrl from './assets/mark.svg';
+  import AccountPage from './AccountPage.svelte';
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
   import Devices from './Devices.svelte';
@@ -10,6 +11,7 @@
   import JumpPalette from './JumpPalette.svelte';
   import NewConversation from './NewConversation.svelte';
   import NewRoom from './NewRoom.svelte';
+  import Preferences from './Preferences.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
   import RoomSettings from './RoomSettings.svelte';
   import Security from './Security.svelte';
@@ -21,7 +23,7 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
-  import { DEFAULT_SETTINGS, SettingsKeeper } from './preferences';
+  import { DEFAULT_SETTINGS, SettingsKeeper, textScale } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
   import { mergeNewest } from './timeline';
@@ -42,6 +44,8 @@
     setUpEncryption,
     setUpRecovery,
     verifyThisDevice,
+    verifyDevice,
+    changeRecoveryKey,
     acceptVerification,
     confirmVerification,
     cancelVerification,
@@ -142,6 +146,7 @@
   // they load and while no account is signed in.
   let settings = $state<AccountSettings>(DEFAULT_SETTINGS);
   let settingsFailure = $state<string | null>(null);
+  const scale = $derived(textScale(settings));
   const settingsKeeper = new SettingsKeeper(
     { load: accountSettings, save: setAccountSettings },
     (next, failure) => {
@@ -1000,7 +1005,9 @@
   </TipButton>
 {/snippet}
 
-<main>
+<!-- The account's text sizes: the interface zooms as a whole, and message
+     text has its own size (style.css). -->
+<main style:--ui-scale={scale.interface} style:--chat-scale={scale.chat}>
   {#if !status}
     <div class="centred">
       <section class="auth-card" aria-label="Persephone">
@@ -1061,9 +1068,25 @@
             <p class="lede">No account is signed in. All rooms and messages here are synthetic test data.</p>
           </section>
         {/if}
+      {:else if settingsTab === 'account'}
+        {#if signedIn}
+          <AccountPage native={mac ? 'macOS' : 'Windows'} />
+        {:else}
+          <section class="settings-page" aria-labelledby="account-heading">
+            <h2 id="account-heading">Account</h2>
+            <p class="lede">No account is signed in, so there is no password or address to change.</p>
+          </section>
+        {/if}
       {:else if settingsTab === 'devices'}
         {#if signedIn}
-          <Devices />
+          <Devices
+            canVerify={security?.identity === 'verified'}
+            busy={securityBusy}
+            onverify={(deviceId) => startSecurity(() => verifyDevice(deviceId))}
+          />
+          {#if securityFailure}
+            <p role="alert" class="error">{securityFailure}</p>
+          {/if}
         {:else}
           <section class="settings-page" aria-labelledby="devices-heading">
             <h2 id="devices-heading">Sessions</h2>
@@ -1071,34 +1094,19 @@
           </section>
         {/if}
       {:else if settingsTab === 'preferences'}
-        <section class="settings-page" aria-labelledby="preferences-heading">
-          <h2 id="preferences-heading">Preferences</h2>
-          {#if signedIn}
-            <p class="lede">These settings belong to this account and are kept in its encrypted profile.</p>
-            <div class="panel">
-              <label class="switch-row">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={settings.enterSends}
-                  onchange={(event) =>
-                    settingsKeeper.change({ ...settings, enterSends: event.currentTarget.checked })}
-                />
-                <span>Enter sends the message</span>
-              </label>
-              <p class="note">
-                {settings.enterSends
-                  ? 'Enter sends. Shift+Enter starts a new line.'
-                  : `Enter starts a new line. ${mac ? '⌘Enter' : 'Ctrl+Enter'} sends.`}
-              </p>
-            </div>
-            {#if settingsFailure}
-              <p role="alert" class="error">{settingsFailure}</p>
-            {/if}
-          {:else}
+        {#if signedIn}
+          <Preferences
+            {settings}
+            failure={settingsFailure}
+            {mac}
+            onchange={(next) => settingsKeeper.change(next)}
+          />
+        {:else}
+          <section class="settings-page" aria-labelledby="preferences-heading">
+            <h2 id="preferences-heading">Preferences</h2>
             <p class="lede">No account is signed in. Settings belong to an account, so there are none to change.</p>
-          {/if}
-        </section>
+          </section>
+        {/if}
       {:else if settingsTab === 'accounts'}
         <Accounts />
         {#if !status || status.store === 'not_configured'}
@@ -1116,6 +1124,7 @@
             onrecover={() => startSecurity(recoverWithKey)}
             onsetuprecovery={() => startSecurity(setUpRecovery)}
             onverify={() => startSecurity(verifyThisDevice)}
+            onchangekey={() => startSecurity(changeRecoveryKey)}
           />
         {:else}
           <section class="settings-page" aria-labelledby="security-heading">

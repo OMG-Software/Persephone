@@ -33,8 +33,33 @@ test('GIVEN Enter to send turned off WHEN keys are pressed THEN Enter starts a l
   );
 });
 
-test('GIVEN an account whose settings have not loaded THEN Enter sends', () => {
-  assert.deepEqual(preferences.DEFAULT_SETTINGS, { enterSends: true });
+test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes are normal and desktop notifications are off', () => {
+  assert.deepEqual(preferences.DEFAULT_SETTINGS, {
+    enterSends: true,
+    chatTextPercent: 100,
+    interfaceTextPercent: 100,
+    desktopNotifications: false
+  });
+});
+
+test('GIVEN text sizes WHEN scaled THEN the interface zooms and message text keeps its own size', () => {
+  const settings = (chat, ui) => ({ ...preferences.DEFAULT_SETTINGS, chatTextPercent: chat, interfaceTextPercent: ui });
+  assert.deepEqual(preferences.textScale(settings(100, 100)), { interface: 1, chat: 1 });
+  // Message text at 150% inside a 125% interface is 150% of normal, not 187.5%.
+  const both = preferences.textScale(settings(150, 125));
+  assert.equal(both.interface, 1.25);
+  assert.ok(Math.abs(both.chat * both.interface - 1.5) < 1e-9);
+  // Out of bounds, or not a number, is held to the bounds the core keeps.
+  assert.deepEqual(preferences.textScale(settings(5000, 10)), { interface: 0.8, chat: 2 / 0.8 });
+  assert.deepEqual(preferences.textScale(settings(NaN, NaN)), { interface: 1, chat: 1 });
+  assert.deepEqual(
+    [preferences.CHAT_TEXT_SIZES.at(0), preferences.CHAT_TEXT_SIZES.at(-1)],
+    [80, 200]
+  );
+  assert.deepEqual(
+    [preferences.INTERFACE_TEXT_SIZES.at(0), preferences.INTERFACE_TEXT_SIZES.at(-1)],
+    [80, 150]
+  );
 });
 
 // Lets queued promise callbacks run, such as a save waiting its turn.

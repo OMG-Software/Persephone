@@ -1,7 +1,9 @@
 use persephone_contracts::{
-    AccountSettings, AccountState, AccountStatus, AppStatus, ConversationStart, DeviceList,
-    DisplayName, InviteList, ProfileList, RoomCreation, RoomInvite, RoomList, SignInError,
-    StoreState, UserSearch, generated_typescript, sample_room_summary, sample_timeline_page,
+    AccountChange, AccountSettings, AccountState, AccountStatus, AppStatus, CHAT_TEXT_PERCENT_MAX,
+    ConversationStart, DeviceList, DisplayName, INTERFACE_TEXT_PERCENT_MAX, InviteList,
+    NotificationLevel, NotificationSettings, ProfileList, RoomCreation, RoomInvite, RoomList,
+    SignInError, StoreState, TEXT_PERCENT_MIN, ThreePidList, UserSearch, generated_typescript,
+    sample_room_summary, sample_timeline_page,
 };
 
 #[test]
@@ -415,16 +417,27 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         );
     }
 
-    assert!(AccountSettings::default().enter_sends);
+    let defaults = AccountSettings::default();
+    assert!(defaults.enter_sends && !defaults.desktop_notifications);
     assert_eq!(
-        serde_json::to_string(&AccountSettings { enter_sends: false }).unwrap(),
-        r#"{"enterSends":false}"#
+        (defaults.chat_text_percent, defaults.interface_text_percent),
+        (100, 100)
+    );
+    assert_eq!(
+        serde_json::to_string(&AccountSettings {
+            enter_sends: false,
+            ..defaults
+        })
+        .unwrap(),
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#
     );
     for invalid in [
         r#"{}"#,
-        r#"{"enterSends":null}"#,
-        r#"{"enterSends":"true"}"#,
-        r#"{"enterSends":true,"userId":"@a:s"}"#,
+        r#"{"enterSends":false}"#,
+        r#"{"enterSends":null,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#,
+        r#"{"enterSends":"true","chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#,
+        r#"{"enterSends":true,"chatTextPercent":-1,"interfaceTextPercent":100,"desktopNotifications":false}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"userId":"@a:s"}"#,
     ] {
         assert!(
             serde_json::from_str::<AccountSettings>(invalid).is_err(),
@@ -514,6 +527,67 @@ fn room_changes_are_a_closed_set() {
     ] {
         assert!(
             serde_json::from_str::<RoomChange>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+/// GIVEN text sizes WHEN checked THEN only sizes within each setting's
+/// bounds pass; the interface stops lower than message text.
+#[test]
+fn given_text_sizes_then_only_bounded_ones_pass() {
+    let with = |chat, interface| AccountSettings {
+        chat_text_percent: chat,
+        interface_text_percent: interface,
+        ..AccountSettings::default()
+    };
+    for (chat, interface) in [
+        (TEXT_PERCENT_MIN, TEXT_PERCENT_MIN),
+        (CHAT_TEXT_PERCENT_MAX, INTERFACE_TEXT_PERCENT_MAX),
+        (100, 100),
+    ] {
+        assert!(with(chat, interface).within_bounds(), "{chat} {interface}");
+    }
+    for (chat, interface) in [
+        (TEXT_PERCENT_MIN - 1, 100),
+        (CHAT_TEXT_PERCENT_MAX + 1, 100),
+        (100, TEXT_PERCENT_MIN - 1),
+        (100, INTERFACE_TEXT_PERCENT_MAX + 1),
+        (0, 0),
+        (u16::MAX, u16::MAX),
+    ] {
+        assert!(!with(chat, interface).within_bounds(), "{chat} {interface}");
+    }
+}
+
+/// GIVEN account-change replies WHEN read THEN only the fixed codes and the
+/// exact list shape are accepted.
+#[test]
+fn given_account_change_replies_then_only_fixed_shapes_are_accepted() {
+    assert_eq!(
+        serde_json::from_str::<AccountChange>(r#""token_sent""#).unwrap(),
+        AccountChange::TokenSent
+    );
+    assert!(serde_json::from_str::<AccountChange>(r#""M_FORBIDDEN""#).is_err());
+    assert_eq!(
+        serde_json::from_str::<NotificationSettings>(r#"{"level":"mentions"}"#)
+            .unwrap()
+            .level,
+        NotificationLevel::Mentions
+    );
+    assert!(serde_json::from_str::<NotificationSettings>(r#"{"level":"loud"}"#).is_err());
+    assert!(
+        serde_json::from_str::<ThreePidList>(
+            r#"{"threePids":[{"medium":"email","address":"a@example.org"}],"truncated":false,"canChange":true,"pending":null}"#
+        )
+        .is_ok()
+    );
+    for invalid in [
+        r#"{"threePids":[{"medium":"fax","address":"1"}],"truncated":false,"canChange":true,"pending":null}"#,
+        r#"{"threePids":[{"medium":"email","address":"a@example.org","validatedAt":1}],"truncated":false,"canChange":true,"pending":null}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<ThreePidList>(invalid).is_err(),
             "{invalid}"
         );
     }

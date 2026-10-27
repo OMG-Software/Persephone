@@ -8,7 +8,9 @@
 //! The stored record is read leniently: a setting it does not have takes its
 //! default, and one this build does not know is ignored, so a record written
 //! by an older or newer build still reads. A record that is too large or not
-//! JSON reads as the defaults; the next save replaces it.
+//! JSON reads as the defaults; the next save replaces it. A text size out of
+//! its bounds reads as its default, so a damaged record cannot make the
+//! interface unusable.
 
 use crate::store::Stores;
 use matrix_sdk_crypto::store::CryptoStore;
@@ -24,6 +26,9 @@ const MAX_SETTINGS_BYTES: usize = 4096;
 #[serde(default)]
 struct Stored {
     enter_sends: bool,
+    chat_text_percent: u16,
+    interface_text_percent: u16,
+    desktop_notifications: bool,
 }
 
 impl Default for Stored {
@@ -36,15 +41,39 @@ impl From<AccountSettings> for Stored {
     fn from(settings: AccountSettings) -> Self {
         Self {
             enter_sends: settings.enter_sends,
+            chat_text_percent: settings.chat_text_percent,
+            interface_text_percent: settings.interface_text_percent,
+            desktop_notifications: settings.desktop_notifications,
         }
     }
 }
 
 impl From<Stored> for AccountSettings {
     fn from(stored: Stored) -> Self {
-        Self {
+        let defaults = AccountSettings::default();
+        let mut settings = Self {
             enter_sends: stored.enter_sends,
+            chat_text_percent: stored.chat_text_percent,
+            interface_text_percent: stored.interface_text_percent,
+            desktop_notifications: stored.desktop_notifications,
+        };
+        if !(AccountSettings {
+            interface_text_percent: defaults.interface_text_percent,
+            ..settings
+        })
+        .within_bounds()
+        {
+            settings.chat_text_percent = defaults.chat_text_percent;
         }
+        if !(AccountSettings {
+            chat_text_percent: defaults.chat_text_percent,
+            ..settings
+        })
+        .within_bounds()
+        {
+            settings.interface_text_percent = defaults.interface_text_percent;
+        }
+        settings
     }
 }
 
@@ -85,18 +114,44 @@ mod tests {
 
     #[test]
     fn given_a_saved_record_then_it_reads_back() {
-        let off = AccountSettings { enter_sends: false };
-        let bytes = serde_json::to_vec(&Stored::from(off)).unwrap();
-        assert_eq!(decode(&bytes), off);
+        let changed = AccountSettings {
+            enter_sends: false,
+            chat_text_percent: 140,
+            interface_text_percent: 90,
+            desktop_notifications: true,
+        };
+        let bytes = serde_json::to_vec(&Stored::from(changed)).unwrap();
+        assert_eq!(decode(&bytes), changed);
     }
 
     #[test]
     fn given_a_record_from_another_build_then_known_settings_read_and_others_default() {
+        // An older build's record has only Enter to send.
         assert_eq!(
             decode(br#"{"enter_sends":false,"theme":"dark"}"#),
-            AccountSettings { enter_sends: false }
+            AccountSettings {
+                enter_sends: false,
+                ..AccountSettings::default()
+            }
         );
         assert_eq!(decode(b"{}"), AccountSettings::default());
+    }
+
+    /// GIVEN a stored text size out of its bounds WHEN read THEN that size
+    /// takes its default and the other settings are kept.
+    #[test]
+    fn given_an_out_of_bounds_text_size_then_it_reads_as_its_default() {
+        let read = decode(
+            br#"{"enter_sends":false,"chat_text_percent":5000,"interface_text_percent":120,"desktop_notifications":true}"#,
+        );
+        assert_eq!(read.chat_text_percent, 100);
+        assert_eq!(read.interface_text_percent, 120);
+        assert!(!read.enter_sends && read.desktop_notifications);
+        let read = decode(br#"{"chat_text_percent":150,"interface_text_percent":10}"#);
+        assert_eq!(
+            (read.chat_text_percent, read.interface_text_percent),
+            (150, 100)
+        );
     }
 
     #[test]

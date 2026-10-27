@@ -30,6 +30,7 @@
 //! finish, including an open file dialog.
 
 pub mod account;
+pub mod account_changes;
 pub mod account_details;
 pub mod contacts;
 pub mod conversations;
@@ -38,12 +39,14 @@ pub mod homeserver;
 pub mod identities;
 pub mod matrix_views;
 pub mod media;
+pub mod notifications;
 pub mod outbox;
 pub mod passphrase;
 pub mod pick;
 pub mod platform;
 pub mod profiles;
 pub mod prompt_text;
+pub mod recovery_file;
 pub mod registration;
 pub mod room_settings;
 pub mod security;
@@ -116,6 +119,9 @@ struct Notifications {
     room_list_changed: bool,
     /// The account's encryption state changed since the last notification.
     security_changed: bool,
+    /// The latest desktop notification waiting to be sent (ADR-0022): room
+    /// and sender names. A newer one replaces it.
+    toast: Option<(String, String)>,
     /// The UI sent a valid request on this connection, so its page runs.
     ready: bool,
     closed: bool,
@@ -144,6 +150,7 @@ impl Hub {
         notifications.subscribed.clear();
         notifications.pending.clear();
         notifications.room_list_changed = false;
+        notifications.toast = None;
         notifications.session_changed = true;
         self.changed.notify_all();
     }
@@ -213,6 +220,12 @@ impl SessionListener for Hub {
             self.changed.notify_all();
         }
     }
+
+    fn notify(&self, room: &str, sender: &str) {
+        let mut notifications = lock(&self.notifications);
+        notifications.toast = Some((room.to_owned(), sender.to_owned()));
+        self.changed.notify_all();
+    }
 }
 
 enum Source {
@@ -248,6 +261,14 @@ pub struct Core {
     room_settings: conversations::Busy,
     room_members: conversations::Busy,
     room_change: conversations::Busy,
+    /// Changing the password or an email address or phone number, one at a
+    /// time; listing them; reading or setting the notification level.
+    account_change: conversations::Busy,
+    three_pid_list: conversations::Busy,
+    notification_level: conversations::Busy,
+    /// The email address or phone number waiting to be added, with the
+    /// session generation it was asked for in (ADR-0020).
+    three_pid: Mutex<Option<(u64, account_changes::Pending)>>,
     /// The local profiles beside the open one; `None` for synthetic data or
     /// a profile without a directory.
     profiles: Option<profiles::Profiles>,
@@ -367,6 +388,10 @@ impl Core {
             room_settings: conversations::Busy::default(),
             room_members: conversations::Busy::default(),
             room_change: conversations::Busy::default(),
+            account_change: conversations::Busy::default(),
+            three_pid_list: conversations::Busy::default(),
+            notification_level: conversations::Busy::default(),
+            three_pid: Mutex::new(None),
             profiles: None,
             long_calls: AtomicUsize::new(0),
         }
@@ -472,7 +497,15 @@ impl Core {
             | Call::DeviceList {}
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
-            | Call::ChangeRoom { .. } => match self.homeserver_call(&request.call) {
+            | Call::ChangeRoom { .. }
+            | Call::ChangePassword { .. }
+            | Call::ThreePids {}
+            | Call::RequestEmailToken { .. }
+            | Call::RequestPhoneToken { .. }
+            | Call::AddThreePid {}
+            | Call::RemoveThreePid { .. }
+            | Call::NotificationLevel {}
+            | Call::SetNotificationLevel { .. } => match self.homeserver_call(&request.call) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
@@ -618,10 +651,21 @@ impl Core {
                 Ok(None) => Outcome::Error(ErrorCode::Internal),
                 Err(_) => Outcome::Error(ErrorCode::Locked),
             },
-            Call::SetAccountSettings { enter_sends } => {
+            Call::SetAccountSettings {
+                enter_sends,
+                chat_text_percent,
+                interface_text_percent,
+                desktop_notifications,
+            } => {
                 let settings = persephone_contracts::AccountSettings {
                     enter_sends: *enter_sends,
+                    chat_text_percent: *chat_text_percent,
+                    interface_text_percent: *interface_text_percent,
+                    desktop_notifications: *desktop_notifications,
                 };
+                if !settings.within_bounds() {
+                    return Outcome::Error(ErrorCode::InvalidArgument);
+                }
                 match self.session.set_account_settings(settings) {
                     Ok(true) => Outcome::Ok(serde_json::Value::Null),
                     Ok(false) => Outcome::Error(ErrorCode::Internal),
@@ -629,6 +673,18 @@ impl Core {
                 }
             }
             Call::SetUpRecovery {} => ok(&self.session.set_up_recovery(self.credentials.clone())),
+            Call::ChangeRecoveryKey {} => {
+                ok(&self.session.change_recovery_key(self.credentials.clone()))
+            }
+            Call::VerifyDevice { device_id } => {
+                if verification::valid_device_id(device_id) {
+                    ok(&self
+                        .session
+                        .verify(verification::Action::StartDevice(device_id.clone())))
+                } else {
+                    Outcome::Error(ErrorCode::InvalidArgument)
+                }
+            }
             Call::VerifyThisDevice {} => ok(&self.session.verify(verification::Action::Start)),
             Call::AcceptVerification { flow_id } => {
                 self.verify(flow_id, verification::Action::Accept)
@@ -686,7 +742,15 @@ impl Core {
             | Call::DeviceList {}
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
-            | Call::ChangeRoom { .. } => match self.homeserver_call(call) {
+            | Call::ChangeRoom { .. }
+            | Call::ChangePassword { .. }
+            | Call::ThreePids {}
+            | Call::RequestEmailToken { .. }
+            | Call::RequestPhoneToken { .. }
+            | Call::AddThreePid {}
+            | Call::RemoveThreePid { .. }
+            | Call::NotificationLevel {}
+            | Call::SetNotificationLevel { .. } => match self.homeserver_call(call) {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
@@ -736,6 +800,14 @@ impl Core {
             RoomSettings(String),
             RoomMembers(String, String),
             ChangeRoom(String, room_settings::Change),
+            ChangePassword(bool),
+            ThreePids,
+            RequestEmail(String),
+            RequestPhone(String, String),
+            AddThreePid,
+            RemoveThreePid(persephone_contracts::ThreePidMedium, String),
+            NotificationLevel,
+            SetNotificationLevel(persephone_contracts::NotificationLevel),
         }
         let user =
             |user_id: &str| conversations::parse_user(user_id).ok_or(ErrorCode::InvalidArgument);
@@ -776,6 +848,31 @@ impl Core {
                 room_id.clone(),
                 room_settings::Change::parse(change).ok_or(ErrorCode::InvalidArgument)?,
             ),
+            Call::ChangePassword { sign_out_others } => Work::ChangePassword(*sign_out_others),
+            Call::ThreePids {} => Work::ThreePids,
+            Call::RequestEmailToken { email } if account_changes::valid_email(email) => {
+                Work::RequestEmail(email.clone())
+            }
+            Call::RequestPhoneToken {
+                country,
+                phone_number,
+            } if account_changes::valid_country(country)
+                && account_changes::valid_phone_number(phone_number) =>
+            {
+                Work::RequestPhone(country.clone(), phone_number.clone())
+            }
+            Call::AddThreePid {} => Work::AddThreePid,
+            Call::RemoveThreePid { medium, address }
+                if account_changes::valid_address(*medium, address) =>
+            {
+                Work::RemoveThreePid(*medium, address.clone())
+            }
+            Call::NotificationLevel {} => Work::NotificationLevel,
+            Call::SetNotificationLevel { level }
+                if *level != persephone_contracts::NotificationLevel::Custom =>
+            {
+                Work::SetNotificationLevel(*level)
+            }
             _ => return Err(ErrorCode::InvalidArgument),
         };
         // Synthetic data has no homeserver.
@@ -803,6 +900,15 @@ impl Core {
             Work::RoomSettings(_) => self.room_settings.begin()?,
             Work::RoomMembers(..) => self.room_members.begin()?,
             Work::ChangeRoom(..) => self.room_change.begin()?,
+            Work::ChangePassword(_)
+            | Work::RequestEmail(_)
+            | Work::RequestPhone(..)
+            | Work::AddThreePid
+            | Work::RemoveThreePid(..) => self.account_change.begin()?,
+            Work::ThreePids => self.three_pid_list.begin()?,
+            Work::NotificationLevel | Work::SetNotificationLevel(_) => {
+                self.notification_level.begin()?
+            }
             _ => self.conversation.begin()?,
         };
         Ok(Box::new(move || {
@@ -864,6 +970,53 @@ impl Core {
                         room_settings::change(&client, room_id, change).await
                     })
                     .map(|()| serde_json::Value::Null),
+                Work::ChangePassword(sign_out_others) => {
+                    json(self.change_password(generation, *sign_out_others))
+                }
+                Work::ThreePids => {
+                    let pending = self
+                        .pending_three_pid(generation)
+                        .map(|pending| pending.shown);
+                    self.with_matrix(generation, async |client| {
+                        Ok(account_changes::list(&client, pending.clone()).await)
+                    })
+                    .and_then(|listed| match listed {
+                        Ok(list) => match bounded(&list) {
+                            Outcome::Ok(value) => Ok(value),
+                            Outcome::Error(code) => Err(code),
+                        },
+                        Err(persephone_contracts::AccountChange::Unreachable) => {
+                            Err(ErrorCode::Unavailable)
+                        }
+                        Err(_) => Err(ErrorCode::Rejected),
+                    })
+                }
+                Work::RequestEmail(email) => {
+                    json(self.request_three_pid(generation, async |client| {
+                        account_changes::request_email(&client, email).await
+                    }))
+                }
+                Work::RequestPhone(country, number) => {
+                    json(self.request_three_pid(generation, async |client| {
+                        account_changes::request_phone(&client, country, number).await
+                    }))
+                }
+                Work::AddThreePid => json(self.add_three_pid(generation)),
+                Work::RemoveThreePid(medium, address) => {
+                    json(self.with_matrix(generation, async |client| {
+                        Ok(account_changes::remove(&client, *medium, address).await)
+                    }))
+                }
+                Work::NotificationLevel => json(self.with_matrix(generation, async |client| {
+                    notifications::level(&client)
+                        .await
+                        .map(|level| persephone_contracts::NotificationSettings { level })
+                })),
+                Work::SetNotificationLevel(level) => self
+                    .with_matrix(generation, async |client| {
+                        notifications::set_level(&client, *level).await
+                    })
+                    .map(|()| serde_json::Value::Null),
             };
             let rooms_changed = matches!(
                 work,
@@ -877,6 +1030,131 @@ impl Core {
                 Err(code) => Outcome::Error(code),
             }
         }))
+    }
+
+    /// Changes the password (ADR-0019): asks for the current password and
+    /// the new one (twice) in the core's own windows, with no lease held,
+    /// then sends the change under a lease of the session in `generation`.
+    fn change_password(
+        &self,
+        generation: u64,
+        sign_out_others: bool,
+    ) -> Result<persephone_contracts::AccountChange, ErrorCode> {
+        use credentials::PasswordPurpose;
+        let (user_id, host) = self.session.account_names().ok_or(ErrorCode::NotFound)?;
+        let user = matrix_sdk::ruma::OwnedUserId::try_from(user_id.as_str())
+            .map_err(|_| ErrorCode::Internal)?;
+        let source = &*self.credentials;
+        let passwords = account_changes::ask_current_password(
+            source,
+            &user_id,
+            &host,
+            PasswordPurpose::ChangePassword,
+        )
+        .and_then(|current| {
+            account_changes::ask_new_password(source, &user_id, &host).map(|new| (current, new))
+        });
+        let (current, new) = match passwords {
+            Ok(passwords) => passwords,
+            Err(code) => return Ok(code),
+        };
+        self.with_matrix(generation, async |client| {
+            Ok(
+                account_changes::change_password(&client, &user, &current, &new, sign_out_others)
+                    .await,
+            )
+        })
+    }
+
+    /// The address waiting to be added in `generation`, if any.
+    fn pending_three_pid(&self, generation: u64) -> Option<account_changes::Pending> {
+        lock(&self.three_pid)
+            .as_ref()
+            .filter(|(asked_in, _)| *asked_in == generation)
+            .map(|(_, pending)| pending.clone())
+    }
+
+    /// Asks the homeserver to send a link or code; on success the address
+    /// replaces any other waiting to be added.
+    fn request_three_pid(
+        &self,
+        generation: u64,
+        request: impl AsyncFnOnce(
+            matrix_sdk::Client,
+        ) -> Result<
+            account_changes::Pending,
+            persephone_contracts::AccountChange,
+        >,
+    ) -> Result<persephone_contracts::AccountChange, ErrorCode> {
+        let requested = self.with_matrix(generation, async |client| Ok(request(client).await))?;
+        Ok(match requested {
+            Ok(pending) => {
+                *lock(&self.three_pid) = Some((generation, pending));
+                persephone_contracts::AccountChange::TokenSent
+            }
+            Err(code) => code,
+        })
+    }
+
+    /// Adds the address waiting to be added (ADR-0020): for a phone, asks
+    /// for its code in the core's own window and sends it to the
+    /// homeserver; then asks for the account password there and adds the
+    /// address. No lease is held while a window is open. The address stays
+    /// waiting until it is added, so an unopened link can be tried again.
+    fn add_three_pid(
+        &self,
+        generation: u64,
+    ) -> Result<persephone_contracts::AccountChange, ErrorCode> {
+        use credentials::PasswordPurpose;
+        use persephone_contracts::{AccountChange, ThreePidMedium};
+        let Some(mut pending) = self.pending_three_pid(generation) else {
+            return Ok(AccountChange::NothingPending);
+        };
+        let (user_id, host) = self.session.account_names().ok_or(ErrorCode::NotFound)?;
+        let user = matrix_sdk::ruma::OwnedUserId::try_from(user_id.as_str())
+            .map_err(|_| ErrorCode::Internal)?;
+        let source = &*self.credentials;
+        if pending.shown.medium == ThreePidMedium::Msisdn && !pending.code_confirmed {
+            let code = match account_changes::ask_phone_code(source, &host) {
+                Ok(code) => code,
+                Err(change) => return Ok(change),
+            };
+            let submitted = self.with_matrix(generation, async |client| {
+                Ok(account_changes::submit_code(&client, &pending, &code).await)
+            })?;
+            if let Err(change) = submitted {
+                return Ok(change);
+            }
+            pending.code_confirmed = true;
+            if let Some((asked_in, waiting)) = lock(&self.three_pid).as_mut()
+                && *asked_in == generation
+                && waiting.sid == pending.sid
+            {
+                waiting.code_confirmed = true;
+            }
+        }
+        let password = match account_changes::ask_current_password(
+            source,
+            &user_id,
+            &host,
+            PasswordPurpose::AddThreePid,
+        ) {
+            Ok(password) => password,
+            Err(change) => return Ok(change),
+        };
+        let added = self.with_matrix(generation, async |client| {
+            Ok(account_changes::add(&client, &user, &pending, &password).await)
+        })?;
+        if added == AccountChange::Done {
+            let mut waiting = lock(&self.three_pid);
+            if waiting
+                .as_ref()
+                .is_some_and(|(_, waiting)| waiting.sid == pending.sid)
+            {
+                *waiting = None;
+            }
+        }
+        Ok(added)
     }
 
     /// Runs `work` with the signed-in client under a lease of the session in
@@ -1227,6 +1505,12 @@ impl Core {
         lock(&self.hub.notifications).pending.len()
     }
 
+    /// The desktop notification waiting to be sent: room and sender names
+    /// (for tests).
+    pub fn pending_toast(&self) -> Option<(String, String)> {
+        lock(&self.hub.notifications).toast.clone()
+    }
+
     /// Waits for pending notifications and takes them all, or returns `None`
     /// once the connection is closed.
     fn take_events(&self) -> Option<Vec<Event>> {
@@ -1235,6 +1519,7 @@ impl Core {
             && !notifications.session_changed
             && !notifications.room_list_changed
             && !notifications.security_changed
+            && notifications.toast.is_none()
             && !notifications.closed
         {
             notifications = self
@@ -1252,12 +1537,17 @@ impl Core {
             .then_some(Event::RoomListChanged {});
         let security = std::mem::take(&mut notifications.security_changed)
             .then_some(Event::SecurityChanged {});
+        let toast = notifications
+            .toast
+            .take()
+            .map(|(room, sender)| Event::Notification { room, sender });
         let rooms = std::mem::take(&mut notifications.pending);
         Some(
             session
                 .into_iter()
                 .chain(list)
                 .chain(security)
+                .chain(toast)
                 .chain(
                     rooms
                         .into_iter()
@@ -1749,8 +2039,32 @@ mod tests {
             (Call::DeviceList {}, ErrorCode::NotFound),
             (Call::AccountSettings {}, ErrorCode::Locked),
             (
-                Call::SetAccountSettings { enter_sends: false },
+                Call::SetAccountSettings {
+                    enter_sends: false,
+                    chat_text_percent: 100,
+                    interface_text_percent: 100,
+                    desktop_notifications: true,
+                },
                 ErrorCode::Locked,
+            ),
+            // Out-of-bounds sizes are refused before anything else.
+            (
+                Call::SetAccountSettings {
+                    enter_sends: false,
+                    chat_text_percent: 79,
+                    interface_text_percent: 100,
+                    desktop_notifications: false,
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::SetAccountSettings {
+                    enter_sends: false,
+                    chat_text_percent: 100,
+                    interface_text_percent: 151,
+                    desktop_notifications: false,
+                },
+                ErrorCode::InvalidArgument,
             ),
             (Call::AddProfile {}, ErrorCode::NotFound),
             (Call::SwitchProfile { slot: 2 }, ErrorCode::NotFound),

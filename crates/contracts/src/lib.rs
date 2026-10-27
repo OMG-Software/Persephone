@@ -691,12 +691,140 @@ pub struct DeviceList {
 pub struct AccountSettings {
     /// Enter sends a message; otherwise it starts a new line. On by default.
     pub enter_sends: bool,
+    /// The size of message text, in percent of the normal size, from
+    /// [`TEXT_PERCENT_MIN`] to [`CHAT_TEXT_PERCENT_MAX`]. 100 by default.
+    pub chat_text_percent: u16,
+    /// The size of the rest of the interface, in percent of the normal size,
+    /// from [`TEXT_PERCENT_MIN`] to [`INTERFACE_TEXT_PERCENT_MAX`]. 100 by
+    /// default.
+    pub interface_text_percent: u16,
+    /// Show a desktop notification (a toast) for a message that notifies
+    /// under the account's push rules, with the sender and room only, never
+    /// the text. Off by default.
+    pub desktop_notifications: bool,
+}
+
+/// The smallest text size either setting accepts, in percent.
+pub const TEXT_PERCENT_MIN: u16 = 80;
+/// The largest message text size, in percent.
+pub const CHAT_TEXT_PERCENT_MAX: u16 = 200;
+/// The largest interface text size, in percent: the whole interface grows
+/// with it, so it stops before the window's minimum size stops fitting.
+pub const INTERFACE_TEXT_PERCENT_MAX: u16 = 150;
+
+impl AccountSettings {
+    /// Whether every setting is within its bounds.
+    pub fn within_bounds(&self) -> bool {
+        (TEXT_PERCENT_MIN..=CHAT_TEXT_PERCENT_MAX).contains(&self.chat_text_percent)
+            && (TEXT_PERCENT_MIN..=INTERFACE_TEXT_PERCENT_MAX)
+                .contains(&self.interface_text_percent)
+    }
 }
 
 impl Default for AccountSettings {
     fn default() -> Self {
-        Self { enter_sends: true }
+        Self {
+            enter_sends: true,
+            chat_text_percent: 100,
+            interface_text_percent: 100,
+            desktop_notifications: false,
+        }
     }
+}
+
+/// When this account is notified of messages, in every room without a rule
+/// of its own: its push rules on the homeserver (ADR-0022).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationLevel {
+    /// Every message.
+    All,
+    /// Mentions and keywords only.
+    Mentions,
+    /// Nothing: the push rules' master switch is on.
+    None,
+    /// Read only: the rules differ by kind of room (set by another client).
+    /// Setting a level replaces them.
+    Custom,
+}
+
+/// Reply of `notification_level`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NotificationSettings {
+    pub level: NotificationLevel,
+}
+
+/// The kind of a third-party identifier (3PID).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreePidMedium {
+    Email,
+    /// A phone number (MSISDN), in international form without the `+`.
+    Msisdn,
+}
+
+/// An email address or phone number on this account, as the homeserver
+/// lists it (projected like a name).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ThreePid {
+    pub medium: ThreePidMedium,
+    pub address: String,
+}
+
+/// Reply of `three_pids` (ADR-0020).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ThreePidList {
+    pub three_pids: Vec<ThreePid>,
+    pub truncated: bool,
+    /// The homeserver lets this account add and remove them (its
+    /// `m.3pid_changes` capability, on unless it says otherwise).
+    pub can_change: bool,
+    /// An address is waiting to be confirmed: `add_three_pid` adds it.
+    pub pending: Option<ThreePid>,
+}
+
+/// How a change to the account (its password, an email address or a phone
+/// number) ended. Codes only: no text from the homeserver.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountChange {
+    Done,
+    /// The homeserver sent a link (email) or a code (phone); add the address
+    /// once the user has it.
+    TokenSent,
+    /// The user closed one of the core's windows.
+    Cancelled,
+    /// No native prompt on this platform.
+    Unsupported,
+    /// The homeserver refused the current password.
+    InvalidPassword,
+    /// The homeserver thinks the new password is too weak.
+    WeakPassword,
+    /// The address was not confirmed: the link was not opened yet, or the
+    /// code was wrong.
+    NotConfirmed,
+    /// Another account already has this address.
+    InUse,
+    /// The homeserver does not allow this address.
+    Denied,
+    /// The homeserver does not support this kind of address, or needs an
+    /// identity server to confirm it, which Persephone does not use.
+    MediumNotSupported,
+    /// The homeserver does not let this account change its addresses or
+    /// password.
+    ChangesDisabled,
+    /// The homeserver asks for a step other than the password.
+    UnsupportedAuth,
+    /// Nothing is waiting to be added, or that address is not listed.
+    NothingPending,
+    /// Too many attempts; the homeserver asks to wait.
+    RateLimited,
+    /// The homeserver could not be reached.
+    Unreachable,
+    Failed,
 }
 
 /// One local profile (account) on this computer. Only its slot number:
@@ -933,6 +1061,13 @@ pub enum SecurityError {
     /// The room is not a direct-message room with one other person who is
     /// still in it.
     NotDirectRoom,
+    /// This device lacks the account's key for signing its other devices
+    /// (verify it with the recovery key first).
+    CannotSignDevices,
+    /// The homeserver does not list that device for this account.
+    DeviceNotFound,
+    /// A new recovery key was made and shown, but saving it to a file failed.
+    RecoveryKeyNotSaved,
     /// Anything else.
     Failed,
 }
@@ -1187,6 +1322,12 @@ pub fn generated_typescript() -> String {
         format!("export {}", DeviceSummary::decl(&config)),
         format!("export {}", DeviceList::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
+        format!("export {}", NotificationLevel::decl(&config)),
+        format!("export {}", NotificationSettings::decl(&config)),
+        format!("export {}", ThreePidMedium::decl(&config)),
+        format!("export {}", ThreePid::decl(&config)),
+        format!("export {}", ThreePidList::decl(&config)),
+        format!("export {}", AccountChange::decl(&config)),
         format!("export {}", ProfileSlot::decl(&config)),
         format!("export {}", ProfileList::decl(&config)),
         format!("export {}", UserMatch::decl(&config)),

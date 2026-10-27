@@ -22,9 +22,10 @@
 //! refuses until the SDK provides a stop-and-join contract.
 //!
 //! Encryption setup (`security.rs`) runs on its own thread, one lease per
-//! step, like sync. Its prompts run on short-lived threads without a lease, so
-//! a prompt left open never holds up a lock; an answer given after a lock (or
-//! a lock and unlock) is dropped.
+//! step, like sync. So do changing the recovery key (ADR-0021) and
+//! verifying another of the account's devices. Its prompts run on
+//! short-lived threads without a lease, so a prompt left open never holds up
+//! a lock; an answer given after a lock (or a lock and unlock) is dropped.
 //!
 //! Unlocking and resetting the profile ask for the passphrase (ADR-0006) in
 //! the core's own window. They run on a worker thread in the `unlocking`
@@ -37,8 +38,10 @@ use crate::credentials::{CredentialSource, NewPassword, PromptError, SecretPromp
 use crate::homeserver::Homeserver;
 use crate::identities;
 use crate::media::ImageUpload;
+use crate::notifications;
 use crate::outbox::{Content, Outbox};
 use crate::passphrase::Unlock;
+use crate::recovery_file;
 use crate::registration::{self, Registered};
 use crate::security;
 use crate::sending;
@@ -65,7 +68,7 @@ use persephone_contracts::{
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
@@ -135,6 +138,10 @@ pub trait SessionListener: Send + Sync {
     /// list names different contacts. Account data touches no room, so a
     /// sync round that brings only this reports no rooms.
     fn direct_rooms_changed(&self) {}
+    /// A message to show as a desktop notification arrived (ADR-0022): the
+    /// room's and sender's projected names, never its text. Called only while
+    /// desktop notifications are on.
+    fn notify(&self, _room: &str, _sender: &str) {}
 }
 
 /// Why a message was not queued.
@@ -183,6 +190,11 @@ enum SecurityCommand {
         user_id: OwnedUserId,
         was_verified: bool,
     },
+    /// Replace the recovery key; the user said yes in the core's own window
+    /// (ADR-0021).
+    ResetRecoveryKey {
+        source: Arc<dyn CredentialSource>,
+    },
 }
 
 struct SecurityShared {
@@ -212,6 +224,9 @@ struct Shared {
     listener: Mutex<Option<Arc<dyn SessionListener>>>,
     /// Set once any SDK client was built over these stores.
     client_ran: AtomicBool,
+    /// The account's desktop-notification setting, kept here so the sync's
+    /// notification handler need not read the store (ADR-0022).
+    toasts: AtomicBool,
     security: Mutex<SecurityShared>,
     outbox: Mutex<Outbox>,
 }
@@ -496,6 +511,11 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
     let host = Homeserver::parse(client.homeserver().as_str())
         .map(|homeserver| homeserver.display_host())
         .unwrap_or_default();
+    let toasts = lease
+        .stores()
+        .block_on(settings::load(lease.stores()))
+        .is_some_and(|settings| settings.desktop_notifications);
+    shared.toasts.store(toasts, Ordering::SeqCst);
     let installed = lease.commit(|| {
         *guard(&shared.account) = Some(ActiveAccount {
             client: client.clone(),
@@ -591,6 +611,10 @@ fn run_sync(
             std::future::ready(())
         })
     };
+    // The SDK keeps notification handlers as long as the client, so this one
+    // holds the session only weakly.
+    let mut notifying = false;
+    let notified: Weak<Shared> = Arc::downgrade(shared);
     loop {
         let lease = match shared.admit() {
             Ok(lease) => lease,
@@ -604,6 +628,29 @@ fn run_sync(
         };
         let started = Instant::now();
         let outcome = lease.stores().block_on(async {
+            if !notifying {
+                notifying = true;
+                let notified = notified.clone();
+                client
+                    .register_notification_handler(move |notification, room, client| {
+                        let notified = notified.clone();
+                        async move {
+                            let Some(shared) = notified.upgrade() else {
+                                return;
+                            };
+                            if !shared.toasts.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            if let Some((room, sender)) =
+                                notifications::shown(&notification, &room, &client).await
+                                && let Some(listener) = shared.listener()
+                            {
+                                listener.notify(&room, &sender);
+                            }
+                        }
+                    })
+                    .await;
+            }
             if keys.is_none() {
                 keys = client
                     .encryption()
@@ -803,8 +850,25 @@ fn run_security(
                     // A request that came in after the start was queued is
                     // kept: replacing it would leave the other device waiting.
                     Some(SecurityCommand::Verify(
-                        VerifyAction::Start | VerifyAction::StartContact(_),
+                        VerifyAction::Start
+                        | VerifyAction::StartContact(_)
+                        | VerifyAction::StartDevice(_),
                     )) if flow.as_ref().is_some_and(|flow| !flow.is_over()) => (None, None),
+                    Some(SecurityCommand::Verify(VerifyAction::StartDevice(device_id))) => {
+                        match verification::start_device(&client, &user_id, &device_id).await {
+                            Ok(new) => {
+                                flow = Some(new);
+                                (None, None)
+                            }
+                            Err(error) => (Some(error), None),
+                        }
+                    }
+                    Some(SecurityCommand::ResetRecoveryKey { source }) => {
+                        match security::reset_recovery_key(&client).await {
+                            Ok(key) => (None, Some((key, source))),
+                            Err(error) => (Some(error), None),
+                        }
+                    }
                     Some(SecurityCommand::Verify(VerifyAction::StartContact(room_id))) => {
                         match verification::start_contact(&client, &room_id).await {
                             Ok(new) => {
@@ -953,11 +1017,12 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
     drop(client);
 }
 
-/// Shows a new recovery key in the credential source's own window. Recovery
-/// is already enabled with this key, so it is shown even when a lock or
-/// sign-out began meanwhile; only the failure report is dropped then. The
-/// window waits for the user, so it has its own thread; the key is zeroed
-/// when that thread ends.
+/// Shows a new recovery key in the credential source's own window, then
+/// offers to save it to a file chosen in the core's own Save dialog
+/// (ADR-0021). Recovery is already enabled with this key, so it is shown
+/// even when a lock or sign-out began meanwhile; only the failure report is
+/// dropped then. The windows wait for the user, so they have their own
+/// thread; the key is zeroed when that thread ends.
 fn show_recovery_key(
     shared: &Arc<Shared>,
     generation: u64,
@@ -973,6 +1038,19 @@ fn show_recovery_key(
             if source.show_recovery_key(&shown_user, &key).is_err() {
                 display_shared.with_security(generation, |security| {
                     security.status.error = Some(SecurityError::RecoveryKeyNotShown);
+                });
+                return;
+            }
+            let saved = match source.choose_recovery_key_file() {
+                Ok(Some(path)) => recovery_file::write(&path, &key).is_ok(),
+                // Not saving it is the user's choice; a platform without the
+                // dialog has shown the key, which is enough.
+                Ok(None) | Err(PromptError::Cancelled | PromptError::Unsupported) => true,
+                Err(PromptError::Invalid | PromptError::Failed) => false,
+            };
+            if !saved {
+                display_shared.with_security(generation, |security| {
+                    security.status.error = Some(SecurityError::RecoveryKeyNotSaved);
                 });
             }
         });
@@ -997,8 +1075,9 @@ fn queue_verification(security: &mut SecurityShared, action: VerifyAction) -> bo
     });
     let allowed = match &action {
         VerifyAction::Start => security.status.identity == IdentityState::Unverified && over,
-        // Only a verified device vouches for someone else.
-        VerifyAction::StartContact(_) => {
+        // Only a verified device vouches for someone else, or for another
+        // of the account's devices.
+        VerifyAction::StartContact(_) | VerifyAction::StartDevice(_) => {
             security.status.identity == IdentityState::Verified && over
         }
         VerifyAction::Accept(id) => flow
@@ -1098,6 +1177,7 @@ impl Session {
                 outbox: Mutex::default(),
                 listener: Mutex::new(None),
                 client_ran: AtomicBool::new(false),
+                toasts: AtomicBool::new(false),
             }),
             transition: Mutex::new(()),
         }
@@ -1573,7 +1653,23 @@ impl Session {
         let saved = lease
             .stores()
             .block_on(settings::save(lease.stores(), value));
-        Ok(saved && lease.commit(|| ()).is_ok())
+        let committed = saved
+            && lease
+                .commit(|| {
+                    self.shared
+                        .toasts
+                        .store(value.desktop_notifications, Ordering::SeqCst)
+                })
+                .is_ok();
+        Ok(committed)
+    }
+
+    /// The signed-in account's user ID and its homeserver as the prompts
+    /// name it, or `None` without one.
+    pub fn account_names(&self) -> Option<(String, String)> {
+        guard(&self.shared.account)
+            .as_ref()
+            .map(|account| (account.user_id.clone(), account.host.clone()))
     }
 
     /// The account's encryption state; `unknown` without a signed-in account.
@@ -1704,6 +1800,62 @@ impl Session {
                             user_id,
                             was_verified,
                         });
+                        security.status.operation = SecurityOperation::Working;
+                    }
+                    Ok(false) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(SecurityError::Cancelled);
+                    }
+                    Err(error) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(security_prompt_error(error));
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
+            });
+        }
+        self.security_status()
+    }
+
+    /// Starts replacing the recovery key (ADR-0021), for a verified device
+    /// whose recovery is set up: the core warns in its own window that the
+    /// old key stops working, and only an explicit yes leaves the command for
+    /// the security thread, which shows the new key and offers to save it.
+    /// The window runs on its own thread without a lease, like the identity
+    /// question. Does nothing while another operation runs.
+    pub fn change_recovery_key(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
+        if guard(&self.shared.account).is_none() {
+            return self.security_status();
+        }
+        let Some(started) = self.shared.open_generation() else {
+            return self.security_status();
+        };
+        let accepted = self.shared.with_security(started, |security| {
+            let free = security.status.identity == IdentityState::Verified
+                && security.status.recovery == RecoveryState::Enabled
+                && security.status.operation == SecurityOperation::Idle
+                && security.command.is_none();
+            if free {
+                security.status.operation = SecurityOperation::WaitingForConfirmation;
+                security.status.error = None;
+            }
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
+        }
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-recovery-change".into())
+            .spawn(move || {
+                let answer = source.confirm_recovery_key_change();
+                shared.with_security(started, |security| match answer {
+                    Ok(true) => {
+                        security.command = Some(SecurityCommand::ResetRecoveryKey { source });
                         security.status.operation = SecurityOperation::Working;
                     }
                     Ok(false) => {
@@ -2070,6 +2222,44 @@ mod tests {
             Some(SecurityCommand::Verify(VerifyAction::StartContact(ref room))) if room == "!dm:s"
         ));
         assert_eq!(verified.status.operation, SecurityOperation::Working);
+    }
+
+    /// GIVEN this device's state WHEN it asks to verify another of the
+    /// account's devices THEN only a verified device with no open flow and
+    /// nothing running queues it.
+    #[test]
+    fn given_a_device_verification_then_only_a_verified_idle_device_queues_it() {
+        let device = || VerifyAction::StartDevice("OTHER".into());
+        for identity in [
+            IdentityState::Unknown,
+            IdentityState::None,
+            IdentityState::Unverified,
+        ] {
+            let mut security = unverified();
+            security.status.identity = identity;
+            assert!(!queue_verification(&mut security, device()), "{identity:?}");
+            assert!(security.command.is_none());
+        }
+        let mut verified = unverified();
+        verified.status.identity = IdentityState::Verified;
+        verified.status.verification = flow(VerificationPhase::Compare);
+        assert!(
+            !queue_verification(&mut verified, device()),
+            "a flow is open"
+        );
+        verified.status.verification = flow(VerificationPhase::Cancelled);
+        verified.status.operation = SecurityOperation::WaitingForConfirmation;
+        assert!(!queue_verification(&mut verified, device()), "busy");
+        verified.status.operation = SecurityOperation::Idle;
+        assert!(queue_verification(&mut verified, device()));
+        assert!(matches!(
+            verified.command,
+            Some(SecurityCommand::Verify(VerifyAction::StartDevice(ref id))) if id == "OTHER"
+        ));
+        assert!(
+            !queue_verification(&mut verified, device()),
+            "a second one waits for the first"
+        );
     }
 
     /// GIVEN each phase WHEN an action arrives THEN only the action for that

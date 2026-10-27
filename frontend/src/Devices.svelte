@@ -5,6 +5,19 @@
 
   // The devices (sessions) signed in to this account, as the homeserver
   // lists them. Their IDs and names are the homeserver's word: isolated text.
+  // A verified device can ask another one to compare emoji; the comparison
+  // then shows on its own screen.
+  let {
+    canVerify = false,
+    busy = false,
+    onverify = () => {}
+  }: {
+    // This device is verified, so it can vouch for the others.
+    canVerify?: boolean;
+    busy?: boolean;
+    onverify?: (deviceId: string) => void;
+  } = $props();
+
   let devices = $state<DeviceList | null>(null);
   let loading = $state(false);
   let failure = $state<string | null>(null);
@@ -57,9 +70,25 @@
               · last seen <time datetime={seen.toISOString()}>{fullTime(seen)}</time>
             {/if}
           </p>
+          {#if !device.current && !device.verified && canVerify}
+            <div class="actions">
+              <button
+                type="button"
+                class="secondary"
+                disabled={busy}
+                aria-label={`Verify ${device.displayName ?? device.deviceId}`}
+                onclick={() => onverify(device.deviceId)}>Verify</button
+              >
+            </div>
+          {/if}
         </li>
       {/each}
     </ul>
+    {#if !canVerify && devices.devices.some((device) => !device.current && !device.verified)}
+      <p class="note">
+        To verify your other sessions, first verify this one in Security &amp; encryption.
+      </p>
+    {/if}
     {#if devices.truncated}
       <p class="note">Showing the first {devices.devices.length} sessions.</p>
     {/if}

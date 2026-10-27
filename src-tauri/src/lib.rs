@@ -14,6 +14,12 @@
 //! gets `"session"`, so the page clears what it shows. When rooms are added or
 //! change, the session channel gets `"rooms"` and the page fetches the list.
 //!
+//! A desktop notification (ADR-0022) arrives from the core as an event with
+//! a room name and a sender name, never message text. The UI process shows
+//! it with the notification plugin's Rust API while the main window is not
+//! focused, and never forwards it to the page; no capability grants the page
+//! any notification command.
+//!
 //! Images (ADR-0009) cross as opaque handles. The page fetches a loaded or
 //! picked image's pixels one band at a time with `image_band`, which answers
 //! with a raw binary IPC response (never JSON numbers or base64): an 8-byte
@@ -25,17 +31,19 @@ pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
-    AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart, DeviceList,
-    DisplayName, ImagePick, ImageView, InviteList, PendingMessage, ProfileList, RoomChange,
-    RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomSettings,
-    SecurityStatus, StoreState, TimelinePage, UserSearch,
+    AccountChange, AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart,
+    DeviceList, DisplayName, ImagePick, ImageView, InviteList, NotificationLevel,
+    NotificationSettings, PendingMessage, ProfileList, RoomChange, RoomCreation,
+    RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomSettings, SecurityStatus,
+    StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
-    Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES, MAX_DISPLAY_NAME_BYTES,
-    MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES,
-    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_PROFILES, MAX_ROOM_ID_BYTES,
-    MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES,
-    room_change_within_limits,
+    COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
+    MAX_DEVICE_ID_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES,
+    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_MEMBER_FILTER_BYTES,
+    MAX_MESSAGE_BYTES, MAX_NOTIFICATION_NAME_BYTES, MAX_PHONE_NUMBER_BYTES, MAX_PROFILES,
+    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_THREE_PID_ADDRESS_BYTES,
+    MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -121,14 +129,19 @@ async fn timeline_page(
     relay(core.inner(), Call::TimelinePage { room_id, cursor }).await
 }
 
+/// Shows one desktop notification: the room's name, then the sender's.
+pub type Toaster = Box<dyn Fn(&str, &str) + Send + Sync>;
+
 /// The page's channel for each room it subscribed to, and its one session
 /// channel. The core accepts at most `MAX_SUBSCRIPTIONS` rooms, and a room
 /// channel is kept only after the core accepted the room, so this map is
-/// bounded the same way.
+/// bounded the same way. Desktop notifications go to the toaster, never to
+/// a page channel.
 #[derive(Default)]
 pub struct Subscriptions {
     channels: Mutex<HashMap<String, Channel<()>>>,
     session: Mutex<Option<Channel<&'static str>>>,
+    toaster: Mutex<Option<Toaster>>,
 }
 
 impl Subscriptions {
@@ -142,6 +155,14 @@ impl Subscriptions {
         self.session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets what shows desktop notifications; until then they are dropped.
+    pub fn set_toaster(&self, toaster: Toaster) {
+        *self
+            .toaster
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(toaster);
     }
 
     /// Forwards a core event to the page. Called on the core reader thread.
@@ -167,6 +188,19 @@ impl Subscriptions {
             Event::SecurityChanged {} => {
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("security");
+                }
+            }
+            // Names only; the core bounds them, and so does this check.
+            Event::Notification { room, sender } => {
+                if room.len() <= MAX_NOTIFICATION_NAME_BYTES
+                    && sender.len() <= MAX_NOTIFICATION_NAME_BYTES
+                    && let Some(toaster) = self
+                        .toaster
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .as_ref()
+                {
+                    toaster(&room, &sender);
                 }
             }
         }
@@ -744,10 +778,131 @@ async fn account_settings(core: State<'_, CoreLink>) -> Result<AccountSettings, 
     relay(core.inner(), Call::AccountSettings {}).await
 }
 
-/// Replaces this account's settings. Each setting is a required argument.
+/// Replaces this account's settings. Each setting is a required argument;
+/// the core checks the text sizes' bounds.
 #[tauri::command]
-async fn set_account_settings(core: State<'_, CoreLink>, enter_sends: bool) -> Result<(), String> {
-    relay::<()>(core.inner(), Call::SetAccountSettings { enter_sends }).await
+async fn set_account_settings(
+    core: State<'_, CoreLink>,
+    enter_sends: bool,
+    chat_text_percent: u16,
+    interface_text_percent: u16,
+    desktop_notifications: bool,
+) -> Result<(), String> {
+    relay::<()>(
+        core.inner(),
+        Call::SetAccountSettings {
+            enter_sends,
+            chat_text_percent,
+            interface_text_percent,
+            desktop_notifications,
+        },
+    )
+    .await
+}
+
+/// Changes this account's password. Nothing secret crosses: the core asks
+/// for the current and new passwords in its own windows (ADR-0019).
+#[tauri::command]
+async fn change_password(
+    core: State<'_, CoreLink>,
+    sign_out_others: bool,
+) -> Result<AccountChange, String> {
+    relay(core.inner(), Call::ChangePassword { sign_out_others }).await
+}
+
+/// This account's email addresses and phone numbers (ADR-0020).
+#[tauri::command]
+async fn three_pids(core: State<'_, CoreLink>) -> Result<ThreePidList, String> {
+    relay(core.inner(), Call::ThreePids {}).await
+}
+
+/// Asks the homeserver to send a confirmation link to this email address.
+#[tauri::command]
+async fn request_email_token(
+    core: State<'_, CoreLink>,
+    email: String,
+) -> Result<AccountChange, String> {
+    if email.len() > MAX_EMAIL_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RequestEmailToken { email }).await
+}
+
+/// Asks the homeserver to send a code to this phone number.
+#[tauri::command]
+async fn request_phone_token(
+    core: State<'_, CoreLink>,
+    country: String,
+    phone_number: String,
+) -> Result<AccountChange, String> {
+    if country.len() != COUNTRY_CODE_BYTES || phone_number.len() > MAX_PHONE_NUMBER_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::RequestPhoneToken {
+            country,
+            phone_number,
+        },
+    )
+    .await
+}
+
+/// Adds the confirmed address; the core asks for a phone's code and the
+/// password in its own windows.
+#[tauri::command]
+async fn add_three_pid(core: State<'_, CoreLink>) -> Result<AccountChange, String> {
+    relay(core.inner(), Call::AddThreePid {}).await
+}
+
+/// Removes an email address or phone number from this account.
+#[tauri::command]
+async fn remove_three_pid(
+    core: State<'_, CoreLink>,
+    medium: ThreePidMedium,
+    address: String,
+) -> Result<AccountChange, String> {
+    if address.len() > MAX_THREE_PID_ADDRESS_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RemoveThreePid { medium, address }).await
+}
+
+/// Asks another of this account's devices to verify each other.
+#[tauri::command]
+async fn verify_device(
+    core: State<'_, CoreLink>,
+    device_id: String,
+) -> Result<SecurityStatus, String> {
+    if device_id.is_empty() || device_id.len() > MAX_DEVICE_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::VerifyDevice { device_id }).await
+}
+
+/// Replaces the recovery key. Nothing crosses: the core warns, shows the
+/// new key and saves it in its own windows (ADR-0021).
+#[tauri::command]
+async fn change_recovery_key(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::ChangeRecoveryKey {}).await
+}
+
+/// This account's notification level, from its push rules (ADR-0022).
+#[tauri::command]
+async fn notification_level(core: State<'_, CoreLink>) -> Result<NotificationSettings, String> {
+    relay(core.inner(), Call::NotificationLevel {}).await
+}
+
+/// Sets this account's notification level in its push rules.
+#[tauri::command]
+async fn set_notification_level(
+    core: State<'_, CoreLink>,
+    level: NotificationLevel,
+) -> Result<(), String> {
+    if level == NotificationLevel::Custom {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::SetNotificationLevel { level }).await
 }
 
 /// The local profiles on this computer, by slot number only.
@@ -864,6 +1019,16 @@ pub fn configure<R: Runtime>(
             device_list,
             account_settings,
             set_account_settings,
+            change_password,
+            three_pids,
+            request_email_token,
+            request_phone_token,
+            add_three_pid,
+            remove_three_pid,
+            verify_device,
+            change_recovery_key,
+            notification_level,
+            set_notification_level,
             profile_list,
             add_profile,
             switch_profile
@@ -876,10 +1041,34 @@ pub fn configure<R: Runtime>(
                 );
             }
         })
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             create_main_window(app.handle())?;
+            let handle = app.handle().clone();
+            app.state::<Arc<Subscriptions>>()
+                .set_toaster(Box::new(move |room, sender| toast(&handle, room, sender)));
             Ok(())
         })
+}
+
+/// Shows one desktop notification (ADR-0022): the room as the title and the
+/// sender in the body, never message text. Skipped while the main window has
+/// the focus, since the page shows the message then.
+fn toast<R: Runtime>(app: &tauri::AppHandle<R>, room: &str, sender: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    let focused = app
+        .get_webview_window(MAIN_WINDOW)
+        .and_then(|window| window.is_focused().ok())
+        .unwrap_or(false);
+    if focused {
+        return;
+    }
+    let _ = app
+        .notification()
+        .builder()
+        .title(room)
+        .body(format!("New message from {sender}"))
+        .show();
 }
 
 /// Creates the main window: bundled app only, no navigation away from it and

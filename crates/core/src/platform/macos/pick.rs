@@ -1,5 +1,6 @@
-//! The macOS file dialog: an `NSOpenPanel` on the main thread, for one PNG
-//! or JPEG file. It does not resolve aliases, so it returns the path the user
+//! The macOS file dialogs: an `NSSavePanel` for where to save a new recovery
+//! key (ADR-0021), and an `NSOpenPanel` on the main thread, for one PNG or
+//! JPEG file. It does not resolve aliases, so it returns the path the user
 //! chose; the read (`unix::read_image_file`) then refuses a symbolic link,
 //! and an alias file is not an image. The panel does not create folders or
 //! open packages.
@@ -7,7 +8,7 @@
 use super::{credentials::bring_to_front, main_loop::main_thread};
 use crate::pick::ImagePicker;
 use objc2::{MainThreadMarker, rc::autoreleasepool};
-use objc2_app_kit::NSOpenPanel;
+use objc2_app_kit::{NSOpenPanel, NSSavePanel};
 use objc2_foundation::{NSArray, NSString};
 use persephone_core_protocol::ErrorCode;
 use std::path::PathBuf;
@@ -39,6 +40,27 @@ pub fn chosen(response: isize, path: Option<PathBuf>) -> Result<Option<PathBuf>,
         (PANEL_CANCEL, _) => Ok(None),
         _ => Err(ErrorCode::Unavailable),
     }
+}
+
+/// Asks where to save a file, suggesting `suggested` as its name, on the
+/// main thread. `Ok(None)` when the user cancelled. The panel asks before
+/// replacing a file.
+pub fn save_panel(title: &str, suggested: &str) -> Result<Option<PathBuf>, ErrorCode> {
+    main_thread(|| {
+        let mtm = MainThreadMarker::new().ok_or(ErrorCode::Unavailable)?;
+        autoreleasepool(|_| {
+            let panel = NSSavePanel::savePanel(mtm);
+            panel.setCanCreateDirectories(true);
+            panel.setTreatsFilePackagesAsDirectories(false);
+            panel.setNameFieldStringValue(&NSString::from_str(suggested));
+            panel.setMessage(Some(&NSString::from_str(title)));
+            bring_to_front(mtm, &panel);
+            let response = panel.runModal();
+            let path = panel.URL().and_then(|url| url.to_file_path());
+            chosen(response, path)
+        })
+    })
+    .unwrap_or(Err(ErrorCode::Unavailable))
 }
 
 fn show(mtm: MainThreadMarker) -> Result<Option<PathBuf>, ErrorCode> {

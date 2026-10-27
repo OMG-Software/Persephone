@@ -1,6 +1,7 @@
 <script module lang="ts">
   export type SettingsTab =
     | 'profile'
+    | 'account'
     | 'security'
     | 'devices'
     | 'preferences'
@@ -29,6 +30,7 @@
 
   const tabs: { id: SettingsTab; label: string }[] = [
     { id: 'profile', label: 'Profile' },
+    { id: 'account', label: 'Account' },
     { id: 'security', label: 'Security & encryption' },
     { id: 'devices', label: 'Sessions' },
     { id: 'preferences', label: 'Preferences' },

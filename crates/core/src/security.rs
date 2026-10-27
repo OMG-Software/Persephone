@@ -169,6 +169,19 @@ pub async fn enable_recovery(client: &Client) -> Result<Zeroizing<String>, Secur
         .map_err(|error| recovery_error(&error))
 }
 
+/// Replaces the recovery key (ADR-0021): new secret storage, holding the
+/// same secrets, opened only by the returned key. The old key stops working.
+/// Needs no password: this verified device holds the secrets.
+pub async fn reset_recovery_key(client: &Client) -> Result<Zeroizing<String>, SecurityError> {
+    client
+        .encryption()
+        .recovery()
+        .reset_key()
+        .await
+        .map(Zeroizing::new)
+        .map_err(|error| recovery_error(&error))
+}
+
 /// Verifies this device with the recovery key (or its passphrase).
 pub async fn recover(client: &Client, key: &Zeroizing<String>) -> Result<(), SecurityError> {
     client

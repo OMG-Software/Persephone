@@ -14,7 +14,7 @@
 //! the core's frames with [`receive_from_core`], which checks the pixel
 //! frame's header against its reply before it allocates the body.
 
-pub use persephone_contracts::RoomChange;
+pub use persephone_contracts::{NotificationLevel, RoomChange, ThreePidMedium};
 use persephone_media_protocol::{
     FrameError, FrameHeader, FrameKind, MAX_DIMENSION, MIB, RGBA_BYTES_PER_PIXEL, ReceivedFrame,
     ResourceBudgets, read_frame, write_frame,
@@ -226,10 +226,66 @@ pub enum Call {
     /// This account's settings, kept in its encrypted profile.
     AccountSettings {},
     /// Replace this account's settings. Every setting is a required field,
-    /// so the page always sends the whole set.
+    /// so the page always sends the whole set. Text sizes outside their
+    /// bounds are `invalid_argument`.
     SetAccountSettings {
         /// Enter sends a message; otherwise it starts a new line.
         enter_sends: bool,
+        /// Message text size, in percent.
+        chat_text_percent: u16,
+        /// Interface text size, in percent.
+        interface_text_percent: u16,
+        /// Desktop notifications with the sender and room only.
+        desktop_notifications: bool,
+    },
+    /// Change this account's password (ADR-0019). The core asks for the
+    /// current password and the new one (twice) in its own windows; nothing
+    /// secret crosses this channel. `sign_out_others` signs out every other
+    /// device of the account, as the specification does by default. Replies
+    /// when done with an `AccountChange` code.
+    ChangePassword {
+        sign_out_others: bool,
+    },
+    /// The email addresses and phone numbers on this account (ADR-0020).
+    ThreePids {},
+    /// Ask the homeserver to send a confirmation link to this email address,
+    /// to add it. Replaces any address waiting to be added. Never binds it
+    /// to an identity server.
+    RequestEmailToken {
+        email: String,
+    },
+    /// Ask the homeserver to send a code to this phone number, given as a
+    /// two-letter country code and the number as dialled there.
+    RequestPhoneToken {
+        country: String,
+        phone_number: String,
+    },
+    /// Add the address waiting to be added, once it is confirmed. The core
+    /// asks for a phone's code and for the account password in its own
+    /// windows.
+    AddThreePid {},
+    /// Remove an email address or phone number from this account.
+    RemoveThreePid {
+        medium: ThreePidMedium,
+        address: String,
+    },
+    /// Ask another of this account's devices to verify each other by
+    /// comparing emoji, from a verified device. Progress arrives as
+    /// [`Event::SecurityChanged`], as for `VerifyThisDevice`.
+    VerifyDevice {
+        device_id: String,
+    },
+    /// Replace the recovery key (ADR-0021). The core warns in its own window
+    /// that the old key stops working, then shows the new key there and
+    /// offers to save it to a file it writes itself. The key never crosses
+    /// this channel. Replies at once with the status.
+    ChangeRecoveryKey {},
+    /// This account's notification level, from its push rules (ADR-0022).
+    NotificationLevel {},
+    /// Set this account's notification level in its push rules. `custom`
+    /// is `invalid_argument`.
+    SetNotificationLevel {
+        level: NotificationLevel,
     },
     /// The local profiles (accounts) on this computer, by slot number. No
     /// path or account name crosses.
@@ -272,6 +328,28 @@ pub enum Call {
         change: RoomChange,
     },
 }
+
+/// Longest email address either side accepts, in bytes (RFC 5321's path
+/// limit less its angle brackets).
+pub const MAX_EMAIL_BYTES: usize = 254;
+
+/// Longest phone number either side accepts, in bytes.
+pub const MAX_PHONE_NUMBER_BYTES: usize = 32;
+
+/// The exact length of a country code (ISO 3166-1 alpha-2).
+pub const COUNTRY_CODE_BYTES: usize = 2;
+
+/// Longest 3PID address either side accepts in `remove_three_pid`.
+pub const MAX_THREE_PID_ADDRESS_BYTES: usize = MAX_EMAIL_BYTES;
+
+/// Most email addresses and phone numbers a `three_pids` reply lists.
+pub const MAX_THREE_PIDS: usize = 50;
+
+/// Longest device ID either side accepts in a call.
+pub const MAX_DEVICE_ID_BYTES: usize = 255;
+
+/// Longest room or sender name in a [`Event::Notification`], in bytes.
+pub const MAX_NOTIFICATION_NAME_BYTES: usize = 512;
 
 /// Longest room topic either side accepts, in bytes.
 pub const MAX_TOPIC_BYTES: usize = 4096;
@@ -386,6 +464,15 @@ pub enum Event {
     /// The account's encryption state changed: ask for `security_status`.
     /// Coalesced; it does not clear what the UI shows.
     SecurityChanged {},
+    /// A message arrived that the account's push rules say to notify of, and
+    /// desktop notifications are on (ADR-0022). The UI process shows a
+    /// desktop notification with these names and never forwards it to the
+    /// page. Names only, never message text; each is projected and at most
+    /// [`MAX_NOTIFICATION_NAME_BYTES`]. Coalesced: only the latest waits.
+    Notification {
+        room: String,
+        sender: String,
+    },
 }
 
 /// Every frame from the core to the UI: a reply to a call, or an event.
@@ -854,8 +941,13 @@ mod tests {
                 r#"{"id":1,"call":{"command":"account_settings"}}"#,
             ),
             (
-                Call::SetAccountSettings { enter_sends: false },
-                r#"{"id":1,"call":{"command":"set_account_settings","enter_sends":false}}"#,
+                Call::SetAccountSettings {
+                    enter_sends: false,
+                    chat_text_percent: 120,
+                    interface_text_percent: 90,
+                    desktop_notifications: true,
+                },
+                r#"{"id":1,"call":{"command":"set_account_settings","enter_sends":false,"chat_text_percent":120,"interface_text_percent":90,"desktop_notifications":true}}"#,
             ),
             (
                 Call::ProfileList {},
@@ -897,6 +989,9 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":"false"}}"#,
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":null}}"#,
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"theme":"x"}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":100,"interface_text_percent":100}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":-1,"interface_text_percent":100,"desktop_notifications":false}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":70000,"interface_text_percent":100,"desktop_notifications":false}}"#,
             br#"{"id":1,"call":{"command":"profile_list","all":true}}"#,
             br#"{"id":1,"call":{"command":"add_profile","dir":"C:\\x"}}"#,
             br#"{"id":1,"call":{"command":"switch_profile"}}"#,
@@ -914,6 +1009,120 @@ mod tests {
                 String::from_utf8_lossy(body)
             );
         }
+    }
+
+    /// GIVEN the account calls of ADR-0019 to ADR-0022 WHEN sent THEN only
+    /// their documented, non-secret arguments cross: no password, code,
+    /// recovery key or path field exists, and anything else is refused.
+    #[test]
+    fn given_account_change_calls_then_they_have_a_strict_wire_form() {
+        let budgets = ResourceBudgets::default();
+        for (call, wire) in [
+            (
+                Call::ChangePassword {
+                    sign_out_others: true,
+                },
+                r#"{"id":1,"call":{"command":"change_password","sign_out_others":true}}"#,
+            ),
+            (
+                Call::ThreePids {},
+                r#"{"id":1,"call":{"command":"three_pids"}}"#,
+            ),
+            (
+                Call::RequestEmailToken {
+                    email: "a@example.org".into(),
+                },
+                r#"{"id":1,"call":{"command":"request_email_token","email":"a@example.org"}}"#,
+            ),
+            (
+                Call::RequestPhoneToken {
+                    country: "GB".into(),
+                    phone_number: "07700900123".into(),
+                },
+                r#"{"id":1,"call":{"command":"request_phone_token","country":"GB","phone_number":"07700900123"}}"#,
+            ),
+            (
+                Call::AddThreePid {},
+                r#"{"id":1,"call":{"command":"add_three_pid"}}"#,
+            ),
+            (
+                Call::RemoveThreePid {
+                    medium: ThreePidMedium::Msisdn,
+                    address: "447700900123".into(),
+                },
+                r#"{"id":1,"call":{"command":"remove_three_pid","medium":"msisdn","address":"447700900123"}}"#,
+            ),
+            (
+                Call::VerifyDevice {
+                    device_id: "ABCDEF".into(),
+                },
+                r#"{"id":1,"call":{"command":"verify_device","device_id":"ABCDEF"}}"#,
+            ),
+            (
+                Call::ChangeRecoveryKey {},
+                r#"{"id":1,"call":{"command":"change_recovery_key"}}"#,
+            ),
+            (
+                Call::NotificationLevel {},
+                r#"{"id":1,"call":{"command":"notification_level"}}"#,
+            ),
+            (
+                Call::SetNotificationLevel {
+                    level: NotificationLevel::Mentions,
+                },
+                r#"{"id":1,"call":{"command":"set_notification_level","level":"mentions"}}"#,
+            ),
+        ] {
+            let request = Request { id: 1, call };
+            let mut sent = Vec::new();
+            send(&mut sent, &request).unwrap();
+            assert_eq!(String::from_utf8(sent[17..].to_vec()).unwrap(), wire);
+            let mut reader = Cursor::new(sent);
+            assert_eq!(
+                receive::<_, Request>(&mut reader, &budgets).unwrap(),
+                request
+            );
+        }
+        for body in [
+            &br#"{"id":1,"call":{"command":"change_password"}}"#[..],
+            br#"{"id":1,"call":{"command":"change_password","sign_out_others":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"change_password","sign_out_others":true,"new_password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"three_pids","medium":"email"}}"#,
+            br#"{"id":1,"call":{"command":"request_email_token"}}"#,
+            br#"{"id":1,"call":{"command":"request_email_token","email":"a@b","id_server":"is.example"}}"#,
+            br#"{"id":1,"call":{"command":"request_phone_token","phone_number":"1"}}"#,
+            br#"{"id":1,"call":{"command":"add_three_pid","sid":"s"}}"#,
+            br#"{"id":1,"call":{"command":"add_three_pid","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"remove_three_pid","medium":"fax","address":"1"}}"#,
+            br#"{"id":1,"call":{"command":"remove_three_pid","address":"a@b"}}"#,
+            br#"{"id":1,"call":{"command":"verify_device"}}"#,
+            br#"{"id":1,"call":{"command":"verify_device","device_id":null}}"#,
+            br#"{"id":1,"call":{"command":"change_recovery_key","key":"x"}}"#,
+            br#"{"id":1,"call":{"command":"change_recovery_key","path":"C:\\x"}}"#,
+            br#"{"id":1,"call":{"command":"set_notification_level"}}"#,
+            br#"{"id":1,"call":{"command":"set_notification_level","level":"loud"}}"#,
+        ] {
+            let mut reader = Cursor::new(frame(FrameKind::Control, body));
+            assert!(
+                matches!(
+                    receive::<_, Request>(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+        // The notification event carries two names and nothing else.
+        let event = CoreMessage::Event(Event::Notification {
+            room: "Plans".into(),
+            sender: "Bob".into(),
+        });
+        let mut sent = Vec::new();
+        send(&mut sent, &event).unwrap();
+        assert_eq!(
+            String::from_utf8(sent[17..].to_vec()).unwrap(),
+            r#"{"event":{"notification":{"room":"Plans","sender":"Bob"}}}"#
+        );
     }
 
     /// GIVEN the room settings calls WHEN sent THEN they cross in the

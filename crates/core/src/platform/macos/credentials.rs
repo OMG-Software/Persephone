@@ -351,6 +351,19 @@ impl CredentialSource for NativePrompt {
         let (caption, message) = prompt_text::identity_change(user_id, was_verified)?;
         yes(prompt(&question_alert(caption, &message))?.response)
     }
+
+    fn confirm_recovery_key_change(&self) -> Result<bool, PromptError> {
+        let (caption, message) = prompt_text::RECOVERY_KEY_CHANGE;
+        yes(prompt(&question_alert(caption, message))?.response)
+    }
+
+    fn choose_recovery_key_file(&self) -> Result<Option<std::path::PathBuf>, PromptError> {
+        let (title, suggested) = prompt_text::SAVE_RECOVERY_KEY;
+        super::pick::save_panel(title, suggested).map_err(|error| match error {
+            persephone_core_protocol::ErrorCode::Unavailable => PromptError::Unsupported,
+            _ => PromptError::Failed,
+        })
+    }
 }
 
 /// Asks whether to start the failed window again; `true` only for Retry.

@@ -1,5 +1,6 @@
-//! The Windows file dialog (`GetOpenFileNameW`) and the Windows read of a
-//! picked file, under the rules in [`crate::pick`].
+//! The Windows file dialogs and the Windows read of a picked file, under the
+//! rules in [`crate::pick`]: `GetOpenFileNameW` for an image to send, and
+//! `GetSaveFileNameW` for where to save a new recovery key (ADR-0021).
 
 use crate::media::MAX_ENCODED_BYTES;
 use crate::{media::Encoded, pick::ImagePicker};
@@ -22,9 +23,9 @@ use windows_sys::Win32::{
         FILE_SHARE_READ,
     },
     UI::Controls::Dialogs::{
-        CommDlgExtendedError, GetOpenFileNameW, OFN_DONTADDTORECENT, OFN_EXPLORER,
-        OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_NODEREFERENCELINKS,
-        OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_DONTADDTORECENT,
+        OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_NODEREFERENCELINKS,
+        OFN_NOREADONLYRETURN, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
     },
 };
 
@@ -105,6 +106,55 @@ impl ImagePicker for NativeDialog {
             .unwrap_or(file.len());
         Ok(Some(PathBuf::from(OsString::from_wide(&file[..length]))))
     }
+}
+
+/// Asks where to save a file, offering text files and `suggested` as the
+/// name. `Ok(None)` when the user cancelled. The dialog asks before
+/// replacing a file, does not follow shortcuts, does not change the working
+/// directory and does not add the file to the recent list.
+pub fn save_dialog(title: &str, suggested: &str) -> Result<Option<PathBuf>, ErrorCode> {
+    let _apartment = super::Apartment::enter();
+    let filter: Vec<u16> = "Text file\0*.txt\0\0".encode_utf16().collect();
+    let title = wide(title);
+    let extension = wide("txt");
+    let mut file = vec![0u16; MAX_PICKED_PATH_UNITS];
+    for (slot, unit) in file.iter_mut().zip(suggested.encode_utf16()) {
+        *slot = unit;
+    }
+    // SAFETY: OPENFILENAMEW is a plain C struct; all-zero is its
+    // documented empty state.
+    let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    dialog.hwndOwner = null_mut();
+    dialog.lpstrFilter = filter.as_ptr();
+    dialog.nFilterIndex = 1;
+    dialog.lpstrFile = file.as_mut_ptr();
+    dialog.nMaxFile = file.len() as u32;
+    dialog.lpstrTitle = title.as_ptr();
+    dialog.lpstrDefExt = extension.as_ptr();
+    dialog.Flags = OFN_EXPLORER
+        | OFN_OVERWRITEPROMPT
+        | OFN_PATHMUSTEXIST
+        | OFN_NOREADONLYRETURN
+        | OFN_NOCHANGEDIR
+        | OFN_DONTADDTORECENT
+        | OFN_NODEREFERENCELINKS
+        | OFN_HIDEREADONLY;
+    // SAFETY: every pointer refers to a buffer that outlives the call,
+    // `nMaxFile` is the file buffer's length, and the suggested name left
+    // its last unit zero.
+    if unsafe { GetSaveFileNameW(&mut dialog) } == 0 {
+        // SAFETY: no arguments.
+        return match unsafe { CommDlgExtendedError() } {
+            0 => Ok(None),
+            _ => Err(ErrorCode::Unavailable),
+        };
+    }
+    let length = file
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(file.len());
+    Ok(Some(PathBuf::from(OsString::from_wide(&file[..length]))))
 }
 
 #[cfg(test)]

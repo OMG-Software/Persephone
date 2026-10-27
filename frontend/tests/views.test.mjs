@@ -17,6 +17,9 @@ let NewConversation;
 let NewRoom;
 let RoomSettings;
 let LevelPicker;
+let Preferences;
+let AccountPage;
+let Devices;
 let render;
 
 before(async () => {
@@ -39,6 +42,9 @@ before(async () => {
   ({ default: NewRoom } = await vite.ssrLoadModule('/src/NewRoom.svelte'));
   ({ default: RoomSettings } = await vite.ssrLoadModule('/src/RoomSettings.svelte'));
   ({ default: LevelPicker } = await vite.ssrLoadModule('/src/LevelPicker.svelte'));
+  ({ default: Preferences } = await vite.ssrLoadModule('/src/Preferences.svelte'));
+  ({ default: AccountPage } = await vite.ssrLoadModule('/src/AccountPage.svelte'));
+  ({ default: Devices } = await vite.ssrLoadModule('/src/Devices.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -267,7 +273,12 @@ test('the encryption panel offers the step that fits and never asks for a secret
   const verified = panel(status('verified', { recovery: 'enabled' }));
   assert.match(verified, /This device is verified\./);
   assert.match(verified, /Recovery is set up\./);
-  assert.doesNotMatch(verified, /<button/);
+  // The only step left is replacing the recovery key, which the core shows.
+  assert.deepEqual([...verified.matchAll(/<button[^>]*>([^<]+)</g)].map((m) => m[1]), ['Change recovery key…']);
+  assert.match(verified, /does not keep your recovery key/);
+  assert.match(verified, /The old key stops working\./);
+  assert.doesNotMatch(panel(status('unverified', { recovery: 'enabled' })), /Change recovery key/);
+  assert.doesNotMatch(panel(status('verified', { recovery: 'disabled' })), /Change recovery key/);
   // Offered only when this device holds the keys recovery needs.
   assert.doesNotMatch(panel(status('verified', { recovery: 'disabled' })), /Set up recovery/);
   const noRecovery = panel(status('verified', { recovery: 'disabled', canSetUpRecovery: true }));
@@ -894,4 +905,49 @@ test('GIVEN the new-conversation dialog WHEN it opens THEN directory search is o
   assert.match(html, /Off: nothing is sent until you press Start\./);
   assert.doesNotMatch(html, /Directory matches/);
   assert.match(html, /<button type="submit" class="primary" disabled/, 'no Matrix ID yet');
+});
+
+test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop notifications are offered, with no message text', () => {
+  const settings = {
+    enterSends: true,
+    chatTextPercent: 125,
+    interfaceTextPercent: 100,
+    desktopNotifications: false
+  };
+  const html = render(Preferences, {
+    props: { settings, failure: null, mac: false, onchange: () => {} }
+  }).body;
+  assert.match(html, /<label for="chat-text-size">Message text</);
+  assert.match(html, /<label for="interface-text-size">Interface</);
+  assert.match(html, /<option value="200">200%/);
+  assert.doesNotMatch(html, /<option value="175">175%<\/option>[^]*id="interface-text-size"[^]*<option value="175">/);
+  for (const level of ['All messages', 'Mentions and keywords only', 'Nothing']) {
+    assert.match(html, new RegExp(`<span>${level}</span>`));
+  }
+  assert.match(html, /never the message itself/);
+  assert.match(html, /Show desktop notifications/);
+  // The level is read from the homeserver; until then nothing can be chosen.
+  assert.match(html, /<fieldset class="choices" disabled/);
+});
+
+test('GIVEN the account page WHEN it shows THEN passwords are never asked on the page and other sessions are signed out by default', () => {
+  const html = render(AccountPage, { props: { native: 'Windows' } }).body;
+  assert.match(html, />Change password…</);
+  assert.match(html, /<input type="checkbox" checked/);
+  assert.match(html, /Sign out my other sessions/);
+  assert.match(html, /own Windows windows, never on this page/);
+  assert.doesNotMatch(html, /type="password"/);
+  assert.match(html, /does not share them with an\s+identity server/);
+});
+
+test('GIVEN sessions WHEN this device cannot vouch THEN no Verify shows, and WHEN it can THEN only other unverified sessions get one', async () => {
+  // Without a host the list does not load in server rendering, so the
+  // offer is checked through the component's own rules.
+  const source = await import('node:fs/promises').then(({ readFile }) =>
+    readFile(new URL('../src/Devices.svelte', import.meta.url), 'utf8')
+  );
+  assert.match(source, /\{#if !device\.current && !device\.verified && canVerify\}/);
+  assert.match(source, /onverify\(device\.deviceId\)/);
+  const html = render(Devices, { props: { canVerify: true } }).body;
+  assert.doesNotMatch(html, />Verify</, 'nothing listed yet');
 });
