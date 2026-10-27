@@ -194,7 +194,7 @@ test('GIVEN settings that cannot be read WHEN they load THEN the defaults stay a
   assert.equal(shown.failure, null);
 });
 
-test('GIVEN two quick changes WHEN saved THEN the second save starts only after the first, in order', async () => {
+test('GIVEN two quick changes WHEN saved THEN the second save starts only after the first, and the first failure is undone before it', async () => {
   const { kept, waiting, shown } = keeper();
   const loading = kept.load();
   waiting.load[0].resolve(STORED);
@@ -208,8 +208,50 @@ test('GIVEN two quick changes WHEN saved THEN the second save starts only after 
   await first;
   await tick();
   assert.equal(waiting.save.length, 2, 'a failed save does not stop the next');
+  assert.deepEqual(
+    waiting.save[1].settings,
+    { ...STORED, chatTextPercent: 80 },
+    'the refused value is not sent again'
+  );
   waiting.save[1].resolve();
   await second;
-  assert.equal(shown.settings.chatTextPercent, 80, 'the newer change stays');
-  assert.equal(shown.failure, null);
+  assert.deepEqual(shown.settings, { ...STORED, chatTextPercent: 80 }, 'the newer change stays');
+  assert.equal(shown.failure, preferences.SAVE_FAILED, 'the first failure is reported');
+});
+
+test('GIVEN two changes of different settings WHEN both saves fail THEN both return to the stored values, and a later save sends neither', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  waiting.load[0].resolve(STORED);
+  await loading;
+  const first = kept.change({ enterSends: true });
+  const second = kept.change({ chatTextPercent: 80 });
+  await tick();
+  waiting.save[0].reject('internal');
+  await first;
+  await tick();
+  waiting.save[1].reject('internal');
+  await second;
+  assert.deepEqual(shown.settings, STORED);
+  const third = kept.change({ desktopNotifications: false });
+  await tick();
+  assert.deepEqual(waiting.save[2].settings, { ...STORED, desktopNotifications: false });
+  waiting.save[2].resolve();
+  await third;
+});
+
+test('GIVEN a save waiting behind another WHEN the account is signed out meanwhile THEN it is never sent', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  waiting.load[0].resolve(STORED);
+  await loading;
+  const first = kept.change({ enterSends: true });
+  const second = kept.change({ chatTextPercent: 80 });
+  await tick();
+  kept.clear();
+  waiting.save[0].resolve();
+  await Promise.all([first, second]);
+  await tick();
+  assert.equal(waiting.save.length, 1, 'the queued save was skipped');
+  assert.deepEqual(shown.settings, DEFAULT_SETTINGS);
 });

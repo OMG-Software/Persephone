@@ -62,8 +62,6 @@ export class SettingsKeeper {
   #epoch = 0;
   // Counts loads: only the newest one's result is shown.
   #loads = 0;
-  // Counts changes: only the newest one's failure is shown.
-  #changes = 0;
   #current: AccountSettings = DEFAULT_SETTINGS;
   // Whether the stored settings are known: the newest load's outcome.
   #known: Promise<boolean> = Promise.resolve(false);
@@ -114,9 +112,10 @@ export class SettingsKeeper {
 
   async change(patch: Partial<AccountSettings>) {
     const epoch = this.#epoch;
-    const change = ++this.#changes;
     const keys = Object.keys(patch) as (keyof AccountSettings)[];
-    let undo = Object.fromEntries(keys.map((key) => [key, this.#current[key]]));
+    let undo: Partial<AccountSettings> = Object.fromEntries(
+      keys.map((key) => [key, this.#current[key]])
+    );
     this.#unsaved = { ...this.#unsaved, ...patch };
     this.#set({ ...this.#current, ...patch }, null);
     // The stored settings come first: saving before them would write the
@@ -132,30 +131,53 @@ export class SettingsKeeper {
     // before the stored settings arrived.
     const stored = this.#stored;
     if (stored) undo = Object.fromEntries(keys.map((key) => [key, stored[key]]));
-    let saved = false;
-    if (known) {
-      // Saves go one at a time, in the order they were made: two calls in
-      // flight could reach the core in either order and keep the older one.
-      // A failed save does not stop the next.
-      let sent: AccountSettings | null = null;
-      const save = this.#saving.then(() => {
-        sent = { ...this.#current };
-        return this.#core.save(sent);
-      });
-      this.#saving = save.catch(() => {});
-      saved = await save.then(
-        () => true,
-        () => false
-      );
-      if (epoch !== this.#epoch) return;
-      if (saved && sent) this.#stored = sent;
+    if (!known) {
+      this.#undo(patch, undo);
+      return;
     }
-    for (const key of keys) {
+    // Saves go one at a time, in the order they were made: two calls in
+    // flight could reach the core in either order and keep the older one.
+    // A failed save is undone before the next one takes its snapshot, so a
+    // later save never sends a refused value again, and it does not stop the
+    // next. A save queued before `clear` is skipped: it would send the reset
+    // settings as the next account's.
+    const save = this.#saving.then(async () => {
+      if (epoch !== this.#epoch) return;
+      const sent = { ...this.#current };
+      try {
+        await this.#core.save(sent);
+      } catch {
+        if (epoch === this.#epoch) this.#undo(patch, undo);
+        return;
+      }
+      if (epoch !== this.#epoch) return;
+      this.#stored = sent;
+      this.#forget(patch);
+    });
+    this.#saving = save.catch(() => {});
+    await save;
+  }
+
+  /** Drops a change's fields from the unsaved ones, unless a newer change set them. */
+  #forget(patch: Partial<AccountSettings>) {
+    for (const key of Object.keys(patch) as (keyof AccountSettings)[]) {
       if (this.#unsaved[key] === patch[key]) delete this.#unsaved[key];
     }
-    if (!saved && change === this.#changes) {
-      this.#set({ ...this.#current, ...undo }, SAVE_FAILED);
+  }
+
+  /**
+   * Puts back the fields of a change that was not saved, with a failure. A
+   * field a newer change set since keeps the newer value.
+   */
+  #undo(patch: Partial<AccountSettings>, undo: Partial<AccountSettings>) {
+    const restored = { ...this.#current };
+    for (const key of Object.keys(patch) as (keyof AccountSettings)[]) {
+      if (this.#unsaved[key] === patch[key]) {
+        Object.assign(restored, { [key]: undo[key] });
+      }
     }
+    this.#forget(patch);
+    this.#set(restored, SAVE_FAILED);
   }
 
   #set(settings: AccountSettings, failure: string | null) {
