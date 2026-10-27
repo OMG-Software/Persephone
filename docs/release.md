@@ -16,8 +16,9 @@ stopped at `preflight` because these signing secrets are not set:
 `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
 `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY`, `GPG_PRIVATE_KEY`
 and `GPG_PASSPHRASE`. The `v0.0.1` pre-release on GitHub was made by hand to
-test the tag and has no files. The only downloads are the unsigned
-[latest builds](#latest-builds).
+test the tag and has no files. The only downloads on the releases page are
+the unsigned [latest builds](#latest-builds); manual runs also leave unsigned
+files as workflow artifacts.
 
 ## What a release run produces
 

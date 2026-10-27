@@ -43,6 +43,7 @@ On Windows, the app can do these things today:
 - Start an encrypted direct conversation by Matrix ID, and accept or decline
   direct-message invitations
   ([ADR-0014](docs/adr/0014-start-encrypted-direct-conversations-by-matrix-id.md)).
+  This is new and has automated tests only; no live run is recorded yet.
 - Send and receive images. Received images load only when you ask. Sent images
   have their metadata removed.
 

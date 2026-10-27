@@ -118,8 +118,9 @@ answer to that question, for these reasons.
    content in its own restricted renderer process. On Windows, the core also
    assigns the UI process to a Job with a memory limit and kill-on-close; the
    web view processes that the UI starts after that are in the Job too. In
-   measured floods of 64 to 256 MiB, the UI stopped at its limit and the
-   core's memory did not change. The core assigns the UI just after starting
+   measured floods, the core's memory did not change. At 64 and 128 MiB the UI
+   stayed alive below its limit; at 256 MiB the renderer, also in the Job,
+   failed to build the message. The core assigns the UI just after starting
    it, not before it runs (`crates/core/src/platform/windows/ui.rs`), so
    nothing guarantees that a web view process started in that short interval
    is in the Job.
