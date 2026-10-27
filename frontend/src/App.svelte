@@ -93,11 +93,13 @@
   // whether the last attempt to find out failed.
   let changes = $state<RoomIdentityChanges | null>(null);
   let changesFailed = $state(false);
-  // The room whose contact this page last asked to verify, and the room in
-  // which it last asked to accept a new identity: the core reports why that
-  // failed in the security status, shown in that room, each in its own place.
+  // The room whose contact this page last asked to verify, the room in which
+  // it last asked to accept a new identity, and the session it last asked to
+  // verify: the core reports why that failed in the security status, shown
+  // in that room or on the Sessions page, each in its own place.
   let contactAsked = $state<string | null>(null);
   let identityAsked = $state<string | null>(null);
+  let deviceAsked = $state<string | null>(null);
   // Messages sent from this device in the selected room.
   let pending = $state<PendingMessage[]>([]);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
@@ -258,6 +260,14 @@
       contactAsked === selected &&
       security?.operation === 'idle' &&
       security.error
+      ? securityErrorText[security.error]
+      : null
+  );
+  // Why the core could not start verifying the session the Sessions page
+  // asked for (such as `cannot_sign_devices`); a flow that did start has its
+  // own screen.
+  const deviceFailure = $derived(
+    deviceAsked !== null && flow === null && security?.operation === 'idle' && security.error
       ? securityErrorText[security.error]
       : null
   );
@@ -428,6 +438,7 @@
     changesFailed = false;
     contactAsked = null;
     identityAsked = null;
+    deviceAsked = null;
     confirmingPlain = null;
     // The core dropped every image handle with the session.
     imageDraft = null;
@@ -541,12 +552,13 @@
     }
   }
 
-  // `asked` names the room whose contact this action verifies, or in which
-  // it accepts a new identity; every other action clears both, so a later
+  // `asked` names the room whose contact this action verifies, the room in
+  // which it accepts a new identity, or the session it verifies; every other
+  // action clears all three, so a later
   // failure is not shown in that room. `explain` turns a refusal into text.
   async function startSecurity(
     start: () => Promise<SecurityStatus>,
-    asked: { room: string; kind: 'contact' | 'identity' } | null = null,
+    asked: { room: string; kind: 'contact' | 'identity' } | { device: string; kind: 'device' } | null = null,
     explain: (reason: unknown) => string = describe
   ) {
     if (securityBusy) return;
@@ -554,6 +566,7 @@
     securityFailure = null;
     contactAsked = asked?.kind === 'contact' ? asked.room : null;
     identityAsked = asked?.kind === 'identity' ? asked.room : null;
+    deviceAsked = asked?.kind === 'device' ? asked.device : null;
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {
@@ -1082,10 +1095,13 @@
           <Devices
             canVerify={security?.identity === 'verified'}
             busy={securityBusy}
-            onverify={(deviceId) => startSecurity(() => verifyDevice(deviceId))}
+            onverify={(deviceId) =>
+              startSecurity(() => verifyDevice(deviceId), { device: deviceId, kind: 'device' })}
           />
           {#if securityFailure}
             <p role="alert" class="error">{securityFailure}</p>
+          {:else if deviceFailure}
+            <p role="alert" class="error">{deviceFailure}</p>
           {/if}
         {:else}
           <section class="settings-page" aria-labelledby="devices-heading">
