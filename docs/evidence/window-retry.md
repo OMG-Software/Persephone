@@ -23,7 +23,8 @@ Owner decision (21 October 2026): detect the failure and offer a retry.
 * **Readiness** ([`lib.rs`](../../crates/core/src/lib.rs)): the first valid
   request on a connection marks the page as ready. The page's first request is
   `app_status`, sent as it loads.
-* **Dialog** ([`ui_job.rs`](../../crates/core/src/ui_job.rs)): the core, not
+* **Dialog** (`ui_job.rs` when recorded; since 24 October 2026 in
+  [`platform/windows/ui.rs`](../../crates/core/src/platform/windows/ui.rs)): the core, not
   the UI, shows a native `MessageBoxW` with Retry and Cancel. It has no owner
   window, because the UI's window is the one that failed. The core prints only
   the failure code.
