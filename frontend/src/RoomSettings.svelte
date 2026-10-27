@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import LevelPicker from './LevelPicker.svelte';
   import { avatarColour, initials, localpart, looksLikeUserId } from './people';
@@ -72,6 +72,10 @@
   let dialog = $state<HTMLDialogElement | null>(null);
   let body = $state<HTMLDivElement | null>(null);
   let question = $state<HTMLDivElement | null>(null);
+  let heading = $state<HTMLHeadingElement | null>(null);
+  // The control that asked the current question, by a key that survives the
+  // re-render a cancel or a change causes (the element itself does not).
+  let askedFrom: string | null = null;
   let settings = $state<RoomSettings | null>(null);
   let loadFailure = $state<string | null>(null);
   let busy = $state(false);
@@ -224,7 +228,36 @@
   function ask(change: RoomChange, question: string, action: string) {
     failure = null;
     done = null;
+    askedFrom = controlKey(document.activeElement);
     confirming = { change, question, action };
+  }
+
+  // A control's key: its ID, a radio's name and value, or a button's text,
+  // which includes its hidden name (such as "Ban Alice").
+  function controlKey(element: Element | null): string | null {
+    if (!(element instanceof HTMLElement) || !body?.contains(element)) return null;
+    if (element.id) return `id:${element.id}`;
+    if (element instanceof HTMLInputElement) return `input:${element.name}:${element.value}`;
+    return `${element.tagName}:${element.textContent?.replace(/\s+/g, ' ').trim()}`;
+  }
+
+  // Once a question closes, focus goes back to the control that asked it,
+  // or to the tab's heading when that control is gone (a banned member's
+  // Ban button) or disabled.
+  async function returnFocus() {
+    const key = askedFrom;
+    askedFrom = null;
+    await tick();
+    let control: HTMLElement | null = null;
+    for (const element of body?.querySelectorAll<HTMLElement>('button, input, select') ?? []) {
+      if (key !== null && controlKey(element) === key) control = element;
+    }
+    (control && !control.matches(':disabled') ? control : heading)?.focus();
+  }
+
+  async function answer(change: RoomChange) {
+    await apply(change);
+    returnFocus();
   }
 
   // A question takes focus when it appears, so keyboard and screen-reader
@@ -236,6 +269,7 @@
   function dismiss() {
     confirming = null;
     revision += 1;
+    returnFocus();
   }
 
   function saveName(event: SubmitEvent) {
@@ -377,7 +411,7 @@
     </aside>
     <div class="room-settings-body" bind:this={body}>
       <div class="room-settings-head">
-        <h3>{tabs.find((item) => item.id === tab)?.label}</h3>
+        <h3 tabindex="-1" bind:this={heading}>{tabs.find((item) => item.id === tab)?.label}</h3>
         <button
           type="button"
           class="icon-button"
@@ -861,7 +895,7 @@
             type="button"
             class="danger"
             disabled={busy}
-            onclick={() => confirming && apply(confirming.change)}>{confirming.action}</button
+            onclick={() => confirming && answer(confirming.change)}>{confirming.action}</button
           >
           <button type="button" class="secondary" disabled={busy} onclick={dismiss}>Cancel</button>
         </div>
