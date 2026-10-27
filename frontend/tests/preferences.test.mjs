@@ -132,6 +132,35 @@ test('GIVEN a change WHEN the core refuses to save it THEN only that setting ret
   assert.equal(shown.failure, preferences.SAVE_FAILED);
 });
 
+test('GIVEN a change made while the settings load WHEN its save fails THEN the stored value returns, not the default', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  const changing = kept.change({ chatTextPercent: 90 });
+  waiting.load[0].resolve(STORED);
+  await loading;
+  await tick();
+  waiting.save[0].reject('internal');
+  await changing;
+  assert.deepEqual(shown.settings, STORED);
+  assert.equal(shown.failure, preferences.SAVE_FAILED);
+});
+
+test('GIVEN a saved change WHEN a later save of the same setting fails THEN the saved value returns', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  waiting.load[0].resolve(STORED);
+  await loading;
+  const first = kept.change({ chatTextPercent: 90 });
+  await tick();
+  waiting.save[0].resolve();
+  await first;
+  const second = kept.change({ chatTextPercent: 200 });
+  await tick();
+  waiting.save[1].reject('internal');
+  await second;
+  assert.deepEqual(shown.settings, { ...STORED, chatTextPercent: 90 });
+});
+
 test('GIVEN settings that cannot be read WHEN a change is made THEN they are read again first, and without them nothing is saved', async () => {
   const { kept, waiting, shown } = keeper();
   const loading = kept.load();

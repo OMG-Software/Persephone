@@ -67,6 +67,9 @@ export class SettingsKeeper {
   #current: AccountSettings = DEFAULT_SETTINGS;
   // Whether the stored settings are known: the newest load's outcome.
   #known: Promise<boolean> = Promise.resolve(false);
+  // The settings the core last confirmed: loaded or saved. A failed save
+  // puts its fields back to these.
+  #stored: AccountSettings | null = null;
   // Changes not yet saved, shown over the stored settings when they load.
   #unsaved: Partial<AccountSettings> = {};
   // The last save asked for; the next one starts after it settles.
@@ -84,6 +87,7 @@ export class SettingsKeeper {
   clear() {
     this.#epoch += 1;
     this.#known = Promise.resolve(false);
+    this.#stored = null;
     this.#unsaved = {};
     this.#set(DEFAULT_SETTINGS, null);
   }
@@ -95,7 +99,10 @@ export class SettingsKeeper {
     const known = this.#core.load().then(
       (stored) => {
         if (epoch !== this.#epoch) return false;
-        if (load === this.#loads) this.#set({ ...stored, ...this.#unsaved }, null);
+        if (load === this.#loads) {
+          this.#stored = stored;
+          this.#set({ ...stored, ...this.#unsaved }, null);
+        }
         return true;
       },
       // A change reports its own failure.
@@ -109,7 +116,7 @@ export class SettingsKeeper {
     const epoch = this.#epoch;
     const change = ++this.#changes;
     const keys = Object.keys(patch) as (keyof AccountSettings)[];
-    const undo = Object.fromEntries(keys.map((key) => [key, this.#current[key]]));
+    let undo = Object.fromEntries(keys.map((key) => [key, this.#current[key]]));
     this.#unsaved = { ...this.#unsaved, ...patch };
     this.#set({ ...this.#current, ...patch }, null);
     // The stored settings come first: saving before them would write the
@@ -121,18 +128,27 @@ export class SettingsKeeper {
       known = await this.#known;
     }
     if (epoch !== this.#epoch) return;
+    // Undone, a field returns to what the core holds, not to what was shown
+    // before the stored settings arrived.
+    const stored = this.#stored;
+    if (stored) undo = Object.fromEntries(keys.map((key) => [key, stored[key]]));
     let saved = false;
     if (known) {
       // Saves go one at a time, in the order they were made: two calls in
       // flight could reach the core in either order and keep the older one.
       // A failed save does not stop the next.
-      const save = this.#saving.then(() => this.#core.save({ ...this.#current }));
+      let sent: AccountSettings | null = null;
+      const save = this.#saving.then(() => {
+        sent = { ...this.#current };
+        return this.#core.save(sent);
+      });
       this.#saving = save.catch(() => {});
       saved = await save.then(
         () => true,
         () => false
       );
       if (epoch !== this.#epoch) return;
+      if (saved && sent) this.#stored = sent;
     }
     for (const key of keys) {
       if (this.#unsaved[key] === patch[key]) delete this.#unsaved[key];
