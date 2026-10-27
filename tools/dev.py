@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -15,6 +16,8 @@ CONTRACTS = ROOT / "crates/contracts"
 # Line coverage of the frontend's TypeScript, for SonarQube
 # (sonar.javascript.lcov.reportPaths).
 FRONTEND_LCOV = ROOT / ".local/coverage/frontend/lcov.info"
+# A source path as the frontend's coverage report may name it.
+REPORT_PATH = re.compile(r"[A-Za-z0-9_.\-/]+")
 
 
 def run(command, environment, *, cwd=ROOT):
@@ -25,12 +28,18 @@ def run(command, environment, *, cwd=ROOT):
 def repository_paths(lcov, base, root=ROOT):
     """Rewrites an LCOV report's source paths, which Node writes relative to
     the directory the tests ran in, as repository-relative POSIX paths, so
-    the report reads the same on every OS and SonarQube finds each file."""
+    the report reads the same on every OS and SonarQube finds each file.
+    The paths are report text, not paths to open: each must be a plain
+    relative path inside `base`, and only text is joined, with no lookup."""
+    prefix = base.relative_to(root).as_posix()
     lines = []
     for line in lcov.read_text(encoding="utf-8").splitlines():
         if line.startswith("SF:"):
-            source = (base / line[3:].replace("\\", "/")).resolve()
-            line = "SF:" + source.relative_to(root.resolve()).as_posix()
+            source = line[3:].replace("\\", "/")
+            parts = source.split("/")
+            if not REPORT_PATH.fullmatch(source) or any(part in ("", ".", "..") for part in parts):
+                raise ValueError(f"unexpected source path in {lcov.name}: {source!r}")
+            line = f"SF:{prefix}/{source}"
         lines.append(line)
     lcov.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 

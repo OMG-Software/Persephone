@@ -31,14 +31,24 @@ class RepositoryPathsTest(unittest.TestCase):
                 "SF:frontend/src/preferences.ts\nDA:2,0\nend_of_record\n",
             )
 
-    def test_given_a_path_outside_the_repository_then_the_rewrite_refuses(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "repository"
-            (root / "frontend").mkdir(parents=True)
-            lcov = root / "lcov.info"
-            lcov.write_text("SF:../../elsewhere.ts\n", encoding="utf-8")
-            with self.assertRaises(ValueError):
-                dev.repository_paths(lcov, root / "frontend", root)
+    def test_given_a_path_that_is_not_plain_and_relative_then_the_rewrite_refuses(self):
+        for source in (
+            "../../elsewhere.ts",
+            "src/../../x.ts",
+            "/etc/x.ts",
+            "C:\\x.ts",
+            "./src/x.ts",
+            "src//x.ts",
+            "src/x .ts",
+        ):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "repository"
+                (root / "frontend").mkdir(parents=True)
+                lcov = root / "lcov.info"
+                lcov.write_text(f"SF:{source}\n", encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    dev.repository_paths(lcov, root / "frontend", root)
+                self.assertEqual(lcov.read_text(encoding="utf-8"), f"SF:{source}\n", "left unchanged")
 
 
 if __name__ == "__main__":
