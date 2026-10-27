@@ -23,7 +23,8 @@
     canVerify = false,
     verifying = false,
     onverify = () => {},
-    oninvite
+    oninvite,
+    onsettings
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -42,6 +43,8 @@
     onverify?: () => void;
     // Opens the invite dialog; absent where inviting is not offered.
     oninvite?: () => void;
+    // Opens the room's settings; absent where they are not offered.
+    onsettings?: () => void;
   } = $props();
 
   // Fixed text per trust level; the core sends codes only.
@@ -113,6 +116,17 @@
     {/if}
     {#if oninvite}
       <button type="button" class="secondary header-action" onclick={oninvite}>Invite</button>
+    {/if}
+    {#if onsettings}
+      <button
+        type="button"
+        class="icon-button header-settings"
+        aria-label="Room settings"
+        title="Room settings"
+        onclick={onsettings}
+      >
+        <Icon name="settings" />
+      </button>
     {/if}
   </header>
   <div class="scroller" bind:this={scroller} onscroll={scrolled}>

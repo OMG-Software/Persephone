@@ -26,15 +26,16 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
     AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart, DeviceList,
-    DisplayName, ImagePick, ImageView, InviteList, PendingMessage, ProfileList, RoomCreation,
-    RoomIdentityChanges, RoomInvite, RoomList, SecurityStatus, StoreState, TimelinePage,
-    UserSearch,
+    DisplayName, ImagePick, ImageView, InviteList, PendingMessage, ProfileList, RoomChange,
+    RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomSettings,
+    SecurityStatus, StoreState, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
     Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES, MAX_DISPLAY_NAME_BYTES,
     MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES,
-    MAX_MESSAGE_BYTES, MAX_PROFILES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES,
-    MAX_USER_ID_BYTES,
+    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_PROFILES, MAX_ROOM_ID_BYTES,
+    MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES,
+    room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -253,6 +254,28 @@ async fn sign_in(core: State<'_, CoreLink>, homeserver: String) -> Result<Accoun
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(core.inner(), Call::SignIn { homeserver }).await
+}
+
+/// Starts registering a new account. Only the homeserver URL and the desired
+/// username cross: the core checks the name, then asks for the password and
+/// any registration token itself, in native prompts.
+#[tauri::command]
+async fn register(
+    core: State<'_, CoreLink>,
+    homeserver: String,
+    username: String,
+) -> Result<AccountStatus, String> {
+    if homeserver.len() > MAX_HOMESERVER_URL_BYTES || username.len() > MAX_USERNAME_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::Register {
+            homeserver,
+            username,
+        },
+    )
+    .await
 }
 
 /// Signs out: the core revokes the session if it can and deletes this
@@ -658,6 +681,42 @@ async fn invite_user(
     relay(core.inner(), Call::InviteUser { room_id, user_id }).await
 }
 
+/// A joined room's settings, with what this account may change.
+#[tauri::command]
+async fn room_settings(core: State<'_, CoreLink>, room_id: String) -> Result<RoomSettings, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RoomSettings { room_id }).await
+}
+
+/// A joined room's members whose ID or name contains `filter`.
+#[tauri::command]
+async fn room_members(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    filter: String,
+) -> Result<RoomMembers, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || filter.len() > MAX_MEMBER_FILTER_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RoomMembers { room_id, filter }).await
+}
+
+/// Changes one setting of a joined room, or acts on one member. The change
+/// is a closed set of kinds; the core validates its content.
+#[tauri::command]
+async fn change_room(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    change: RoomChange,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || !room_change_within_limits(&change) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay::<()>(core.inner(), Call::ChangeRoom { room_id, change }).await
+}
+
 /// This account's display name.
 #[tauri::command]
 async fn display_name(core: State<'_, CoreLink>) -> Result<DisplayName, String> {
@@ -765,6 +824,7 @@ pub fn configure<R: Runtime>(
             unlock_session,
             reset_profile,
             sign_in,
+            register,
             sign_out,
             security_status,
             set_up_encryption,
@@ -796,6 +856,9 @@ pub fn configure<R: Runtime>(
             search_users,
             create_room,
             invite_user,
+            room_settings,
+            room_members,
+            change_room,
             display_name,
             set_display_name,
             device_list,

@@ -405,6 +405,12 @@ mod tests {
             SecretPrompt::RecoveryKey { user_id: "@a:b" },
             SecretPrompt::Passphrase { retry: false },
             SecretPrompt::NewPassphrase(NewPassphrase::Confirm),
+            SecretPrompt::NewAccountPassword {
+                username: "al",
+                host: "b",
+                step: crate::credentials::NewPassword::Mismatch,
+            },
+            SecretPrompt::RegistrationToken { host: "b" },
         ] {
             let text = prompt_text::secret(&request);
             let alert = secret_alert(&text);

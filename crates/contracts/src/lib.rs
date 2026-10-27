@@ -317,6 +317,340 @@ pub enum RoomInvite {
     Refused {},
 }
 
+/// A Matrix power level, within the range JavaScript holds exactly (the
+/// Matrix limit too). Another value fails to deserialize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct PowerLevel(i64);
+
+impl PowerLevel {
+    /// JavaScript's largest exact integer, 2^53 - 1.
+    pub const MAX: i64 = (1 << 53) - 1;
+    pub const MIN: i64 = -Self::MAX;
+
+    /// `level`, or `None` outside [`PowerLevel::MIN`] to [`PowerLevel::MAX`].
+    pub fn new(level: i64) -> Option<Self> {
+        (Self::MIN..=Self::MAX)
+            .contains(&level)
+            .then_some(Self(level))
+    }
+
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PowerLevel {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(i64::deserialize(deserializer)?)
+            .ok_or_else(|| D::Error::custom("power level out of range"))
+    }
+}
+
+/// How people may join a room (`m.room.join_rules`). Persephone sets only
+/// `invite`, `knock` and `public`; the others are shown as they are.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinRule {
+    /// Only people who are invited.
+    Invite,
+    /// Anyone may ask to join; a member who may invite lets them in.
+    Knock,
+    /// Anyone who knows the room's ID or an address.
+    Public,
+    /// Members of certain other rooms (spaces).
+    Restricted,
+    /// Members of certain other rooms, and anyone may ask.
+    KnockRestricted,
+    /// Reserved by the specification; works like `invite`.
+    Private,
+    /// A rule this client does not know.
+    Other,
+}
+
+/// Who may read a room's history (`m.room.history_visibility`).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryVisibility {
+    /// Members, from the point they were invited.
+    Invited,
+    /// Members, from the point they joined.
+    Joined,
+    /// Members, all of it, including what was sent before they joined.
+    Shared,
+    /// Anyone, members or not. Encrypted messages stay unreadable without
+    /// their keys.
+    WorldReadable,
+    /// A value this client does not know.
+    Other,
+}
+
+/// How this account is notified of a room's messages: its push rules for the
+/// room, kept on the homeserver.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomNotifications {
+    /// No rule for this room: the account's defaults apply.
+    Default,
+    All,
+    /// Mentions and keywords only.
+    Mentions,
+    Mute,
+}
+
+/// A power level a room requires for an action, or gives by default.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum LevelKey {
+    /// The level of a member not listed by name.
+    UsersDefault,
+    /// Send messages (any event without its own level).
+    EventsDefault,
+    /// Change settings without their own level.
+    StateDefault,
+    Invite,
+    Kick,
+    Ban,
+    /// Remove other people's messages.
+    Redact,
+    /// Notify the whole room (`@room`).
+    NotifyRoom,
+    /// Change the room's name (`m.room.name`).
+    Name,
+    Topic,
+    Avatar,
+    /// Change the room's main and published addresses.
+    CanonicalAlias,
+    JoinRules,
+    HistoryVisibility,
+    GuestAccess,
+    /// Turn on encryption.
+    Encryption,
+    /// Change permissions and member levels.
+    PowerLevels,
+    /// Change which servers may take part.
+    ServerAcl,
+    /// Upgrade the room to a new version.
+    Tombstone,
+    PinnedEvents,
+}
+
+impl LevelKey {
+    /// Every key, in the order the settings show them.
+    pub const ALL: [LevelKey; 20] = [
+        LevelKey::UsersDefault,
+        LevelKey::EventsDefault,
+        LevelKey::StateDefault,
+        LevelKey::Invite,
+        LevelKey::Kick,
+        LevelKey::Ban,
+        LevelKey::Redact,
+        LevelKey::NotifyRoom,
+        LevelKey::Name,
+        LevelKey::Topic,
+        LevelKey::Avatar,
+        LevelKey::CanonicalAlias,
+        LevelKey::JoinRules,
+        LevelKey::HistoryVisibility,
+        LevelKey::GuestAccess,
+        LevelKey::Encryption,
+        LevelKey::PowerLevels,
+        LevelKey::ServerAcl,
+        LevelKey::Tombstone,
+        LevelKey::PinnedEvents,
+    ];
+}
+
+/// One entry of a room's power levels.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomLevel {
+    pub key: LevelKey,
+    #[ts(type = "number")]
+    pub level: PowerLevel,
+}
+
+/// What this account may change in a room, by the room's power levels. A
+/// hint for the page: the homeserver decides.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomPermissions {
+    pub name: bool,
+    pub topic: bool,
+    /// The main and published addresses.
+    pub canonical_alias: bool,
+    pub join_rules: bool,
+    pub history_visibility: bool,
+    pub guest_access: bool,
+    pub encryption: bool,
+    pub power_levels: bool,
+    pub invite: bool,
+    pub kick: bool,
+    pub ban: bool,
+}
+
+/// Reply of `room_settings`: a joined room's configuration. Names and the
+/// topic are the homeserver's word, projected; addresses are sent only when
+/// they are valid, visible ASCII, so the page can name them back.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomSettings {
+    pub room_id: String,
+    pub name: Option<String>,
+    /// Line breaks kept, like a message body.
+    pub topic: Option<String>,
+    /// The main address (`m.room.canonical_alias`).
+    pub canonical_alias: Option<String>,
+    /// The other published addresses.
+    pub alt_aliases: Vec<String>,
+    /// Addresses on this account's homeserver that lead to the room; none
+    /// when the homeserver did not say.
+    pub local_aliases: Option<Vec<String>>,
+    pub join_rule: JoinRule,
+    pub history_visibility: HistoryVisibility,
+    /// Guests (accounts without a password) may join.
+    pub guest_access: bool,
+    pub encryption: RoomEncryption,
+    /// Listed in this homeserver's public room directory; none when the
+    /// homeserver did not say.
+    pub published: Option<bool>,
+    /// Untrusted, projected like a name.
+    pub room_version: Option<String>,
+    /// Marked as a direct-message room.
+    pub direct: bool,
+    pub notifications: RoomNotifications,
+    /// Every [`LevelKey`], in [`LevelKey::ALL`] order, with the level now in
+    /// effect.
+    pub levels: Vec<RoomLevel>,
+    /// This account's level; none for a creator of a room whose version
+    /// gives creators every permission.
+    #[ts(type = "number | null")]
+    pub own_level: Option<PowerLevel>,
+    pub may: RoomPermissions,
+}
+
+/// A room member's membership, as listed in the settings.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Membership {
+    Join,
+    Invite,
+    /// Asked to join.
+    Knock,
+    Ban,
+}
+
+/// One member of a room, in its settings.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomMember {
+    /// The member's ID unchanged when it is valid, visible ASCII; otherwise
+    /// projected, and every `can` field is false.
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub membership: Membership,
+    /// None for a creator with every permission.
+    #[ts(type = "number | null")]
+    pub level: Option<PowerLevel>,
+    /// This account.
+    pub own: bool,
+    /// Hints for the page, by the room's power levels.
+    pub can_kick: bool,
+    pub can_ban: bool,
+    pub can_unban: bool,
+    pub can_change_level: bool,
+}
+
+/// Reply of `room_members`: members (joined, invited, asking or banned)
+/// whose ID or name contains the filter; this account first, then by
+/// membership, level and ID.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomMembers {
+    pub room_id: String,
+    pub members: Vec<RoomMember>,
+    /// More members matched than are listed.
+    pub truncated: bool,
+}
+
+/// One change to a room's settings, the argument of `change_room`. Each is
+/// a separate homeserver request; nothing is changed when it is refused.
+/// Every variant is a struct variant, so unknown fields are refused.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RoomChange {
+    /// An empty name removes it.
+    Name {
+        name: String,
+    },
+    /// An empty topic removes it.
+    Topic {
+        topic: String,
+    },
+    /// `invite`, `knock` or `public` only.
+    JoinRule {
+        rule: JoinRule,
+    },
+    /// Any value but `other`.
+    HistoryVisibility {
+        visibility: HistoryVisibility,
+    },
+    GuestAccess {
+        allowed: bool,
+    },
+    /// Turns on encryption. It cannot be turned off.
+    Encryption {},
+    /// Lists the room in this homeserver's public directory, or not.
+    Published {
+        published: bool,
+    },
+    /// Makes an address on this account's homeserver lead to the room.
+    AddAlias {
+        alias: String,
+    },
+    /// Removes an address from this account's homeserver, and from the
+    /// room's published addresses.
+    RemoveAlias {
+        alias: String,
+    },
+    /// Sets the main address (none removes it) and the other published
+    /// addresses.
+    #[serde(rename_all = "camelCase")]
+    CanonicalAlias {
+        #[serde(deserialize_with = "Option::deserialize")]
+        alias: Option<String>,
+        alt_aliases: Vec<String>,
+    },
+    Level {
+        key: LevelKey,
+        #[ts(type = "number")]
+        level: PowerLevel,
+    },
+    #[serde(rename_all = "camelCase")]
+    MemberLevel {
+        user_id: String,
+        #[ts(type = "number")]
+        level: PowerLevel,
+    },
+    #[serde(rename_all = "camelCase")]
+    Kick {
+        user_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Ban {
+        user_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Unban {
+        user_id: String,
+    },
+    Notifications {
+        mode: RoomNotifications,
+    },
+    /// Leaves the room.
+    Leave {},
+}
+
 /// Reply of `display_name`: this account's display name, projected like any
 /// name.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -488,6 +822,23 @@ pub enum SignInError {
     /// Signed out locally, but the homeserver could not be told: the server
     /// session may stay active until it expires or is revoked elsewhere.
     SessionNotRevoked,
+    /// Registering: someone already has that username.
+    UsernameTaken,
+    /// Registering: the homeserver does not accept that username.
+    InvalidUsername,
+    /// Registering: the username is reserved, for example for a bridge.
+    UsernameReserved,
+    /// Registering: the homeserver does not let anyone register here.
+    RegistrationDisabled,
+    /// Registering: the homeserver did not accept the registration token.
+    TokenRejected,
+    /// Registering: the homeserver thinks the password is too weak.
+    WeakPassword,
+    /// Registering: the homeserver asks for a step Persephone cannot do,
+    /// such as an email address, a captcha or accepting its terms.
+    UnsupportedRegistration,
+    /// Too many attempts; the homeserver asks to wait.
+    RateLimited,
     /// Anything else.
     Failed,
 }
@@ -821,6 +1172,17 @@ pub fn generated_typescript() -> String {
         format!("export {}", ConversationStart::decl(&config)),
         format!("export {}", RoomCreation::decl(&config)),
         format!("export {}", RoomInvite::decl(&config)),
+        format!("export {}", JoinRule::decl(&config)),
+        format!("export {}", HistoryVisibility::decl(&config)),
+        format!("export {}", RoomNotifications::decl(&config)),
+        format!("export {}", LevelKey::decl(&config)),
+        format!("export {}", RoomLevel::decl(&config)),
+        format!("export {}", RoomPermissions::decl(&config)),
+        format!("export {}", RoomSettings::decl(&config)),
+        format!("export {}", Membership::decl(&config)),
+        format!("export {}", RoomMember::decl(&config)),
+        format!("export {}", RoomMembers::decl(&config)),
+        format!("export {}", RoomChange::decl(&config)),
         format!("export {}", DisplayName::decl(&config)),
         format!("export {}", DeviceSummary::decl(&config)),
         format!("export {}", DeviceList::decl(&config)),

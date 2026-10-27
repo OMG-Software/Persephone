@@ -44,7 +44,7 @@ use zeroize::Zeroizing;
 /// Crypto-store custom value holding the saved account.
 pub const ACCOUNT_KEY: &str = "persephone.account.v1";
 const MAX_SAVED_ACCOUNT_BYTES: usize = 64 * 1024;
-const DEVICE_NAME: &str = "Persephone";
+pub const DEVICE_NAME: &str = "Persephone";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Long-poll wait for one sync round. A lock waits for at most one round.
 pub const SYNC_POLL: Duration = Duration::from_secs(5);
@@ -121,6 +121,16 @@ pub async fn sign_in(
         .initial_device_display_name(DEVICE_NAME)
         .await
         .map_err(|error| sign_in_error(&error))?;
+    save_session(client, homeserver, stores).await
+}
+
+/// Saves the client's new session encrypted, after a sign-in or a
+/// registration. Returns the user ID.
+pub async fn save_session(
+    client: &Client,
+    homeserver: &Homeserver,
+    stores: &Stores,
+) -> Result<String, SignInError> {
     let session = client.matrix_auth().session().ok_or(SignInError::Failed)?;
     let user_id = session.meta.user_id.to_string();
     let saved = Zeroizing::new(

@@ -14,6 +14,7 @@
 //! the core's frames with [`receive_from_core`], which checks the pixel
 //! frame's header against its reply before it allocates the body.
 
+pub use persephone_contracts::RoomChange;
 use persephone_media_protocol::{
     FrameError, FrameHeader, FrameKind, MAX_DIMENSION, MIB, RGBA_BYTES_PER_PIXEL, ReceivedFrame,
     ResourceBudgets, read_frame, write_frame,
@@ -65,6 +66,17 @@ pub enum Call {
     /// [`Event::SessionChanged`].
     SignIn {
         homeserver: String,
+    },
+    /// Register a new account named `username` (a localpart) on this
+    /// homeserver, then sign in to it. The core checks that the name is free
+    /// first, then asks for the password (twice) and, when the homeserver
+    /// needs one, the registration token, in its own windows; nothing secret
+    /// crosses this channel. Replies at once like `SignIn`; the outcome, or
+    /// why it failed (such as `username_taken`), arrives as
+    /// [`Event::SessionChanged`].
+    Register {
+        homeserver: String,
+        username: String,
     },
     /// Sign out: revoke the session on the homeserver if it can be reached,
     /// then delete this device's local profile (keys first). Replies with the
@@ -241,6 +253,72 @@ pub enum Call {
     SearchUsers {
         term: String,
     },
+    /// A joined room's settings: names, addresses, access, encryption,
+    /// notifications and power levels, with what this account may change.
+    RoomSettings {
+        room_id: String,
+    },
+    /// A joined room's members (joined, invited, asking or banned) whose ID
+    /// or display name contains `filter` (empty: all), at most
+    /// [`MAX_LISTED_MEMBERS`].
+    RoomMembers {
+        room_id: String,
+        filter: String,
+    },
+    /// Change one setting of a joined room, or act on one member. The
+    /// homeserver decides whether this account may.
+    ChangeRoom {
+        room_id: String,
+        change: RoomChange,
+    },
+}
+
+/// Longest room topic either side accepts, in bytes.
+pub const MAX_TOPIC_BYTES: usize = 4096;
+
+/// Longest room address either side accepts, in bytes (the Matrix limit).
+pub const MAX_ALIAS_BYTES: usize = 255;
+
+/// Most published addresses besides the main one.
+pub const MAX_ALT_ALIASES: usize = 10;
+
+/// Longest member filter either side accepts, in bytes.
+pub const MAX_MEMBER_FILTER_BYTES: usize = 256;
+
+/// Most members a `room_members` reply lists.
+pub const MAX_LISTED_MEMBERS: usize = 100;
+
+/// Whether every text in `change` is within its limit. The receiver still
+/// validates the content; this only keeps oversized input off the channel.
+pub fn room_change_within_limits(change: &RoomChange) -> bool {
+    match change {
+        RoomChange::Name { name } => name.len() <= MAX_ROOM_NAME_BYTES,
+        RoomChange::Topic { topic } => topic.len() <= MAX_TOPIC_BYTES,
+        RoomChange::AddAlias { alias } | RoomChange::RemoveAlias { alias } => {
+            alias.len() <= MAX_ALIAS_BYTES
+        }
+        RoomChange::CanonicalAlias { alias, alt_aliases } => {
+            alias
+                .as_ref()
+                .is_none_or(|alias| alias.len() <= MAX_ALIAS_BYTES)
+                && alt_aliases.len() <= MAX_ALT_ALIASES
+                && alt_aliases
+                    .iter()
+                    .all(|alias| alias.len() <= MAX_ALIAS_BYTES)
+        }
+        RoomChange::MemberLevel { user_id, .. }
+        | RoomChange::Kick { user_id }
+        | RoomChange::Ban { user_id }
+        | RoomChange::Unban { user_id } => user_id.len() <= MAX_USER_ID_BYTES,
+        RoomChange::JoinRule { .. }
+        | RoomChange::HistoryVisibility { .. }
+        | RoomChange::GuestAccess { .. }
+        | RoomChange::Encryption {}
+        | RoomChange::Published { .. }
+        | RoomChange::Level { .. }
+        | RoomChange::Notifications { .. }
+        | RoomChange::Leave {} => true,
+    }
 }
 
 /// Longest user-directory search term either side accepts, in bytes.
@@ -278,6 +356,9 @@ pub const MAX_FLOW_ID_BYTES: usize = 128;
 
 /// Longest message body either side accepts, in bytes (the display limit).
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+
+/// Longest username (localpart) either side accepts when registering.
+pub const MAX_USERNAME_BYTES: usize = 255;
 
 /// Longest homeserver URL either side accepts in a call.
 pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
@@ -716,6 +797,13 @@ mod tests {
                 Call::SearchUsers { term: "bob".into() },
                 r#"{"id":1,"call":{"command":"search_users","term":"bob"}}"#,
             ),
+            (
+                Call::Register {
+                    homeserver: "https://h".into(),
+                    username: "al".into(),
+                },
+                r#"{"id":1,"call":{"command":"register","homeserver":"https://h","username":"al"}}"#,
+            ),
         ] {
             let request = Request { id: 1, call };
             let mut sent = Vec::new();
@@ -828,6 +916,196 @@ mod tests {
         }
     }
 
+    /// GIVEN the room settings calls WHEN sent THEN they cross in the
+    /// documented wire form; missing, extra, null, unknown or out-of-range
+    /// fields are refused, inside the change as well as around it.
+    #[test]
+    fn given_room_settings_calls_then_they_have_a_strict_wire_form() {
+        use persephone_contracts::{JoinRule, LevelKey, PowerLevel};
+        let budgets = ResourceBudgets::default();
+        for (call, wire) in [
+            (
+                Call::RoomSettings {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"room_settings","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::RoomMembers {
+                    room_id: "!r:s".into(),
+                    filter: "bo".into(),
+                },
+                r#"{"id":1,"call":{"command":"room_members","room_id":"!r:s","filter":"bo"}}"#,
+            ),
+            (
+                Call::ChangeRoom {
+                    room_id: "!r:s".into(),
+                    change: RoomChange::JoinRule {
+                        rule: JoinRule::Knock,
+                    },
+                },
+                r#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"join_rule","rule":"knock"}}}"#,
+            ),
+            (
+                Call::ChangeRoom {
+                    room_id: "!r:s".into(),
+                    change: RoomChange::CanonicalAlias {
+                        alias: None,
+                        alt_aliases: vec!["#a:s".into()],
+                    },
+                },
+                r##"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"canonical_alias","alias":null,"altAliases":["#a:s"]}}}"##,
+            ),
+            (
+                Call::ChangeRoom {
+                    room_id: "!r:s".into(),
+                    change: RoomChange::Level {
+                        key: LevelKey::NotifyRoom,
+                        level: PowerLevel::new(-5).unwrap(),
+                    },
+                },
+                r#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"level","key":"notify_room","level":-5}}}"#,
+            ),
+            (
+                Call::ChangeRoom {
+                    room_id: "!r:s".into(),
+                    change: RoomChange::MemberLevel {
+                        user_id: "@b:s".into(),
+                        level: PowerLevel::new(PowerLevel::MAX).unwrap(),
+                    },
+                },
+                r#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"member_level","userId":"@b:s","level":9007199254740991}}}"#,
+            ),
+            (
+                Call::ChangeRoom {
+                    room_id: "!r:s".into(),
+                    change: RoomChange::Leave {},
+                },
+                r#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"leave"}}}"#,
+            ),
+        ] {
+            let request = Request { id: 1, call };
+            let mut sent = Vec::new();
+            send(&mut sent, &request).unwrap();
+            assert_eq!(String::from_utf8(sent[17..].to_vec()).unwrap(), wire);
+            let mut reader = Cursor::new(sent);
+            assert_eq!(
+                receive::<_, Request>(&mut reader, &budgets).unwrap(),
+                request
+            );
+        }
+        for body in [
+            &br#"{"id":1,"call":{"command":"room_settings"}}"#[..],
+            br#"{"id":1,"call":{"command":"room_settings","room_id":"!r:s","all":true}}"#,
+            br#"{"id":1,"call":{"command":"room_members","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"room_members","room_id":"!r:s","filter":null}}"#,
+            br#"{"id":1,"call":{"command":"room_members","room_id":"!r:s","filter":"","limit":500}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"name"}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"name","name":"x","topic":"y"}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"encryption","enabled":false}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"leave","forget":true}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"join_rule","rule":"open"}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"canonical_alias","altAliases":[]}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"canonical_alias","alias":null,"alt_aliases":[]}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"level","key":"ban","level":9007199254740992}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"level","key":"ban","level":-9007199254740992}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"level","key":"ban","level":1.5}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"level","key":"m.room.name","level":1}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"member_level","user_id":"@b:s","level":1}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"kick","userId":"@b:s","reason":"x"}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"redact","eventId":"$e"}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"notifications","mode":"loud"}}}"#,
+            br#"{"id":1,"call":{"command":"change_room","room_id":"!r:s","change":{"kind":"state","type":"m.room.server_acl","content":{}}}}"#,
+        ] {
+            let mut reader = Cursor::new(frame(FrameKind::Control, body));
+            assert!(
+                matches!(
+                    receive::<_, Request>(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    /// GIVEN changes with text at and over each limit THEN only those within
+    /// every limit pass the length check.
+    #[test]
+    fn given_room_changes_then_texts_over_their_limit_are_caught() {
+        let at = |n: usize| "a".repeat(n);
+        for (change, within) in [
+            (
+                RoomChange::Name {
+                    name: at(MAX_ROOM_NAME_BYTES),
+                },
+                true,
+            ),
+            (
+                RoomChange::Name {
+                    name: at(MAX_ROOM_NAME_BYTES + 1),
+                },
+                false,
+            ),
+            (
+                RoomChange::Topic {
+                    topic: at(MAX_TOPIC_BYTES),
+                },
+                true,
+            ),
+            (
+                RoomChange::Topic {
+                    topic: at(MAX_TOPIC_BYTES + 1),
+                },
+                false,
+            ),
+            (
+                RoomChange::AddAlias {
+                    alias: at(MAX_ALIAS_BYTES + 1),
+                },
+                false,
+            ),
+            (
+                RoomChange::RemoveAlias {
+                    alias: at(MAX_ALIAS_BYTES + 1),
+                },
+                false,
+            ),
+            (
+                RoomChange::CanonicalAlias {
+                    alias: Some(at(MAX_ALIAS_BYTES)),
+                    alt_aliases: vec![at(MAX_ALIAS_BYTES); MAX_ALT_ALIASES],
+                },
+                true,
+            ),
+            (
+                RoomChange::CanonicalAlias {
+                    alias: None,
+                    alt_aliases: vec![String::new(); MAX_ALT_ALIASES + 1],
+                },
+                false,
+            ),
+            (
+                RoomChange::CanonicalAlias {
+                    alias: None,
+                    alt_aliases: vec![at(MAX_ALIAS_BYTES + 1)],
+                },
+                false,
+            ),
+            (
+                RoomChange::Ban {
+                    user_id: at(MAX_USER_ID_BYTES + 1),
+                },
+                false,
+            ),
+            (RoomChange::Leave {}, true),
+        ] {
+            assert_eq!(room_change_within_limits(&change), within, "{change:?}");
+        }
+    }
+
     #[test]
     fn given_unknown_command_field_or_kind_then_receive_refuses() {
         let budgets = ResourceBudgets::default();
@@ -846,6 +1124,10 @@ mod tests {
             br#"{"id":1,"call":{"command":"sign_in"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,
+            br#"{"id":1,"call":{"command":"register","homeserver":"https://h"}}"#,
+            br#"{"id":1,"call":{"command":"register","homeserver":"https://h","username":"al","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"register","homeserver":"https://h","username":"al","token":"x"}}"#,
+            br#"{"id":1,"call":{"command":"register","username":"al"}}"#,
             br#"{"id":1,"call":{"command":"sign_out","keep_data":true}}"#,
             br#"{"id":1,"call":{"command":"security_status","user":"@a:s"}}"#,
             br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,

@@ -15,6 +15,8 @@ let IdentityChanges;
 let Invites;
 let NewConversation;
 let NewRoom;
+let RoomSettings;
+let LevelPicker;
 let render;
 
 before(async () => {
@@ -35,6 +37,8 @@ before(async () => {
   ({ default: Invites } = await vite.ssrLoadModule('/src/Invites.svelte'));
   ({ default: NewConversation } = await vite.ssrLoadModule('/src/NewConversation.svelte'));
   ({ default: NewRoom } = await vite.ssrLoadModule('/src/NewRoom.svelte'));
+  ({ default: RoomSettings } = await vite.ssrLoadModule('/src/RoomSettings.svelte'));
+  ({ default: LevelPicker } = await vite.ssrLoadModule('/src/LevelPicker.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -139,31 +143,76 @@ test('notices render as fixed text with an isolated sender, never as content', (
 
 test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
   const signedOut = { state: 'signed_out', userId: null, error: null };
-  const { body: html } = render(SignIn, {
-    props: { account: signedOut, busy: false, onsignin: () => {} }
+  const form = (mode = 'sign_in', username = '') => ({ homeserver: 'https://matrix.org', mode, username });
+  const props = (account, extra = {}) => ({
+    account,
+    busy: false,
+    form: form(),
+    onsignin: () => {},
+    onregister: () => {},
+    ...extra
   });
+  const { body: html } = render(SignIn, { props: props(signedOut) });
   assert.match(html, /Your server/);
   assert.match(html, /<bdi class="server-value">matrix\.org<\/bdi>/, 'matrix.org until changed');
   assert.match(html, />Continue</);
   assert.doesNotMatch(html, /type="password"/i, 'no password field in the page');
   assert.doesNotMatch(html, /<input/, 'the server is chosen in the picker; nothing else is asked');
   assert.match(html, /This page never sees your password/);
+  assert.match(html, /<button type="button" class="link"[^>]*>\s*Create an account\s*<\/button>/);
 
   const failed = render(SignIn, {
-    props: {
-      account: { state: 'sign_in_failed', userId: null, error: 'invalid_credentials' },
-      busy: false,
-      onsignin: () => {}
-    }
+    props: props({ state: 'sign_in_failed', userId: null, error: 'invalid_credentials' })
   }).body;
   assert.match(failed, /role="alert"/);
   assert.match(failed, /did not accept that username and password/);
 
-  const waiting = render(SignIn, {
-    props: { account: { state: 'signing_in', userId: null, error: null }, busy: false, onsignin: () => {} }
-  }).body;
+  const waiting = render(SignIn, { props: props({ state: 'signing_in', userId: null, error: null }) }).body;
   assert.match(waiting, /Waiting for the Windows sign-in window/);
   assert.match(waiting, /<button type="submit" class="primary wide" disabled/);
+});
+
+test('GIVEN the create-account mode WHEN it shows THEN only a username is asked, and its problems and the server\'s answer are clear', () => {
+  const signedOut = { state: 'signed_out', userId: null, error: null };
+  const view = (username, account = signedOut) =>
+    render(SignIn, {
+      props: {
+        account,
+        busy: false,
+        form: { homeserver: 'https://matrix.org', mode: 'register', username },
+        onsignin: () => {},
+        onregister: () => {}
+      }
+    }).body;
+  const empty = view('');
+  assert.match(empty, /<h2 id="sign-in-heading">Create an account<\/h2>/);
+  assert.match(empty, /<input id="register-username" class="field mono" type="text"/);
+  assert.equal((empty.match(/<input/g) ?? []).length, 1, 'the username is the only field');
+  assert.doesNotMatch(empty, /type="password"/i, 'the password goes to a native window');
+  assert.match(empty, /<button type="submit" class="primary wide" disabled[^>]*>\s*Create account/);
+  assert.match(empty, /This page never sees them/);
+
+  const fine = view('  @Newbie ');
+  assert.match(fine, /Your Matrix ID will start with @newbie\./);
+  assert.doesNotMatch(fine, /<button type="submit" class="primary wide" disabled/);
+
+  assert.match(view('newbie:matrix.org'), /without ":" and a server/);
+  assert.match(view('new bie'), /Use only letters, digits/);
+  assert.match(view('<b>x</b>'), /aria-invalid="true"/);
+
+  for (const [error, text] of [
+    ['username_taken', /That username is taken/],
+    ['registration_disabled', /does not let anyone register/],
+    ['token_rejected', /did not accept the registration token/],
+    ['unsupported_registration', /Register in the homeserver's own web page/],
+    ['weak_password', /too weak/],
+    ['future_code', /That did not work\./]
+  ]) {
+    const html = view('newbie', { state: 'sign_in_failed', userId: null, error });
+    assert.match(html, /role="alert"/, error);
+    assert.match(html.replaceAll('&#39;', "'"), text, error);
+  }
+  assert.match(view('newbie', { state: 'signing_in', userId: null, error: null }), /Checking the name/);
 });
 
 test('GIVEN the server picker WHEN another server is chosen THEN it asks only for a URL', () => {
@@ -772,6 +821,47 @@ test('GIVEN a room with an invite action WHEN the header shows THEN it offers In
     }).body;
   assert.match(header(() => {}), /<button type="button" class="secondary header-action">Invite<\/button>/);
   assert.doesNotMatch(header(undefined), />Invite</);
+});
+
+test('GIVEN a room with a settings action WHEN the header shows THEN it offers a labelled settings button, and only then', () => {
+  const header = (onsettings) =>
+    render(Timeline, {
+      props: { title: 'general', items: [], hasOlder: false, loading: false, error: null, onolder: () => {}, onsettings }
+    }).body;
+  assert.match(header(() => {}), /<button type="button" class="icon-button header-settings" aria-label="Room settings"/);
+  assert.doesNotMatch(header(undefined), /Room settings/);
+});
+
+test('GIVEN the room settings WHEN they open THEN the room name is isolated text, the tabs show and nothing is changeable before they load', () => {
+  const html = render(RoomSettings, {
+    props: { roomId: '!r:example.invalid', roomName: hostileName, changes: 0, onleft: () => {}, onclose: () => {} }
+  }).body;
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /<dialog class="room-settings" aria-labelledby="room-settings-heading"/);
+  assert.match(html, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  for (const tab of ['General', 'People', 'Notifications', 'Security &amp; privacy', 'Advanced']) {
+    assert.match(html, new RegExp(String.raw`class="room-row"[^>]*>\s*${tab}\s*</button>`), tab);
+  }
+  assert.match(html, /aria-current="page"[^>]*>\s*General/);
+  assert.match(html, /aria-label="Close room settings"/);
+  assert.match(html, /role="status"[^>]*>Loading the room's settings…/);
+  assert.doesNotMatch(html, /Save name|Leave room|Turn on encryption/);
+});
+
+test('GIVEN a level WHEN the picker shows THEN it names the roles this account may give and the current level', () => {
+  const picker = (level, own, disabled = false) =>
+    render(LevelPicker, {
+      props: { id: 'p', label: 'Role of <b>Bob</b>', level, own, disabled, onpick: () => {} }
+    }).body;
+  const moderator = picker(0, 50);
+  assert.match(moderator, /aria-label="Role of &lt;b>Bob&lt;\/b>"/);
+  assert.doesNotMatch(moderator, />Admin</, 'not above this account');
+  assert.match(moderator, /<option value="50"[^>]*>Moderator<\/option>/);
+  assert.match(moderator, /<option value="0"[^>]*selected[^>]*>Member<\/option>/);
+  assert.match(moderator, /<option value="custom"[^>]*>Custom…<\/option>/);
+  assert.match(picker(75, null), /<option value="75"[^>]*selected[^>]*>Level 75<\/option>/);
+  assert.match(picker(0, 100, true), /<select id="p" class="field" aria-label="[^"]*" disabled="">/);
+  assert.doesNotMatch(moderator, /disabled/);
 });
 
 test('GIVEN Enter to send on or off WHEN the composer shows THEN its key shortcut says which keys send', () => {

@@ -14,15 +14,26 @@ import type {
   DisplayName,
   ImageMime,
   ImagePick,
+  HistoryVisibility,
   ImageView,
   InviteList,
   InviteSummary,
+  JoinRule,
+  LevelKey,
+  Membership,
   PendingMessage,
   ProfileList,
   ProfileSlot,
+  RoomChange,
   RoomCreation,
   RoomIdentityChanges,
   RoomInvite,
+  RoomLevel,
+  RoomMember,
+  RoomMembers,
+  RoomNotifications,
+  RoomPermissions,
+  RoomSettings,
   SignInError,
   RoomList,
   SecurityStatus,
@@ -45,14 +56,25 @@ export type {
   DisplayName,
   ImageMime,
   ImagePick,
+  HistoryVisibility,
   ImageView,
   InviteList,
   InviteSummary,
+  JoinRule,
+  LevelKey,
+  Membership,
   ProfileList,
   ProfileSlot,
+  RoomChange,
   RoomCreation,
   RoomIdentityChanges,
   RoomInvite,
+  RoomLevel,
+  RoomMember,
+  RoomMembers,
+  RoomNotifications,
+  RoomPermissions,
+  RoomSettings,
   PendingMessage,
   RoomList,
   SecurityStatus,
@@ -139,6 +161,17 @@ export function resetProfile(): Promise<StoreState> {
  */
 export function signIn(homeserver: string): Promise<AccountStatus> {
   return invoke<AccountStatus>('sign_in', { homeserver });
+}
+
+/**
+ * Starts registering a new account named `username` (a localpart) on
+ * `homeserver`. Only these two are sent: the core checks the name is free,
+ * then asks for the password and any registration token in its own windows.
+ * The outcome, or why it failed (such as `username_taken`), arrives as a
+ * session change.
+ */
+export function register(homeserver: string, username: string): Promise<AccountStatus> {
+  return invoke<AccountStatus>('register', { homeserver, username });
 }
 
 /**
@@ -335,6 +368,32 @@ export function createRoom(name: string, invite: string[]): Promise<RoomCreation
 /** Invites one person to a joined room. */
 export function inviteUser(roomId: string, userId: string): Promise<RoomInvite> {
   return invoke<RoomInvite>('invite_user', { roomId, userId });
+}
+
+/**
+ * A joined room's settings: name, topic, addresses, access, encryption,
+ * notifications and power levels, with what this account may change. The
+ * permissions are hints; the homeserver decides.
+ */
+export function roomSettings(roomId: string): Promise<RoomSettings> {
+  return invoke<RoomSettings>('room_settings', { roomId });
+}
+
+/**
+ * A joined room's members (joined, invited, asking to join or banned) whose
+ * ID or display name contains `filter`; an empty filter lists everyone, up to
+ * the core's limit.
+ */
+export function roomMembers(roomId: string, filter: string): Promise<RoomMembers> {
+  return invoke<RoomMembers>('room_members', { roomId, filter });
+}
+
+/**
+ * Changes one setting of a joined room, or acts on one member. Rejects with
+ * `rejected` when the homeserver refuses, for example for lack of permission.
+ */
+export function changeRoom(roomId: string, change: RoomChange): Promise<void> {
+  return invoke<void>('change_room', { roomId, change });
 }
 
 /** This account's display name, as the homeserver has it. */

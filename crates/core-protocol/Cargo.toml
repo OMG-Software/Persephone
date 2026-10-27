@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Only for the `change_room` argument type, which the page also uses.
+persephone-contracts = { path = "../contracts" }
 persephone-media-protocol = { path = "../media-protocol" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
