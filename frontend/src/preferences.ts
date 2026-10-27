@@ -70,6 +70,10 @@ export class SettingsKeeper {
   #stored: AccountSettings | null = null;
   // Changes not yet saved, shown over the stored settings when they load.
   #unsaved: Partial<AccountSettings> = {};
+  // Which change set each unsaved field last: a change undoes or forgets
+  // only the fields it still owns, even when another set the same value.
+  #owners: Partial<Record<keyof AccountSettings, number>> = {};
+  #changes = 0;
   // The last save asked for; the next one starts after it settles.
   #saving: Promise<void> = Promise.resolve();
 
@@ -87,6 +91,7 @@ export class SettingsKeeper {
     this.#known = Promise.resolve(false);
     this.#stored = null;
     this.#unsaved = {};
+    this.#owners = {};
     this.#set(DEFAULT_SETTINGS, null);
   }
 
@@ -113,10 +118,13 @@ export class SettingsKeeper {
   async change(patch: Partial<AccountSettings>) {
     const epoch = this.#epoch;
     const keys = Object.keys(patch) as (keyof AccountSettings)[];
-    let undo: Partial<AccountSettings> = Object.fromEntries(
+    const change = ++this.#changes;
+    // What a failure puts back while the stored settings are not known.
+    const before: Partial<AccountSettings> = Object.fromEntries(
       keys.map((key) => [key, this.#current[key]])
     );
     this.#unsaved = { ...this.#unsaved, ...patch };
+    for (const key of keys) this.#owners[key] = change;
     this.#set({ ...this.#current, ...patch }, null);
     // The stored settings come first: saving before them would write the
     // defaults over every setting this change does not touch. Read them now
@@ -127,12 +135,8 @@ export class SettingsKeeper {
       known = await this.#known;
     }
     if (epoch !== this.#epoch) return;
-    // Undone, a field returns to what the core holds, not to what was shown
-    // before the stored settings arrived.
-    const stored = this.#stored;
-    if (stored) undo = Object.fromEntries(keys.map((key) => [key, stored[key]]));
     if (!known) {
-      this.#undo(patch, undo);
+      this.#undo(change, keys, before);
       return;
     }
     // Saves go one at a time, in the order they were made: two calls in
@@ -147,36 +151,44 @@ export class SettingsKeeper {
       try {
         await this.#core.save(sent);
       } catch {
-        if (epoch === this.#epoch) this.#undo(patch, undo);
+        if (epoch === this.#epoch) this.#undo(change, keys, before);
         return;
       }
       if (epoch !== this.#epoch) return;
       this.#stored = sent;
-      this.#forget(patch);
+      this.#forget(change, keys);
     });
     this.#saving = save.catch(() => {});
     await save;
   }
 
-  /** Drops a change's fields from the unsaved ones, unless a newer change set them. */
-  #forget(patch: Partial<AccountSettings>) {
-    for (const key of Object.keys(patch) as (keyof AccountSettings)[]) {
-      if (this.#unsaved[key] === patch[key]) delete this.#unsaved[key];
+  /** The fields of `keys` that `change` still owns: no newer change set them. */
+  #owned(change: number, keys: (keyof AccountSettings)[]): (keyof AccountSettings)[] {
+    return keys.filter((key) => this.#owners[key] === change);
+  }
+
+  /** Drops a saved change's fields from the unsaved ones, where it still owns them. */
+  #forget(change: number, keys: (keyof AccountSettings)[]) {
+    for (const key of this.#owned(change, keys)) {
+      delete this.#unsaved[key];
+      delete this.#owners[key];
     }
   }
 
   /**
-   * Puts back the fields of a change that was not saved, with a failure. A
-   * field a newer change set since keeps the newer value.
+   * Puts back the fields of a change that was not saved, with a failure: to
+   * what the core holds now (an earlier save may have confirmed a value
+   * since the change began), or to what was shown before it while the
+   * stored settings are not known. A field a newer change set keeps the
+   * newer value.
    */
-  #undo(patch: Partial<AccountSettings>, undo: Partial<AccountSettings>) {
+  #undo(change: number, keys: (keyof AccountSettings)[], before: Partial<AccountSettings>) {
+    const stored = this.#stored;
     const restored = { ...this.#current };
-    for (const key of Object.keys(patch) as (keyof AccountSettings)[]) {
-      if (this.#unsaved[key] === patch[key]) {
-        Object.assign(restored, { [key]: undo[key] });
-      }
+    for (const key of this.#owned(change, keys)) {
+      Object.assign(restored, { [key]: stored ? stored[key] : before[key] });
     }
-    this.#forget(patch);
+    this.#forget(change, keys);
     this.#set(restored, SAVE_FAILED);
   }
 

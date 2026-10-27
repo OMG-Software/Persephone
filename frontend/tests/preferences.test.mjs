@@ -240,6 +240,43 @@ test('GIVEN two changes of different settings WHEN both saves fail THEN both ret
   await third;
 });
 
+test('GIVEN two changes setting the same value WHEN the first save fails THEN the second keeps it and saves it', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  waiting.load[0].resolve(STORED);
+  await loading;
+  const first = kept.change({ enterSends: true, chatTextPercent: 90 });
+  const second = kept.change({ enterSends: true });
+  await tick();
+  waiting.save[0].reject('internal');
+  await first;
+  await tick();
+  assert.equal(shown.settings.enterSends, true, 'the second change still owns it');
+  assert.equal(shown.settings.chatTextPercent, STORED.chatTextPercent, 'the first change is undone');
+  assert.deepEqual(waiting.save[1].settings, { ...STORED, enterSends: true });
+  waiting.save[1].resolve();
+  await second;
+});
+
+test('GIVEN a value an earlier save confirmed WHEN the later change that set it fails THEN the confirmed value stays', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  waiting.load[0].resolve(STORED);
+  await loading;
+  const first = kept.change({ enterSends: true });
+  const second = kept.change({ chatTextPercent: 90 });
+  await tick();
+  // The first save carries the second change's value too, and succeeds.
+  assert.equal(waiting.save[0].settings.chatTextPercent, 90);
+  waiting.save[0].resolve();
+  await first;
+  await tick();
+  waiting.save[1].reject('internal');
+  await second;
+  assert.equal(shown.settings.chatTextPercent, 90, 'what the core holds, not the value before the change');
+  assert.equal(shown.failure, preferences.SAVE_FAILED);
+});
+
 test('GIVEN a save waiting behind another WHEN the account is signed out meanwhile THEN it is never sent', async () => {
   const { kept, waiting, shown } = keeper();
   const loading = kept.load();
