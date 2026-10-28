@@ -429,10 +429,17 @@ mod tests {
         Arc::new(ImageUpload::for_tests(budgets, b"\x89PNG\r\n\x1a\nimage"))
     }
 
-    fn file(budgets: &persephone_media_protocol::ResourceBudgets, name: &str) -> Arc<FileUpload> {
+    fn file(
+        budgets: &Arc<persephone_media_protocol::ResourceBudgets>,
+        name: &str,
+    ) -> Arc<FileUpload> {
         let mut bytes = crate::media::Encoded::reserve(budgets, 4).unwrap();
         bytes.extend(b"data").unwrap();
-        Arc::new(FileUpload::new(bytes, std::path::Path::new(name)))
+        Arc::new(FileUpload::new(
+            bytes,
+            std::path::Path::new(name),
+            budgets.clone(),
+        ))
     }
 
     /// GIVEN an unsent image WHEN a file is queued THEN it waits its turn,

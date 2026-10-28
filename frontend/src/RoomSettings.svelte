@@ -222,6 +222,10 @@
     if (seen !== null && now !== seen) {
       loadSettings();
       if (tab === 'people') loadMembers();
+      if (tab === 'security') {
+        loadServers();
+        loadReaders();
+      }
     }
     seen = now;
   });

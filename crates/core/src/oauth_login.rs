@@ -23,6 +23,9 @@ use tokio::{
 pub const REDIRECT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Most bytes read of the redirect request.
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024;
+/// Longest one connection may take to send its request; a connection that
+/// sends nothing is dropped, so it cannot hold up the real redirect.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The page the browser shows once it is redirected back.
 const DONE_PAGE: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
     Cache-Control: no-store\r\nConnection: close\r\n\r\n\
@@ -96,16 +99,11 @@ impl Redirect {
                     .accept()
                     .await
                     .map_err(|_| RedirectError::Failed)?;
-                let mut request = Vec::new();
-                let mut buffer = [0u8; 2048];
-                while !request.windows(4).any(|end| end == b"\r\n\r\n")
-                    && request.len() < MAX_REQUEST_BYTES
-                {
-                    match stream.read(&mut buffer).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => request.extend_from_slice(&buffer[..read]),
-                    }
-                }
+                let Ok(request) =
+                    tokio::time::timeout(REQUEST_TIMEOUT, read_request(&mut stream)).await
+                else {
+                    continue;
+                };
                 match callback_query(&request) {
                     Some(query) => {
                         let _ = stream.write_all(DONE_PAGE.as_bytes()).await;
@@ -120,6 +118,19 @@ impl Redirect {
         .await
         .map_err(|_| RedirectError::TimedOut)?
     }
+}
+
+/// Reads one request's head, up to [`MAX_REQUEST_BYTES`].
+async fn read_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 2048];
+    while !request.windows(4).any(|end| end == b"\r\n\r\n") && request.len() < MAX_REQUEST_BYTES {
+        match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => request.extend_from_slice(&buffer[..read]),
+        }
+    }
+    request
 }
 
 /// The query of a `GET /callback?<query> HTTP/1.x` request line, or `None`

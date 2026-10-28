@@ -1709,7 +1709,7 @@ impl Core {
                 Ok(bytes) => bytes,
                 Err(code) => return Outcome::Error(code),
             };
-            let upload = Arc::new(files::FileUpload::new(bytes, &path));
+            let upload = Arc::new(files::FileUpload::new(bytes, &path, self.budgets.clone()));
             match self.session.send_file(&room_id, upload) {
                 Ok(queued) => ok(&queued),
                 Err(session::SendRefusal::Full) => Outcome::Error(ErrorCode::LimitExceeded),

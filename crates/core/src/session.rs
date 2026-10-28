@@ -1386,9 +1386,12 @@ impl Session {
 
     /// Starts signing in to `homeserver` through its OAuth 2.0 provider
     /// (ADR-0030) on a worker thread and returns the status at once, like
-    /// [`Session::sign_in`]. The core asks in its own window before the
-    /// provider's page opens in the browser, then waits for the redirect
-    /// under a lease; a lock abandons the wait within half a second.
+    /// [`Session::sign_in`]. One lease covers starting the login (the
+    /// provider's page); the question in the core's own window runs with no
+    /// lease held, as the password prompt does; a second lease, in the same
+    /// generation, covers the redirect wait and the install. A lock in
+    /// between abandons the attempt, and abandons the wait within half a
+    /// second.
     pub fn sign_in_oidc(
         &self,
         homeserver: Homeserver,
@@ -1423,31 +1426,85 @@ impl Session {
                     let inner = lock(&shared);
                     inner.generation == started && inner.state == StoreState::Protected
                 };
-                let lease = match shared.admit() {
-                    Ok(lease) if lease.generation == started => lease,
-                    _ => {
-                        shared.set_status(AccountStatus::signed_out());
+                let admitted = || match shared.admit() {
+                    Ok(lease) if lease.generation == started => Some(lease),
+                    _ => None,
+                };
+                // Reports the end of an attempt that did not sign in.
+                let end = |lease: Option<Lease>, error: SignInError| {
+                    let current = lease.is_some_and(|lease| lease.commit(|| ()).is_ok());
+                    shared.set_status(if current {
+                        failed(error)
+                    } else {
+                        AccountStatus::signed_out()
+                    });
+                };
+                // First lease: the client and the provider's page.
+                let Some(lease) = admitted() else {
+                    shared.set_status(AccountStatus::signed_out());
+                    return;
+                };
+                shared.client_ran.store(true, Ordering::SeqCst);
+                let runtime = lease.stores().runtime().handle().clone();
+                let begun = lease.stores().block_on(async {
+                    let client = account::build_client(&homeserver, lease.stores()).await?;
+                    match account::start_oauth(&client).await {
+                        Ok(start) => Ok((client, start)),
+                        Err(error) => {
+                            drop(client);
+                            Err(error)
+                        }
+                    }
+                });
+                let (client, start) = match begun {
+                    Ok(begun) => begun,
+                    Err(error) => {
+                        end(Some(lease), error);
                         return;
                     }
                 };
-                shared.client_ran.store(true, Ordering::SeqCst);
-                let host = homeserver.display_host();
-                let open = |url: &url::Url| -> Result<bool, SignInError> {
-                    let (caption, message) =
-                        crate::oauth_login::question(&host, url).ok_or(SignInError::Failed)?;
-                    match source.confirm_open_link(caption, &message) {
-                        Ok(true) => source
-                            .open_link(url.as_str())
-                            .map(|()| true)
-                            .map_err(|_| SignInError::Failed),
-                        Ok(false) | Err(PromptError::Cancelled) => Ok(false),
-                        Err(PromptError::Unsupported) => Err(SignInError::Unsupported),
-                        Err(_) => Err(SignInError::Failed),
-                    }
+                drop(lease);
+                // Dropped inside its runtime, as everywhere else.
+                let discard = |client: Client| {
+                    let _context = runtime.enter();
+                    drop(client);
                 };
+                // The question, with no lease held: it may stay open long.
+                let answer =
+                    match crate::oauth_login::question(&homeserver.display_host(), start.url()) {
+                        None => Err(SignInError::Failed),
+                        Some((caption, message)) => {
+                            match source.confirm_open_link(caption, &message) {
+                                Ok(true) => source
+                                    .open_link(start.url().as_str())
+                                    .map(|()| true)
+                                    .map_err(|_| SignInError::Failed),
+                                Ok(false) | Err(PromptError::Cancelled) => Ok(false),
+                                Err(PromptError::Unsupported) => Err(SignInError::Unsupported),
+                                Err(_) => Err(SignInError::Failed),
+                            }
+                        }
+                    };
+                // Second lease, in the same generation: a lock in between
+                // abandons the attempt.
+                let Some(lease) = admitted() else {
+                    discard(client);
+                    shared.set_status(AccountStatus::signed_out());
+                    return;
+                };
+                match answer {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => {
+                        lease
+                            .stores()
+                            .block_on(account::abort_oauth(&client, start));
+                        discard(client);
+                        end(Some(lease), answer.err().unwrap_or(SignInError::Cancelled));
+                        return;
+                    }
+                }
                 let result = lease.stores().block_on(async {
-                    let client = account::build_client(&homeserver, lease.stores()).await?;
-                    match account::sign_in_oauth(&client, &homeserver, lease.stores(), open, || {
+                    match account::finish_oauth(&client, &homeserver, lease.stores(), start, || {
                         !still_current()
                     })
                     .await

@@ -75,9 +75,10 @@ by the UI process's Rust code".
   line now names `rand_chacha 0.3.1`, as two versions are present).
 * The plugin injects a small script that redefines `window.Notification`;
   its calls are denied by the capability.
-* Sender and room names still reach the OS notification centre, which may
-  keep a history, unless names are turned off; the setting is off by
-  default for this reason.
+* While desktop notifications are on, sender and room names reach the OS
+  notification centre, which may keep a history, until the user turns names
+  off: names are on by default once notifications are. Desktop
+  notifications themselves are off by default for this reason.
 * On Windows, a toast from an application that is not installed (no Start
   menu shortcut with Persephone's application ID) may not show.
 * The level and toasts were tested against a mock homeserver only.

@@ -28,19 +28,27 @@ pub const MAX_KNOWN_DEVICES: usize = 200;
 pub const MAX_NEW_SESSIONS: usize = 10;
 const MAX_KNOWN_BYTES: usize = 64 * 1024;
 
-/// The known device IDs, oldest first; `None` when none were recorded or the
-/// record cannot be read.
-async fn known(stores: &Stores) -> Option<Vec<String>> {
-    let bytes = stores
+/// The known device IDs, oldest first; `Ok(None)` only when none were ever
+/// recorded. A record that cannot be read is `internal`, never a first run:
+/// treating it as one would record every current device, a new session
+/// among them, as known.
+async fn known(stores: &Stores) -> Result<Option<Vec<String>>, ErrorCode> {
+    let Some(bytes) = stores
         .crypto()
         .get_custom_value(KNOWN_DEVICES_KEY)
         .await
-        .ok()
-        .flatten()?;
+        .map_err(|_| ErrorCode::Internal)?
+    else {
+        return Ok(None);
+    };
+    decode(&bytes).map(Some)
+}
+
+fn decode(bytes: &[u8]) -> Result<Vec<String>, ErrorCode> {
     if bytes.len() > MAX_KNOWN_BYTES {
-        return None;
+        return Err(ErrorCode::Internal);
     }
-    serde_json::from_slice(&bytes).ok()
+    serde_json::from_slice(bytes).map_err(|_| ErrorCode::Internal)
 }
 
 async fn save(stores: &Stores, mut devices: Vec<String>) -> Result<(), ErrorCode> {
@@ -80,7 +88,7 @@ async fn other_devices(client: &Client) -> Result<Vec<(OwnedDeviceId, Option<Str
 /// current ones and returns none.
 pub async fn new_sessions(client: &Client, stores: &Stores) -> Result<NewSessions, ErrorCode> {
     let devices = other_devices(client).await?;
-    let Some(known) = known(stores).await else {
+    let Some(known) = known(stores).await? else {
         save(
             stores,
             devices.iter().map(|(id, _)| id.to_string()).collect(),
@@ -123,7 +131,7 @@ pub async fn acknowledge(
     device_ids: &[String],
 ) -> Result<(), ErrorCode> {
     let devices = other_devices(client).await?;
-    let mut known = known(stores).await.unwrap_or_default();
+    let mut known = known(stores).await?.unwrap_or_default();
     for (id, _) in &devices {
         let id = id.to_string();
         if device_ids.contains(&project_name(&id)) && !known.contains(&id) {
@@ -139,6 +147,22 @@ mod tests {
 
     fn device(id: &str, name: Option<&str>) -> (OwnedDeviceId, Option<String>) {
         (id.into(), name.map(ToOwned::to_owned))
+    }
+
+    /// GIVEN damaged or oversized records WHEN decoded THEN each is an
+    /// error, not an empty list that would make every device known.
+    #[test]
+    fn given_an_unreadable_record_then_it_is_an_error() {
+        assert_eq!(
+            decode(br#"["A","B"]"#),
+            Ok(vec!["A".to_owned(), "B".to_owned()])
+        );
+        for bad in [&b"not json"[..], br#"{"A":1}"#, br#"[1]"#] {
+            assert_eq!(decode(bad), Err(ErrorCode::Internal));
+        }
+        let mut large = b"[\"".to_vec();
+        large.resize(MAX_KNOWN_BYTES + 1, b'x');
+        assert_eq!(decode(&large), Err(ErrorCode::Internal));
     }
 
     /// GIVEN known and new devices WHEN compared THEN only the new are

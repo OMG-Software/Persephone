@@ -3,6 +3,7 @@
   import { notificationLevel, setNotificationLevel, type AccountSettings, type NotificationLevel } from './bridge';
   import { notificationLevelText } from './accountChanges';
   import ProxySettings from './ProxySettings.svelte';
+  import { notWindows } from './image';
   import {
     CHAT_TEXT_SIZES,
     IDLE_LOCK_CHOICES,
@@ -26,6 +27,9 @@
     // stored ones.
     onchange: (patch: Partial<AccountSettings>) => void;
   } = $props();
+
+  // Whether the core cannot read this computer's idle time (ADR-0025).
+  const idleUnavailable = notWindows();
 
   let level = $state<NotificationLevel | null>(null);
   let levelBusy = $state(false);
@@ -201,10 +205,13 @@
       active. You still see other people's. Your other devices always learn what you have read.
     </p>
     <label for="idle-lock">Lock Persephone when this computer is not used</label>
+    <!-- Only Windows reads the computer's idle time yet (ADR-0025); elsewhere
+         the setting could not take effect, so it is not offered. -->
     <select
       id="idle-lock"
       class="field"
-      value={settings.idleLockMinutes}
+      disabled={idleUnavailable}
+      value={idleUnavailable ? 0 : settings.idleLockMinutes}
       onchange={(event) => onchange({ idleLockMinutes: Number(event.currentTarget.value) })}
     >
       {#each IDLE_LOCK_CHOICES as minutes (minutes)}
@@ -212,8 +219,10 @@
       {/each}
     </select>
     <p class="note">
-      Counts time without keyboard or mouse input on this computer, in any program. Locking closes
-      the profile; your passphrase opens it again. Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
+      {idleUnavailable
+        ? 'Not available on this system yet: Persephone cannot read how long it has been idle.'
+        : 'Counts time without keyboard or mouse input on this computer, in any program. Locking closes the profile; your passphrase opens it again.'}
+      Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
     </p>
   </div>
   {#if failure}

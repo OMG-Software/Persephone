@@ -8,6 +8,9 @@
   let current = $state<string | null>(null);
   let typed = $state('');
   let loaded = $state(false);
+  // The record could not be read: Persephone does not connect until it is
+  // replaced or removed, which saving does without reading it.
+  let unreadable = $state(false);
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let saved = $state<string | null>(null);
@@ -25,7 +28,15 @@
       typed = current ?? '';
       loaded = true;
     } catch (reason) {
-      failure = failures[String(reason)] ?? 'The proxy setting could not be read.';
+      const code = String(reason);
+      if (code === 'locked') {
+        failure = failures.locked;
+        return;
+      }
+      unreadable = true;
+      loaded = true;
+      failure =
+        'The proxy setting could not be read, so Persephone does not connect. Save a proxy or remove the setting.';
     }
   });
 
@@ -38,6 +49,7 @@
       await setProxySetting(proxy);
       current = proxy;
       typed = proxy ?? '';
+      unreadable = false;
       saved = proxy
         ? 'Saved. Persephone uses the proxy from its next start.'
         : 'Removed. Persephone connects directly from its next start.';
@@ -76,7 +88,7 @@
   </p>
   <div class="actions">
     <button type="submit" class="secondary" disabled={!loaded || busy}>Save proxy</button>
-    {#if current}
+    {#if current || unreadable}
       <button type="button" class="secondary" disabled={busy} onclick={() => save(null)}
         >Remove proxy</button
       >

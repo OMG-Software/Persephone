@@ -144,10 +144,12 @@ fn text_body(msgtype: &MessageType) -> Option<&str> {
 }
 
 /// The sender of the event when an edit may replace it: an original text
-/// message that is not an edit itself.
+/// message (`m.text`, not a notice or emote) that is not an edit itself, the
+/// same rule `sending::own_text_message` applies before this account sends
+/// an edit.
 fn editable_sender(event: &TimelineEvent) -> Option<OwnedUserId> {
     let message = room_message(event)?;
-    let editable = text_body(&message.content.msgtype).is_some()
+    let editable = matches!(message.content.msgtype, MessageType::Text(_))
         && !matches!(message.content.relates_to, Some(Relation::Replacement(_)));
     editable.then_some(message.sender)
 }

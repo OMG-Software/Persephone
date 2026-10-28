@@ -41,7 +41,10 @@ Proposed option: "the system browser with a loopback redirect".
   `https://omg-software.github.io/Persephone/` as its URI.
 * It asks in its own window, naming the homeserver and the provider's host
   (https only, ASCII only), before it opens the provider's page with the
-  same opener as links (ADR-0024). "No" aborts the login.
+  same opener as links (ADR-0024). "No" aborts the login. The question runs
+  with no session lease held, as the password prompt does: one lease covers
+  starting the login, and a second, in the same generation, covers the
+  redirect wait, so an open question never keeps a lock waiting.
 * It waits for one `GET /callback?…` on the loopback address, at most
   16 KiB and five minutes, answering other requests with an error; the SDK
   checks the state it sent. The wait checks every half second whether a

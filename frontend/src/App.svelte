@@ -1602,16 +1602,18 @@
         {/snippet}
       </Sidebar>
       <div class="pane">
+        <!-- Above any room: a new session may be someone else's, so the alert
+             does not wait for a room to be opened. -->
+        {#if newFound}
+          <NewSessionsAlert
+            found={newFound}
+            busy={sessionsBusy}
+            failure={sessionsFailure}
+            onknown={sessionsKnown}
+            onremove={removeNewSession}
+          />
+        {/if}
         {#if selectedRoom}
-          {#if newFound}
-            <NewSessionsAlert
-              found={newFound}
-              busy={sessionsBusy}
-              failure={sessionsFailure}
-              onknown={sessionsKnown}
-              onremove={removeNewSession}
-            />
-          {/if}
           <Timeline
             title={selectedRoom.displayName ?? selectedRoom.roomId}
             roomId={selectedRoom.roomId}

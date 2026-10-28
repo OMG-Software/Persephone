@@ -28,7 +28,9 @@ use matrix_sdk::{
 };
 use persephone_contracts::{TimelineItem, UnixMillis};
 use persephone_core_protocol::ErrorCode;
+use persephone_media_protocol::{BudgetClass, BudgetPermit, ResourceBudgets};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Longest file name sent, suggested or shown, in characters.
 pub const MAX_FILE_NAME_CHARS: usize = 120;
@@ -38,17 +40,38 @@ pub const MAX_FILE_NAME_CHARS: usize = 120;
 pub struct FileUpload {
     bytes: Encoded,
     name: String,
+    budgets: Arc<ResourceBudgets>,
 }
 
 impl FileUpload {
     /// The upload of `bytes` read from `path`, named after the path's final
     /// part made safe ([`safe_name`]).
-    pub fn new(bytes: Encoded, path: &Path) -> Self {
+    pub fn new(bytes: Encoded, path: &Path, budgets: Arc<ResourceBudgets>) -> Self {
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
             .map_or_else(|| "file".to_owned(), safe_name);
-        Self { bytes, name }
+        Self {
+            bytes,
+            name,
+            budgets,
+        }
+    }
+
+    /// A copy of the bytes for the SDK, which takes its own, reserved in the
+    /// encoded budget before it is allocated, as an image's is
+    /// (`ImageUpload::copy_for_send`). Keep the permit until the send ends.
+    pub fn copy_for_send(&self) -> Result<(Vec<u8>, BudgetPermit), ErrorCode> {
+        let length = self.bytes.bytes().len();
+        let permit = self
+            .budgets
+            .try_acquire(BudgetClass::EncodedInFlight, length as u64)
+            .map_err(|_| ErrorCode::LimitExceeded)?;
+        let mut copy = Vec::new();
+        copy.try_reserve_exact(length)
+            .map_err(|_| ErrorCode::LimitExceeded)?;
+        copy.extend_from_slice(self.bytes.bytes());
+        Ok((copy, permit))
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -171,9 +194,11 @@ pub fn too_large(size: Option<UInt>) -> bool {
 }
 
 /// Writes a saved file where the user chose in the core's Save dialog. The
-/// dialog asked before replacing a file.
+/// dialog asked before replacing a file. A failed write (a full disk, no
+/// permission, a file in use) is `unavailable`, not `rejected`, which means
+/// the file itself was refused.
 pub fn write(path: &Path, bytes: &[u8]) -> Result<(), ErrorCode> {
-    std::fs::write(path, bytes).map_err(|_| ErrorCode::Rejected)
+    std::fs::write(path, bytes).map_err(|_| ErrorCode::Unavailable)
 }
 
 #[cfg(test)]

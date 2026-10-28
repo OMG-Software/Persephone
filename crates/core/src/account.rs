@@ -256,23 +256,29 @@ pub async fn save_if_refreshed(
     }
 }
 
-/// Signs in through the homeserver's OAuth 2.0 provider (ADR-0030): registers
-/// as a native client with a loopback redirect, has `open` ask the user and
-/// open the provider's page in the browser, waits for the redirect, finishes
-/// the login and saves the session encrypted. Returns the user ID.
-pub async fn sign_in_oauth(
-    client: &Client,
-    homeserver: &Homeserver,
-    stores: &Stores,
-    open: impl FnOnce(&url::Url) -> Result<bool, SignInError>,
-    abandoned: impl Fn() -> bool,
-) -> Result<String, SignInError> {
-    use crate::oauth_login::{Redirect, RedirectError};
-    use matrix_sdk::{
-        authentication::oauth::registration::{
-            ApplicationType, ClientMetadata, Localized, OAuthGrantType,
-        },
-        utils::UrlOrQuery,
+/// An OAuth sign-in that is started (ADR-0030): the loopback redirect and the
+/// provider's page, which the user has yet to be asked about.
+pub struct OAuthStart {
+    redirect: crate::oauth_login::Redirect,
+    authorization: matrix_sdk::authentication::oauth::OAuthAuthorizationData,
+}
+
+impl OAuthStart {
+    /// The provider's page to open in the browser.
+    pub fn url(&self) -> &url::Url {
+        &self.authorization.url
+    }
+}
+
+/// Starts signing in through the homeserver's OAuth 2.0 provider (ADR-0030):
+/// reads its metadata, binds the loopback redirect, and registers as a
+/// native client with it. Nothing is asked here: the caller asks the user,
+/// with no lease held, then finishes with [`finish_oauth`] or
+/// [`abort_oauth`].
+pub async fn start_oauth(client: &Client) -> Result<OAuthStart, SignInError> {
+    use crate::oauth_login::Redirect;
+    use matrix_sdk::authentication::oauth::registration::{
+        ApplicationType, ClientMetadata, Localized, OAuthGrantType,
     };
     // A server without an OAuth provider has none to offer.
     client
@@ -298,10 +304,33 @@ pub async fn sign_in_oauth(
         .build()
         .await
         .map_err(|_| SignInError::OidcUnavailable)?;
-    if !open(&authorization.url)? {
-        client.oauth().abort_login(&authorization.state).await;
-        return Err(SignInError::Cancelled);
-    }
+    Ok(OAuthStart {
+        redirect,
+        authorization,
+    })
+}
+
+/// Forgets a started sign-in the user declined.
+pub async fn abort_oauth(client: &Client, start: OAuthStart) {
+    client.oauth().abort_login(&start.authorization.state).await;
+}
+
+/// Finishes a started sign-in once the provider's page is open: waits for
+/// the redirect (until `abandoned`), finishes the login and saves the
+/// session encrypted. Returns the user ID.
+pub async fn finish_oauth(
+    client: &Client,
+    homeserver: &Homeserver,
+    stores: &Stores,
+    start: OAuthStart,
+    abandoned: impl Fn() -> bool,
+) -> Result<String, SignInError> {
+    use crate::oauth_login::RedirectError;
+    use matrix_sdk::utils::UrlOrQuery;
+    let OAuthStart {
+        redirect,
+        authorization,
+    } = start;
     let query = match redirect.wait(abandoned).await {
         Ok(query) => query,
         Err(error) => {

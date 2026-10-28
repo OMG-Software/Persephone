@@ -302,11 +302,12 @@ pub async fn send_file(
     let Some(mime) = parse_mime("application/octet-stream") else {
         return SendOutcome::Failed(SendFailure::Failed);
     };
+    // The SDK takes its own copy; it is reserved like the upload.
+    let Ok((data, _reservation)) = file.copy_for_send() else {
+        return SendOutcome::Failed(SendFailure::Failed);
+    };
     let config = AttachmentConfig::new().txn_id(transaction_id);
-    match room
-        .send_attachment(file.name(), &mime, file.bytes().to_vec(), config)
-        .await
-    {
+    match room.send_attachment(file.name(), &mime, data, config).await {
         Ok(response) => SendOutcome::Sent(response.event_id.to_string()),
         Err(error) => classify(&error),
     }

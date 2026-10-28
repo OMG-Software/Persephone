@@ -455,16 +455,20 @@ fn fit(members: &mut RoomMembers) {
 pub async fn readers(client: &Client, room_id: &str) -> Result<RoomReaders, ErrorCode> {
     let room = joined(client, room_id)?;
     let own = own_user(client)?;
-    let mut members: Vec<OwnedUserId> = room
+    let all = room
         .members(RoomMemberships::JOIN | RoomMemberships::INVITE)
         .await
-        .map_err(|_| ErrorCode::Unavailable)?
-        .iter()
-        .map(|member| member.user_id().to_owned())
+        .map_err(|_| ErrorCode::Unavailable)?;
+    // Sorted and cut by reference first: only the listed IDs are copied.
+    let mut sorted: Vec<&UserId> = all.iter().map(|member| member.user_id()).collect();
+    sorted.sort();
+    let truncated = sorted.len() > MAX_LISTED_MEMBERS;
+    let members: Vec<OwnedUserId> = sorted
+        .into_iter()
+        .take(MAX_LISTED_MEMBERS)
+        .map(ToOwned::to_owned)
         .collect();
-    members.sort();
-    let truncated = members.len() > MAX_LISTED_MEMBERS;
-    members.truncate(MAX_LISTED_MEMBERS);
+    drop(all);
     let encryption = client.encryption();
     let mut readers = Vec::with_capacity(members.len());
     for user in members {

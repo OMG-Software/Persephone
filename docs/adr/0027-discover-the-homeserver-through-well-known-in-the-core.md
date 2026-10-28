@@ -19,7 +19,8 @@ Who looks it up, and what does the user see?
 
 ## Decision Drivers
 
-* Keep every connection on the client policy: TLS 1.3, no proxy, no
+* Keep every connection on the client policy: TLS 1.3, no ambient proxy
+  (only the profile's own SOCKS5 proxy, when one is set; ADR-0028), no
   redirects (security design; owner decision of 20 October 2026).
 * Show the user the server found before any credential is sent.
 * Bound what is read from an untrusted server.
@@ -53,7 +54,10 @@ Proposed option: "look it up in the core and show it first".
 ### Positive Consequences
 
 * Users can type their server's name.
-* Nothing is sent to a server the user has not seen named.
+* No account credentials are sent to a server the user has not seen
+  named. Discovery itself does make two requests first: the `.well-known`
+  file on the typed name, and `/_matrix/client/versions` on the server it
+  names, which may be another host.
 
 ### Negative Consequences
 
