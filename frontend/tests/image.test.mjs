@@ -189,7 +189,7 @@ test('GIVEN image error codes WHEN shown THEN each is a short fixed message', ()
     assert.equal(image.sendImageErrorText(reason), 'The image was not queued. Try again.');
   }
   assert.match(image.sendImageErrorText('limit_exceeded'), /An image is already waiting to send/);
-  assert.match(image.attachErrorText('rejected'), /larger than 13 MB, damaged, or not a PNG or JPEG/);
+  assert.match(image.attachErrorText('rejected'), /larger than 6 MB, damaged, or not a PNG or JPEG/);
   assert.match(image.attachErrorText('limit_exceeded'), /already preparing an image/);
   assert.equal(image.formatSize(48_213), '48 KB');
   assert.equal(image.formatSize(999), '999 bytes');

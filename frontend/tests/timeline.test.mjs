@@ -93,6 +93,29 @@ test('GIVEN edits WHEN applied THEN each message shows its newest edit, marked, 
   );
 });
 
+test('GIVEN a deleted edit WHEN applied THEN its text is not shown and the message keeps its previous text', async () => {
+  const { applyRelations } = await import('../src/timeline.ts');
+  const msg = (id, body) => ({ kind: 'message', event_id: id, sender: '@a:s', body, origin_server_ts: null, reply_to: null });
+  const edit = (id, replaces, body) => ({ kind: 'edit', event_id: id, sender: '@a:s', replaces, body, origin_server_ts: null });
+  const shown = applyRelations([
+    msg('$1', 'first'),
+    edit('$e1', '$1', 'second'),
+    edit('$e2', '$1', 'regretted'),
+    msg('$2', 'original'),
+    edit('$e3', '$2', 'also regretted'),
+    { kind: 'redaction', event_id: '$d1', sender: '@a:s', redacts: '$e2', origin_server_ts: null },
+    { kind: 'redaction', event_id: '$d2', sender: '@a:s', redacts: '$e3', origin_server_ts: null }
+  ]);
+  assert.deepEqual(
+    shown.map((item) => [item.event_id, item.kind, item.body, item.edited === true]),
+    [
+      ['$1', 'message', 'second', true],
+      ['$2', 'message', 'original', false]
+    ]
+  );
+  assert.ok(!JSON.stringify(shown).includes('regretted'));
+});
+
 test('GIVEN deletions WHEN applied THEN deleted messages show as deleted and edits do not bring them back', async () => {
   const { applyRelations } = await import('../src/timeline.ts');
   const shown = applyRelations([

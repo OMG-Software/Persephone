@@ -32,7 +32,9 @@ use windows_sys::Win32::{
 /// Room for the longest path the dialog can return, in UTF-16 units.
 const MAX_PICKED_PATH_UNITS: usize = 32_768;
 
-pub fn read(path: &Path, budgets: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
+/// Reads a picked file of 1 byte to `limit` (never more than
+/// [`MAX_ENCODED_BYTES`]) under the rules of `crate::pick`.
+pub fn read(path: &Path, limit: u64, budgets: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
     let mut file = OpenOptions::new()
         .access_mode(GENERIC_READ)
         .share_mode(FILE_SHARE_READ)
@@ -51,7 +53,7 @@ pub fn read(path: &Path, budgets: &ResourceBudgets) -> Result<Encoded, ErrorCode
         return Err(ErrorCode::Rejected);
     }
     let size = metadata.len();
-    if size == 0 || size > MAX_ENCODED_BYTES {
+    if size == 0 || size > limit.min(MAX_ENCODED_BYTES) {
         return Err(ErrorCode::Rejected);
     }
     let mut encoded = Encoded::reserve(budgets, size)?;

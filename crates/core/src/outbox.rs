@@ -33,7 +33,7 @@ use zeroize::Zeroizing;
 pub const MAX_UNSENT: usize = 16;
 /// Most messages kept, sent ones included.
 pub const MAX_KEPT: usize = 32;
-/// Most images not yet sent at once: each holds up to 13 MiB
+/// Most images not yet sent at once: each holds up to 6 MiB
 /// (`media::MAX_SENT_BYTES`).
 pub const MAX_UNSENT_IMAGES: usize = 1;
 /// Most bytes all kept messages take as JSON (see [`entry_size`]). This
@@ -467,17 +467,20 @@ mod tests {
         let Content::File(sent) = &job.content else {
             panic!("a file");
         };
-        // The copy for the SDK reserves its own copy too: twice the file.
+        // The copy for the SDK reserves the SDK's copies too: all but the
+        // outbox's of `media::SENT_COPIES`.
         let (copy, _permit) = sent.copy_for_send().unwrap();
         assert_eq!(copy, b"data");
         assert!(
             budgets
                 .try_acquire(
                     persephone_media_protocol::BudgetClass::EncodedInFlight,
-                    persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT - 4 - 8 + 1
+                    persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT
+                        - crate::media::SENT_COPIES * 4
+                        + 1
                 )
                 .is_err(),
-            "the file, its copy and the SDK's copy are reserved"
+            "every copy of the send is reserved"
         );
         outbox.finish(queued.local_id, SendOutcome::Sent("$f".into()));
         assert!(!outbox.holds_image(queued.local_id));

@@ -141,14 +141,19 @@ function countReactions(
  * deleted message shows as deleted, and each other message shows the text
  * of its newest edit (the last in the room's order), marked as edited. The
  * core sends only edits by the message's own sender; an edit whose sender
- * differs from the message's here is still ignored.
+ * differs from the message's here is still ignored. A deleted edit counts
+ * for nothing, so the message falls back to its previous text.
  */
 export function applyRelations(items: TimelineItem[], ownUserId: string | null = null): ShownItem[] {
-  const newest = new Map<string, { sender: string; body: string }>();
   const deleted = new Set<string>();
   for (const item of items) {
-    if (item.kind === 'edit') newest.set(item.replaces, { sender: item.sender, body: item.body });
     if (item.kind === 'redaction') deleted.add(item.redacts);
+  }
+  const newest = new Map<string, { sender: string; body: string }>();
+  for (const item of items) {
+    if (item.kind === 'edit' && !deleted.has(item.event_id)) {
+      newest.set(item.replaces, { sender: item.sender, body: item.body });
+    }
   }
   const reactions = countReactions(items, deleted, ownUserId);
   const shown: ShownItem[] = [];

@@ -87,9 +87,10 @@ pub(crate) fn image_picker() -> Box<dyn ImagePicker> {
 
 pub(crate) fn read_image_file(
     path: &Path,
+    limit: u64,
     budgets: &ResourceBudgets,
 ) -> Result<Encoded, ErrorCode> {
-    pick::read(path, budgets)
+    pick::read(path, limit, budgets)
 }
 
 pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {

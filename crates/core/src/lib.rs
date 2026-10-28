@@ -1705,9 +1705,8 @@ impl Core {
             if self.media_generation() != Some(generation) {
                 return Outcome::Error(ErrorCode::Locked);
             }
-            let bytes = match pick::read_image_file(&path, &self.budgets) {
-                Ok(bytes) if bytes.bytes().len() as u64 <= media::MAX_SENT_BYTES => bytes,
-                Ok(_) => return Outcome::Error(ErrorCode::Rejected),
+            let bytes = match pick::read_sent_file(&path, &self.budgets) {
+                Ok(bytes) => bytes,
                 Err(code) => return Outcome::Error(code),
             };
             let upload = Arc::new(files::FileUpload::new(bytes, &path, self.budgets.clone()));

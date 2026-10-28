@@ -76,13 +76,21 @@ use zeroize::Zeroizing;
 
 /// Largest encoded image, downloaded or picked (the media plan's limit).
 pub const MAX_ENCODED_BYTES: u64 = 20 * MIB;
-/// Largest image (after stripping) or file sent. A send holds three copies
-/// at once: the outbox's, the one handed to the SDK, and the SDK's own (it
-/// clones the data in a room that is not encrypted, and encrypts into a new
-/// buffer in one that is). All three fit the 40 MiB `EncodedInFlight`
-/// budget. Downloads and saved files make no such copies and keep
-/// [`MAX_ENCODED_BYTES`].
-pub const MAX_SENT_BYTES: u64 = 13 * MIB;
+/// Copies of an image or file alive at the peak of one send, counted in its
+/// length (matrix-sdk 0.19.1 `Room::send_attachment`): the outbox's; the
+/// SDK's input, kept for the whole call; the upload buffer, which the
+/// request keeps for a retry after a token refresh (a clone in a room that
+/// is not encrypted, or the encrypted copy, whose capacity can reach twice
+/// the length as it grows); the clone of the request that is sent; and the
+/// HTTP body serialized from it. Five in a room that is not encrypted, six
+/// in one that is.
+pub const SENT_COPIES: u64 = 6;
+/// Largest image (after stripping) or file sent, so that every copy of a
+/// send fits the 40 MiB `EncodedInFlight` budget. Downloads and saved files
+/// make no such copies and keep [`MAX_ENCODED_BYTES`].
+pub const MAX_SENT_BYTES: u64 = 6 * MIB;
+const _: () =
+    assert!(SENT_COPIES * MAX_SENT_BYTES <= persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT);
 /// Received and preview images are scaled down to fit this square; 2048 x
 /// 2048 RGBA is 16 MiB, so four fit the `RetainedPixels` budget.
 pub const MAX_SHOWN_SIDE: u32 = 2048;
@@ -488,12 +496,15 @@ impl ImageUpload {
     }
 
     /// A copy for the SDK, which takes the data by value, reserved like the
-    /// upload itself together with the second copy the SDK makes while it
-    /// uploads (see [`MAX_SENT_BYTES`]). Neither SDK copy is zeroed.
+    /// upload itself together with the copies the SDK makes while it uploads
+    /// (all but the upload's own of [`SENT_COPIES`]). No SDK copy is zeroed.
     pub fn copy_for_send(&self) -> Result<(Vec<u8>, BudgetPermit), ErrorCode> {
         let permit = self
             .budgets
-            .try_acquire(BudgetClass::EncodedInFlight, 2 * self.bytes.len() as u64)
+            .try_acquire(
+                BudgetClass::EncodedInFlight,
+                (SENT_COPIES - 1) * self.bytes.len() as u64,
+            )
             .map_err(|_| ErrorCode::LimitExceeded)?;
         let mut copy = Vec::new();
         copy.try_reserve_exact(self.bytes.len())

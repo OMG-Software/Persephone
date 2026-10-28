@@ -430,14 +430,14 @@ fn given_a_stripped_image_over_the_send_limit_then_no_draft_is_made() {
 }
 
 /// GIVEN an image to send WHEN it is copied for the SDK THEN the copy and
-/// the SDK's own copy are reserved: three times the image in all.
+/// the SDK's own copies are reserved: [`SENT_COPIES`] times the image in all.
 #[test]
 fn given_an_image_copied_for_send_then_the_sdk_copy_is_reserved_too() {
     let budgets = budgets();
     let upload = ImageUpload::for_tests(&budgets, JPEG);
     let (copy, _permit) = upload.copy_for_send().unwrap();
     assert_eq!(copy, JPEG);
-    let free = persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT - 3 * JPEG.len() as u64;
+    let free = persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT - SENT_COPIES * JPEG.len() as u64;
     assert!(
         budgets
             .try_acquire(BudgetClass::EncodedInFlight, free + 1)

@@ -143,7 +143,7 @@ travel in row bands instead:
 | Item | Limit |
 | --- | --- |
 | Encoded file, download or selection | 20 MiB, checked before allocation |
-| Image or file sent | 13 MiB after stripping: three copies fit the 40 MiB encoded budget |
+| Image or file sent | 6 MiB after stripping: the six copies of a send (outbox, SDK input, upload buffer, request clone, HTTP body) fit the 40 MiB encoded budget |
 | Decoded image | 8192 per side, 16 megapixels, 64 MiB RGBA |
 | Displayed image | Scaled to fit 2048 × 2048 |
 | Retained pixels | 64 MiB, least recently used evicted |
