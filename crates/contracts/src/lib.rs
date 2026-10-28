@@ -188,6 +188,17 @@ pub enum TimelineItem {
         replaces: String,
         body: String,
     },
+    /// The deletion (redaction) of the event `redacts`. Not shown as a line
+    /// of its own; the page shows that event, if loaded, as deleted. The
+    /// homeserver decided whether `sender` may delete it.
+    Redaction {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        redacts: String,
+    },
     /// A change to the room's members or state, shown as a line of its own.
     State {
         event_id: String,
@@ -325,6 +336,8 @@ pub enum NoticeKind {
     UntrustedSender,
     /// A kind of event this client does not display yet.
     Unsupported,
+    /// The message was deleted (redacted) by its sender or a moderator.
+    Deleted,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

@@ -156,6 +156,32 @@ pub async fn send(
     }
 }
 
+/// Deletes (redacts) `event_id` in the joined room `room_id`, for everyone.
+/// The homeserver decides whether this account may: `rejected` when it
+/// refuses, `unavailable` when it cannot be reached.
+pub async fn delete(
+    client: &Client,
+    room_id: &str,
+    event_id: &EventId,
+) -> Result<(), persephone_core_protocol::ErrorCode> {
+    use persephone_core_protocol::ErrorCode;
+    let room = RoomId::parse(room_id)
+        .ok()
+        .and_then(|room_id| client.get_room(&room_id))
+        .filter(|room| room.state() == RoomState::Joined)
+        .ok_or(ErrorCode::NotFound)?;
+    room.redact(event_id, None, None)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            if error.as_client_api_error().is_some() {
+                ErrorCode::Rejected
+            } else {
+                ErrorCode::Unavailable
+            }
+        })
+}
+
 /// Parses a MIME type into whatever type the SDK's attachment send names,
 /// without this crate depending on that type's crate directly.
 fn parse_mime<T: std::str::FromStr>(text: &str) -> Option<T> {

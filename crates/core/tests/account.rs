@@ -662,6 +662,9 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                     ..
                 } => format!("{event_id}:edit:{replaces}={body}"),
                 TimelineItem::State { event_id, .. } => format!("{event_id}:state"),
+                TimelineItem::Redaction {
+                    event_id, redacts, ..
+                } => format!("{event_id}:redacts:{redacts}"),
             })
             .collect();
         assert_eq!(

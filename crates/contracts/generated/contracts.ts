@@ -311,7 +311,7 @@ displayName: string | null, };
 
 export type UserSearch = { users: Array<UserMatch>, truncated: boolean, };
 
-export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported";
+export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported" | "deleted";
 
 export type MembershipChange = "joined" | "left" | "invited" | "invite_rejected" | "invite_withdrawn" | "kicked" | "banned" | "unbanned" | "knocked" | "knock_withdrawn" | "knock_denied";
 
@@ -357,7 +357,11 @@ encrypted: boolean, } | { "kind": "edit", event_id: string, sender: string,
 /**
  * As for messages.
  */
-origin_server_ts: number | null, replaces: string, body: string, } | { "kind": "state", event_id: string, sender: string, 
+origin_server_ts: number | null, replaces: string, body: string, } | { "kind": "redaction", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, redacts: string, } | { "kind": "state", event_id: string, sender: string, 
 /**
  * As for messages.
  */

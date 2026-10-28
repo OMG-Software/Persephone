@@ -26,7 +26,7 @@
   import { DEFAULT_SETTINGS, SettingsKeeper, textScale } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
-  import { applyEdits, mergeNewest, quoteOf, type Quote } from './timeline';
+  import { applyRelations, mergeNewest, quoteOf, type Quote } from './timeline';
   import {
     accountSettings,
     allowUnencrypted,
@@ -40,6 +40,7 @@
     retryMessage,
     sendMessage,
     editMessage,
+    deleteMessage,
     recoverWithKey,
     securityStatus,
     setUpEncryption,
@@ -108,6 +109,10 @@
   // The message of this account the draft is a new version of, and the
   // draft from before the edit began, put back when the edit ends.
   let editingMessage = $state<{ eventId: string; savedDraft: string } | null>(null);
+  // One of this account's messages waiting for "Delete" to be confirmed,
+  // and whether the deletion is being sent.
+  let confirmingDelete = $state<{ roomId: string; eventId: string } | null>(null);
+  let deleting = $state(false);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
   // core also refuses until the consent is recorded.
   // `image` is true when the question is about sending the attached image.
@@ -449,6 +454,7 @@
     confirmingPlain = null;
     replyingTo = null;
     editingMessage = null;
+    confirmingDelete = null;
     // The core dropped every image handle with the session.
     imageDraft = null;
     attaching = false;
@@ -758,6 +764,7 @@
     changesFailed = false;
     confirmingPlain = null;
     replyingTo = null;
+    confirmingDelete = null;
     if (editingMessage) {
       draft = editingMessage.savedDraft;
       editingMessage = null;
@@ -854,6 +861,29 @@
             : describe(reason);
       }
       return false;
+    }
+  }
+
+  // Deletes the message waiting for confirmation. The deletion arrives as a
+  // change of the room, which then shows the message as deleted.
+  async function confirmDelete() {
+    const asked = confirmingDelete;
+    if (!asked || deleting) return;
+    const generation = sessionGeneration;
+    deleting = true;
+    try {
+      await deleteMessage(asked.roomId, asked.eventId);
+      if (current(asked.roomId, generation)) confirmingDelete = null;
+    } catch (reason) {
+      if (current(asked.roomId, generation)) {
+        confirmingDelete = null;
+        error =
+          String(reason) === 'rejected'
+            ? 'The homeserver did not allow this message to be deleted.'
+            : describe(reason);
+      }
+    } finally {
+      deleting = false;
     }
   }
 
@@ -1340,7 +1370,7 @@
             onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
             onreply={sendBlocked === null
               ? (eventId) => {
-                  const quote = quoteOf(applyEdits(items), eventId);
+                  const quote = quoteOf(applyRelations(items), eventId);
                   if (!quote) return;
                   endEdit();
                   replyingTo = { eventId, quote };
@@ -1348,6 +1378,9 @@
               : undefined}
             ownUserId={signedIn ? status.account.userId : null}
             onedit={sendBlocked === null ? startEdit : undefined}
+            ondelete={signedIn
+              ? (eventId) => (confirmingDelete = { roomId: selectedRoom.roomId, eventId })
+              : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
@@ -1376,6 +1409,25 @@
             />
           {/if}
           {#if signedIn}
+            {#if confirmingDelete}
+              <div class="confirm" role="alertdialog" aria-labelledby="delete-question">
+                <p id="delete-question">
+                  Delete this message for everyone? Other people's devices and servers may already
+                  have a copy.
+                </p>
+                <button type="button" class="danger" disabled={deleting} onclick={confirmDelete}>
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  disabled={deleting}
+                  onclick={() => (confirmingDelete = null)}
+                >
+                  Keep
+                </button>
+              </div>
+            {/if}
             {#if confirmingPlain}
               <div class="confirm" role="alertdialog" aria-labelledby="plain-question">
                 <p id="plain-question">

@@ -10,7 +10,8 @@
     quote = null,
     edited = false,
     onreply,
-    onedit
+    onedit,
+    ondelete
   }: {
     name: string;
     body: string;
@@ -24,6 +25,8 @@
     onreply?: () => void;
     // Starts editing this message; only for this account's own messages.
     onedit?: () => void;
+    // Asks to delete this message; only for this account's own messages.
+    ondelete?: () => void;
   } = $props();
 
   // The sender's homeserver sets this time; a value no date can show is left out.
@@ -44,7 +47,7 @@
       {#if edited}
         <span class="edited">(edited)</span>
       {/if}
-      {#if onreply || onedit}
+      {#if onreply || onedit || ondelete}
         <span class="message-actions">
           {#if onreply}
             <button type="button" class="link" onclick={onreply}>
@@ -54,6 +57,11 @@
           {#if onedit}
             <button type="button" class="link" onclick={onedit}>
               Edit <span class="visually-hidden">your message</span>
+            </button>
+          {/if}
+          {#if ondelete}
+            <button type="button" class="link" onclick={ondelete}>
+              Delete <span class="visually-hidden">your message</span>
             </button>
           {/if}
         </span>

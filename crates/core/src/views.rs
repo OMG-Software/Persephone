@@ -381,6 +381,7 @@ mod tests {
                     | TimelineItem::Notice { .. }
                     | TimelineItem::Image { .. }
                     | TimelineItem::Edit { .. }
+                    | TimelineItem::Redaction { .. }
                     | TimelineItem::State { .. } => unreachable!(),
                 })
                 .collect();
@@ -413,6 +414,7 @@ mod tests {
                     | TimelineItem::Notice { .. }
                     | TimelineItem::Image { .. }
                     | TimelineItem::Edit { .. }
+                    | TimelineItem::Redaction { .. }
                     | TimelineItem::State { .. } => unreachable!(),
                 })
                 .collect()

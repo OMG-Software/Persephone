@@ -111,6 +111,12 @@ pub enum Call {
         event_id: String,
         body: String,
     },
+    /// Delete (redact) this event in a joined room, for everyone. The
+    /// homeserver decides whether this account may.
+    DeleteMessage {
+        room_id: String,
+        event_id: String,
+    },
     /// The room's messages sent from this device in this session.
     PendingMessages {
         room_id: String,
@@ -958,6 +964,13 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::DeleteMessage {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                },
+                r#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s","event_id":"$e"}}"#,
+            ),
+            (
                 Call::EditMessage {
                     room_id: "!r:s".into(),
                     event_id: "$e".into(),
@@ -1386,6 +1399,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","reply_to":1}}"#,
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","reply_to":null,"edit":"$e"}}"#,
             br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","body":"x"}}"#,
+            br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s","event_id":"$e","reason":"spam"}}"#,
             br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":null,"body":"x"}}"#,
             br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":"$e","body":"x","sender":"@b:s"}}"#,
             br#"{"id":1,"call":{"command":"retry_message","local_id":-1}}"#,

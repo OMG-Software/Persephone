@@ -52,6 +52,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.inviteUser('!r:s', '@b:s'), 'invite_user', { roomId: '!r:s', userId: '@b:s' }],
     [() => bridge.displayName(), 'display_name', {}],
     [() => bridge.sendMessage('!r:s', 'hi'), 'send_message', { roomId: '!r:s', body: 'hi', replyTo: null }],
+    [() => bridge.deleteMessage('!r:s', '$mine'), 'delete_message', { roomId: '!r:s', eventId: '$mine' }],
     [
       () => bridge.editMessage('!r:s', '$mine', 'fixed'),
       'edit_message',

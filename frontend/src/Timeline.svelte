@@ -10,7 +10,7 @@
   import Message from './Message.svelte';
   import { stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
-  import { applyEdits, quoteOf, type ShownItem } from './timeline';
+  import { applyRelations, quoteOf, type ShownItem } from './timeline';
 
   let {
     title,
@@ -29,7 +29,8 @@
     onsettings,
     onreply,
     ownUserId = null,
-    onedit
+    onedit,
+    ondelete
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -57,10 +58,13 @@
     // Starts editing one of this account's messages; absent where editing
     // is not offered.
     onedit?: (eventId: string, body: string) => void;
+    // Asks to delete one of this account's messages; absent where deleting
+    // is not offered.
+    ondelete?: (eventId: string) => void;
   } = $props();
 
   // Edits are not lines of their own: each message shows its newest edit.
-  const shown = $derived(applyEdits(items));
+  const shown = $derived(applyRelations(items));
 
   // Fixed text per trust level; the core sends codes only.
   const trustText: Record<string, string> = {
@@ -79,7 +83,8 @@
     withheld: 'Encrypted message. The sender did not share its key with this device.',
     untrusted_sender:
       'Encrypted message from a device its owner has not verified. It is not shown, because it could come from a device they never added.',
-    unsupported: 'A kind of message Persephone does not show yet.'
+    unsupported: 'A kind of message Persephone does not show yet.',
+    deleted: 'Message deleted.'
   };
   const key = (item: ShownItem, index: number) =>
     item.kind === 'gap' ? 'gap-' + index : item.event_id;
@@ -176,6 +181,9 @@
                 onreply={onreply && (() => onreply(item.event_id))}
                 onedit={onedit && ownUserId !== null && item.sender === ownUserId
                   ? () => onedit(item.event_id, item.body)
+                  : undefined}
+                ondelete={ondelete && ownUserId !== null && item.sender === ownUserId
+                  ? () => ondelete(item.event_id)
                   : undefined}
               />
             {:else if item.kind === 'image'}

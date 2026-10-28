@@ -496,6 +496,7 @@ impl Core {
             },
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
+            | Call::DeleteMessage { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -762,6 +763,7 @@ impl Core {
             Call::InviteList {} => self.invite_list(),
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
+            | Call::DeleteMessage { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -819,6 +821,7 @@ impl Core {
         enum Work {
             Accept(String),
             Decline(String),
+            Delete(String, matrix_sdk::ruma::OwnedEventId),
             Start(OwnedUserId),
             Search(String),
             CreateRoom(String, Vec<OwnedUserId>),
@@ -847,6 +850,10 @@ impl Core {
             Call::DeclineInvite { room_id } if valid_room_id(room_id) => {
                 Work::Decline(room_id.clone())
             }
+            Call::DeleteMessage { room_id, event_id } if valid_room_id(room_id) => Work::Delete(
+                room_id.clone(),
+                parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
+            ),
             Call::StartConversation { user_id } => Work::Start(user(user_id)?),
             Call::SearchUsers { term } if conversations::valid_term(term) => {
                 Work::Search(term.clone())
@@ -928,7 +935,7 @@ impl Core {
             Work::Devices => self.devices.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
             Work::RoomMembers(..) => self.room_members.begin()?,
-            Work::ChangeRoom(..) => self.room_change.begin()?,
+            Work::ChangeRoom(..) | Work::Delete(..) => self.room_change.begin()?,
             Work::ChangePassword(_)
             | Work::RequestEmail(_)
             | Work::RequestPhone(..)
@@ -951,6 +958,11 @@ impl Core {
                 Work::Decline(room_id) => self
                     .with_matrix(generation, async |client| {
                         conversations::decline(&client, room_id).await
+                    })
+                    .map(|()| serde_json::Value::Null),
+                Work::Delete(room_id, event_id) => self
+                    .with_matrix(generation, async |client| {
+                        sending::delete(&client, room_id, event_id).await
                     })
                     .map(|()| serde_json::Value::Null),
                 Work::Start(user) => json(self.with_matrix(generation, async |client| {

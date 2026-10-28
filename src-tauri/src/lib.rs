@@ -412,6 +412,20 @@ async fn edit_message(
     .await
 }
 
+/// Deletes (redacts) an event in a joined room, for everyone. The core
+/// checks the arguments; the homeserver decides whether this account may.
+#[tauri::command]
+async fn delete_message(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || event_id.len() > MAX_EVENT_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::DeleteMessage { room_id, event_id }).await
+}
+
 /// The room's messages sent from this device in this session.
 #[tauri::command]
 async fn pending_messages(
@@ -1045,6 +1059,7 @@ pub fn configure<R: Runtime>(
             recover_with_key,
             send_message,
             edit_message,
+            delete_message,
             pending_messages,
             retry_message,
             discard_message,

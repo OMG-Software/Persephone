@@ -73,10 +73,10 @@ test('GIVEN a loaded message WHEN quoted THEN its first line shows, cut to the l
 });
 
 test('GIVEN edits WHEN applied THEN each message shows its newest edit, marked, and edits are not lines', async () => {
-  const { applyEdits } = await import('../src/timeline.ts');
+  const { applyRelations } = await import('../src/timeline.ts');
   const msg = (id, sender, body) => ({ kind: 'message', event_id: id, sender, body, origin_server_ts: null, reply_to: null });
   const edit = (id, sender, replaces, body) => ({ kind: 'edit', event_id: id, sender, replaces, body, origin_server_ts: null });
-  const shown = applyEdits([
+  const shown = applyRelations([
     msg('$1', '@a:s', 'first'),
     edit('$e1', '@a:s', '$1', 'second'),
     msg('$2', '@b:s', 'untouched'),
@@ -91,4 +91,26 @@ test('GIVEN edits WHEN applied THEN each message shows its newest edit, marked, 
       ['$2', 'untouched', false]
     ]
   );
+});
+
+test('GIVEN deletions WHEN applied THEN deleted messages show as deleted and edits do not bring them back', async () => {
+  const { applyRelations } = await import('../src/timeline.ts');
+  const shown = applyRelations([
+    { kind: 'message', event_id: '$1', sender: '@a:s', body: 'secret', origin_server_ts: 5, reply_to: null },
+    { kind: 'image', event_id: '$2', sender: '@b:s', name: 'x.png', origin_server_ts: null },
+    { kind: 'message', event_id: '$3', sender: '@a:s', body: 'kept', origin_server_ts: null, reply_to: null },
+    { kind: 'edit', event_id: '$e', sender: '@a:s', replaces: '$1', body: 'new secret', origin_server_ts: null },
+    { kind: 'redaction', event_id: '$d1', sender: '@a:s', redacts: '$1', origin_server_ts: null },
+    { kind: 'redaction', event_id: '$d2', sender: '@mod:s', redacts: '$2', origin_server_ts: null }
+  ]);
+  assert.deepEqual(
+    shown.map((item) => [item.event_id, item.kind, item.kind === 'notice' ? item.notice : item.body]),
+    [
+      ['$1', 'notice', 'deleted'],
+      ['$2', 'notice', 'deleted'],
+      ['$3', 'message', 'kept']
+    ]
+  );
+  assert.equal(shown[0].origin_server_ts, 5);
+  assert.ok(!JSON.stringify(shown).includes('secret'));
 });

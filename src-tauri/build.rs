@@ -28,6 +28,7 @@ fn main() {
             "recover_with_key",
             "send_message",
             "edit_message",
+            "delete_message",
             "pending_messages",
             "retry_message",
             "discard_message",

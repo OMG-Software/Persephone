@@ -81,22 +81,37 @@ export function quoteOf(items: ShownItem[], eventId: string): Quote | null {
 }
 
 /** A timeline item as shown: a message may carry its newest edit. */
-export type ShownItem = Exclude<TimelineItem, { kind: 'edit' }> & { edited?: boolean };
+export type ShownItem = Exclude<TimelineItem, { kind: 'edit' } | { kind: 'redaction' }> & {
+  edited?: boolean;
+};
 
 /**
- * The items to show: edits are not lines of their own, and each message
- * shows the text of its newest edit (the last in the room's order), marked
- * as edited. The core sends only edits by the message's own sender; an edit
- * whose sender differs from the message's here is still ignored.
+ * The items to show. Edits and deletions are not lines of their own: a
+ * deleted message shows as deleted, and each other message shows the text
+ * of its newest edit (the last in the room's order), marked as edited. The
+ * core sends only edits by the message's own sender; an edit whose sender
+ * differs from the message's here is still ignored.
  */
-export function applyEdits(items: TimelineItem[]): ShownItem[] {
+export function applyRelations(items: TimelineItem[]): ShownItem[] {
   const newest = new Map<string, { sender: string; body: string }>();
+  const deleted = new Set<string>();
   for (const item of items) {
     if (item.kind === 'edit') newest.set(item.replaces, { sender: item.sender, body: item.body });
+    if (item.kind === 'redaction') deleted.add(item.redacts);
   }
   const shown: ShownItem[] = [];
   for (const item of items) {
-    if (item.kind === 'edit') continue;
+    if (item.kind === 'edit' || item.kind === 'redaction') continue;
+    if (item.kind !== 'gap' && item.kind !== 'state' && deleted.has(item.event_id)) {
+      shown.push({
+        kind: 'notice',
+        event_id: item.event_id,
+        sender: item.sender,
+        notice: 'deleted',
+        origin_server_ts: item.origin_server_ts
+      });
+      continue;
+    }
     const edit = item.kind === 'message' ? newest.get(item.event_id) : undefined;
     shown.push(
       item.kind === 'message' && edit && edit.sender === item.sender

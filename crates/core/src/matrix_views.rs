@@ -26,6 +26,9 @@
 //!   from the homeserver for up to `MAX_EDIT_LOOKUPS` edits a page; an edit
 //!   that cannot be checked is left out. An edit is never shown as a message
 //!   of its own.
+//! * A deleted (redacted) message is a `deleted` notice, and a deletion is a
+//!   `redaction` item naming the deleted event, so the page can mark a
+//!   message it already shows.
 //! * A page holds at most `MAX_PAGE_ITEMS` items and `MAX_PAGE_BYTES`
 //!   serialized. The SDK cannot resume inside a fetched chunk, so a chunk that
 //!   would exceed the byte budget is fetched again with half the limit, down to
@@ -51,6 +54,7 @@ use matrix_sdk::{
                     MessageType, OriginalSyncRoomMessageEvent, Relation,
                     sanitize::remove_plain_reply_fallback,
                 },
+                redaction::SyncRoomRedactionEvent,
             },
         },
     },
@@ -170,12 +174,47 @@ fn edit_claim(event: &TimelineEvent) -> Option<EditClaim> {
     })
 }
 
+/// Whether the event is a message (plain, encrypted or a sticker) that was
+/// deleted: the homeserver keeps the deletion in `unsigned`.
+fn deleted_message(event: &TimelineEvent) -> bool {
+    let raw = event.raw();
+    let is_message = raw
+        .get_field::<String>("type")
+        .ok()
+        .flatten()
+        .is_some_and(|kind| {
+            matches!(
+                kind.as_str(),
+                "m.room.message" | "m.room.encrypted" | "m.sticker"
+            )
+        });
+    let state = raw
+        .get_field::<serde_json::Value>("state_key")
+        .ok()
+        .flatten()
+        .is_some();
+    let redacted = raw
+        .get_field::<serde_json::Value>("unsigned")
+        .ok()
+        .flatten()
+        .is_some_and(|unsigned| unsigned.get("redacted_because").is_some());
+    is_message && !state && redacted
+}
+
 /// The visible form of one event, or `None` for events not shown. An edit
 /// is never shown as a message; `MatrixViews::timeline_page` checks it.
 fn project(event: &TimelineEvent) -> Option<TimelineItem> {
     let event_id = event.event_id()?.to_string();
     let sender = project_name(event.sender()?.as_str());
     let origin_server_ts = server_time(event);
+    if deleted_message(event) {
+        return Some(TimelineItem::Notice {
+            event_id,
+            sender,
+            notice: NoticeKind::Deleted,
+            origin_server_ts,
+        });
+    }
     if let TimelineEventKind::UnableToDecrypt { utd_info, .. } = &event.kind {
         return Some(TimelineItem::Notice {
             event_id,
@@ -204,6 +243,22 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
         Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
             SyncMessageLikeEvent::Original(message),
         ))) => message,
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(
+            SyncRoomRedactionEvent::Original(redaction),
+        ))) => {
+            // Room version 11 moved `redacts` into the content.
+            let redacts = redaction
+                .content
+                .redacts
+                .as_ref()
+                .or(redaction.redacts.as_ref())?;
+            return Some(TimelineItem::Redaction {
+                event_id,
+                sender,
+                origin_server_ts,
+                redacts: redacts.to_string(),
+            });
+        }
         Ok(AnySyncTimelineEvent::State(state)) => {
             return state_change(&state).map(|change| TimelineItem::State {
                 event_id,
@@ -796,6 +851,71 @@ mod tests {
         };
         assert_eq!(body, "> <@bob:example.org> quoted\n\nmine");
         assert_eq!(reply_to, None);
+    }
+
+    fn raw_event(event: serde_json::Value) -> TimelineEvent {
+        TimelineEvent::from_plaintext(
+            matrix_sdk::ruma::serde::Raw::from_json_string(event.to_string()).unwrap(),
+        )
+    }
+
+    /// GIVEN a deleted message, plain or encrypted, and a deleted reaction
+    /// WHEN projected THEN each message is a `deleted` notice from its
+    /// sender, never an undecryptable one, and the reaction stays hidden.
+    #[test]
+    fn given_deleted_events_then_messages_show_as_deleted() {
+        let unsigned = serde_json::json!({ "redacted_because": {
+            "type": "m.room.redaction", "sender": "@mod:example.org",
+            "event_id": "$why", "origin_server_ts": 2, "content": {}
+        }});
+        for kind in ["m.room.message", "m.room.encrypted"] {
+            let item = project(&raw_event(serde_json::json!({
+                "type": kind, "event_id": "$gone", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+            })));
+            let Some(TimelineItem::Notice { notice, sender, .. }) = item else {
+                panic!("a notice: {item:?}");
+            };
+            assert_eq!(
+                (notice, sender.as_str()),
+                (NoticeKind::Deleted, "@alice:example.org")
+            );
+        }
+        let reaction = project(&raw_event(serde_json::json!({
+            "type": "m.reaction", "event_id": "$r", "sender": "@alice:example.org",
+            "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+        })));
+        assert!(reaction.is_none(), "{reaction:?}");
+    }
+
+    /// GIVEN a deletion, in the old form (`redacts` beside the content) and
+    /// the room version 11 form (in the content) WHEN projected THEN it is a
+    /// `redaction` item naming the deleted event.
+    #[test]
+    fn given_a_deletion_then_it_names_the_deleted_event() {
+        for (top, content) in [
+            (Some("$target"), serde_json::json!({})),
+            (None, serde_json::json!({ "redacts": "$target" })),
+        ] {
+            let mut event = serde_json::json!({
+                "type": "m.room.redaction", "event_id": "$del", "sender": "@mod:example.org",
+                "origin_server_ts": 1, "content": content,
+            });
+            if let Some(top) = top {
+                event["redacts"] = top.into();
+            }
+            let item = project(&raw_event(event));
+            let Some(TimelineItem::Redaction {
+                redacts, sender, ..
+            }) = item
+            else {
+                panic!("a redaction: {item:?}");
+            };
+            assert_eq!(
+                (redacts.as_str(), sender.as_str()),
+                ("$target", "@mod:example.org")
+            );
+        }
     }
 
     fn state_event(

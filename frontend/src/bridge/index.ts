@@ -339,6 +339,14 @@ export function editMessage(roomId: string, eventId: string, body: string): Prom
   return invoke<PendingMessage>('edit_message', { roomId, eventId, body });
 }
 
+/**
+ * Deletes (redacts) a message in a joined room, for everyone. The homeserver
+ * decides whether this account may (`rejected` otherwise).
+ */
+export function deleteMessage(roomId: string, eventId: string): Promise<void> {
+  return invoke<void>('delete_message', { roomId, eventId });
+}
+
 /** Queues a picked image, by its draft handle, like `sendMessage`. */
 export function sendImage(roomId: string, handle: string): Promise<PendingMessage> {
   return invoke<PendingMessage>('send_image', { roomId, handle });
