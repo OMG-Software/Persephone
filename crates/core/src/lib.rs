@@ -54,6 +54,7 @@ pub mod room_settings;
 pub mod security;
 pub mod sending;
 pub mod session;
+pub mod sessions;
 pub mod settings;
 pub mod store;
 pub mod ui_host;
@@ -537,6 +538,9 @@ impl Core {
             | Call::DisplayName {}
             | Call::SetDisplayName { .. }
             | Call::DeviceList {}
+            | Call::NewSessions {}
+            | Call::AcknowledgeSessions { .. }
+            | Call::RemoveDevice { .. }
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
             | Call::RoomServers { .. }
@@ -803,6 +807,9 @@ impl Core {
             | Call::DisplayName {}
             | Call::SetDisplayName { .. }
             | Call::DeviceList {}
+            | Call::NewSessions {}
+            | Call::AcknowledgeSessions { .. }
+            | Call::RemoveDevice { .. }
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
             | Call::RoomServers { .. }
@@ -867,6 +874,9 @@ impl Core {
             DisplayName,
             SetDisplayName(String),
             Devices,
+            NewSessions,
+            AcknowledgeSessions(Vec<String>),
+            RemoveDevice(matrix_sdk::ruma::OwnedDeviceId),
             RoomSettings(String),
             RoomMembers(String, String),
             RoomServers(String),
@@ -931,6 +941,18 @@ impl Core {
                 Work::SetDisplayName(name.clone())
             }
             Call::DeviceList {} => Work::Devices,
+            Call::NewSessions {} => Work::NewSessions,
+            Call::AcknowledgeSessions { device_ids }
+                if device_ids.len() <= persephone_core_protocol::MAX_NEW_SESSION_IDS
+                    && device_ids
+                        .iter()
+                        .all(|id| verification::valid_device_id(id)) =>
+            {
+                Work::AcknowledgeSessions(device_ids.clone())
+            }
+            Call::RemoveDevice { device_id } if verification::valid_device_id(device_id) => {
+                Work::RemoveDevice(device_id.as_str().into())
+            }
             Call::RoomSettings { room_id } if valid_room_id(room_id) => {
                 Work::RoomSettings(room_id.clone())
             }
@@ -999,7 +1021,10 @@ impl Core {
             Work::MarkRead(..) | Work::Typing(..) => self.read_marker.begin()?,
             Work::OpenLink(_) => self.link.begin()?,
             Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
-            Work::Devices => self.devices.begin()?,
+            Work::Devices | Work::NewSessions | Work::AcknowledgeSessions(_) => {
+                self.devices.begin()?
+            }
+            Work::RemoveDevice(_) => self.account_change.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
             Work::RoomMembers(..) | Work::RoomServers(_) | Work::RoomReaders(_) => {
                 self.room_members.begin()?
@@ -1086,6 +1111,15 @@ impl Core {
                         Outcome::Ok(value) => Ok(value),
                         Outcome::Error(code) => Err(code),
                     }),
+                Work::NewSessions => json(self.with_stores(generation, async |client, stores| {
+                    sessions::new_sessions(&client, stores).await
+                })),
+                Work::AcknowledgeSessions(device_ids) => self
+                    .with_stores(generation, async |client, stores| {
+                        sessions::acknowledge(&client, stores, device_ids).await
+                    })
+                    .map(|()| serde_json::Value::Null),
+                Work::RemoveDevice(device_id) => json(self.remove_device(generation, device_id)),
                 Work::RoomSettings(room_id) => self
                     .with_matrix(generation, async |client| {
                         room_settings::settings(&client, room_id).await
@@ -1175,6 +1209,39 @@ impl Core {
                 Err(code) => Outcome::Error(code),
             }
         }))
+    }
+
+    /// Signs out another device of this account (ADR-0026): asks for the
+    /// password in the core's own window, with no lease held, then sends the
+    /// removal under a lease of the session in `generation`. This device is
+    /// refused: signing it out is `sign_out`.
+    fn remove_device(
+        &self,
+        generation: u64,
+        device_id: &matrix_sdk::ruma::DeviceId,
+    ) -> Result<persephone_contracts::AccountChange, ErrorCode> {
+        use credentials::PasswordPurpose;
+        let this = self.with_matrix(generation, async |client| {
+            Ok(client.device_id().map(ToOwned::to_owned))
+        })?;
+        if this.as_deref() == Some(device_id) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let (user_id, host) = self.session.account_names().ok_or(ErrorCode::NotFound)?;
+        let user = matrix_sdk::ruma::OwnedUserId::try_from(user_id.as_str())
+            .map_err(|_| ErrorCode::Internal)?;
+        let password = match account_changes::ask_current_password(
+            &*self.credentials,
+            &user_id,
+            &host,
+            PasswordPurpose::RemoveSession,
+        ) {
+            Ok(password) => password,
+            Err(code) => return Ok(code),
+        };
+        self.with_matrix(generation, async |client| {
+            Ok(account_changes::remove_device(&client, &user, &password, device_id).await)
+        })
     }
 
     /// Changes the password (ADR-0019): asks for the current password and
@@ -1340,6 +1407,33 @@ impl Core {
             Some(outbox::SendOutcome::Unknown) => Err(ErrorCode::Unavailable),
             Some(outbox::SendOutcome::Failed(_)) => Err(ErrorCode::Rejected),
         }
+    }
+
+    /// Like [`Core::with_matrix`], with the session's stores as well.
+    fn with_stores<T>(
+        &self,
+        generation: u64,
+        work: impl AsyncFnOnce(matrix_sdk::Client, &store::Stores) -> Result<T, ErrorCode>,
+    ) -> Result<T, ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let result = if lease.generation() == generation {
+            lease
+                .stores()
+                .block_on(work(client.clone(), lease.stores()))
+        } else {
+            Err(ErrorCode::Locked)
+        };
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        result
     }
 
     fn with_matrix<T>(

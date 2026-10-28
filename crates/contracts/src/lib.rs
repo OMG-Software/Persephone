@@ -809,6 +809,23 @@ pub struct DeviceList {
     pub truncated: bool,
 }
 
+/// A session of this account the user has not been shown yet: its device
+/// ID and name, projected like names (ADR-0026).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NewSession {
+    pub device_id: String,
+    pub display_name: Option<String>,
+}
+
+/// Reply of `new_sessions`: at most ten; `truncated` says more exist.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NewSessions {
+    pub sessions: Vec<NewSession>,
+    pub truncated: bool,
+}
+
 /// Reply of `account_settings`: this account's settings, kept in its
 /// encrypted profile. A setting never saved has its default.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -1531,6 +1548,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", DisplayName::decl(&config)),
         format!("export {}", DeviceSummary::decl(&config)),
         format!("export {}", DeviceList::decl(&config)),
+        format!("export {}", NewSession::decl(&config)),
+        format!("export {}", NewSessions::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
         format!("export {}", RoomActivity::decl(&config)),
         format!("export {}", RoomServer::decl(&config)),

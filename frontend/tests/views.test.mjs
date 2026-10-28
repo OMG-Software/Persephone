@@ -1106,14 +1106,41 @@ test('GIVEN the account page WHEN it shows THEN passwords are never asked on the
   assert.match(html, /does not share them with an\s+identity server/);
 });
 
+test('GIVEN new sessions WHEN the alert shows THEN names are isolated text and each session can be signed out', async () => {
+  const { default: NewSessions } = await vite.ssrLoadModule('/src/NewSessions.svelte');
+  const html = render(NewSessions, {
+    props: {
+      found: {
+        sessions: [
+          { deviceId: 'ABC', displayName: hostileName },
+          { deviceId: 'DEF', displayName: null }
+        ],
+        truncated: true
+      },
+      onknown: () => {},
+      onremove: () => {}
+    }
+  }).body.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /role="alert"/);
+  assert.match(html, /New sessions signed in/);
+  assert.match(html, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  assert.equal((html.match(/>Sign it out</g) ?? []).length, 2);
+  assert.match(html, />It was me</);
+  assert.match(html, /More new sessions are in Settings/);
+});
+
 test('GIVEN sessions WHEN this device cannot vouch THEN no Verify shows, and WHEN it can THEN only other unverified sessions get one', async () => {
   // Without a host the list does not load in server rendering, so the
   // offer is checked through the component's own rules.
   const source = await import('node:fs/promises').then(({ readFile }) =>
     readFile(new URL('../src/Devices.svelte', import.meta.url), 'utf8')
   );
-  assert.match(source, /\{#if !device\.current && !device\.verified && canVerify\}/);
+  // Other sessions get actions; Verify only when unverified and this device
+  // can vouch, Sign out always.
+  assert.match(source, /\{#if !device\.current\}[\s\S]*\{#if !device\.verified && canVerify\}/);
   assert.match(source, /onverify\(device\.deviceId\)/);
+  assert.match(source, /onclick=\{\(\) => remove\(device\.deviceId\)\}/);
   const html = render(Devices, { props: { canVerify: true } }).body;
   assert.doesNotMatch(html, />Verify</, 'nothing listed yet');
 });

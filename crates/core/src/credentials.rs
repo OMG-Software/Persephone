@@ -90,6 +90,7 @@ pub enum SecretPrompt<'a> {
 pub enum PasswordPurpose {
     ChangePassword,
     AddThreePid,
+    RemoveSession,
 }
 
 /// Which step of choosing a new account password a prompt is for.

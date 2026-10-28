@@ -19,6 +19,8 @@
   import Sidebar from './Sidebar.svelte';
   import SignIn, { type SignInForm } from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
+  import NewSessionsAlert from './NewSessions.svelte';
+  import { changeText } from './accountChanges';
   import TipButton from './TipButton.svelte';
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
@@ -51,6 +53,9 @@
     deleteMessage,
     react,
     markRead,
+    newSessions,
+    acknowledgeSessions,
+    removeDevice,
     roomActivity,
     setTyping,
     openLink,
@@ -88,6 +93,7 @@
     type RoomIdentityChanges,
     type PendingMessage,
     type RoomActivity,
+    type NewSessions,
     type RoomList as Rooms,
     type SecurityStatus,
     type StoreState,
@@ -507,9 +513,72 @@
     load();
   }
 
+  // New sessions of this account not yet shown (ADR-0026), and whether the
+  // alert's action is running.
+  let newFound = $state<NewSessions | null>(null);
+  let sessionsBusy = $state(false);
+  let sessionsFailure = $state<string | null>(null);
+
+  // Reads the new sessions from the core's store; no network request. Best
+  // effort: the next check tries again.
+  async function checkSessions() {
+    const generation = sessionGeneration;
+    try {
+      const found = await newSessions();
+      if (generation === sessionGeneration && !sessionsBusy) {
+        newFound = found.sessions.length > 0 ? found : null;
+      }
+    } catch {
+      // Shown as nothing until the next check.
+    }
+  }
+
+  // Checked when signed in, on each security change and every minute.
+  $effect(() => {
+    if (!signedIn) {
+      newFound = null;
+      return;
+    }
+    checkSessions();
+    const timer = setInterval(checkSessions, 60_000);
+    return () => clearInterval(timer);
+  });
+
+  async function sessionsKnown() {
+    const found = newFound;
+    if (!found || sessionsBusy) return;
+    sessionsBusy = true;
+    sessionsFailure = null;
+    try {
+      await acknowledgeSessions(found.sessions.map((session) => session.deviceId));
+      newFound = null;
+    } catch (reason) {
+      sessionsFailure = describe(reason);
+    } finally {
+      sessionsBusy = false;
+    }
+    checkSessions();
+  }
+
+  async function removeNewSession(deviceId: string) {
+    if (sessionsBusy) return;
+    sessionsBusy = true;
+    sessionsFailure = null;
+    try {
+      const outcome = await removeDevice(deviceId);
+      if (outcome !== 'done') sessionsFailure = changeText(outcome);
+    } catch (reason) {
+      sessionsFailure = describe(reason);
+    } finally {
+      sessionsBusy = false;
+    }
+    checkSessions();
+  }
+
   // The account's encryption state changed: fetch it again. Nothing else
   // changes.
   async function refreshSecurity() {
+    checkSessions();
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {
@@ -1491,6 +1560,15 @@
       </Sidebar>
       <div class="pane">
         {#if selectedRoom}
+          {#if newFound}
+            <NewSessionsAlert
+              found={newFound}
+              busy={sessionsBusy}
+              failure={sessionsFailure}
+              onknown={sessionsKnown}
+              onremove={removeNewSession}
+            />
+          {/if}
           <Timeline
             title={selectedRoom.displayName ?? selectedRoom.roomId}
             roomId={selectedRoom.roomId}

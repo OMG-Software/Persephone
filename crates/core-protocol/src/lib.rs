@@ -285,6 +285,22 @@ pub enum Call {
     DeviceList {},
     /// This account's settings, kept in its encrypted profile.
     AccountSettings {},
+    /// The sessions of this account the user has not been shown yet
+    /// (ADR-0026). The first time, the current ones are recorded and none
+    /// is new.
+    NewSessions {},
+    /// Record that the user has seen these sessions (at most
+    /// [`MAX_NEW_SESSION_IDS`] device IDs, as `new_sessions` gave them).
+    AcknowledgeSessions {
+        device_ids: Vec<String>,
+    },
+    /// Sign out another session of this account (ADR-0026). The core asks
+    /// for the account password in its own window. Replies when done with
+    /// an `AccountChange` code; this device's own ID is `invalid_argument`
+    /// (use `sign_out`).
+    RemoveDevice {
+        device_id: String,
+    },
     /// Replace this account's settings. Every setting is a required field
     /// of the record, which refuses unknown ones, so the page always sends
     /// the whole set. Text sizes outside their bounds are
@@ -409,6 +425,9 @@ pub const MAX_THREE_PID_ADDRESS_BYTES: usize = MAX_EMAIL_BYTES;
 
 /// Most email addresses and phone numbers a `three_pids` reply lists.
 pub const MAX_THREE_PIDS: usize = 50;
+
+/// Most device IDs one `acknowledge_sessions` call carries.
+pub const MAX_NEW_SESSION_IDS: usize = 10;
 
 /// Longest device ID either side accepts in a call.
 pub const MAX_DEVICE_ID_BYTES: usize = 255;
@@ -1082,6 +1101,22 @@ mod tests {
                 r#"{"id":1,"call":{"command":"set_display_name","name":"Al"}}"#,
             ),
             (
+                Call::NewSessions {},
+                r#"{"id":1,"call":{"command":"new_sessions"}}"#,
+            ),
+            (
+                Call::AcknowledgeSessions {
+                    device_ids: vec!["DEV".into()],
+                },
+                r#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":["DEV"]}}"#,
+            ),
+            (
+                Call::RemoveDevice {
+                    device_id: "DEV".into(),
+                },
+                r#"{"id":1,"call":{"command":"remove_device","device_id":"DEV"}}"#,
+            ),
+            (
                 Call::DeviceList {},
                 r#"{"id":1,"call":{"command":"device_list"}}"#,
             ),
@@ -1512,6 +1547,11 @@ mod tests {
             br#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"open_link"}}"#,
             br#"{"id":1,"call":{"command":"room_servers"}}"#,
+            br#"{"id":1,"call":{"command":"new_sessions","all":true}}"#,
+            br#"{"id":1,"call":{"command":"acknowledge_sessions"}}"#,
+            br#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":"DEV"}}"#,
+            br#"{"id":1,"call":{"command":"remove_device"}}"#,
+            br#"{"id":1,"call":{"command":"remove_device","device_id":"DEV","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"room_readers","room_id":"!r:s","all":true}}"#,
             br#"{"id":1,"call":{"command":"room_servers","room_id":"!r:s","limit":5}}"#,
             br#"{"id":1,"call":{"command":"open_link","url":"https://e.org","confirmed":true}}"#,

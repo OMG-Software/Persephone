@@ -247,6 +247,10 @@ verified: boolean, };
 
 export type DeviceList = { devices: Array<DeviceSummary>, truncated: boolean, };
 
+export type NewSession = { deviceId: string, displayName: string | null, };
+
+export type NewSessions = { sessions: Array<NewSession>, truncated: boolean, };
+
 export type AccountSettings = { 
 /**
  * Enter sends a message; otherwise it starts a new line. On by default.

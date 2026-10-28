@@ -32,7 +32,7 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart,
-    DeviceList, DisplayName, ImagePick, ImageView, InviteList, NotificationLevel,
+    DeviceList, DisplayName, ImagePick, ImageView, InviteList, NewSessions, NotificationLevel,
     NotificationSettings, PendingMessage, ProfileList, RoomActivity, RoomChange, RoomCreation,
     RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomReaders, RoomServers, RoomSettings,
     SecurityStatus, StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
@@ -41,7 +41,7 @@ use persephone_core_protocol::{
     COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
     MAX_DEVICE_ID_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES,
     MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
-    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NOTIFICATION_NAME_BYTES,
+    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES,
     MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES,
     MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES,
     MAX_USERNAME_BYTES, room_change_within_limits,
@@ -972,6 +972,39 @@ async fn change_password(
     relay(core.inner(), Call::ChangePassword { sign_out_others }).await
 }
 
+/// The sessions of this account the user has not been shown yet (ADR-0026).
+#[tauri::command]
+async fn new_sessions(core: State<'_, CoreLink>) -> Result<NewSessions, String> {
+    relay(core.inner(), Call::NewSessions {}).await
+}
+
+/// Records that the user has seen these sessions.
+#[tauri::command]
+async fn acknowledge_sessions(
+    core: State<'_, CoreLink>,
+    device_ids: Vec<String>,
+) -> Result<(), String> {
+    if device_ids.len() > MAX_NEW_SESSION_IDS
+        || device_ids.iter().any(|id| id.len() > MAX_DEVICE_ID_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::AcknowledgeSessions { device_ids }).await
+}
+
+/// Signs out another session of this account. Nothing secret crosses: the
+/// core asks for the password in its own window (ADR-0026).
+#[tauri::command]
+async fn remove_device(
+    core: State<'_, CoreLink>,
+    device_id: String,
+) -> Result<AccountChange, String> {
+    if device_id.len() > MAX_DEVICE_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RemoveDevice { device_id }).await
+}
+
 /// This account's email addresses and phone numbers (ADR-0020).
 #[tauri::command]
 async fn three_pids(core: State<'_, CoreLink>) -> Result<ThreePidList, String> {
@@ -1156,6 +1189,9 @@ pub fn configure<R: Runtime>(
             open_link,
             room_servers,
             room_readers,
+            new_sessions,
+            acknowledge_sessions,
+            remove_device,
             pending_messages,
             retry_message,
             discard_message,

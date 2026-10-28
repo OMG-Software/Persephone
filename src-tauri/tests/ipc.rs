@@ -300,6 +300,14 @@ impl CoreTransport for FakeCore {
                 true => Ok(serde_json::Value::Null),
                 false => Err(CoreError::Core(ErrorCode::Locked)),
             },
+            Call::NewSessions {} => Ok(serde_json::json!({
+                "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
+            })),
+            Call::AcknowledgeSessions { .. } => Ok(serde_json::Value::Null),
+            Call::RemoveDevice { device_id } => match device_id.as_str() {
+                "NEWDEV" => Ok(serde_json::json!("done")),
+                _ => Ok(serde_json::json!("invalid_password")),
+            },
             Call::ChangePassword { sign_out_others } => match sign_out_others {
                 true => Ok(serde_json::json!("done")),
                 // A code outside the contract must not reach the page.
@@ -643,6 +651,9 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-open-link",
             "allow-room-servers",
             "allow-room-readers",
+            "allow-new-sessions",
+            "allow-acknowledge-sessions",
+            "allow-remove-device",
             "allow-pending-messages",
             "allow-retry-message",
             "allow-discard-message",
@@ -1587,6 +1598,40 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         .is_err(),
         "a code outside the contract"
     );
+    assert_eq!(
+        invoke("new_sessions", serde_json::json!({})).unwrap()["sessions"][0]["deviceId"],
+        "NEWDEV"
+    );
+    assert_eq!(
+        invoke(
+            "acknowledge_sessions",
+            serde_json::json!({"deviceIds": ["NEWDEV"]})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke("remove_device", serde_json::json!({"deviceId": "NEWDEV"})).unwrap(),
+        "done"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    let eleven: Vec<String> = (0..11).map(|n| format!("D{n}")).collect();
+    assert_eq!(
+        invoke(
+            "acknowledge_sessions",
+            serde_json::json!({"deviceIds": eleven})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        invoke(
+            "remove_device",
+            serde_json::json!({"deviceId": "D".repeat(256)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     let listed = invoke("three_pids", serde_json::json!({})).unwrap();
     assert_eq!(listed["threePids"][0]["medium"], "email");
     assert_eq!(

@@ -22,6 +22,7 @@ import type {
   JoinRule,
   LevelKey,
   Membership,
+  NewSessions,
   NotificationLevel,
   NotificationSettings,
   PendingMessage,
@@ -73,6 +74,7 @@ export type {
   JoinRule,
   LevelKey,
   Membership,
+  NewSessions,
   NotificationLevel,
   NotificationSettings,
   ProfileList,
@@ -525,6 +527,28 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       idleLockMinutes: settings.idleLockMinutes
     }
   });
+}
+
+/**
+ * The sessions of this account the user has not been shown yet. The first
+ * time, the current ones are recorded and none is new (ADR-0026).
+ */
+export function newSessions(): Promise<NewSessions> {
+  return invoke<NewSessions>('new_sessions');
+}
+
+/** Records that the user has seen these sessions (at most ten device IDs). */
+export function acknowledgeSessions(deviceIds: string[]): Promise<void> {
+  return invoke<void>('acknowledge_sessions', { deviceIds });
+}
+
+/**
+ * Signs out another session of this account. The core asks for the
+ * password in its own window; no password crosses. Resolves with how it
+ * ended; this device's own ID is `invalid_argument`.
+ */
+export function removeDevice(deviceId: string): Promise<AccountChange> {
+  return invoke<AccountChange>('remove_device', { deviceId });
 }
 
 /**

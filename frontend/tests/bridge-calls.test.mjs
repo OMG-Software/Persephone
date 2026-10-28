@@ -99,6 +99,9 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
       }
     ],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
+    [() => bridge.newSessions(), 'new_sessions', {}],
+    [() => bridge.acknowledgeSessions(['D']), 'acknowledge_sessions', { deviceIds: ['D'] }],
+    [() => bridge.removeDevice('D'), 'remove_device', { deviceId: 'D' }],
     [() => bridge.threePids(), 'three_pids', {}],
     [() => bridge.requestEmailToken('a@example.org'), 'request_email_token', { email: 'a@example.org' }],
     [

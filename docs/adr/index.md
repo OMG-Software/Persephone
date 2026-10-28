@@ -32,6 +32,7 @@
 * [0023 - Show typing notices and read receipts, and send them only when turned on](0023-show-typing-and-receipts-and-send-them-only-when-turned-on.md)
 * [0024 - Open links only after the core asks in its own window](0024-open-links-only-after-the-core-asks-in-its-own-window.md)
 * [0025 - Lock after system idle time measured in the core](0025-lock-after-system-idle-time-measured-in-the-core.md)
+* [0026 - Alert on new sessions, and sign them out with the password in the core](0026-alert-on-new-sessions-and-sign-them-out-with-the-password-in-the-core.md)
 
 ## Superseded Records
 
