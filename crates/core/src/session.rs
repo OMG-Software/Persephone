@@ -716,9 +716,12 @@ fn run_sync(
                     .map(Box::pin);
             }
             let rooms =
-                account::sync_round(&client, engine.as_ref().expect("selected above")).await?;
+                account::sync_round(&client, engine.as_ref().expect("selected above")).await;
+            // Saved even when the round failed: the SDK may have refreshed the
+            // token, spending the old refresh token, before the error.
             saved_token =
                 account::save_if_refreshed(&client, lease.stores(), saved_token.take()).await;
+            let rooms = rooms?;
             let keyed = match keys.as_mut() {
                 Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
                 None => None,
