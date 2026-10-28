@@ -4,8 +4,8 @@
 //! * The page sends a server name, such as `example.org`; it is checked to be
 //!   a host with an optional port, nothing else.
 //! * The core fetches `https://<name>/.well-known/matrix/client` with the
-//!   Matrix client policy (`homeserver::http_client`: TLS 1.3, no proxy, no
-//!   redirects), at most [`MAX_WELL_KNOWN_BYTES`] within [`DISCOVERY_TIMEOUT`].
+//!   Matrix client policy (`homeserver::http_client`: TLS 1.3, no ambient
+//!   proxy, the profile's SOCKS5 proxy if set, no redirects), at most [`MAX_WELL_KNOWN_BYTES`] within [`DISCOVERY_TIMEOUT`].
 //!   A 404 means none: the name itself is tried as the homeserver. Any other
 //!   failure stops discovery.
 //! * The `m.homeserver.base_url` found must pass [`Homeserver::parse`] like
@@ -15,6 +15,7 @@
 //!   `.well-known` file can name a server on another host.
 
 use crate::homeserver::{self, Homeserver};
+use crate::proxy::Socks;
 use persephone_contracts::HomeserverFound;
 use persephone_core_protocol::ErrorCode;
 use std::time::Duration;
@@ -99,9 +100,9 @@ async fn fetch(client: &reqwest::Client, url: Url) -> Result<(u16, Vec<u8>), Err
 /// Finds and confirms the homeserver of `name`: `not_found` when there is
 /// no Matrix server, `rejected` when the `.well-known` file is not valid,
 /// `unavailable` when a server cannot be reached.
-pub async fn discover(name: &str) -> Result<HomeserverFound, ErrorCode> {
+pub async fn discover(name: &str, proxy: Option<&Socks>) -> Result<HomeserverFound, ErrorCode> {
     let origin = origin(name).ok_or(ErrorCode::InvalidArgument)?;
-    let client = homeserver::http_client().map_err(|_| ErrorCode::Internal)?;
+    let client = homeserver::http_client(proxy).map_err(|_| ErrorCode::Internal)?;
     let well_known = origin
         .join(".well-known/matrix/client")
         .map_err(|_| ErrorCode::Internal)?;

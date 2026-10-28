@@ -669,7 +669,6 @@ pub struct MediaService {
     /// One worker run at a time; admitted work waits here, bounded by the
     /// admission limits.
     worker_slot: Mutex<()>,
-    http: Mutex<Option<reqwest::Client>>,
 }
 
 impl MediaService {
@@ -681,7 +680,6 @@ impl MediaService {
             loads: AtomicUsize::new(0),
             picks: AtomicUsize::new(0),
             worker_slot: Mutex::new(()),
-            http: Mutex::new(None),
         }
     }
 
@@ -701,17 +699,6 @@ impl MediaService {
             return Err(ErrorCode::LimitExceeded);
         }
         take_slot(&self.picks, MAX_PICKS)
-    }
-
-    /// The HTTP client for downloads, with the core's connection policy.
-    pub fn http(&self) -> Result<reqwest::Client, ErrorCode> {
-        let mut http = guard(&self.http);
-        if let Some(client) = http.as_ref() {
-            return Ok(client.clone());
-        }
-        let client = crate::homeserver::http_client().map_err(|_| ErrorCode::Unavailable)?;
-        *http = Some(client.clone());
-        Ok(client)
     }
 
     /// Decodes one image in the worker.

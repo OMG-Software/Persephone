@@ -22,6 +22,8 @@ fn main() {
             "reset_profile",
             "sign_in",
             "discover_homeserver",
+            "proxy_setting",
+            "set_proxy_setting",
             "register",
             "sign_out",
             "security_status",

@@ -65,7 +65,11 @@ pub async fn build_client(homeserver: &Homeserver, stores: &Stores) -> Result<Cl
         .event_cache_store(sdk.event_cache.clone())
         .media_store(sdk.media.clone())
         .crypto_store(sdk.crypto.clone());
-    let http = homeserver::http_client().map_err(|_| SignInError::Failed)?;
+    // An unreadable proxy record refuses the connection: never direct.
+    let proxy = crate::proxy::load(stores)
+        .await
+        .map_err(|_| SignInError::Failed)?;
+    let http = homeserver::http_client(proxy.as_ref()).map_err(|_| SignInError::Failed)?;
     Client::builder()
         .homeserver_url(homeserver.url().as_str())
         .respect_login_well_known(false)

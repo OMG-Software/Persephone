@@ -49,6 +49,7 @@ pub mod pick;
 pub mod platform;
 pub mod profiles;
 pub mod prompt_text;
+pub mod proxy;
 pub mod recovery_file;
 pub mod registration;
 pub mod room_settings;
@@ -723,6 +724,13 @@ impl Core {
                     }
                 }
             }
+            Call::ProxySetting {} => match self.proxy_setting() {
+                Ok(socks) => ok(&persephone_contracts::ProxySetting {
+                    proxy: socks.map(|socks| socks.address()),
+                }),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::SetProxySetting { proxy } => self.set_proxy_setting(proxy.as_deref()),
             Call::AccountSettings {} => match self.session.account_settings() {
                 Ok(Some(settings)) => ok(&settings),
                 Ok(None) => Outcome::Error(ErrorCode::Internal),
@@ -1548,22 +1556,16 @@ impl Core {
         };
         let generation = lease.generation();
         let current = || self.session.open_generation() == Some(generation);
-        let encoded = match self.media.http() {
-            Ok(http) => {
-                let encoded = lease.stores().block_on(media::fetch(
-                    &client,
-                    &http,
-                    room_id,
-                    event_id,
-                    &self.budgets,
-                    &current,
-                ));
-                let _context = lease.stores().runtime().enter();
-                drop(http);
-                encoded
-            }
-            Err(code) => Err(code),
-        };
+        // The account's own HTTP client: the core's policy and the
+        // profile's proxy, as for every other request.
+        let encoded = lease.stores().block_on(media::fetch(
+            &client,
+            client.http_client(),
+            room_id,
+            event_id,
+            &self.budgets,
+            &current,
+        ));
         {
             let _context = lease.stores().runtime().enter();
             drop(client);
@@ -1591,6 +1593,8 @@ impl Core {
         if discovery::origin(server_name).is_none() {
             return Err(ErrorCode::InvalidArgument);
         }
+        // The profile's proxy, read now; unreadable refuses (never direct).
+        let proxy = self.proxy_setting()?;
         let slot = self.discovery.begin()?;
         let server_name = server_name.to_owned();
         Ok(Box::new(move || {
@@ -1599,9 +1603,56 @@ impl Core {
                 .enable_all()
                 .build()
                 .map_err(|_| ErrorCode::Internal)
-                .and_then(|runtime| runtime.block_on(discovery::discover(&server_name)));
+                .and_then(|runtime| {
+                    runtime.block_on(discovery::discover(&server_name, proxy.as_ref()))
+                });
             refused(found)
         }))
+    }
+
+    /// The profile's proxy (ADR-0028): `None` without one or for the
+    /// synthetic views; `locked` while the profile is locked, and `internal`
+    /// when the record cannot be read, so nothing connects directly.
+    fn proxy_setting(&self) -> Result<Option<proxy::Socks>, ErrorCode> {
+        if !self.session.is_configured() {
+            return Ok(None);
+        }
+        let lease = self.session.admit().map_err(|error| match error {
+            session::AdmissionError::Locked => ErrorCode::Locked,
+            session::AdmissionError::Saturated => ErrorCode::LimitExceeded,
+        })?;
+        lease
+            .stores()
+            .block_on(proxy::load(lease.stores()))
+            .map_err(|_| ErrorCode::Internal)
+    }
+
+    /// Replaces the profile's proxy; it applies when Persephone next
+    /// connects (ADR-0028).
+    fn set_proxy_setting(&self, proxy: Option<&str>) -> Outcome {
+        let socks = match proxy.map(proxy::Socks::parse) {
+            None => None,
+            Some(Some(socks)) => Some(socks),
+            Some(None) => return Outcome::Error(ErrorCode::InvalidArgument),
+        };
+        if !self.session.is_configured() {
+            return Outcome::Error(ErrorCode::Unavailable);
+        }
+        let lease = match self.session.admit() {
+            Ok(lease) => lease,
+            Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => {
+                return Outcome::Error(ErrorCode::LimitExceeded);
+            }
+        };
+        if lease
+            .stores()
+            .block_on(proxy::save(lease.stores(), socks.as_ref()))
+        {
+            Outcome::Ok(serde_json::Value::Null)
+        } else {
+            Outcome::Error(ErrorCode::Internal)
+        }
     }
 
     fn pick_image<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { notificationLevel, setNotificationLevel, type AccountSettings, type NotificationLevel } from './bridge';
   import { notificationLevelText } from './accountChanges';
+  import ProxySettings from './ProxySettings.svelte';
   import {
     CHAT_TEXT_SIZES,
     IDLE_LOCK_CHOICES,
@@ -158,6 +159,10 @@
       A notification shows who wrote and in which room, never the message itself. It shows only while
       Persephone's window is not in front.
     </p>
+  </div>
+  <div class="panel">
+    <h3>Connection</h3>
+    <ProxySettings />
   </div>
   <div class="panel">
     <h3>Privacy</h3>

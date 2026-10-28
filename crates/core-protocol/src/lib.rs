@@ -67,6 +67,17 @@ pub enum Call {
     SignIn {
         homeserver: String,
     },
+    /// The profile's SOCKS5 proxy (ADR-0028). Available whenever the profile
+    /// is unlocked, signed in or not.
+    ProxySetting {},
+    /// Set the profile's SOCKS5 proxy as `host:port` (or after `socks5://`),
+    /// at most [`MAX_PROXY_BYTES`]; null removes it. It applies to
+    /// connections made afterwards.
+    SetProxySetting {
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        proxy: Option<String>,
+    },
     /// Find the homeserver of a server name such as `example.org`, through
     /// its `.well-known/matrix/client` file, and confirm it speaks Matrix
     /// (ADR-0027). Answered when done; `not_found` when no Matrix server is
@@ -534,6 +545,9 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
 /// Longest username (localpart) either side accepts when registering.
 pub const MAX_USERNAME_BYTES: usize = 255;
+
+/// Longest proxy address either side accepts, in bytes.
+pub const MAX_PROXY_BYTES: usize = 300;
 
 /// Longest server name either side accepts in `discover_homeserver`, in
 /// bytes (a DNS name and a port).
@@ -1116,6 +1130,20 @@ mod tests {
                 r#"{"id":1,"call":{"command":"new_sessions"}}"#,
             ),
             (
+                Call::ProxySetting {},
+                r#"{"id":1,"call":{"command":"proxy_setting"}}"#,
+            ),
+            (
+                Call::SetProxySetting {
+                    proxy: Some("127.0.0.1:9050".into()),
+                },
+                r#"{"id":1,"call":{"command":"set_proxy_setting","proxy":"127.0.0.1:9050"}}"#,
+            ),
+            (
+                Call::SetProxySetting { proxy: None },
+                r#"{"id":1,"call":{"command":"set_proxy_setting","proxy":null}}"#,
+            ),
+            (
                 Call::DiscoverHomeserver {
                     server_name: "example.org".into(),
                 },
@@ -1566,6 +1594,9 @@ mod tests {
             br#"{"id":1,"call":{"command":"room_servers"}}"#,
             br#"{"id":1,"call":{"command":"new_sessions","all":true}}"#,
             br#"{"id":1,"call":{"command":"discover_homeserver"}}"#,
+            br#"{"id":1,"call":{"command":"set_proxy_setting"}}"#,
+            br#"{"id":1,"call":{"command":"set_proxy_setting","proxy":"h:1","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"proxy_setting","proxy":null}}"#,
             br#"{"id":1,"call":{"command":"discover_homeserver","server_name":"e.org","url":"x"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":"DEV"}}"#,

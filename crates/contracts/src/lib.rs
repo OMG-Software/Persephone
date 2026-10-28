@@ -809,6 +809,14 @@ pub struct DeviceList {
     pub truncated: bool,
 }
 
+/// Reply of `proxy_setting`: the profile's SOCKS5 proxy as `host:port`, or
+/// none (ADR-0028).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProxySetting {
+    pub proxy: Option<String>,
+}
+
 /// Reply of `discover_homeserver`: the homeserver found for a server name,
 /// confirmed to speak Matrix, and whether a `.well-known` file named it
 /// (ADR-0027). The page shows it before signing in to it.
@@ -1558,6 +1566,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", DisplayName::decl(&config)),
         format!("export {}", DeviceSummary::decl(&config)),
         format!("export {}", DeviceList::decl(&config)),
+        format!("export {}", ProxySetting::decl(&config)),
         format!("export {}", HomeserverFound::decl(&config)),
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),

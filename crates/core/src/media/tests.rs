@@ -681,7 +681,7 @@ fn fetch_with(
         .enable_all()
         .build()
         .unwrap();
-    let http = crate::homeserver::http_client().unwrap();
+    let http = crate::homeserver::http_client(None).unwrap();
     let result = runtime.block_on(download(&http, url, token, cap, &budgets, current));
     (result, budgets)
 }

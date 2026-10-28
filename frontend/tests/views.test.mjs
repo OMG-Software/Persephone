@@ -278,7 +278,10 @@ test('the sign-in form asks only for the homeserver; the password goes to a nati
   assert.match(html, /<bdi class="server-value">matrix\.org<\/bdi>/, 'matrix.org until changed');
   assert.match(html, />Continue</);
   assert.doesNotMatch(html, /type="password"/i, 'no password field in the page');
-  assert.doesNotMatch(html, /<input/, 'the server is chosen in the picker; nothing else is asked');
+  // The sign-in form itself; the proxy has its own form under Connection.
+  const signInForm = html.slice(html.indexOf('<form'), html.indexOf('</form>'));
+  assert.doesNotMatch(signInForm, /<input/, 'the server is chosen in the picker; nothing else is asked');
+  assert.match(html, /<details class="connection"><summary>Connection<\/summary>[\s\S]*id="proxy-address"/);
   assert.match(html, /This page never sees your password/);
   assert.match(html, /<button type="button" class="link"[^>]*>\s*Create an account\s*<\/button>/);
 
@@ -308,7 +311,8 @@ test('GIVEN the create-account mode WHEN it shows THEN only a username is asked,
   const empty = view('');
   assert.match(empty, /<h2 id="sign-in-heading">Create an account<\/h2>/);
   assert.match(empty, /<input id="register-username" class="field mono" type="text"/);
-  assert.equal((empty.match(/<input/g) ?? []).length, 1, 'the username is the only field');
+  const registerForm = empty.slice(empty.indexOf('<form'), empty.indexOf('</form>'));
+  assert.equal((registerForm.match(/<input/g) ?? []).length, 1, 'the username is the only field');
   assert.doesNotMatch(empty, /type="password"/i, 'the password goes to a native window');
   assert.match(empty, /<button type="submit" class="primary wide" disabled[^>]*>\s*Create account/);
   assert.match(empty, /This page never sees them/);

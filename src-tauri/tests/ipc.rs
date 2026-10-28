@@ -306,6 +306,11 @@ impl CoreTransport for FakeCore {
                 })),
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },
+            Call::ProxySetting {} => Ok(serde_json::json!({"proxy": "127.0.0.1:9050"})),
+            Call::SetProxySetting { proxy } => match proxy.as_deref() {
+                None | Some("127.0.0.1:9050") => Ok(serde_json::Value::Null),
+                Some(_) => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+            },
             Call::NewSessions {} => Ok(serde_json::json!({
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
             })),
@@ -643,6 +648,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-reset-profile",
             "allow-sign-in",
             "allow-discover-homeserver",
+            "allow-proxy-setting",
+            "allow-set-proxy-setting",
             "allow-register",
             "allow-sign-out",
             "allow-security-status",
@@ -1625,6 +1632,26 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         .unwrap_err(),
         "invalid_argument"
     );
+    assert_eq!(
+        invoke("proxy_setting", serde_json::json!({})).unwrap()["proxy"],
+        "127.0.0.1:9050"
+    );
+    for proxy in [serde_json::json!("127.0.0.1:9050"), serde_json::Value::Null] {
+        assert_eq!(
+            invoke("set_proxy_setting", serde_json::json!({ "proxy": proxy })),
+            Ok(serde_json::Value::Null)
+        );
+    }
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "set_proxy_setting",
+            serde_json::json!({"proxy": "h".repeat(301)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
         invoke(
             "acknowledge_sessions",

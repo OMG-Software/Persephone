@@ -1037,6 +1037,24 @@ kbd {
   white-space: nowrap;
 }
 
+/* Connection settings on the sign-in card: folded away until asked for. */
+.connection {
+  margin-top: 12px;
+  color: var(--ink2);
+  font-size: 13px;
+}
+
+.connection summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.proxy-settings {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 /* The new-session alert: above the room, in the warning colours. */
 .new-sessions {
   margin: 12px 16px 0;

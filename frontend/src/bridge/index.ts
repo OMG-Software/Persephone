@@ -23,6 +23,7 @@ import type {
   LevelKey,
   Membership,
   HomeserverFound,
+  ProxySetting,
   NewSessions,
   NotificationLevel,
   NotificationSettings,
@@ -76,6 +77,7 @@ export type {
   LevelKey,
   Membership,
   HomeserverFound,
+  ProxySetting,
   NewSessions,
   NotificationLevel,
   NotificationSettings,
@@ -529,6 +531,19 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       idleLockMinutes: settings.idleLockMinutes
     }
   });
+}
+
+/** The profile's SOCKS5 proxy as `host:port`, or none (ADR-0028). */
+export function proxySetting(): Promise<ProxySetting> {
+  return invoke<ProxySetting>('proxy_setting');
+}
+
+/**
+ * Sets the profile's SOCKS5 proxy (`host:port`), or removes it with `null`.
+ * It applies to connections Persephone makes from its next start.
+ */
+export function setProxySetting(proxy: string | null): Promise<void> {
+  return invoke<void>('set_proxy_setting', { proxy });
 }
 
 /**

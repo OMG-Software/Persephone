@@ -12,6 +12,7 @@
   import type { AccountStatus } from '../../crates/contracts/generated/contracts';
   import markUrl from './assets/mark.svg';
   import ServerPicker from './ServerPicker.svelte';
+  import ProxySettings from './ProxySettings.svelte';
   import {
     MAX_USERNAME,
     normalizeUsername,
@@ -162,6 +163,10 @@
       {waiting ? 'Waiting…' : registering ? 'Create account' : 'Continue'}
     </button>
   </form>
+  <details class="connection">
+    <summary>Connection</summary>
+    <ProxySettings />
+  </details>
   <p class="auth-switch">
     {registering ? 'Already have an account?' : 'New to this server?'}
     <button type="button" class="link" disabled={waiting} onclick={switchMode}>
