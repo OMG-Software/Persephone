@@ -194,6 +194,29 @@ test('GIVEN state changes with hostile names WHEN rendered THEN each line is fix
   assert.match(shown, /<bdi>@c:example\.invalid<\/bdi> turned on end-to-end encryption/);
 });
 
+test('GIVEN replies WHEN rendered THEN a loaded message is quoted as isolated text, and a missing one is named only', () => {
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [
+        { kind: 'message', event_id: '$1', sender: hostileName, body: 'asked <b>', origin_server_ts: null, reply_to: null },
+        { kind: 'message', event_id: '$2', sender: '@b:example.invalid', body: 'answer', origin_server_ts: null, reply_to: '$1' },
+        { kind: 'message', event_id: '$3', sender: '@b:example.invalid', body: 'late', origin_server_ts: null, reply_to: '$gone' }
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {},
+      onreply: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(shown, /<img|<b>/);
+  assert.match(shown, /In reply to <bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>: <span dir="auto">asked &lt;b><\/span>/);
+  assert.match(shown, /In reply to an earlier message/);
+  assert.equal((shown.match(/>\s*Reply <span class="visually-hidden">/g) ?? []).length, 3);
+});
+
 test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
   const signedOut = { state: 'signed_out', userId: null, error: null };
   const form = (mode = 'sign_in', username = '') => ({ homeserver: 'https://matrix.org', mode, username });

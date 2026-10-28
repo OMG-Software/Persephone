@@ -317,13 +317,23 @@ export type MembershipChange = "joined" | "left" | "invited" | "invite_rejected"
 
 export type StateChange = { "type": "member", target: string, membership: MembershipChange, } | { "type": "display_name", target: string, name: string | null, } | { "type": "name", name: string | null, } | { "type": "topic", topic: string | null, } | { "type": "avatar", } | { "type": "encryption", } | { "type": "join_rule", rule: JoinRule, } | { "type": "history_visibility", visibility: HistoryVisibility, } | { "type": "power_levels", } | { "type": "addresses", } | { "type": "created", } | { "type": "server_acl", } | { "type": "upgraded", };
 
-export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, 
+export type TimelineItem = { "kind": "message", event_id: string, sender: string, 
+/**
+ * The text, without a reply's quoted fallback.
+ */
+body: string, 
 /**
  * When the sender's homeserver says it received the event
  * (`origin_server_ts`). That server sets it and nothing checks it,
  * so it can be wrong. `None` when the event has no usable time.
  */
-origin_server_ts: number | null, } | { "kind": "gap", next_cursor: string | null, } | { "kind": "notice", event_id: string, sender: string, notice: NoticeKind, 
+origin_server_ts: number | null, 
+/**
+ * The event this message replies to, as the sender claims. The
+ * page shows it only from history it has loaded itself; the
+ * sender's quoted copy of it is never shown.
+ */
+reply_to: string | null, } | { "kind": "gap", next_cursor: string | null, } | { "kind": "notice", event_id: string, sender: string, notice: NoticeKind, 
 /**
  * As for messages.
  */
@@ -381,7 +391,8 @@ export const timelinePageFixture = {
       "event_id": "$event",
       "sender": "@alice:server.invalid",
       "body": "hostile <img src=x onerror=alert(1)>",
-      "origin_server_ts": 1767258000000
+      "origin_server_ts": 1767258000000,
+      "reply_to": null
     },
     {
       "kind": "notice",

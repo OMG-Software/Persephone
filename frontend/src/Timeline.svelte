@@ -10,6 +10,7 @@
   import Message from './Message.svelte';
   import { stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
+  import { quoteOf } from './timeline';
 
   let {
     title,
@@ -25,7 +26,8 @@
     verifying = false,
     onverify = () => {},
     oninvite,
-    onsettings
+    onsettings,
+    onreply
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -46,6 +48,8 @@
     oninvite?: () => void;
     // Opens the room's settings; absent where they are not offered.
     onsettings?: () => void;
+    // Starts a reply to a message; absent where replying is not offered.
+    onreply?: (eventId: string) => void;
   } = $props();
 
   // Fixed text per trust level; the core sends codes only.
@@ -151,7 +155,15 @@
               <p class="day-divider"><span>{dividers[index]}</span></p>
             {/if}
             {#if item.kind === 'message'}
-              <Message name={item.sender} body={item.body} time={item.origin_server_ts} />
+              <Message
+                name={item.sender}
+                body={item.body}
+                time={item.origin_server_ts}
+                quote={item.reply_to === null || item.reply_to === undefined
+                  ? null
+                  : (quoteOf(items, item.reply_to) ?? 'missing')}
+                onreply={onreply && (() => onreply(item.event_id))}
+              />
             {:else if item.kind === 'image'}
               <ImageMessage {roomId} {item} />
             {:else if item.kind === 'notice'}

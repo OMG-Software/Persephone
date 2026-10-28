@@ -129,12 +129,17 @@ pub enum TimelineItem {
     Message {
         event_id: String,
         sender: String,
+        /// The text, without a reply's quoted fallback.
         body: String,
         /// When the sender's homeserver says it received the event
         /// (`origin_server_ts`). That server sets it and nothing checks it,
         /// so it can be wrong. `None` when the event has no usable time.
         #[ts(type = "number | null")]
         origin_server_ts: Option<UnixMillis>,
+        /// The event this message replies to, as the sender claims. The
+        /// page shows it only from history it has loaded itself; the
+        /// sender's quoted copy of it is never shown.
+        reply_to: Option<String>,
     },
     Gap {
         next_cursor: Option<String>,
@@ -1295,6 +1300,7 @@ pub fn sample_timeline_page() -> TimelinePage {
                 sender: "@alice:server.invalid".into(),
                 body: "hostile <img src=x onerror=alert(1)>".into(),
                 origin_server_ts: UnixMillis::new(1_767_258_000_000),
+                reply_to: None,
             },
             TimelineItem::Notice {
                 event_id: "$encrypted".into(),

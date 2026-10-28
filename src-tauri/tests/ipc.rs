@@ -157,7 +157,7 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false}),
             ),
             // A reply carrying a secret is refused by the contract.
-            Call::SendMessage { room_id, body } => match body.as_str() {
+            Call::SendMessage { room_id, body, .. } => match body.as_str() {
                 "hello" => Ok(serde_json::json!({
                     "localId": 1, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
                     "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
@@ -1035,9 +1035,25 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
         "invalid_argument"
     );
     assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "hi", "replyTo": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
         core.calls.load(Ordering::SeqCst),
         calls,
-        "oversized body never crossed"
+        "oversized body and reply target never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "hello", "replyTo": "$e"})
+        )
+        .unwrap()["state"],
+        "queued"
     );
     assert_eq!(
         invoke("pending_messages", serde_json::json!({"roomId": room})),

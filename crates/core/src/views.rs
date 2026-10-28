@@ -289,6 +289,7 @@ impl Fixtures {
                 sender: message.sender.clone(),
                 body: project_body(&message.body),
                 origin_server_ts: message.origin_server_ts,
+                reply_to: None,
             };
             let size = serde_json::to_vec(&item)
                 .map_err(|_| ErrorCode::Internal)?

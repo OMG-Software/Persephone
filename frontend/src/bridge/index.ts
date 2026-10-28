@@ -219,8 +219,12 @@ export function recoverWithKey(): Promise<SecurityStatus> {
  * room only from a verified device, in a room that is not encrypted only after
  * `allowUnencrypted`. Progress arrives as a change of the room.
  */
-export function sendMessage(roomId: string, body: string): Promise<PendingMessage> {
-  return invoke<PendingMessage>('send_message', { roomId, body });
+export function sendMessage(
+  roomId: string,
+  body: string,
+  replyTo: string | null = null
+): Promise<PendingMessage> {
+  return invoke<PendingMessage>('send_message', { roomId, body, replyTo });
 }
 
 /** The room's messages sent from this device in this session. */

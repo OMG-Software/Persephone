@@ -26,7 +26,7 @@
   import { DEFAULT_SETTINGS, SettingsKeeper, textScale } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
-  import { mergeNewest } from './timeline';
+  import { mergeNewest, quoteOf, type Quote } from './timeline';
   import {
     accountSettings,
     allowUnencrypted,
@@ -102,12 +102,15 @@
   let deviceAsked = $state<string | null>(null);
   // Messages sent from this device in the selected room.
   let pending = $state<PendingMessage[]>([]);
+  // The message the next one replies to, in the selected room.
+  let replyingTo = $state<{ eventId: string; quote: Quote } | null>(null);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
   // core also refuses until the consent is recorded.
   // `image` is true when the question is about sending the attached image.
   let confirmingPlain = $state<{
     roomId: string;
     body: string | null;
+    replyTo: string | null;
     retryId: number | null;
     image: boolean;
   } | null>(null);
@@ -440,6 +443,7 @@
     identityAsked = null;
     deviceAsked = null;
     confirmingPlain = null;
+    replyingTo = null;
     // The core dropped every image handle with the session.
     imageDraft = null;
     attaching = false;
@@ -748,6 +752,7 @@
     changes = null;
     changesFailed = false;
     confirmingPlain = null;
+    replyingTo = null;
     nextCursor = null;
     error = null;
     loading = true;
@@ -819,10 +824,18 @@
     }
   }
 
-  async function queue(roomId: string, body: string, generation: number): Promise<boolean> {
+  async function queue(
+    roomId: string,
+    body: string,
+    replyTo: string | null,
+    generation: number
+  ): Promise<boolean> {
     try {
-      await sendMessage(roomId, body);
-      if (current(roomId, generation)) await loadPending(roomId, generation);
+      await sendMessage(roomId, body, replyTo);
+      if (current(roomId, generation)) {
+        if (replyTo !== null && replyingTo?.eventId === replyTo) replyingTo = null;
+        await loadPending(roomId, generation);
+      }
       return true;
     } catch (reason) {
       if (current(roomId, generation)) {
@@ -838,11 +851,12 @@
   async function sendText(body: string): Promise<boolean> {
     const roomId = selected;
     if (!roomId) return false;
+    const replyTo = replyingTo?.eventId ?? null;
     if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(roomId)) {
-      confirmingPlain = { roomId, body, retryId: null, image: false };
+      confirmingPlain = { roomId, body, replyTo, retryId: null, image: false };
       return false;
     }
-    return queue(roomId, body, sessionGeneration);
+    return queue(roomId, body, replyTo, sessionGeneration);
   }
 
   async function confirmPlain() {
@@ -858,7 +872,10 @@
     }
     if (!current(asked.roomId, generation)) return;
     confirmedRooms.add(asked.roomId);
-    if (asked.body !== null && (await queue(asked.roomId, asked.body, generation))) {
+    if (
+      asked.body !== null &&
+      (await queue(asked.roomId, asked.body, asked.replyTo, generation))
+    ) {
       draftVersion += 1;
     }
     if (asked.retryId !== null) changeMessage(retryMessage, asked.retryId);
@@ -904,7 +921,7 @@
     const draft = imageDraft;
     if (!draft || draft.roomId !== selected || sendingImage) return;
     if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(draft.roomId)) {
-      confirmingPlain = { roomId: draft.roomId, body: null, retryId: null, image: true };
+      confirmingPlain = { roomId: draft.roomId, body: null, replyTo: null, retryId: null, image: true };
       return;
     }
     await queueImage(draft.roomId, draft.preview.handle, sessionGeneration);
@@ -1273,6 +1290,12 @@
               ? () => (invitingTo = selectedRoom.roomId)
               : undefined}
             onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
+            onreply={sendBlocked === null
+              ? (eventId) => {
+                  const quote = quoteOf(items, eventId);
+                  if (quote) replyingTo = { eventId, quote };
+                }
+              : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
@@ -1326,7 +1349,13 @@
               onretry={(localId) => changeMessage(retryMessage, localId)}
               ondiscard={(localId) => changeMessage(discardMessage, localId)}
               onallow={(localId) =>
-                (confirmingPlain = { roomId: selectedRoom.roomId, body: null, retryId: localId, image: false })}
+                (confirmingPlain = {
+                  roomId: selectedRoom.roomId,
+                  body: null,
+                  replyTo: null,
+                  retryId: localId,
+                  image: false
+                })}
               {imageDraft}
               {attaching}
               {sendingImage}
@@ -1335,6 +1364,8 @@
               onsendimage={sendAttached}
               oncancelimage={cancelImage}
               enterSends={settings.enterSends}
+              replyingTo={replyingTo?.quote ?? null}
+              oncancelreply={() => (replyingTo = null)}
             />
           {/if}
         {:else}

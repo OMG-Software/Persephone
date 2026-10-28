@@ -927,6 +927,52 @@ kbd {
   text-align: center;
 }
 
+/* Replies: the quoted message sits above the reply's text, and the Reply
+   action shows on hover and on keyboard focus. */
+.reply-quote {
+  margin: 2px 0 4px;
+  padding: 2px 0 2px 10px;
+  overflow: hidden;
+  border-left: 3px solid var(--line);
+  color: var(--ink3);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-actions {
+  margin-left: auto;
+  opacity: 0;
+}
+
+.message:hover .message-actions,
+.message:focus-within .message-actions {
+  opacity: 1;
+}
+
+.message-actions .link {
+  font-size: 12px;
+}
+
+.replying {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 6px 8px 6px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--ink2);
+  font-size: 13px;
+}
+
+.replying p {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Composer */
 .composer-area {
   flex: none;

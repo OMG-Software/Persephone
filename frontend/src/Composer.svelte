@@ -11,6 +11,7 @@
   import { isolate } from './people';
   import { composerKey } from './preferences';
   import { clockTime, fullTime, toDate } from './time';
+  import type { Quote } from './timeline';
 
   let {
     pending,
@@ -30,7 +31,9 @@
     onattach = () => {},
     onsendimage = () => {},
     oncancelimage = () => {},
-    enterSends = true
+    enterSends = true,
+    replyingTo = null,
+    oncancelreply = () => {}
   }: {
     // Messages sent from this device that the timeline does not show yet.
     pending: PendingMessage[];
@@ -60,6 +63,9 @@
     // Whether Enter sends (Shift+Enter starts a line) or starts a line
     // (Ctrl+Enter sends). A setting; on by default.
     enterSends?: boolean;
+    // The message the next one replies to, quoted from the loaded history.
+    replyingTo?: Quote | null;
+    oncancelreply?: () => void;
   } = $props();
 
   // The core's limit is 16 KiB of UTF-8; this length is only a first stop.
@@ -118,6 +124,11 @@
 
   // See `composerKey` for which keys send.
   function keydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && replyingTo) {
+      event.preventDefault();
+      oncancelreply();
+      return;
+    }
     if (composerKey(event, enterSends) === 'send') {
       event.preventDefault();
       form?.requestSubmit();
@@ -171,6 +182,15 @@
   {/if}
   {#if imageError}
     <p class="error image-error" role="alert">{imageError}</p>
+  {/if}
+
+  {#if replyingTo}
+    <div class="replying">
+      <p>
+        Replying to <bdi>{replyingTo.sender}</bdi>: <span dir="auto">{replyingTo.text}</span>
+      </p>
+      <button type="button" class="link" onclick={oncancelreply}>Cancel reply</button>
+    </div>
   {/if}
 
   <form class="composer" class:plain={notEncrypted} bind:this={form} onsubmit={submit}>

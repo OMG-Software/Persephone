@@ -1650,6 +1650,7 @@ fn send(core: &Core, room_id: &str, body: &str) -> Outcome {
         Call::SendMessage {
             room_id: room_id.into(),
             body: body.into(),
+            reply_to: None,
         },
     )
 }

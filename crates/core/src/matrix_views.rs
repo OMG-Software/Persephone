@@ -38,7 +38,10 @@ use matrix_sdk::{
         events::{
             AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
             SyncStateEvent,
-            room::{member::MembershipChange as Change, message::MessageType},
+            room::{
+                member::MembershipChange as Change,
+                message::{MessageType, Relation, sanitize::remove_plain_reply_fallback},
+            },
         },
     },
 };
@@ -133,24 +136,41 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
         }
         _ => return None,
     };
+    // A reply's quoted fallback is the sender's copy of another event: it
+    // can say anything, so it is dropped and the page quotes the event
+    // itself from history it loaded.
+    let reply_to = match &message.content.relates_to {
+        Some(Relation::Reply(reply)) => Some(reply.in_reply_to.event_id.to_string()),
+        _ => None,
+    };
+    let text = |body: &str| {
+        project_body(if reply_to.is_some() {
+            remove_plain_reply_fallback(body)
+        } else {
+            body
+        })
+    };
     Some(match &message.content.msgtype {
-        MessageType::Text(text) => TimelineItem::Message {
+        MessageType::Text(text_content) => TimelineItem::Message {
             event_id,
             sender,
-            body: project_body(&text.body),
+            body: text(&text_content.body),
             origin_server_ts,
+            reply_to,
         },
         MessageType::Notice(notice) => TimelineItem::Message {
             event_id,
             sender,
-            body: project_body(&notice.body),
+            body: text(&notice.body),
             origin_server_ts,
+            reply_to,
         },
         MessageType::Emote(emote) => TimelineItem::Message {
             event_id,
             sender,
-            body: project_body(&emote.body),
+            body: text(&emote.body),
             origin_server_ts,
+            reply_to,
         },
         MessageType::Image(image) => {
             crate::media::timeline_item(event_id, sender, origin_server_ts, image)
@@ -579,6 +599,36 @@ mod tests {
             Some(TimelineItem::Image { .. })
         ));
         assert!(crate::media::image_content(&broken).is_none());
+    }
+
+    /// GIVEN a reply with a quoted fallback, which the sender writes and can
+    /// make say anything WHEN projected THEN the item names the event it
+    /// replies to and its body is only the reply's own text; text that only
+    /// looks like a quote, outside a reply, is kept.
+    #[test]
+    fn given_a_reply_then_the_fallback_is_dropped_and_the_event_named() {
+        let reply = project(&plain_event(serde_json::json!({
+            "msgtype": "m.text",
+            "body": "> <@bob:example.org> I never said this\n> second line\n\nmy answer",
+            "m.relates_to": { "m.in_reply_to": { "event_id": "$asked" } },
+        })))
+        .unwrap();
+        let TimelineItem::Message { body, reply_to, .. } = reply else {
+            panic!("a message: {reply:?}");
+        };
+        assert_eq!(body, "my answer");
+        assert_eq!(reply_to.as_deref(), Some("$asked"));
+
+        let quote = project(&plain_event(serde_json::json!({
+            "msgtype": "m.text",
+            "body": "> <@bob:example.org> quoted\n\nmine",
+        })))
+        .unwrap();
+        let TimelineItem::Message { body, reply_to, .. } = quote else {
+            panic!("a message");
+        };
+        assert_eq!(body, "> <@bob:example.org> quoted\n\nmine");
+        assert_eq!(reply_to, None);
     }
 
     fn state_event(

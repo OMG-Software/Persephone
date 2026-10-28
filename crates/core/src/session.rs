@@ -981,11 +981,12 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
         let outcome = lease.stores().block_on(async {
             let consented = sending::consented(lease.stores(), &job.room_id).await;
             match &job.content {
-                Content::Text(body) => {
+                Content::Text(body, relation) => {
                     sending::send(
                         &client,
                         &job.room_id,
                         body,
+                        relation.as_ref(),
                         job.transaction_id.clone(),
                         consented,
                     )
@@ -1543,6 +1544,7 @@ impl Session {
         &self,
         room_id: &str,
         body: Zeroizing<String>,
+        relation: Option<crate::outbox::Relation>,
     ) -> Result<PendingMessage, SendRefusal> {
         if guard(&self.shared.account).is_none() {
             return Err(SendRefusal::Unavailable);
@@ -1554,7 +1556,7 @@ impl Session {
             if inner.state != StoreState::Protected {
                 return Err(SendRefusal::Unavailable);
             }
-            guard(&self.shared.outbox).queue(room_id, body)
+            guard(&self.shared.outbox).queue(room_id, body, relation)
         }
         .ok_or(SendRefusal::Full)?;
         if let Some(listener) = self.shared.listener() {

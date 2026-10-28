@@ -356,18 +356,33 @@ async fn recover_with_key(core: State<'_, CoreLink>) -> Result<SecurityStatus, S
     relay(core.inner(), Call::RecoverWithKey {}).await
 }
 
-/// Queues a text message. The core checks the room and body and decides at
-/// send time whether the room needs consent.
+/// Queues a text message, as a reply to `reply_to` when it names an event.
+/// The core checks the room, body and event ID and decides at send time
+/// whether the room needs consent.
 #[tauri::command]
 async fn send_message(
     core: State<'_, CoreLink>,
     room_id: String,
     body: String,
+    reply_to: Option<String>,
 ) -> Result<PendingMessage, String> {
-    if room_id.len() > MAX_ROOM_ID_BYTES || body.len() > MAX_MESSAGE_BYTES {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || body.len() > MAX_MESSAGE_BYTES
+        || reply_to
+            .as_ref()
+            .is_some_and(|event_id| event_id.len() > MAX_EVENT_ID_BYTES)
+    {
         return Err(INVALID_ARGUMENT.to_string());
     }
-    relay(core.inner(), Call::SendMessage { room_id, body }).await
+    relay(
+        core.inner(),
+        Call::SendMessage {
+            room_id,
+            body,
+            reply_to,
+        },
+    )
+    .await
 }
 
 /// The room's messages sent from this device in this session.

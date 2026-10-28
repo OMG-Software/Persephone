@@ -53,3 +53,21 @@ test('a shown notice is replaced when the same event comes back readable', () =>
   );
 });
 
+
+test('GIVEN a loaded message WHEN quoted THEN its first line shows, cut to the limit', async () => {
+  const { quoteOf, MAX_QUOTE_CHARS } = await import('../src/timeline.ts');
+  const items = [
+    { kind: 'message', event_id: '$1', sender: '@a:s', body: '\n\nfirst line\nsecond', origin_server_ts: null },
+    { kind: 'message', event_id: '$2', sender: '@b:s', body: 'x'.repeat(500), origin_server_ts: null },
+    { kind: 'image', event_id: '$3', sender: '@c:s', name: 'cat.png', origin_server_ts: null },
+    { kind: 'notice', event_id: '$4', sender: '@d:s', notice: 'undecryptable', origin_server_ts: null },
+    { kind: 'gap', next_cursor: null }
+  ];
+  assert.deepEqual(quoteOf(items, '$1'), { sender: '@a:s', text: 'first line' });
+  const long = quoteOf(items, '$2');
+  assert.equal(Array.from(long.text).length, MAX_QUOTE_CHARS + 1);
+  assert.ok(long.text.endsWith('…'));
+  assert.deepEqual(quoteOf(items, '$3'), { sender: '@c:s', text: 'Image' });
+  assert.deepEqual(quoteOf(items, '$4'), { sender: '@d:s', text: 'A message that is not shown' });
+  assert.equal(quoteOf(items, '$missing'), null);
+});

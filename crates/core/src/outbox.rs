@@ -20,7 +20,7 @@
 //! * Memory only: nothing is kept after a lock or restart.
 
 use crate::media::ImageUpload;
-use matrix_sdk::ruma::{OwnedTransactionId, TransactionId};
+use matrix_sdk::ruma::{OwnedEventId, OwnedTransactionId, TransactionId};
 use persephone_contracts::{PendingKind, PendingMessage, PendingState, SendFailure, UnixMillis};
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -56,10 +56,17 @@ pub enum SendOutcome {
     Unknown,
 }
 
+/// The event a text message refers to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Relation {
+    /// A reply to this event (`m.in_reply_to`).
+    Reply(OwnedEventId),
+}
+
 /// What a message sends.
 #[derive(Clone)]
 pub enum Content {
-    Text(Zeroizing<String>),
+    Text(Zeroizing<String>, Option<Relation>),
     /// The stripped image; dropped from the entry once sent.
     Image(Arc<ImageUpload>),
 }
@@ -69,6 +76,7 @@ struct Entry {
     room_id: String,
     kind: PendingKind,
     body: Zeroizing<String>,
+    relation: Option<Relation>,
     image: Option<Arc<ImageUpload>>,
     /// What the message takes as JSON, from [`entry_size`].
     size: usize,
@@ -111,8 +119,13 @@ pub struct Outbox {
 impl Outbox {
     /// Queues a message, or `None` when [`MAX_UNSENT`] are already unsent or
     /// the message does not fit [`MAX_KEPT_BYTES`] beside the unsent ones.
-    pub fn queue(&mut self, room_id: &str, body: Zeroizing<String>) -> Option<PendingMessage> {
-        self.push(room_id, Content::Text(body))
+    pub fn queue(
+        &mut self,
+        room_id: &str,
+        body: Zeroizing<String>,
+        relation: Option<Relation>,
+    ) -> Option<PendingMessage> {
+        self.push(room_id, Content::Text(body, relation))
     }
 
     /// Queues an image, or `None` when [`MAX_UNSENT_IMAGES`] images are
@@ -134,9 +147,9 @@ impl Outbox {
     }
 
     fn push(&mut self, room_id: &str, content: Content) -> Option<PendingMessage> {
-        let (kind, body, image) = match content {
-            Content::Text(body) => (PendingKind::Text, body, None),
-            Content::Image(image) => (PendingKind::Image, Zeroizing::default(), Some(image)),
+        let (kind, body, relation, image) = match content {
+            Content::Text(body, relation) => (PendingKind::Text, body, relation, None),
+            Content::Image(image) => (PendingKind::Image, Zeroizing::default(), None, Some(image)),
         };
         let unsent: Vec<&Entry> = self
             .entries
@@ -170,6 +183,7 @@ impl Outbox {
             room_id: room_id.to_owned(),
             kind,
             body,
+            relation,
             image,
             size,
             transaction_id: TransactionId::new(),
@@ -214,7 +228,7 @@ impl Outbox {
         entry.state = PendingState::Sending;
         let content = match &entry.image {
             Some(image) => Content::Image(image.clone()),
-            None => Content::Text(entry.body.clone()),
+            None => Content::Text(entry.body.clone(), entry.relation.clone()),
         };
         Some(Job {
             local_id: entry.local_id,
@@ -326,9 +340,9 @@ mod tests {
     #[test]
     fn given_a_failed_message_then_later_ones_in_its_room_wait_and_a_retry_keeps_its_id() {
         let mut outbox = Outbox::default();
-        let a1 = outbox.queue("!a:s", body("a1")).unwrap().local_id;
-        let a2 = outbox.queue("!a:s", body("a2")).unwrap().local_id;
-        let b1 = outbox.queue("!b:s", body("b1")).unwrap().local_id;
+        let a1 = outbox.queue("!a:s", body("a1"), None).unwrap().local_id;
+        let a2 = outbox.queue("!a:s", body("a2"), None).unwrap().local_id;
+        let b1 = outbox.queue("!b:s", body("b1"), None).unwrap().local_id;
         let first = outbox.next_job().unwrap();
         assert_eq!(first.local_id, a1);
         let id = first.transaction_id.clone();
@@ -343,6 +357,26 @@ mod tests {
         assert_eq!((again.local_id, again.transaction_id), (a1, id), "same ID");
         outbox.finish(a1, SendOutcome::Sent("$a1".into()));
         assert_eq!(outbox.next_job().unwrap().local_id, a2);
+    }
+
+    /// GIVEN a reply WHEN it is sent, fails and is sent again THEN each job
+    /// carries the event it replies to.
+    #[test]
+    fn given_a_reply_then_each_send_carries_its_relation() {
+        let mut outbox = Outbox::default();
+        let reply = Relation::Reply(OwnedEventId::try_from("$original").unwrap());
+        let id = outbox
+            .queue("!a:s", body("yes"), Some(reply.clone()))
+            .unwrap()
+            .local_id;
+        let relation = |job: Job| match job.content {
+            Content::Text(_, relation) => relation,
+            Content::Image(_) => panic!("text"),
+        };
+        assert_eq!(relation(outbox.next_job().unwrap()), Some(reply.clone()));
+        outbox.finish(id, SendOutcome::Unknown);
+        outbox.retry(id);
+        assert_eq!(relation(outbox.next_job().unwrap()), Some(reply));
     }
 
     fn image(budgets: &Arc<persephone_media_protocol::ResourceBudgets>) -> Arc<ImageUpload> {
@@ -363,7 +397,7 @@ mod tests {
             "queued"
         );
         assert_eq!(
-            outbox.queue("!a:s", body("text")).unwrap().kind,
+            outbox.queue("!a:s", body("text"), None).unwrap().kind,
             PendingKind::Text
         );
         let job = outbox.next_job().unwrap();
@@ -436,7 +470,7 @@ mod tests {
     #[test]
     fn given_each_state_then_retry_and_discard_apply_only_where_safe() {
         let mut outbox = Outbox::default();
-        let id = outbox.queue("!a:s", body("x")).unwrap().local_id;
+        let id = outbox.queue("!a:s", body("x"), None).unwrap().local_id;
         assert_eq!(outbox.retry(id), None, "queued: nothing to retry");
         outbox.next_job();
         assert_eq!(outbox.discard(id), None, "sending: not discarded");
@@ -460,9 +494,12 @@ mod tests {
     fn given_the_limits_then_unsent_messages_are_capped_and_old_sent_ones_make_room() {
         let mut outbox = Outbox::default();
         for n in 0..MAX_UNSENT {
-            assert!(outbox.queue(&format!("!r{n}:s"), body("x")).is_some());
+            assert!(outbox.queue(&format!("!r{n}:s"), body("x"), None).is_some());
         }
-        assert!(outbox.queue("!r:s", body("x")).is_none(), "unsent capped");
+        assert!(
+            outbox.queue("!r:s", body("x"), None).is_none(),
+            "unsent capped"
+        );
         for _ in 0..MAX_UNSENT {
             let job = outbox.next_job().unwrap();
             outbox.finish(
@@ -471,12 +508,12 @@ mod tests {
             );
         }
         for n in 0..MAX_UNSENT {
-            assert!(outbox.queue(&format!("!s{n}:s"), body("y")).is_some());
+            assert!(outbox.queue(&format!("!s{n}:s"), body("y"), None).is_some());
         }
         // Full: one more drops the oldest sent message.
         let job = outbox.next_job().unwrap();
         outbox.finish(job.local_id, SendOutcome::Sent("$late".into()));
-        assert!(outbox.queue("!t:s", body("z")).is_some());
+        assert!(outbox.queue("!t:s", body("z"), None).is_some());
         assert!(outbox.for_room("!r0:s").is_empty(), "oldest sent dropped");
         assert_eq!(outbox.for_room("!r1:s").len(), 1);
     }
@@ -488,11 +525,11 @@ mod tests {
     fn given_each_state_then_has_job_only_looks() {
         let mut outbox = Outbox::default();
         assert!(!outbox.has_job());
-        let id = outbox.queue("!a:s", body("x")).unwrap().local_id;
+        let id = outbox.queue("!a:s", body("x"), None).unwrap().local_id;
         assert!(outbox.has_job());
         assert!(outbox.has_job(), "asking twice changes nothing");
         assert_eq!(outbox.for_room("!a:s")[0].state, PendingState::Queued);
-        outbox.queue("!a:s", body("y")).unwrap();
+        outbox.queue("!a:s", body("y"), None).unwrap();
         assert_eq!(outbox.next_job().unwrap().local_id, id);
         assert!(!outbox.has_job(), "the next one in the room waits");
         outbox.finish(id, SendOutcome::Failed(SendFailure::Failed));
@@ -517,7 +554,7 @@ mod tests {
         };
         let mut outbox = Outbox::default();
         let mut fitted = 0;
-        while outbox.queue("!a:s", body(&large)).is_some() {
+        while outbox.queue("!a:s", body(&large), None).is_some() {
             fitted += 1;
         }
         assert_eq!(fitted, MAX_KEPT_BYTES / entry_size("!a:s", &large));
@@ -533,7 +570,7 @@ mod tests {
         }
         let first = outbox.for_room("!a:s")[0].local_id;
         assert!(
-            outbox.queue("!a:s", body(&large)).is_some(),
+            outbox.queue("!a:s", body(&large), None).is_some(),
             "sent ones make room"
         );
         assert!(total(&outbox) <= MAX_KEPT_BYTES);
@@ -582,7 +619,7 @@ mod tests {
         // Fill with sent messages until the budget makes room, then with
         // unsent ones until it refuses.
         for _ in 0..MAX_KEPT * 2 {
-            if outbox.queue(&room, body(&text)).is_none() {
+            if outbox.queue(&room, body(&text), None).is_none() {
                 break;
             }
             let job = outbox.next_job().unwrap();
@@ -598,12 +635,12 @@ mod tests {
             );
         };
         fits(&outbox);
-        while outbox.queue(&room, body(&text)).is_some() {}
+        while outbox.queue(&room, body(&text), None).is_some() {}
         fits(&outbox);
         // And with many small messages, the count limit holds it.
         let mut outbox = Outbox::default();
         for _ in 0..MAX_KEPT * 2 {
-            if outbox.queue(&room, body("x")).is_none() {
+            if outbox.queue(&room, body("x"), None).is_none() {
                 break;
             }
             let job = outbox.next_job().unwrap();

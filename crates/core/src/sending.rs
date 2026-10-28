@@ -15,6 +15,9 @@
 //!   without retries (`account.rs`), so nothing is retried behind the user.
 //! * Consent is a list of room IDs in an encrypted crypto-store custom value,
 //!   at most [`MAX_CONSENTED_ROOMS`].
+//! * A reply carries `m.in_reply_to` and no quoted fallback (the
+//!   specification dropped it in v1.13), so the quoted text is not copied
+//!   out of an encrypted room's history into a new event.
 //! * An image goes through the same checks, then the SDK's attachment send:
 //!   the SDK uploads it encrypted in an encrypted room (and fails rather than
 //!   upload it in plain), and sends the event with the image's size, MIME
@@ -23,12 +26,18 @@
 
 use crate::identities;
 use crate::media::ImageUpload;
-use crate::outbox::SendOutcome;
+use crate::outbox::{Relation, SendOutcome};
 use crate::store::Stores;
 use matrix_sdk::{
     Client, HttpError, Room, RoomState,
     attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo},
-    ruma::{OwnedTransactionId, RoomId, UInt, events::room::message::RoomMessageEventContent},
+    ruma::{
+        OwnedTransactionId, RoomId, UInt,
+        events::{
+            relation::{InReplyTo, Reply},
+            room::message::{self, RoomMessageEventContent},
+        },
+    },
 };
 use matrix_sdk_crypto::{OlmError, SessionRecipientCollectionError, store::CryptoStore};
 use persephone_contracts::SendFailure;
@@ -75,11 +84,24 @@ async fn checked_room(
     Ok(room)
 }
 
+/// The content of a text message with `body`, related to an event by
+/// `relation`.
+pub fn text_content(body: &str, relation: Option<&Relation>) -> RoomMessageEventContent {
+    let mut content = RoomMessageEventContent::text_plain(body);
+    content.relates_to = relation.map(|relation| match relation {
+        Relation::Reply(event_id) => {
+            message::Relation::Reply(Reply::new(InReplyTo::new(event_id.clone())))
+        }
+    });
+    content
+}
+
 /// Sends `body` as a text message with `transaction_id`.
 pub async fn send(
     client: &Client,
     room_id: &str,
     body: &str,
+    relation: Option<&Relation>,
     transaction_id: OwnedTransactionId,
     consented: bool,
 ) -> SendOutcome {
@@ -88,7 +110,7 @@ pub async fn send(
         Err(outcome) => return outcome,
     };
     match room
-        .send(RoomMessageEventContent::text_plain(body))
+        .send(text_content(body, relation))
         .with_transaction_id(transaction_id)
         .await
     {
@@ -202,4 +224,29 @@ pub async fn allow_plaintext(stores: &Stores, room_id: &str) -> bool {
         .set_custom_value(CONSENT_KEY, bytes)
         .await
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matrix_sdk::ruma::OwnedEventId;
+
+    /// GIVEN a reply WHEN its content is built THEN it names the event in
+    /// `m.in_reply_to` and the body is only the user's text, with no quoted
+    /// fallback.
+    #[test]
+    fn given_a_reply_then_the_content_relates_to_it_without_a_fallback() {
+        let event_id = OwnedEventId::try_from("$original:example.org").unwrap();
+        let content =
+            serde_json::to_value(text_content("yes", Some(&Relation::Reply(event_id)))).unwrap();
+        assert_eq!(content["body"], "yes");
+        assert_eq!(
+            content["m.relates_to"]["m.in_reply_to"]["event_id"],
+            "$original:example.org"
+        );
+        assert!(content.get("formatted_body").is_none());
+
+        let plain = serde_json::to_value(text_content("hi", None)).unwrap();
+        assert!(plain.get("m.relates_to").is_none());
+    }
 }

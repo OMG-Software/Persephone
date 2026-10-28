@@ -48,3 +48,34 @@ export function mergeNewest(
   while (kept[0]?.kind === 'gap') kept.shift();
   return [gap, ...kept];
 }
+
+/** Most characters of a quoted message shown above a reply. */
+export const MAX_QUOTE_CHARS = 140;
+
+/** What a reply shows of the message it answers. */
+export type Quote = { sender: string; text: string };
+
+/**
+ * The quote of the event `eventId` from the loaded `items`, or `null` when
+ * it is not loaded. Only what this page shows of the event is quoted (its
+ * first line, cut to `MAX_QUOTE_CHARS`), never a sender's copy of it.
+ */
+export function quoteOf(items: TimelineItem[], eventId: string): Quote | null {
+  const item = items.find((entry) => entry.kind !== 'gap' && entry.event_id === eventId);
+  if (!item || item.kind === 'gap') return null;
+  switch (item.kind) {
+    case 'message': {
+      const line = item.body.split('\n').find((part) => part.trim() !== '') ?? '';
+      const chars = Array.from(line.trim());
+      const text =
+        chars.length > MAX_QUOTE_CHARS ? chars.slice(0, MAX_QUOTE_CHARS).join('') + '…' : chars.join('');
+      return { sender: item.sender, text };
+    }
+    case 'image':
+      return { sender: item.sender, text: 'Image' };
+    case 'notice':
+      return { sender: item.sender, text: 'A message that is not shown' };
+    case 'state':
+      return { sender: item.sender, text: 'A change to the room' };
+  }
+}

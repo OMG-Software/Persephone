@@ -334,6 +334,14 @@ fn valid_event_id(event_id: &str) -> bool {
     event_id.len() <= MAX_EVENT_ID_BYTES && matrix_sdk::ruma::EventId::parse(event_id).is_ok()
 }
 
+/// The event ID, when the SDK accepts it.
+fn parse_event_id(event_id: &str) -> Option<matrix_sdk::ruma::OwnedEventId> {
+    if event_id.len() > MAX_EVENT_ID_BYTES {
+        return None;
+    }
+    matrix_sdk::ruma::OwnedEventId::try_from(event_id).ok()
+}
+
 /// A long call's result as the reply's JSON value.
 fn json<T: Serialize>(result: Result<T, ErrorCode>) -> Result<serde_json::Value, ErrorCode> {
     result.and_then(|value| serde_json::to_value(value).map_err(|_| ErrorCode::Internal))
@@ -623,7 +631,11 @@ impl Core {
                 ok(&self.session.set_up_encryption(self.credentials.clone()))
             }
             Call::RecoverWithKey {} => ok(&self.session.recover_with_key(self.credentials.clone())),
-            Call::SendMessage { room_id, body } => self.send_message(room_id, body),
+            Call::SendMessage {
+                room_id,
+                body,
+                reply_to,
+            } => self.send_message(room_id, body, reply_to.as_deref()),
             Call::PendingMessages { room_id } => {
                 if valid_room_id(room_id) {
                     bounded(&self.session.pending_messages(room_id))
@@ -1373,13 +1385,18 @@ impl Core {
         }
     }
 
-    fn send_message(&self, room_id: &str, body: &str) -> Outcome {
+    fn send_message(&self, room_id: &str, body: &str, reply_to: Option<&str>) -> Outcome {
         if !valid_room_id(room_id) || !valid_body(body) {
             return Outcome::Error(ErrorCode::InvalidArgument);
         }
+        let relation = match reply_to.map(parse_event_id) {
+            None => None,
+            Some(Some(event_id)) => Some(outbox::Relation::Reply(event_id)),
+            Some(None) => return Outcome::Error(ErrorCode::InvalidArgument),
+        };
         match self
             .session
-            .send_message(room_id, zeroize::Zeroizing::new(body.to_owned()))
+            .send_message(room_id, zeroize::Zeroizing::new(body.to_owned()), relation)
         {
             Ok(queued) => ok(&queued),
             Err(session::SendRefusal::Full) => Outcome::Error(ErrorCode::LimitExceeded),
