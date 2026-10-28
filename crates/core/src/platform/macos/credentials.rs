@@ -351,6 +351,19 @@ impl CredentialSource for NativePrompt {
         let (caption, message) = prompt_text::identity_change(user_id, was_verified)?;
         yes(prompt(&question_alert(caption, &message))?.response)
     }
+
+    fn confirm_recovery_key_change(&self) -> Result<bool, PromptError> {
+        let (caption, message) = prompt_text::RECOVERY_KEY_CHANGE;
+        yes(prompt(&question_alert(caption, message))?.response)
+    }
+
+    /// Any panel error is `Failed`, so the key is reported as not saved; a
+    /// cancel stays `Ok(None)`. The key window just ran, so a missing main
+    /// loop is a failure here too, not a platform without the dialog.
+    fn choose_recovery_key_file(&self) -> Result<Option<std::path::PathBuf>, PromptError> {
+        let (title, suggested) = prompt_text::SAVE_RECOVERY_KEY;
+        super::pick::save_panel(title, suggested).map_err(|_| PromptError::Failed)
+    }
 }
 
 /// Asks whether to start the failed window again; `true` only for Retry.

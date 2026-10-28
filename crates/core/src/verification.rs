@@ -39,6 +39,9 @@ pub enum Action {
     Start,
     /// Verify the contact of this direct-message room.
     StartContact(String),
+    /// Verify another of the account's devices, by its ID, from this
+    /// verified device.
+    StartDevice(String),
     Accept(String),
     Confirm(String),
     Cancel(String),
@@ -254,6 +257,59 @@ pub async fn start(client: &Client, user_id: &UserId) -> Option<Flow> {
         .ok()??;
     let request = identity.request_verification().await.ok()?;
     Some(Flow {
+        request,
+        sas: None,
+        refreshed: false,
+    })
+}
+
+/// Whether this device holds the account's self-signing key, which a match
+/// with another of the account's devices signs that device with.
+pub async fn can_sign_devices(client: &Client) -> bool {
+    client
+        .encryption()
+        .cross_signing_status()
+        .await
+        .is_some_and(|status| status.has_self_signing)
+}
+
+/// A device ID the page sent: within the limit, printable ASCII. Device IDs
+/// are opaque, so nothing more is checked; the homeserver's list decides.
+pub fn valid_device_id(device_id: &str) -> bool {
+    !device_id.is_empty()
+        && device_id.len() <= persephone_core_protocol::MAX_DEVICE_ID_BYTES
+        && device_id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Asks one other device of this account to verify each other. The request
+/// goes to that device only. Refused for this device itself, for a device
+/// the store does not know, and when this device cannot sign it.
+pub async fn start_device(
+    client: &Client,
+    user_id: &UserId,
+    device_id: &str,
+) -> Result<Flow, SecurityError> {
+    if client
+        .device_id()
+        .is_some_and(|own| own.as_str() == device_id)
+    {
+        return Err(SecurityError::DeviceNotFound);
+    }
+    if !can_sign_devices(client).await {
+        return Err(SecurityError::CannotSignDevices);
+    }
+    let encryption = client.encryption();
+    let device_id: matrix_sdk::ruma::OwnedDeviceId = device_id.into();
+    let device = encryption
+        .get_device(user_id, &device_id)
+        .await
+        .map_err(|_| SecurityError::Failed)?
+        .ok_or(SecurityError::DeviceNotFound)?;
+    let request = device
+        .request_verification()
+        .await
+        .map_err(|_| SecurityError::Failed)?;
+    Ok(Flow {
         request,
         sas: None,
         refreshed: false,

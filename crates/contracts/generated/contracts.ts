@@ -31,7 +31,7 @@ export type RecoveryState = "unknown" | "disabled" | "incomplete" | "enabled";
 
 export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_confirmation" | "working";
 
-export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "failed";
+export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "cannot_sign_devices" | "device_not_found" | "recovery_key_not_saved" | "failed";
 
 export type VerificationPhase = "incoming" | "waiting" | "compare" | "confirmed" | "done" | "cancelled";
 
@@ -251,7 +251,45 @@ export type AccountSettings = {
 /**
  * Enter sends a message; otherwise it starts a new line. On by default.
  */
-enterSends: boolean, };
+enterSends: boolean, 
+/**
+ * The size of message text, in percent of the normal size, from
+ * [`TEXT_PERCENT_MIN`] to [`CHAT_TEXT_PERCENT_MAX`]. 100 by default.
+ */
+chatTextPercent: number, 
+/**
+ * The size of the rest of the interface, in percent of the normal size,
+ * from [`TEXT_PERCENT_MIN`] to [`INTERFACE_TEXT_PERCENT_MAX`]. 100 by
+ * default.
+ */
+interfaceTextPercent: number, 
+/**
+ * Show a desktop notification (a toast) for a message that notifies
+ * under the account's push rules, with the sender and room only, never
+ * the text. Off by default.
+ */
+desktopNotifications: boolean, };
+
+export type NotificationLevel = "all" | "mentions" | "none" | "custom";
+
+export type NotificationSettings = { level: NotificationLevel, };
+
+export type ThreePidMedium = "email" | "msisdn";
+
+export type ThreePid = { medium: ThreePidMedium, address: string, };
+
+export type ThreePidList = { threePids: Array<ThreePid>, truncated: boolean, 
+/**
+ * The homeserver lets this account add and remove them (its
+ * `m.3pid_changes` capability, on unless it says otherwise).
+ */
+canChange: boolean, 
+/**
+ * An address is waiting to be confirmed: `add_three_pid` adds it.
+ */
+pending: ThreePid | null, };
+
+export type AccountChange = "done" | "token_sent" | "cancelled" | "unsupported" | "invalid_password" | "weak_password" | "not_confirmed" | "in_use" | "denied" | "medium_not_supported" | "changes_disabled" | "unsupported_auth" | "nothing_pending" | "rate_limited" | "unreachable" | "failed";
 
 export type ProfileSlot = { slot: number, 
 /**

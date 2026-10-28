@@ -10,8 +10,12 @@
 //! asked again to set up cross-signing and the recovery key are entered in the
 //! core's own dialog, and a new recovery key is shown in a native window,
 //! never in the page. So is the profile passphrase (ADR-0006), and the
-//! warning that confirms a profile reset.
+//! warning that confirms a profile reset. Changing the password (ADR-0019),
+//! confirming a phone number (ADR-0020) and changing the recovery key
+//! (ADR-0021) ask in the core's windows too, and a new recovery key is saved
+//! to a file chosen in the core's own Save dialog.
 
+use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 /// Longest username accepted (a Matrix user ID is at most 255 bytes).
@@ -42,6 +46,9 @@ pub const MAX_RECOVERY_KEY_CHARS: usize = 1024;
 /// Longest registration token accepted (the Matrix limit is 64).
 pub const MAX_REGISTRATION_TOKEN_CHARS: usize = 64;
 
+/// Longest phone confirmation code accepted.
+pub const MAX_PHONE_CODE_CHARS: usize = 32;
+
 /// A secret the core asks for after sign-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecretPrompt<'a> {
@@ -62,6 +69,27 @@ pub enum SecretPrompt<'a> {
     },
     /// The registration token the homeserver asks for.
     RegistrationToken { host: &'a str },
+    /// The account's current password, to approve a change to the account.
+    CurrentPassword {
+        user_id: &'a str,
+        host: &'a str,
+        purpose: PasswordPurpose,
+    },
+    /// A new password for the signed-in account.
+    ChangedPassword {
+        user_id: &'a str,
+        host: &'a str,
+        step: NewPassword,
+    },
+    /// The code the homeserver sent to a phone number being added.
+    PhoneCode { host: &'a str },
+}
+
+/// What the current password is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasswordPurpose {
+    ChangePassword,
+    AddThreePid,
 }
 
 /// Which step of choosing a new account password a prompt is for.
@@ -108,6 +136,20 @@ pub trait CredentialSource: Send + Sync {
     /// Asks whether to delete this computer's profile. `Ok(true)` only for an
     /// explicit yes. Unsupported unless a source provides it.
     fn confirm_reset(&self) -> Result<bool, PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
+    /// Asks whether to replace the recovery key (ADR-0021): the old one
+    /// stops working. `Ok(true)` only for an explicit yes. Unsupported unless
+    /// a source provides it.
+    fn confirm_recovery_key_change(&self) -> Result<bool, PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
+    /// Asks where to save a new recovery key, in the core's own Save dialog.
+    /// `Ok(None)` when the user chose not to save it. Unsupported unless a
+    /// source provides it.
+    fn choose_recovery_key_file(&self) -> Result<Option<PathBuf>, PromptError> {
         Err(PromptError::Unsupported)
     }
 
@@ -172,8 +214,9 @@ pub fn from_wide(username: &[u16], password: &[u16]) -> Result<Credentials, Prom
 #[cfg(feature = "dev-disposable-servers")]
 pub mod dev {
     use super::{
-        CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS,
-        MAX_REGISTRATION_TOKEN_CHARS, PromptError, SecretPrompt, checked_secret,
+        CredentialSource, Credentials, MAX_PASSWORD_CHARS, MAX_PHONE_CODE_CHARS,
+        MAX_RECOVERY_KEY_CHARS, MAX_REGISTRATION_TOKEN_CHARS, PromptError, SecretPrompt,
+        checked_secret,
     };
     use std::path::{Component, Path, PathBuf};
     use zeroize::Zeroizing;
@@ -189,6 +232,12 @@ pub mod dev {
         /// Answers the registration-token prompt for this homeserver.
         #[serde(default)]
         registration_token: Option<String>,
+        /// Answers the new-password prompts of a password change.
+        #[serde(default)]
+        new_password: Option<String>,
+        /// Answers the phone confirmation code prompt.
+        #[serde(default)]
+        phone_code: Option<String>,
     }
 
     pub struct HarnessProfile {
@@ -323,6 +372,7 @@ pub mod dev {
         fn ask_secret(&self, prompt: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
             match prompt {
                 SecretPrompt::Password { host, .. }
+                | SecretPrompt::CurrentPassword { host, .. }
                 | SecretPrompt::NewAccountPassword { host, .. } => checked_secret(
                     Zeroizing::new(self.entry(host)?.password),
                     MAX_PASSWORD_CHARS,
@@ -334,6 +384,18 @@ pub mod dev {
                             .ok_or(PromptError::Cancelled)?,
                     ),
                     MAX_REGISTRATION_TOKEN_CHARS,
+                ),
+                SecretPrompt::ChangedPassword { host, .. } => checked_secret(
+                    Zeroizing::new(
+                        self.entry(host)?
+                            .new_password
+                            .ok_or(PromptError::Cancelled)?,
+                    ),
+                    MAX_PASSWORD_CHARS,
+                ),
+                SecretPrompt::PhoneCode { host } => checked_secret(
+                    Zeroizing::new(self.entry(host)?.phone_code.ok_or(PromptError::Cancelled)?),
+                    MAX_PHONE_CODE_CHARS,
                 ),
                 SecretPrompt::RecoveryKey { .. } => {
                     Self::read_secret(&self.recovery_file()?, MAX_RECOVERY_KEY_CHARS)
@@ -349,6 +411,16 @@ pub mod dev {
 
         fn confirm_reset(&self) -> Result<bool, PromptError> {
             super::platform().confirm_reset()
+        }
+
+        /// The native window, like the reset warning.
+        fn confirm_recovery_key_change(&self) -> Result<bool, PromptError> {
+            super::platform().confirm_recovery_key_change()
+        }
+
+        /// The native Save dialog.
+        fn choose_recovery_key_file(&self) -> Result<Option<std::path::PathBuf>, PromptError> {
+            super::platform().choose_recovery_key_file()
         }
 
         fn confirm_identity_change(
@@ -444,6 +516,21 @@ mod tests {
         assert_eq!(
             Unsupported.show_recovery_key("@a:s", "key"),
             Err(PromptError::Unsupported)
+        );
+        // So do the recovery-key change and its Save dialog.
+        assert_eq!(
+            Unsupported.confirm_recovery_key_change(),
+            Err(PromptError::Unsupported)
+        );
+        assert_eq!(
+            Unsupported.choose_recovery_key_file(),
+            Err(PromptError::Unsupported)
+        );
+        assert_eq!(
+            Unsupported
+                .ask_secret(SecretPrompt::PhoneCode { host: "s" })
+                .err(),
+            Some(PromptError::Unsupported)
         );
     }
 

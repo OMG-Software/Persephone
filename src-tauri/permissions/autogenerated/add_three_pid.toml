@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-three-pid"
+description = "Enables the add_three_pid command without any pre-configured scope."
+commands.allow = ["add_three_pid"]
+
+[[permission]]
+identifier = "deny-add-three-pid"
+description = "Denies the add_three_pid command without any pre-configured scope."
+commands.deny = ["add_three_pid"]

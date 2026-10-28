@@ -25,6 +25,10 @@
 * [0016 - Create encrypted rooms and answer every invitation](0016-create-encrypted-rooms-and-answer-every-invitation.md)
 * [0017 - Configure joined rooms through one closed change call](0017-configure-joined-rooms-through-one-closed-change-call.md)
 * [0018 - Register accounts with secrets entered in the core](0018-register-accounts-with-secrets-in-the-core.md)
+* [0019 - Change the password with secrets entered in the core](0019-change-the-password-with-secrets-entered-in-the-core.md)
+* [0020 - Add email addresses and phone numbers without an identity server](0020-add-email-addresses-and-phone-numbers-without-an-identity-server.md)
+* [0021 - Save the recovery key to a file from the core](0021-save-the-recovery-key-to-a-file-from-the-core.md)
+* [0022 - Notify through push rules and content-free desktop notifications](0022-notify-through-push-rules-and-content-free-desktop-notifications.md)
 
 ## Superseded Records
 

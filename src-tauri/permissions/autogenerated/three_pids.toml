@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-three-pids"
+description = "Enables the three_pids command without any pre-configured scope."
+commands.allow = ["three_pids"]
+
+[[permission]]
+identifier = "deny-three-pids"
+description = "Denies the three_pids command without any pre-configured scope."
+commands.deny = ["three_pids"]

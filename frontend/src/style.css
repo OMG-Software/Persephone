@@ -90,6 +90,14 @@ main {
   height: 100%;
 }
 
+/* The account's interface text size zooms the whole interface; message text
+   has its own size (--chat-scale, already divided by this zoom), so the two
+   settings do not multiply. The percentage height above is not zoomed, so
+   the window stays filled. */
+main {
+  zoom: var(--ui-scale, 1);
+}
+
 body {
   min-width: 20rem;
   margin: 0;
@@ -871,7 +879,7 @@ kbd {
 
 .message-body p,
 .pending p[dir='auto'] {
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--chat-scale, 1));
   line-height: 1.5;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -1040,7 +1048,7 @@ kbd {
   border: 0;
   outline: none;
   background: transparent;
-  font-size: 14.5px;
+  font-size: calc(14.5px * var(--chat-scale, 1));
   line-height: 1.4;
   resize: none;
   field-sizing: content;
@@ -2364,4 +2372,32 @@ mark {
   color: var(--ink2);
   font-size: 13.5px;
   text-align: center;
+}
+
+/* Account and preferences pages */
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.choices legend {
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.add-address {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.add-address .country {
+  flex: 0 0 64px;
+  text-transform: uppercase;
 }

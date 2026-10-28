@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import markUrl from './assets/mark.svg';
+  import AccountPage from './AccountPage.svelte';
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
   import Devices from './Devices.svelte';
@@ -10,6 +11,7 @@
   import JumpPalette from './JumpPalette.svelte';
   import NewConversation from './NewConversation.svelte';
   import NewRoom from './NewRoom.svelte';
+  import Preferences from './Preferences.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
   import RoomSettings from './RoomSettings.svelte';
   import Security from './Security.svelte';
@@ -21,7 +23,7 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
-  import { DEFAULT_SETTINGS, SettingsKeeper } from './preferences';
+  import { DEFAULT_SETTINGS, SettingsKeeper, textScale } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
   import { mergeNewest } from './timeline';
@@ -42,6 +44,8 @@
     setUpEncryption,
     setUpRecovery,
     verifyThisDevice,
+    verifyDevice,
+    changeRecoveryKey,
     acceptVerification,
     confirmVerification,
     cancelVerification,
@@ -89,11 +93,13 @@
   // whether the last attempt to find out failed.
   let changes = $state<RoomIdentityChanges | null>(null);
   let changesFailed = $state(false);
-  // The room whose contact this page last asked to verify, and the room in
-  // which it last asked to accept a new identity: the core reports why that
-  // failed in the security status, shown in that room, each in its own place.
+  // The room whose contact this page last asked to verify, the room in which
+  // it last asked to accept a new identity, and the session it last asked to
+  // verify: the core reports why that failed in the security status, shown
+  // in that room or on the Sessions page, each in its own place.
   let contactAsked = $state<string | null>(null);
   let identityAsked = $state<string | null>(null);
+  let deviceAsked = $state<string | null>(null);
   // Messages sent from this device in the selected room.
   let pending = $state<PendingMessage[]>([]);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
@@ -142,6 +148,7 @@
   // they load and while no account is signed in.
   let settings = $state<AccountSettings>(DEFAULT_SETTINGS);
   let settingsFailure = $state<string | null>(null);
+  const scale = $derived(textScale(settings));
   const settingsKeeper = new SettingsKeeper(
     { load: accountSettings, save: setAccountSettings },
     (next, failure) => {
@@ -253,6 +260,14 @@
       contactAsked === selected &&
       security?.operation === 'idle' &&
       security.error
+      ? securityErrorText[security.error]
+      : null
+  );
+  // Why the core could not start verifying the session the Sessions page
+  // asked for (such as `cannot_sign_devices`); a flow that did start has its
+  // own screen.
+  const deviceFailure = $derived(
+    deviceAsked !== null && flow === null && security?.operation === 'idle' && security.error
       ? securityErrorText[security.error]
       : null
   );
@@ -423,6 +438,7 @@
     changesFailed = false;
     contactAsked = null;
     identityAsked = null;
+    deviceAsked = null;
     confirmingPlain = null;
     // The core dropped every image handle with the session.
     imageDraft = null;
@@ -536,12 +552,13 @@
     }
   }
 
-  // `asked` names the room whose contact this action verifies, or in which
-  // it accepts a new identity; every other action clears both, so a later
+  // `asked` names the room whose contact this action verifies, the room in
+  // which it accepts a new identity, or the session it verifies; every other
+  // action clears all three, so a later
   // failure is not shown in that room. `explain` turns a refusal into text.
   async function startSecurity(
     start: () => Promise<SecurityStatus>,
-    asked: { room: string; kind: 'contact' | 'identity' } | null = null,
+    asked: { room: string; kind: 'contact' | 'identity' } | { device: string; kind: 'device' } | null = null,
     explain: (reason: unknown) => string = describe
   ) {
     if (securityBusy) return;
@@ -549,6 +566,7 @@
     securityFailure = null;
     contactAsked = asked?.kind === 'contact' ? asked.room : null;
     identityAsked = asked?.kind === 'identity' ? asked.room : null;
+    deviceAsked = asked?.kind === 'device' ? asked.device : null;
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {
@@ -1000,7 +1018,9 @@
   </TipButton>
 {/snippet}
 
-<main>
+<!-- The account's text sizes: the interface zooms as a whole, and message
+     text has its own size (style.css). -->
+<main style:--ui-scale={scale.interface} style:--chat-scale={scale.chat}>
   {#if !status}
     <div class="centred">
       <section class="auth-card" aria-label="Persephone">
@@ -1061,9 +1081,28 @@
             <p class="lede">No account is signed in. All rooms and messages here are synthetic test data.</p>
           </section>
         {/if}
+      {:else if settingsTab === 'account'}
+        {#if signedIn}
+          <AccountPage native={mac ? 'macOS' : 'Windows'} />
+        {:else}
+          <section class="settings-page" aria-labelledby="account-heading">
+            <h2 id="account-heading">Account</h2>
+            <p class="lede">No account is signed in, so there is no password or address to change.</p>
+          </section>
+        {/if}
       {:else if settingsTab === 'devices'}
         {#if signedIn}
-          <Devices />
+          <Devices
+            canVerify={security?.identity === 'verified'}
+            busy={securityBusy}
+            onverify={(deviceId) =>
+              startSecurity(() => verifyDevice(deviceId), { device: deviceId, kind: 'device' })}
+          />
+          {#if securityFailure}
+            <p role="alert" class="error">{securityFailure}</p>
+          {:else if deviceFailure}
+            <p role="alert" class="error">{deviceFailure}</p>
+          {/if}
         {:else}
           <section class="settings-page" aria-labelledby="devices-heading">
             <h2 id="devices-heading">Sessions</h2>
@@ -1071,34 +1110,19 @@
           </section>
         {/if}
       {:else if settingsTab === 'preferences'}
-        <section class="settings-page" aria-labelledby="preferences-heading">
-          <h2 id="preferences-heading">Preferences</h2>
-          {#if signedIn}
-            <p class="lede">These settings belong to this account and are kept in its encrypted profile.</p>
-            <div class="panel">
-              <label class="switch-row">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={settings.enterSends}
-                  onchange={(event) =>
-                    settingsKeeper.change({ ...settings, enterSends: event.currentTarget.checked })}
-                />
-                <span>Enter sends the message</span>
-              </label>
-              <p class="note">
-                {settings.enterSends
-                  ? 'Enter sends. Shift+Enter starts a new line.'
-                  : `Enter starts a new line. ${mac ? '⌘Enter' : 'Ctrl+Enter'} sends.`}
-              </p>
-            </div>
-            {#if settingsFailure}
-              <p role="alert" class="error">{settingsFailure}</p>
-            {/if}
-          {:else}
+        {#if signedIn}
+          <Preferences
+            {settings}
+            failure={settingsFailure}
+            {mac}
+            onchange={(patch) => settingsKeeper.change(patch)}
+          />
+        {:else}
+          <section class="settings-page" aria-labelledby="preferences-heading">
+            <h2 id="preferences-heading">Preferences</h2>
             <p class="lede">No account is signed in. Settings belong to an account, so there are none to change.</p>
-          {/if}
-        </section>
+          </section>
+        {/if}
       {:else if settingsTab === 'accounts'}
         <Accounts />
         {#if !status || status.store === 'not_configured'}
@@ -1116,6 +1140,7 @@
             onrecover={() => startSecurity(recoverWithKey)}
             onsetuprecovery={() => startSecurity(setUpRecovery)}
             onverify={() => startSecurity(verifyThisDevice)}
+            onchangekey={() => startSecurity(changeRecoveryKey)}
           />
         {:else}
           <section class="settings-page" aria-labelledby="security-heading">

@@ -263,11 +263,43 @@ impl CoreTransport for FakeCore {
                 "Al" => Ok(serde_json::json!({"displayName": "Al"})),
                 _ => Err(CoreError::Core(ErrorCode::Rejected)),
             },
-            Call::AccountSettings {} => Ok(serde_json::json!({"enterSends": false})),
-            Call::SetAccountSettings { enter_sends } => match enter_sends {
+            Call::AccountSettings {} => Ok(serde_json::json!({
+                "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
+                "desktopNotifications": true
+            })),
+            Call::SetAccountSettings { enter_sends, .. } => match enter_sends {
                 true => Ok(serde_json::Value::Null),
                 false => Err(CoreError::Core(ErrorCode::Locked)),
             },
+            Call::ChangePassword { sign_out_others } => match sign_out_others {
+                true => Ok(serde_json::json!("done")),
+                // A code outside the contract must not reach the page.
+                false => Ok(serde_json::json!("password_was_hunter2")),
+            },
+            Call::ThreePids {} => Ok(serde_json::json!({
+                "threePids": [{"medium": "email", "address": "<b>a</b>@example.invalid"}],
+                "truncated": false, "canChange": true, "pending": null
+            })),
+            Call::RequestEmailToken { email } => match email.as_str() {
+                "a@example.invalid" => Ok(serde_json::json!("token_sent")),
+                _ => Ok(serde_json::json!("medium_not_supported")),
+            },
+            Call::RequestPhoneToken { .. } => Ok(serde_json::json!("token_sent")),
+            Call::AddThreePid {} => Ok(serde_json::json!("not_confirmed")),
+            Call::RemoveThreePid { .. } => Ok(serde_json::json!("done")),
+            Call::VerifyDevice { device_id } => Ok(serde_json::json!({
+                "identity": "verified", "recovery": "enabled", "operation": "working",
+                "error": null, "canSetUpRecovery": false,
+                "verification": {"flowId": device_id, "phase": "waiting", "emoji": [],
+                    "otherDevice": null, "contact": null}
+            })),
+            Call::ChangeRecoveryKey {} => Ok(serde_json::json!({
+                "identity": "verified", "recovery": "enabled",
+                "operation": "waiting_for_confirmation", "error": null,
+                "verification": null, "canSetUpRecovery": false
+            })),
+            Call::NotificationLevel {} => Ok(serde_json::json!({"level": "custom"})),
+            Call::SetNotificationLevel { .. } => Ok(serde_json::Value::Null),
             Call::DeviceList {} => Ok(serde_json::json!({
                 "devices": [{
                     "deviceId": "ME",
@@ -447,6 +479,13 @@ fn given_core_plugin_commands_then_every_one_is_denied() {
         "plugin:resources|close",
         "plugin:menu|new",
         "plugin:tray|new",
+        // ADR-0022: the notification plugin is used from Rust only.
+        "plugin:notification|notify",
+        "plugin:notification|request_permission",
+        "plugin:notification|is_permission_granted",
+        "plugin:notification|register_action_types",
+        "plugin:notification|register_listener",
+        "plugin:notification|remove_active",
     ] {
         assert!(
             call(cmd, app_origin(), serde_json::json!({})).is_err(),
@@ -600,6 +639,16 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-device-list",
             "allow-account-settings",
             "allow-set-account-settings",
+            "allow-change-password",
+            "allow-three-pids",
+            "allow-request-email-token",
+            "allow-request-phone-token",
+            "allow-add-three-pid",
+            "allow-remove-three-pid",
+            "allow-verify-device",
+            "allow-change-recovery-key",
+            "allow-notification-level",
+            "allow-set-notification-level",
             "allow-profile-list",
             "allow-add-profile",
             "allow-switch-profile"
@@ -1241,23 +1290,25 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
     assert_eq!(devices["devices"][0]["current"], true);
     assert!(devices["devices"][0].get("lastSeenIp").is_none());
     assert_eq!(
-        invoke("account_settings", serde_json::json!({})).unwrap(),
-        serde_json::json!({"enterSends": false})
+        invoke("account_settings", serde_json::json!({})).unwrap()["chatTextPercent"],
+        120
     );
+    let settings = |enter_sends: bool| {
+        serde_json::json!({"enterSends": enter_sends, "chatTextPercent": 100,
+            "interfaceTextPercent": 100, "desktopNotifications": false})
+    };
+    assert!(invoke("set_account_settings", settings(true)).is_ok());
+    assert_eq!(
+        invoke("set_account_settings", settings(false)).unwrap_err(),
+        "locked"
+    );
+    // Every setting is required: an older page's call does not cross.
     assert!(
         invoke(
             "set_account_settings",
             serde_json::json!({"enterSends": true})
         )
-        .is_ok()
-    );
-    assert_eq!(
-        invoke(
-            "set_account_settings",
-            serde_json::json!({"enterSends": false})
-        )
-        .unwrap_err(),
-        "locked"
+        .is_err()
     );
     assert_eq!(
         invoke("profile_list", serde_json::json!({})).unwrap()["profiles"][1]["slot"],
@@ -1305,6 +1356,209 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         core.calls.load(Ordering::SeqCst),
         calls,
         "oversized arguments never crossed"
+    );
+}
+
+/// The account-change commands (ADR-0019 to ADR-0022) relay only codes,
+/// addresses and IDs; no password, code, key or path argument exists. Bad
+/// arguments never reach the core, and replies outside the contract are
+/// refused.
+#[test]
+fn given_account_change_commands_then_only_non_secret_arguments_cross() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    assert_eq!(
+        invoke(
+            "change_password",
+            serde_json::json!({"signOutOthers": true})
+        )
+        .unwrap(),
+        "done"
+    );
+    assert!(
+        invoke(
+            "change_password",
+            serde_json::json!({"signOutOthers": false})
+        )
+        .is_err(),
+        "a code outside the contract"
+    );
+    let listed = invoke("three_pids", serde_json::json!({})).unwrap();
+    assert_eq!(listed["threePids"][0]["medium"], "email");
+    assert_eq!(
+        invoke(
+            "request_email_token",
+            serde_json::json!({"email": "a@example.invalid"})
+        )
+        .unwrap(),
+        "token_sent"
+    );
+    assert_eq!(
+        invoke(
+            "request_phone_token",
+            serde_json::json!({"country": "GB", "phoneNumber": "07700900123"})
+        )
+        .unwrap(),
+        "token_sent"
+    );
+    assert_eq!(
+        invoke("add_three_pid", serde_json::json!({})).unwrap(),
+        "not_confirmed"
+    );
+    assert_eq!(
+        invoke(
+            "remove_three_pid",
+            serde_json::json!({"medium": "msisdn", "address": "447700900123"})
+        )
+        .unwrap(),
+        "done"
+    );
+    assert_eq!(
+        invoke("verify_device", serde_json::json!({"deviceId": "OTHER"})).unwrap()["verification"]
+            ["flowId"],
+        "OTHER"
+    );
+    assert_eq!(
+        invoke("change_recovery_key", serde_json::json!({})).unwrap()["operation"],
+        "waiting_for_confirmation"
+    );
+    assert_eq!(
+        invoke("notification_level", serde_json::json!({})).unwrap()["level"],
+        "custom"
+    );
+    assert!(
+        invoke(
+            "set_notification_level",
+            serde_json::json!({"level": "mentions"})
+        )
+        .is_ok()
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for (cmd, args) in [
+        (
+            "request_email_token",
+            serde_json::json!({"email": "a".repeat(255)}),
+        ),
+        (
+            "request_phone_token",
+            serde_json::json!({"country": "GBR", "phoneNumber": "1"}),
+        ),
+        (
+            "request_phone_token",
+            serde_json::json!({"country": "GB", "phoneNumber": "1".repeat(33)}),
+        ),
+        (
+            "remove_three_pid",
+            serde_json::json!({"medium": "email", "address": "a".repeat(255)}),
+        ),
+        ("verify_device", serde_json::json!({"deviceId": ""})),
+        (
+            "verify_device",
+            serde_json::json!({"deviceId": "D".repeat(256)}),
+        ),
+        (
+            "set_notification_level",
+            serde_json::json!({"level": "custom"}),
+        ),
+    ] {
+        assert_eq!(invoke(cmd, args).unwrap_err(), "invalid_argument", "{cmd}");
+    }
+    // Missing or unknown kinds of argument fail before the handler runs.
+    for (cmd, args) in [
+        ("change_password", serde_json::json!({})),
+        (
+            "remove_three_pid",
+            serde_json::json!({"medium": "fax", "address": "1"}),
+        ),
+        (
+            "set_notification_level",
+            serde_json::json!({"level": "loud"}),
+        ),
+    ] {
+        assert!(invoke(cmd, args).is_err(), "{cmd}");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "refused arguments never crossed"
+    );
+}
+
+/// GIVEN a desktop-notification event from the core WHEN it is dispatched
+/// THEN only the toaster sees its names, the latest one waits for the toaster
+/// to be installed, no page channel gets anything, and oversized names are
+/// dropped.
+#[test]
+fn given_a_notification_event_then_only_the_toaster_sees_it() {
+    use std::sync::Mutex;
+    let delivered: Arc<Mutex<Vec<u32>>> = Arc::default();
+    let record = delivered.clone();
+    let subscriptions = Arc::new(Subscriptions::default());
+    let app = configure(
+        mock_builder().channel_interceptor(move |_, callback, _, _| {
+            record.lock().unwrap().push(callback.0);
+            true
+        }),
+        FakeCore::new(true),
+        subscriptions.clone(),
+    )
+    .build(context())
+    .unwrap();
+    let window = create_main_window(&app).unwrap();
+    get_ipc_response(
+        &window,
+        request(
+            "watch_session",
+            app_origin(),
+            serde_json::json!({"onChange": "__CHANNEL__:3"}),
+        ),
+    )
+    .unwrap();
+    get_ipc_response(
+        &window,
+        request(
+            "subscribe_room",
+            app_origin(),
+            serde_json::json!({"roomId": "!r:example.invalid", "onChange": "__CHANNEL__:4"}),
+        ),
+    )
+    .unwrap();
+    // Before a toaster is set, only the latest notification is kept, and
+    // shown once it is.
+    for room in ["Earlier", "Plans"] {
+        subscriptions.dispatch(Event::Notification {
+            room: room.into(),
+            sender: "Bob".into(),
+        });
+    }
+    let toasts: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let shown = toasts.clone();
+    subscriptions.set_toaster(Box::new(move |room, sender| {
+        shown.lock().unwrap().push((room.into(), sender.into()));
+    }));
+    subscriptions.dispatch(Event::Notification {
+        room: "Later".into(),
+        sender: "Ann".into(),
+    });
+    subscriptions.dispatch(Event::Notification {
+        room: "x".repeat(513),
+        sender: "Bob".into(),
+    });
+    assert_eq!(
+        *toasts.lock().unwrap(),
+        vec![
+            ("Plans".to_owned(), "Bob".to_owned()),
+            ("Later".to_owned(), "Ann".to_owned())
+        ]
+    );
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "no page channel was told"
     );
 }
 

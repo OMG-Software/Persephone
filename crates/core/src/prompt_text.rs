@@ -3,8 +3,8 @@
 //! only draws them (`src/platform/<os>/credentials.rs`).
 
 use crate::credentials::{
-    MAX_PASSWORD_CHARS, MAX_RECOVERY_KEY_CHARS, MAX_REGISTRATION_TOKEN_CHARS, NewPassphrase,
-    NewPassword, PromptError, SecretPrompt,
+    MAX_PASSWORD_CHARS, MAX_PHONE_CODE_CHARS, MAX_RECOVERY_KEY_CHARS, MAX_REGISTRATION_TOKEN_CHARS,
+    NewPassphrase, NewPassword, PasswordPurpose, PromptError, SecretPrompt,
 };
 use crate::passphrase::MIN_PASSPHRASE_CHARS;
 use zeroize::Zeroizing;
@@ -125,8 +125,80 @@ pub fn secret<'a>(request: &SecretPrompt<'a>) -> SecretText<'a> {
             field: Some("Registration token"),
             max_chars: MAX_REGISTRATION_TOKEN_CHARS,
         },
+        SecretPrompt::CurrentPassword {
+            user_id,
+            host,
+            purpose,
+        } => SecretText {
+            caption: match purpose {
+                PasswordPurpose::ChangePassword => "Change your Matrix password",
+                PasswordPurpose::AddThreePid => "Add an email address or phone number",
+            },
+            message: format!(
+                "Enter the current password for {user_id} on {host} to approve {}. \
+                 Only Persephone's core sees it.",
+                match purpose {
+                    PasswordPurpose::ChangePassword => "the new password",
+                    PasswordPurpose::AddThreePid => "adding it to your account",
+                }
+            ),
+            field: Some(user_id),
+            max_chars: MAX_PASSWORD_CHARS,
+        },
+        SecretPrompt::ChangedPassword {
+            user_id,
+            host,
+            step,
+        } => {
+            let choose = format!(
+                "Choose a new password for {user_id} on {host} and type it in the \
+                 password field. Only Persephone's core sees it."
+            );
+            SecretText {
+                caption: "Change your Matrix password",
+                message: match step {
+                    NewPassword::Choose => choose,
+                    NewPassword::Confirm => {
+                        "Type the same new password again to confirm it.".to_owned()
+                    }
+                    NewPassword::Mismatch => {
+                        format!("The two new passwords were different. {choose}")
+                    }
+                },
+                field: Some("New password"),
+                max_chars: MAX_PASSWORD_CHARS,
+            }
+        }
+        SecretPrompt::PhoneCode { host } => SecretText {
+            caption: "Confirm your phone number",
+            message: format!(
+                "{host} sent a code to the phone number you are adding. Type the \
+                 code in the password field. Only Persephone's core sees it."
+            ),
+            field: Some("Code from the text message"),
+            max_chars: MAX_PHONE_CODE_CHARS,
+        },
     }
 }
+
+/// The recovery-key change warning (ADR-0021): caption and message. "No"
+/// must be the default answer.
+pub const RECOVERY_KEY_CHANGE: (&str, &str) = (
+    "Change your recovery key?",
+    "Persephone makes a new recovery key and shows it once. The old key \
+     stops working at once: delete or destroy every copy of it, and keep \
+     the new one somewhere safe.\n\n\
+     Your encrypted messages and this device's verification are not \
+     affected.\n\n\
+     Make a new recovery key?",
+);
+
+/// The Save dialog's title for a new recovery key, and the file name it
+/// suggests.
+pub const SAVE_RECOVERY_KEY: (&str, &str) = (
+    "Save your recovery key to a file (Cancel to skip)",
+    "persephone-recovery-key.txt",
+);
 
 /// The reset warning: caption and message. "No" must be the default answer.
 pub const RESET: (&str, &str) = (
@@ -188,7 +260,8 @@ pub fn recovery_key(
         "This is the recovery key for {user_id}. Write it down or save it \
          somewhere safe now: Persephone does not keep it, and it is shown \
          only once. You need it to read your encrypted messages on a new \
-         device.\n\n{key}"
+         device. After this window, Persephone offers to save it to a file \
+         as well.\n\n{key}"
     ));
     if let Some(hint) = copy_hint {
         message.push_str("\n\n");
@@ -270,6 +343,17 @@ mod tests {
             SecretPrompt::Passphrase { retry: false },
             SecretPrompt::Passphrase { retry: true },
             SecretPrompt::RegistrationToken { host: "b" },
+            SecretPrompt::PhoneCode { host: "b" },
+            SecretPrompt::CurrentPassword {
+                user_id: "@a:b",
+                host: "b",
+                purpose: PasswordPurpose::ChangePassword,
+            },
+            SecretPrompt::CurrentPassword {
+                user_id: "@a:b",
+                host: "b",
+                purpose: PasswordPurpose::AddThreePid,
+            },
         ];
         for step in [
             NewPassphrase::Choose,
@@ -290,6 +374,11 @@ mod tests {
                 host: "b",
                 step,
             });
+            prompts.push(SecretPrompt::ChangedPassword {
+                user_id: "@a:b",
+                host: "b",
+                step,
+            });
         }
         for prompt in prompts {
             let message = secret(&prompt).message;
@@ -298,6 +387,40 @@ mod tests {
                 "{prompt:?}: {message:?}"
             );
         }
+    }
+
+    /// GIVEN the account-change prompts WHEN their text is built THEN each
+    /// has its own limit and field, and the current password names the
+    /// account it approves for.
+    #[test]
+    fn given_account_change_prompts_then_each_has_its_limit_and_field() {
+        let current = secret(&SecretPrompt::CurrentPassword {
+            user_id: "@a:b",
+            host: "b",
+            purpose: PasswordPurpose::AddThreePid,
+        });
+        assert_eq!(
+            (current.field, current.max_chars),
+            (Some("@a:b"), MAX_PASSWORD_CHARS)
+        );
+        assert!(current.message.contains("adding it to your account"));
+        let changed = secret(&SecretPrompt::ChangedPassword {
+            user_id: "@a:b",
+            host: "b",
+            step: NewPassword::Mismatch,
+        });
+        assert_eq!(changed.field, Some("New password"));
+        assert!(
+            changed
+                .message
+                .starts_with("The two new passwords were different.")
+        );
+        let code = secret(&SecretPrompt::PhoneCode { host: "b" });
+        assert_eq!(code.max_chars, MAX_PHONE_CODE_CHARS);
+        // The warning says the old key stops working before it asks.
+        let (_, warning) = RECOVERY_KEY_CHANGE;
+        assert!(warning.contains("old key stops working"));
+        assert!(warning.ends_with("Make a new recovery key?"));
     }
 
     /// GIVEN a copy hint WHEN the recovery key text is built THEN the hint

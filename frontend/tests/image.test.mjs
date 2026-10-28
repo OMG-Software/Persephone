@@ -10,8 +10,14 @@ let Composer;
 let render;
 
 before(async () => {
+  // Test files run in parallel: each server keeps its own dependency cache,
+  // and none discovers dependencies mid-run, so no server finds another's
+  // pre-bundle outdated (ERR_OUTDATED_OPTIMIZED_DEP).
   vite = await createServer({
     configFile: './vite.config.js',
+    cacheDir: 'node_modules/.vite-tests/image',
+    optimizeDeps: { noDiscovery: true },
+    ssr: { optimizeDeps: { noDiscovery: true } },
     server: { middlewareMode: true, hmr: false, ws: false },
     appType: 'custom'
   });
