@@ -524,7 +524,11 @@ pub async fn servers(client: &Client, room_id: &str) -> Result<RoomServers, Erro
     ))
 }
 
-/// Counts users by homeserver; see [`servers`].
+/// Counts users by homeserver; see [`servers`]. The map and the list made
+/// from it hold one borrowed name and a count per distinct server, so they
+/// are bounded by the member list the SDK already holds and far smaller
+/// than it. Ranking needs every count, so neither is cut before the sort;
+/// only the [`MAX_LISTED_SERVERS`] listed names are copied.
 fn count_servers<'a>(users: impl IntoIterator<Item = &'a UserId>, own: &ServerName) -> RoomServers {
     let mut counts: BTreeMap<&ServerName, u32> = BTreeMap::new();
     for user in users {
