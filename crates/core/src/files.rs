@@ -31,6 +31,7 @@ use matrix_sdk::{
 use persephone_contracts::{TimelineItem, UnixMillis};
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::{BudgetClass, BudgetPermit, ResourceBudgets};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -201,16 +202,82 @@ pub fn too_large(size: Option<UInt>) -> bool {
 }
 
 /// Writes a saved file where the user chose in the core's Save dialog. The
-/// dialog asked before replacing a file. A failed write (a full disk, no
-/// permission, a file in use) is `unavailable`, not `rejected`, which means
-/// the file itself was refused.
+/// dialog asked before replacing a file. The bytes go to a new file with a
+/// random name beside it, flushed to disk, which then replaces the
+/// destination in one rename: a failed write (a full disk, no permission, a
+/// file in use) leaves a file already there unchanged and removes the
+/// partial one. A failure is `unavailable`, not `rejected`, which means the
+/// file itself was refused.
 pub fn write(path: &Path, bytes: &[u8]) -> Result<(), ErrorCode> {
-    std::fs::write(path, bytes).map_err(|_| ErrorCode::Unavailable)
+    let dir = path.parent().ok_or(ErrorCode::Unavailable)?;
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).map_err(|_| ErrorCode::Unavailable)?;
+    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let partial = dir.join(format!(".persephone-{suffix}.part"));
+    let written = write_new(&partial, bytes).and_then(|()| std::fs::rename(&partial, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written.map_err(|_| ErrorCode::Unavailable)
+}
+
+/// Creates `path`, which must not exist, with `bytes`, flushed to disk.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// GIVEN a new name and a file already there WHEN saved THEN each holds
+    /// exactly the new bytes, and no partial file is left beside them.
+    #[test]
+    fn given_a_save_then_the_file_holds_the_bytes_and_nothing_else_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("new.pdf");
+        let old = dir.path().join("old.pdf");
+        std::fs::write(&old, b"the old file, longer than the new one").unwrap();
+        write(&new, b"new").unwrap();
+        write(&old, b"replaced").unwrap();
+        assert_eq!(std::fs::read(&new).unwrap(), b"new");
+        assert_eq!(std::fs::read(&old).unwrap(), b"replaced");
+        assert_eq!(entries(dir.path()), ["new.pdf", "old.pdf"]);
+    }
+
+    /// GIVEN a destination that cannot be replaced (a folder with a file in
+    /// it) or a folder that does not exist WHEN saved THEN it is
+    /// `unavailable`, what was there is unchanged, and the partial file,
+    /// fully written before the rename failed, is removed.
+    #[test]
+    fn given_a_save_that_fails_then_what_was_there_is_kept_and_nothing_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let taken = dir.path().join("taken.pdf");
+        std::fs::create_dir(&taken).unwrap();
+        std::fs::write(taken.join("inside.txt"), b"kept").unwrap();
+        assert_eq!(write(&taken, b"new"), Err(ErrorCode::Unavailable));
+        assert_eq!(std::fs::read(taken.join("inside.txt")).unwrap(), b"kept");
+        assert_eq!(entries(dir.path()), ["taken.pdf"]);
+        assert_eq!(
+            write(&dir.path().join("missing").join("x.pdf"), b"new"),
+            Err(ErrorCode::Unavailable)
+        );
+        assert_eq!(entries(dir.path()), ["taken.pdf"]);
+    }
 
     /// GIVEN hostile and odd file names WHEN made safe THEN separators,
     /// reserved characters, controls, bidirectional controls, leading and

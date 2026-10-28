@@ -48,7 +48,9 @@ Proposed option: "in the core, through its own dialogs".
   is fetched.
 * "Save…" asks the core: it downloads and decrypts the file like an image
   (at most 20 MiB, checked by its hash), then asks where to save in its own
-  Save dialog, suggesting the safe name, and writes it. Nothing opens it.
+  Save dialog, suggesting the safe name, and writes it: to a new file
+  beside it first, which then replaces the destination in one rename, so a
+  failed save leaves a file already there unchanged. Nothing opens it.
 
 ### Positive Consequences
 
