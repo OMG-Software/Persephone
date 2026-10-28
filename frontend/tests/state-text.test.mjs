@@ -53,7 +53,7 @@ test('GIVEN room changes WHEN described THEN set and removed values read differe
 });
 
 test('GIVEN names from the event WHEN split into parts THEN only they are name parts', () => {
-  const hostile = '‮gnp.exe <b>';
+  const hostile = '\u202Egnp.exe <b>';
   const parts = stateParts(hostile, { type: 'member', target: hostile, membership: 'kicked' });
   assert.deepEqual(parts, [{ name: hostile }, { text: ' removed ' }, { name: hostile }]);
   const topic = stateParts(A, { type: 'topic', topic: hostile });
