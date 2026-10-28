@@ -49,8 +49,11 @@ Proposed option: "in the core, through its own dialogs".
 * "Save…" asks the core: it downloads and decrypts the file like an image
   (at most 20 MiB, checked by its hash), then asks where to save in its own
   Save dialog, suggesting the safe name, and writes it: to a new file
-  beside it first, which then replaces the destination in one rename, so a
-  failed save leaves a file already there unchanged. Nothing opens it.
+  beside it first, readable by its owner only from the start (a protected
+  owner-only DACL on Windows, mode 0600 elsewhere), which then takes the
+  destination's place in one step, so a failed save leaves a file already
+  there unchanged. A replaced file keeps its permissions (`ReplaceFileW` on
+  Windows); a new one stays readable by its owner only. Nothing opens it.
 
 ### Positive Consequences
 

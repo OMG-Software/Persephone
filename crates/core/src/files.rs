@@ -201,30 +201,32 @@ pub fn too_large(size: Option<UInt>) -> bool {
 
 /// Writes a saved file where the user chose in the core's Save dialog. The
 /// dialog asked before replacing a file. The bytes go to a new file with a
-/// random name beside it, flushed to disk, which then replaces the
-/// destination in one rename: a failed write (a full disk, no permission, a
-/// file in use) leaves a file already there unchanged and removes the
-/// partial one. A failure is `unavailable`, not `rejected`, which means the
-/// file itself was refused.
+/// random name beside it, which only its owner can read from the start
+/// (`platform::os::create_private_file`), flushed to disk, which then takes
+/// the destination's place in one step (`platform::os::replace_file`): a
+/// file already there keeps its permissions, and a new one stays readable
+/// by its owner only. A failed write (a full disk, no permission, a file in
+/// use) leaves a file already there unchanged and removes the partial one.
+/// A failure is `unavailable`, not `rejected`, which means the file itself
+/// was refused.
 pub fn write(path: &Path, bytes: &[u8]) -> Result<(), ErrorCode> {
     let dir = path.parent().ok_or(ErrorCode::Unavailable)?;
     let mut random = [0u8; 8];
     getrandom::fill(&mut random).map_err(|_| ErrorCode::Unavailable)?;
     let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let partial = dir.join(format!(".persephone-{suffix}.part"));
-    let written = write_new(&partial, bytes).and_then(|()| std::fs::rename(&partial, path));
+    let written =
+        write_new(&partial, bytes).and_then(|()| crate::platform::os::replace_file(&partial, path));
     if written.is_err() {
         let _ = std::fs::remove_file(&partial);
     }
     written.map_err(|_| ErrorCode::Unavailable)
 }
 
-/// Creates `path`, which must not exist, with `bytes`, flushed to disk.
+/// Creates `path`, which must not exist and only its owner can read, with
+/// `bytes`, flushed to disk.
 fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file = crate::platform::os::create_private_file(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }

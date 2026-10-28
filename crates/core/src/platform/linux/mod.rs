@@ -67,6 +67,16 @@ pub(crate) fn read_image_file(
     super::unix::read_image_file(path, budgets)
 }
 
+/// Saving a file (ADR-0029): see `unix::create_private_file`.
+pub(crate) fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    super::unix::create_private_file(path)
+}
+
+/// Saving a file (ADR-0029): see `unix::replace_file`.
+pub(crate) fn replace_file(partial: &Path, path: &Path) -> std::io::Result<()> {
+    super::unix::replace_file(partial, path)
+}
+
 /// The contained media worker next to the core: the broker's rlimit
 /// launcher and the worker's seccomp allowlist, confirmed through
 /// `/proc/<pid>/status` before input is sent (ADR-0010).

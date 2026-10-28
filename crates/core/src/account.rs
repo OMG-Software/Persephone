@@ -91,8 +91,8 @@ pub async fn build_client(homeserver: &Homeserver, stores: &Stores) -> Result<Cl
     Client::builder()
         .homeserver_url(homeserver.url().as_str())
         .respect_login_well_known(false)
-        // An OAuth session's access token expires; the SDK refreshes it, and
-        // the sync loop saves the new tokens (`save_if_refreshed`).
+        // An access token with a refresh token expires; the SDK refreshes
+        // it, and the sync loop saves the new tokens (`save_if_refreshed`).
         .handle_refresh_tokens()
         .http_client(http)
         .request_config(
@@ -236,15 +236,16 @@ pub async fn restore(stores: &Stores) -> Result<Option<(Client, String)>, SignIn
     Ok(Some((client, user_id)))
 }
 
-/// Saves the session again when the SDK refreshed an OAuth access token
-/// since `last` (the token last saved), so a restart restores the new one.
-/// Returns the token now saved.
+/// Saves the session again when the SDK refreshed its access token since
+/// `last` (the token last saved), so a restart restores the new one. An
+/// OAuth session refreshes; a password session does only if the server gave
+/// it a refresh token, which sign-in does not ask for, but it is saved the
+/// same way if it does. Returns the token now saved.
 pub async fn save_if_refreshed(
     client: &Client,
     stores: &Stores,
     last: Option<Zeroizing<String>>,
 ) -> Option<Zeroizing<String>> {
-    client.oauth().full_session()?;
     let now = Zeroizing::new(client.access_token()?);
     if last.as_ref().is_some_and(|last| **last == *now) {
         return last;
