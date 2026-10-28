@@ -375,6 +375,11 @@ pub enum Call {
         room_id: String,
         filter: String,
     },
+    /// The homeservers with members (joined or invited) in a joined room:
+    /// every one of them receives its messages and metadata.
+    RoomServers {
+        room_id: String,
+    },
     /// Change one setting of a joined room, or act on one member. The
     /// homeserver decides whether this account may.
     ChangeRoom {
@@ -1005,6 +1010,12 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::RoomServers {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"room_servers","room_id":"!r:s"}}"#,
+            ),
+            (
                 Call::OpenLink {
                     url: "https://example.org/".into(),
                 },
@@ -1488,6 +1499,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"open_link"}}"#,
+            br#"{"id":1,"call":{"command":"room_servers"}}"#,
+            br#"{"id":1,"call":{"command":"room_servers","room_id":"!r:s","limit":5}}"#,
             br#"{"id":1,"call":{"command":"open_link","url":"https://e.org","confirmed":true}}"#,
             br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s","typing":"yes"}}"#,

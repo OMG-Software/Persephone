@@ -35,6 +35,7 @@ import type {
   RoomMember,
   RoomMembers,
   RoomActivity,
+  RoomServers,
   RoomNotifications,
   RoomPermissions,
   RoomSettings,
@@ -83,6 +84,7 @@ export type {
   RoomMember,
   RoomMembers,
   RoomActivity,
+  RoomServers,
   RoomNotifications,
   RoomPermissions,
   RoomSettings,
@@ -339,6 +341,14 @@ export function pickImage(roomId: string): Promise<ImagePick> {
  */
 export function editMessage(roomId: string, eventId: string, body: string): Promise<PendingMessage> {
   return invoke<PendingMessage>('edit_message', { roomId, eventId, body });
+}
+
+/**
+ * The homeservers with members in a room: each receives the room's messages
+ * and metadata. The most members first, at most 50.
+ */
+export function roomServers(roomId: string): Promise<RoomServers> {
+  return invoke<RoomServers>('room_servers', { roomId });
 }
 
 /**

@@ -219,6 +219,10 @@ impl CoreTransport for FakeCore {
                 "truncated": false
             })),
             Call::MarkRead { .. } => Ok(serde_json::Value::Null),
+            Call::RoomServers { .. } => Ok(serde_json::json!({
+                "servers": [{"name": "example.invalid", "members": 2, "own": true}],
+                "truncated": false
+            })),
             Call::OpenLink { url } => Ok(serde_json::Value::Bool(url == "https://example.org/")),
             Call::RoomActivity { .. } => Ok(serde_json::json!({
                 "typing": ["@b:example.invalid"], "readBy": [], "truncated": false
@@ -632,6 +636,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-room-activity",
             "allow-set-typing",
             "allow-open-link",
+            "allow-room-servers",
             "allow-pending-messages",
             "allow-retry-message",
             "allow-discard-message",
@@ -1199,6 +1204,10 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
             serde_json::json!({"url": "https://example.org/"})
         ),
         Ok(serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        invoke("room_servers", serde_json::json!({"roomId": room})).unwrap()["servers"][0]["members"],
+        2
     );
     let calls = core.calls.load(Ordering::SeqCst);
     assert_eq!(

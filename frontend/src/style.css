@@ -1037,6 +1037,23 @@ kbd {
   white-space: nowrap;
 }
 
+/* The servers in a room: one per line, names in the monospace face. */
+.server-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.server-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
 /* A link in a message: a button that asks the core, styled as a link and
    allowed to wrap anywhere, as long addresses do. */
 .body-link {

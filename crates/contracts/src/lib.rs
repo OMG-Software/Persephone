@@ -876,6 +876,27 @@ impl Default for AccountSettings {
     }
 }
 
+/// One homeserver with members in a room: its name, projected like a name,
+/// how many members it has (joined or invited), and whether it is this
+/// account's own.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomServer {
+    pub name: String,
+    pub members: u32,
+    pub own: bool,
+}
+
+/// Reply of `room_servers`: the homeservers that receive a room's messages
+/// and metadata, the most members first, at most 50; `truncated` says more
+/// exist.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomServers {
+    pub servers: Vec<RoomServer>,
+    pub truncated: bool,
+}
+
 /// Reply of `room_activity`: who else is typing in a room, and who else has
 /// read up to the event the page asked about (ADR-0023). Each list holds at
 /// most ten user IDs, projected like names; `truncated` says more exist.
@@ -1488,6 +1509,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", DeviceList::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
         format!("export {}", RoomActivity::decl(&config)),
+        format!("export {}", RoomServer::decl(&config)),
+        format!("export {}", RoomServers::decl(&config)),
         format!("export {}", NotificationLevel::decl(&config)),
         format!("export {}", NotificationSettings::decl(&config)),
         format!("export {}", ThreePidMedium::decl(&config)),

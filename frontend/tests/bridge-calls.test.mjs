@@ -59,6 +59,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.roomActivity('!r:s', null), 'room_activity', { roomId: '!r:s', eventId: null }],
     [() => bridge.setTyping('!r:s', true), 'set_typing', { roomId: '!r:s', typing: true }],
     [() => bridge.openLink('https://example.org/'), 'open_link', { url: 'https://example.org/' }],
+    [() => bridge.roomServers('!r:s'), 'room_servers', { roomId: '!r:s' }],
     [
       () => bridge.editMessage('!r:s', '$mine', 'fixed'),
       'edit_message',

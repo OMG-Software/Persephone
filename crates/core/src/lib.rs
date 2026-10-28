@@ -539,6 +539,7 @@ impl Core {
             | Call::DeviceList {}
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
+            | Call::RoomServers { .. }
             | Call::ChangeRoom { .. }
             | Call::ChangePassword { .. }
             | Call::ThreePids {}
@@ -803,6 +804,7 @@ impl Core {
             | Call::DeviceList {}
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
+            | Call::RoomServers { .. }
             | Call::ChangeRoom { .. }
             | Call::ChangePassword { .. }
             | Call::ThreePids {}
@@ -865,6 +867,7 @@ impl Core {
             Devices,
             RoomSettings(String),
             RoomMembers(String, String),
+            RoomServers(String),
             ChangeRoom(String, room_settings::Change),
             ChangePassword(bool),
             ThreePids,
@@ -933,6 +936,9 @@ impl Core {
             {
                 Work::RoomMembers(room_id.clone(), filter.clone())
             }
+            Call::RoomServers { room_id } if valid_room_id(room_id) => {
+                Work::RoomServers(room_id.clone())
+            }
             Call::ChangeRoom { room_id, change } if valid_room_id(room_id) => Work::ChangeRoom(
                 room_id.clone(),
                 room_settings::Change::parse(change).ok_or(ErrorCode::InvalidArgument)?,
@@ -989,7 +995,7 @@ impl Core {
             Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
             Work::Devices => self.devices.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
-            Work::RoomMembers(..) => self.room_members.begin()?,
+            Work::RoomMembers(..) | Work::RoomServers(_) => self.room_members.begin()?,
             Work::ChangeRoom(..) | Work::Delete(..) | Work::React(..) => {
                 self.room_change.begin()?
             }
@@ -1085,6 +1091,9 @@ impl Core {
                         room_settings::members(&client, room_id, filter).await
                     }))
                 }
+                Work::RoomServers(room_id) => json(self.with_matrix(generation, async |client| {
+                    room_settings::servers(&client, room_id).await
+                })),
                 Work::ChangeRoom(room_id, change) => self
                     .with_matrix(generation, async |client| {
                         room_settings::change(&client, room_id, change).await

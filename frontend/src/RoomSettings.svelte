@@ -25,11 +25,13 @@
     changeRoom,
     inviteUser,
     roomMembers,
+    roomServers,
     roomSettings,
     type LevelKey,
     type RoomChange,
     type RoomMember,
     type RoomMembers,
+    type RoomServers,
     type RoomSettings
   } from './bridge';
 
@@ -165,6 +167,19 @@
     }
   }
 
+  // The homeservers with members here, read when the Security tab opens.
+  let servers = $state<RoomServers | null>(null);
+  let serversFailure = $state<string | null>(null);
+
+  async function loadServers() {
+    try {
+      servers = await roomServers(roomId);
+      serversFailure = null;
+    } catch (reason) {
+      serversFailure = failureText(reason);
+    }
+  }
+
   onMount(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialog?.showModal();
@@ -195,6 +210,7 @@
     // Read again on every visit: members may have changed meanwhile. The
     // old list stays shown until the new one arrives.
     if (next === 'people') loadMembers();
+    if (next === 'security') loadServers();
   }
 
   async function apply(change: RoomChange, success = 'Saved.') {
@@ -739,6 +755,33 @@
           </p>
         </fieldset>
       {:else if tab === 'security'}
+        <section class="panel" aria-labelledby="servers-heading">
+          <h4 id="servers-heading">Servers in this room</h4>
+          <p class="note">
+            Each of these homeservers has members here, so it receives the room's messages (encrypted,
+            if the room is) and who sent them and when.
+          </p>
+          {#if serversFailure}
+            <p role="alert" class="error">{serversFailure}</p>
+          {:else if servers === null}
+            <p class="note" role="status">Reading the servers…</p>
+          {:else}
+            <ul class="server-list">
+              {#each servers.servers as server (server.name)}
+                <li>
+                  <bdi class="server-name">{server.name}</bdi>
+                  <span class="note"
+                    >{server.members}
+                    {server.members === 1 ? 'member' : 'members'}{server.own ? ' · your server' : ''}</span
+                  >
+                </li>
+              {/each}
+            </ul>
+            {#if servers.truncated}
+              <p class="note">More servers have members here than are listed.</p>
+            {/if}
+          {/if}
+        </section>
         <section class="panel" aria-labelledby="encryption-heading">
           <h4 id="encryption-heading">Encryption</h4>
           {#if settings.encryption === 'encrypted'}

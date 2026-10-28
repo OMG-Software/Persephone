@@ -33,7 +33,7 @@ use matrix_sdk::{
     Client, EncryptionState, Room, RoomMemberships, RoomState,
     notification_settings::RoomNotificationMode,
     ruma::{
-        Int, OwnedRoomAliasId, OwnedUserId, RoomAliasId, RoomId, UserId,
+        Int, OwnedRoomAliasId, OwnedUserId, RoomAliasId, RoomId, ServerName, UserId,
         api::client::room::{Visibility, aliases},
         events::{
             StateEventType, TimelineEventType,
@@ -49,12 +49,14 @@ use matrix_sdk::{
 };
 use persephone_contracts::{
     HistoryVisibility, JoinRule, LevelKey, Membership, PowerLevel, RoomChange, RoomEncryption,
-    RoomLevel, RoomMember, RoomMembers, RoomNotifications, RoomPermissions, RoomSettings,
+    RoomLevel, RoomMember, RoomMembers, RoomNotifications, RoomPermissions, RoomServer,
+    RoomServers, RoomSettings,
 };
 use persephone_core_protocol::{
     ErrorCode, MAX_ALIAS_BYTES, MAX_ALT_ALIASES, MAX_LISTED_MEMBERS, MAX_MEMBER_FILTER_BYTES,
     MAX_ROOM_NAME_BYTES, MAX_TOPIC_BYTES, MAX_USER_ID_BYTES,
 };
+use std::collections::BTreeMap;
 
 /// A change the page asked for, after validation.
 #[derive(Debug, PartialEq)]
@@ -446,6 +448,48 @@ fn fit(members: &mut RoomMembers) {
 }
 
 /// A joined room's members that match `filter` (see the module notes).
+/// Most homeservers a `room_servers` reply lists.
+pub const MAX_LISTED_SERVERS: usize = 50;
+
+/// The homeservers with joined or invited members in a joined room, the
+/// most members first (then by name), at most [`MAX_LISTED_SERVERS`].
+pub async fn servers(client: &Client, room_id: &str) -> Result<RoomServers, ErrorCode> {
+    let room = joined(client, room_id)?;
+    let own = own_user(client)?;
+    let members = room
+        .members(RoomMemberships::JOIN | RoomMemberships::INVITE)
+        .await
+        .map_err(|_| ErrorCode::Unavailable)?;
+    Ok(count_servers(
+        members.iter().map(|member| member.user_id()),
+        own.server_name(),
+    ))
+}
+
+/// Counts users by homeserver; see [`servers`].
+fn count_servers<'a>(users: impl IntoIterator<Item = &'a UserId>, own: &ServerName) -> RoomServers {
+    let mut counts: BTreeMap<&ServerName, u32> = BTreeMap::new();
+    for user in users {
+        *counts.entry(user.server_name()).or_default() += 1;
+    }
+    let mut servers: Vec<(&ServerName, u32)> = counts.into_iter().collect();
+    // Most members first; names break ties, as the map already sorted them.
+    servers.sort_by_key(|server| std::cmp::Reverse(server.1));
+    let truncated = servers.len() > MAX_LISTED_SERVERS;
+    RoomServers {
+        servers: servers
+            .into_iter()
+            .take(MAX_LISTED_SERVERS)
+            .map(|(name, members)| RoomServer {
+                name: project_name(name.as_str()),
+                members,
+                own: name == own,
+            })
+            .collect(),
+        truncated,
+    }
+}
+
 pub async fn members(
     client: &Client,
     room_id: &str,
@@ -697,6 +741,48 @@ fn request_error(error: &matrix_sdk::Error) -> ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN members on several homeservers WHEN counted THEN each server
+    /// appears once with its count, the most members first and then by
+    /// name, this account's own marked, and more than the limit cut.
+    #[test]
+    fn given_members_then_servers_are_counted_and_bounded() {
+        let users: Vec<OwnedUserId> = [
+            "@a:big.example",
+            "@b:big.example",
+            "@c:big.example",
+            "@me:home.example",
+            "@d:zed.example",
+            "@e:alpha.example",
+        ]
+        .into_iter()
+        .map(|id| OwnedUserId::try_from(id).unwrap())
+        .collect();
+        let own = <&ServerName>::try_from("home.example").unwrap();
+        let counted = count_servers(users.iter().map(|user| &**user), own);
+        let listed: Vec<(&str, u32, bool)> = counted
+            .servers
+            .iter()
+            .map(|server| (server.name.as_str(), server.members, server.own))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("big.example", 3, false),
+                ("alpha.example", 1, false),
+                ("home.example", 1, true),
+                ("zed.example", 1, false),
+            ]
+        );
+        assert!(!counted.truncated);
+
+        let many: Vec<OwnedUserId> = (0..=MAX_LISTED_SERVERS)
+            .map(|n| OwnedUserId::try_from(format!("@u:s{n}.example")).unwrap())
+            .collect();
+        let counted = count_servers(many.iter().map(|user| &**user), own);
+        assert_eq!(counted.servers.len(), MAX_LISTED_SERVERS);
+        assert!(counted.truncated);
+    }
     use matrix_sdk::ruma::{
         events::room::power_levels::RoomPowerLevelsSource, room_version_rules::RoomVersionRules,
     };
