@@ -38,3 +38,12 @@ test('GIVEN a hostile body WHEN split THEN quotes and angle brackets end a link,
   const many = Array.from({ length: MAX_LINKS + 5 }, (_, n) => `https://h${n}.test`).join(' ');
   assert.equal(bodyParts(many).filter((part) => 'link' in part).length, MAX_LINKS);
 });
+
+test('GIVEN a link ending in a long run of punctuation WHEN split THEN it is trimmed in linear time', () => {
+  const body = 'https://a.test/x' + '.,;:!?)'.repeat(2400) + ' after';
+  const started = performance.now();
+  const parts = bodyParts(body);
+  assert.ok(performance.now() - started < 200, 'no quadratic backtracking');
+  assert.deepEqual(parts[0], { link: 'https://a.test/x' });
+  assert.ok(parts[1].text.endsWith(' after'));
+});
