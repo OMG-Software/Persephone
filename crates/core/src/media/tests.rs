@@ -406,6 +406,50 @@ fn encoded(budgets: &ResourceBudgets, bytes: &[u8]) -> Encoded {
 
 const JPEG: &[u8] = b"\xff\xd8\xff\xe0 jpeg body \xff\xd9";
 
+/// GIVEN a picked image whose stripped copy is one byte over the send limit
+/// WHEN the draft is prepared THEN it is refused before it is copied, and
+/// nothing stays reserved.
+#[test]
+fn given_a_stripped_image_over_the_send_limit_then_no_draft_is_made() {
+    let media = service(FakeWorker::new((30, 20), 1));
+    let padding = MAX_SENT_BYTES as usize + 1 - JPEG.len();
+    let original = encoded(media.budgets(), &[JPEG, &vec![0; padding]].concat());
+    assert_eq!(
+        media.prepare_draft(1, &|| Some(1), "!r:s", original).err(),
+        Some(ErrorCode::Rejected)
+    );
+    assert!(
+        media
+            .budgets()
+            .try_acquire(
+                BudgetClass::EncodedInFlight,
+                persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT
+            )
+            .is_ok()
+    );
+}
+
+/// GIVEN an image to send WHEN it is copied for the SDK THEN the copy and
+/// the SDK's own copy are reserved: three times the image in all.
+#[test]
+fn given_an_image_copied_for_send_then_the_sdk_copy_is_reserved_too() {
+    let budgets = budgets();
+    let upload = ImageUpload::for_tests(&budgets, JPEG);
+    let (copy, _permit) = upload.copy_for_send().unwrap();
+    assert_eq!(copy, JPEG);
+    let free = persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT - 3 * JPEG.len() as u64;
+    assert!(
+        budgets
+            .try_acquire(BudgetClass::EncodedInFlight, free + 1)
+            .is_err()
+    );
+    assert!(
+        budgets
+            .try_acquire(BudgetClass::EncodedInFlight, free)
+            .is_ok()
+    );
+}
+
 /// GIVEN a picked JPEG WHEN the draft is prepared THEN the worker strips it
 /// and decodes the stripped copy (two runs), the preview has the oriented,
 /// fitted size, and the draft sends exactly the stripped bytes with the

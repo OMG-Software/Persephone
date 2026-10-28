@@ -59,9 +59,10 @@ Proposed option: "in the core, through its own dialogs".
 ### Negative Consequences
 
 * Audio and video are saved, not played.
-* Files sent are at most 13 MiB: a send holds three copies (the outbox's,
-  the SDK's input and the SDK's own upload or encryption copy), all
-  reserved in the 40 MiB encoded budget. Saved files keep the 20 MiB limit.
+* Files sent are at most 13 MiB, as are images after stripping: a send
+  holds three copies (the outbox's, the SDK's input and the SDK's own
+  upload or encryption copy), all reserved in the 40 MiB encoded budget.
+  Saved files keep the 20 MiB limit.
 * The sent name can say something about the file; it is the one the user
   chose.
 * Windows only, like the image dialogs; other platforms fail closed.

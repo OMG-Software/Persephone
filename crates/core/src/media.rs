@@ -76,6 +76,13 @@ use zeroize::Zeroizing;
 
 /// Largest encoded image, downloaded or picked (the media plan's limit).
 pub const MAX_ENCODED_BYTES: u64 = 20 * MIB;
+/// Largest image (after stripping) or file sent. A send holds three copies
+/// at once: the outbox's, the one handed to the SDK, and the SDK's own (it
+/// clones the data in a room that is not encrypted, and encrypts into a new
+/// buffer in one that is). All three fit the 40 MiB `EncodedInFlight`
+/// budget. Downloads and saved files make no such copies and keep
+/// [`MAX_ENCODED_BYTES`].
+pub const MAX_SENT_BYTES: u64 = 13 * MIB;
 /// Received and preview images are scaled down to fit this square; 2048 x
 /// 2048 RGBA is 16 MiB, so four fit the `RetainedPixels` budget.
 pub const MAX_SHOWN_SIDE: u32 = 2048;
@@ -397,7 +404,8 @@ pub struct ImageUpload {
 
 impl ImageUpload {
     /// Copies a stripped file from the worker into zeroed-on-drop memory.
-    /// `rejected` unless it is a PNG or JPEG file.
+    /// `rejected` unless it is a PNG or JPEG file of at most
+    /// [`MAX_SENT_BYTES`].
     fn from_stripped(
         budgets: &Arc<ResourceBudgets>,
         stripped: ReceivedFrame,
@@ -407,6 +415,9 @@ impl ImageUpload {
         }
         let mime = sniff(stripped.body()).ok_or(ErrorCode::Rejected)?;
         let length = stripped.body().len();
+        if length as u64 > MAX_SENT_BYTES {
+            return Err(ErrorCode::Rejected);
+        }
         let permit = budgets
             .try_acquire(BudgetClass::EncodedInFlight, length as u64)
             .map_err(|_| ErrorCode::LimitExceeded)?;
@@ -477,11 +488,12 @@ impl ImageUpload {
     }
 
     /// A copy for the SDK, which takes the data by value, reserved like the
-    /// upload itself. The SDK's copy is not zeroed.
+    /// upload itself together with the second copy the SDK makes while it
+    /// uploads (see [`MAX_SENT_BYTES`]). Neither SDK copy is zeroed.
     pub fn copy_for_send(&self) -> Result<(Vec<u8>, BudgetPermit), ErrorCode> {
         let permit = self
             .budgets
-            .try_acquire(BudgetClass::EncodedInFlight, self.bytes.len() as u64)
+            .try_acquire(BudgetClass::EncodedInFlight, 2 * self.bytes.len() as u64)
             .map_err(|_| ErrorCode::LimitExceeded)?;
         let mut copy = Vec::new();
         copy.try_reserve_exact(self.bytes.len())

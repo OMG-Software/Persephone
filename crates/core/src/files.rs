@@ -3,7 +3,8 @@
 //! played or decoded.
 //!
 //! * A picked file is read like a picked image (`pick::read_image_file`: no
-//!   link, no directory), at most [`MAX_SENT_FILE_BYTES`], and queued at once:
+//!   link, no directory), at most
+//!   [`MAX_SENT_BYTES`](crate::media::MAX_SENT_BYTES), and queued at once:
 //!   the dialog, titled for the room, is the user's choice to send it. It is
 //!   sent as `application/octet-stream` with its file name, encrypted in an
 //!   encrypted room by the SDK.
@@ -35,13 +36,6 @@ use std::sync::Arc;
 /// Longest file name sent, suggested or shown, in characters.
 pub const MAX_FILE_NAME_CHARS: usize = 120;
 
-/// Largest file sent, in bytes. A send holds three copies at once: the
-/// outbox's, the one handed to the SDK, and the SDK's own (it clones the
-/// data in a room that is not encrypted, and encrypts into a new buffer in
-/// one that is). All three fit the 40 MiB encoded budget. Saving a received
-/// file makes no such copies and keeps [`MAX_ENCODED_BYTES`].
-pub const MAX_SENT_FILE_BYTES: usize = 13 * 1024 * 1024;
-
 /// A picked file waiting to be sent: its bytes, reserved in the encoded
 /// budget, and its name.
 pub struct FileUpload {
@@ -67,8 +61,8 @@ impl FileUpload {
 
     /// A copy of the bytes for the SDK, reserved in the encoded budget before
     /// it is allocated, together with the second copy the SDK makes while it
-    /// uploads (see [`MAX_SENT_FILE_BYTES`]). Keep the permit until the send
-    /// ends.
+    /// uploads (see [`MAX_SENT_BYTES`](crate::media::MAX_SENT_BYTES)). Keep
+    /// the permit until the send ends.
     pub fn copy_for_send(&self) -> Result<(Vec<u8>, BudgetPermit), ErrorCode> {
         let length = self.bytes.bytes().len();
         let permit = self

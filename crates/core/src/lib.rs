@@ -1706,7 +1706,7 @@ impl Core {
                 return Outcome::Error(ErrorCode::Locked);
             }
             let bytes = match pick::read_image_file(&path, &self.budgets) {
-                Ok(bytes) if bytes.bytes().len() <= files::MAX_SENT_FILE_BYTES => bytes,
+                Ok(bytes) if bytes.bytes().len() as u64 <= media::MAX_SENT_BYTES => bytes,
                 Ok(_) => return Outcome::Error(ErrorCode::Rejected),
                 Err(code) => return Outcome::Error(code),
             };

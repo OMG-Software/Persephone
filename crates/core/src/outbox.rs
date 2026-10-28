@@ -33,7 +33,8 @@ use zeroize::Zeroizing;
 pub const MAX_UNSENT: usize = 16;
 /// Most messages kept, sent ones included.
 pub const MAX_KEPT: usize = 32;
-/// Most images not yet sent at once: each holds up to 20 MiB.
+/// Most images not yet sent at once: each holds up to 13 MiB
+/// (`media::MAX_SENT_BYTES`).
 pub const MAX_UNSENT_IMAGES: usize = 1;
 /// Most bytes all kept messages take as JSON (see [`entry_size`]). This
 /// leaves room for the list's brackets and commas within one bounded view
