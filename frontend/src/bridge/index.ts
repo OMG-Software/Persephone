@@ -330,6 +330,15 @@ export function pickImage(roomId: string): Promise<ImagePick> {
   return invoke<ImagePick>('pick_image', { roomId });
 }
 
+/**
+ * Queues a new version of one of this account's text messages, like
+ * `sendMessage`. The core sends it only if the message is this account's
+ * own text message, and fails it as `rejected` otherwise.
+ */
+export function editMessage(roomId: string, eventId: string, body: string): Promise<PendingMessage> {
+  return invoke<PendingMessage>('edit_message', { roomId, eventId, body });
+}
+
 /** Queues a picked image, by its draft handle, like `sendMessage`. */
 export function sendImage(roomId: string, handle: string): Promise<PendingMessage> {
   return invoke<PendingMessage>('send_image', { roomId, handle });

@@ -8,7 +8,9 @@
     body,
     time = null,
     quote = null,
-    onreply
+    edited = false,
+    onreply,
+    onedit
   }: {
     name: string;
     body: string;
@@ -16,8 +18,12 @@
     // What this message replies to: a quote from the loaded history,
     // 'missing' when that message is not loaded, or null for no reply.
     quote?: Quote | 'missing' | null;
+    // The text is the sender's newest edit.
+    edited?: boolean;
     // Starts a reply to this message; absent where replying is not offered.
     onreply?: () => void;
+    // Starts editing this message; only for this account's own messages.
+    onedit?: () => void;
   } = $props();
 
   // The sender's homeserver sets this time; a value no date can show is left out.
@@ -35,11 +41,21 @@
       {#if date}
         <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
       {/if}
-      {#if onreply}
+      {#if edited}
+        <span class="edited">(edited)</span>
+      {/if}
+      {#if onreply || onedit}
         <span class="message-actions">
-          <button type="button" class="link" onclick={onreply}>
-            Reply <span class="visually-hidden">to <bdi>{name}</bdi></span>
-          </button>
+          {#if onreply}
+            <button type="button" class="link" onclick={onreply}>
+              Reply <span class="visually-hidden">to <bdi>{name}</bdi></span>
+            </button>
+          {/if}
+          {#if onedit}
+            <button type="button" class="link" onclick={onedit}>
+              Edit <span class="visually-hidden">your message</span>
+            </button>
+          {/if}
         </span>
       {/if}
     </div>

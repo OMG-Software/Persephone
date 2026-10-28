@@ -71,3 +71,24 @@ test('GIVEN a loaded message WHEN quoted THEN its first line shows, cut to the l
   assert.deepEqual(quoteOf(items, '$4'), { sender: '@d:s', text: 'A message that is not shown' });
   assert.equal(quoteOf(items, '$missing'), null);
 });
+
+test('GIVEN edits WHEN applied THEN each message shows its newest edit, marked, and edits are not lines', async () => {
+  const { applyEdits } = await import('../src/timeline.ts');
+  const msg = (id, sender, body) => ({ kind: 'message', event_id: id, sender, body, origin_server_ts: null, reply_to: null });
+  const edit = (id, sender, replaces, body) => ({ kind: 'edit', event_id: id, sender, replaces, body, origin_server_ts: null });
+  const shown = applyEdits([
+    msg('$1', '@a:s', 'first'),
+    edit('$e1', '@a:s', '$1', 'second'),
+    msg('$2', '@b:s', 'untouched'),
+    edit('$e2', '@a:s', '$1', 'third'),
+    // Not the message's sender here: ignored, even though the core checks.
+    edit('$e3', '@c:s', '$2', 'forged')
+  ]);
+  assert.deepEqual(
+    shown.map((item) => [item.event_id, item.body, item.edited === true]),
+    [
+      ['$1', 'third', true],
+      ['$2', 'untouched', false]
+    ]
+  );
+});

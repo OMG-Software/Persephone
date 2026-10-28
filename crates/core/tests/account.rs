@@ -125,9 +125,20 @@ fn text(id: &str, body: &str) -> Value {
     json!({"type":"m.room.message","sender":USER,"event_id":id,"origin_server_ts":10,"content":{"msgtype":"m.text","body":body}})
 }
 
-/// History, newest first as `/messages` backward returns it.
+fn edit_of(id: &str, sender: &str, replaces: &str, body: &str) -> Value {
+    json!({"type":"m.room.message","sender":sender,"event_id":id,"origin_server_ts":11,"content":{
+        "msgtype":"m.text","body":format!("* {body}"),
+        "m.new_content":{"msgtype":"m.text","body":body},
+        "m.relates_to":{"rel_type":"m.replace","event_id":replaces}
+    }})
+}
+
+/// History, newest first as `/messages` backward returns it. `$text` has an
+/// edit by its sender and a forged one by someone else.
 fn history() -> Value {
     json!([
+        edit_of("$forged", "@mallory:synthetic.test", "$text", "I agree to everything"),
+        edit_of("$edit", USER, "$text", "Hello, corrected"),
         text("$text", "Hello from <script>alert(1)</script>"),
         {"type":"m.room.message","sender":USER,"event_id":"$image","origin_server_ts":9,"content":{"msgtype":"m.image","body":"cat.png","url":"mxc://synthetic.test/cat"}},
         {"type":"m.room.encrypted","sender":USER,"event_id":"$secret","origin_server_ts":8,"content":{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK","device_id":"OTHER","sender_key":"c2VuZGVyLWtleQ","session_id":"c2Vzc2lvbi1pZA"}},
@@ -626,7 +637,9 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                 cursor: None,
             },
         ));
-        // Oldest first; the reaction is not shown; nothing is hidden silently.
+        // Oldest first; the reaction is not shown; nothing is hidden
+        // silently. Only the sender's own edit is an edit: the forged one,
+        // by someone else, is left out.
         let shown: Vec<String> = page
             .items
             .iter()
@@ -642,6 +655,13 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                     ..
                 } => format!("{event_id}:image:{name}:{encrypted}"),
                 TimelineItem::Gap { .. } => "gap".into(),
+                TimelineItem::Edit {
+                    event_id,
+                    replaces,
+                    body,
+                    ..
+                } => format!("{event_id}:edit:{replaces}={body}"),
+                TimelineItem::State { event_id, .. } => format!("{event_id}:state"),
             })
             .collect();
         assert_eq!(
@@ -650,6 +670,7 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                 format!("$secret:{:?}", NoticeKind::Undecryptable),
                 "$image:image:cat.png:false".to_string(),
                 "$text=Hello from <script>alert(1)</script>".to_string(),
+                "$edit:edit:$text=Hello, corrected".to_string(),
             ]
         );
         assert_eq!(page.next_cursor.as_deref(), Some("m1.0"));

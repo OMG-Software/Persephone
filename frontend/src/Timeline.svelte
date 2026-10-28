@@ -10,7 +10,7 @@
   import Message from './Message.svelte';
   import { stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
-  import { quoteOf } from './timeline';
+  import { applyEdits, quoteOf, type ShownItem } from './timeline';
 
   let {
     title,
@@ -27,7 +27,9 @@
     onverify = () => {},
     oninvite,
     onsettings,
-    onreply
+    onreply,
+    ownUserId = null,
+    onedit
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -50,7 +52,15 @@
     onsettings?: () => void;
     // Starts a reply to a message; absent where replying is not offered.
     onreply?: (eventId: string) => void;
+    // This account's user ID: its own messages can be edited.
+    ownUserId?: string | null;
+    // Starts editing one of this account's messages; absent where editing
+    // is not offered.
+    onedit?: (eventId: string, body: string) => void;
   } = $props();
+
+  // Edits are not lines of their own: each message shows its newest edit.
+  const shown = $derived(applyEdits(items));
 
   // Fixed text per trust level; the core sends codes only.
   const trustText: Record<string, string> = {
@@ -62,7 +72,7 @@
     unknown: 'Checking…'
   };
 
-  const startsWithGap = $derived(items[0]?.kind === 'gap');
+  const startsWithGap = $derived(shown[0]?.kind === 'gap');
   // Fixed text per notice; the core sends codes only.
   const noticeText: Record<string, string> = {
     undecryptable: 'Encrypted message. This device has no key for it.',
@@ -71,13 +81,13 @@
       'Encrypted message from a device its owner has not verified. It is not shown, because it could come from a device they never added.',
     unsupported: 'A kind of message Persephone does not show yet.'
   };
-  const key = (item: TimelineItem, index: number) =>
+  const key = (item: ShownItem, index: number) =>
     item.kind === 'gap' ? 'gap-' + index : item.event_id;
 
   // A "Today", "Yesterday" or date line where the day changes. Items stay in
   // the order the homeserver gave; their times are not used to sort.
-  const timeOf = (item: TimelineItem) => (item.kind === 'gap' ? null : item.origin_server_ts);
-  const dividers = $derived(dayDividers(items.map(timeOf), new Date()));
+  const timeOf = (item: ShownItem) => (item.kind === 'gap' ? null : item.origin_server_ts);
+  const dividers = $derived(dayDividers(shown.map(timeOf), new Date()));
 
   // The timeline stays at the newest message while the reader is there; it
   // does not move when they have scrolled up to read older ones. Where the
@@ -149,7 +159,7 @@
         <p role="alert" class="error">{error}</p>
       {/if}
       <ol>
-        {#each items as item, index (key(item, index))}
+        {#each shown as item, index (key(item, index))}
           <li>
             {#if dividers[index]}
               <p class="day-divider"><span>{dividers[index]}</span></p>
@@ -161,8 +171,12 @@
                 time={item.origin_server_ts}
                 quote={item.reply_to === null || item.reply_to === undefined
                   ? null
-                  : (quoteOf(items, item.reply_to) ?? 'missing')}
+                  : (quoteOf(shown, item.reply_to) ?? 'missing')}
+                edited={item.edited === true}
                 onreply={onreply && (() => onreply(item.event_id))}
+                onedit={onedit && ownUserId !== null && item.sender === ownUserId
+                  ? () => onedit(item.event_id, item.body)
+                  : undefined}
               />
             {:else if item.kind === 'image'}
               <ImageMessage {roomId} {item} />

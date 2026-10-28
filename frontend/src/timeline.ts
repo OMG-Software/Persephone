@@ -60,7 +60,7 @@ export type Quote = { sender: string; text: string };
  * it is not loaded. Only what this page shows of the event is quoted (its
  * first line, cut to `MAX_QUOTE_CHARS`), never a sender's copy of it.
  */
-export function quoteOf(items: TimelineItem[], eventId: string): Quote | null {
+export function quoteOf(items: ShownItem[], eventId: string): Quote | null {
   const item = items.find((entry) => entry.kind !== 'gap' && entry.event_id === eventId);
   if (!item || item.kind === 'gap') return null;
   switch (item.kind) {
@@ -78,4 +78,31 @@ export function quoteOf(items: TimelineItem[], eventId: string): Quote | null {
     case 'state':
       return { sender: item.sender, text: 'A change to the room' };
   }
+}
+
+/** A timeline item as shown: a message may carry its newest edit. */
+export type ShownItem = Exclude<TimelineItem, { kind: 'edit' }> & { edited?: boolean };
+
+/**
+ * The items to show: edits are not lines of their own, and each message
+ * shows the text of its newest edit (the last in the room's order), marked
+ * as edited. The core sends only edits by the message's own sender; an edit
+ * whose sender differs from the message's here is still ignored.
+ */
+export function applyEdits(items: TimelineItem[]): ShownItem[] {
+  const newest = new Map<string, { sender: string; body: string }>();
+  for (const item of items) {
+    if (item.kind === 'edit') newest.set(item.replaces, { sender: item.sender, body: item.body });
+  }
+  const shown: ShownItem[] = [];
+  for (const item of items) {
+    if (item.kind === 'edit') continue;
+    const edit = item.kind === 'message' ? newest.get(item.event_id) : undefined;
+    shown.push(
+      item.kind === 'message' && edit && edit.sender === item.sender
+        ? { ...item, body: edit.body, edited: true }
+        : item
+    );
+  }
+  return shown;
 }

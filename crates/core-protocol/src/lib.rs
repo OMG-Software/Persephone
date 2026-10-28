@@ -102,6 +102,15 @@ pub enum Call {
         #[serde(deserialize_with = "Option::deserialize")]
         reply_to: Option<String>,
     },
+    /// Queue a new version of one of this account's text messages in this
+    /// room. Replies like `SendMessage`. When it is sent, the core checks
+    /// that the message is this account's own text message, and fails it
+    /// as `rejected` otherwise.
+    EditMessage {
+        room_id: String,
+        event_id: String,
+        body: String,
+    },
     /// The room's messages sent from this device in this session.
     PendingMessages {
         room_id: String,
@@ -949,6 +958,14 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::EditMessage {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                    body: "fixed".into(),
+                },
+                r#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":"$e","body":"fixed"}}"#,
+            ),
+            (
                 Call::SetDisplayName { name: "Al".into() },
                 r#"{"id":1,"call":{"command":"set_display_name","name":"Al"}}"#,
             ),
@@ -1368,6 +1385,9 @@ mod tests {
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x"}}"#,
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","reply_to":1}}"#,
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","reply_to":null,"edit":"$e"}}"#,
+            br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","body":"x"}}"#,
+            br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":null,"body":"x"}}"#,
+            br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":"$e","body":"x","sender":"@b:s"}}"#,
             br#"{"id":1,"call":{"command":"retry_message","local_id":-1}}"#,
             br#"{"id":1,"call":{"command":"retry_message","local_id":4294967296}}"#,
             br#"{"id":1,"call":{"command":"discard_message","local_id":"1"}}"#,

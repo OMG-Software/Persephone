@@ -157,17 +157,19 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false}),
             ),
             // A reply carrying a secret is refused by the contract.
-            Call::SendMessage { room_id, body, .. } => match body.as_str() {
-                "hello" => Ok(serde_json::json!({
-                    "localId": 1, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
-                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
-                })),
-                // A reply carrying the transaction ID is refused by the contract.
-                _ => Ok(serde_json::json!({
-                    "localId": 2, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
-                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64, "transactionId": "t"
-                })),
-            },
+            Call::SendMessage { room_id, body, .. } | Call::EditMessage { room_id, body, .. } => {
+                match body.as_str() {
+                    "hello" => Ok(serde_json::json!({
+                        "localId": 1, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
+                        "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
+                    })),
+                    // A reply carrying the transaction ID is refused by the contract.
+                    _ => Ok(serde_json::json!({
+                        "localId": 2, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
+                        "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64, "transactionId": "t"
+                    })),
+                }
+            }
             Call::PendingMessages { .. } => Ok(serde_json::json!([])),
             Call::RetryMessage { local_id } | Call::DiscardMessage { local_id } => match local_id {
                 1 => Ok(serde_json::Value::Null),
@@ -605,6 +607,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-set-up-encryption",
             "allow-recover-with-key",
             "allow-send-message",
+            "allow-edit-message",
             "allow-pending-messages",
             "allow-retry-message",
             "allow-discard-message",
@@ -1054,6 +1057,29 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
         )
         .unwrap()["state"],
         "queued"
+    );
+    assert_eq!(
+        invoke(
+            "edit_message",
+            serde_json::json!({"roomId": room, "eventId": "$mine", "body": "hello"})
+        )
+        .unwrap()["state"],
+        "queued"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255)), "body": "x"}),
+        serde_json::json!({"roomId": room, "eventId": "$mine", "body": "x".repeat(16 * 1024 + 1)}),
+    ] {
+        assert_eq!(
+            invoke("edit_message", args).unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized edits never crossed"
     );
     assert_eq!(
         invoke("pending_messages", serde_json::json!({"roomId": room})),

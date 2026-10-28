@@ -380,6 +380,7 @@ mod tests {
                     TimelineItem::Gap { .. }
                     | TimelineItem::Notice { .. }
                     | TimelineItem::Image { .. }
+                    | TimelineItem::Edit { .. }
                     | TimelineItem::State { .. } => unreachable!(),
                 })
                 .collect();
@@ -411,6 +412,7 @@ mod tests {
                     TimelineItem::Gap { .. }
                     | TimelineItem::Notice { .. }
                     | TimelineItem::Image { .. }
+                    | TimelineItem::Edit { .. }
                     | TimelineItem::State { .. } => unreachable!(),
                 })
                 .collect()

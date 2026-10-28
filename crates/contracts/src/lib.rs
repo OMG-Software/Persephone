@@ -103,6 +103,8 @@ pub enum PendingKind {
     Text,
     /// One image; `body` is empty. The pixels are not repeated here.
     Image,
+    /// A new version of one of this account's messages; `body` is its text.
+    Edit,
 }
 
 /// A message the user sent from this device in this session. Only the body
@@ -172,6 +174,19 @@ pub enum TimelineItem {
         height: Option<u32>,
         /// The file is end-to-end encrypted.
         encrypted: bool,
+    },
+    /// A new version of the text message `replaces`, by the same sender:
+    /// the core checked that both events have the same sender. Not shown as
+    /// a line of its own; the page shows `body` in place of the message's,
+    /// marked as edited. The newest edit in the room's order counts.
+    Edit {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        replaces: String,
+        body: String,
     },
     /// A change to the room's members or state, shown as a line of its own.
     State {

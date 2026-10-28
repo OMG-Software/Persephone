@@ -19,6 +19,13 @@
 //!   removed, and who changed what, matters most in an encrypted room. A
 //!   change of picture alone, a redacted state event, and other state are not
 //!   shown. Reactions and other non-message events are not shown.
+//! * An edit (`m.replace`) of a text message is an `edit` item only when its
+//!   sender sent the edited message, compared by full user ID: anyone can
+//!   send an edit naming someone else's message. The edited message's sender
+//!   comes from the same page, from up to `MAX_KNOWN_SENDERS` remembered, or
+//!   from the homeserver for up to `MAX_EDIT_LOOKUPS` edits a page; an edit
+//!   that cannot be checked is left out. An edit is never shown as a message
+//!   of its own.
 //! * A page holds at most `MAX_PAGE_ITEMS` items and `MAX_PAGE_BYTES`
 //!   serialized. The SDK cannot resume inside a fetched chunk, so a chunk that
 //!   would exceed the byte budget is fetched again with half the limit, down to
@@ -34,13 +41,16 @@ use matrix_sdk::{
     deserialized_responses::{TimelineEvent, TimelineEventKind, UnableToDecryptReason},
     room::MessagesOptions,
     ruma::{
-        RoomId, UInt,
+        EventId, OwnedEventId, OwnedUserId, RoomId, UInt,
         events::{
             AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
             SyncStateEvent,
             room::{
                 member::MembershipChange as Change,
-                message::{MessageType, Relation, sanitize::remove_plain_reply_fallback},
+                message::{
+                    MessageType, OriginalSyncRoomMessageEvent, Relation,
+                    sanitize::remove_plain_reply_fallback,
+                },
             },
         },
     },
@@ -66,9 +76,18 @@ struct Cursors {
     entries: VecDeque<(u64, String, String)>,
 }
 
+/// Most senders of editable messages remembered, across all rooms.
+pub const MAX_KNOWN_SENDERS: usize = 512;
+/// Most edited messages a page reads from the homeserver to check an edit's
+/// sender; an edit beyond them is left out of that page.
+pub const MAX_EDIT_LOOKUPS: usize = 8;
+
 #[derive(Default)]
 pub struct MatrixViews {
     cursors: Mutex<Cursors>,
+    /// Oldest first: (room, event, sender) of messages an edit may replace,
+    /// so an edit's sender can be checked without asking the homeserver.
+    senders: Mutex<VecDeque<(String, OwnedEventId, OwnedUserId)>>,
 }
 
 fn room_id(raw: &str) -> Result<&RoomId, ErrorCode> {
@@ -86,18 +105,77 @@ fn joined_room(client: &Client, raw: &str) -> Result<matrix_sdk::Room, ErrorCode
         .ok_or(ErrorCode::NotFound)
 }
 
-/// The visible form of one event, or `None` for events not shown.
-fn project(event: &TimelineEvent) -> Option<TimelineItem> {
-    let event_id = event.event_id()?.to_string();
-    let sender = project_name(event.sender()?.as_str());
-    // Read from the raw event, so an encrypted one has its time too. `UInt`
-    // is at most 2^53 - 1, which `UnixMillis` holds.
-    let origin_server_ts = event
+/// The event's `origin_server_ts`. Read from the raw event, so an encrypted
+/// one has its time too. `UInt` is at most 2^53 - 1, which `UnixMillis`
+/// holds.
+fn server_time(event: &TimelineEvent) -> Option<UnixMillis> {
+    event
         .raw()
         .get_field::<UInt>("origin_server_ts")
         .ok()
         .flatten()
-        .and_then(|millis| UnixMillis::new(millis.into()));
+        .and_then(|millis| UnixMillis::new(millis.into()))
+}
+
+/// The event as an original (not redacted) `m.room.message`.
+fn room_message(event: &TimelineEvent) -> Option<OriginalSyncRoomMessageEvent> {
+    match event.raw().deserialize() {
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(message),
+        ))) => Some(message),
+        _ => None,
+    }
+}
+
+/// The text of a text, notice or emote message.
+fn text_body(msgtype: &MessageType) -> Option<&str> {
+    match msgtype {
+        MessageType::Text(text) => Some(&text.body),
+        MessageType::Notice(notice) => Some(&notice.body),
+        MessageType::Emote(emote) => Some(&emote.body),
+        _ => None,
+    }
+}
+
+/// The sender of the event when an edit may replace it: an original text
+/// message that is not an edit itself.
+fn editable_sender(event: &TimelineEvent) -> Option<OwnedUserId> {
+    let message = room_message(event)?;
+    let editable = text_body(&message.content.msgtype).is_some()
+        && !matches!(message.content.relates_to, Some(Relation::Replacement(_)));
+    editable.then_some(message.sender)
+}
+
+/// What an edit (`m.replace`) claims, before its sender is checked against
+/// the edited message's.
+struct EditClaim {
+    replaces: OwnedEventId,
+    sender: OwnedUserId,
+    /// The projected new text.
+    body: String,
+}
+
+/// The claim of an edit whose new content is text, or `None` for any other
+/// event.
+fn edit_claim(event: &TimelineEvent) -> Option<EditClaim> {
+    let message = room_message(event)?;
+    let Some(Relation::Replacement(replacement)) = &message.content.relates_to else {
+        return None;
+    };
+    let body = text_body(&replacement.new_content.msgtype)?;
+    Some(EditClaim {
+        replaces: replacement.event_id.clone(),
+        sender: message.sender.clone(),
+        body: project_body(body),
+    })
+}
+
+/// The visible form of one event, or `None` for events not shown. An edit
+/// is never shown as a message; `MatrixViews::timeline_page` checks it.
+fn project(event: &TimelineEvent) -> Option<TimelineItem> {
+    let event_id = event.event_id()?.to_string();
+    let sender = project_name(event.sender()?.as_str());
+    let origin_server_ts = server_time(event);
     if let TimelineEventKind::UnableToDecrypt { utd_info, .. } = &event.kind {
         return Some(TimelineItem::Notice {
             event_id,
@@ -141,6 +219,7 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
     // itself from history it loaded.
     let reply_to = match &message.content.relates_to {
         Some(Relation::Reply(reply)) => Some(reply.in_reply_to.event_id.to_string()),
+        Some(Relation::Replacement(_)) => return None,
         _ => None,
     };
     let text = |body: &str| {
@@ -307,6 +386,76 @@ impl MatrixViews {
             .ok_or(ErrorCode::NotFound)
     }
 
+    fn senders(&self) -> MutexGuard<'_, VecDeque<(String, OwnedEventId, OwnedUserId)>> {
+        self.senders
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Remembers the sender of an event an edit may replace.
+    fn remember_sender(&self, room: &str, event: &TimelineEvent) {
+        let (Some(event_id), Some(sender)) = (event.event_id(), editable_sender(event)) else {
+            return;
+        };
+        let mut senders = self.senders();
+        if senders
+            .iter()
+            .any(|(r, id, _)| r == room && *id == event_id)
+        {
+            return;
+        }
+        senders.push_back((room.to_owned(), event_id.to_owned(), sender));
+        while senders.len() > MAX_KNOWN_SENDERS {
+            senders.pop_front();
+        }
+    }
+
+    fn known_sender(&self, room: &str, event_id: &EventId) -> Option<OwnedUserId> {
+        self.senders()
+            .iter()
+            .find(|(r, id, _)| r == room && id == event_id)
+            .map(|(_, _, sender)| sender.clone())
+    }
+
+    /// The edit as a timeline item when its sender sent the edited message,
+    /// which must be a text message that is not an edit itself. The edited
+    /// message's sender comes from `chunk`, from those remembered, or, while
+    /// `lookups` allows, from the homeserver; otherwise the edit is left out.
+    async fn checked_edit(
+        &self,
+        joined: &matrix_sdk::Room,
+        room: &str,
+        chunk: &[TimelineEvent],
+        edit: &TimelineEvent,
+        claim: EditClaim,
+        lookups: &mut usize,
+    ) -> Option<TimelineItem> {
+        let event_id = edit.event_id()?.to_string();
+        let in_chunk = chunk
+            .iter()
+            .find(|event| event.event_id() == Some(&*claim.replaces));
+        let original_sender = match in_chunk {
+            Some(event) => editable_sender(event),
+            None => match self.known_sender(room, &claim.replaces) {
+                Some(sender) => Some(sender),
+                None if *lookups < MAX_EDIT_LOOKUPS => {
+                    *lookups += 1;
+                    let original = joined.event(&claim.replaces, None).await.ok()?;
+                    self.remember_sender(room, &original);
+                    editable_sender(&original)
+                }
+                None => None,
+            },
+        };
+        (original_sender? == claim.sender).then(|| TimelineItem::Edit {
+            event_id,
+            sender: project_name(claim.sender.as_str()),
+            origin_server_ts: server_time(edit),
+            replaces: claim.replaces.to_string(),
+            body: claim.body,
+        })
+    }
+
     pub fn has_room(client: &Client, room: &str) -> bool {
         joined_room(client, room).is_ok()
     }
@@ -372,8 +521,26 @@ impl MatrixViews {
                 .await
                 .map_err(|_| ErrorCode::Unavailable)?;
             // Backward pagination returns newest first; pages read oldest first.
-            let mut items: Vec<TimelineItem> =
-                messages.chunk.iter().rev().filter_map(project).collect();
+            let mut items = Vec::new();
+            let mut lookups = 0;
+            for event in messages.chunk.iter().rev() {
+                self.remember_sender(room, event);
+                let item = match edit_claim(event) {
+                    Some(claim) => {
+                        self.checked_edit(
+                            &joined,
+                            room,
+                            &messages.chunk,
+                            event,
+                            claim,
+                            &mut lookups,
+                        )
+                        .await
+                    }
+                    None => project(event),
+                };
+                items.extend(item);
+            }
             let bytes: usize = items
                 .iter()
                 .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |v| v.len()))

@@ -19,6 +19,7 @@
     "allow-set-up-encryption",
     "allow-recover-with-key",
     "allow-send-message",
+    "allow-edit-message",
     "allow-pending-messages",
     "allow-retry-message",
     "allow-discard-message",

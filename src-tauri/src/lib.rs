@@ -385,6 +385,33 @@ async fn send_message(
     .await
 }
 
+/// Queues a new version of one of this account's text messages. The core
+/// checks the arguments, and at send time that the message is this
+/// account's own text message.
+#[tauri::command]
+async fn edit_message(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+    body: String,
+) -> Result<PendingMessage, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || event_id.len() > MAX_EVENT_ID_BYTES
+        || body.len() > MAX_MESSAGE_BYTES
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::EditMessage {
+            room_id,
+            event_id,
+            body,
+        },
+    )
+    .await
+}
+
 /// The room's messages sent from this device in this session.
 #[tauri::command]
 async fn pending_messages(
@@ -1017,6 +1044,7 @@ pub fn configure<R: Runtime>(
             set_up_encryption,
             recover_with_key,
             send_message,
+            edit_message,
             pending_messages,
             retry_message,
             discard_message,

@@ -33,7 +33,9 @@
     oncancelimage = () => {},
     enterSends = true,
     replyingTo = null,
-    oncancelreply = () => {}
+    oncancelreply = () => {},
+    editing = false,
+    oncanceledit = () => {}
   }: {
     // Messages sent from this device that the timeline does not show yet.
     pending: PendingMessage[];
@@ -66,6 +68,9 @@
     // The message the next one replies to, quoted from the loaded history.
     replyingTo?: Quote | null;
     oncancelreply?: () => void;
+    // The draft is a new version of one of this account's messages.
+    editing?: boolean;
+    oncanceledit?: () => void;
   } = $props();
 
   // The core's limit is 16 KiB of UTF-8; this length is only a first stop.
@@ -124,9 +129,10 @@
 
   // See `composerKey` for which keys send.
   function keydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && replyingTo) {
+    if (event.key === 'Escape' && (replyingTo || editing)) {
       event.preventDefault();
-      oncancelreply();
+      if (editing) oncanceledit();
+      else oncancelreply();
       return;
     }
     if (composerKey(event, enterSends) === 'send') {
@@ -144,6 +150,8 @@
         <li>
           {#if message.kind === 'image'}
             <p class="pending-image"><Icon name="image" />Image</p>
+          {:else if message.kind === 'edit'}
+            <p dir="auto"><span class="pending-kind">Edit:</span> {message.body}</p>
           {:else}
             <p dir="auto">{message.body}</p>
           {/if}
@@ -184,7 +192,12 @@
     <p class="error image-error" role="alert">{imageError}</p>
   {/if}
 
-  {#if replyingTo}
+  {#if editing}
+    <div class="replying">
+      <p>Editing your message</p>
+      <button type="button" class="link" onclick={oncanceledit}>Cancel edit</button>
+    </div>
+  {:else if replyingTo}
     <div class="replying">
       <p>
         Replying to <bdi>{replyingTo.sender}</bdi>: <span dir="auto">{replyingTo.text}</span>

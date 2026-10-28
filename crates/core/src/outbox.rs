@@ -61,6 +61,9 @@ pub enum SendOutcome {
 pub enum Relation {
     /// A reply to this event (`m.in_reply_to`).
     Reply(OwnedEventId),
+    /// A new version of this event, one of this account's text messages
+    /// (`m.replace`).
+    Replace(OwnedEventId),
 }
 
 /// What a message sends.
@@ -148,6 +151,12 @@ impl Outbox {
 
     fn push(&mut self, room_id: &str, content: Content) -> Option<PendingMessage> {
         let (kind, body, relation, image) = match content {
+            Content::Text(body, Some(Relation::Replace(event_id))) => (
+                PendingKind::Edit,
+                body,
+                Some(Relation::Replace(event_id)),
+                None,
+            ),
             Content::Text(body, relation) => (PendingKind::Text, body, relation, None),
             Content::Image(image) => (PendingKind::Image, Zeroizing::default(), None, Some(image)),
         };

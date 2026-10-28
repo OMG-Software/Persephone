@@ -940,9 +940,21 @@ kbd {
   white-space: nowrap;
 }
 
+.edited {
+  color: var(--ink3);
+  font-size: 12px;
+}
+
 .message-actions {
+  display: flex;
+  gap: 10px;
   margin-left: auto;
   opacity: 0;
+}
+
+.pending-kind {
+  color: var(--ink3);
+  font-weight: 600;
 }
 
 .message:hover .message-actions,

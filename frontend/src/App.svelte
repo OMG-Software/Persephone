@@ -26,7 +26,7 @@
   import { DEFAULT_SETTINGS, SettingsKeeper, textScale } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
-  import { mergeNewest, quoteOf, type Quote } from './timeline';
+  import { applyEdits, mergeNewest, quoteOf, type Quote } from './timeline';
   import {
     accountSettings,
     allowUnencrypted,
@@ -39,6 +39,7 @@
     pendingMessages,
     retryMessage,
     sendMessage,
+    editMessage,
     recoverWithKey,
     securityStatus,
     setUpEncryption,
@@ -104,6 +105,9 @@
   let pending = $state<PendingMessage[]>([]);
   // The message the next one replies to, in the selected room.
   let replyingTo = $state<{ eventId: string; quote: Quote } | null>(null);
+  // The message of this account the draft is a new version of, and the
+  // draft from before the edit began, put back when the edit ends.
+  let editingMessage = $state<{ eventId: string; savedDraft: string } | null>(null);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
   // core also refuses until the consent is recorded.
   // `image` is true when the question is about sending the attached image.
@@ -444,6 +448,7 @@
     deviceAsked = null;
     confirmingPlain = null;
     replyingTo = null;
+    editingMessage = null;
     // The core dropped every image handle with the session.
     imageDraft = null;
     attaching = false;
@@ -753,6 +758,10 @@
     changesFailed = false;
     confirmingPlain = null;
     replyingTo = null;
+    if (editingMessage) {
+      draft = editingMessage.savedDraft;
+      editingMessage = null;
+    }
     nextCursor = null;
     error = null;
     loading = true;
@@ -848,9 +857,48 @@
     }
   }
 
+  function startEdit(eventId: string, body: string) {
+    replyingTo = null;
+    editingMessage = { eventId, savedDraft: editingMessage?.savedDraft ?? draft };
+    draft = body;
+  }
+
+  function endEdit() {
+    if (!editingMessage) return;
+    draft = editingMessage.savedDraft;
+    editingMessage = null;
+  }
+
+  // Sends the draft as a new version of the message being edited. In a room
+  // that is not encrypted the core asks for consent like any message: the
+  // edit then waits with "Send unencrypted".
+  async function sendEdit(roomId: string, eventId: string, body: string): Promise<boolean> {
+    const generation = sessionGeneration;
+    try {
+      await editMessage(roomId, eventId, body);
+    } catch (reason) {
+      if (current(roomId, generation)) {
+        error =
+          String(reason) === 'limit_exceeded'
+            ? 'Too many messages are waiting to send. Wait, or discard some.'
+            : describe(reason);
+      }
+      return false;
+    }
+    if (current(roomId, generation)) {
+      const saved = editingMessage?.eventId === eventId ? editingMessage.savedDraft : '';
+      editingMessage = null;
+      draft = saved;
+      await loadPending(roomId, generation);
+    }
+    // The composer keeps the draft put back above.
+    return false;
+  }
+
   async function sendText(body: string): Promise<boolean> {
     const roomId = selected;
     if (!roomId) return false;
+    if (editingMessage) return sendEdit(roomId, editingMessage.eventId, body);
     const replyTo = replyingTo?.eventId ?? null;
     if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(roomId)) {
       confirmingPlain = { roomId, body, replyTo, retryId: null, image: false };
@@ -1292,10 +1340,14 @@
             onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
             onreply={sendBlocked === null
               ? (eventId) => {
-                  const quote = quoteOf(items, eventId);
-                  if (quote) replyingTo = { eventId, quote };
+                  const quote = quoteOf(applyEdits(items), eventId);
+                  if (!quote) return;
+                  endEdit();
+                  replyingTo = { eventId, quote };
                 }
               : undefined}
+            ownUserId={signedIn ? status.account.userId : null}
+            onedit={sendBlocked === null ? startEdit : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
@@ -1366,6 +1418,8 @@
               enterSends={settings.enterSends}
               replyingTo={replyingTo?.quote ?? null}
               oncancelreply={() => (replyingTo = null)}
+              editing={editingMessage !== null}
+              oncanceledit={endEdit}
             />
           {/if}
         {:else}

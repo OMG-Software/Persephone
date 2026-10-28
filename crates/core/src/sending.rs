@@ -18,6 +18,10 @@
 //! * A reply carries `m.in_reply_to` and no quoted fallback (the
 //!   specification dropped it in v1.13), so the quoted text is not copied
 //!   out of an encrypted room's history into a new event.
+//! * An edit is sent only after the core reads the edited event from the
+//!   homeserver and finds it is this account's own text message, itself not
+//!   an edit; otherwise it fails as `rejected` and nothing is sent. It
+//!   carries the new text in `m.new_content`, and a `* ` fallback body.
 //! * An image goes through the same checks, then the SDK's attachment send:
 //!   the SDK uploads it encrypted in an encrypted room (and fails rather than
 //!   upload it in plain), and sends the event with the image's size, MIME
@@ -32,10 +36,11 @@ use matrix_sdk::{
     Client, HttpError, Room, RoomState,
     attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo},
     ruma::{
-        OwnedTransactionId, RoomId, UInt,
+        EventId, OwnedTransactionId, RoomId, UInt,
         events::{
+            AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
             relation::{InReplyTo, Reply},
-            room::message::{self, RoomMessageEventContent},
+            room::message::{self, MessageType, ReplacementMetadata, RoomMessageEventContent},
         },
     },
 };
@@ -88,12 +93,39 @@ async fn checked_room(
 /// `relation`.
 pub fn text_content(body: &str, relation: Option<&Relation>) -> RoomMessageEventContent {
     let mut content = RoomMessageEventContent::text_plain(body);
-    content.relates_to = relation.map(|relation| match relation {
-        Relation::Reply(event_id) => {
-            message::Relation::Reply(Reply::new(InReplyTo::new(event_id.clone())))
+    match relation {
+        None => content,
+        Some(Relation::Reply(event_id)) => {
+            content.relates_to = Some(message::Relation::Reply(Reply::new(InReplyTo::new(
+                event_id.clone(),
+            ))));
+            content
         }
-    });
-    content
+        Some(Relation::Replace(event_id)) => {
+            content.make_replacement(ReplacementMetadata::new(event_id.clone(), None))
+        }
+    }
+}
+
+/// Whether `event_id` in `room` is one of this account's own text
+/// messages, itself not an edit: the only events an edit may replace.
+async fn own_text_message(client: &Client, room: &Room, event_id: &EventId) -> bool {
+    let Some(own) = client.user_id() else {
+        return false;
+    };
+    let Ok(event) = room.event(event_id, None).await else {
+        return false;
+    };
+    if event.sender().as_deref() != Some(own) {
+        return false;
+    }
+    matches!(
+        event.raw().deserialize(),
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(message),
+        ))) if matches!(message.content.msgtype, MessageType::Text(_))
+            && !matches!(message.content.relates_to, Some(message::Relation::Replacement(_)))
+    )
 }
 
 /// Sends `body` as a text message with `transaction_id`.
@@ -109,6 +141,11 @@ pub async fn send(
         Ok(room) => room,
         Err(outcome) => return outcome,
     };
+    if let Some(Relation::Replace(event_id)) = relation
+        && !own_text_message(client, &room, event_id).await
+    {
+        return SendOutcome::Failed(SendFailure::Rejected);
+    }
     match room
         .send(text_content(body, relation))
         .with_transaction_id(transaction_id)

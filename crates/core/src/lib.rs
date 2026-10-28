@@ -635,7 +635,24 @@ impl Core {
                 room_id,
                 body,
                 reply_to,
-            } => self.send_message(room_id, body, reply_to.as_deref()),
+            } => {
+                let relation = match reply_to.as_deref().map(parse_event_id) {
+                    None => None,
+                    Some(Some(event_id)) => Some(outbox::Relation::Reply(event_id)),
+                    Some(None) => return Outcome::Error(ErrorCode::InvalidArgument),
+                };
+                self.send_message(room_id, body, relation)
+            }
+            Call::EditMessage {
+                room_id,
+                event_id,
+                body,
+            } => match parse_event_id(event_id) {
+                Some(event_id) => {
+                    self.send_message(room_id, body, Some(outbox::Relation::Replace(event_id)))
+                }
+                None => Outcome::Error(ErrorCode::InvalidArgument),
+            },
             Call::PendingMessages { room_id } => {
                 if valid_room_id(room_id) {
                     bounded(&self.session.pending_messages(room_id))
@@ -1385,15 +1402,15 @@ impl Core {
         }
     }
 
-    fn send_message(&self, room_id: &str, body: &str, reply_to: Option<&str>) -> Outcome {
+    fn send_message(
+        &self,
+        room_id: &str,
+        body: &str,
+        relation: Option<outbox::Relation>,
+    ) -> Outcome {
         if !valid_room_id(room_id) || !valid_body(body) {
             return Outcome::Error(ErrorCode::InvalidArgument);
         }
-        let relation = match reply_to.map(parse_event_id) {
-            None => None,
-            Some(Some(event_id)) => Some(outbox::Relation::Reply(event_id)),
-            Some(None) => return Outcome::Error(ErrorCode::InvalidArgument),
-        };
         match self
             .session
             .send_message(room_id, zeroize::Zeroizing::new(body.to_owned()), relation)
