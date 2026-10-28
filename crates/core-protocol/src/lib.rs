@@ -1075,9 +1075,10 @@ mod tests {
                         desktop_notifications: true,
                         send_typing: false,
                         send_read_receipts: true,
+                        idle_lock_minutes: 15,
                     },
                 },
-                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true}}}"#,
+                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15}}}"#,
             ),
             (
                 Call::ProfileList {},

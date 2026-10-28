@@ -31,6 +31,7 @@
 * [0022 - Notify through push rules and content-free desktop notifications](0022-notify-through-push-rules-and-content-free-desktop-notifications.md)
 * [0023 - Show typing notices and read receipts, and send them only when turned on](0023-show-typing-and-receipts-and-send-them-only-when-turned-on.md)
 * [0024 - Open links only after the core asks in its own window](0024-open-links-only-after-the-core-asks-in-its-own-window.md)
+* [0025 - Lock after system idle time measured in the core](0025-lock-after-system-idle-time-measured-in-the-core.md)
 
 ## Superseded Records
 

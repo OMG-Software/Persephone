@@ -280,7 +280,13 @@ sendTyping: boolean,
  * receipt, which only this account sees, are sent either way
  * (ADR-0023).
  */
-sendReadReceipts: boolean, };
+sendReadReceipts: boolean, 
+/**
+ * Lock the profile after this many minutes without keyboard or mouse
+ * input on this computer, from 1 to [`IDLE_LOCK_MINUTES_MAX`]; 0 never
+ * does. Off (0) by default (ADR-0025).
+ */
+idleLockMinutes: number, };
 
 export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
 

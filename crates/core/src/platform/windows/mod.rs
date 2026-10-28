@@ -50,6 +50,25 @@ impl Drop for Apartment {
     }
 }
 
+/// How long this computer has had no keyboard or mouse input, from
+/// `GetLastInputInfo` (ADR-0025). Its tick count wraps every 49.7 days; the
+/// difference is taken with wrapping, which is right for any idle time
+/// shorter than that.
+pub(crate) fn idle_time() -> Option<std::time::Duration> {
+    use windows_sys::Win32::{
+        System::SystemInformation::GetTickCount,
+        UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+    };
+    let mut info = LASTINPUTINFO {
+        cbSize: u32::try_from(std::mem::size_of::<LASTINPUTINFO>()).ok()?,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a correctly sized LASTINPUTINFO that lives for the
+    // call; GetTickCount takes nothing.
+    let (read, now) = unsafe { (GetLastInputInfo(&mut info), GetTickCount()) };
+    (read != 0).then(|| std::time::Duration::from_millis(now.wrapping_sub(info.dwTime).into()))
+}
+
 pub(crate) fn default_profile_dir() -> Option<PathBuf> {
     profile::default_dir()
 }

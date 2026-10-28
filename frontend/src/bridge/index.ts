@@ -500,7 +500,8 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       interfaceTextPercent: settings.interfaceTextPercent,
       desktopNotifications: settings.desktopNotifications,
       sendTyping: settings.sendTyping,
-      sendReadReceipts: settings.sendReadReceipts
+      sendReadReceipts: settings.sendReadReceipts,
+      idleLockMinutes: settings.idleLockMinutes
     }
   });
 }

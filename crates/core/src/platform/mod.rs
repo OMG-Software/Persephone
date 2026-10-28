@@ -58,6 +58,10 @@ mod other {
         None
     }
 
+    pub(crate) fn idle_time() -> Option<std::time::Duration> {
+        None
+    }
+
     pub(crate) fn key_protector() -> Arc<dyn KeyProtector> {
         Arc::new(vault::Unsupported)
     }

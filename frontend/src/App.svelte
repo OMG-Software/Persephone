@@ -23,7 +23,7 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
-  import { DEFAULT_SETTINGS, SettingsKeeper, textScale } from './preferences';
+  import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
   import {
@@ -326,6 +326,12 @@
 
   // Ctrl K (⌘K on macOS) opens the jump palette from the room view.
   function shortcutKey(event: KeyboardEvent) {
+    // Lock at once, from anywhere, while the profile is open.
+    if (isLockShortcut(event, mac)) {
+      event.preventDefault();
+      if (status?.store === 'protected') void toggleLock();
+      return;
+    }
     if (!(mac ? event.metaKey : event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'k') {
       return;
     }

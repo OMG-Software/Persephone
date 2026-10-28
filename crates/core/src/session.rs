@@ -71,7 +71,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -233,6 +233,8 @@ struct Shared {
     /// kept here so sending them need not read the store (ADR-0023).
     send_typing: AtomicBool,
     send_receipts: AtomicBool,
+    /// The account's idle lock, in minutes (0: off; ADR-0025).
+    idle_lock_minutes: AtomicU16,
     /// Who is typing in each room, from the sync.
     typing: Arc<activity::Typing>,
     security: Mutex<SecurityShared>,
@@ -532,6 +534,9 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
     shared
         .send_receipts
         .store(loaded.send_read_receipts, Ordering::SeqCst);
+    shared
+        .idle_lock_minutes
+        .store(loaded.idle_lock_minutes, Ordering::SeqCst);
     let installed = lease.commit(|| {
         *guard(&shared.account) = Some(ActiveAccount {
             client: client.clone(),
@@ -1210,6 +1215,7 @@ impl Session {
                 toasts: AtomicBool::new(false),
                 send_typing: AtomicBool::new(false),
                 send_receipts: AtomicBool::new(false),
+                idle_lock_minutes: AtomicU16::new(0),
                 typing: Arc::default(),
             }),
             transition: Mutex::new(()),
@@ -1688,6 +1694,13 @@ impl Session {
         self.shared.send_receipts.load(Ordering::SeqCst)
     }
 
+    /// The account's idle lock in minutes, 0 when off (ADR-0025). It stays
+    /// as last loaded while the profile is locked or signed out, which is
+    /// harmless: only an open profile can be locked.
+    pub fn idle_lock_minutes(&self) -> u16 {
+        self.shared.idle_lock_minutes.load(Ordering::SeqCst)
+    }
+
     /// Who is typing in each room, from the sync.
     pub fn typing(&self) -> &activity::Typing {
         &self.shared.typing
@@ -1716,6 +1729,9 @@ impl Session {
                     shared
                         .send_receipts
                         .store(value.send_read_receipts, Ordering::SeqCst);
+                    shared
+                        .idle_lock_minutes
+                        .store(value.idle_lock_minutes, Ordering::SeqCst);
                 })
                 .is_ok();
         Ok(committed)

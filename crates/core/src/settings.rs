@@ -31,6 +31,7 @@ struct Stored {
     desktop_notifications: bool,
     send_typing: bool,
     send_read_receipts: bool,
+    idle_lock_minutes: u16,
 }
 
 impl Default for Stored {
@@ -48,6 +49,7 @@ impl From<AccountSettings> for Stored {
             desktop_notifications: settings.desktop_notifications,
             send_typing: settings.send_typing,
             send_read_receipts: settings.send_read_receipts,
+            idle_lock_minutes: settings.idle_lock_minutes,
         }
     }
 }
@@ -62,7 +64,11 @@ impl From<Stored> for AccountSettings {
             desktop_notifications: stored.desktop_notifications,
             send_typing: stored.send_typing,
             send_read_receipts: stored.send_read_receipts,
+            idle_lock_minutes: stored.idle_lock_minutes,
         };
+        if settings.idle_lock_minutes > persephone_contracts::IDLE_LOCK_MINUTES_MAX {
+            settings.idle_lock_minutes = defaults.idle_lock_minutes;
+        }
         if !(AccountSettings {
             interface_text_percent: defaults.interface_text_percent,
             ..settings
@@ -127,6 +133,7 @@ mod tests {
             desktop_notifications: true,
             send_typing: true,
             send_read_receipts: true,
+            idle_lock_minutes: 30,
         };
         let bytes = serde_json::to_vec(&Stored::from(changed)).unwrap();
         assert_eq!(decode(&bytes), changed);
@@ -155,6 +162,11 @@ mod tests {
         assert_eq!(read.chat_text_percent, 100);
         assert_eq!(read.interface_text_percent, 120);
         assert!(!read.enter_sends && read.desktop_notifications);
+        assert_eq!(
+            decode(br#"{"idle_lock_minutes":60000}"#).idle_lock_minutes,
+            0,
+            "an idle time over a day reads as off"
+        );
         let read = decode(br#"{"chat_text_percent":150,"interface_text_percent":10}"#);
         assert_eq!(
             (read.chat_text_percent, read.interface_text_percent),

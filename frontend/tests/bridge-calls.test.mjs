@@ -80,7 +80,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           interfaceTextPercent: 90,
           desktopNotifications: true,
           sendTyping: true,
-          sendReadReceipts: false
+          sendReadReceipts: false,
+          idleLockMinutes: 15
         }),
       'set_account_settings',
       {
@@ -90,7 +91,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           interfaceTextPercent: 90,
           desktopNotifications: true,
           sendTyping: true,
-          sendReadReceipts: false
+          sendReadReceipts: false,
+          idleLockMinutes: 15
         }
       }
     ],
@@ -142,6 +144,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       desktopNotifications: false,
       sendTyping: false,
       sendReadReceipts: false,
+      idleLockMinutes: 0,
       theme: 'dark'
     })
   );
@@ -152,7 +155,8 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       interfaceTextPercent: 100,
       desktopNotifications: false,
       sendTyping: false,
-      sendReadReceipts: false
+      sendReadReceipts: false,
+      idleLockMinutes: 0
     }
   });
 });

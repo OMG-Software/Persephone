@@ -95,6 +95,10 @@ pub const REVISION: &str = env!("PERSEPHONE_REVISION");
 /// `locking`; the UI may call again to resume the wait. Covers one sync round.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How often the idle lock compares the computer's idle time with the
+/// account's setting (ADR-0025).
+pub const IDLE_CHECK: Duration = Duration::from_secs(15);
+
 /// Stack for a thread that answers a long call: the SDK's request futures
 /// need more than the default in debug builds, as for the sync thread.
 const LONG_CALL_STACK_BYTES: usize = 8 * 1024 * 1024;
@@ -345,6 +349,16 @@ fn valid_reaction_key(key: &str) -> bool {
     key.len() <= persephone_core_protocol::MAX_REACTION_KEY_BYTES
         && !key.trim().is_empty()
         && !key.chars().any(char::is_control)
+}
+
+/// Whether the idle lock should lock now: it is on (`minutes` above 0), the
+/// profile is open, and the computer's idle time is known and at least that
+/// long. An unknown idle time never locks; the page says the lock is
+/// unavailable then (ADR-0025).
+fn idle_lock_due(minutes: u16, state: StoreState, idle: Option<Duration>) -> bool {
+    minutes > 0
+        && state == StoreState::Protected
+        && idle.is_some_and(|idle| idle >= Duration::from_secs(u64::from(minutes) * 60))
 }
 
 /// The event ID, when the SDK accepts it.
@@ -1327,6 +1341,29 @@ impl Core {
         result
     }
 
+    /// Locks the open profile when the account's idle lock is on and this
+    /// computer has had no input for that long (ADR-0025). Returns whether
+    /// it locked.
+    fn lock_if_idle(&self, idle: Option<Duration>) -> bool {
+        let due = idle_lock_due(self.session.idle_lock_minutes(), self.session.state(), idle);
+        if due {
+            self.session.lock(LOCK_TIMEOUT, || self.announce_lock());
+        }
+        due
+    }
+
+    /// Waits up to `timeout` for the UI connection to close; whether it
+    /// closed.
+    fn wait_closed(&self, timeout: Duration) -> bool {
+        let notifications = lock(&self.hub.notifications);
+        let (notifications, _) = self
+            .hub
+            .changed
+            .wait_timeout_while(notifications, timeout, |n| !n.closed)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        notifications.closed
+    }
+
     /// Runs when a lock or sign-out has closed admission and advanced the
     /// generation: drops every image and draft, then tells the UI.
     fn announce_lock(&self) {
@@ -1783,6 +1820,13 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                 }
             }
         });
+        // The idle lock: checks every `IDLE_CHECK` until the connection
+        // closes, which wakes it at once.
+        let idle = scope.spawn(|| {
+            while !core.wait_closed(IDLE_CHECK) {
+                core.lock_if_idle(platform::os::idle_time());
+            }
+        });
         let mut ready = false;
         let end = loop {
             match receive::<_, Request>(&mut input, &budgets) {
@@ -1853,6 +1897,7 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
         };
         core.close();
         let _ = notifier.join();
+        let _ = idle.join();
         end
     })
 }
@@ -1860,6 +1905,36 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN each setting, profile state and idle time WHEN checked THEN the
+    /// idle lock locks only an open profile, only when on, and only once the
+    /// known idle time reaches the setting.
+    #[test]
+    fn given_idle_times_then_the_idle_lock_locks_only_when_due() {
+        let minutes = |m: u64| Some(Duration::from_secs(m * 60));
+        assert!(idle_lock_due(5, StoreState::Protected, minutes(5)));
+        assert!(idle_lock_due(5, StoreState::Protected, minutes(90)));
+        assert!(!idle_lock_due(
+            5,
+            StoreState::Protected,
+            Some(Duration::from_secs(299))
+        ));
+        assert!(
+            !idle_lock_due(0, StoreState::Protected, minutes(10_000)),
+            "off"
+        );
+        assert!(
+            !idle_lock_due(5, StoreState::Protected, None),
+            "unknown idle time"
+        );
+        for state in [
+            StoreState::Locked,
+            StoreState::Locking,
+            StoreState::Unlocking,
+        ] {
+            assert!(!idle_lock_due(5, state, minutes(90)), "{state:?}");
+        }
+    }
 
     /// GIVEN reaction keys WHEN checked THEN an emoji or short text passes;
     /// empty, blank, oversized or control-bearing keys are refused.

@@ -835,12 +835,19 @@ pub struct AccountSettings {
     /// receipt, which only this account sees, are sent either way
     /// (ADR-0023).
     pub send_read_receipts: bool,
+    /// Lock the profile after this many minutes without keyboard or mouse
+    /// input on this computer, from 1 to [`IDLE_LOCK_MINUTES_MAX`]; 0 never
+    /// does. Off (0) by default (ADR-0025).
+    pub idle_lock_minutes: u16,
 }
 
 /// The smallest text size either setting accepts, in percent.
 pub const TEXT_PERCENT_MIN: u16 = 80;
 /// The largest message text size, in percent.
 pub const CHAT_TEXT_PERCENT_MAX: u16 = 200;
+/// The longest idle time the idle lock accepts, in minutes (a day).
+pub const IDLE_LOCK_MINUTES_MAX: u16 = 24 * 60;
+
 /// The largest interface text size, in percent: the whole interface grows
 /// with it, so it stops before the window's minimum size stops fitting.
 pub const INTERFACE_TEXT_PERCENT_MAX: u16 = 150;
@@ -851,6 +858,7 @@ impl AccountSettings {
         (TEXT_PERCENT_MIN..=CHAT_TEXT_PERCENT_MAX).contains(&self.chat_text_percent)
             && (TEXT_PERCENT_MIN..=INTERFACE_TEXT_PERCENT_MAX)
                 .contains(&self.interface_text_percent)
+            && self.idle_lock_minutes <= IDLE_LOCK_MINUTES_MAX
     }
 }
 
@@ -863,6 +871,7 @@ impl Default for AccountSettings {
             desktop_notifications: false,
             send_typing: false,
             send_read_receipts: false,
+            idle_lock_minutes: 0,
         }
     }
 }

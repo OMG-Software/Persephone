@@ -2,7 +2,12 @@
   import { onMount } from 'svelte';
   import { notificationLevel, setNotificationLevel, type AccountSettings, type NotificationLevel } from './bridge';
   import { notificationLevelText } from './accountChanges';
-  import { CHAT_TEXT_SIZES, INTERFACE_TEXT_SIZES } from './preferences';
+  import {
+    CHAT_TEXT_SIZES,
+    IDLE_LOCK_CHOICES,
+    INTERFACE_TEXT_SIZES,
+    idleLockText
+  } from './preferences';
 
   // This account's preferences. The settings are kept in its encrypted
   // profile through the caller; the notification level is the account's
@@ -177,6 +182,21 @@
     <p class="note">
       Both are off by default: each tells the homeserver and everyone in the room when you are
       active. You still see other people's. Your other devices always learn what you have read.
+    </p>
+    <label for="idle-lock">Lock Persephone when this computer is not used</label>
+    <select
+      id="idle-lock"
+      class="field"
+      value={settings.idleLockMinutes}
+      onchange={(event) => onchange({ idleLockMinutes: Number(event.currentTarget.value) })}
+    >
+      {#each IDLE_LOCK_CHOICES as minutes (minutes)}
+        <option value={minutes}>{idleLockText(minutes)}</option>
+      {/each}
+    </select>
+    <p class="note">
+      Counts time without keyboard or mouse input on this computer, in any program. Locking closes
+      the profile; your passphrase opens it again. Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
     </p>
   </div>
   {#if failure}

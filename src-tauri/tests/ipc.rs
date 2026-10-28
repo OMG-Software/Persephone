@@ -284,7 +284,8 @@ impl CoreTransport for FakeCore {
             },
             Call::AccountSettings {} => Ok(serde_json::json!({
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
-                "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false
+                "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
+                "idleLockMinutes": 0
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
@@ -1474,7 +1475,7 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
     let settings = |enter_sends: bool| {
         serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
             "interfaceTextPercent": 100, "desktopNotifications": false,
-            "sendTyping": false, "sendReadReceipts": false}})
+            "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0}})
     };
     assert!(invoke("set_account_settings", settings(true)).is_ok());
     assert_eq!(

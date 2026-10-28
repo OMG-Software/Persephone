@@ -23,6 +23,12 @@ use std::{
 
 /// The default profile (ADR-0013): `persephone/profile` under the XDG data
 /// directory.
+/// No idle time is read here yet: the idle lock is unavailable
+/// (ADR-0025).
+pub(crate) fn idle_time() -> Option<std::time::Duration> {
+    None
+}
+
 pub(crate) fn default_profile_dir() -> Option<PathBuf> {
     data_home(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
         .map(|base| base.join("persephone").join("profile"))

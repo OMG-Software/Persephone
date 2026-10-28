@@ -36,6 +36,12 @@ use std::{
 /// The default profile (ADR-0013):
 /// `~/Library/Application Support/OMG-Software/Persephone/profile`. A
 /// missing or relative `HOME` gives `None`.
+/// No idle time is read here yet: the idle lock is unavailable
+/// (ADR-0025).
+pub(crate) fn idle_time() -> Option<std::time::Duration> {
+    None
+}
+
 pub(crate) fn default_profile_dir() -> Option<PathBuf> {
     super::unix::absolute(env::var_os("HOME")).map(|home| {
         home.join("Library")
