@@ -294,7 +294,13 @@ sendReadReceipts: boolean,
  * input on this computer, from 1 to [`IDLE_LOCK_MINUTES_MAX`]; 0 never
  * does. Off (0) by default (ADR-0025).
  */
-idleLockMinutes: number, };
+idleLockMinutes: number, 
+/**
+ * Desktop notifications name the sender and room; otherwise they say
+ * only that a message arrived, and no name leaves the core. On by
+ * default (ADR-0022).
+ */
+notificationNames: boolean, };
 
 export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
 

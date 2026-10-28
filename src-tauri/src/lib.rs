@@ -1294,8 +1294,9 @@ pub fn configure<R: Runtime>(
 }
 
 /// Shows one desktop notification (ADR-0022): the room as the title and the
-/// sender in the body, never message text. Skipped while the main window has
-/// the focus, since the page shows the message then.
+/// sender in the body, never message text, or only that a message arrived
+/// when the core sent no names. Skipped while the main window has the focus,
+/// since the page shows the message then.
 fn toast<R: Runtime>(app: &tauri::AppHandle<R>, room: &str, sender: &str) {
     use tauri_plugin_notification::NotificationExt;
     let focused = app
@@ -1305,12 +1306,18 @@ fn toast<R: Runtime>(app: &tauri::AppHandle<R>, room: &str, sender: &str) {
     if focused {
         return;
     }
-    let _ = app
-        .notification()
-        .builder()
-        .title(room)
-        .body(format!("New message from {sender}"))
-        .show();
+    let (title, body) = toast_text(room, sender);
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// A notification's title and body: named, or plain when the core sent no
+/// names (the account leaves them out).
+pub fn toast_text(room: &str, sender: &str) -> (String, String) {
+    if room.is_empty() && sender.is_empty() {
+        ("Persephone".to_owned(), "New message".to_owned())
+    } else {
+        (room.to_owned(), format!("New message from {sender}"))
+    }
 }
 
 /// Creates the main window: bundled app only, no navigation away from it and

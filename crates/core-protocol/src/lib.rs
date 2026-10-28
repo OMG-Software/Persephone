@@ -583,7 +583,8 @@ pub enum Event {
     /// desktop notifications are on (ADR-0022). The UI process shows a
     /// desktop notification with these names and never forwards it to the
     /// page. Names only, never message text; each is projected and at most
-    /// [`MAX_NOTIFICATION_NAME_BYTES`]. Coalesced: only the latest waits.
+    /// [`MAX_NOTIFICATION_NAME_BYTES`]. Both are empty when the account's
+    /// settings leave names out. Coalesced: only the latest waits.
     Notification {
         room: String,
         sender: String,
@@ -1179,9 +1180,10 @@ mod tests {
                         send_typing: false,
                         send_read_receipts: true,
                         idle_lock_minutes: 15,
+                        notification_names: false,
                     },
                 },
-                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15}}}"#,
+                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false}}}"#,
             ),
             (
                 Call::ProfileList {},

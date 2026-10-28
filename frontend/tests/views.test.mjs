@@ -1084,11 +1084,25 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     enterSends: true,
     chatTextPercent: 125,
     interfaceTextPercent: 100,
-    desktopNotifications: false
+    desktopNotifications: false,
+    sendTyping: false,
+    sendReadReceipts: false,
+    idleLockMinutes: 0,
+    notificationNames: true
   };
   const html = render(Preferences, {
     props: { settings, failure: null, mac: false, onchange: () => {} }
   }).body;
+  const nameless = render(Preferences, {
+    props: {
+      settings: { ...settings, desktopNotifications: true, notificationNames: false },
+      failure: null,
+      mac: false,
+      onchange: () => {}
+    }
+  }).body;
+  assert.match(nameless, /says only that a message arrived: no names, no message/);
+  assert.match(html, /Show who wrote and in which room/);
   assert.match(html, /<label for="chat-text-size">Message text</);
   assert.match(html, /<label for="interface-text-size">Interface</);
   assert.match(html, /<option value="200">200%/);

@@ -229,6 +229,8 @@ struct Shared {
     /// The account's desktop-notification setting, kept here so the sync's
     /// notification handler need not read the store (ADR-0022).
     toasts: AtomicBool,
+    /// Whether those notifications name the sender and room.
+    toast_names: AtomicBool,
     /// The account's settings for typing notices and public read receipts,
     /// kept here so sending them need not read the store (ADR-0023).
     send_typing: AtomicBool,
@@ -529,6 +531,9 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
         .toasts
         .store(loaded.desktop_notifications, Ordering::SeqCst);
     shared
+        .toast_names
+        .store(loaded.notification_names, Ordering::SeqCst);
+    shared
         .send_typing
         .store(loaded.send_typing, Ordering::SeqCst);
     shared
@@ -678,7 +683,12 @@ fn run_sync(
                                 notifications::shown(&notification, &room, &client).await
                                 && let Some(listener) = shared.listener()
                             {
-                                listener.notify(&room, &sender);
+                                // Without names, none leaves the core.
+                                if shared.toast_names.load(Ordering::SeqCst) {
+                                    listener.notify(&room, &sender);
+                                } else {
+                                    listener.notify("", "");
+                                }
                             }
                         }
                     })
@@ -1213,6 +1223,7 @@ impl Session {
                 listener: Mutex::new(None),
                 client_ran: AtomicBool::new(false),
                 toasts: AtomicBool::new(false),
+                toast_names: AtomicBool::new(true),
                 send_typing: AtomicBool::new(false),
                 send_receipts: AtomicBool::new(false),
                 idle_lock_minutes: AtomicU16::new(0),
@@ -1723,6 +1734,9 @@ impl Session {
                     shared
                         .toasts
                         .store(value.desktop_notifications, Ordering::SeqCst);
+                    shared
+                        .toast_names
+                        .store(value.notification_names, Ordering::SeqCst);
                     shared
                         .send_typing
                         .store(value.send_typing, Ordering::SeqCst);

@@ -436,6 +436,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
     assert!(defaults.enter_sends && !defaults.desktop_notifications);
     assert!(!defaults.send_typing && !defaults.send_read_receipts);
     assert_eq!(defaults.idle_lock_minutes, 0);
+    assert!(defaults.notification_names);
     assert!(
         !AccountSettings {
             idle_lock_minutes: persephone_contracts::IDLE_LOCK_MINUTES_MAX + 1,
@@ -453,7 +454,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true}"#
     );
     for invalid in [
         r#"{}"#,
@@ -461,7 +462,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         r#"{"enterSends":null,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#,
         r#"{"enterSends":"true","chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#,
         r#"{"enterSends":true,"chatTextPercent":-1,"interfaceTextPercent":100,"desktopNotifications":false}"#,
-        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"userId":"@a:s"}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"userId":"@a:s"}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":-5}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":"yes","sendReadReceipts":false}"#,

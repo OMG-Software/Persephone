@@ -874,6 +874,10 @@ pub struct AccountSettings {
     /// input on this computer, from 1 to [`IDLE_LOCK_MINUTES_MAX`]; 0 never
     /// does. Off (0) by default (ADR-0025).
     pub idle_lock_minutes: u16,
+    /// Desktop notifications name the sender and room; otherwise they say
+    /// only that a message arrived, and no name leaves the core. On by
+    /// default (ADR-0022).
+    pub notification_names: bool,
 }
 
 /// The smallest text size either setting accepts, in percent.
@@ -907,6 +911,7 @@ impl Default for AccountSettings {
             send_typing: false,
             send_read_receipts: false,
             idle_lock_minutes: 0,
+            notification_names: true,
         }
     }
 }

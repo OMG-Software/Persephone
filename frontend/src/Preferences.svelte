@@ -155,9 +155,21 @@
       />
       <span>Show desktop notifications</span>
     </label>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.notificationNames}
+        disabled={!settings.desktopNotifications}
+        onchange={(event) => onchange({ notificationNames: event.currentTarget.checked })}
+      />
+      <span>Show who wrote and in which room</span>
+    </label>
     <p class="note">
-      A notification shows who wrote and in which room, never the message itself. It shows only while
-      Persephone's window is not in front.
+      {settings.notificationNames
+        ? 'A notification shows who wrote and in which room, never the message itself.'
+        : 'A notification says only that a message arrived: no names, no message.'} It shows only
+      while Persephone's window is not in front. Your system may keep a history of notifications.
     </p>
   </div>
   <div class="panel">

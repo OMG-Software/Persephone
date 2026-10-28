@@ -294,7 +294,7 @@ impl CoreTransport for FakeCore {
             Call::AccountSettings {} => Ok(serde_json::json!({
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
                 "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
-                "idleLockMinutes": 0
+                "idleLockMinutes": 0, "notificationNames": true
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
@@ -1519,7 +1519,8 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
     let settings = |enter_sends: bool| {
         serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
             "interfaceTextPercent": 100, "desktopNotifications": false,
-            "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0}})
+            "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
+            "notificationNames": true}})
     };
     assert!(invoke("set_account_settings", settings(true)).is_ok());
     assert_eq!(
@@ -2320,5 +2321,23 @@ fn given_unreachable_core_then_an_image_band_is_a_generic_error() {
         )
         .unwrap_err(),
         "core_unavailable"
+    );
+}
+
+/// GIVEN a notification with names and one without WHEN its text is made
+/// THEN the first names the room and sender, and the second says only that a
+/// message arrived.
+#[test]
+fn given_notifications_with_and_without_names_then_only_named_ones_show_names() {
+    assert_eq!(
+        persephone_desktop::toast_text("Plans", "@bob:example.invalid"),
+        (
+            "Plans".to_owned(),
+            "New message from @bob:example.invalid".to_owned()
+        )
+    );
+    assert_eq!(
+        persephone_desktop::toast_text("", ""),
+        ("Persephone".to_owned(), "New message".to_owned())
     );
 }

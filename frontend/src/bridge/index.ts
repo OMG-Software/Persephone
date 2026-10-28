@@ -528,7 +528,8 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       desktopNotifications: settings.desktopNotifications,
       sendTyping: settings.sendTyping,
       sendReadReceipts: settings.sendReadReceipts,
-      idleLockMinutes: settings.idleLockMinutes
+      idleLockMinutes: settings.idleLockMinutes,
+      notificationNames: settings.notificationNames
     }
   });
 }
