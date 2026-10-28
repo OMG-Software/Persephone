@@ -203,9 +203,9 @@ pub fn too_large(size: Option<UInt>) -> bool {
 /// dialog asked before replacing a file. The bytes go to a new file with a
 /// random name beside it, which only its owner can read from the start
 /// (`platform::os::create_private_file`), flushed to disk, which then takes
-/// the destination's place in one step (`platform::os::replace_file`): a
-/// file already there keeps its permissions, and a new one stays readable
-/// by its owner only. A failed write (a full disk, no permission, a file in
+/// the destination's place in one step (`platform::os::replace_file`): on
+/// Windows a file already there keeps its DACL; otherwise the saved file
+/// stays readable by its owner only. A failed write (a full disk, no permission, a file in
 /// use) leaves a file already there unchanged and removes the partial one.
 /// A failure is `unavailable`, not `rejected`, which means the file itself
 /// was refused.

@@ -52,8 +52,11 @@ Proposed option: "in the core, through its own dialogs".
   beside it first, readable by its owner only from the start (a protected
   owner-only DACL on Windows, mode 0600 elsewhere), which then takes the
   destination's place in one step, so a failed save leaves a file already
-  there unchanged. A replaced file keeps its permissions (`ReplaceFileW` on
-  Windows); a new one stays readable by its owner only. Nothing opens it.
+  there unchanged. On Windows a replaced file keeps its DACL
+  (`ReplaceFileW`, with a backup name so no failure loses the old file).
+  Otherwise the saved file stays readable by its owner only, even over a
+  file with a wider mode: copying the mode could switch on an entry of the
+  folder's default ACL. Nothing opens it.
 
 ### Positive Consequences
 

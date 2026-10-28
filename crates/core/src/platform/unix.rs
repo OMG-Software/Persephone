@@ -63,15 +63,12 @@ pub fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-/// Puts the written `partial` file at `path`. A regular file already there
-/// passes its permissions on; with none there (or a link, which is replaced
-/// itself), the file keeps its owner-only mode.
+/// Puts the written `partial` file at `path` (a link there is replaced
+/// itself). The file keeps its owner-only mode even over a file that had
+/// another: copying a mode would widen the ACL mask, which could switch on
+/// a named entry that the folder's default ACL gave `partial` and the old
+/// file never had. Copying the ACL itself would need libacl.
 pub fn replace_file(partial: &Path, path: &Path) -> std::io::Result<()> {
-    if let Ok(existing) = std::fs::symlink_metadata(path)
-        && existing.is_file()
-    {
-        std::fs::set_permissions(partial, existing.permissions())?;
-    }
     std::fs::rename(partial, path)
 }
 
@@ -336,10 +333,10 @@ mod tests {
     }
 
     /// GIVEN a new file WHEN created private THEN only its owner may read or
-    /// write it; GIVEN a file already there WHEN replaced THEN it keeps its
-    /// mode, and a new file keeps the owner-only one.
+    /// write it; GIVEN a file already there with a wider mode WHEN replaced
+    /// THEN the saved file is still owner-only, as is a new one.
     #[test]
-    fn given_a_saved_file_then_its_mode_is_private_or_kept() {
+    fn given_a_saved_file_then_its_mode_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
@@ -353,7 +350,7 @@ mod tests {
         std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o640)).unwrap();
         replace_file(&partial, &existing).unwrap();
         assert_eq!(std::fs::read(&existing).unwrap(), b"new");
-        assert_eq!(mode(&existing), 0o640);
+        assert_eq!(mode(&existing), 0o600);
 
         let fresh = dir.path().join("fresh.pdf");
         std::io::Write::write_all(&mut create_private_file(&partial).unwrap(), b"fresh").unwrap();

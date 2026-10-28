@@ -3,7 +3,8 @@
 //! Owner Rights SID), and no other process may open it while it is written,
 //! so nothing inherited from the folder exposes the decrypted bytes. It then
 //! replaces a file already there with `ReplaceFileW`, which keeps that
-//! file's DACL, or is moved into place with its own owner-only DACL.
+//! file's DACL, or is moved into place with its own owner-only DACL. The
+//! replaced file goes to a backup name first, so no failure loses it.
 
 use std::{
     fs::File,
@@ -14,7 +15,10 @@ use std::{
 };
 use windows_sys::{
     Win32::{
-        Foundation::{ERROR_FILE_NOT_FOUND, GENERIC_WRITE, INVALID_HANDLE_VALUE},
+        Foundation::{
+            ERROR_FILE_NOT_FOUND, ERROR_UNABLE_TO_MOVE_REPLACEMENT_2, GENERIC_WRITE,
+            INVALID_HANDLE_VALUE,
+        },
         Security::{
             ACL, ACL_REVISION, AddAccessAllowedAce, CreateWellKnownSid, InitializeAcl,
             InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
@@ -122,29 +126,49 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
 /// Puts the written `partial` file at `path`. A file already there is
 /// replaced with `ReplaceFileW`, which keeps its DACL; with none there,
 /// `partial` is moved, never over a file that appeared meanwhile.
+///
+/// The replaced file is kept at a backup name beside `partial` until the
+/// replacement is done, then deleted. With a backup name every failure has a
+/// known outcome: `ERROR_UNABLE_TO_MOVE_REPLACEMENT` leaves both files
+/// under their own names, and `ERROR_UNABLE_TO_MOVE_REPLACEMENT_2` leaves the
+/// replaced file at the backup name, from which it is moved back. Without
+/// one, the first deletes the replaced file and the second leaves it under a
+/// name nobody knows.
 pub(crate) fn replace_file(partial: &Path, path: &Path) -> io::Result<()> {
-    let (partial, path) = (wide(partial), wide(path));
-    // SAFETY: both names are NUL-terminated; no backup file, no reserved
-    // arguments.
+    let backup = partial.with_extension("old");
+    let (partial, path, backup_name) = (wide(partial), wide(path), wide(&backup));
+    // SAFETY: all three names are NUL-terminated; no reserved arguments.
     let replaced = unsafe {
         ReplaceFileW(
             path.as_ptr(),
             partial.as_ptr(),
-            ptr::null(),
+            backup_name.as_ptr(),
             0,
             ptr::null(),
             ptr::null(),
         )
     };
     if replaced != 0 {
+        // The old content; a failure leaves it beside the saved file.
+        let _ = std::fs::remove_file(&backup);
         return Ok(());
     }
     let error = io::Error::last_os_error();
-    if error.raw_os_error() != Some(ERROR_FILE_NOT_FOUND as i32) {
-        return Err(error);
+    match error.raw_os_error() {
+        Some(code) if code == ERROR_FILE_NOT_FOUND as i32 => {
+            // SAFETY: both names are NUL-terminated.
+            check(unsafe { MoveFileExW(partial.as_ptr(), path.as_ptr(), MOVEFILE_WRITE_THROUGH) })
+        }
+        Some(code) if code == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 as i32 => {
+            // The replaced file is at the backup name: put it back. Should
+            // that fail too, it stays there, still whole.
+            // SAFETY: both names are NUL-terminated.
+            let _ =
+                unsafe { MoveFileExW(backup_name.as_ptr(), path.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+            Err(error)
+        }
+        _ => Err(error),
     }
-    // SAFETY: both names are NUL-terminated.
-    check(unsafe { MoveFileExW(partial.as_ptr(), path.as_ptr(), MOVEFILE_WRITE_THROUGH) })
 }
 
 #[cfg(test)]
