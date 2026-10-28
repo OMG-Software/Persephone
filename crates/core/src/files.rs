@@ -205,10 +205,14 @@ pub fn too_large(size: Option<UInt>) -> bool {
 /// (`platform::os::create_private_file`), flushed to disk, which then takes
 /// the destination's place in one step (`platform::os::replace_file`): on
 /// Windows a file already there keeps its DACL; otherwise the saved file
-/// stays readable by its owner only. A failed write (a full disk, no permission, a file in
-/// use) leaves a file already there unchanged and removes the partial one.
-/// A failure is `unavailable`, not `rejected`, which means the file itself
-/// was refused.
+/// stays readable by its owner only. A failed write (a full disk, no
+/// permission, a file in use) leaves a file already there unchanged and
+/// removes the partial one, with one exception on Windows: should
+/// `ReplaceFileW` move the old file to its backup name and moving it back
+/// fail too, the old content stays whole at that backup name
+/// (`.persephone-<random>.old` beside it). A backup that cannot be deleted
+/// after a save stays there the same way. A failure is `unavailable`, not
+/// `rejected`, which means the file itself was refused.
 pub fn write(path: &Path, bytes: &[u8]) -> Result<(), ErrorCode> {
     let dir = path.parent().ok_or(ErrorCode::Unavailable)?;
     let mut random = [0u8; 8];
