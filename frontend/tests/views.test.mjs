@@ -217,6 +217,25 @@ test('GIVEN replies WHEN rendered THEN a loaded message is quoted as isolated te
   assert.equal((shown.match(/>\s*Reply <span class="visually-hidden">/g) ?? []).length, 3);
 });
 
+test('GIVEN the first unread message WHEN rendered THEN one New messages line comes just before it', () => {
+  const msg = (id) => ({ kind: 'message', event_id: id, sender: '@b:example.invalid', body: id, origin_server_ts: null, reply_to: null });
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [msg('$1'), msg('$2'), msg('$3')],
+      unreadFrom: '$2',
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.equal((shown.match(/New messages/g) ?? []).length, 1);
+  assert.ok(shown.indexOf('New messages') > shown.indexOf('>$1<'));
+  assert.ok(shown.indexOf('New messages') < shown.indexOf('>$2<'));
+});
+
 test('GIVEN reactions WHEN rendered THEN keys are isolated text with counts, and our own is pressed', () => {
   const { body: html } = render(Timeline, {
     props: {

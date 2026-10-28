@@ -111,6 +111,12 @@ pub enum Call {
         event_id: String,
         body: String,
     },
+    /// Mark a joined room read up to this event: its fully-read marker and
+    /// a private read receipt, which only this account's devices see.
+    MarkRead {
+        room_id: String,
+        event_id: String,
+    },
     /// React to this event in a joined room with `key`, usually an emoji:
     /// some visible text of at most [`MAX_REACTION_KEY_BYTES`], without
     /// control characters. Sent like a message: in an encrypted room it is
@@ -978,6 +984,13 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::MarkRead {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                },
+                r#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s","event_id":"$e"}}"#,
+            ),
+            (
                 Call::React {
                     room_id: "!r:s".into(),
                     event_id: "$e".into(),
@@ -1423,6 +1436,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","body":"x"}}"#,
             br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e"}}"#,
+            br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s","event_id":"$e","public":true}}"#,
             br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e","key":null}}"#,
             br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s","event_id":"$e","reason":"spam"}}"#,
             br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":null,"body":"x"}}"#,

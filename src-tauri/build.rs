@@ -30,6 +30,7 @@ fn main() {
             "edit_message",
             "delete_message",
             "react",
+            "mark_read",
             "pending_messages",
             "retry_message",
             "discard_message",

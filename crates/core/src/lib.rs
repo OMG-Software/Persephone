@@ -252,6 +252,7 @@ pub struct Core {
     conversation: conversations::Busy,
     /// One user-directory search at a time.
     search: conversations::Busy,
+    read_marker: conversations::Busy,
     /// Reading or setting the display name, one at a time.
     display_name: conversations::Busy,
     /// One device-list request at a time.
@@ -399,6 +400,7 @@ impl Core {
             budgets,
             conversation: conversations::Busy::default(),
             search: conversations::Busy::default(),
+            read_marker: conversations::Busy::default(),
             display_name: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             room_settings: conversations::Busy::default(),
@@ -506,6 +508,7 @@ impl Core {
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
             | Call::React { .. }
+            | Call::MarkRead { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -774,6 +777,7 @@ impl Core {
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
             | Call::React { .. }
+            | Call::MarkRead { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -833,6 +837,7 @@ impl Core {
             Decline(String),
             Delete(String, matrix_sdk::ruma::OwnedEventId),
             React(String, matrix_sdk::ruma::OwnedEventId, String),
+            MarkRead(String, matrix_sdk::ruma::OwnedEventId),
             Start(OwnedUserId),
             Search(String),
             CreateRoom(String, Vec<OwnedUserId>),
@@ -873,6 +878,10 @@ impl Core {
                 room_id.clone(),
                 parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
                 key.clone(),
+            ),
+            Call::MarkRead { room_id, event_id } if valid_room_id(room_id) => Work::MarkRead(
+                room_id.clone(),
+                parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
             ),
             Call::StartConversation { user_id } => Work::Start(user(user_id)?),
             Call::SearchUsers { term } if conversations::valid_term(term) => {
@@ -951,6 +960,7 @@ impl Core {
         };
         let slot = match work {
             Work::Search(_) => self.search.begin()?,
+            Work::MarkRead(..) => self.read_marker.begin()?,
             Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
             Work::Devices => self.devices.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
@@ -985,6 +995,11 @@ impl Core {
                 Work::Delete(room_id, event_id) => self
                     .with_matrix(generation, async |client| {
                         sending::delete(&client, room_id, event_id).await
+                    })
+                    .map(|()| serde_json::Value::Null),
+                Work::MarkRead(room_id, event_id) => self
+                    .with_matrix(generation, async |client| {
+                        sending::mark_read(&client, room_id, event_id).await
                     })
                     .map(|()| serde_json::Value::Null),
                 Work::React(room_id, event_id, key) => self

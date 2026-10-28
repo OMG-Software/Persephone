@@ -26,7 +26,13 @@
   import { DEFAULT_SETTINGS, SettingsKeeper, textScale } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
-  import { applyRelations, mergeNewest, quoteOf, type Quote } from './timeline';
+  import {
+    applyRelations,
+    firstUnread,
+    mergeNewest,
+    quoteOf,
+    type Quote
+  } from './timeline';
   import {
     accountSettings,
     allowUnencrypted,
@@ -42,6 +48,7 @@
     editMessage,
     deleteMessage,
     react,
+    markRead,
     recoverWithKey,
     securityStatus,
     setUpEncryption,
@@ -113,6 +120,10 @@
   // One of this account's messages waiting for "Delete" to be confirmed,
   // and whether the deletion is being sent.
   let confirmingDelete = $state<{ roomId: string; eventId: string } | null>(null);
+  // Where the "New messages" line goes in the selected room, fixed when it
+  // opens, and the event this room was last marked read at.
+  let unreadFrom = $state<string | null>(null);
+  let markedRead: string | null = null;
   let deleting = $state(false);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
   // core also refuses until the consent is recorded.
@@ -768,6 +779,8 @@
     confirmingPlain = null;
     replyingTo = null;
     confirmingDelete = null;
+    unreadFrom = null;
+    markedRead = null;
     if (editingMessage) {
       draft = editingMessage.savedDraft;
       editingMessage = null;
@@ -785,6 +798,12 @@
       if (!current(roomId, generation)) return;
       items = page.items;
       nextCursor = page.nextCursor;
+      const ownUserId = status?.account.userId ?? null;
+      unreadFrom = firstUnread(
+        applyRelations(page.items, ownUserId),
+        selectedRoom?.unreadCount ?? 0,
+        ownUserId
+      );
       if (signedIn) {
         loadPending(roomId, generation);
         loadContact(roomId, generation);
@@ -921,6 +940,19 @@
       return;
     }
     void sendReaction(roomId, eventId, key);
+  }
+
+  // Marks the selected room read once its newest event has been seen. Best
+  // effort: a failure is tried again with the next newest event.
+  async function readTo(eventId: string) {
+    const roomId = selected;
+    if (!roomId || eventId === markedRead) return;
+    markedRead = eventId;
+    try {
+      await markRead(roomId, eventId);
+    } catch {
+      if (markedRead === eventId) markedRead = null;
+    }
   }
 
   // Takes back one of this account's reactions by deleting its event.
@@ -1432,6 +1464,8 @@
               : undefined}
             onreact={sendBlocked === null ? reactTo : undefined}
             onunreact={signedIn ? unreact : undefined}
+            {unreadFrom}
+            onread={signedIn ? readTo : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>

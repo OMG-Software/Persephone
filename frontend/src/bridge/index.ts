@@ -340,6 +340,14 @@ export function editMessage(roomId: string, eventId: string, body: string): Prom
 }
 
 /**
+ * Marks a room read up to an event, privately: its fully-read marker and a
+ * private read receipt, which other people do not see.
+ */
+export function markRead(roomId: string, eventId: string): Promise<void> {
+  return invoke<void>('mark_read', { roomId, eventId });
+}
+
+/**
  * Reacts to an event with a short key, usually an emoji. Sent like a message:
  * in a room that is not encrypted only after `allowUnencrypted`. A reaction
  * is taken back with `deleteMessage` on its own event.

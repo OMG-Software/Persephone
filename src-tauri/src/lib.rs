@@ -412,6 +412,20 @@ async fn edit_message(
     .await
 }
 
+/// Marks a joined room read up to an event, privately: its fully-read
+/// marker and a private read receipt.
+#[tauri::command]
+async fn mark_read(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || event_id.len() > MAX_EVENT_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::MarkRead { room_id, event_id }).await
+}
+
 /// Reacts to an event in a joined room with a short key, usually an emoji.
 /// The core checks the arguments and the room, as for a message.
 #[tauri::command]
@@ -1087,6 +1101,7 @@ pub fn configure<R: Runtime>(
             edit_message,
             delete_message,
             react,
+            mark_read,
             pending_messages,
             retry_message,
             discard_message,

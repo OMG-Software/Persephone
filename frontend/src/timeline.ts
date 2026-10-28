@@ -173,3 +173,39 @@ export function applyRelations(items: TimelineItem[], ownUserId: string | null =
   }
   return shown;
 }
+
+/** Kinds that count as messages for the unread count and the read marker. */
+const MESSAGE_KINDS = new Set<ShownItem['kind']>(['message', 'image', 'notice']);
+
+/**
+ * Where the "New messages" line goes when a room with `unread` unread
+ * messages opens: before the `unread`-th newest message from someone else,
+ * or before the oldest loaded one when fewer are loaded. `null` when there
+ * is nothing unread or nothing to mark.
+ */
+export function firstUnread(
+  items: ShownItem[],
+  unread: number,
+  ownUserId: string | null
+): string | null {
+  if (!(unread > 0)) return null;
+  let found: string | null = null;
+  let counted = 0;
+  for (let index = items.length - 1; index >= 0 && counted < unread; index--) {
+    const item = items[index];
+    if (!MESSAGE_KINDS.has(item.kind) || item.kind === 'gap') continue;
+    if (ownUserId !== null && item.sender === ownUserId) continue;
+    found = item.event_id;
+    counted += 1;
+  }
+  return found;
+}
+
+/** The newest event in `items` that a read marker may point at, or `null`. */
+export function newestEvent(items: TimelineItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (item.kind !== 'gap') return item.event_id;
+  }
+  return null;
+}

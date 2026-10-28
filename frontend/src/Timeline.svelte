@@ -10,7 +10,7 @@
   import Message from './Message.svelte';
   import { stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
-  import { applyRelations, quoteOf, type ShownItem } from './timeline';
+  import { applyRelations, newestEvent, quoteOf, type ShownItem } from './timeline';
 
   let {
     title,
@@ -32,7 +32,9 @@
     onedit,
     ondelete,
     onreact,
-    onunreact
+    onunreact,
+    unreadFrom = null,
+    onread
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -67,6 +69,12 @@
     // event; absent where reacting is not offered.
     onreact?: (eventId: string, key: string) => void;
     onunreact?: (reactionEventId: string) => void;
+    // The first unread message when the room opened: a "New messages" line
+    // goes before it.
+    unreadFrom?: string | null;
+    // Called with the newest event once the reader has seen it: the window
+    // has focus and the timeline is at its end.
+    onread?: (eventId: string) => void;
   } = $props();
 
   // Edits, deletions and reactions are not lines of their own: each message
@@ -106,16 +114,31 @@
   // reader is comes from scrolling, not from measuring during an update: by
   // then a tall new message may already be in the page.
   let scroller = $state<HTMLElement | null>(null);
-  let atEnd = true;
+  let atEnd = $state(true);
   function scrolled() {
     if (scroller) atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
   }
+
+  // The newest event counts as read only while the reader can see it: the
+  // window has focus and the timeline is at its end.
+  let attention = $state(0);
+  let reported: string | null = null;
+  $effect(() => {
+    void attention;
+    const newest = newestEvent(items);
+    if (!onread || !atEnd || newest === null || newest === reported) return;
+    if (typeof document === 'undefined' || !document.hasFocus()) return;
+    reported = newest;
+    onread(newest);
+  });
   $effect(() => {
     // An emptied timeline is a room being opened: it starts at the newest.
     if (items.length === 0) atEnd = true;
     if (scroller && atEnd) scroller.scrollTop = scroller.scrollHeight;
   });
 </script>
+
+<svelte:window onfocus={() => (attention += 1)} />
 
 <section class="timeline" aria-labelledby="timeline-heading">
   <header class="chat-header">
@@ -175,6 +198,9 @@
           <li>
             {#if dividers[index]}
               <p class="day-divider"><span>{dividers[index]}</span></p>
+            {/if}
+            {#if unreadFrom !== null && item.kind !== 'gap' && item.event_id === unreadFrom}
+              <p class="unread-divider"><span>New messages</span></p>
             {/if}
             {#if item.kind === 'message'}
               <Message

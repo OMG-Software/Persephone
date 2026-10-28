@@ -860,6 +860,24 @@ kbd {
   font-weight: 500;
 }
 
+/* The "New messages" line: like a day divider, in the accent colour. */
+.unread-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 8px 6px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.unread-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--accent);
+}
+
 .day-divider::before,
 .day-divider::after {
   content: '';

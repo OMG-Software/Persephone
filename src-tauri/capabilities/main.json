@@ -22,6 +22,7 @@
     "allow-edit-message",
     "allow-delete-message",
     "allow-react",
+    "allow-mark-read",
     "allow-pending-messages",
     "allow-retry-message",
     "allow-discard-message",

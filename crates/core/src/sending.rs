@@ -38,6 +38,7 @@ use crate::store::Stores;
 use matrix_sdk::{
     Client, HttpError, Room, RoomState,
     attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo},
+    room::Receipts,
     ruma::{
         EventId, OwnedTransactionId, RoomId, UInt,
         events::{
@@ -50,6 +51,7 @@ use matrix_sdk::{
 };
 use matrix_sdk_crypto::{OlmError, SessionRecipientCollectionError, store::CryptoStore};
 use persephone_contracts::SendFailure;
+use persephone_core_protocol::ErrorCode;
 
 /// Crypto-store custom value holding the rooms the user allowed plain text in.
 pub const CONSENT_KEY: &str = "persephone.plaintext_rooms.v1";
@@ -183,27 +185,47 @@ pub async fn react(
 /// Deletes (redacts) `event_id` in the joined room `room_id`, for everyone.
 /// The homeserver decides whether this account may: `rejected` when it
 /// refuses, `unavailable` when it cannot be reached.
-pub async fn delete(
-    client: &Client,
-    room_id: &str,
-    event_id: &EventId,
-) -> Result<(), persephone_core_protocol::ErrorCode> {
-    use persephone_core_protocol::ErrorCode;
-    let room = RoomId::parse(room_id)
+pub async fn delete(client: &Client, room_id: &str, event_id: &EventId) -> Result<(), ErrorCode> {
+    joined(client, room_id)?
+        .redact(event_id, None, None)
+        .await
+        .map(|_| ())
+        .map_err(|error| refusal(error.as_client_api_error().is_some()))
+}
+
+/// The joined room `room_id`, or `not_found`.
+fn joined(client: &Client, room_id: &str) -> Result<Room, ErrorCode> {
+    RoomId::parse(room_id)
         .ok()
         .and_then(|room_id| client.get_room(&room_id))
         .filter(|room| room.state() == RoomState::Joined)
-        .ok_or(ErrorCode::NotFound)?;
-    room.redact(event_id, None, None)
+        .ok_or(ErrorCode::NotFound)
+}
+
+/// What a failed request means for the page: `rejected` when the homeserver
+/// answered it, `unavailable` when it may not have been reached.
+fn refusal(answered: bool) -> ErrorCode {
+    if answered {
+        ErrorCode::Rejected
+    } else {
+        ErrorCode::Unavailable
+    }
+}
+
+/// Marks the joined room `room_id` read up to `event_id`: its fully-read
+/// marker and a private read receipt, which other people do not see.
+pub async fn mark_read(
+    client: &Client,
+    room_id: &str,
+    event_id: &EventId,
+) -> Result<(), ErrorCode> {
+    let receipts = Receipts::new()
+        .fully_read_marker(event_id.to_owned())
+        .private_read_receipt(event_id.to_owned());
+    joined(client, room_id)?
+        .send_multiple_receipts(receipts)
         .await
-        .map(|_| ())
-        .map_err(|error| {
-            if error.as_client_api_error().is_some() {
-                ErrorCode::Rejected
-            } else {
-                ErrorCode::Unavailable
-            }
-        })
+        .map_err(|error| refusal(error.as_client_api_error().is_some()))
 }
 
 /// Parses a MIME type into whatever type the SDK's attachment send names,

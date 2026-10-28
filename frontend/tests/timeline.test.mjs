@@ -139,3 +139,21 @@ test('GIVEN reactions WHEN applied THEN each key counts its senders once, mine i
   assert.equal(capped.reactions.length, MAX_REACTION_KEYS);
   assert.equal(applyRelations(items).length, 1, 'reactions are not lines of their own');
 });
+
+test('GIVEN unread messages WHEN a room opens THEN the line goes before the oldest unread one from someone else', async () => {
+  const { firstUnread, newestEvent } = await import('../src/timeline.ts');
+  const msg = (id, sender) => ({ kind: 'message', event_id: id, sender, body: id, origin_server_ts: null, reply_to: null });
+  const items = [
+    msg('$1', '@b:s'),
+    msg('$2', '@b:s'),
+    { kind: 'state', event_id: '$s', sender: '@b:s', origin_server_ts: null, change: { type: 'encryption' } },
+    msg('$3', '@me:s'),
+    msg('$4', '@b:s')
+  ];
+  assert.equal(firstUnread(items, 2, '@me:s'), '$2', 'own messages and state changes are not counted');
+  assert.equal(firstUnread(items, 1, '@me:s'), '$4');
+  assert.equal(firstUnread(items, 99, '@me:s'), '$1', 'more than loaded: the oldest loaded');
+  assert.equal(firstUnread(items, 0, '@me:s'), null);
+  assert.equal(newestEvent([...items, { kind: 'gap', next_cursor: null }]), '$4');
+  assert.equal(newestEvent([]), null);
+});
