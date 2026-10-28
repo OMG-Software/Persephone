@@ -105,6 +105,8 @@ pub enum PendingKind {
     Image,
     /// A new version of one of this account's messages; `body` is its text.
     Edit,
+    /// One file; `body` is its name (ADR-0029).
+    File,
 }
 
 /// A message the user sent from this device in this session. Only the body
@@ -173,6 +175,20 @@ pub enum TimelineItem {
         width: Option<u32>,
         height: Option<u32>,
         /// The file is end-to-end encrypted.
+        encrypted: bool,
+    },
+    /// An `m.file`, `m.audio` or `m.video` event (ADR-0029). Nothing is
+    /// fetched, played or shown until the user saves it (`save_file`).
+    /// `name` is made safe for a file system and projected like a name;
+    /// `size` is the sender's claim.
+    File {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        name: String,
+        size: Option<u32>,
         encrypted: bool,
     },
     /// A new version of the text message `replaces`, by the same sender:

@@ -101,7 +101,7 @@ export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
 export type SendFailure = "confirmation_required" | "device_not_verified" | "identity_changed" | "not_joined" | "rejected" | "failed";
 
-export type PendingKind = "text" | "image" | "edit";
+export type PendingKind = "text" | "image" | "edit" | "file";
 
 export type PendingMessage = { localId: number, roomId: string, kind: PendingKind, body: string, state: PendingState, eventId: string | null, failure: SendFailure | null, 
 /**
@@ -399,7 +399,11 @@ width: number | null, height: number | null,
 /**
  * The file is end-to-end encrypted.
  */
-encrypted: boolean, } | { "kind": "edit", event_id: string, sender: string, 
+encrypted: boolean, } | { "kind": "file", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, name: string, size: number | null, encrypted: boolean, } | { "kind": "edit", event_id: string, sender: string, 
 /**
  * As for messages.
  */

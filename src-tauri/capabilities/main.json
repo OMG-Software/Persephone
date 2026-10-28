@@ -51,6 +51,8 @@
     "allow-image-band",
     "allow-release-image",
     "allow-pick-image",
+    "allow-pick-file",
+    "allow-save-file",
     "allow-send-image",
     "allow-discard-image",
     "allow-invite-list",

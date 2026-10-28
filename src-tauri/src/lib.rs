@@ -791,6 +791,34 @@ async fn pick_image(core: State<'_, CoreLink>, room_id: String) -> Result<ImageP
     relay(core.inner(), Call::PickImage { room_id }).await
 }
 
+/// Asks the user for a file to send in the core's own dialog and queues it
+/// (ADR-0029); no path crosses. The reply is the queued message, or null
+/// when the user cancelled.
+#[tauri::command]
+async fn pick_file(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<Option<PendingMessage>, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::PickFile { room_id }).await
+}
+
+/// Saves a received file where the user chooses in the core's own dialog
+/// (ADR-0029); `true` when saved, `false` when cancelled.
+#[tauri::command]
+async fn save_file(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+) -> Result<bool, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || event_id.len() > MAX_EVENT_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SaveFile { room_id, event_id }).await
+}
+
 /// Queues a picked image by its draft handle, with the same checks as text.
 #[tauri::command]
 async fn send_image(
@@ -1244,6 +1272,8 @@ pub fn configure<R: Runtime>(
             image_band,
             release_image,
             pick_image,
+            pick_file,
+            save_file,
             send_image,
             discard_image,
             invite_list,

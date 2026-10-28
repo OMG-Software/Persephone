@@ -418,6 +418,23 @@ export function deleteMessage(roomId: string, eventId: string): Promise<void> {
   return invoke<void>('delete_message', { roomId, eventId });
 }
 
+/**
+ * Asks the user for a file to send, in the core's own dialog, and queues it
+ * at once (ADR-0029). Resolves with the queued message, or null when the
+ * user cancelled.
+ */
+export function pickFile(roomId: string): Promise<PendingMessage | null> {
+  return invoke<PendingMessage | null>('pick_file', { roomId });
+}
+
+/**
+ * Saves a received file: the core downloads and decrypts it, then asks where
+ * in its own Save dialog. Resolves `true` when saved, `false` when cancelled.
+ */
+export function saveFile(roomId: string, eventId: string): Promise<boolean> {
+  return invoke<boolean>('save_file', { roomId, eventId });
+}
+
 /** Queues a picked image, by its draft handle, like `sendMessage`. */
 export function sendImage(roomId: string, handle: string): Promise<PendingMessage> {
   return invoke<PendingMessage>('send_image', { roomId, handle });

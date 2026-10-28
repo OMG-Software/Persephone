@@ -37,6 +37,7 @@ pub mod contacts;
 pub mod conversations;
 pub mod credentials;
 pub mod discovery;
+pub mod files;
 pub mod homeserver;
 pub mod identities;
 pub mod links;
@@ -533,6 +534,14 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            Call::PickFile { room_id } => match self.pick_file(room_id) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
+            Call::SaveFile { room_id, event_id } => match self.save_file(room_id, event_id) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
@@ -801,6 +810,14 @@ impl Core {
                 Err(code) => Outcome::Error(code),
             },
             Call::DiscoverHomeserver { server_name } => match self.discover(server_name) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::PickFile { room_id } => match self.pick_file(room_id) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::SaveFile { room_id, event_id } => match self.save_file(room_id, event_id) {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
@@ -1653,6 +1670,106 @@ impl Core {
         } else {
             Outcome::Error(ErrorCode::Internal)
         }
+    }
+
+    /// Admits a file pick for a joined room (ADR-0029): the core's file
+    /// dialog, then the read and the queue. One dialog at a time, as for
+    /// images.
+    fn pick_file<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+        if !valid_room_id(room_id) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let generation = match self.source() {
+            Source::Locked => return Err(ErrorCode::Locked),
+            Source::Fixtures | Source::SignedOut => return Err(ErrorCode::NotFound),
+            Source::Matrix(lease, client) => {
+                if !MatrixViews::has_room(&client, room_id) {
+                    return Err(ErrorCode::NotFound);
+                }
+                lease.generation()
+            }
+        };
+        let slot = self.media.begin_pick()?;
+        let room_id = room_id.to_owned();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            let Some(path) = (match self.picker.pick_file() {
+                Ok(path) => path,
+                Err(code) => return Outcome::Error(code),
+            }) else {
+                return Outcome::Ok(serde_json::Value::Null);
+            };
+            // A file chosen after a lock is not read.
+            if self.media_generation() != Some(generation) {
+                return Outcome::Error(ErrorCode::Locked);
+            }
+            let bytes = match pick::read_image_file(&path, &self.budgets) {
+                Ok(bytes) => bytes,
+                Err(code) => return Outcome::Error(code),
+            };
+            let upload = Arc::new(files::FileUpload::new(bytes, &path));
+            match self.session.send_file(&room_id, upload) {
+                Ok(queued) => ok(&queued),
+                Err(session::SendRefusal::Full) => Outcome::Error(ErrorCode::LimitExceeded),
+                Err(session::SendRefusal::Unavailable) => Outcome::Error(ErrorCode::Unavailable),
+            }
+        }))
+    }
+
+    /// Admits saving a received file (ADR-0029): the download and decrypt
+    /// under a lease, then the core's Save dialog without one, then the
+    /// write. One at a time, as image loads are.
+    fn save_file<'a>(&'a self, room_id: &str, event_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+        if !valid_room_id(room_id) || !valid_event_id(event_id) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let slot = self.media.begin_load()?;
+        let (room_id, event_id) = (room_id.to_owned(), event_id.to_owned());
+        Ok(Box::new(move || {
+            let _slot = slot;
+            refused(self.finish_save(&room_id, &event_id))
+        }))
+    }
+
+    fn finish_save(&self, room_id: &str, event_id: &str) -> Result<bool, ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let generation = lease.generation();
+        let current = || self.session.open_generation() == Some(generation);
+        let fetched = lease.stores().block_on(async {
+            let event = media::room_event(&client, room_id, event_id).await?;
+            let file = files::file_content(&event).ok_or(ErrorCode::NotFound)?;
+            if files::too_large(file.size) {
+                return Err(ErrorCode::Rejected);
+            }
+            let bytes = media::fetch_source(
+                &client,
+                client.http_client(),
+                &file.source,
+                &self.budgets,
+                &current,
+            )
+            .await?;
+            Ok((file.name, bytes))
+        });
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        let (name, bytes) = fetched?;
+        // The dialog may stay open long: no lease is held meanwhile.
+        let Some(path) = self.picker.save_file(&name)? else {
+            return Ok(false);
+        };
+        if !current() {
+            return Err(ErrorCode::Locked);
+        }
+        files::write(&path, bytes.bytes()).map(|()| true)
     }
 
     fn pick_image<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {

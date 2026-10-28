@@ -59,6 +59,7 @@
     roomActivity,
     setTyping,
     openLink,
+    pickFile,
     recoverWithKey,
     securityStatus,
     setUpEncryption,
@@ -1194,6 +1195,32 @@
     }
   }
 
+  // Asks the core for a file to send; the core queues it at once, and the
+  // pending list shows it (ADR-0029).
+  let attachingFile = $state(false);
+  async function attachFile() {
+    const roomId = selected;
+    if (!roomId || attachingFile) return;
+    const generation = sessionGeneration;
+    attachingFile = true;
+    imageError = null;
+    try {
+      const queued = await pickFile(roomId);
+      if (queued && current(roomId, generation)) await loadPending(roomId, generation);
+    } catch (reason) {
+      if (current(roomId, generation)) {
+        imageError =
+          String(reason) === 'limit_exceeded'
+            ? 'An image or file is already waiting to send. Wait until it is sent, or discard it.'
+            : String(reason) === 'rejected'
+              ? 'That file cannot be sent: it is empty, larger than 20 MB, or not a plain file.'
+              : 'The file could not be attached. Files work on Windows only for now.';
+      }
+    } finally {
+      if (generation === sessionGeneration) attachingFile = false;
+    }
+  }
+
   function cancelImage() {
     const draft = imageDraft;
     imageDraft = null;
@@ -1691,6 +1718,8 @@
               {sendingImage}
               {imageError}
               onattach={attachImage}
+              {attachingFile}
+              onattachfile={attachFile}
               onsendimage={sendAttached}
               oncancelimage={cancelImage}
               enterSends={settings.enterSends}

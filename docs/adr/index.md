@@ -35,6 +35,7 @@
 * [0026 - Alert on new sessions, and sign them out with the password in the core](0026-alert-on-new-sessions-and-sign-them-out-with-the-password-in-the-core.md)
 * [0027 - Discover the homeserver through .well-known in the core](0027-discover-the-homeserver-through-well-known-in-the-core.md)
 * [0028 - Route every connection through the profile's SOCKS5 proxy](0028-route-every-connection-through-the-profiles-socks5-proxy.md)
+* [0029 - Send and save files through the core's own dialogs](0029-send-and-save-files-through-the-cores-own-dialogs.md)
 
 ## Superseded Records
 

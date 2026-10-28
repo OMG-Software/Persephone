@@ -662,6 +662,7 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                     ..
                 } => format!("{event_id}:edit:{replaces}={body}"),
                 TimelineItem::State { event_id, .. } => format!("{event_id}:state"),
+                TimelineItem::File { event_id, name, .. } => format!("{event_id}:file:{name}"),
                 TimelineItem::Reaction {
                     event_id,
                     reacts_to,

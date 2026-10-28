@@ -1206,7 +1206,42 @@ pub async fn fetch(
     {
         return Err(ErrorCode::Rejected);
     }
-    let (uri, encryption) = match &image.source {
+    fetch_source(client, http, &image.source, budgets, current).await
+}
+
+/// The event `event_id` in the joined room `room_id`, from the homeserver,
+/// decrypted when it can be.
+pub async fn room_event(
+    client: &Client,
+    room_id: &str,
+    event_id: &str,
+) -> Result<TimelineEvent, ErrorCode> {
+    let room_id = <&RoomId>::try_from(room_id).map_err(|_| ErrorCode::InvalidArgument)?;
+    let event_id = <&EventId>::try_from(event_id).map_err(|_| ErrorCode::InvalidArgument)?;
+    let room = client
+        .get_room(room_id)
+        .filter(|room| room.state() == RoomState::Joined)
+        .ok_or(ErrorCode::NotFound)?;
+    room.event(event_id, None)
+        .await
+        .map_err(|error| match error {
+            matrix_sdk::Error::Http(http) if matches!(*http, HttpError::Api(_)) => {
+                ErrorCode::NotFound
+            }
+            _ => ErrorCode::Unavailable,
+        })
+}
+
+/// Downloads `source` (at most [`MAX_ENCODED_BYTES`]) and decrypts it when
+/// it is encrypted.
+pub async fn fetch_source(
+    client: &Client,
+    http: &reqwest::Client,
+    source: &MediaSource,
+    budgets: &ResourceBudgets,
+    current: &(dyn Fn() -> bool + Sync),
+) -> Result<Encoded, ErrorCode> {
+    let (uri, encryption) = match source {
         MediaSource::Plain(uri) => (uri.clone(), None),
         MediaSource::Encrypted(file) => (
             file.url.clone(),

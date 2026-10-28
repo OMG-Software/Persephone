@@ -1036,6 +1036,16 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
                     )
                     .await
                 }
+                Content::File(file) => {
+                    sending::send_file(
+                        &client,
+                        &job.room_id,
+                        file,
+                        job.transaction_id.clone(),
+                        consented,
+                    )
+                    .await
+                }
                 Content::Image(image) => {
                     sending::send_image(
                         &client,
@@ -1607,6 +1617,31 @@ impl Session {
                 return Err(SendRefusal::Unavailable);
             }
             guard(&self.shared.outbox).queue(room_id, body, relation)
+        }
+        .ok_or(SendRefusal::Full)?;
+        if let Some(listener) = self.shared.listener() {
+            listener.outbox_changed(room_id);
+        }
+        Ok(queued)
+    }
+
+    /// Queues a picked file for the signed-in account, like
+    /// [`Session::send_image`] (ADR-0029).
+    pub fn send_file(
+        &self,
+        room_id: &str,
+        file: Arc<crate::files::FileUpload>,
+    ) -> Result<PendingMessage, SendRefusal> {
+        if guard(&self.shared.account).is_none() {
+            return Err(SendRefusal::Unavailable);
+        }
+        let queued = {
+            // As for text: nothing queued here outlives a lock.
+            let inner = lock(&self.shared);
+            if inner.state != StoreState::Protected {
+                return Err(SendRefusal::Unavailable);
+            }
+            guard(&self.shared.outbox).queue_file(room_id, file)
         }
         .ok_or(SendRefusal::Full)?;
         if let Some(listener) = self.shared.listener() {

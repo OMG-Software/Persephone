@@ -1126,6 +1126,28 @@ test('GIVEN the account page WHEN it shows THEN passwords are never asked on the
   assert.match(html, /does not share them with an\s+identity server/);
 });
 
+test('GIVEN a received file WHEN shown THEN its name is isolated text, nothing loads, and Save asks the core', async () => {
+  const { default: FileMessage } = await vite.ssrLoadModule('/src/FileMessage.svelte');
+  const html = render(FileMessage, {
+    props: {
+      roomId: '!r:example.invalid',
+      item: {
+        kind: 'file',
+        event_id: '$f',
+        sender: '@a:example.invalid',
+        origin_server_ts: null,
+        name: hostileName,
+        size: 2_500_000,
+        encrypted: true
+      }
+    }
+  }).body.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(html, /<(?:img|a|video|audio|iframe|object|embed)\b/);
+  assert.match(html, /<bdi class="file-name">&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  assert.match(html, /2\.4 MB · encrypted/);
+  assert.match(html, />\s*Save…/);
+});
+
 test('GIVEN new sessions WHEN the alert shows THEN names are isolated text and each session can be signed out', async () => {
   const { default: NewSessions } = await vite.ssrLoadModule('/src/NewSessions.svelte');
   const html = render(NewSessions, {

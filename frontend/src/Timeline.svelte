@@ -6,6 +6,7 @@
   } from '../../crates/contracts/generated/contracts';
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
+  import FileMessage from './FileMessage.svelte';
   import ImageMessage from './ImageMessage.svelte';
   import Message from './Message.svelte';
   import { stateParts } from './stateText';
@@ -231,6 +232,8 @@
               />
             {:else if item.kind === 'image'}
               <ImageMessage {roomId} {item} />
+            {:else if item.kind === 'file'}
+              <FileMessage {roomId} {item} />
             {:else if item.kind === 'notice'}
               {@const date = toDate(item.origin_server_ts)}
               <p class="notice">

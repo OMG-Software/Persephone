@@ -19,6 +19,7 @@
 //!   a text message, in the same order.
 //! * Memory only: nothing is kept after a lock or restart.
 
+use crate::files::FileUpload;
 use crate::media::ImageUpload;
 use matrix_sdk::ruma::{OwnedEventId, OwnedTransactionId, TransactionId};
 use persephone_contracts::{PendingKind, PendingMessage, PendingState, SendFailure, UnixMillis};
@@ -72,6 +73,8 @@ pub enum Content {
     Text(Zeroizing<String>, Option<Relation>),
     /// The stripped image; dropped from the entry once sent.
     Image(Arc<ImageUpload>),
+    /// A picked file (ADR-0029); dropped from the entry once sent.
+    File(Arc<FileUpload>),
 }
 
 struct Entry {
@@ -81,6 +84,7 @@ struct Entry {
     body: Zeroizing<String>,
     relation: Option<Relation>,
     image: Option<Arc<ImageUpload>>,
+    file: Option<Arc<FileUpload>>,
     /// What the message takes as JSON, from [`entry_size`].
     size: usize,
     transaction_id: OwnedTransactionId,
@@ -138,15 +142,29 @@ impl Outbox {
         room_id: &str,
         image: Arc<ImageUpload>,
     ) -> Option<PendingMessage> {
-        let unsent_images = self
-            .entries
-            .iter()
-            .filter(|entry| entry.image.is_some() && entry.state != PendingState::Sent)
-            .count();
-        if unsent_images >= MAX_UNSENT_IMAGES {
+        if self.unsent_attachments() >= MAX_UNSENT_IMAGES {
             return None;
         }
         self.push(room_id, Content::Image(image))
+    }
+
+    /// Queues a file, under the same limits as an image: it counts toward
+    /// [`MAX_UNSENT_IMAGES`] too.
+    pub fn queue_file(&mut self, room_id: &str, file: Arc<FileUpload>) -> Option<PendingMessage> {
+        if self.unsent_attachments() >= MAX_UNSENT_IMAGES {
+            return None;
+        }
+        self.push(room_id, Content::File(file))
+    }
+
+    /// Unsent messages that hold an image's or a file's bytes.
+    fn unsent_attachments(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                (entry.image.is_some() || entry.file.is_some()) && entry.state != PendingState::Sent
+            })
+            .count()
     }
 
     fn push(&mut self, room_id: &str, content: Content) -> Option<PendingMessage> {
@@ -159,7 +177,23 @@ impl Outbox {
             ),
             Content::Text(body, relation) => (PendingKind::Text, body, relation, None),
             Content::Image(image) => (PendingKind::Image, Zeroizing::default(), None, Some(image)),
+            Content::File(file) => {
+                let name = Zeroizing::new(file.name().to_owned());
+                return self.push_entry(room_id, PendingKind::File, name, None, None, Some(file));
+            }
         };
+        self.push_entry(room_id, kind, body, relation, image, None)
+    }
+
+    fn push_entry(
+        &mut self,
+        room_id: &str,
+        kind: PendingKind,
+        body: Zeroizing<String>,
+        relation: Option<Relation>,
+        image: Option<Arc<ImageUpload>>,
+        file: Option<Arc<FileUpload>>,
+    ) -> Option<PendingMessage> {
         let unsent: Vec<&Entry> = self
             .entries
             .iter()
@@ -194,6 +228,7 @@ impl Outbox {
             body,
             relation,
             image,
+            file,
             size,
             transaction_id: TransactionId::new(),
             state: PendingState::Queued,
@@ -235,9 +270,10 @@ impl Outbox {
         let index = self.next_index()?;
         let entry = &mut self.entries[index];
         entry.state = PendingState::Sending;
-        let content = match &entry.image {
-            Some(image) => Content::Image(image.clone()),
-            None => Content::Text(entry.body.clone(), entry.relation.clone()),
+        let content = match (&entry.image, &entry.file) {
+            (Some(image), _) => Content::Image(image.clone()),
+            (None, Some(file)) => Content::File(file.clone()),
+            (None, None) => Content::Text(entry.body.clone(), entry.relation.clone()),
         };
         Some(Job {
             local_id: entry.local_id,
@@ -260,6 +296,7 @@ impl Outbox {
                 entry.failure = None;
                 // Nothing will send it again.
                 entry.image = None;
+                entry.file = None;
             }
             SendOutcome::Failed(failure) => {
                 entry.state = PendingState::Failed;
@@ -311,11 +348,11 @@ impl Outbox {
             .map(|entry| entry.transaction_id.clone())
     }
 
-    /// Whether a message still holds its image bytes (for tests).
+    /// Whether a message still holds its image or file bytes (for tests).
     pub fn holds_image(&self, local_id: u32) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| entry.local_id == local_id && entry.image.is_some())
+        self.entries.iter().any(|entry| {
+            entry.local_id == local_id && (entry.image.is_some() || entry.file.is_some())
+        })
     }
 
     pub fn clear(&mut self) {
@@ -380,7 +417,7 @@ mod tests {
             .local_id;
         let relation = |job: Job| match job.content {
             Content::Text(_, relation) => relation,
-            Content::Image(_) => panic!("text"),
+            Content::Image(_) | Content::File(_) => panic!("text"),
         };
         assert_eq!(relation(outbox.next_job().unwrap()), Some(reply.clone()));
         outbox.finish(id, SendOutcome::Unknown);
@@ -390,6 +427,39 @@ mod tests {
 
     fn image(budgets: &Arc<persephone_media_protocol::ResourceBudgets>) -> Arc<ImageUpload> {
         Arc::new(ImageUpload::for_tests(budgets, b"\x89PNG\r\n\x1a\nimage"))
+    }
+
+    fn file(budgets: &persephone_media_protocol::ResourceBudgets, name: &str) -> Arc<FileUpload> {
+        let mut bytes = crate::media::Encoded::reserve(budgets, 4).unwrap();
+        bytes.extend(b"data").unwrap();
+        Arc::new(FileUpload::new(bytes, std::path::Path::new(name)))
+    }
+
+    /// GIVEN an unsent image WHEN a file is queued THEN it waits its turn,
+    /// as a second image would; once sent, a file shows its name, holds no
+    /// bytes, and another attachment fits.
+    #[test]
+    fn given_an_unsent_attachment_then_a_file_waits_and_drops_its_bytes_once_sent() {
+        let budgets = Arc::new(persephone_media_protocol::ResourceBudgets::default());
+        let mut outbox = Outbox::default();
+        let image_id = outbox
+            .queue_image("!a:s", image(&budgets))
+            .unwrap()
+            .local_id;
+        assert!(outbox.queue_file("!a:s", file(&budgets, "x.pdf")).is_none());
+        outbox.discard(image_id);
+        let queued = outbox
+            .queue_file("!a:s", file(&budgets, "report.pdf"))
+            .unwrap();
+        assert_eq!(
+            (queued.kind, queued.body.as_str()),
+            (PendingKind::File, "report.pdf")
+        );
+        let job = outbox.next_job().unwrap();
+        assert!(matches!(job.content, Content::File(_)));
+        outbox.finish(queued.local_id, SendOutcome::Sent("$f".into()));
+        assert!(!outbox.holds_image(queued.local_id));
+        assert!(outbox.queue_image("!a:s", image(&budgets)).is_some());
     }
 
     /// GIVEN an unsent image WHEN another image is queued THEN it is refused

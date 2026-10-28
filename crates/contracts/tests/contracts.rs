@@ -302,7 +302,8 @@ fn image_contracts_reject_unknown_fields_and_out_of_range_values() {
         )
     };
     assert!(serde_json::from_str::<PendingMessage>(&pending(r#""image""#)).is_ok());
-    assert!(serde_json::from_str::<PendingMessage>(&pending(r#""file""#)).is_err());
+    assert!(serde_json::from_str::<PendingMessage>(&pending(r#""file""#)).is_ok());
+    assert!(serde_json::from_str::<PendingMessage>(&pending(r#""video""#)).is_err());
     assert!(serde_json::from_str::<PendingMessage>(&pending("null")).is_err());
 }
 

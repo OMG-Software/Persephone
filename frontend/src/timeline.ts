@@ -73,6 +73,8 @@ export function quoteOf(items: ShownItem[], eventId: string): Quote | null {
     }
     case 'image':
       return { sender: item.sender, text: 'Image' };
+    case 'file':
+      return { sender: item.sender, text: 'File: ' + item.name };
     case 'notice':
       return { sender: item.sender, text: 'A message that is not shown' };
     case 'state':
@@ -175,7 +177,7 @@ export function applyRelations(items: TimelineItem[], ownUserId: string | null =
 }
 
 /** Kinds that count as messages for the unread count and the read marker. */
-const MESSAGE_KINDS = new Set<ShownItem['kind']>(['message', 'image', 'notice']);
+const MESSAGE_KINDS = new Set<ShownItem['kind']>(['message', 'image', 'file', 'notice']);
 
 /**
  * Where the "New messages" line goes when a room with `unread` unread

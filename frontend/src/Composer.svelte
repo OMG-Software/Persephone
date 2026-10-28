@@ -26,6 +26,8 @@
     onallow,
     imageDraft = null,
     attaching = false,
+    attachingFile = false,
+    onattachfile = () => {},
     sendingImage = false,
     imageError = null,
     onattach = () => {},
@@ -59,6 +61,9 @@
     // dialog is open or the image is being queued.
     imageDraft?: ImageDraft | null;
     attaching?: boolean;
+    // Whether the core's dialog for a file to send is open (ADR-0029).
+    attachingFile?: boolean;
+    onattachfile?: () => void;
     sendingImage?: boolean;
     // Why the last attach or image send failed, as fixed text.
     imageError?: string | null;
@@ -159,6 +164,11 @@
         <li>
           {#if message.kind === 'image'}
             <p class="pending-image"><Icon name="image" />Image</p>
+          {:else if message.kind === 'file'}
+            <p class="pending-image">
+              <Icon name="paperclip" /><span class="pending-kind">File:</span>
+              <bdi>{message.body}</bdi>
+            </p>
           {:else if message.kind === 'edit'}
             <p dir="auto"><span class="pending-kind">Edit:</span> {message.body}</p>
           {:else}
@@ -262,6 +272,16 @@
         onclick={onattach}
       >
         <Icon name="image" />
+      </button>
+      <button
+        type="button"
+        class="attach"
+        aria-label={attachingFile ? 'Choosing a file…' : 'Attach a file'}
+        title="Attach a file"
+        disabled={blocked !== null || attachingFile}
+        onclick={onattachfile}
+      >
+        <Icon name="paperclip" />
       </button>
       <label for="composer-text" class="visually-hidden"
         >{notEncrypted ? 'Message (not encrypted)' : 'Message'}</label

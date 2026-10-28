@@ -55,6 +55,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.deleteMessage('!r:s', '$mine'), 'delete_message', { roomId: '!r:s', eventId: '$mine' }],
     [() => bridge.react('!r:s', '$e', '👍'), 'react', { roomId: '!r:s', eventId: '$e', key: '👍' }],
     [() => bridge.markRead('!r:s', '$e'), 'mark_read', { roomId: '!r:s', eventId: '$e' }],
+    [() => bridge.pickFile('!r:s'), 'pick_file', { roomId: '!r:s' }],
+    [() => bridge.saveFile('!r:s', '$f'), 'save_file', { roomId: '!r:s', eventId: '$f' }],
     [() => bridge.roomActivity('!r:s', '$e'), 'room_activity', { roomId: '!r:s', eventId: '$e' }],
     [() => bridge.roomActivity('!r:s', null), 'room_activity', { roomId: '!r:s', eventId: null }],
     [() => bridge.setTyping('!r:s', true), 'set_typing', { roomId: '!r:s', typing: true }],

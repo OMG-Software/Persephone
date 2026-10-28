@@ -219,6 +219,8 @@ impl CoreTransport for FakeCore {
                 "truncated": false
             })),
             Call::MarkRead { .. } => Ok(serde_json::Value::Null),
+            Call::PickFile { .. } => Ok(serde_json::Value::Null),
+            Call::SaveFile { event_id, .. } => Ok(serde_json::Value::Bool(event_id == "$f")),
             Call::RoomReaders { .. } => Ok(serde_json::json!({
                 "readers": [{"userId": "@b:example.invalid", "trust": "verified",
                     "receiving": 2, "refused": 1, "own": false}],
@@ -685,6 +687,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-image-band",
             "allow-release-image",
             "allow-pick-image",
+            "allow-pick-file",
+            "allow-save-file",
             "allow-send-image",
             "allow-discard-image",
             "allow-invite-list",
@@ -1240,6 +1244,28 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
         invoke("room_servers", serde_json::json!({"roomId": room})).unwrap()["servers"][0]["members"],
         2
     );
+    assert_eq!(
+        invoke("pick_file", serde_json::json!({"roomId": room})),
+        Ok(serde_json::Value::Null),
+        "cancelled"
+    );
+    assert_eq!(
+        invoke(
+            "save_file",
+            serde_json::json!({"roomId": room, "eventId": "$f"})
+        ),
+        Ok(serde_json::Value::Bool(true))
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "save_file",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
         invoke("room_readers", serde_json::json!({"roomId": room})).unwrap()["readers"][0]["refused"],
         1

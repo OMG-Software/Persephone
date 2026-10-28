@@ -326,6 +326,10 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
         MessageType::Image(image) => {
             crate::media::timeline_item(event_id, sender, origin_server_ts, image)
         }
+        MessageType::File(_) | MessageType::Audio(_) | MessageType::Video(_) => {
+            let file = crate::files::file_parts(&message.content.msgtype)?;
+            crate::files::timeline_item(event_id, sender, origin_server_ts, &file)
+        }
         _ => TimelineItem::Notice {
             event_id,
             sender,

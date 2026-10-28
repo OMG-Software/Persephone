@@ -31,6 +31,7 @@
 //!   type and a generic file name, without a thumbnail. A retry uploads the
 //!   file again but sends the event with the same transaction ID.
 
+use crate::files::FileUpload;
 use crate::identities;
 use crate::media::ImageUpload;
 use crate::outbox::{Relation, SendOutcome};
@@ -278,6 +279,32 @@ pub async fn send_image(
     let config = AttachmentConfig::new().txn_id(transaction_id).info(info);
     match room
         .send_attachment(image.file_name(), &mime, data, config)
+        .await
+    {
+        Ok(response) => SendOutcome::Sent(response.event_id.to_string()),
+        Err(error) => classify(&error),
+    }
+}
+
+/// Sends a picked file with `transaction_id`, after the same checks as
+/// [`send`], as `application/octet-stream` with its name (ADR-0029).
+pub async fn send_file(
+    client: &Client,
+    room_id: &str,
+    file: &FileUpload,
+    transaction_id: OwnedTransactionId,
+    consented: bool,
+) -> SendOutcome {
+    let room = match checked_room(client, room_id, consented).await {
+        Ok(room) => room,
+        Err(outcome) => return outcome,
+    };
+    let Some(mime) = parse_mime("application/octet-stream") else {
+        return SendOutcome::Failed(SendFailure::Failed);
+    };
+    let config = AttachmentConfig::new().txn_id(transaction_id);
+    match room
+        .send_attachment(file.name(), &mime, file.bytes().to_vec(), config)
         .await
     {
         Ok(response) => SendOutcome::Sent(response.event_id.to_string()),

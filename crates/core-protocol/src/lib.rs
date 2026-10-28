@@ -269,6 +269,19 @@ pub enum Call {
     DiscardImage {
         handle: String,
     },
+    /// Ask the user for a file to send in this room, in the core's own file
+    /// dialog, and queue it at once (ADR-0029); the page never names a path.
+    /// Replies with the queued message, or null when the user cancelled.
+    PickFile {
+        room_id: String,
+    },
+    /// Download and decrypt the file of this event, then ask the user where
+    /// to save it in the core's own Save dialog and write it (ADR-0029).
+    /// Replies `true` when saved and `false` when the user cancelled.
+    SaveFile {
+        room_id: String,
+        event_id: String,
+    },
     /// Room invitations this account has not answered, direct-message or
     /// not, from this homeserver or another one.
     InviteList {},
@@ -1061,6 +1074,19 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::PickFile {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"pick_file","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::SaveFile {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                },
+                r#"{"id":1,"call":{"command":"save_file","room_id":"!r:s","event_id":"$e"}}"#,
+            ),
+            (
                 Call::RoomReaders {
                     room_id: "!r:s".into(),
                 },
@@ -1594,6 +1620,9 @@ mod tests {
             br#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"open_link"}}"#,
             br#"{"id":1,"call":{"command":"room_servers"}}"#,
+            br#"{"id":1,"call":{"command":"pick_file","room_id":"!r:s","path":"C:/x"}}"#,
+            br#"{"id":1,"call":{"command":"save_file","room_id":"!r:s","event_id":"$e","path":"C:/x"}}"#,
+            br#"{"id":1,"call":{"command":"save_file","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"new_sessions","all":true}}"#,
             br#"{"id":1,"call":{"command":"discover_homeserver"}}"#,
             br#"{"id":1,"call":{"command":"set_proxy_setting"}}"#,
