@@ -22,23 +22,37 @@
     core_unavailable: 'The proxy setting cannot be changed now.'
   };
 
-  onMount(async () => {
+  // Reads the setting. Only `core_unavailable` (the record cannot be read)
+  // enables replacing it unread; a busy or locked session leaves the form
+  // closed, and Try again reads it once more.
+  let retry = $state(false);
+  async function load() {
+    retry = false;
+    failure = null;
     try {
       current = (await proxySetting()).proxy;
       typed = current ?? '';
       loaded = true;
     } catch (reason) {
       const code = String(reason);
-      if (code === 'locked') {
-        failure = failures.locked;
+      if (code === 'core_unavailable') {
+        unreadable = true;
+        loaded = true;
+        failure =
+          'The proxy setting could not be read, so Persephone does not connect. Save a proxy or remove the setting.';
         return;
       }
-      unreadable = true;
-      loaded = true;
+      retry = code !== 'locked';
       failure =
-        'The proxy setting could not be read, so Persephone does not connect. Save a proxy or remove the setting.';
+        code === 'locked'
+          ? failures.locked
+          : code === 'limit_exceeded'
+            ? 'Persephone is busy. Try again in a moment.'
+            : 'The proxy setting could not be read.';
     }
-  });
+  }
+
+  onMount(load);
 
   async function save(proxy: string | null) {
     if (busy) return;
@@ -96,6 +110,9 @@
   </div>
   {#if failure}
     <p role="alert" class="error">{failure}</p>
+    {#if retry}
+      <button type="button" class="secondary" onclick={load}>Try again</button>
+    {/if}
   {:else if saved}
     <p role="status" class="note">{saved}</p>
   {/if}

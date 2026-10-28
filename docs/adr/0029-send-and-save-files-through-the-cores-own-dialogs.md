@@ -36,7 +36,7 @@ Proposed option: "in the core, through its own dialogs".
 * "Attach a file" opens the core's file dialog ("Choose a file to send to
   this room"); the choice is the user's decision to send, so the file is
   read and queued at once. It is read as a picked image is: no link or
-  junction, no directory, not empty, at most 20 MiB, shared for reading
+  junction, no directory, not empty, at most 13 MiB, shared for reading
   only. It counts toward the one unsent attachment the outbox allows, and
   is retried, discarded and asked consent for like any message.
 * It is sent with its file name, made safe (separators, reserved and
@@ -59,7 +59,9 @@ Proposed option: "in the core, through its own dialogs".
 ### Negative Consequences
 
 * Audio and video are saved, not played.
-* The 20 MiB limit, shared with images.
+* Files sent are at most 13 MiB: a send holds three copies (the outbox's,
+  the SDK's input and the SDK's own upload or encryption copy), all
+  reserved in the 40 MiB encoded budget. Saved files keep the 20 MiB limit.
 * The sent name can say something about the file; it is the one the user
   chose.
 * Windows only, like the image dialogs; other platforms fail closed.

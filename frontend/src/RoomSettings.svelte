@@ -196,6 +196,25 @@
     unknown: 'Not known yet'
   };
 
+  let securityLoading = false;
+  let securityAgain = false;
+  async function loadSecurity() {
+    if (securityLoading) {
+      securityAgain = true;
+      return;
+    }
+    securityLoading = true;
+    try {
+      do {
+        securityAgain = false;
+        await loadServers();
+        await loadReaders();
+      } while (securityAgain);
+    } finally {
+      securityLoading = false;
+    }
+  }
+
   async function loadServers() {
     try {
       servers = await roomServers(roomId);
@@ -222,10 +241,7 @@
     if (seen !== null && now !== seen) {
       loadSettings();
       if (tab === 'people') loadMembers();
-      if (tab === 'security') {
-        loadServers();
-        loadReaders();
-      }
+      if (tab === 'security') loadSecurity();
     }
     seen = now;
   });
@@ -239,10 +255,7 @@
     // Read again on every visit: members may have changed meanwhile. The
     // old list stays shown until the new one arrives.
     if (next === 'people') loadMembers();
-    if (next === 'security') {
-      loadServers();
-      loadReaders();
-    }
+    if (next === 'security') loadSecurity();
   }
 
   async function apply(change: RoomChange, success = 'Saved.') {

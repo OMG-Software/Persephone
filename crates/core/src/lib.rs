@@ -1706,7 +1706,8 @@ impl Core {
                 return Outcome::Error(ErrorCode::Locked);
             }
             let bytes = match pick::read_image_file(&path, &self.budgets) {
-                Ok(bytes) => bytes,
+                Ok(bytes) if bytes.bytes().len() <= files::MAX_SENT_FILE_BYTES => bytes,
+                Ok(_) => return Outcome::Error(ErrorCode::Rejected),
                 Err(code) => return Outcome::Error(code),
             };
             let upload = Arc::new(files::FileUpload::new(bytes, &path, self.budgets.clone()));

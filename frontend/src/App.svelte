@@ -1228,7 +1228,7 @@
           String(reason) === 'limit_exceeded'
             ? 'An image or file is already waiting to send. Wait until it is sent, or discard it.'
             : String(reason) === 'rejected'
-              ? 'That file cannot be sent: it is empty, larger than 20 MB, or not a plain file.'
+              ? 'That file cannot be sent: it is empty, larger than 13 MB, or not a plain file.'
               : 'The file could not be attached. Files work on Windows only for now.';
       }
     } finally {

@@ -463,7 +463,21 @@ mod tests {
             (PendingKind::File, "report.pdf")
         );
         let job = outbox.next_job().unwrap();
-        assert!(matches!(job.content, Content::File(_)));
+        let Content::File(sent) = &job.content else {
+            panic!("a file");
+        };
+        // The copy for the SDK reserves its own copy too: twice the file.
+        let (copy, _permit) = sent.copy_for_send().unwrap();
+        assert_eq!(copy, b"data");
+        assert!(
+            budgets
+                .try_acquire(
+                    persephone_media_protocol::BudgetClass::EncodedInFlight,
+                    persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT - 4 - 8 + 1
+                )
+                .is_err(),
+            "the file, its copy and the SDK's copy are reserved"
+        );
         outbox.finish(queued.local_id, SendOutcome::Sent("$f".into()));
         assert!(!outbox.holds_image(queued.local_id));
         assert!(outbox.queue_image("!a:s", image(&budgets)).is_some());
