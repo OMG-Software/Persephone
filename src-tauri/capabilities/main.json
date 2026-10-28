@@ -13,6 +13,7 @@
     "allow-unlock-session",
     "allow-reset-profile",
     "allow-sign-in",
+    "allow-discover-homeserver",
     "allow-register",
     "allow-sign-out",
     "allow-security-status",

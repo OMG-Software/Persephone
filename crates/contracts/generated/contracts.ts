@@ -247,6 +247,8 @@ verified: boolean, };
 
 export type DeviceList = { devices: Array<DeviceSummary>, truncated: boolean, };
 
+export type HomeserverFound = { homeserver: string, fromWellKnown: boolean, };
+
 export type NewSession = { deviceId: string, displayName: string | null, };
 
 export type NewSessions = { sessions: Array<NewSession>, truncated: boolean, };

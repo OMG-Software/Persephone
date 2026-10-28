@@ -100,6 +100,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     ],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
     [() => bridge.newSessions(), 'new_sessions', {}],
+    [() => bridge.discoverHomeserver('example.org'), 'discover_homeserver', { serverName: 'example.org' }],
     [() => bridge.acknowledgeSessions(['D']), 'acknowledge_sessions', { deviceIds: ['D'] }],
     [() => bridge.removeDevice('D'), 'remove_device', { deviceId: 'D' }],
     [() => bridge.threePids(), 'three_pids', {}],

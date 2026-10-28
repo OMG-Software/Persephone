@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discover-homeserver"
+description = "Enables the discover_homeserver command without any pre-configured scope."
+commands.allow = ["discover_homeserver"]
+
+[[permission]]
+identifier = "deny-discover-homeserver"
+description = "Denies the discover_homeserver command without any pre-configured scope."
+commands.deny = ["discover_homeserver"]

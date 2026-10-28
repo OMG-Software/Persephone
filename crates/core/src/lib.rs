@@ -36,6 +36,7 @@ pub mod activity;
 pub mod contacts;
 pub mod conversations;
 pub mod credentials;
+pub mod discovery;
 pub mod homeserver;
 pub mod identities;
 pub mod links;
@@ -260,6 +261,8 @@ pub struct Core {
     /// One user-directory search at a time.
     search: conversations::Busy,
     read_marker: conversations::Busy,
+    /// One homeserver discovery at a time.
+    discovery: conversations::Busy,
     /// One link question at a time.
     link: conversations::Busy,
     /// Reading or setting the display name, one at a time.
@@ -420,6 +423,7 @@ impl Core {
             conversation: conversations::Busy::default(),
             search: conversations::Busy::default(),
             read_marker: conversations::Busy::default(),
+            discovery: conversations::Busy::default(),
             link: conversations::Busy::default(),
             display_name: conversations::Busy::default(),
             devices: conversations::Busy::default(),
@@ -521,6 +525,10 @@ impl Core {
                 Err(code) => error(code),
             },
             Call::PickImage { room_id } => match self.pick_image(room_id) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
+            Call::DiscoverHomeserver { server_name } => match self.discover(server_name) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
@@ -781,6 +789,10 @@ impl Core {
                 Err(code) => Outcome::Error(code),
             },
             Call::PickImage { room_id } => match self.pick_image(room_id) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::DiscoverHomeserver { server_name } => match self.discover(server_name) {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
@@ -1572,6 +1584,26 @@ impl Core {
     /// strip run later, on their own thread, without a lease (nothing there
     /// touches the stores); the draft is kept only if the generation is still
     /// open.
+    /// Admits a homeserver discovery (ADR-0027), one at a time. It runs on
+    /// its own small runtime: it needs no session, and may run before any
+    /// sign-in.
+    fn discover<'a>(&'a self, server_name: &str) -> Result<LongCall<'a>, ErrorCode> {
+        if discovery::origin(server_name).is_none() {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let slot = self.discovery.begin()?;
+        let server_name = server_name.to_owned();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            let found = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| ErrorCode::Internal)
+                .and_then(|runtime| runtime.block_on(discovery::discover(&server_name)));
+            refused(found)
+        }))
+    }
+
     fn pick_image<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
         if !valid_room_id(room_id) {
             return Err(ErrorCode::InvalidArgument);

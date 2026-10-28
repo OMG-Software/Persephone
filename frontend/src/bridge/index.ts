@@ -22,6 +22,7 @@ import type {
   JoinRule,
   LevelKey,
   Membership,
+  HomeserverFound,
   NewSessions,
   NotificationLevel,
   NotificationSettings,
@@ -74,6 +75,7 @@ export type {
   JoinRule,
   LevelKey,
   Membership,
+  HomeserverFound,
   NewSessions,
   NotificationLevel,
   NotificationSettings,
@@ -527,6 +529,15 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       idleLockMinutes: settings.idleLockMinutes
     }
   });
+}
+
+/**
+ * Finds the homeserver of a server name such as `example.org`, through its
+ * `.well-known` file, and confirms it speaks Matrix (ADR-0027). Rejects with
+ * `not_found` when no Matrix server is there.
+ */
+export function discoverHomeserver(serverName: string): Promise<HomeserverFound> {
+  return invoke<HomeserverFound>('discover_homeserver', { serverName });
 }
 
 /**

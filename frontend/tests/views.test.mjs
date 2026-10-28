@@ -336,23 +336,25 @@ test('GIVEN the create-account mode WHEN it shows THEN only a username is asked,
   assert.match(view('newbie', { state: 'signing_in', userId: null, error: null }), /Checking the name/);
 });
 
-test('GIVEN the server picker WHEN another server is chosen THEN it asks only for a URL', () => {
+test('GIVEN the server picker WHEN another server is chosen THEN it asks only for a name or address', () => {
   const picker = (current) =>
     render(ServerPicker, { props: { current, onchoose: () => {}, oncancel: () => {} } }).body;
 
   const matrixOrg = picker('https://matrix.org');
   assert.match(matrixOrg, /<dialog[^>]*aria-labelledby="picker-heading"/);
   assert.equal((matrixOrg.match(/type="radio"/g) ?? []).length, 2);
-  assert.doesNotMatch(matrixOrg, /type="url"/, 'no address field until another server is chosen');
+  assert.doesNotMatch(matrixOrg, /id="homeserver"/, 'no address field until another server is chosen');
   assert.match(matrixOrg, />Use matrix\.org</);
 
   const other = picker(hostileName);
   assert.match(other, /<label for="homeserver" class="visually-hidden">Homeserver address<\/label>/);
-  assert.match(other, /<input id="homeserver"[^>]*type="url"[^>]*required/);
+  assert.match(other, /<input id="homeserver"[^>]*type="text"[^>]*required/);
   assert.match(other, /value="&lt;img src=x onerror=alert\(1\)>"/, 'the typed address stays text');
   assert.doesNotMatch(other, /<img/);
   assert.doesNotMatch(other, /type="password"/i);
-  assert.match(other, />Use this server</);
+  // A name, not an address: it is looked up before it is used.
+  assert.match(other, />Find server</);
+  assert.match(picker('https://chat.example.org'), />Use this server</);
 });
 
 test('the encryption panel offers the step that fits and never asks for a secret itself', () => {

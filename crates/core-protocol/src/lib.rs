@@ -67,6 +67,13 @@ pub enum Call {
     SignIn {
         homeserver: String,
     },
+    /// Find the homeserver of a server name such as `example.org`, through
+    /// its `.well-known/matrix/client` file, and confirm it speaks Matrix
+    /// (ADR-0027). Answered when done; `not_found` when no Matrix server is
+    /// there.
+    DiscoverHomeserver {
+        server_name: String,
+    },
     /// Register a new account named `username` (a localpart) on this
     /// homeserver, then sign in to it. The core checks that the name is free
     /// first, then asks for the password (twice) and, when the homeserver
@@ -527,6 +534,10 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
 /// Longest username (localpart) either side accepts when registering.
 pub const MAX_USERNAME_BYTES: usize = 255;
+
+/// Longest server name either side accepts in `discover_homeserver`, in
+/// bytes (a DNS name and a port).
+pub const MAX_SERVER_NAME_BYTES: usize = 261;
 
 /// Longest homeserver URL either side accepts in a call.
 pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
@@ -1105,6 +1116,12 @@ mod tests {
                 r#"{"id":1,"call":{"command":"new_sessions"}}"#,
             ),
             (
+                Call::DiscoverHomeserver {
+                    server_name: "example.org".into(),
+                },
+                r#"{"id":1,"call":{"command":"discover_homeserver","server_name":"example.org"}}"#,
+            ),
+            (
                 Call::AcknowledgeSessions {
                     device_ids: vec!["DEV".into()],
                 },
@@ -1548,6 +1565,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"open_link"}}"#,
             br#"{"id":1,"call":{"command":"room_servers"}}"#,
             br#"{"id":1,"call":{"command":"new_sessions","all":true}}"#,
+            br#"{"id":1,"call":{"command":"discover_homeserver"}}"#,
+            br#"{"id":1,"call":{"command":"discover_homeserver","server_name":"e.org","url":"x"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":"DEV"}}"#,
             br#"{"id":1,"call":{"command":"remove_device"}}"#,

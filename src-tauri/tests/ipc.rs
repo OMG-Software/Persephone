@@ -300,6 +300,12 @@ impl CoreTransport for FakeCore {
                 true => Ok(serde_json::Value::Null),
                 false => Err(CoreError::Core(ErrorCode::Locked)),
             },
+            Call::DiscoverHomeserver { server_name } => match server_name.as_str() {
+                "example.invalid" => Ok(serde_json::json!({
+                    "homeserver": "https://matrix.example.invalid/", "fromWellKnown": true
+                })),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
             Call::NewSessions {} => Ok(serde_json::json!({
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
             })),
@@ -636,6 +642,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-unlock-session",
             "allow-reset-profile",
             "allow-sign-in",
+            "allow-discover-homeserver",
             "allow-register",
             "allow-sign-out",
             "allow-security-status",
@@ -1601,6 +1608,22 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
     assert_eq!(
         invoke("new_sessions", serde_json::json!({})).unwrap()["sessions"][0]["deviceId"],
         "NEWDEV"
+    );
+    assert_eq!(
+        invoke(
+            "discover_homeserver",
+            serde_json::json!({"serverName": "example.invalid"})
+        )
+        .unwrap()["homeserver"],
+        "https://matrix.example.invalid/"
+    );
+    assert_eq!(
+        invoke(
+            "discover_homeserver",
+            serde_json::json!({"serverName": "x".repeat(262)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
     );
     assert_eq!(
         invoke(

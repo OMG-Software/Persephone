@@ -1,8 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { discoverHomeserver, type HomeserverFound } from './bridge';
 
   // Chooses the homeserver to sign in to. Only the address leaves this
-  // dialog; the core checks it again before it connects.
+  // dialog; the core checks it again before it connects. A server name such
+  // as example.org is looked up through its .well-known file first, and the
+  // address found is shown before it is used (ADR-0027).
   let {
     current,
     onchoose,
@@ -20,14 +23,50 @@
   // svelte-ignore state_referenced_locally
   let other = $state(current === MATRIX_ORG ? 'https://' : current);
   let dialog = $state<HTMLDialogElement | null>(null);
+  // The homeserver found for the name typed, and the name it was found for.
+  let found = $state<(HomeserverFound & { name: string }) | null>(null);
+  let finding = $state(false);
+  let findFailure = $state<string | null>(null);
+
+  const findFailures: Record<string, string> = {
+    not_found: 'No Matrix server answers at that name.',
+    rejected: "That server's Matrix settings (its .well-known file) are not valid.",
+    core_unavailable: 'That server could not be reached.',
+    invalid_argument:
+      'Enter a server name such as example.org, or a full address starting with https://.',
+    limit_exceeded: 'A server is already being looked up.'
+  };
 
   onMount(() => {
     dialog?.showModal();
   });
 
-  function submit(event: SubmitEvent) {
+  async function submit(event: SubmitEvent) {
     event.preventDefault();
-    onchoose(choice === 'matrix_org' ? MATRIX_ORG : other.trim());
+    if (choice === 'matrix_org') {
+      onchoose(MATRIX_ORG);
+      return;
+    }
+    const typed = other.trim();
+    if (found && found.name === typed) {
+      onchoose(found.homeserver);
+      return;
+    }
+    if (/^https?:\/\//i.test(typed)) {
+      onchoose(typed);
+      return;
+    }
+    if (finding) return;
+    finding = true;
+    findFailure = null;
+    try {
+      found = { ...(await discoverHomeserver(typed)), name: typed };
+    } catch (reason) {
+      found = null;
+      findFailure = findFailures[String(reason)] ?? 'The server could not be looked up.';
+    } finally {
+      finding = false;
+    }
   }
 
   // Escape closes the dialog without a choice.
@@ -59,19 +98,41 @@
       <input
         id="homeserver"
         class="field mono"
-        type="url"
+        type="text"
         required
         maxlength="2048"
         autocomplete="url"
         spellcheck="false"
-        placeholder="https://chat.example.org"
+        placeholder="example.org or https://chat.example.org"
         bind:value={other}
+        oninput={() => {
+          found = null;
+          findFailure = null;
+        }}
       />
+      {#if found && found.name === other.trim()}
+        <p class="auth-note" role="status">
+          Found <bdi class="mono">{found.homeserver}</bdi>{found.fromWellKnown
+            ? ', named by the server\'s .well-known file'
+            : ''}. Check that it is the server you expect before you sign in.
+        </p>
+      {/if}
+      {#if findFailure}
+        <p class="error" role="alert">{findFailure}</p>
+      {/if}
     {/if}
     <div class="actions">
       <button type="button" class="secondary" onclick={oncancel}>Cancel</button>
-      <button type="submit" class="primary">
-        {choice === 'matrix_org' ? 'Use matrix.org' : 'Use this server'}
+      <button type="submit" class="primary" disabled={finding}>
+        {choice === 'matrix_org'
+          ? 'Use matrix.org'
+          : finding
+            ? 'Looking up…'
+            : found && found.name === other.trim()
+              ? 'Use this server'
+              : /^https?:\/\//i.test(other.trim())
+                ? 'Use this server'
+                : 'Find server'}
       </button>
     </div>
   </form>

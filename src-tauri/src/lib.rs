@@ -32,10 +32,11 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart,
-    DeviceList, DisplayName, ImagePick, ImageView, InviteList, NewSessions, NotificationLevel,
-    NotificationSettings, PendingMessage, ProfileList, RoomActivity, RoomChange, RoomCreation,
-    RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomReaders, RoomServers, RoomSettings,
-    SecurityStatus, StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
+    DeviceList, DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, NewSessions,
+    NotificationLevel, NotificationSettings, PendingMessage, ProfileList, RoomActivity, RoomChange,
+    RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomReaders, RoomServers,
+    RoomSettings, SecurityStatus, StoreState, ThreePidList, ThreePidMedium, TimelinePage,
+    UserSearch,
 };
 use persephone_core_protocol::{
     COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
@@ -43,8 +44,8 @@ use persephone_core_protocol::{
     MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
     MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES,
     MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES,
-    MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES,
-    MAX_USERNAME_BYTES, room_change_within_limits,
+    MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES, MAX_THREE_PID_ADDRESS_BYTES,
+    MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -972,6 +973,19 @@ async fn change_password(
     relay(core.inner(), Call::ChangePassword { sign_out_others }).await
 }
 
+/// Finds the homeserver of a server name through its `.well-known` file
+/// and confirms it speaks Matrix (ADR-0027).
+#[tauri::command]
+async fn discover_homeserver(
+    core: State<'_, CoreLink>,
+    server_name: String,
+) -> Result<HomeserverFound, String> {
+    if server_name.len() > MAX_SERVER_NAME_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::DiscoverHomeserver { server_name }).await
+}
+
 /// The sessions of this account the user has not been shown yet (ADR-0026).
 #[tauri::command]
 async fn new_sessions(core: State<'_, CoreLink>) -> Result<NewSessions, String> {
@@ -1190,6 +1204,7 @@ pub fn configure<R: Runtime>(
             room_servers,
             room_readers,
             new_sessions,
+            discover_homeserver,
             acknowledge_sessions,
             remove_device,
             pending_messages,
