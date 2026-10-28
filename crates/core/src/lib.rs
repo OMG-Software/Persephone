@@ -38,6 +38,7 @@ pub mod conversations;
 pub mod credentials;
 pub mod homeserver;
 pub mod identities;
+pub mod links;
 pub mod matrix_views;
 pub mod media;
 pub mod notifications;
@@ -254,6 +255,8 @@ pub struct Core {
     /// One user-directory search at a time.
     search: conversations::Busy,
     read_marker: conversations::Busy,
+    /// One link question at a time.
+    link: conversations::Busy,
     /// Reading or setting the display name, one at a time.
     display_name: conversations::Busy,
     /// One device-list request at a time.
@@ -402,6 +405,7 @@ impl Core {
             conversation: conversations::Busy::default(),
             search: conversations::Busy::default(),
             read_marker: conversations::Busy::default(),
+            link: conversations::Busy::default(),
             display_name: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             room_settings: conversations::Busy::default(),
@@ -511,6 +515,7 @@ impl Core {
             | Call::React { .. }
             | Call::MarkRead { .. }
             | Call::SetTyping { .. }
+            | Call::OpenLink { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -774,6 +779,7 @@ impl Core {
             | Call::React { .. }
             | Call::MarkRead { .. }
             | Call::SetTyping { .. }
+            | Call::OpenLink { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -835,6 +841,7 @@ impl Core {
             React(String, matrix_sdk::ruma::OwnedEventId, String),
             MarkRead(String, matrix_sdk::ruma::OwnedEventId),
             Typing(String, bool),
+            OpenLink(url::Url),
             Start(OwnedUserId),
             Search(String),
             CreateRoom(String, Vec<OwnedUserId>),
@@ -876,6 +883,9 @@ impl Core {
                 parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
                 key.clone(),
             ),
+            Call::OpenLink { url } => {
+                Work::OpenLink(links::checked(url).ok_or(ErrorCode::InvalidArgument)?)
+            }
             Call::SetTyping { room_id, typing } if valid_room_id(room_id) => {
                 Work::Typing(room_id.clone(), *typing)
             }
@@ -961,6 +971,7 @@ impl Core {
         let slot = match work {
             Work::Search(_) => self.search.begin()?,
             Work::MarkRead(..) | Work::Typing(..) => self.read_marker.begin()?,
+            Work::OpenLink(_) => self.link.begin()?,
             Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
             Work::Devices => self.devices.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
@@ -1003,6 +1014,10 @@ impl Core {
                         sending::mark_read(&client, room_id, event_id, public).await
                     })
                     .map(|()| serde_json::Value::Null)
+                }
+                // No lease is held while the question is open.
+                Work::OpenLink(url) => {
+                    links::open(&*self.credentials, url).map(serde_json::Value::Bool)
                 }
                 // Refused, not dropped, while the setting is off: the page
                 // never asks then, so an ask is a mistake to see.

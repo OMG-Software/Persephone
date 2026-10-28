@@ -40,10 +40,11 @@ use persephone_contracts::{
 use persephone_core_protocol::{
     COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
     MAX_DEVICE_ID_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES,
-    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_MEMBER_FILTER_BYTES,
-    MAX_MESSAGE_BYTES, MAX_NOTIFICATION_NAME_BYTES, MAX_PHONE_NUMBER_BYTES, MAX_PROFILES,
-    MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES,
-    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
+    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
+    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NOTIFICATION_NAME_BYTES,
+    MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES,
+    MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES,
+    MAX_USERNAME_BYTES, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -424,6 +425,16 @@ async fn mark_read(
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(core.inner(), Call::MarkRead { room_id, event_id }).await
+}
+
+/// Asks the core to open a link from a message. The core checks it and asks
+/// the user in its own window first (ADR-0024); `true` when it opened.
+#[tauri::command]
+async fn open_link(core: State<'_, CoreLink>, url: String) -> Result<bool, String> {
+    if url.len() > MAX_LINK_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::OpenLink { url }).await
 }
 
 /// Who else is typing in a joined room and, for an event, who else has read
@@ -1124,6 +1135,7 @@ pub fn configure<R: Runtime>(
             mark_read,
             room_activity,
             set_typing,
+            open_link,
             pending_messages,
             retry_message,
             discard_message,

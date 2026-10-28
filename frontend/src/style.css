@@ -1037,6 +1037,16 @@ kbd {
   white-space: nowrap;
 }
 
+/* A link in a message: a button that asks the core, styled as a link and
+   allowed to wrap anywhere, as long addresses do. */
+.body-link {
+  display: inline;
+  font-weight: 400;
+  text-align: left;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 /* Who else is typing, above the composer, and who has read the newest
    message, under the timeline. Small and muted, like notices. */
 .typing {

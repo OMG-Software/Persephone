@@ -1,6 +1,7 @@
 <script lang="ts">
   import { avatarColour, initials } from './people';
   import { clockTime, fullTime, toDate } from './time';
+  import { bodyParts } from './links';
   import { QUICK_REACTIONS, type Quote, type ReactionCount } from './timeline';
 
   let {
@@ -14,7 +15,8 @@
     ondelete,
     reactions = [],
     onreact,
-    onunreact
+    onunreact,
+    onlink
   }: {
     name: string;
     body: string;
@@ -36,6 +38,8 @@
     // event); absent where reacting is not offered.
     onreact?: (key: string) => void;
     onunreact?: (reactionEventId: string) => void;
+    // Asks the core to open a link; without it, links stay plain text.
+    onlink?: (url: string) => void;
   } = $props();
 
   // Whether the quick reactions are open.
@@ -91,7 +95,16 @@
         In reply to <bdi>{quote.sender}</bdi>: <span dir="auto">{quote.text}</span>
       </p>
     {/if}
-    <p dir="auto">{body}</p>
+    <!-- A link is a button that asks the core, never an anchor: the page
+         navigates nowhere, and the core shows the full address first. -->
+    <p dir="auto">
+      {#if onlink}{#each bodyParts(body) as part, at (at)}{#if 'link' in part}<button
+              type="button"
+              class="link body-link"
+              title={'Open ' + part.link}
+              onclick={() => onlink(part.link)}>{part.link}</button
+            >{:else}{part.text}{/if}{/each}{:else}{body}{/if}
+    </p>
     {#if picking && onreact}
       <div class="quick-reactions" role="group" aria-label="Quick reactions">
         {#each QUICK_REACTIONS as key (key)}

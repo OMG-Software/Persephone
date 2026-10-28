@@ -53,6 +53,7 @@
     markRead,
     roomActivity,
     setTyping,
+    openLink,
     recoverWithKey,
     securityStatus,
     setUpEncryption,
@@ -994,6 +995,18 @@
     }
   }
 
+  // Asks the core to open a link; it shows the address and asks first.
+  async function followLink(url: string) {
+    try {
+      await openLink(url);
+    } catch (reason) {
+      error =
+        String(reason) === 'invalid_argument'
+          ? 'Persephone opens only web links (http and https) without a name or password in them.'
+          : describe(reason);
+    }
+  }
+
   // Takes back one of this account's reactions by deleting its event.
   async function unreact(reactionEventId: string) {
     const roomId = selected;
@@ -1507,6 +1520,7 @@
             {unreadFrom}
             onread={signedIn ? readTo : undefined}
             readBy={activity?.readBy ?? []}
+            onlink={signedIn ? followLink : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>

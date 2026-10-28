@@ -8,6 +8,7 @@ let Timeline;
 let SignIn;
 let Security;
 let Composer;
+let Message;
 let ServerPicker;
 let Verification;
 let JumpPalette;
@@ -39,6 +40,7 @@ before(async () => {
   ({ default: SignIn } = await vite.ssrLoadModule('/src/SignIn.svelte'));
   ({ default: Security } = await vite.ssrLoadModule('/src/Security.svelte'));
   ({ default: Composer } = await vite.ssrLoadModule('/src/Composer.svelte'));
+  ({ default: Message } = await vite.ssrLoadModule('/src/Message.svelte'));
   ({ default: ServerPicker } = await vite.ssrLoadModule('/src/ServerPicker.svelte'));
   ({ default: Verification } = await vite.ssrLoadModule('/src/Verification.svelte'));
   ({ default: JumpPalette } = await vite.ssrLoadModule('/src/JumpPalette.svelte'));
@@ -524,6 +526,18 @@ test('every room is labelled with its encryption in the list and the header', ()
   assert.match(timeline('not_encrypted'), /class="enc-icon large not_encrypted"/);
   // Unknown never claims encryption.
   assert.deepEqual(labels(timeline('unknown')), ['Encryption unknown']);
+});
+
+test('GIVEN links in a message WHEN rendered THEN web links are buttons, never anchors, and other schemes stay text', () => {
+  const body = 'go https://example.org/a?b=<i>c</i> or javascript:alert(1)';
+  const withLinks = render(Message, {
+    props: { name: '@a:s', body, onlink: () => {} }
+  }).body.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(withLinks, /<a\b|href=|<i>/);
+  assert.match(withLinks, /<button type="button" class="link body-link" title="Open https:\/\/example\.org\/a\?b=">https:\/\/example\.org\/a\?b=<\/button>/);
+  assert.match(withLinks, /&lt;i>c&lt;\/i> or javascript:alert\(1\)/);
+  const without = render(Message, { props: { name: '@a:s', body } }).body;
+  assert.doesNotMatch(without, /<button[^>]*body-link/);
 });
 
 test('GIVEN others typing and reading WHEN shown THEN each name is isolated text, and many are counted', () => {

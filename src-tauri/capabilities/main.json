@@ -25,6 +25,7 @@
     "allow-mark-read",
     "allow-room-activity",
     "allow-set-typing",
+    "allow-open-link",
     "allow-pending-messages",
     "allow-retry-message",
     "allow-discard-message",

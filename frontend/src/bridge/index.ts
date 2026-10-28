@@ -342,6 +342,15 @@ export function editMessage(roomId: string, eventId: string, body: string): Prom
 }
 
 /**
+ * Asks the core to open a link from a message. The core checks it and asks
+ * the user in its own window first (ADR-0024). Resolves `true` when it
+ * opened and `false` when the user said no.
+ */
+export function openLink(url: string): Promise<boolean> {
+  return invoke<boolean>('open_link', { url });
+}
+
+/**
  * Who else is typing in a room and, for an event, who else has read up to
  * it. At most ten names each; `truncated` says more exist.
  */

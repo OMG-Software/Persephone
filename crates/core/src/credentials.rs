@@ -153,6 +153,19 @@ pub trait CredentialSource: Send + Sync {
         Err(PromptError::Unsupported)
     }
 
+    /// Asks whether to open a link (ADR-0024), with the question from
+    /// `links::question`. `Ok(true)` only for an explicit yes. Unsupported
+    /// unless a source provides it.
+    fn confirm_open_link(&self, _caption: &str, _message: &str) -> Result<bool, PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
+    /// Opens a checked link in the user's default browser (ADR-0024).
+    /// Unsupported unless a source provides it.
+    fn open_link(&self, _url: &str) -> Result<(), PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
     /// Asks whether to accept the new identity of `user_id` (ADR-0007);
     /// `was_verified` when this account had verified the old one. `Ok(true)`
     /// only for an explicit yes. Unsupported unless a source provides it.

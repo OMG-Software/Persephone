@@ -35,7 +35,8 @@
     onunreact,
     unreadFrom = null,
     onread,
-    readBy = []
+    readBy = [],
+    onlink
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -78,6 +79,8 @@
     onread?: (eventId: string) => void;
     // Who else has read up to the newest event.
     readBy?: string[];
+    // Asks the core to open a link from a message.
+    onlink?: (url: string) => void;
   } = $props();
 
   // Edits, deletions and reactions are not lines of their own: each message
@@ -224,6 +227,7 @@
                 reactions={item.reactions ?? []}
                 onreact={onreact && ((key) => onreact(item.event_id, key))}
                 {onunreact}
+                {onlink}
               />
             {:else if item.kind === 'image'}
               <ImageMessage {roomId} {item} />

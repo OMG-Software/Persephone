@@ -33,6 +33,7 @@ fn main() {
             "mark_read",
             "room_activity",
             "set_typing",
+            "open_link",
             "pending_messages",
             "retry_message",
             "discard_message",

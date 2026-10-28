@@ -111,6 +111,13 @@ pub enum Call {
         event_id: String,
         body: String,
     },
+    /// Open a link from a message in the user's browser. The core checks it
+    /// (only http and https, at most [`MAX_LINK_BYTES`]) and asks in its own
+    /// window first (ADR-0024). Replies `true` when opened, `false` when the
+    /// user said no; `invalid_argument` for a refused link.
+    OpenLink {
+        url: String,
+    },
     /// Who else is typing in a joined room and, when `event_id` is given,
     /// who else has read up to that event.
     RoomActivity {
@@ -463,6 +470,9 @@ pub const MAX_DISPLAY_NAME_BYTES: usize = 256;
 
 /// Most local profiles (slots 1 to this number) on one computer.
 pub const MAX_PROFILES: u32 = 8;
+
+/// Longest link either side accepts in `open_link`, in bytes.
+pub const MAX_LINK_BYTES: usize = 2048;
 
 /// Longest reaction key either side accepts, in bytes.
 pub const MAX_REACTION_KEY_BYTES: usize = 64;
@@ -995,6 +1005,12 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::OpenLink {
+                    url: "https://example.org/".into(),
+                },
+                r#"{"id":1,"call":{"command":"open_link","url":"https://example.org/"}}"#,
+            ),
+            (
                 Call::RoomActivity {
                     room_id: "!r:s".into(),
                     event_id: Some("$e".into()),
@@ -1470,6 +1486,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e"}}"#,
             br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"open_link"}}"#,
+            br#"{"id":1,"call":{"command":"open_link","url":"https://e.org","confirmed":true}}"#,
             br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s","typing":"yes"}}"#,
             br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s","event_id":"$e","public":true}}"#,
