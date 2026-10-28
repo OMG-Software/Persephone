@@ -380,6 +380,12 @@ pub enum Call {
     RoomServers {
         room_id: String,
     },
+    /// Who can read a joined room's new messages: each joined or invited
+    /// member, how far this account trusts them, and how many of their
+    /// devices receive room keys or are refused them (ADR-0005).
+    RoomReaders {
+        room_id: String,
+    },
     /// Change one setting of a joined room, or act on one member. The
     /// homeserver decides whether this account may.
     ChangeRoom {
@@ -1010,6 +1016,12 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::RoomReaders {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"room_readers","room_id":"!r:s"}}"#,
+            ),
+            (
                 Call::RoomServers {
                     room_id: "!r:s".into(),
                 },
@@ -1500,6 +1512,7 @@ mod tests {
             br#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"open_link"}}"#,
             br#"{"id":1,"call":{"command":"room_servers"}}"#,
+            br#"{"id":1,"call":{"command":"room_readers","room_id":"!r:s","all":true}}"#,
             br#"{"id":1,"call":{"command":"room_servers","room_id":"!r:s","limit":5}}"#,
             br#"{"id":1,"call":{"command":"open_link","url":"https://e.org","confirmed":true}}"#,
             br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s"}}"#,

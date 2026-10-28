@@ -48,9 +48,9 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    HistoryVisibility, JoinRule, LevelKey, Membership, PowerLevel, RoomChange, RoomEncryption,
-    RoomLevel, RoomMember, RoomMembers, RoomNotifications, RoomPermissions, RoomServer,
-    RoomServers, RoomSettings,
+    ContactTrust, HistoryVisibility, JoinRule, LevelKey, Membership, PowerLevel, RoomChange,
+    RoomEncryption, RoomLevel, RoomMember, RoomMembers, RoomNotifications, RoomPermissions,
+    RoomReader, RoomReaders, RoomServer, RoomServers, RoomSettings,
 };
 use persephone_core_protocol::{
     ErrorCode, MAX_ALIAS_BYTES, MAX_ALT_ALIASES, MAX_LISTED_MEMBERS, MAX_MEMBER_FILTER_BYTES,
@@ -448,6 +448,60 @@ fn fit(members: &mut RoomMembers) {
 }
 
 /// A joined room's members that match `filter` (see the module notes).
+/// Who can read a joined room's new messages: up to [`MAX_LISTED_MEMBERS`]
+/// joined or invited members by user ID, each with this account's trust in
+/// them and their devices split by whether they receive room keys
+/// (ADR-0005), from the local crypto store.
+pub async fn readers(client: &Client, room_id: &str) -> Result<RoomReaders, ErrorCode> {
+    let room = joined(client, room_id)?;
+    let own = own_user(client)?;
+    let mut members: Vec<OwnedUserId> = room
+        .members(RoomMemberships::JOIN | RoomMemberships::INVITE)
+        .await
+        .map_err(|_| ErrorCode::Unavailable)?
+        .iter()
+        .map(|member| member.user_id().to_owned())
+        .collect();
+    members.sort();
+    let truncated = members.len() > MAX_LISTED_MEMBERS;
+    members.truncate(MAX_LISTED_MEMBERS);
+    let encryption = client.encryption();
+    let mut readers = Vec::with_capacity(members.len());
+    for user in members {
+        let trust = crate::contacts::trust(client, &user)
+            .await
+            .unwrap_or(ContactTrust::NoIdentity);
+        let devices = encryption
+            .get_user_devices(&user)
+            .await
+            .map_err(|_| ErrorCode::Unavailable)?;
+        let (receiving, refused) = split_devices(
+            devices
+                .devices()
+                .map(|device| device.is_cross_signed_by_owner()),
+        );
+        readers.push(RoomReader {
+            user_id: project_name(user.as_str()),
+            trust,
+            receiving,
+            refused,
+            own: user == own,
+        });
+    }
+    Ok(RoomReaders { readers, truncated })
+}
+
+/// Counts devices by whether they receive room keys.
+fn split_devices(receives: impl IntoIterator<Item = bool>) -> (u32, u32) {
+    receives.into_iter().fold((0, 0), |(yes, no), receives| {
+        if receives {
+            (yes.saturating_add(1), no)
+        } else {
+            (yes, no.saturating_add(1))
+        }
+    })
+}
+
 /// Most homeservers a `room_servers` reply lists.
 pub const MAX_LISTED_SERVERS: usize = 50;
 
@@ -741,6 +795,14 @@ fn request_error(error: &matrix_sdk::Error) -> ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN devices that are and are not cross-signed by their owner WHEN
+    /// split THEN each counts on its side, and no devices count as none.
+    #[test]
+    fn given_devices_then_they_split_by_whether_they_receive_keys() {
+        assert_eq!(split_devices([true, false, true, true]), (3, 1));
+        assert_eq!(split_devices([]), (0, 0));
+    }
 
     /// GIVEN members on several homeservers WHEN counted THEN each server
     /// appears once with its count, the most members first and then by

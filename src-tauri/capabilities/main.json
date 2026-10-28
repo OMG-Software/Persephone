@@ -27,6 +27,7 @@
     "allow-set-typing",
     "allow-open-link",
     "allow-room-servers",
+    "allow-room-readers",
     "allow-pending-messages",
     "allow-retry-message",
     "allow-discard-message",

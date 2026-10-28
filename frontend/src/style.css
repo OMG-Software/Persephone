@@ -1037,7 +1037,17 @@ kbd {
   white-space: nowrap;
 }
 
-/* The servers in a room: one per line, names in the monospace face. */
+/* The servers in a room and who can read it: one per line, names in the
+   monospace face. */
+.reader-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
 .server-list li {
   display: flex;
   align-items: baseline;

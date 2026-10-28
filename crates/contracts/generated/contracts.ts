@@ -294,6 +294,14 @@ export type RoomServer = { name: string, members: number, own: boolean, };
 
 export type RoomServers = { servers: Array<RoomServer>, truncated: boolean, };
 
+export type RoomReader = { userId: string, trust: ContactTrust, receiving: number, refused: number, 
+/**
+ * This account: its other devices read the room too.
+ */
+own: boolean, };
+
+export type RoomReaders = { readers: Array<RoomReader>, truncated: boolean, };
+
 export type NotificationLevel = "all" | "mentions" | "none" | "custom";
 
 export type NotificationSettings = { level: NotificationLevel, };

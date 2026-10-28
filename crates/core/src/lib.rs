@@ -540,6 +540,7 @@ impl Core {
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
             | Call::RoomServers { .. }
+            | Call::RoomReaders { .. }
             | Call::ChangeRoom { .. }
             | Call::ChangePassword { .. }
             | Call::ThreePids {}
@@ -805,6 +806,7 @@ impl Core {
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
             | Call::RoomServers { .. }
+            | Call::RoomReaders { .. }
             | Call::ChangeRoom { .. }
             | Call::ChangePassword { .. }
             | Call::ThreePids {}
@@ -868,6 +870,7 @@ impl Core {
             RoomSettings(String),
             RoomMembers(String, String),
             RoomServers(String),
+            RoomReaders(String),
             ChangeRoom(String, room_settings::Change),
             ChangePassword(bool),
             ThreePids,
@@ -939,6 +942,9 @@ impl Core {
             Call::RoomServers { room_id } if valid_room_id(room_id) => {
                 Work::RoomServers(room_id.clone())
             }
+            Call::RoomReaders { room_id } if valid_room_id(room_id) => {
+                Work::RoomReaders(room_id.clone())
+            }
             Call::ChangeRoom { room_id, change } if valid_room_id(room_id) => Work::ChangeRoom(
                 room_id.clone(),
                 room_settings::Change::parse(change).ok_or(ErrorCode::InvalidArgument)?,
@@ -995,7 +1001,9 @@ impl Core {
             Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
             Work::Devices => self.devices.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
-            Work::RoomMembers(..) | Work::RoomServers(_) => self.room_members.begin()?,
+            Work::RoomMembers(..) | Work::RoomServers(_) | Work::RoomReaders(_) => {
+                self.room_members.begin()?
+            }
             Work::ChangeRoom(..) | Work::Delete(..) | Work::React(..) => {
                 self.room_change.begin()?
             }
@@ -1094,6 +1102,14 @@ impl Core {
                 Work::RoomServers(room_id) => json(self.with_matrix(generation, async |client| {
                     room_settings::servers(&client, room_id).await
                 })),
+                Work::RoomReaders(room_id) => self
+                    .with_matrix(generation, async |client| {
+                        room_settings::readers(&client, room_id).await
+                    })
+                    .and_then(|readers| match bounded(&readers) {
+                        Outcome::Ok(value) => Ok(value),
+                        Outcome::Error(code) => Err(code),
+                    }),
                 Work::ChangeRoom(room_id, change) => self
                     .with_matrix(generation, async |client| {
                         room_settings::change(&client, room_id, change).await

@@ -897,6 +897,30 @@ pub struct RoomServers {
     pub truncated: bool,
 }
 
+/// One member of an encrypted room and the devices that can read its new
+/// messages: under ADR-0005 room keys go only to devices their owner
+/// cross-signed (`receiving`), never to the others (`refused`). From this
+/// computer's crypto store, which may lag behind a device just added.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomReader {
+    pub user_id: String,
+    pub trust: ContactTrust,
+    pub receiving: u32,
+    pub refused: u32,
+    /// This account: its other devices read the room too.
+    pub own: bool,
+}
+
+/// Reply of `room_readers`: who can read a room's new messages, at most 100
+/// members by user ID; `truncated` says more exist.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomReaders {
+    pub readers: Vec<RoomReader>,
+    pub truncated: bool,
+}
+
 /// Reply of `room_activity`: who else is typing in a room, and who else has
 /// read up to the event the page asked about (ADR-0023). Each list holds at
 /// most ten user IDs, projected like names; `truncated` says more exist.
@@ -1511,6 +1535,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", RoomActivity::decl(&config)),
         format!("export {}", RoomServer::decl(&config)),
         format!("export {}", RoomServers::decl(&config)),
+        format!("export {}", RoomReader::decl(&config)),
+        format!("export {}", RoomReaders::decl(&config)),
         format!("export {}", NotificationLevel::decl(&config)),
         format!("export {}", NotificationSettings::decl(&config)),
         format!("export {}", ThreePidMedium::decl(&config)),

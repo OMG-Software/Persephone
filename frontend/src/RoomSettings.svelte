@@ -26,12 +26,14 @@
     inviteUser,
     roomMembers,
     roomServers,
+    roomReaders,
     roomSettings,
     type LevelKey,
     type RoomChange,
     type RoomMember,
     type RoomMembers,
     type RoomServers,
+    type RoomReaders,
     type RoomSettings
   } from './bridge';
 
@@ -171,6 +173,29 @@
   let servers = $state<RoomServers | null>(null);
   let serversFailure = $state<string | null>(null);
 
+  // Who can read new messages here, read when the Security tab opens.
+  let readers = $state<RoomReaders | null>(null);
+  let readersFailure = $state<string | null>(null);
+
+  async function loadReaders() {
+    try {
+      readers = await roomReaders(roomId);
+      readersFailure = null;
+    } catch (reason) {
+      readersFailure = failureText(reason);
+    }
+  }
+
+  // Fixed text per trust level; the core sends codes only.
+  const readerTrust: Record<string, string> = {
+    verified: 'Verified',
+    unverified: 'Not verified',
+    no_identity: 'No encryption identity: receives no keys',
+    changed: 'Identity changed',
+    verified_changed: 'Identity changed since you verified them',
+    unknown: 'Not known yet'
+  };
+
   async function loadServers() {
     try {
       servers = await roomServers(roomId);
@@ -210,7 +235,10 @@
     // Read again on every visit: members may have changed meanwhile. The
     // old list stays shown until the new one arrives.
     if (next === 'people') loadMembers();
-    if (next === 'security') loadServers();
+    if (next === 'security') {
+      loadServers();
+      loadReaders();
+    }
   }
 
   async function apply(change: RoomChange, success = 'Saved.') {
@@ -755,6 +783,39 @@
           </p>
         </fieldset>
       {:else if tab === 'security'}
+        {#if settings.encryption === 'encrypted'}
+          <section class="panel" aria-labelledby="readers-heading">
+            <h4 id="readers-heading">Who can read new messages</h4>
+            <p class="note">
+              Room keys go only to devices their owner has signed. A device that is not signed
+              receives no keys and cannot read new messages. This is what this computer knows; a
+              device added a moment ago may not show yet.
+            </p>
+            {#if readersFailure}
+              <p role="alert" class="error">{readersFailure}</p>
+            {:else if readers === null}
+              <p class="note" role="status">Reading the members' devices…</p>
+            {:else}
+              <ul class="reader-list">
+                {#each readers.readers as reader (reader.userId)}
+                  <li>
+                    <bdi class="server-name">{reader.userId}</bdi>{reader.own ? ' (you)' : ''}
+                    <span class="note">
+                      {readerTrust[reader.trust] ?? readerTrust.unknown} ·
+                      {reader.receiving}
+                      {reader.receiving === 1 ? 'device reads' : 'devices read'}{reader.refused > 0
+                        ? ` · ${reader.refused} not signed, refused`
+                        : ''}
+                    </span>
+                  </li>
+                {/each}
+              </ul>
+              {#if readers.truncated}
+                <p class="note">More members are here than are listed.</p>
+              {/if}
+            {/if}
+          </section>
+        {/if}
         <section class="panel" aria-labelledby="servers-heading">
           <h4 id="servers-heading">Servers in this room</h4>
           <p class="note">

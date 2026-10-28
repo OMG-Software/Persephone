@@ -34,7 +34,7 @@ use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart,
     DeviceList, DisplayName, ImagePick, ImageView, InviteList, NotificationLevel,
     NotificationSettings, PendingMessage, ProfileList, RoomActivity, RoomChange, RoomCreation,
-    RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomServers, RoomSettings,
+    RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomReaders, RoomServers, RoomSettings,
     SecurityStatus, StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
@@ -425,6 +425,15 @@ async fn mark_read(
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(core.inner(), Call::MarkRead { room_id, event_id }).await
+}
+
+/// Who can read a joined room's new messages, by member and device.
+#[tauri::command]
+async fn room_readers(core: State<'_, CoreLink>, room_id: String) -> Result<RoomReaders, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RoomReaders { room_id }).await
 }
 
 /// The homeservers with members in a joined room.
@@ -1146,6 +1155,7 @@ pub fn configure<R: Runtime>(
             set_typing,
             open_link,
             room_servers,
+            room_readers,
             pending_messages,
             retry_message,
             discard_message,

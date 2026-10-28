@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-room-readers"
+description = "Enables the room_readers command without any pre-configured scope."
+commands.allow = ["room_readers"]
+
+[[permission]]
+identifier = "deny-room-readers"
+description = "Denies the room_readers command without any pre-configured scope."
+commands.deny = ["room_readers"]

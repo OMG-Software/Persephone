@@ -35,6 +35,7 @@ import type {
   RoomMember,
   RoomMembers,
   RoomActivity,
+  RoomReaders,
   RoomServers,
   RoomNotifications,
   RoomPermissions,
@@ -84,6 +85,7 @@ export type {
   RoomMember,
   RoomMembers,
   RoomActivity,
+  RoomReaders,
   RoomServers,
   RoomNotifications,
   RoomPermissions,
@@ -341,6 +343,15 @@ export function pickImage(roomId: string): Promise<ImagePick> {
  */
 export function editMessage(roomId: string, eventId: string, body: string): Promise<PendingMessage> {
   return invoke<PendingMessage>('edit_message', { roomId, eventId, body });
+}
+
+/**
+ * Who can read a room's new messages: each member, how far this account
+ * trusts them, and how many of their devices receive room keys or are
+ * refused them (ADR-0005). At most 100 members.
+ */
+export function roomReaders(roomId: string): Promise<RoomReaders> {
+  return invoke<RoomReaders>('room_readers', { roomId });
 }
 
 /**

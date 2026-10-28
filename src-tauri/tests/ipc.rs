@@ -219,6 +219,11 @@ impl CoreTransport for FakeCore {
                 "truncated": false
             })),
             Call::MarkRead { .. } => Ok(serde_json::Value::Null),
+            Call::RoomReaders { .. } => Ok(serde_json::json!({
+                "readers": [{"userId": "@b:example.invalid", "trust": "verified",
+                    "receiving": 2, "refused": 1, "own": false}],
+                "truncated": false
+            })),
             Call::RoomServers { .. } => Ok(serde_json::json!({
                 "servers": [{"name": "example.invalid", "members": 2, "own": true}],
                 "truncated": false
@@ -637,6 +642,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-set-typing",
             "allow-open-link",
             "allow-room-servers",
+            "allow-room-readers",
             "allow-pending-messages",
             "allow-retry-message",
             "allow-discard-message",
@@ -1208,6 +1214,10 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
     assert_eq!(
         invoke("room_servers", serde_json::json!({"roomId": room})).unwrap()["servers"][0]["members"],
         2
+    );
+    assert_eq!(
+        invoke("room_readers", serde_json::json!({"roomId": room})).unwrap()["readers"][0]["refused"],
+        1
     );
     let calls = core.calls.load(Ordering::SeqCst);
     assert_eq!(

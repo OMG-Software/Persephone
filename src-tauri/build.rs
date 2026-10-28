@@ -35,6 +35,7 @@ fn main() {
             "set_typing",
             "open_link",
             "room_servers",
+            "room_readers",
             "pending_messages",
             "retry_message",
             "discard_message",
