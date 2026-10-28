@@ -74,11 +74,7 @@ mod other {
         Box::new(pick::NoPicker)
     }
 
-    pub(crate) fn read_image_file(
-        _: &Path,
-        _: u64,
-        _: &ResourceBudgets,
-    ) -> Result<Encoded, ErrorCode> {
+    pub(crate) fn read_image_file(_: &Path, _: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
         Err(ErrorCode::Unavailable)
     }
 

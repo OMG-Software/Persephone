@@ -3,12 +3,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const MIB: u64 = 1024 * 1024;
-pub const APP_ADMITTED_LIMIT: u64 = 256 * MIB;
+pub const APP_ADMITTED_LIMIT: u64 = 356 * MIB;
 pub const ENCODED_IN_FLIGHT_LIMIT: u64 = 40 * MIB;
 pub const WORKER_OUTPUT_LIMIT: u64 = 64 * MIB;
 pub const RETAINED_PIXELS_LIMIT: u64 = 64 * MIB;
 pub const BOUNDED_VIEWS_LIMIT: u64 = 16 * MIB;
 pub const CONTROL_QUEUE_LIMIT: u64 = 16 * MIB;
+/// The SDK's copies of one image or file being sent (ADR-0031).
+pub const OUTGOING_SEND_LIMIT: u64 = 100 * MIB;
 pub const RESERVED_HEADROOM: u64 = 56 * MIB;
 
 pub const MAX_DIMENSION: u32 = 8192;
@@ -27,6 +29,7 @@ pub enum BudgetClass {
     RetainedPixels,
     BoundedViews,
     ControlQueue,
+    OutgoingSend,
 }
 
 impl BudgetClass {
@@ -37,6 +40,7 @@ impl BudgetClass {
             Self::RetainedPixels => RETAINED_PIXELS_LIMIT,
             Self::BoundedViews => BOUNDED_VIEWS_LIMIT,
             Self::ControlQueue => CONTROL_QUEUE_LIMIT,
+            Self::OutgoingSend => OUTGOING_SEND_LIMIT,
         }
     }
 }
@@ -109,7 +113,7 @@ impl Drop for Permit {
 /// Shared app-level and per-class byte admission. Reserve a permit before allocating or queueing.
 pub struct ResourceBudgets {
     aggregate: Arc<Counter>,
-    classes: [Arc<Counter>; 5],
+    classes: [Arc<Counter>; 6],
 }
 
 impl Default for ResourceBudgets {
@@ -128,6 +132,7 @@ impl ResourceBudgets {
                 Arc::new(Counter::new(RETAINED_PIXELS_LIMIT)),
                 Arc::new(Counter::new(BOUNDED_VIEWS_LIMIT)),
                 Arc::new(Counter::new(CONTROL_QUEUE_LIMIT)),
+                Arc::new(Counter::new(OUTGOING_SEND_LIMIT)),
             ],
         }
     }
@@ -176,6 +181,7 @@ impl BudgetClass {
             Self::RetainedPixels => 2,
             Self::BoundedViews => 3,
             Self::ControlQueue => 4,
+            Self::OutgoingSend => 5,
         }
     }
 }
@@ -604,7 +610,8 @@ mod tests {
             + WORKER_OUTPUT_LIMIT
             + RETAINED_PIXELS_LIMIT
             + BOUNDED_VIEWS_LIMIT
-            + CONTROL_QUEUE_LIMIT;
+            + CONTROL_QUEUE_LIMIT
+            + OUTGOING_SEND_LIMIT;
         assert_eq!(class_sum + RESERVED_HEADROOM, APP_ADMITTED_LIMIT);
         assert!(class_sum <= APP_ADMITTED_LIMIT);
     }

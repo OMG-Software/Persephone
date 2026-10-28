@@ -158,7 +158,7 @@ export function canRetryLoad(reason: unknown): boolean {
 }
 
 const attachText: Record<string, string> = {
-  rejected: 'That file cannot be sent: it is larger than 6 MB, damaged, or not a PNG or JPEG.',
+  rejected: 'That file cannot be sent: it is larger than 20 MB, damaged, or not a PNG or JPEG.',
   limit_exceeded: 'Persephone is already preparing an image. Wait for it to finish.',
   not_found: 'That room no longer exists.',
   locked: 'The session is locked.',

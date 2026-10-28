@@ -406,48 +406,39 @@ fn encoded(budgets: &ResourceBudgets, bytes: &[u8]) -> Encoded {
 
 const JPEG: &[u8] = b"\xff\xd8\xff\xe0 jpeg body \xff\xd9";
 
-/// GIVEN a picked image whose stripped copy is one byte over the send limit
-/// WHEN the draft is prepared THEN it is refused before it is copied, and
-/// nothing stays reserved.
+/// GIVEN an image to send WHEN it is copied for the SDK THEN the upload
+/// stays in `EncodedInFlight` and the copy, with the SDK's own copies, is
+/// reserved in `OutgoingSend`: [`SENT_COPIES`] times the image in all, all
+/// released when the send ends.
 #[test]
-fn given_a_stripped_image_over_the_send_limit_then_no_draft_is_made() {
-    let media = service(FakeWorker::new((30, 20), 1));
-    let padding = MAX_SENT_BYTES as usize + 1 - JPEG.len();
-    let original = encoded(media.budgets(), &[JPEG, &vec![0; padding]].concat());
-    assert_eq!(
-        media.prepare_draft(1, &|| Some(1), "!r:s", original).err(),
-        Some(ErrorCode::Rejected)
-    );
-    assert!(
-        media
-            .budgets()
-            .try_acquire(
-                BudgetClass::EncodedInFlight,
-                persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT
-            )
-            .is_ok()
-    );
-}
-
-/// GIVEN an image to send WHEN it is copied for the SDK THEN the copy and
-/// the SDK's own copies are reserved: [`SENT_COPIES`] times the image in all.
-#[test]
-fn given_an_image_copied_for_send_then_the_sdk_copy_is_reserved_too() {
+fn given_an_image_copied_for_send_then_the_sdk_copies_are_reserved_apart() {
     let budgets = budgets();
     let upload = ImageUpload::for_tests(&budgets, JPEG);
-    let (copy, _permit) = upload.copy_for_send().unwrap();
+    let (copy, permit) = upload.copy_for_send().unwrap();
     assert_eq!(copy, JPEG);
-    let free = persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT - SENT_COPIES * JPEG.len() as u64;
-    assert!(
-        budgets
-            .try_acquire(BudgetClass::EncodedInFlight, free + 1)
-            .is_err()
+    let length = JPEG.len() as u64;
+    assert_eq!(budgets.class_used(BudgetClass::EncodedInFlight), length);
+    assert_eq!(
+        budgets.class_used(BudgetClass::OutgoingSend),
+        (SENT_COPIES - 1) * length
     );
-    assert!(
-        budgets
-            .try_acquire(BudgetClass::EncodedInFlight, free)
-            .is_ok()
-    );
+    drop((copy, permit));
+    assert_eq!(budgets.class_used(BudgetClass::OutgoingSend), 0);
+}
+
+/// GIVEN an image of the largest size sent, while a received image of the
+/// largest size downloads WHEN it is copied for the SDK THEN every copy
+/// fits; a second send at the same time does not.
+#[test]
+fn given_the_largest_image_then_its_send_fits_beside_downloads() {
+    let budgets = budgets();
+    let largest = vec![0xff; MAX_SENT_BYTES as usize];
+    let upload = ImageUpload::for_tests(&budgets, &largest);
+    let downloading = Encoded::reserve(&budgets, MAX_ENCODED_BYTES).unwrap();
+    let (copy, _permit) = upload.copy_for_send().unwrap();
+    assert_eq!(copy.len() as u64, MAX_SENT_BYTES);
+    assert_eq!(upload.copy_for_send().err(), Some(ErrorCode::LimitExceeded));
+    drop(downloading);
 }
 
 /// GIVEN a picked JPEG WHEN the draft is prepared THEN the worker strips it

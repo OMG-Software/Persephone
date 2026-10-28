@@ -10,13 +10,11 @@
 //!   (no other process can open it for writing meanwhile), without following
 //!   a reparse point. It refuses a reparse point (symbolic link or junction),
 //!   a directory, anything that is not a plain file, an empty file and one
-//!   larger than [`MAX_ENCODED_BYTES`]. [`read_sent_file`], for a file sent
-//!   as it is, applies the same rules with [`MAX_SENT_BYTES`] instead. The
-//!   size is checked on the open file, and the buffer reserved, before
-//!   anything is read; the read fails if the length differs from the size
+//!   larger than [`MAX_ENCODED_BYTES`](crate::media::MAX_ENCODED_BYTES). The buffer is reserved before it is
+//!   allocated, and the read fails if the length differs from the size
 //!   checked first. The file is never written.
 
-use crate::media::{Encoded, MAX_ENCODED_BYTES, MAX_SENT_BYTES};
+use crate::media::Encoded;
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::ResourceBudgets;
 use std::path::{Path, PathBuf};
@@ -60,13 +58,7 @@ pub fn platform() -> Box<dyn ImagePicker> {
 /// full budget (`limit_exceeded`).
 /// Platforms without an implemented read return `unavailable`.
 pub fn read_image_file(path: &Path, budgets: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
-    crate::platform::os::read_image_file(path, MAX_ENCODED_BYTES, budgets)
-}
-
-/// Reads a picked file to send as it is, under the same rules, at most
-/// [`MAX_SENT_BYTES`].
-pub fn read_sent_file(path: &Path, budgets: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
-    crate::platform::os::read_image_file(path, MAX_SENT_BYTES, budgets)
+    crate::platform::os::read_image_file(path, budgets)
 }
 
 #[cfg(feature = "dev-disposable-servers")]
@@ -225,35 +217,6 @@ mod tests {
             read_image_file(&exact, &budgets).unwrap().bytes().len() as u64,
             MAX_ENCODED_BYTES,
             "exactly the cap is accepted"
-        );
-    }
-
-    /// GIVEN a file one byte over the send limit WHEN it is read to send
-    /// THEN it is refused before anything is reserved, while the same file
-    /// can still be read as an image to strip; exactly the limit is read.
-    #[test]
-    fn given_a_file_over_the_send_limit_then_it_is_refused_before_it_is_read() {
-        let dir = temp();
-        let budgets = ResourceBudgets::default();
-        let over = dir.path().join("over.bin");
-        std::fs::File::create(&over)
-            .unwrap()
-            .set_len(MAX_SENT_BYTES + 1)
-            .unwrap();
-        assert_eq!(
-            read_sent_file(&over, &budgets).err(),
-            Some(ErrorCode::Rejected)
-        );
-        assert_eq!(budgets.class_used(BudgetClass::EncodedInFlight), 0);
-        assert!(read_image_file(&over, &budgets).is_ok());
-        let exact = dir.path().join("exact.bin");
-        std::fs::File::create(&exact)
-            .unwrap()
-            .set_len(MAX_SENT_BYTES)
-            .unwrap();
-        assert_eq!(
-            read_sent_file(&exact, &budgets).unwrap().bytes().len() as u64,
-            MAX_SENT_BYTES
         );
     }
 }

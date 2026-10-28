@@ -83,14 +83,19 @@ pub const MAX_ENCODED_BYTES: u64 = 20 * MIB;
 /// is not encrypted, or the encrypted copy, whose capacity can reach twice
 /// the length as it grows); the clone of the request that is sent; and the
 /// HTTP body serialized from it. Five in a room that is not encrypted, six
-/// in one that is.
+/// in one that is. The outbox's copy is in `EncodedInFlight`; the others
+/// are in `OutgoingSend` (ADR-0031).
 pub const SENT_COPIES: u64 = 6;
-/// Largest image (after stripping) or file sent, so that every copy of a
-/// send fits the 40 MiB `EncodedInFlight` budget. Downloads and saved files
-/// make no such copies and keep [`MAX_ENCODED_BYTES`].
-pub const MAX_SENT_BYTES: u64 = 6 * MIB;
+/// Largest image (after stripping) or file sent: the same as one received.
+/// Picked files are read at most [`MAX_ENCODED_BYTES`], checked on the open
+/// file before anything is read, and a stripped image is an encoded frame of
+/// at most that size, so neither needs a check of its own. One send's SDK
+/// copies fit `OutgoingSend`; one attachment is sent at a time
+/// (`outbox::MAX_UNSENT_IMAGES`).
+pub const MAX_SENT_BYTES: u64 = MAX_ENCODED_BYTES;
+const _: () = assert!(MAX_ENCODED_BYTES <= MAX_SENT_BYTES);
 const _: () =
-    assert!(SENT_COPIES * MAX_SENT_BYTES <= persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT);
+    assert!((SENT_COPIES - 1) * MAX_SENT_BYTES <= persephone_media_protocol::OUTGOING_SEND_LIMIT);
 /// Received and preview images are scaled down to fit this square; 2048 x
 /// 2048 RGBA is 16 MiB, so four fit the `RetainedPixels` budget.
 pub const MAX_SHOWN_SIDE: u32 = 2048;
@@ -412,8 +417,7 @@ pub struct ImageUpload {
 
 impl ImageUpload {
     /// Copies a stripped file from the worker into zeroed-on-drop memory.
-    /// `rejected` unless it is a PNG or JPEG file of at most
-    /// [`MAX_SENT_BYTES`].
+    /// `rejected` unless it is a PNG or JPEG file.
     fn from_stripped(
         budgets: &Arc<ResourceBudgets>,
         stripped: ReceivedFrame,
@@ -423,9 +427,6 @@ impl ImageUpload {
         }
         let mime = sniff(stripped.body()).ok_or(ErrorCode::Rejected)?;
         let length = stripped.body().len();
-        if length as u64 > MAX_SENT_BYTES {
-            return Err(ErrorCode::Rejected);
-        }
         let permit = budgets
             .try_acquire(BudgetClass::EncodedInFlight, length as u64)
             .map_err(|_| ErrorCode::LimitExceeded)?;
@@ -495,14 +496,15 @@ impl ImageUpload {
         self.bytes.is_empty()
     }
 
-    /// A copy for the SDK, which takes the data by value, reserved like the
-    /// upload itself together with the copies the SDK makes while it uploads
-    /// (all but the upload's own of [`SENT_COPIES`]). No SDK copy is zeroed.
+    /// A copy for the SDK, which takes the data by value, reserved in
+    /// `OutgoingSend` before it is allocated together with the copies the SDK
+    /// makes while it uploads (all but the upload's own of [`SENT_COPIES`]).
+    /// No SDK copy is zeroed.
     pub fn copy_for_send(&self) -> Result<(Vec<u8>, BudgetPermit), ErrorCode> {
         let permit = self
             .budgets
             .try_acquire(
-                BudgetClass::EncodedInFlight,
+                BudgetClass::OutgoingSend,
                 (SENT_COPIES - 1) * self.bytes.len() as u64,
             )
             .map_err(|_| ErrorCode::LimitExceeded)?;

@@ -24,16 +24,12 @@ pub fn absolute(value: Option<OsString>) -> Option<PathBuf> {
 
 /// Reads a picked image file once, without writing it. The last path
 /// component must not be a symbolic link (`O_NOFOLLOW`), the open file must
-/// be a regular file (`fstat`), and its size must be 1 byte to `limit`
-/// (never more than [`MAX_ENCODED_BYTES`]). `O_NONBLOCK` keeps a FIFO from
-/// blocking the open; it is then refused as not a regular file. Unix has no
-/// share mode, so another process may write the file meanwhile; a read that
-/// does not end at exactly the size checked first is refused.
-pub fn read_image_file(
-    path: &Path,
-    limit: u64,
-    budgets: &ResourceBudgets,
-) -> Result<Encoded, ErrorCode> {
+/// be a regular file (`fstat`), and its size must be 1 byte to
+/// [`MAX_ENCODED_BYTES`]. `O_NONBLOCK` keeps a FIFO from blocking the open; it
+/// is then refused as not a regular file. Unix has no share mode, so another
+/// process may write the file meanwhile; a read that does not end at exactly
+/// the size checked first is refused.
+pub fn read_image_file(path: &Path, budgets: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
@@ -48,7 +44,7 @@ pub fn read_image_file(
         return Err(ErrorCode::Rejected);
     }
     let size = metadata.len();
-    if size == 0 || size > limit.min(MAX_ENCODED_BYTES) {
+    if size == 0 || size > MAX_ENCODED_BYTES {
         return Err(ErrorCode::Rejected);
     }
     let mut encoded = Encoded::reserve(budgets, size)?;
@@ -279,7 +275,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let plain = dir.join("plain.png");
         std::fs::write(&plain, b"\x89PNG data").unwrap();
-        let read = read_image_file(&plain, MAX_ENCODED_BYTES, &budgets).unwrap();
+        let read = read_image_file(&plain, &budgets).unwrap();
         assert_eq!(read.bytes(), b"\x89PNG data");
         assert_eq!(std::fs::read(&plain).unwrap(), b"\x89PNG data");
 
@@ -287,22 +283,22 @@ mod tests {
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&plain, &link).unwrap();
         assert!(matches!(
-            read_image_file(&link, MAX_ENCODED_BYTES, &budgets),
+            read_image_file(&link, &budgets),
             Err(ErrorCode::Rejected)
         ));
 
         let empty = dir.join("empty.png");
         std::fs::write(&empty, b"").unwrap();
         assert!(matches!(
-            read_image_file(&empty, MAX_ENCODED_BYTES, &budgets),
+            read_image_file(&empty, &budgets),
             Err(ErrorCode::Rejected)
         ));
         assert!(matches!(
-            read_image_file(&dir, MAX_ENCODED_BYTES, &budgets),
+            read_image_file(&dir, &budgets),
             Err(ErrorCode::Rejected)
         ));
         assert!(matches!(
-            read_image_file(&dir.join("missing.png"), MAX_ENCODED_BYTES, &budgets),
+            read_image_file(&dir.join("missing.png"), &budgets),
             Err(ErrorCode::NotFound)
         ));
 
@@ -310,7 +306,7 @@ mod tests {
         let file = std::fs::File::create(&large).unwrap();
         file.set_len(MAX_ENCODED_BYTES + 1).unwrap();
         assert!(matches!(
-            read_image_file(&large, MAX_ENCODED_BYTES, &budgets),
+            read_image_file(&large, &budgets),
             Err(ErrorCode::Rejected)
         ));
         std::fs::remove_dir_all(&dir).unwrap();

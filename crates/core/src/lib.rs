@@ -1705,7 +1705,7 @@ impl Core {
             if self.media_generation() != Some(generation) {
                 return Outcome::Error(ErrorCode::Locked);
             }
-            let bytes = match pick::read_sent_file(&path, &self.budgets) {
+            let bytes = match pick::read_image_file(&path, &self.budgets) {
                 Ok(bytes) => bytes,
                 Err(code) => return Outcome::Error(code),
             };

@@ -33,8 +33,9 @@ use zeroize::Zeroizing;
 pub const MAX_UNSENT: usize = 16;
 /// Most messages kept, sent ones included.
 pub const MAX_KEPT: usize = 32;
-/// Most images not yet sent at once: each holds up to 6 MiB
-/// (`media::MAX_SENT_BYTES`).
+/// Most images not yet sent at once: each holds up to 20 MiB
+/// (`media::MAX_SENT_BYTES`), and one send's SDK copies fill the
+/// `OutgoingSend` budget (ADR-0031).
 pub const MAX_UNSENT_IMAGES: usize = 1;
 /// Most bytes all kept messages take as JSON (see [`entry_size`]). This
 /// leaves room for the list's brackets and commas within one bounded view
@@ -467,20 +468,13 @@ mod tests {
         let Content::File(sent) = &job.content else {
             panic!("a file");
         };
-        // The copy for the SDK reserves the SDK's copies too: all but the
-        // outbox's of `media::SENT_COPIES`.
+        // The copy for the SDK reserves the SDK's copies too, in their own
+        // class: all but the outbox's of `media::SENT_COPIES`.
         let (copy, _permit) = sent.copy_for_send().unwrap();
         assert_eq!(copy, b"data");
-        assert!(
-            budgets
-                .try_acquire(
-                    persephone_media_protocol::BudgetClass::EncodedInFlight,
-                    persephone_media_protocol::ENCODED_IN_FLIGHT_LIMIT
-                        - crate::media::SENT_COPIES * 4
-                        + 1
-                )
-                .is_err(),
-            "every copy of the send is reserved"
+        assert_eq!(
+            budgets.class_used(persephone_media_protocol::BudgetClass::OutgoingSend),
+            (crate::media::SENT_COPIES - 1) * 4
         );
         outbox.finish(queued.local_id, SendOutcome::Sent("$f".into()));
         assert!(!outbox.holds_image(queued.local_id));

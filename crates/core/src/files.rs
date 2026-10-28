@@ -2,11 +2,10 @@
 //! and saved through its own Save dialog. Nothing is opened, previewed,
 //! played or decoded.
 //!
-//! * A picked file is read like a picked image (`pick::read_sent_file`: no
+//! * A picked file is read like a picked image (`pick::read_image_file`: no
 //!   link, no directory, at most
 //!   [`MAX_SENT_BYTES`](crate::media::MAX_SENT_BYTES), checked before it is
-//!   read) and queued at once:
-//!   the dialog, titled for the room, is the user's choice to send it. It is
+//!   read) and queued at once: the dialog, titled for the room, is the user's choice to send it. It is
 //!   sent as `application/octet-stream` with its file name, encrypted in an
 //!   encrypted room by the SDK.
 //! * `m.file`, `m.audio` and `m.video` events are `file` items: a name
@@ -61,17 +60,16 @@ impl FileUpload {
         }
     }
 
-    /// A copy of the bytes for the SDK, reserved in the encoded budget before
-    /// it is allocated, together with the copies the SDK makes while it
-    /// uploads (all but the outbox's of
-    /// [`SENT_COPIES`](crate::media::SENT_COPIES)). Keep the permit until the
-    /// send ends.
+    /// A copy of the bytes for the SDK, reserved in `OutgoingSend` before it
+    /// is allocated, together with the copies the SDK makes while it uploads
+    /// (all but the outbox's of [`SENT_COPIES`](crate::media::SENT_COPIES)).
+    /// Keep the permit until the send ends.
     pub fn copy_for_send(&self) -> Result<(Vec<u8>, BudgetPermit), ErrorCode> {
         let length = self.bytes.bytes().len();
         let permit = self
             .budgets
             .try_acquire(
-                BudgetClass::EncodedInFlight,
+                BudgetClass::OutgoingSend,
                 (crate::media::SENT_COPIES - 1) * length as u64,
             )
             .map_err(|_| ErrorCode::LimitExceeded)?;
