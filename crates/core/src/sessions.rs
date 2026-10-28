@@ -8,9 +8,9 @@
 //! * The account's devices come from this computer's crypto store, which the
 //!   sync keeps up to date. A device there that is neither this one nor in
 //!   the list is new.
-//! * With no list yet (the first time, or after it could not be read), the
-//!   current devices are recorded and none is new: a fresh sign-in is not an
-//!   alert.
+//! * With no list yet (the first time), the current devices are recorded and
+//!   none is new: a fresh sign-in is not an alert. A list that cannot be read
+//!   is `internal`, and nothing is recorded over it.
 //! * Names are the homeserver's and the device's word, projected like names.
 
 use crate::store::Stores;
