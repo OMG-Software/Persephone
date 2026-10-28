@@ -33,7 +33,7 @@ use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart,
     DeviceList, DisplayName, ImagePick, ImageView, InviteList, NotificationLevel,
-    NotificationSettings, PendingMessage, ProfileList, RoomChange, RoomCreation,
+    NotificationSettings, PendingMessage, ProfileList, RoomActivity, RoomChange, RoomCreation,
     RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomSettings, SecurityStatus,
     StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
 };
@@ -424,6 +424,38 @@ async fn mark_read(
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(core.inner(), Call::MarkRead { room_id, event_id }).await
+}
+
+/// Who else is typing in a joined room and, for an event, who else has read
+/// up to it.
+#[tauri::command]
+async fn room_activity(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: Option<String>,
+) -> Result<RoomActivity, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || event_id
+            .as_ref()
+            .is_some_and(|event_id| event_id.len() > MAX_EVENT_ID_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RoomActivity { room_id, event_id }).await
+}
+
+/// Tells a joined room this account started or stopped typing; the core
+/// refuses while the account's setting is off (ADR-0023).
+#[tauri::command]
+async fn set_typing(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    typing: bool,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SetTyping { room_id, typing }).await
 }
 
 /// Reacts to an event in a joined room with a short key, usually an emoji.
@@ -891,26 +923,14 @@ async fn account_settings(core: State<'_, CoreLink>) -> Result<AccountSettings, 
     relay(core.inner(), Call::AccountSettings {}).await
 }
 
-/// Replaces this account's settings. Each setting is a required argument;
-/// the core checks the text sizes' bounds.
+/// Replaces this account's settings. The record refuses missing and unknown
+/// settings; the core checks the text sizes' bounds.
 #[tauri::command]
 async fn set_account_settings(
     core: State<'_, CoreLink>,
-    enter_sends: bool,
-    chat_text_percent: u16,
-    interface_text_percent: u16,
-    desktop_notifications: bool,
+    settings: AccountSettings,
 ) -> Result<(), String> {
-    relay::<()>(
-        core.inner(),
-        Call::SetAccountSettings {
-            enter_sends,
-            chat_text_percent,
-            interface_text_percent,
-            desktop_notifications,
-        },
-    )
-    .await
+    relay::<()>(core.inner(), Call::SetAccountSettings { settings }).await
 }
 
 /// Changes this account's password. Nothing secret crosses: the core asks
@@ -1102,6 +1122,8 @@ pub fn configure<R: Runtime>(
             delete_message,
             react,
             mark_read,
+            room_activity,
+            set_typing,
             pending_messages,
             retry_message,
             discard_message,

@@ -14,7 +14,7 @@
 //! the core's frames with [`receive_from_core`], which checks the pixel
 //! frame's header against its reply before it allocates the body.
 
-pub use persephone_contracts::{NotificationLevel, RoomChange, ThreePidMedium};
+pub use persephone_contracts::{AccountSettings, NotificationLevel, RoomChange, ThreePidMedium};
 use persephone_media_protocol::{
     FrameError, FrameHeader, FrameKind, MAX_DIMENSION, MIB, RGBA_BYTES_PER_PIXEL, ReceivedFrame,
     ResourceBudgets, read_frame, write_frame,
@@ -111,8 +111,25 @@ pub enum Call {
         event_id: String,
         body: String,
     },
+    /// Who else is typing in a joined room and, when `event_id` is given,
+    /// who else has read up to that event.
+    RoomActivity {
+        room_id: String,
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        event_id: Option<String>,
+    },
+    /// Tell a joined room this account started or stopped typing. Refused as
+    /// `rejected` while the account's settings do not send typing notices
+    /// (ADR-0023).
+    SetTyping {
+        room_id: String,
+        typing: bool,
+    },
     /// Mark a joined room read up to this event: its fully-read marker and
-    /// a private read receipt, which only this account's devices see.
+    /// a private read receipt, which only this account's devices see, and a
+    /// public read receipt when the account's settings send them
+    /// (ADR-0023).
     MarkRead {
         room_id: String,
         event_id: String,
@@ -261,18 +278,12 @@ pub enum Call {
     DeviceList {},
     /// This account's settings, kept in its encrypted profile.
     AccountSettings {},
-    /// Replace this account's settings. Every setting is a required field,
-    /// so the page always sends the whole set. Text sizes outside their
-    /// bounds are `invalid_argument`.
+    /// Replace this account's settings. Every setting is a required field
+    /// of the record, which refuses unknown ones, so the page always sends
+    /// the whole set. Text sizes outside their bounds are
+    /// `invalid_argument`.
     SetAccountSettings {
-        /// Enter sends a message; otherwise it starts a new line.
-        enter_sends: bool,
-        /// Message text size, in percent.
-        chat_text_percent: u16,
-        /// Interface text size, in percent.
-        interface_text_percent: u16,
-        /// Desktop notifications with the sender and room only.
-        desktop_notifications: bool,
+        settings: AccountSettings,
     },
     /// Change this account's password (ADR-0019). The core asks for the
     /// current password and the new one (twice) in its own windows; nothing
@@ -984,6 +995,20 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::RoomActivity {
+                    room_id: "!r:s".into(),
+                    event_id: Some("$e".into()),
+                },
+                r#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s","event_id":"$e"}}"#,
+            ),
+            (
+                Call::SetTyping {
+                    room_id: "!r:s".into(),
+                    typing: true,
+                },
+                r#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s","typing":true}}"#,
+            ),
+            (
                 Call::MarkRead {
                     room_id: "!r:s".into(),
                     event_id: "$e".into(),
@@ -1027,12 +1052,16 @@ mod tests {
             ),
             (
                 Call::SetAccountSettings {
-                    enter_sends: false,
-                    chat_text_percent: 120,
-                    interface_text_percent: 90,
-                    desktop_notifications: true,
+                    settings: AccountSettings {
+                        enter_sends: false,
+                        chat_text_percent: 120,
+                        interface_text_percent: 90,
+                        desktop_notifications: true,
+                        send_typing: false,
+                        send_read_receipts: true,
+                    },
                 },
-                r#"{"id":1,"call":{"command":"set_account_settings","enter_sends":false,"chat_text_percent":120,"interface_text_percent":90,"desktop_notifications":true}}"#,
+                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true}}}"#,
             ),
             (
                 Call::ProfileList {},
@@ -1075,8 +1104,11 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":null}}"#,
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"theme":"x"}}"#,
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":100,"interface_text_percent":100}}"#,
-            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":-1,"interface_text_percent":100,"desktop_notifications":false}}"#,
-            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":70000,"interface_text_percent":100,"desktop_notifications":false}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":true,"chatTextPercent":-1,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false}}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":true,"chatTextPercent":70000,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false}}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false}}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"extra":1}}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":100,"interface_text_percent":100,"desktop_notifications":false}}"#,
             br#"{"id":1,"call":{"command":"profile_list","all":true}}"#,
             br#"{"id":1,"call":{"command":"add_profile","dir":"C:\\x"}}"#,
             br#"{"id":1,"call":{"command":"switch_profile"}}"#,
@@ -1437,6 +1469,9 @@ mod tests {
             br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e"}}"#,
             br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s","typing":"yes"}}"#,
             br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s","event_id":"$e","public":true}}"#,
             br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e","key":null}}"#,
             br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s","event_id":"$e","reason":"spam"}}"#,

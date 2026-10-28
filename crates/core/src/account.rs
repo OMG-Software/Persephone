@@ -211,9 +211,9 @@ pub async fn select_engine(client: &Client) -> Result<Engine, SignInError> {
                 ])
                 .timeline_limit(20),
         )
+        // Typing notices and receipts are received to be shown; whether this
+        // account sends its own is a setting (ADR-0023).
         .with_all_extensions()
-        .without_typing_extension()
-        .without_receipt_extension()
         .poll_timeout(SYNC_POLL)
         .network_timeout(REQUEST_TIMEOUT)
         .build()

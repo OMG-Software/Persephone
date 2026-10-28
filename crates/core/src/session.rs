@@ -33,6 +33,7 @@
 //! blocked by an open prompt and nothing else can change the stores meanwhile.
 
 use crate::account;
+use crate::activity;
 use crate::contacts;
 use crate::credentials::{CredentialSource, NewPassword, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
@@ -58,6 +59,7 @@ use matrix_sdk::{
             direct::DirectEventContent,
             key::verification::request::ToDeviceKeyVerificationRequestEvent,
             room::message::{MessageType, OriginalSyncRoomMessageEvent},
+            typing::SyncTypingEvent,
         },
     },
 };
@@ -227,6 +229,12 @@ struct Shared {
     /// The account's desktop-notification setting, kept here so the sync's
     /// notification handler need not read the store (ADR-0022).
     toasts: AtomicBool,
+    /// The account's settings for typing notices and public read receipts,
+    /// kept here so sending them need not read the store (ADR-0023).
+    send_typing: AtomicBool,
+    send_receipts: AtomicBool,
+    /// Who is typing in each room, from the sync.
+    typing: Arc<activity::Typing>,
     security: Mutex<SecurityShared>,
     outbox: Mutex<Outbox>,
 }
@@ -511,11 +519,19 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
     let host = Homeserver::parse(client.homeserver().as_str())
         .map(|homeserver| homeserver.display_host())
         .unwrap_or_default();
-    let toasts = lease
+    let loaded = lease
         .stores()
         .block_on(settings::load(lease.stores()))
-        .is_some_and(|settings| settings.desktop_notifications);
-    shared.toasts.store(toasts, Ordering::SeqCst);
+        .unwrap_or_default();
+    shared
+        .toasts
+        .store(loaded.desktop_notifications, Ordering::SeqCst);
+    shared
+        .send_typing
+        .store(loaded.send_typing, Ordering::SeqCst);
+    shared
+        .send_receipts
+        .store(loaded.send_read_receipts, Ordering::SeqCst);
     let installed = lease.commit(|| {
         *guard(&shared.account) = Some(ActiveAccount {
             client: client.clone(),
@@ -608,6 +624,18 @@ fn run_sync(
         let _context = runtime.enter();
         client.add_event_handler(move |_: GlobalAccountDataEvent<DirectEventContent>| {
             noted.store(true, Ordering::SeqCst);
+            std::future::ready(())
+        })
+    };
+    // Typing notices are ephemeral: kept as they arrive, for the page to ask.
+    let typing = shared.typing.clone();
+    let typing_handler = {
+        let _context = runtime.enter();
+        client.add_event_handler(move |event: SyncTypingEvent, room: matrix_sdk::Room| {
+            typing.set(
+                room.room_id().as_str(),
+                event.content.user_ids.iter().map(|user| &**user),
+            );
             std::future::ready(())
         })
     };
@@ -726,6 +754,7 @@ fn run_sync(
     }
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
+    client.remove_event_handler(typing_handler);
     drop(identities);
     drop(keys);
     drop(engine);
@@ -1179,6 +1208,9 @@ impl Session {
                 listener: Mutex::new(None),
                 client_ran: AtomicBool::new(false),
                 toasts: AtomicBool::new(false),
+                send_typing: AtomicBool::new(false),
+                send_receipts: AtomicBool::new(false),
+                typing: Arc::default(),
             }),
             transition: Mutex::new(()),
         }
@@ -1434,6 +1466,7 @@ impl Session {
         // unsent messages are dropped.
         *guard(&self.shared.security) = SecurityShared::default();
         guard(&self.shared.outbox).clear();
+        self.shared.typing.clear();
         // No lease remains, so the sync loop is between rounds and will see
         // the lock at its next admission; join it, then drop the client inside
         // the stores' runtime before closing them.
@@ -1645,6 +1678,21 @@ impl Session {
         Ok(lease.stores().block_on(settings::load(lease.stores())))
     }
 
+    /// Whether the account's settings send typing notices (ADR-0023).
+    pub fn sends_typing(&self) -> bool {
+        self.shared.send_typing.load(Ordering::SeqCst)
+    }
+
+    /// Whether the account's settings send public read receipts (ADR-0023).
+    pub fn sends_read_receipts(&self) -> bool {
+        self.shared.send_receipts.load(Ordering::SeqCst)
+    }
+
+    /// Who is typing in each room, from the sync.
+    pub fn typing(&self) -> &activity::Typing {
+        &self.shared.typing
+    }
+
     /// Replaces this account's settings. `Ok(false)` when the store could
     /// not be written.
     pub fn set_account_settings(&self, value: AccountSettings) -> Result<bool, AdmissionError> {
@@ -1658,9 +1706,16 @@ impl Session {
         let committed = saved
             && lease
                 .commit(|| {
-                    self.shared
+                    let shared = &self.shared;
+                    shared
                         .toasts
-                        .store(value.desktop_notifications, Ordering::SeqCst)
+                        .store(value.desktop_notifications, Ordering::SeqCst);
+                    shared
+                        .send_typing
+                        .store(value.send_typing, Ordering::SeqCst);
+                    shared
+                        .send_receipts
+                        .store(value.send_read_receipts, Ordering::SeqCst);
                 })
                 .is_ok();
         Ok(committed)

@@ -526,6 +526,45 @@ test('every room is labelled with its encryption in the list and the header', ()
   assert.deepEqual(labels(timeline('unknown')), ['Encryption unknown']);
 });
 
+test('GIVEN others typing and reading WHEN shown THEN each name is isolated text, and many are counted', () => {
+  const composer = (typing, typingCut = false) =>
+    render(Composer, {
+      props: {
+        pending: [],
+        blocked: null,
+        encryption: 'encrypted',
+        roomName: 'general',
+        draftVersion: 0,
+        onsend: async () => true,
+        onretry: () => {},
+        ondiscard: () => {},
+        onallow: () => {},
+        typing,
+        typingCut
+      }
+    }).body.replace(/<!--.*?-->/g, '');
+  assert.match(composer([hostileName]), /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi> is typing…/);
+  assert.match(composer(['@a:s', '@b:s']), /<bdi>@a:s<\/bdi> and <bdi>@b:s<\/bdi> are typing…/);
+  assert.match(composer(['@a:s', '@b:s', '@c:s']), /Several people are typing…/);
+  assert.match(composer(['@a:s'], true), /Several people are typing…/);
+  assert.doesNotMatch(composer([]), /typing…/);
+
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [],
+      readBy: [hostileName, '@b:s'],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(shown, /<img/);
+  assert.match(shown, /Seen by <bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>,\s*<bdi>@b:s<\/bdi>/);
+});
+
 test('GIVEN a room that is not encrypted WHEN the composer shows THEN it warns, and only then', () => {
   const composer = (encryption) =>
     render(Composer, {

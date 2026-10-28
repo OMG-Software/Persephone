@@ -827,6 +827,14 @@ pub struct AccountSettings {
     /// under the account's push rules, with the sender and room only, never
     /// the text. Off by default.
     pub desktop_notifications: bool,
+    /// Tell the people in a room while this account is typing there
+    /// (typing notices). Off by default (ADR-0023).
+    pub send_typing: bool,
+    /// Show the people in a room how far this account has read (public
+    /// read receipts). Off by default; the fully-read marker and a private
+    /// receipt, which only this account sees, are sent either way
+    /// (ADR-0023).
+    pub send_read_receipts: bool,
 }
 
 /// The smallest text size either setting accepts, in percent.
@@ -853,8 +861,21 @@ impl Default for AccountSettings {
             chat_text_percent: 100,
             interface_text_percent: 100,
             desktop_notifications: false,
+            send_typing: false,
+            send_read_receipts: false,
         }
     }
+}
+
+/// Reply of `room_activity`: who else is typing in a room, and who else has
+/// read up to the event the page asked about (ADR-0023). Each list holds at
+/// most ten user IDs, projected like names; `truncated` says more exist.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomActivity {
+    pub typing: Vec<String>,
+    pub read_by: Vec<String>,
+    pub truncated: bool,
 }
 
 /// When this account is notified of messages, in every room without a rule
@@ -1457,6 +1478,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", DeviceSummary::decl(&config)),
         format!("export {}", DeviceList::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
+        format!("export {}", RoomActivity::decl(&config)),
         format!("export {}", NotificationLevel::decl(&config)),
         format!("export {}", NotificationSettings::decl(&config)),
         format!("export {}", ThreePidMedium::decl(&config)),

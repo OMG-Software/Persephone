@@ -55,6 +55,9 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.deleteMessage('!r:s', '$mine'), 'delete_message', { roomId: '!r:s', eventId: '$mine' }],
     [() => bridge.react('!r:s', '$e', '👍'), 'react', { roomId: '!r:s', eventId: '$e', key: '👍' }],
     [() => bridge.markRead('!r:s', '$e'), 'mark_read', { roomId: '!r:s', eventId: '$e' }],
+    [() => bridge.roomActivity('!r:s', '$e'), 'room_activity', { roomId: '!r:s', eventId: '$e' }],
+    [() => bridge.roomActivity('!r:s', null), 'room_activity', { roomId: '!r:s', eventId: null }],
+    [() => bridge.setTyping('!r:s', true), 'set_typing', { roomId: '!r:s', typing: true }],
     [
       () => bridge.editMessage('!r:s', '$mine', 'fixed'),
       'edit_message',
@@ -74,10 +77,21 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           enterSends: false,
           chatTextPercent: 120,
           interfaceTextPercent: 90,
-          desktopNotifications: true
+          desktopNotifications: true,
+          sendTyping: true,
+          sendReadReceipts: false
         }),
       'set_account_settings',
-      { enterSends: false, chatTextPercent: 120, interfaceTextPercent: 90, desktopNotifications: true }
+      {
+        settings: {
+          enterSends: false,
+          chatTextPercent: 120,
+          interfaceTextPercent: 90,
+          desktopNotifications: true,
+          sendTyping: true,
+          sendReadReceipts: false
+        }
+      }
     ],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
     [() => bridge.threePids(), 'three_pids', {}],
@@ -125,14 +139,20 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       chatTextPercent: 100,
       interfaceTextPercent: 100,
       desktopNotifications: false,
+      sendTyping: false,
+      sendReadReceipts: false,
       theme: 'dark'
     })
   );
   assert.deepEqual(made.args, {
-    enterSends: true,
-    chatTextPercent: 100,
-    interfaceTextPercent: 100,
-    desktopNotifications: false
+    settings: {
+      enterSends: true,
+      chatTextPercent: 100,
+      interfaceTextPercent: 100,
+      desktopNotifications: false,
+      sendTyping: false,
+      sendReadReceipts: false
+    }
   });
 });
 

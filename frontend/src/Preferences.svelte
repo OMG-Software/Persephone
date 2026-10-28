@@ -154,6 +154,31 @@
       Persephone's window is not in front.
     </p>
   </div>
+  <div class="panel">
+    <h3>Privacy</h3>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.sendTyping}
+        onchange={(event) => onchange({ sendTyping: event.currentTarget.checked })}
+      />
+      <span>Tell people when you are typing</span>
+    </label>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.sendReadReceipts}
+        onchange={(event) => onchange({ sendReadReceipts: event.currentTarget.checked })}
+      />
+      <span>Show people how far you have read</span>
+    </label>
+    <p class="note">
+      Both are off by default: each tells the homeserver and everyone in the room when you are
+      active. You still see other people's. Your other devices always learn what you have read.
+    </p>
+  </div>
   {#if failure}
     <p role="alert" class="error">{failure}</p>
   {/if}

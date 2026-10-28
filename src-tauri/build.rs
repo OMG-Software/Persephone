@@ -31,6 +31,8 @@ fn main() {
             "delete_message",
             "react",
             "mark_read",
+            "room_activity",
+            "set_typing",
             "pending_messages",
             "retry_message",
             "discard_message",

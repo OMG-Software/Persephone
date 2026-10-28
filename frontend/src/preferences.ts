@@ -9,7 +9,9 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   enterSends: true,
   chatTextPercent: 100,
   interfaceTextPercent: 100,
-  desktopNotifications: false
+  desktopNotifications: false,
+  sendTyping: false,
+  sendReadReceipts: false
 };
 
 /**

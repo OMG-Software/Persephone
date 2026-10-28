@@ -30,9 +30,11 @@
     applyRelations,
     firstUnread,
     mergeNewest,
+    newestEvent,
     quoteOf,
     type Quote
   } from './timeline';
+  import { TypingNotifier } from './typing';
   import {
     accountSettings,
     allowUnencrypted,
@@ -49,6 +51,8 @@
     deleteMessage,
     react,
     markRead,
+    roomActivity,
+    setTyping,
     recoverWithKey,
     securityStatus,
     setUpEncryption,
@@ -82,6 +86,7 @@
     type InviteList,
     type RoomIdentityChanges,
     type PendingMessage,
+    type RoomActivity,
     type RoomList as Rooms,
     type SecurityStatus,
     type StoreState,
@@ -124,6 +129,12 @@
   // opens, and the event this room was last marked read at.
   let unreadFrom = $state<string | null>(null);
   let markedRead: string | null = null;
+  // Who else is typing in the selected room, and who has read its newest
+  // event (ADR-0023).
+  let activity = $state<RoomActivity | null>(null);
+  // Sends this account's typing notices in the selected room while the
+  // setting is on.
+  let typingNotifier: TypingNotifier | null = null;
   let deleting = $state(false);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
   // core also refuses until the consent is recorded.
@@ -781,6 +792,9 @@
     confirmingDelete = null;
     unreadFrom = null;
     markedRead = null;
+    activity = null;
+    typingNotifier?.stop();
+    typingNotifier = null;
     if (editingMessage) {
       draft = editingMessage.savedDraft;
       editingMessage = null;
@@ -805,6 +819,7 @@
         ownUserId
       );
       if (signedIn) {
+        loadActivity(roomId, generation);
         loadPending(roomId, generation);
         loadContact(roomId, generation);
         loadChanges(roomId, generation);
@@ -833,7 +848,10 @@
         const page = await timelinePage(roomId, null);
         if (!current(roomId, generation)) return;
         items = mergeNewest(items, page.items);
-        if (signedIn) await loadPending(roomId, generation);
+        if (signedIn) {
+          loadActivity(roomId, generation);
+          await loadPending(roomId, generation);
+        }
       } while (changedAgain);
     } catch (reason) {
       if (current(roomId, generation)) error = describe(reason);
@@ -942,6 +960,27 @@
     void sendReaction(roomId, eventId, key);
   }
 
+  // Who is typing and who has read the newest event. Best effort: the next
+  // change of the room asks again.
+  async function loadActivity(roomId: string, generation: number) {
+    try {
+      const found = await roomActivity(roomId, newestEvent(items));
+      if (current(roomId, generation)) activity = found;
+    } catch {
+      // Shown as nothing until the next change.
+    }
+  }
+
+  // Tells the selected room this account is typing, while the setting is on.
+  function typed() {
+    const roomId = selected;
+    if (!roomId || !settings.sendTyping) return;
+    typingNotifier ??= new TypingNotifier((typing) => {
+      setTyping(roomId, typing).catch(() => {});
+    });
+    typingNotifier.input();
+  }
+
   // Marks the selected room read once its newest event has been seen. Best
   // effort: a failure is tried again with the next newest event.
   async function readTo(eventId: string) {
@@ -1008,6 +1047,7 @@
   async function sendText(body: string): Promise<boolean> {
     const roomId = selected;
     if (!roomId) return false;
+    typingNotifier?.stop();
     if (editingMessage) return sendEdit(roomId, editingMessage.eventId, body);
     const replyTo = replyingTo?.eventId ?? null;
     if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(roomId)) {
@@ -1466,6 +1506,7 @@
             onunreact={signedIn ? unreact : undefined}
             {unreadFrom}
             onread={signedIn ? readTo : undefined}
+            readBy={activity?.readBy ?? []}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
@@ -1559,6 +1600,9 @@
               oncancelreply={() => (replyingTo = null)}
               editing={editingMessage !== null}
               oncanceledit={endEdit}
+              typing={activity?.typing ?? []}
+              typingCut={activity?.truncated ?? false}
+              ontyping={signedIn && settings.sendTyping ? typed : undefined}
             />
           {/if}
         {:else}

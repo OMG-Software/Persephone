@@ -34,6 +34,7 @@ import type {
   RoomLevel,
   RoomMember,
   RoomMembers,
+  RoomActivity,
   RoomNotifications,
   RoomPermissions,
   RoomSettings,
@@ -81,6 +82,7 @@ export type {
   RoomLevel,
   RoomMember,
   RoomMembers,
+  RoomActivity,
   RoomNotifications,
   RoomPermissions,
   RoomSettings,
@@ -340,6 +342,22 @@ export function editMessage(roomId: string, eventId: string, body: string): Prom
 }
 
 /**
+ * Who else is typing in a room and, for an event, who else has read up to
+ * it. At most ten names each; `truncated` says more exist.
+ */
+export function roomActivity(roomId: string, eventId: string | null): Promise<RoomActivity> {
+  return invoke<RoomActivity>('room_activity', { roomId, eventId });
+}
+
+/**
+ * Tells a room this account started or stopped typing. Rejected with
+ * `rejected` while the account's setting is off; call it only when on.
+ */
+export function setTyping(roomId: string, typing: boolean): Promise<void> {
+  return invoke<void>('set_typing', { roomId, typing });
+}
+
+/**
  * Marks a room read up to an event, privately: its fully-read marker and a
  * private read receipt, which other people do not see.
  */
@@ -467,10 +485,14 @@ export function accountSettings(): Promise<AccountSettings> {
  */
 export function setAccountSettings(settings: AccountSettings): Promise<void> {
   return invoke<void>('set_account_settings', {
-    enterSends: settings.enterSends,
-    chatTextPercent: settings.chatTextPercent,
-    interfaceTextPercent: settings.interfaceTextPercent,
-    desktopNotifications: settings.desktopNotifications
+    settings: {
+      enterSends: settings.enterSends,
+      chatTextPercent: settings.chatTextPercent,
+      interfaceTextPercent: settings.interfaceTextPercent,
+      desktopNotifications: settings.desktopNotifications,
+      sendTyping: settings.sendTyping,
+      sendReadReceipts: settings.sendReadReceipts
+    }
   });
 }
 

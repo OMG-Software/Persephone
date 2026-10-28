@@ -35,7 +35,10 @@
     replyingTo = null,
     oncancelreply = () => {},
     editing = false,
-    oncanceledit = () => {}
+    oncanceledit = () => {},
+    typing = [],
+    typingCut = false,
+    ontyping
   }: {
     // Messages sent from this device that the timeline does not show yet.
     pending: PendingMessage[];
@@ -71,6 +74,12 @@
     // The draft is a new version of one of this account's messages.
     editing?: boolean;
     oncanceledit?: () => void;
+    // Who else is typing here, and whether more are than named.
+    typing?: string[];
+    typingCut?: boolean;
+    // Called on each change of the draft; absent while this account does
+    // not send typing notices.
+    ontyping?: () => void;
   } = $props();
 
   // The core's limit is 16 KiB of UTF-8; this length is only a first stop.
@@ -192,6 +201,16 @@
     <p class="error image-error" role="alert">{imageError}</p>
   {/if}
 
+  <p class="typing" aria-live="polite">
+    {#if typing.length > 2 || (typing.length > 0 && typingCut)}
+      Several people are typing…
+    {:else if typing.length === 2}
+      <bdi>{typing[0]}</bdi> and <bdi>{typing[1]}</bdi> are typing…
+    {:else if typing.length === 1}
+      <bdi>{typing[0]}</bdi> is typing…
+    {/if}
+  </p>
+
   {#if editing}
     <div class="replying">
       <p>Editing your message</p>
@@ -257,6 +276,7 @@
         dir="auto"
         aria-keyshortcuts={enterSends ? 'Enter' : 'Control+Enter Meta+Enter'}
         onkeydown={keydown}
+        oninput={ontyping}
       ></textarea>
       {#if encryption === 'encrypted'}
         <span class="enc-note"><Icon name="lock" />Encrypted</span>

@@ -219,6 +219,13 @@ impl CoreTransport for FakeCore {
                 "truncated": false
             })),
             Call::MarkRead { .. } => Ok(serde_json::Value::Null),
+            Call::RoomActivity { .. } => Ok(serde_json::json!({
+                "typing": ["@b:example.invalid"], "readBy": [], "truncated": false
+            })),
+            Call::SetTyping { typing, .. } => match typing {
+                true => Ok(serde_json::Value::Null),
+                false => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
             Call::React { key, .. } => match key.as_str() {
                 "👍" => Ok(serde_json::Value::Null),
                 _ => Err(CoreError::Core(ErrorCode::Rejected)),
@@ -276,9 +283,9 @@ impl CoreTransport for FakeCore {
             },
             Call::AccountSettings {} => Ok(serde_json::json!({
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
-                "desktopNotifications": true
+                "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false
             })),
-            Call::SetAccountSettings { enter_sends, .. } => match enter_sends {
+            Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
                 false => Err(CoreError::Core(ErrorCode::Locked)),
             },
@@ -620,6 +627,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-delete-message",
             "allow-react",
             "allow-mark-read",
+            "allow-room-activity",
+            "allow-set-typing",
             "allow-pending-messages",
             "allow-retry-message",
             "allow-discard-message",
@@ -1159,6 +1168,39 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
     );
     assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
+        invoke(
+            "room_activity",
+            serde_json::json!({"roomId": room, "eventId": "$e"})
+        )
+        .unwrap()["typing"][0],
+        "@b:example.invalid"
+    );
+    assert_eq!(
+        invoke(
+            "set_typing",
+            serde_json::json!({"roomId": room, "typing": true})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke(
+            "set_typing",
+            serde_json::json!({"roomId": room, "typing": false})
+        )
+        .unwrap_err(),
+        "rejected"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "room_activity",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
         invoke("pending_messages", serde_json::json!({"roomId": room})),
         Ok(serde_json::json!([]))
     );
@@ -1413,8 +1455,9 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         120
     );
     let settings = |enter_sends: bool| {
-        serde_json::json!({"enterSends": enter_sends, "chatTextPercent": 100,
-            "interfaceTextPercent": 100, "desktopNotifications": false})
+        serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
+            "interfaceTextPercent": 100, "desktopNotifications": false,
+            "sendTyping": false, "sendReadReceipts": false}})
     };
     assert!(invoke("set_account_settings", settings(true)).is_ok());
     assert_eq!(

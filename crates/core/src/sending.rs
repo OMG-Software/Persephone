@@ -213,17 +213,29 @@ fn refusal(answered: bool) -> ErrorCode {
 }
 
 /// Marks the joined room `room_id` read up to `event_id`: its fully-read
-/// marker and a private read receipt, which other people do not see.
+/// marker and a private read receipt, which other people do not see, and a
+/// public read receipt only when `public` (ADR-0023).
 pub async fn mark_read(
     client: &Client,
     room_id: &str,
     event_id: &EventId,
+    public: bool,
 ) -> Result<(), ErrorCode> {
     let receipts = Receipts::new()
         .fully_read_marker(event_id.to_owned())
-        .private_read_receipt(event_id.to_owned());
+        .private_read_receipt(event_id.to_owned())
+        .public_read_receipt(public.then(|| event_id.to_owned()));
     joined(client, room_id)?
         .send_multiple_receipts(receipts)
+        .await
+        .map_err(|error| refusal(error.as_client_api_error().is_some()))
+}
+
+/// Tells the joined room `room_id` this account started or stopped typing.
+/// The caller checks the account's setting first (ADR-0023).
+pub async fn typing(client: &Client, room_id: &str, typing: bool) -> Result<(), ErrorCode> {
+    joined(client, room_id)?
+        .typing_notice(typing)
         .await
         .map_err(|error| refusal(error.as_client_api_error().is_some()))
 }

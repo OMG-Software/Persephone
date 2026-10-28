@@ -29,6 +29,8 @@ struct Stored {
     chat_text_percent: u16,
     interface_text_percent: u16,
     desktop_notifications: bool,
+    send_typing: bool,
+    send_read_receipts: bool,
 }
 
 impl Default for Stored {
@@ -44,6 +46,8 @@ impl From<AccountSettings> for Stored {
             chat_text_percent: settings.chat_text_percent,
             interface_text_percent: settings.interface_text_percent,
             desktop_notifications: settings.desktop_notifications,
+            send_typing: settings.send_typing,
+            send_read_receipts: settings.send_read_receipts,
         }
     }
 }
@@ -56,6 +60,8 @@ impl From<Stored> for AccountSettings {
             chat_text_percent: stored.chat_text_percent,
             interface_text_percent: stored.interface_text_percent,
             desktop_notifications: stored.desktop_notifications,
+            send_typing: stored.send_typing,
+            send_read_receipts: stored.send_read_receipts,
         };
         if !(AccountSettings {
             interface_text_percent: defaults.interface_text_percent,
@@ -119,6 +125,8 @@ mod tests {
             chat_text_percent: 140,
             interface_text_percent: 90,
             desktop_notifications: true,
+            send_typing: true,
+            send_read_receipts: true,
         };
         let bytes = serde_json::to_vec(&Stored::from(changed)).unwrap();
         assert_eq!(decode(&bytes), changed);

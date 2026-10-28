@@ -268,7 +268,21 @@ interfaceTextPercent: number,
  * under the account's push rules, with the sender and room only, never
  * the text. Off by default.
  */
-desktopNotifications: boolean, };
+desktopNotifications: boolean, 
+/**
+ * Tell the people in a room while this account is typing there
+ * (typing notices). Off by default (ADR-0023).
+ */
+sendTyping: boolean, 
+/**
+ * Show the people in a room how far this account has read (public
+ * read receipts). Off by default; the fully-read marker and a private
+ * receipt, which only this account sees, are sent either way
+ * (ADR-0023).
+ */
+sendReadReceipts: boolean, };
+
+export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
 
 export type NotificationLevel = "all" | "mentions" | "none" | "custom";
 

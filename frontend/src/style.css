@@ -1037,6 +1037,21 @@ kbd {
   white-space: nowrap;
 }
 
+/* Who else is typing, above the composer, and who has read the newest
+   message, under the timeline. Small and muted, like notices. */
+.typing {
+  min-height: 18px;
+  color: var(--ink3);
+  font-size: 12px;
+}
+
+.seen-by {
+  padding: 2px 8px 6px;
+  color: var(--ink3);
+  font-size: 12px;
+  text-align: right;
+}
+
 /* Composer */
 .composer-area {
   flex: none;

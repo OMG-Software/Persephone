@@ -33,12 +33,14 @@ test('GIVEN Enter to send turned off WHEN keys are pressed THEN Enter starts a l
   );
 });
 
-test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes are normal and desktop notifications are off', () => {
+test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes are normal and nothing extra is sent or shown', () => {
   assert.deepEqual(preferences.DEFAULT_SETTINGS, {
     enterSends: true,
     chatTextPercent: 100,
     interfaceTextPercent: 100,
-    desktopNotifications: false
+    desktopNotifications: false,
+    sendTyping: false,
+    sendReadReceipts: false
   });
 });
 

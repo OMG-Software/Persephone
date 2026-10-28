@@ -34,7 +34,8 @@
     onreact,
     onunreact,
     unreadFrom = null,
-    onread
+    onread,
+    readBy = []
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -75,6 +76,8 @@
     // Called with the newest event once the reader has seen it: the window
     // has focus and the timeline is at its end.
     onread?: (eventId: string) => void;
+    // Who else has read up to the newest event.
+    readBy?: string[];
   } = $props();
 
   // Edits, deletions and reactions are not lines of their own: each message
@@ -250,6 +253,12 @@
           </li>
         {/each}
       </ol>
+      {#if readBy.length > 0}
+        <p class="seen-by">
+          Seen by {#each readBy as name, at (at)}{#if at > 0},
+            {/if}<bdi>{name}</bdi>{/each}
+        </p>
+      {/if}
     </div>
   </div>
 </section>

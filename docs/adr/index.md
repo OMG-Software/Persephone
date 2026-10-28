@@ -29,6 +29,7 @@
 * [0020 - Add email addresses and phone numbers without an identity server](0020-add-email-addresses-and-phone-numbers-without-an-identity-server.md)
 * [0021 - Save the recovery key to a file from the core](0021-save-the-recovery-key-to-a-file-from-the-core.md)
 * [0022 - Notify through push rules and content-free desktop notifications](0022-notify-through-push-rules-and-content-free-desktop-notifications.md)
+* [0023 - Show typing notices and read receipts, and send them only when turned on](0023-show-typing-and-receipts-and-send-them-only-when-turned-on.md)
 
 ## Superseded Records
 

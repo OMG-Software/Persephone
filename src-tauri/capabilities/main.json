@@ -23,6 +23,8 @@
     "allow-delete-message",
     "allow-react",
     "allow-mark-read",
+    "allow-room-activity",
+    "allow-set-typing",
     "allow-pending-messages",
     "allow-retry-message",
     "allow-discard-message",

@@ -32,6 +32,7 @@
 pub mod account;
 pub mod account_changes;
 pub mod account_details;
+pub mod activity;
 pub mod contacts;
 pub mod conversations;
 pub mod credentials;
@@ -509,6 +510,7 @@ impl Core {
             | Call::DeleteMessage { .. }
             | Call::React { .. }
             | Call::MarkRead { .. }
+            | Call::SetTyping { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -693,18 +695,8 @@ impl Core {
                 Ok(None) => Outcome::Error(ErrorCode::Internal),
                 Err(_) => Outcome::Error(ErrorCode::Locked),
             },
-            Call::SetAccountSettings {
-                enter_sends,
-                chat_text_percent,
-                interface_text_percent,
-                desktop_notifications,
-            } => {
-                let settings = persephone_contracts::AccountSettings {
-                    enter_sends: *enter_sends,
-                    chat_text_percent: *chat_text_percent,
-                    interface_text_percent: *interface_text_percent,
-                    desktop_notifications: *desktop_notifications,
-                };
+            Call::SetAccountSettings { settings } => {
+                let settings = *settings;
                 if !settings.within_bounds() {
                     return Outcome::Error(ErrorCode::InvalidArgument);
                 }
@@ -738,6 +730,9 @@ impl Core {
                 self.verify(flow_id, verification::Action::Cancel)
             }
             Call::ContactStatus { room_id } => self.contact_status(room_id),
+            Call::RoomActivity { room_id, event_id } => {
+                self.room_activity(room_id, event_id.as_deref())
+            }
             Call::IdentityChanges { room_id } => self.identity_changes(room_id),
             Call::AcceptIdentity { room_id, user_id } => self.accept_identity(room_id, user_id),
             Call::VerifyContact { room_id } => {
@@ -778,6 +773,7 @@ impl Core {
             | Call::DeleteMessage { .. }
             | Call::React { .. }
             | Call::MarkRead { .. }
+            | Call::SetTyping { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -838,6 +834,7 @@ impl Core {
             Delete(String, matrix_sdk::ruma::OwnedEventId),
             React(String, matrix_sdk::ruma::OwnedEventId, String),
             MarkRead(String, matrix_sdk::ruma::OwnedEventId),
+            Typing(String, bool),
             Start(OwnedUserId),
             Search(String),
             CreateRoom(String, Vec<OwnedUserId>),
@@ -879,6 +876,9 @@ impl Core {
                 parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
                 key.clone(),
             ),
+            Call::SetTyping { room_id, typing } if valid_room_id(room_id) => {
+                Work::Typing(room_id.clone(), *typing)
+            }
             Call::MarkRead { room_id, event_id } if valid_room_id(room_id) => Work::MarkRead(
                 room_id.clone(),
                 parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
@@ -960,7 +960,7 @@ impl Core {
         };
         let slot = match work {
             Work::Search(_) => self.search.begin()?,
-            Work::MarkRead(..) => self.read_marker.begin()?,
+            Work::MarkRead(..) | Work::Typing(..) => self.read_marker.begin()?,
             Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
             Work::Devices => self.devices.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
@@ -997,9 +997,19 @@ impl Core {
                         sending::delete(&client, room_id, event_id).await
                     })
                     .map(|()| serde_json::Value::Null),
-                Work::MarkRead(room_id, event_id) => self
+                Work::MarkRead(room_id, event_id) => {
+                    let public = self.session.sends_read_receipts();
+                    self.with_matrix(generation, async |client| {
+                        sending::mark_read(&client, room_id, event_id, public).await
+                    })
+                    .map(|()| serde_json::Value::Null)
+                }
+                // Refused, not dropped, while the setting is off: the page
+                // never asks then, so an ask is a mistake to see.
+                Work::Typing(..) if !self.session.sends_typing() => Err(ErrorCode::Rejected),
+                Work::Typing(room_id, typing) => self
                     .with_matrix(generation, async |client| {
-                        sending::mark_read(&client, room_id, event_id).await
+                        sending::typing(&client, room_id, *typing).await
                     })
                     .map(|()| serde_json::Value::Null),
                 Work::React(room_id, event_id, key) => self
@@ -1513,6 +1523,36 @@ impl Core {
             return Outcome::Error(ErrorCode::InvalidArgument);
         }
         ok(&self.session.verify(action(flow_id.to_owned())))
+    }
+
+    fn room_activity(&self, room_id: &str, event_id: Option<&str>) -> Outcome {
+        if !valid_room_id(room_id) {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        let event_id = match event_id.map(parse_event_id) {
+            None => None,
+            Some(Some(event_id)) => Some(event_id),
+            Some(None) => return Outcome::Error(ErrorCode::InvalidArgument),
+        };
+        let activity = match self.source() {
+            Source::Locked => Err(ErrorCode::Locked),
+            // Synthetic rooms have no one else in them.
+            Source::Fixtures | Source::SignedOut => Ok(persephone_contracts::RoomActivity {
+                typing: Vec::new(),
+                read_by: Vec::new(),
+                truncated: false,
+            }),
+            Source::Matrix(lease, client) => lease.stores().block_on(activity::room_activity(
+                &client,
+                self.session.typing(),
+                room_id,
+                event_id.as_deref(),
+            )),
+        };
+        match activity {
+            Ok(activity) => ok(&activity),
+            Err(code) => Outcome::Error(code),
+        }
     }
 
     fn contact_status(&self, room_id: &str) -> Outcome {
@@ -2181,29 +2221,38 @@ mod tests {
             (Call::AccountSettings {}, ErrorCode::Locked),
             (
                 Call::SetAccountSettings {
-                    enter_sends: false,
-                    chat_text_percent: 100,
-                    interface_text_percent: 100,
-                    desktop_notifications: true,
+                    settings: persephone_contracts::AccountSettings {
+                        enter_sends: false,
+                        chat_text_percent: 100,
+                        interface_text_percent: 100,
+                        desktop_notifications: true,
+                        ..persephone_contracts::AccountSettings::default()
+                    },
                 },
                 ErrorCode::Locked,
             ),
             // Out-of-bounds sizes are refused before anything else.
             (
                 Call::SetAccountSettings {
-                    enter_sends: false,
-                    chat_text_percent: 79,
-                    interface_text_percent: 100,
-                    desktop_notifications: false,
+                    settings: persephone_contracts::AccountSettings {
+                        enter_sends: false,
+                        chat_text_percent: 79,
+                        interface_text_percent: 100,
+                        desktop_notifications: false,
+                        ..persephone_contracts::AccountSettings::default()
+                    },
                 },
                 ErrorCode::InvalidArgument,
             ),
             (
                 Call::SetAccountSettings {
-                    enter_sends: false,
-                    chat_text_percent: 100,
-                    interface_text_percent: 151,
-                    desktop_notifications: false,
+                    settings: persephone_contracts::AccountSettings {
+                        enter_sends: false,
+                        chat_text_percent: 100,
+                        interface_text_percent: 151,
+                        desktop_notifications: false,
+                        ..persephone_contracts::AccountSettings::default()
+                    },
                 },
                 ErrorCode::InvalidArgument,
             ),
