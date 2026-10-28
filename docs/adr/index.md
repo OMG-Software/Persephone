@@ -36,6 +36,7 @@
 * [0027 - Discover the homeserver through .well-known in the core](0027-discover-the-homeserver-through-well-known-in-the-core.md)
 * [0028 - Route every connection through the profile's SOCKS5 proxy](0028-route-every-connection-through-the-profiles-socks5-proxy.md)
 * [0029 - Send and save files through the core's own dialogs](0029-send-and-save-files-through-the-cores-own-dialogs.md)
+* [0030 - Sign in with OIDC through the browser and a loopback redirect](0030-sign-in-with-oidc-through-the-browser-and-a-loopback-redirect.md)
 
 ## Superseded Records
 

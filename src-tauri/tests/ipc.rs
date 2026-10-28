@@ -189,6 +189,9 @@ impl CoreTransport for FakeCore {
                 ),
                 _ => Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null})),
             },
+            Call::SignInWithOidc { .. } => {
+                Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
+            }
             Call::SignIn { homeserver } => match homeserver.as_str() {
                 "https://matrix.example.org" => {
                     Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
@@ -649,6 +652,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-unlock-session",
             "allow-reset-profile",
             "allow-sign-in",
+            "allow-sign-in-with-oidc",
             "allow-discover-homeserver",
             "allow-proxy-setting",
             "allow-set-proxy-setting",
@@ -1642,6 +1646,14 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
     assert_eq!(
         invoke("new_sessions", serde_json::json!({})).unwrap()["sessions"][0]["deviceId"],
         "NEWDEV"
+    );
+    assert_eq!(
+        invoke(
+            "sign_in_with_oidc",
+            serde_json::json!({"homeserver": "https://matrix.example.invalid"})
+        )
+        .unwrap()["state"],
+        "signing_in"
     );
     assert_eq!(
         invoke(

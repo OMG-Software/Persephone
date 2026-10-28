@@ -85,6 +85,14 @@ pub enum Call {
     DiscoverHomeserver {
         server_name: String,
     },
+    /// Sign in to this homeserver through its OAuth 2.0 provider (OIDC,
+    /// ADR-0030). The core asks in its own window before the provider's page
+    /// opens in the browser; the password goes to the provider, never here.
+    /// Replies at once like `SignIn`; the outcome arrives as
+    /// [`Event::SessionChanged`].
+    SignInWithOidc {
+        homeserver: String,
+    },
     /// Register a new account named `username` (a localpart) on this
     /// homeserver, then sign in to it. The core checks that the name is free
     /// first, then asks for the password (twice) and, when the homeserver
@@ -1157,6 +1165,12 @@ mod tests {
                 r#"{"id":1,"call":{"command":"new_sessions"}}"#,
             ),
             (
+                Call::SignInWithOidc {
+                    homeserver: "https://example.org/".into(),
+                },
+                r#"{"id":1,"call":{"command":"sign_in_with_oidc","homeserver":"https://example.org/"}}"#,
+            ),
+            (
                 Call::ProxySetting {},
                 r#"{"id":1,"call":{"command":"proxy_setting"}}"#,
             ),
@@ -1596,6 +1610,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"unlock_session","passphrase":"x"}}"#,
             br#"{"id":1,"call":{"command":"reset_profile","confirm":true}}"#,
             br#"{"id":1,"call":{"command":"sign_in"}}"#,
+            br#"{"id":1,"call":{"command":"sign_in_with_oidc"}}"#,
+            br#"{"id":1,"call":{"command":"sign_in_with_oidc","homeserver":"https://h","code":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,
             br#"{"id":1,"call":{"command":"register","homeserver":"https://h"}}"#,

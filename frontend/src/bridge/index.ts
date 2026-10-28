@@ -188,6 +188,16 @@ export function signIn(homeserver: string): Promise<AccountStatus> {
 }
 
 /**
+ * Starts signing in through the homeserver's OAuth 2.0 provider (ADR-0030).
+ * The core asks before the provider's page opens in the browser, where the
+ * password is entered; this page never sees it. Resolves with the status at
+ * once; the outcome arrives as a session change.
+ */
+export function signInWithOidc(homeserver: string): Promise<AccountStatus> {
+  return invoke<AccountStatus>('sign_in_with_oidc', { homeserver });
+}
+
+/**
  * Starts registering a new account named `username` (a localpart) on
  * `homeserver`. Only these two are sent: the core checks the name is free,
  * then asks for the password and any registration token in its own windows.

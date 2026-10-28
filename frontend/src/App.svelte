@@ -80,6 +80,7 @@
     acceptInvite,
     declineInvite,
     signIn,
+    signInWithOidc,
     register,
     subscribeRoom,
     timelinePage,
@@ -730,6 +731,20 @@
             ? 'Use the homeserver\'s base address, such as https://matrix.example.org, with no path, query or fragment.'
             : describe(reason);
       }
+    } finally {
+      signingIn = false;
+    }
+  }
+
+  async function startSso(homeserver: string) {
+    if (signingIn) return;
+    signingIn = true;
+    const generation = sessionGeneration;
+    try {
+      const account = await signInWithOidc(homeserver);
+      if (generation === sessionGeneration && status) status = { ...status, account };
+    } catch (reason) {
+      if (generation === sessionGeneration) error = describe(reason);
     } finally {
       signingIn = false;
     }
@@ -1388,6 +1403,7 @@
           bind:form={signInForm}
           onsignin={startSignIn}
           onregister={startRegister}
+          onsso={startSso}
         />
         {#if error}
           <p role="alert" class="error">{error}</p>

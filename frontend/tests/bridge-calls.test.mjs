@@ -104,6 +104,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     ],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
     [() => bridge.newSessions(), 'new_sessions', {}],
+    [() => bridge.signInWithOidc('https://e.org'), 'sign_in_with_oidc', { homeserver: 'https://e.org' }],
     [() => bridge.proxySetting(), 'proxy_setting', {}],
     [() => bridge.setProxySetting('127.0.0.1:9050'), 'set_proxy_setting', { proxy: '127.0.0.1:9050' }],
     [() => bridge.setProxySetting(null), 'set_proxy_setting', { proxy: null }],

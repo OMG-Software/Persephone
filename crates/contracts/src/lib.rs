@@ -1193,6 +1193,9 @@ pub enum AccountState {
 pub enum SignInError {
     /// The user closed the credential prompt.
     Cancelled,
+    /// The homeserver has no OAuth 2.0 provider to sign in with, or it
+    /// refused to register Persephone (ADR-0030).
+    OidcUnavailable,
     /// The homeserver refused the username or password.
     InvalidCredentials,
     /// The homeserver could not be reached or did not answer as Matrix.

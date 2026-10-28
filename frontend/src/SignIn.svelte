@@ -25,13 +25,16 @@
     busy,
     form = $bindable(),
     onsignin,
-    onregister
+    onregister,
+    onsso
   }: {
     account: AccountStatus;
     busy: boolean;
     form: SignInForm;
     onsignin: (homeserver: string) => void;
     onregister: (homeserver: string, username: string) => void;
+    // Signs in through the homeserver's own sign-in page (OIDC, ADR-0030).
+    onsso?: (homeserver: string) => void;
   } = $props();
 
   let picking = $state(false);
@@ -40,6 +43,8 @@
   // Fixed text per error code; the core sends codes only.
   const errors: Record<string, string> = {
     cancelled: 'Cancelled.',
+    oidc_unavailable:
+      'This server has no single sign-on, or it did not let Persephone use it. Sign in with a password instead.',
     invalid_credentials: 'The homeserver did not accept that username and password.',
     unreachable: 'The homeserver could not be reached.',
     homeserver_refused: 'Persephone does not accept that homeserver address.',
@@ -163,6 +168,20 @@
       {waiting ? 'Waiting…' : registering ? 'Create account' : 'Continue'}
     </button>
   </form>
+  {#if !registering && onsso}
+    <button
+      type="button"
+      class="secondary wide"
+      disabled={waiting}
+      onclick={() => onsso(form.homeserver.trim())}
+    >
+      Sign in with single sign-on
+    </button>
+    <p class="auth-note">
+      Single sign-on opens your server's own sign-in page in your browser, after Persephone asks.
+      Enter your password there.
+    </p>
+  {/if}
   <details class="connection">
     <summary>Connection</summary>
     <ProxySettings />

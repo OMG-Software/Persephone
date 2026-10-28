@@ -13,6 +13,7 @@
     "allow-unlock-session",
     "allow-reset-profile",
     "allow-sign-in",
+    "allow-sign-in-with-oidc",
     "allow-discover-homeserver",
     "allow-proxy-setting",
     "allow-set-proxy-setting",

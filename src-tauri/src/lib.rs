@@ -309,6 +309,20 @@ async fn sign_in(core: State<'_, CoreLink>, homeserver: String) -> Result<Accoun
     relay(core.inner(), Call::SignIn { homeserver }).await
 }
 
+/// Starts signing in through the homeserver's OAuth 2.0 provider (ADR-0030).
+/// Only the homeserver URL crosses; the core asks before the provider's page
+/// opens in the browser, and the password goes to the provider.
+#[tauri::command]
+async fn sign_in_with_oidc(
+    core: State<'_, CoreLink>,
+    homeserver: String,
+) -> Result<AccountStatus, String> {
+    if homeserver.len() > MAX_HOMESERVER_URL_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SignInWithOidc { homeserver }).await
+}
+
 /// Starts registering a new account. Only the homeserver URL and the desired
 /// username cross: the core checks the name, then asks for the password and
 /// any registration token itself, in native prompts.
@@ -1234,6 +1248,7 @@ pub fn configure<R: Runtime>(
             unlock_session,
             reset_profile,
             sign_in,
+            sign_in_with_oidc,
             register,
             sign_out,
             security_status,

@@ -653,6 +653,9 @@ fn run_sync(
     // holds the session only weakly.
     let mut notifying = false;
     let notified: Weak<Shared> = Arc::downgrade(shared);
+    // The access token last saved, so a refreshed OAuth token is saved once
+    // (ADR-0030); `None` until the first round saves or confirms it.
+    let mut saved_token: Option<Zeroizing<String>> = None;
     loop {
         let lease = match shared.admit() {
             Ok(lease) => lease,
@@ -714,6 +717,8 @@ fn run_sync(
             }
             let rooms =
                 account::sync_round(&client, engine.as_ref().expect("selected above")).await?;
+            saved_token =
+                account::save_if_refreshed(&client, lease.stores(), saved_token.take()).await;
             let keyed = match keys.as_mut() {
                 Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
                 None => None,
@@ -1379,6 +1384,100 @@ impl Session {
         Ok(self.account_status())
     }
 
+    /// Starts signing in to `homeserver` through its OAuth 2.0 provider
+    /// (ADR-0030) on a worker thread and returns the status at once, like
+    /// [`Session::sign_in`]. The core asks in its own window before the
+    /// provider's page opens in the browser, then waits for the redirect
+    /// under a lease; a lock abandons the wait within half a second.
+    pub fn sign_in_oidc(
+        &self,
+        homeserver: Homeserver,
+        source: Arc<dyn CredentialSource>,
+    ) -> Result<AccountStatus, AdmissionError> {
+        if self.state() != StoreState::Protected {
+            return Err(AdmissionError::Locked);
+        }
+        {
+            let mut status = guard(&self.shared.status);
+            if matches!(
+                status.state,
+                AccountState::SigningIn | AccountState::SignedIn
+            ) {
+                return Ok(status.clone());
+            }
+            *status = AccountStatus {
+                state: AccountState::SigningIn,
+                user_id: None,
+                error: None,
+            };
+        }
+        if let Some(listener) = self.shared.listener() {
+            listener.session_changed();
+        }
+        let shared = self.shared.clone();
+        let started = lock(&self.shared).generation;
+        let spawned = std::thread::Builder::new()
+            .name("core-sign-in-oidc".into())
+            .spawn(move || {
+                let still_current = || {
+                    let inner = lock(&shared);
+                    inner.generation == started && inner.state == StoreState::Protected
+                };
+                let lease = match shared.admit() {
+                    Ok(lease) if lease.generation == started => lease,
+                    _ => {
+                        shared.set_status(AccountStatus::signed_out());
+                        return;
+                    }
+                };
+                shared.client_ran.store(true, Ordering::SeqCst);
+                let host = homeserver.display_host();
+                let open = |url: &url::Url| -> Result<bool, SignInError> {
+                    let (caption, message) =
+                        crate::oauth_login::question(&host, url).ok_or(SignInError::Failed)?;
+                    match source.confirm_open_link(caption, &message) {
+                        Ok(true) => source
+                            .open_link(url.as_str())
+                            .map(|()| true)
+                            .map_err(|_| SignInError::Failed),
+                        Ok(false) | Err(PromptError::Cancelled) => Ok(false),
+                        Err(PromptError::Unsupported) => Err(SignInError::Unsupported),
+                        Err(_) => Err(SignInError::Failed),
+                    }
+                };
+                let result = lease.stores().block_on(async {
+                    let client = account::build_client(&homeserver, lease.stores()).await?;
+                    match account::sign_in_oauth(&client, &homeserver, lease.stores(), open, || {
+                        !still_current()
+                    })
+                    .await
+                    {
+                        Ok(user_id) => Ok((client, user_id)),
+                        Err(error) => {
+                            drop(client);
+                            Err(error)
+                        }
+                    }
+                });
+                match result {
+                    Ok((client, user_id)) => install(&shared, lease, client, user_id),
+                    Err(error) => {
+                        let current = lease.commit(|| ()).is_ok();
+                        drop(lease);
+                        shared.set_status(if current {
+                            failed(error)
+                        } else {
+                            AccountStatus::signed_out()
+                        });
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.shared.set_status(failed(SignInError::Failed));
+        }
+        Ok(self.account_status())
+    }
+
     /// Starts registering `username` on `homeserver` on a worker thread and
     /// returns the status at once, like [`Session::sign_in`]. The name is
     /// checked first; the password and any registration token are asked for
@@ -1567,10 +1666,7 @@ impl Session {
                     // Before the request: an interrupted sign-out must never
                     // restore this account on the next start.
                     let began = store::begin_sign_out(&dir).is_ok();
-                    let revoked = lease
-                        .stores()
-                        .block_on(client.matrix_auth().logout())
-                        .is_ok();
+                    let revoked = lease.stores().block_on(client.logout()).is_ok();
                     break (began, revoked);
                 }
                 Ok(None) | Err(AdmissionError::Locked) => return Ok(self.state()),

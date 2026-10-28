@@ -44,6 +44,7 @@ pub mod links;
 pub mod matrix_views;
 pub mod media;
 pub mod notifications;
+pub mod oauth_login;
 pub mod outbox;
 pub mod passphrase;
 pub mod pick;
@@ -680,6 +681,7 @@ impl Core {
                 ok(&state)
             }
             Call::SignIn { homeserver } => self.sign_in(homeserver),
+            Call::SignInWithOidc { homeserver } => self.sign_in_oidc(homeserver),
             Call::Register {
                 homeserver,
                 username,
@@ -1844,6 +1846,27 @@ impl Core {
             return Outcome::Error(ErrorCode::InvalidArgument);
         };
         match self.session.sign_in(homeserver, self.credentials.clone()) {
+            Ok(status) => ok(&status),
+            Err(_) => Outcome::Error(ErrorCode::Locked),
+        }
+    }
+
+    /// Like `sign_in`, through the homeserver's OAuth 2.0 provider
+    /// (ADR-0030).
+    fn sign_in_oidc(&self, homeserver: &str) -> Outcome {
+        if !self.session.is_configured() {
+            return Outcome::Error(ErrorCode::Unavailable);
+        }
+        if homeserver.len() > MAX_HOMESERVER_URL_BYTES {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        let Ok(homeserver) = Homeserver::parse(homeserver) else {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        };
+        match self
+            .session
+            .sign_in_oidc(homeserver, self.credentials.clone())
+        {
             Ok(status) => ok(&status),
             Err(_) => Outcome::Error(ErrorCode::Locked),
         }

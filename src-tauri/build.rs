@@ -21,6 +21,7 @@ fn main() {
             "unlock_session",
             "reset_profile",
             "sign_in",
+            "sign_in_with_oidc",
             "discover_homeserver",
             "proxy_setting",
             "set_proxy_setting",
