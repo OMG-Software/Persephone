@@ -47,6 +47,21 @@ fn serde_rejects_unknown_fields_and_variants() {
     let unknown_gap_field = r#"{"kind":"gap","next_cursor":null,"extra":true}"#;
     assert!(serde_json::from_str::<persephone_contracts::TimelineItem>(unknown_gap_field).is_err());
 
+    let state = r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"member","target":"@a:s","membership":"joined"}}"#;
+    assert!(serde_json::from_str::<persephone_contracts::TimelineItem>(state).is_ok());
+    for invalid in [
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"member","target":"@a:s","membership":"joined","extra":1}}"#,
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"member","target":"@a:s","membership":"teleported"}}"#,
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"weather"}}"#,
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"encryption","algorithm":"none"}}"#,
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<persephone_contracts::TimelineItem>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+
     let unknown_nested_field = r#"{"roomId":"!r:s","items":[{"kind":"gap","next_cursor":null,"extra":true}],"nextCursor":null}"#;
     assert!(
         serde_json::from_str::<persephone_contracts::TimelinePage>(unknown_nested_field).is_err()

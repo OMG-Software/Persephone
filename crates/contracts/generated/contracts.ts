@@ -313,6 +313,10 @@ export type UserSearch = { users: Array<UserMatch>, truncated: boolean, };
 
 export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported";
 
+export type MembershipChange = "joined" | "left" | "invited" | "invite_rejected" | "invite_withdrawn" | "kicked" | "banned" | "unbanned" | "knocked" | "knock_withdrawn" | "knock_denied";
+
+export type StateChange = { "type": "member", target: string, membership: MembershipChange, } | { "type": "display_name", target: string, name: string | null, } | { "type": "name", name: string | null, } | { "type": "topic", topic: string | null, } | { "type": "avatar", } | { "type": "encryption", } | { "type": "join_rule", rule: JoinRule, } | { "type": "history_visibility", visibility: HistoryVisibility, } | { "type": "power_levels", } | { "type": "addresses", } | { "type": "created", } | { "type": "server_acl", } | { "type": "upgraded", };
+
 export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, 
 /**
  * When the sender's homeserver says it received the event
@@ -339,7 +343,11 @@ width: number | null, height: number | null,
 /**
  * The file is end-to-end encrypted.
  */
-encrypted: boolean, };
+encrypted: boolean, } | { "kind": "state", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, change: StateChange, };
 
 export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, };
 
@@ -392,6 +400,17 @@ export const timelinePageFixture = {
       "width": 640,
       "height": 480,
       "encrypted": true
+    },
+    {
+      "kind": "state",
+      "event_id": "$joined",
+      "sender": "@bob:server.invalid",
+      "origin_server_ts": 1767258090000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "joined"
+      }
     },
     {
       "kind": "gap",

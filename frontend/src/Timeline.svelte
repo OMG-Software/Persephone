@@ -8,6 +8,7 @@
   import Icon from './Icon.svelte';
   import ImageMessage from './ImageMessage.svelte';
   import Message from './Message.svelte';
+  import { stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
 
   let {
@@ -157,6 +158,18 @@
               {@const date = toDate(item.origin_server_ts)}
               <p class="notice">
                 <span><bdi>{item.sender}</bdi>: {noticeText[item.notice] ?? noticeText.unsupported}</span>
+                {#if date}
+                  <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
+                {/if}
+              </p>
+            {:else if item.kind === 'state'}
+              {@const date = toDate(item.origin_server_ts)}
+              <p class="notice state-change">
+                <span
+                  >{#each stateParts(item.sender, item.change) as part, at (at)}{#if 'name' in part}<bdi
+                        >{part.name}</bdi
+                      >{:else}{part.text}{/if}{/each}</span
+                >
                 {#if date}
                   <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
                 {/if}

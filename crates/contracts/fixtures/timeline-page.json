@@ -27,6 +27,17 @@
       "encrypted": true
     },
     {
+      "kind": "state",
+      "event_id": "$joined",
+      "sender": "@bob:server.invalid",
+      "origin_server_ts": 1767258090000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "joined"
+      }
+    },
+    {
       "kind": "gap",
       "next_cursor": null
     }

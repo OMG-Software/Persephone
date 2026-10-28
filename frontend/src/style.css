@@ -897,6 +897,11 @@ kbd {
   line-height: 1.4;
 }
 
+.state-change span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .notice::before,
 .gap::before {
   content: '';

@@ -168,6 +168,86 @@ pub enum TimelineItem {
         /// The file is end-to-end encrypted.
         encrypted: bool,
     },
+    /// A change to the room's members or state, shown as a line of its own.
+    State {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        change: StateChange,
+    },
+}
+
+/// What a state event changed. Names, topics and user IDs come from the
+/// event and are projected like display names; `sender` is who made the
+/// change and `target` the member it was made to.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StateChange {
+    /// A member joined, left, was invited, removed, banned, and so on.
+    Member {
+        target: String,
+        membership: MembershipChange,
+    },
+    /// A member set (or, with `None`, removed) their display name in this
+    /// room.
+    DisplayName {
+        target: String,
+        name: Option<String>,
+    },
+    /// The room's name was set, or removed (`None`).
+    Name {
+        name: Option<String>,
+    },
+    /// The room's topic was set, or removed (`None`).
+    Topic {
+        topic: Option<String>,
+    },
+    /// The room's picture changed.
+    Avatar {},
+    /// End-to-end encryption was turned on. It cannot be turned off.
+    Encryption {},
+    JoinRule {
+        rule: JoinRule,
+    },
+    HistoryVisibility {
+        visibility: HistoryVisibility,
+    },
+    /// Who may do what (power levels) changed.
+    PowerLevels {},
+    /// The room's published addresses changed.
+    Addresses {},
+    /// The room was created.
+    Created {},
+    /// Which homeservers may take part changed (server ACL).
+    ServerAcl {},
+    /// The room was replaced by a new version.
+    Upgraded {},
+}
+
+/// How a member's membership changed. `sender` made the change; for
+/// `joined`, `left` and `knocked` that is the member themself.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipChange {
+    Joined,
+    Left,
+    Invited,
+    /// The member declined their invitation.
+    InviteRejected,
+    /// The invitation was withdrawn by someone else.
+    InviteWithdrawn,
+    /// Removed by someone else.
+    Kicked,
+    Banned,
+    Unbanned,
+    /// Asked to join.
+    Knocked,
+    /// Withdrew their request to join.
+    KnockWithdrawn,
+    /// Their request to join was refused.
+    KnockDenied,
 }
 
 /// The kind of an image the user picked to send.
@@ -1232,6 +1312,15 @@ pub fn sample_timeline_page() -> TimelinePage {
                 height: Some(480),
                 encrypted: true,
             },
+            TimelineItem::State {
+                event_id: "$joined".into(),
+                sender: "@bob:server.invalid".into(),
+                origin_server_ts: UnixMillis::new(1_767_258_090_000),
+                change: StateChange::Member {
+                    target: "@bob:server.invalid".into(),
+                    membership: MembershipChange::Joined,
+                },
+            },
             TimelineItem::Gap { next_cursor: None },
         ],
         next_cursor: Some("cursor-2".into()),
@@ -1333,6 +1422,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", UserMatch::decl(&config)),
         format!("export {}", UserSearch::decl(&config)),
         format!("export {}", NoticeKind::decl(&config)),
+        format!("export {}", MembershipChange::decl(&config)),
+        format!("export {}", StateChange::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),
         format!("export {}", ImageMime::decl(&config)),

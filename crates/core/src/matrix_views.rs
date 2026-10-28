@@ -12,8 +12,13 @@
 //!   disappears. An encrypted event that cannot be shown becomes a notice
 //!   saying why: `withheld` (the sender withheld the key from this device),
 //!   `untrusted_sender` (the sending device is not signed by its owner, which
-//!   the decryption settings refuse; ADR-0005) or `undecryptable`. State
-//!   events, reactions and other non-message events are not shown.
+//!   the decryption settings refuse; ADR-0005) or `undecryptable`.
+//! * Membership changes and changes to the room's name, topic, picture,
+//!   encryption, access, history visibility, power levels, addresses, server
+//!   ACL and version are `state` items (`state_change`): who joined or was
+//!   removed, and who changed what, matters most in an encrypted room. A
+//!   change of picture alone, a redacted state event, and other state are not
+//!   shown. Reactions and other non-message events are not shown.
 //! * A page holds at most `MAX_PAGE_ITEMS` items and `MAX_PAGE_BYTES`
 //!   serialized. The SDK cannot resume inside a fetched chunk, so a chunk that
 //!   would exceed the byte budget is fetched again with half the limit, down to
@@ -31,14 +36,15 @@ use matrix_sdk::{
     ruma::{
         RoomId, UInt,
         events::{
-            AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
-            room::message::MessageType,
+            AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+            SyncStateEvent,
+            room::{member::MembershipChange as Change, message::MessageType},
         },
     },
 };
 use persephone_contracts::{
-    ContactStatus, NoticeKind, RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage,
-    UnixMillis,
+    ContactStatus, MembershipChange, NoticeKind, RoomEncryption, RoomList, RoomSummary,
+    StateChange, TimelineItem, TimelinePage, UnixMillis,
 };
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
@@ -113,11 +119,19 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             origin_server_ts,
         });
     }
-    let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
-        SyncMessageLikeEvent::Original(message),
-    ))) = event.raw().deserialize()
-    else {
-        return None;
+    let message = match event.raw().deserialize() {
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(message),
+        ))) => message,
+        Ok(AnySyncTimelineEvent::State(state)) => {
+            return state_change(&state).map(|change| TimelineItem::State {
+                event_id,
+                sender,
+                origin_server_ts,
+                change,
+            });
+        }
+        _ => return None,
     };
     Some(match &message.content.msgtype {
         MessageType::Text(text) => TimelineItem::Message {
@@ -147,6 +161,77 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             notice: NoticeKind::Unsupported,
             origin_server_ts,
         },
+    })
+}
+
+/// A name or topic as shown: projected, and `None` when empty.
+fn shown_text(raw: &str) -> Option<String> {
+    let shown = project_name(raw);
+    (!shown.trim().is_empty()).then_some(shown)
+}
+
+/// What a state event changed, or `None` for a change not shown.
+fn state_change(event: &AnySyncStateEvent) -> Option<StateChange> {
+    use crate::room_settings::{history_visibility, join_rule};
+    Some(match event {
+        AnySyncStateEvent::RoomMember(SyncStateEvent::Original(member)) => {
+            let target = project_name(member.state_key.as_str());
+            let membership = match member.membership_change() {
+                Change::Joined | Change::InvitationAccepted => MembershipChange::Joined,
+                Change::Left => MembershipChange::Left,
+                Change::Invited | Change::KnockAccepted => MembershipChange::Invited,
+                Change::InvitationRejected => MembershipChange::InviteRejected,
+                Change::InvitationRevoked => MembershipChange::InviteWithdrawn,
+                Change::Kicked => MembershipChange::Kicked,
+                Change::Banned | Change::KickedAndBanned => MembershipChange::Banned,
+                Change::Unbanned => MembershipChange::Unbanned,
+                Change::Knocked => MembershipChange::Knocked,
+                Change::KnockRetracted => MembershipChange::KnockWithdrawn,
+                Change::KnockDenied => MembershipChange::KnockDenied,
+                Change::ProfileChanged {
+                    displayname_change: Some(change),
+                    ..
+                } => {
+                    return Some(StateChange::DisplayName {
+                        target,
+                        name: change.new.and_then(shown_text),
+                    });
+                }
+                // A new picture alone, no change, or one ruma cannot name.
+                _ => return None,
+            };
+            StateChange::Member { target, membership }
+        }
+        AnySyncStateEvent::RoomName(SyncStateEvent::Original(name)) => StateChange::Name {
+            name: shown_text(&name.content.name),
+        },
+        AnySyncStateEvent::RoomTopic(SyncStateEvent::Original(topic)) => StateChange::Topic {
+            topic: shown_text(&topic.content.topic),
+        },
+        AnySyncStateEvent::RoomAvatar(SyncStateEvent::Original(_)) => StateChange::Avatar {},
+        AnySyncStateEvent::RoomEncryption(SyncStateEvent::Original(_)) => {
+            StateChange::Encryption {}
+        }
+        AnySyncStateEvent::RoomJoinRules(SyncStateEvent::Original(rules)) => {
+            StateChange::JoinRule {
+                rule: join_rule(Some(rules.content.join_rule.clone())),
+            }
+        }
+        AnySyncStateEvent::RoomHistoryVisibility(SyncStateEvent::Original(history)) => {
+            StateChange::HistoryVisibility {
+                visibility: history_visibility(Some(history.content.history_visibility.clone())),
+            }
+        }
+        AnySyncStateEvent::RoomPowerLevels(SyncStateEvent::Original(_)) => {
+            StateChange::PowerLevels {}
+        }
+        AnySyncStateEvent::RoomCanonicalAlias(SyncStateEvent::Original(_)) => {
+            StateChange::Addresses {}
+        }
+        AnySyncStateEvent::RoomCreate(SyncStateEvent::Original(_)) => StateChange::Created {},
+        AnySyncStateEvent::RoomServerAcl(SyncStateEvent::Original(_)) => StateChange::ServerAcl {},
+        AnySyncStateEvent::RoomTombstone(SyncStateEvent::Original(_)) => StateChange::Upgraded {},
+        _ => return None,
     })
 }
 
@@ -494,6 +579,212 @@ mod tests {
             Some(TimelineItem::Image { .. })
         ));
         assert!(crate::media::image_content(&broken).is_none());
+    }
+
+    fn state_event(
+        kind: &str,
+        sender: &str,
+        state_key: &str,
+        content: serde_json::Value,
+        prev_content: Option<serde_json::Value>,
+    ) -> TimelineEvent {
+        let mut event = serde_json::json!({
+            "type": kind,
+            "event_id": "$state",
+            "sender": sender,
+            "state_key": state_key,
+            "origin_server_ts": 1_767_258_000_000u64,
+            "content": content,
+        });
+        if let Some(prev) = prev_content {
+            event["unsigned"] = serde_json::json!({ "prev_content": prev });
+        }
+        TimelineEvent::from_plaintext(
+            matrix_sdk::ruma::serde::Raw::from_json_string(event.to_string()).unwrap(),
+        )
+    }
+
+    fn change_of(event: &TimelineEvent) -> Option<StateChange> {
+        match project(event) {
+            Some(TimelineItem::State { change, .. }) => Some(change),
+            None => None,
+            Some(other) => panic!("a state item or nothing: {other:?}"),
+        }
+    }
+
+    fn member(
+        sender: &str,
+        target: &str,
+        membership: &str,
+        prev: Option<&str>,
+    ) -> Option<StateChange> {
+        change_of(&state_event(
+            "m.room.member",
+            sender,
+            target,
+            serde_json::json!({ "membership": membership }),
+            prev.map(|prev| serde_json::json!({ "membership": prev })),
+        ))
+    }
+
+    /// GIVEN membership events WHEN projected THEN each names the member
+    /// and what happened to them, telling a member leaving from one removed
+    /// by someone else.
+    #[test]
+    fn given_membership_events_then_each_becomes_a_member_change() {
+        const A: &str = "@alice:example.org";
+        const B: &str = "@bob:example.org";
+        let change = |membership| {
+            Some(StateChange::Member {
+                target: B.into(),
+                membership,
+            })
+        };
+        for (sender, membership, prev, expected) in [
+            (B, "join", None, MembershipChange::Joined),
+            (B, "join", Some("invite"), MembershipChange::Joined),
+            (B, "leave", Some("join"), MembershipChange::Left),
+            (A, "leave", Some("join"), MembershipChange::Kicked),
+            (A, "ban", Some("join"), MembershipChange::Banned),
+            (A, "leave", Some("ban"), MembershipChange::Unbanned),
+            (A, "invite", None, MembershipChange::Invited),
+            (B, "leave", Some("invite"), MembershipChange::InviteRejected),
+            (
+                A,
+                "leave",
+                Some("invite"),
+                MembershipChange::InviteWithdrawn,
+            ),
+            (B, "knock", None, MembershipChange::Knocked),
+            (B, "leave", Some("knock"), MembershipChange::KnockWithdrawn),
+        ] {
+            assert_eq!(
+                member(sender, B, membership, prev),
+                change(expected),
+                "{sender} {prev:?} -> {membership}"
+            );
+        }
+        // No change at all is not shown.
+        assert_eq!(member(B, B, "join", Some("join")), None);
+    }
+
+    /// GIVEN a member changing their display name, to something hostile or
+    /// to nothing, or only their picture WHEN projected THEN the name is
+    /// inert bounded text, a removed name is `None`, and a picture change
+    /// alone is not shown.
+    #[test]
+    fn given_profile_changes_then_names_are_projected_and_pictures_alone_hidden() {
+        const B: &str = "@bob:example.org";
+        let profile = |content: serde_json::Value, prev: serde_json::Value| {
+            change_of(&state_event("m.room.member", B, B, content, Some(prev)))
+        };
+        let hostile = format!("Admin\u{202E}\n{}", "x".repeat(500));
+        let Some(StateChange::DisplayName { target, name }) = profile(
+            serde_json::json!({ "membership": "join", "displayname": hostile }),
+            serde_json::json!({ "membership": "join", "displayname": "Bob" }),
+        ) else {
+            panic!("a display name change");
+        };
+        assert_eq!(target, B);
+        let name = name.unwrap();
+        assert!(
+            !name.contains('\u{202E}') && !name.contains('\n'),
+            "{name:?}"
+        );
+        assert!(name.chars().count() <= crate::views::MAX_DISPLAY_NAME_CHARS + 1);
+        assert_eq!(
+            profile(
+                serde_json::json!({ "membership": "join" }),
+                serde_json::json!({ "membership": "join", "displayname": "Bob" }),
+            ),
+            Some(StateChange::DisplayName {
+                target: B.into(),
+                name: None
+            })
+        );
+        assert_eq!(
+            profile(
+                serde_json::json!({ "membership": "join", "avatar_url": "mxc://s/new" }),
+                serde_json::json!({ "membership": "join", "avatar_url": "mxc://s/old" }),
+            ),
+            None
+        );
+    }
+
+    /// GIVEN changes to the room's state WHEN projected THEN each security-
+    /// relevant one is shown, names and topics are projected and empty ones
+    /// are `None`, and an unknown state type is not shown.
+    #[test]
+    fn given_room_state_events_then_known_changes_are_shown() {
+        const A: &str = "@alice:example.org";
+        let room = |kind: &str, content: serde_json::Value| {
+            change_of(&state_event(kind, A, "", content, None))
+        };
+        assert_eq!(
+            room(
+                "m.room.name",
+                serde_json::json!({ "name": "Plans\u{202E}" })
+            ),
+            Some(StateChange::Name {
+                name: Some("Plans\u{FFFD}".into())
+            })
+        );
+        assert_eq!(
+            room("m.room.name", serde_json::json!({ "name": "" })),
+            Some(StateChange::Name { name: None })
+        );
+        assert_eq!(
+            room(
+                "m.room.topic",
+                serde_json::json!({ "topic": "line one\nline two" })
+            ),
+            Some(StateChange::Topic {
+                topic: Some("line one line two".into())
+            })
+        );
+        assert_eq!(
+            room(
+                "m.room.encryption",
+                serde_json::json!({ "algorithm": "m.megolm.v1.aes-sha2" })
+            ),
+            Some(StateChange::Encryption {})
+        );
+        assert_eq!(
+            room(
+                "m.room.join_rules",
+                serde_json::json!({ "join_rule": "public" })
+            ),
+            Some(StateChange::JoinRule {
+                rule: persephone_contracts::JoinRule::Public
+            })
+        );
+        assert_eq!(
+            room(
+                "m.room.history_visibility",
+                serde_json::json!({ "history_visibility": "world_readable" })
+            ),
+            Some(StateChange::HistoryVisibility {
+                visibility: persephone_contracts::HistoryVisibility::WorldReadable
+            })
+        );
+        assert_eq!(
+            room(
+                "m.room.power_levels",
+                serde_json::json!({ "users": { A: 100 } })
+            ),
+            Some(StateChange::PowerLevels {})
+        );
+        assert_eq!(
+            room(
+                "m.room.server_acl",
+                serde_json::json!({ "allow": ["*"], "deny": [] })
+            ),
+            Some(StateChange::ServerAcl {})
+        );
+        assert_eq!(
+            room("org.example.custom", serde_json::json!({ "x": 1 })),
+            None
+        );
     }
 
     #[test]

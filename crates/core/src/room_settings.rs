@@ -307,7 +307,7 @@ async fn encryption(room: &Room) -> RoomEncryption {
     }
 }
 
-fn join_rule(rule: Option<Rule>) -> JoinRule {
+pub(crate) fn join_rule(rule: Option<Rule>) -> JoinRule {
     match rule {
         // Without a join rule only an invitation lets anyone in.
         None | Some(Rule::Invite) => JoinRule::Invite,
@@ -320,7 +320,7 @@ fn join_rule(rule: Option<Rule>) -> JoinRule {
     }
 }
 
-fn history_visibility(visibility: Option<Visible>) -> HistoryVisibility {
+pub(crate) fn history_visibility(visibility: Option<Visible>) -> HistoryVisibility {
     match visibility {
         // The specification's default.
         None | Some(Visible::Shared) => HistoryVisibility::Shared,

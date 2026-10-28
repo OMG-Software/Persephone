@@ -153,6 +153,47 @@ test('notices render as fixed text with an isolated sender, never as content', (
   assert.match(html, /from a device its owner has not verified/);
 });
 
+test('GIVEN state changes with hostile names WHEN rendered THEN each line is fixed text with every name isolated', () => {
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [
+        {
+          kind: 'state',
+          event_id: '$1',
+          sender: '@a:example.invalid',
+          origin_server_ts: null,
+          change: { type: 'member', target: hostileName, membership: 'kicked' }
+        },
+        {
+          kind: 'state',
+          event_id: '$2',
+          sender: hostileName,
+          origin_server_ts: null,
+          change: { type: 'topic', topic: '<script>alert(1)</script>' }
+        },
+        {
+          kind: 'state',
+          event_id: '$3',
+          sender: '@c:example.invalid',
+          origin_server_ts: null,
+          change: { type: 'encryption' }
+        }
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  });
+  assert.doesNotMatch(html, /<(?:img|script)\b/i);
+  // Without Svelte's hydration markers, which sit between the parts.
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.match(shown, /<bdi>@a:example\.invalid<\/bdi> removed <bdi>&lt;img/);
+  assert.match(shown, /changed the topic to <bdi>&lt;script>/);
+  assert.match(shown, /<bdi>@c:example\.invalid<\/bdi> turned on end-to-end encryption/);
+});
+
 test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
   const signedOut = { state: 'signed_out', userId: null, error: null };
   const form = (mode = 'sign_in', username = '') => ({ homeserver: 'https://matrix.org', mode, username });
