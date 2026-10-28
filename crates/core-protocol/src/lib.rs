@@ -111,6 +111,17 @@ pub enum Call {
         event_id: String,
         body: String,
     },
+    /// React to this event in a joined room with `key`, usually an emoji:
+    /// some visible text of at most [`MAX_REACTION_KEY_BYTES`], without
+    /// control characters. Sent like a message: in an encrypted room it is
+    /// encrypted, in a room that is not, only after `allow_unencrypted`, and
+    /// not while a member's identity change waits (`rejected` then). A
+    /// reaction is taken back with `delete_message` on its own event.
+    React {
+        room_id: String,
+        event_id: String,
+        key: String,
+    },
     /// Delete (redact) this event in a joined room, for everyone. The
     /// homeserver decides whether this account may.
     DeleteMessage {
@@ -435,6 +446,9 @@ pub const MAX_DISPLAY_NAME_BYTES: usize = 256;
 
 /// Most local profiles (slots 1 to this number) on one computer.
 pub const MAX_PROFILES: u32 = 8;
+
+/// Longest reaction key either side accepts, in bytes.
+pub const MAX_REACTION_KEY_BYTES: usize = 64;
 
 /// Longest event ID either side accepts in a call (the Matrix limit).
 pub const MAX_EVENT_ID_BYTES: usize = 255;
@@ -964,6 +978,14 @@ mod tests {
                 r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
             ),
             (
+                Call::React {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                    key: "👍".into(),
+                },
+                r#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e","key":"👍"}}"#,
+            ),
+            (
                 Call::DeleteMessage {
                     room_id: "!r:s".into(),
                     event_id: "$e".into(),
@@ -1400,6 +1422,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","reply_to":null,"edit":"$e"}}"#,
             br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","body":"x"}}"#,
             br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e"}}"#,
+            br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e","key":null}}"#,
             br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s","event_id":"$e","reason":"spam"}}"#,
             br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":null,"body":"x"}}"#,
             br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":"$e","body":"x","sender":"@b:s"}}"#,

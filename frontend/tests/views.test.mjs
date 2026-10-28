@@ -217,6 +217,30 @@ test('GIVEN replies WHEN rendered THEN a loaded message is quoted as isolated te
   assert.equal((shown.match(/>\s*Reply <span class="visually-hidden">/g) ?? []).length, 3);
 });
 
+test('GIVEN reactions WHEN rendered THEN keys are isolated text with counts, and our own is pressed', () => {
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      ownUserId: '@me:example.invalid',
+      items: [
+        { kind: 'message', event_id: '$1', sender: '@a:example.invalid', body: 'hi', origin_server_ts: null, reply_to: null },
+        { kind: 'reaction', event_id: '$r1', sender: '@me:example.invalid', reacts_to: '$1', key: '<b>bold</b>', origin_server_ts: null },
+        { kind: 'reaction', event_id: '$r2', sender: '@a:example.invalid', reacts_to: '$1', key: '👍', origin_server_ts: null }
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {},
+      onreact: () => {},
+      onunreact: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(shown, /<b>/);
+  assert.match(shown, /aria-pressed="true"[^>]*><bdi>&lt;b>bold&lt;\/b><\/bdi> <span class="count">1<\/span>/);
+  assert.match(shown, /aria-pressed="false"[^>]*><bdi>👍<\/bdi> <span class="count">1<\/span>/);
+});
+
 test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
   const signedOut = { state: 'signed_out', userId: null, error: null };
   const form = (mode = 'sign_in', username = '') => ({ homeserver: 'https://matrix.org', mode, username });

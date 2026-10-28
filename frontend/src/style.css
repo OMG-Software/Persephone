@@ -952,6 +952,40 @@ kbd {
   opacity: 0;
 }
 
+/* Reactions: chips under a message; this account's own is outlined in the
+   accent colour and pressed. */
+.reactions,
+.quick-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.reaction.mine {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.reaction .count {
+  color: var(--ink2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .pending-kind {
   color: var(--ink3);
   font-weight: 600;

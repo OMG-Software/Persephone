@@ -80,10 +80,59 @@ export function quoteOf(items: ShownItem[], eventId: string): Quote | null {
   }
 }
 
-/** A timeline item as shown: a message may carry its newest edit. */
-export type ShownItem = Exclude<TimelineItem, { kind: 'edit' } | { kind: 'redaction' }> & {
+/** Most different reactions shown under one message; the most used first. */
+export const MAX_REACTION_KEYS = 12;
+
+/** The quick reactions offered; any key the core accepts can be received. */
+export const QUICK_REACTIONS: readonly string[] = ['👍', '❤️', '😂', '😮', '😢', '🎉'];
+
+/**
+ * One reaction under a message: how many people reacted with `key`, and the
+ * event of this account's own reaction with it, if any.
+ */
+export type ReactionCount = { key: string; count: number; mine: string | null };
+
+/**
+ * A timeline item as shown: a message may carry its newest edit, and a
+ * message or image the reactions to it.
+ */
+export type ShownItem = Exclude<
+  TimelineItem,
+  { kind: 'edit' } | { kind: 'redaction' } | { kind: 'reaction' }
+> & {
   edited?: boolean;
+  reactions?: ReactionCount[];
 };
+
+/** The reactions to each event: one per sender and key, deleted ones left out. */
+function countReactions(
+  items: TimelineItem[],
+  deleted: Set<string>,
+  ownUserId: string | null
+): Map<string, ReactionCount[]> {
+  const byTarget = new Map<string, Map<string, { senders: Set<string>; mine: string | null }>>();
+  for (const item of items) {
+    if (item.kind !== 'reaction' || deleted.has(item.event_id)) continue;
+    let keys = byTarget.get(item.reacts_to);
+    if (!keys) byTarget.set(item.reacts_to, (keys = new Map()));
+    let entry = keys.get(item.key);
+    if (!entry) keys.set(item.key, (entry = { senders: new Set(), mine: null }));
+    entry.senders.add(item.sender);
+    if (ownUserId !== null && item.sender === ownUserId) entry.mine = item.event_id;
+  }
+  const counted = new Map<string, ReactionCount[]>();
+  for (const [target, keys] of byTarget) {
+    const list = Array.from(keys, ([key, entry]) => ({
+      key,
+      count: entry.senders.size,
+      mine: entry.mine
+    }));
+    // A stable sort keeps first-seen order among equal counts.
+    list.sort((a, b) => b.count - a.count);
+    counted.set(target, list.slice(0, MAX_REACTION_KEYS));
+  }
+  return counted;
+}
 
 /**
  * The items to show. Edits and deletions are not lines of their own: a
@@ -92,16 +141,17 @@ export type ShownItem = Exclude<TimelineItem, { kind: 'edit' } | { kind: 'redact
  * core sends only edits by the message's own sender; an edit whose sender
  * differs from the message's here is still ignored.
  */
-export function applyRelations(items: TimelineItem[]): ShownItem[] {
+export function applyRelations(items: TimelineItem[], ownUserId: string | null = null): ShownItem[] {
   const newest = new Map<string, { sender: string; body: string }>();
   const deleted = new Set<string>();
   for (const item of items) {
     if (item.kind === 'edit') newest.set(item.replaces, { sender: item.sender, body: item.body });
     if (item.kind === 'redaction') deleted.add(item.redacts);
   }
+  const reactions = countReactions(items, deleted, ownUserId);
   const shown: ShownItem[] = [];
   for (const item of items) {
-    if (item.kind === 'edit' || item.kind === 'redaction') continue;
+    if (item.kind === 'edit' || item.kind === 'redaction' || item.kind === 'reaction') continue;
     if (item.kind !== 'gap' && item.kind !== 'state' && deleted.has(item.event_id)) {
       shown.push({
         kind: 'notice',
@@ -113,11 +163,13 @@ export function applyRelations(items: TimelineItem[]): ShownItem[] {
       continue;
     }
     const edit = item.kind === 'message' ? newest.get(item.event_id) : undefined;
-    shown.push(
+    const edited: ShownItem =
       item.kind === 'message' && edit && edit.sender === item.sender
         ? { ...item, body: edit.body, edited: true }
-        : item
-    );
+        : item;
+    const counts =
+      edited.kind === 'message' || edited.kind === 'image' ? reactions.get(edited.event_id) : undefined;
+    shown.push(counts ? { ...edited, reactions: counts } : edited);
   }
   return shown;
 }

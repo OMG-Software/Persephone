@@ -41,6 +41,7 @@
     sendMessage,
     editMessage,
     deleteMessage,
+    react,
     recoverWithKey,
     securityStatus,
     setUpEncryption,
@@ -121,6 +122,8 @@
     body: string | null;
     replyTo: string | null;
     retryId: number | null;
+    // A reaction waiting for the consent, if the question is about it.
+    reaction?: { eventId: string; key: string } | null;
     image: boolean;
   } | null>(null);
   // A picked image waiting for Send or Cancel. The core holds it under the
@@ -887,6 +890,51 @@
     }
   }
 
+  async function sendReaction(roomId: string, eventId: string, key: string) {
+    const generation = sessionGeneration;
+    try {
+      await react(roomId, eventId, key);
+    } catch (reason) {
+      if (current(roomId, generation)) {
+        error =
+          String(reason) === 'rejected'
+            ? 'The reaction was not sent. Check that this device is verified and no one in this room changed their identity.'
+            : describe(reason);
+      }
+    }
+  }
+
+  // Reacts to a message; in a room that is not encrypted, asks first like a
+  // message does.
+  function reactTo(eventId: string, key: string) {
+    const roomId = selected;
+    if (!roomId) return;
+    if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(roomId)) {
+      confirmingPlain = {
+        roomId,
+        body: null,
+        replyTo: null,
+        retryId: null,
+        image: false,
+        reaction: { eventId, key }
+      };
+      return;
+    }
+    void sendReaction(roomId, eventId, key);
+  }
+
+  // Takes back one of this account's reactions by deleting its event.
+  async function unreact(reactionEventId: string) {
+    const roomId = selected;
+    if (!roomId) return;
+    const generation = sessionGeneration;
+    try {
+      await deleteMessage(roomId, reactionEventId);
+    } catch (reason) {
+      if (current(roomId, generation)) error = describe(reason);
+    }
+  }
+
   function startEdit(eventId: string, body: string) {
     replyingTo = null;
     editingMessage = { eventId, savedDraft: editingMessage?.savedDraft ?? draft };
@@ -957,6 +1005,7 @@
       draftVersion += 1;
     }
     if (asked.retryId !== null) changeMessage(retryMessage, asked.retryId);
+    if (asked.reaction) await sendReaction(asked.roomId, asked.reaction.eventId, asked.reaction.key);
     if (asked.image && imageDraft?.roomId === asked.roomId) {
       await queueImage(asked.roomId, imageDraft.preview.handle, generation);
     }
@@ -1370,7 +1419,7 @@
             onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
             onreply={sendBlocked === null
               ? (eventId) => {
-                  const quote = quoteOf(applyRelations(items), eventId);
+                  const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), eventId);
                   if (!quote) return;
                   endEdit();
                   replyingTo = { eventId, quote };
@@ -1381,6 +1430,8 @@
             ondelete={signedIn
               ? (eventId) => (confirmingDelete = { roomId: selectedRoom.roomId, eventId })
               : undefined}
+            onreact={sendBlocked === null ? reactTo : undefined}
+            onunreact={signedIn ? unreact : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
@@ -1434,7 +1485,9 @@
                   This room is not encrypted: the homeserver and anyone with access to it can read
                   what you send here. {confirmingPlain.image
                     ? 'Send unencrypted messages in this room, starting with this image?'
-                    : 'Send unencrypted messages in this room?'}
+                    : confirmingPlain.reaction
+                      ? 'Send unencrypted messages in this room, starting with this reaction?'
+                      : 'Send unencrypted messages in this room?'}
                 </p>
                 <button type="button" class="danger" onclick={confirmPlain}>Send unencrypted</button>
                 <button type="button" class="secondary" onclick={() => (confirmingPlain = null)}>

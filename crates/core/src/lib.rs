@@ -334,6 +334,14 @@ fn valid_event_id(event_id: &str) -> bool {
     event_id.len() <= MAX_EVENT_ID_BYTES && matrix_sdk::ruma::EventId::parse(event_id).is_ok()
 }
 
+/// A reaction key: some visible text, within the limit, and no control
+/// characters.
+fn valid_reaction_key(key: &str) -> bool {
+    key.len() <= persephone_core_protocol::MAX_REACTION_KEY_BYTES
+        && !key.trim().is_empty()
+        && !key.chars().any(char::is_control)
+}
+
 /// The event ID, when the SDK accepts it.
 fn parse_event_id(event_id: &str) -> Option<matrix_sdk::ruma::OwnedEventId> {
     if event_id.len() > MAX_EVENT_ID_BYTES {
@@ -497,6 +505,7 @@ impl Core {
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
+            | Call::React { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -764,6 +773,7 @@ impl Core {
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
+            | Call::React { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -822,6 +832,7 @@ impl Core {
             Accept(String),
             Decline(String),
             Delete(String, matrix_sdk::ruma::OwnedEventId),
+            React(String, matrix_sdk::ruma::OwnedEventId, String),
             Start(OwnedUserId),
             Search(String),
             CreateRoom(String, Vec<OwnedUserId>),
@@ -853,6 +864,15 @@ impl Core {
             Call::DeleteMessage { room_id, event_id } if valid_room_id(room_id) => Work::Delete(
                 room_id.clone(),
                 parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
+            ),
+            Call::React {
+                room_id,
+                event_id,
+                key,
+            } if valid_room_id(room_id) && valid_reaction_key(key) => Work::React(
+                room_id.clone(),
+                parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
+                key.clone(),
             ),
             Call::StartConversation { user_id } => Work::Start(user(user_id)?),
             Call::SearchUsers { term } if conversations::valid_term(term) => {
@@ -935,7 +955,9 @@ impl Core {
             Work::Devices => self.devices.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
             Work::RoomMembers(..) => self.room_members.begin()?,
-            Work::ChangeRoom(..) | Work::Delete(..) => self.room_change.begin()?,
+            Work::ChangeRoom(..) | Work::Delete(..) | Work::React(..) => {
+                self.room_change.begin()?
+            }
             Work::ChangePassword(_)
             | Work::RequestEmail(_)
             | Work::RequestPhone(..)
@@ -964,6 +986,9 @@ impl Core {
                     .with_matrix(generation, async |client| {
                         sending::delete(&client, room_id, event_id).await
                     })
+                    .map(|()| serde_json::Value::Null),
+                Work::React(room_id, event_id, key) => self
+                    .react(generation, room_id, event_id, key)
                     .map(|()| serde_json::Value::Null),
                 Work::Start(user) => json(self.with_matrix(generation, async |client| {
                     conversations::start(&client, user).await
@@ -1203,6 +1228,41 @@ impl Core {
     /// the lease ends. Another generation (the session locked, or another
     /// sign-in, since the call was admitted) is `locked`, and `work` does not
     /// run.
+    /// Sends a reaction under a lease of the session in `generation`, with
+    /// the room's consent read from its stores: `rejected` when the checks
+    /// refuse it, `unavailable` when it may not have reached the homeserver.
+    fn react(
+        &self,
+        generation: u64,
+        room_id: &str,
+        event_id: &matrix_sdk::ruma::EventId,
+        key: &str,
+    ) -> Result<(), ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let outcome = (lease.generation() == generation).then(|| {
+            lease.stores().block_on(async {
+                let consented = sending::consented(lease.stores(), room_id).await;
+                sending::react(&client, room_id, event_id, key, consented).await
+            })
+        });
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        match outcome {
+            None => Err(ErrorCode::Locked),
+            Some(outbox::SendOutcome::Sent(_)) => Ok(()),
+            Some(outbox::SendOutcome::Unknown) => Err(ErrorCode::Unavailable),
+            Some(outbox::SendOutcome::Failed(_)) => Err(ErrorCode::Rejected),
+        }
+    }
+
     fn with_matrix<T>(
         &self,
         generation: u64,
@@ -1730,6 +1790,26 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN reaction keys WHEN checked THEN an emoji or short text passes;
+    /// empty, blank, oversized or control-bearing keys are refused.
+    #[test]
+    fn given_reaction_keys_then_only_short_visible_text_is_accepted() {
+        assert!(valid_reaction_key("👍"));
+        assert!(valid_reaction_key("+1"));
+        assert!(valid_reaction_key(
+            &"x".repeat(persephone_core_protocol::MAX_REACTION_KEY_BYTES)
+        ));
+        for bad in [
+            String::new(),
+            "  ".into(),
+            "a\nb".into(),
+            "\u{7}".into(),
+            "x".repeat(persephone_core_protocol::MAX_REACTION_KEY_BYTES + 1),
+        ] {
+            assert!(!valid_reaction_key(&bad), "{bad:?}");
+        }
+    }
 
     /// GIVEN message bodies WHEN checked THEN text with line breaks and tabs
     /// passes; empty, blank, oversized or control-bearing bodies are refused.

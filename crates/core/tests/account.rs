@@ -637,9 +637,9 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                 cursor: None,
             },
         ));
-        // Oldest first; the reaction is not shown; nothing is hidden
-        // silently. Only the sender's own edit is an edit: the forged one,
-        // by someone else, is left out.
+        // Oldest first; nothing is hidden silently. The reaction names the
+        // message it reacts to. Only the sender's own edit is an edit: the
+        // forged one, by someone else, is left out.
         let shown: Vec<String> = page
             .items
             .iter()
@@ -662,6 +662,12 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                     ..
                 } => format!("{event_id}:edit:{replaces}={body}"),
                 TimelineItem::State { event_id, .. } => format!("{event_id}:state"),
+                TimelineItem::Reaction {
+                    event_id,
+                    reacts_to,
+                    key,
+                    ..
+                } => format!("{event_id}:reacts:{reacts_to}:{key}"),
                 TimelineItem::Redaction {
                     event_id, redacts, ..
                 } => format!("{event_id}:redacts:{redacts}"),
@@ -670,6 +676,7 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
         assert_eq!(
             shown,
             [
+                "$reaction:reacts:$text:+1".to_string(),
                 format!("$secret:{:?}", NoticeKind::Undecryptable),
                 "$image:image:cat.png:false".to_string(),
                 "$text=Hello from <script>alert(1)</script>".to_string(),

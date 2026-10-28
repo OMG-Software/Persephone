@@ -218,6 +218,10 @@ impl CoreTransport for FakeCore {
                 ],
                 "truncated": false
             })),
+            Call::React { key, .. } => match key.as_str() {
+                "👍" => Ok(serde_json::Value::Null),
+                _ => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
             Call::DeleteMessage { event_id, .. } => match event_id.as_str() {
                 "$mine" => Ok(serde_json::Value::Null),
                 _ => Err(CoreError::Core(ErrorCode::Rejected)),
@@ -613,6 +617,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-send-message",
             "allow-edit-message",
             "allow-delete-message",
+            "allow-react",
             "allow-pending-messages",
             "allow-retry-message",
             "allow-discard-message",
@@ -1114,6 +1119,25 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
         core.calls.load(Ordering::SeqCst),
         calls,
         "an oversized event ID never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "react",
+            serde_json::json!({"roomId": room, "eventId": "$e", "key": "👍"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"roomId": room, "eventId": "$e", "key": "x".repeat(65)}),
+        serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255)), "key": "👍"}),
+    ] {
+        assert_eq!(invoke("react", args).unwrap_err(), "invalid_argument");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized reactions never crossed"
     );
     assert_eq!(
         invoke("pending_messages", serde_json::json!({"roomId": room})),

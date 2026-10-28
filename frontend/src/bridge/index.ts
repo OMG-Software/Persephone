@@ -340,6 +340,15 @@ export function editMessage(roomId: string, eventId: string, body: string): Prom
 }
 
 /**
+ * Reacts to an event with a short key, usually an emoji. Sent like a message:
+ * in a room that is not encrypted only after `allowUnencrypted`. A reaction
+ * is taken back with `deleteMessage` on its own event.
+ */
+export function react(roomId: string, eventId: string, key: string): Promise<void> {
+  return invoke<void>('react', { roomId, eventId, key });
+}
+
+/**
  * Deletes (redacts) a message in a joined room, for everyone. The homeserver
  * decides whether this account may (`rejected` otherwise).
  */

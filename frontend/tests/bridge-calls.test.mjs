@@ -53,6 +53,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.displayName(), 'display_name', {}],
     [() => bridge.sendMessage('!r:s', 'hi'), 'send_message', { roomId: '!r:s', body: 'hi', replyTo: null }],
     [() => bridge.deleteMessage('!r:s', '$mine'), 'delete_message', { roomId: '!r:s', eventId: '$mine' }],
+    [() => bridge.react('!r:s', '$e', '👍'), 'react', { roomId: '!r:s', eventId: '$e', key: '👍' }],
     [
       () => bridge.editMessage('!r:s', '$mine', 'fixed'),
       'edit_message',

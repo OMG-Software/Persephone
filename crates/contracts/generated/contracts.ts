@@ -357,7 +357,11 @@ encrypted: boolean, } | { "kind": "edit", event_id: string, sender: string,
 /**
  * As for messages.
  */
-origin_server_ts: number | null, replaces: string, body: string, } | { "kind": "redaction", event_id: string, sender: string, 
+origin_server_ts: number | null, replaces: string, body: string, } | { "kind": "reaction", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, reacts_to: string, key: string, } | { "kind": "redaction", event_id: string, sender: string, 
 /**
  * As for messages.
  */

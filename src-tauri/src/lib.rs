@@ -42,8 +42,8 @@ use persephone_core_protocol::{
     MAX_DEVICE_ID_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES,
     MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_MEMBER_FILTER_BYTES,
     MAX_MESSAGE_BYTES, MAX_NOTIFICATION_NAME_BYTES, MAX_PHONE_NUMBER_BYTES, MAX_PROFILES,
-    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_THREE_PID_ADDRESS_BYTES,
-    MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
+    MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES,
+    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -407,6 +407,32 @@ async fn edit_message(
             room_id,
             event_id,
             body,
+        },
+    )
+    .await
+}
+
+/// Reacts to an event in a joined room with a short key, usually an emoji.
+/// The core checks the arguments and the room, as for a message.
+#[tauri::command]
+async fn react(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+    key: String,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || event_id.len() > MAX_EVENT_ID_BYTES
+        || key.len() > MAX_REACTION_KEY_BYTES
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::React {
+            room_id,
+            event_id,
+            key,
         },
     )
     .await
@@ -1060,6 +1086,7 @@ pub fn configure<R: Runtime>(
             send_message,
             edit_message,
             delete_message,
+            react,
             pending_messages,
             retry_message,
             discard_message,

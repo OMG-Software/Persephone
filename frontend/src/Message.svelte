@@ -1,7 +1,7 @@
 <script lang="ts">
   import { avatarColour, initials } from './people';
   import { clockTime, fullTime, toDate } from './time';
-  import type { Quote } from './timeline';
+  import { QUICK_REACTIONS, type Quote, type ReactionCount } from './timeline';
 
   let {
     name,
@@ -11,7 +11,10 @@
     edited = false,
     onreply,
     onedit,
-    ondelete
+    ondelete,
+    reactions = [],
+    onreact,
+    onunreact
   }: {
     name: string;
     body: string;
@@ -27,7 +30,16 @@
     onedit?: () => void;
     // Asks to delete this message; only for this account's own messages.
     ondelete?: () => void;
+    // The reactions to this message, the most used first.
+    reactions?: ReactionCount[];
+    // Reacts with a key, or takes back this account's reaction (by its
+    // event); absent where reacting is not offered.
+    onreact?: (key: string) => void;
+    onunreact?: (reactionEventId: string) => void;
   } = $props();
+
+  // Whether the quick reactions are open.
+  let picking = $state(false);
 
   // The sender's homeserver sets this time; a value no date can show is left out.
   const date = $derived(toDate(time));
@@ -47,8 +59,13 @@
       {#if edited}
         <span class="edited">(edited)</span>
       {/if}
-      {#if onreply || onedit || ondelete}
+      {#if onreply || onedit || ondelete || onreact}
         <span class="message-actions">
+          {#if onreact}
+            <button type="button" class="link" aria-expanded={picking} onclick={() => (picking = !picking)}>
+              React <span class="visually-hidden">to <bdi>{name}</bdi></span>
+            </button>
+          {/if}
           {#if onreply}
             <button type="button" class="link" onclick={onreply}>
               Reply <span class="visually-hidden">to <bdi>{name}</bdi></span>
@@ -75,5 +92,38 @@
       </p>
     {/if}
     <p dir="auto">{body}</p>
+    {#if picking && onreact}
+      <div class="quick-reactions" role="group" aria-label="Quick reactions">
+        {#each QUICK_REACTIONS as key (key)}
+          <button
+            type="button"
+            class="reaction"
+            aria-label={'React with ' + key}
+            onclick={() => {
+              picking = false;
+              onreact(key);
+            }}>{key}</button
+          >
+        {/each}
+      </div>
+    {/if}
+    {#if reactions.length > 0}
+      <div class="reactions" role="group" aria-label="Reactions">
+        {#each reactions as reaction (reaction.key)}
+          <button
+            type="button"
+            class="reaction"
+            class:mine={reaction.mine !== null}
+            aria-pressed={reaction.mine !== null}
+            disabled={reaction.mine !== null ? !onunreact : !onreact}
+            onclick={() =>
+              reaction.mine !== null ? onunreact?.(reaction.mine) : onreact?.(reaction.key)}
+          >
+            <bdi>{reaction.key}</bdi>
+            <span class="count">{reaction.count}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
 </article>

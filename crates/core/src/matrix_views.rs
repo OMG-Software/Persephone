@@ -18,7 +18,9 @@
 //!   ACL and version are `state` items (`state_change`): who joined or was
 //!   removed, and who changed what, matters most in an encrypted room. A
 //!   change of picture alone, a redacted state event, and other state are not
-//!   shown. Reactions and other non-message events are not shown.
+//!   shown. A reaction is a `reaction` item naming the event it reacts to,
+//!   with its key projected like a name; other non-message events are not
+//!   shown.
 //! * An edit (`m.replace`) of a text message is an `edit` item only when its
 //!   sender sent the edited message, compared by full user ID: anyone can
 //!   send an edit naming someone else's message. The edited message's sender
@@ -243,6 +245,21 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
         Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
             SyncMessageLikeEvent::Original(message),
         ))) => message,
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(
+            SyncMessageLikeEvent::Original(reaction),
+        ))) => {
+            let key = project_name(&reaction.content.relates_to.key);
+            if key.trim().is_empty() {
+                return None;
+            }
+            return Some(TimelineItem::Reaction {
+                event_id,
+                sender,
+                origin_server_ts,
+                reacts_to: reaction.content.relates_to.event_id.to_string(),
+                key,
+            });
+        }
         Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(
             SyncRoomRedactionEvent::Original(redaction),
         ))) => {
@@ -886,6 +903,33 @@ mod tests {
             "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
         })));
         assert!(reaction.is_none(), "{reaction:?}");
+    }
+
+    /// GIVEN reactions with a normal, a hostile and an empty key WHEN
+    /// projected THEN each names the event it reacts to with its key as
+    /// bounded, inert text, and one with nothing to show is left out.
+    #[test]
+    fn given_reactions_then_keys_are_projected_and_empty_ones_dropped() {
+        let reaction = |key: &str| {
+            project(&raw_event(serde_json::json!({
+                "type": "m.reaction", "event_id": "$r", "sender": "@bob:example.org",
+                "origin_server_ts": 1,
+                "content": { "m.relates_to": {
+                    "rel_type": "m.annotation", "event_id": "$liked", "key": key
+                }},
+            })))
+        };
+        let Some(TimelineItem::Reaction { reacts_to, key, .. }) = reaction("👍") else {
+            panic!("a reaction");
+        };
+        assert_eq!((reacts_to.as_str(), key.as_str()), ("$liked", "👍"));
+        let hostile = format!("\u{202E}<b>{}", "x".repeat(300));
+        let Some(TimelineItem::Reaction { key, .. }) = reaction(&hostile) else {
+            panic!("a reaction");
+        };
+        assert!(!key.contains('\u{202E}'));
+        assert!(key.chars().count() <= crate::views::MAX_DISPLAY_NAME_CHARS + 1);
+        assert!(reaction("   ").is_none());
     }
 
     /// GIVEN a deletion, in the old form (`redacts` beside the content) and

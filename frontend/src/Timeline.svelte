@@ -30,7 +30,9 @@
     onreply,
     ownUserId = null,
     onedit,
-    ondelete
+    ondelete,
+    onreact,
+    onunreact
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -61,10 +63,15 @@
     // Asks to delete one of this account's messages; absent where deleting
     // is not offered.
     ondelete?: (eventId: string) => void;
+    // Reacts to a message, or takes back this account's reaction by its
+    // event; absent where reacting is not offered.
+    onreact?: (eventId: string, key: string) => void;
+    onunreact?: (reactionEventId: string) => void;
   } = $props();
 
-  // Edits are not lines of their own: each message shows its newest edit.
-  const shown = $derived(applyRelations(items));
+  // Edits, deletions and reactions are not lines of their own: each message
+  // shows its newest edit and its reactions, or that it was deleted.
+  const shown = $derived(applyRelations(items, ownUserId));
 
   // Fixed text per trust level; the core sends codes only.
   const trustText: Record<string, string> = {
@@ -185,6 +192,9 @@
                 ondelete={ondelete && ownUserId !== null && item.sender === ownUserId
                   ? () => ondelete(item.event_id)
                   : undefined}
+                reactions={item.reactions ?? []}
+                onreact={onreact && ((key) => onreact(item.event_id, key))}
+                {onunreact}
               />
             {:else if item.kind === 'image'}
               <ImageMessage {roomId} {item} />

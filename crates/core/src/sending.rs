@@ -22,6 +22,9 @@
 //!   homeserver and finds it is this account's own text message, itself not
 //!   an edit; otherwise it fails as `rejected` and nothing is sent. It
 //!   carries the new text in `m.new_content`, and a `* ` fallback body.
+//! * A reaction goes through the same checks as a message, then is sent at
+//!   once (not through the outbox): it has no text to keep, and the user
+//!   can react again if it fails.
 //! * An image goes through the same checks, then the SDK's attachment send:
 //!   the SDK uploads it encrypted in an encrypted room (and fails rather than
 //!   upload it in plain), and sends the event with the image's size, MIME
@@ -39,7 +42,8 @@ use matrix_sdk::{
         EventId, OwnedTransactionId, RoomId, UInt,
         events::{
             AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
-            relation::{InReplyTo, Reply},
+            reaction::ReactionEventContent,
+            relation::{Annotation, InReplyTo, Reply},
             room::message::{self, MessageType, ReplacementMetadata, RoomMessageEventContent},
         },
     },
@@ -151,6 +155,26 @@ pub async fn send(
         .with_transaction_id(transaction_id)
         .await
     {
+        Ok(result) => SendOutcome::Sent(result.response.event_id.to_string()),
+        Err(error) => classify(&error),
+    }
+}
+
+/// Reacts to `event_id` in `room_id` with `key`, after the checks every
+/// message passes.
+pub async fn react(
+    client: &Client,
+    room_id: &str,
+    event_id: &EventId,
+    key: &str,
+    consented: bool,
+) -> SendOutcome {
+    let room = match checked_room(client, room_id, consented).await {
+        Ok(room) => room,
+        Err(outcome) => return outcome,
+    };
+    let content = ReactionEventContent::new(Annotation::new(event_id.to_owned(), key.to_owned()));
+    match room.send(content).await {
         Ok(result) => SendOutcome::Sent(result.response.event_id.to_string()),
         Err(error) => classify(&error),
     }

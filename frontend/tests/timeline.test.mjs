@@ -114,3 +114,28 @@ test('GIVEN deletions WHEN applied THEN deleted messages show as deleted and edi
   assert.equal(shown[0].origin_server_ts, 5);
   assert.ok(!JSON.stringify(shown).includes('secret'));
 });
+
+test('GIVEN reactions WHEN applied THEN each key counts its senders once, mine is marked, and deleted ones drop out', async () => {
+  const { applyRelations, MAX_REACTION_KEYS } = await import('../src/timeline.ts');
+  const reaction = (id, sender, key, to = '$1') => ({
+    kind: 'reaction', event_id: id, sender, reacts_to: to, key, origin_server_ts: null
+  });
+  const items = [
+    { kind: 'message', event_id: '$1', sender: '@a:s', body: 'hi', origin_server_ts: null, reply_to: null },
+    reaction('$r1', '@b:s', '👍'),
+    reaction('$r2', '@c:s', '👍'),
+    reaction('$r3', '@b:s', '👍'),
+    reaction('$r4', '@me:s', '🎉'),
+    reaction('$r5', '@c:s', '😂'),
+    { kind: 'redaction', event_id: '$d', sender: '@c:s', redacts: '$r5', origin_server_ts: null }
+  ];
+  const [shown] = applyRelations(items, '@me:s');
+  assert.deepEqual(shown.reactions, [
+    { key: '👍', count: 2, mine: null },
+    { key: '🎉', count: 1, mine: '$r4' }
+  ]);
+  const many = Array.from({ length: 20 }, (_, n) => reaction(`$k${n}`, '@b:s', `k${n}`));
+  const [capped] = applyRelations([items[0], ...many]);
+  assert.equal(capped.reactions.length, MAX_REACTION_KEYS);
+  assert.equal(applyRelations(items).length, 1, 'reactions are not lines of their own');
+});

@@ -188,6 +188,18 @@ pub enum TimelineItem {
         replaces: String,
         body: String,
     },
+    /// A reaction (`m.reaction`) to the event `reacts_to`: `key`, usually an
+    /// emoji, projected like a name. Not shown as a line of its own; the
+    /// page counts reactions under the event they react to.
+    Reaction {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        reacts_to: String,
+        key: String,
+    },
     /// The deletion (redaction) of the event `redacts`. Not shown as a line
     /// of its own; the page shows that event, if loaded, as deleted. The
     /// homeserver decided whether `sender` may delete it.
