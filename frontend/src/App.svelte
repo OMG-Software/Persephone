@@ -26,6 +26,7 @@
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
   import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
+  import { OwnNameKeeper } from './ownName';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
   import {
@@ -460,20 +461,9 @@
   // The account's display name for its labels. With none set, or none read,
   // the labels show only the user ID.
   let ownName = $state<string | null>(null);
+  const ownNameKeeper = new OwnNameKeeper(displayName, (name) => (ownName = name));
   $effect(() => {
-    const userId = signedIn ? status?.account.userId : null;
-    ownName = null;
-    if (!userId) return;
-    let current = true;
-    displayName().then(
-      (name) => {
-        if (current) ownName = name.displayName;
-      },
-      () => {}
-    );
-    return () => {
-      current = false;
-    };
+    ownNameKeeper.account((signedIn ? status?.account.userId : null) ?? null);
   });
 
   // A conversation was started or found: show it in the list and open it.
@@ -1442,7 +1432,10 @@
     >
       {#if settingsTab === 'profile'}
         {#if signedIn && status.account.userId}
-          <ProfileSettings userId={status.account.userId} onsaved={(name) => (ownName = name)} />
+          <ProfileSettings
+            userId={status.account.userId}
+            onsaved={(userId, name) => ownNameKeeper.saved(userId, name)}
+          />
         {:else}
           <section class="settings-page" aria-labelledby="profile-heading">
             <h2 id="profile-heading">Profile</h2>

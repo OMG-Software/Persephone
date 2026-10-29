@@ -10,8 +10,9 @@
     onsaved = () => {}
   }: {
     userId: string;
-    // The name now set, or null when none is.
-    onsaved?: (name: string | null) => void;
+    // The account the save was made for, and the name now set, or null when
+    // none is. The account may have changed while the save was running.
+    onsaved?: (userId: string, name: string | null) => void;
   } = $props();
 
   // The core's limit, in bytes; this length is only a first stop.
@@ -54,6 +55,7 @@
   async function save(event: SubmitEvent) {
     event.preventDefault();
     if (saving || !changed) return;
+    const account = userId;
     saving = true;
     saved = false;
     failure = null;
@@ -61,7 +63,7 @@
       current = (await setDisplayName(name)).displayName;
       name = current ?? '';
       saved = true;
-      onsaved(current);
+      onsaved(account, current);
     } catch (reason) {
       failure = failures[String(reason)] ?? 'That did not work.';
     } finally {
