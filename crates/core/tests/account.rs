@@ -10,7 +10,7 @@ use persephone_contracts::{
     TimelinePage,
 };
 use persephone_core::{
-    Core, IDLE_CHECK, ServeEnd,
+    Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
     credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
     serve,
     session::AdmissionError,
@@ -1168,6 +1168,17 @@ impl std::io::Read for QuietUi {
     }
 }
 
+/// Locks the session when dropped, also when the test fails first. Locking
+/// stops the sync loop, which would otherwise go on polling the mock server
+/// after wiremock hands it to another test.
+struct LockOnDrop<'a>(&'a Core);
+
+impl Drop for LockOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.session().lock(LOCK_TIMEOUT, || {});
+    }
+}
+
 /// GIVEN a signed-in account and a connected UI WHEN the homeserver ends the
 /// session (it refuses the token without soft logout, and again when asked
 /// once more) THEN the core deletes the key at once, without waiting for the
@@ -1180,6 +1191,7 @@ fn given_the_homeserver_ends_the_session_then_the_profile_is_deleted_and_the_nex
     let dir = TempDir::new().unwrap();
     {
         let core = signed_in_core(&server, dir.path());
+        let _locked = LockOnDrop(&core);
         wait_for("the first sync", || {
             server.requests_to("/_matrix/client/v3/sync") > 0
         });
@@ -1252,6 +1264,7 @@ fn given_a_soft_logout_then_the_profile_is_kept() {
     let server = Homeserver::signed_in();
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
+    let _locked = LockOnDrop(&core);
     server.refuse_token(true, true);
     wait_for("a refused round", || {
         core.session().account_status().error == Some(SignInError::SyncFailed)
@@ -1268,9 +1281,6 @@ fn given_a_soft_logout_then_the_profile_is_kept() {
         core.session().account_status().state,
         AccountState::SignedIn
     );
-    // Stops the sync loop: the mock server goes back to a shared pool.
-    let state: StoreState = value(call(&core, Call::LockSession {}));
-    assert_eq!(state, StoreState::RestartRequired);
 }
 
 /// GIVEN a sync round refused as if the session ended WHEN a second request
@@ -1280,6 +1290,7 @@ fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_ke
     let server = Homeserver::signed_in();
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
+    let _locked = LockOnDrop(&core);
     server.refuse_token(false, false);
     wait_for("the second request", || {
         server.requests_to("/_matrix/client/v3/account/whoami") > 0
@@ -1296,9 +1307,6 @@ fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_ke
         core.session().account_status().error,
         Some(SignInError::SyncFailed)
     );
-    // Stops the sync loop: the mock server goes back to a shared pool.
-    let state: StoreState = value(call(&core, Call::LockSession {}));
-    assert_eq!(state, StoreState::RestartRequired);
 }
 
 /// GIVEN one sync round in which the homeserver ends the session, confirmed
@@ -1309,6 +1317,7 @@ fn given_one_round_that_ends_the_session_then_a_good_round_keeps_the_profile() {
     let server = Homeserver::signed_in();
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
+    let _locked = LockOnDrop(&core);
     wait_for("the first sync", || {
         server.requests_to("/_matrix/client/v3/sync") > 0
     });
@@ -1325,9 +1334,6 @@ fn given_one_round_that_ends_the_session_then_a_good_round_keeps_the_profile() {
     assert!(dir.path().join("store-key.v2").exists());
     let status = core.session().account_status();
     assert_eq!((status.state, status.error), (AccountState::SignedIn, None));
-    // Stops the sync loop: the mock server goes back to a shared pool.
-    let state: StoreState = value(call(&core, Call::LockSession {}));
-    assert_eq!(state, StoreState::RestartRequired);
 }
 
 #[test]
