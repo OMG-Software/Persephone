@@ -148,6 +148,15 @@ p { margin: 0 0 12px; }
 .flow-label { fill: var(--text); font: 11.5px var(--mono); text-anchor: middle; }
 .flow-label.start { text-anchor: start; }
 
+/* Screenshots */
+.shots { display: grid; grid-template-columns: minmax(0, 1fr); gap: 40px; }
+.shots figure { margin: 0; }
+.shots img {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.shots figcaption { color: var(--muted); font: 12.5px/1.7 var(--mono); margin-top: 12px; }
+
 /* Roadmap */
 .roadmap { list-style: none; padding: 0; margin: 0; display: grid; gap: 0; border-top: 1px solid var(--border); }
 .roadmap li {
