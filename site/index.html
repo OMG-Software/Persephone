@@ -21,6 +21,7 @@
         <span>Persephone</span>
       </a>
       <nav aria-label="Sections">
+        <a href="#screenshots">Screenshots</a>
         <a href="#security">Security</a>
         <a href="#architecture">Architecture</a>
         <a href="#roadmap">Roadmap</a>
@@ -59,9 +60,29 @@
       </div>
     </section>
 
+    <section id="screenshots">
+      <div class="wrap">
+        <p class="eyebrow">01 / Screenshots</p>
+        <h2>The app today</h2>
+        <p class="section-lede">A Windows development build in its demo mode, which shows synthetic rooms and stores nothing. The design can change before the first release.</p>
+        <div class="shots">
+          <figure>
+            <img src="screenshots/room-history.png" width="1266" height="793" loading="lazy"
+              alt="The Persephone window. The room list is on the left and the Project planning room is selected. Its message history shows alternating notes from Alice and Bob below a New messages marker.">
+            <figcaption>Room list and message history.</figcaption>
+          </figure>
+          <figure>
+            <img src="screenshots/hostile-content.png" width="1266" height="793" loading="lazy"
+              alt="A test room whose name is an HTML image tag. Its messages contain a script tag, a javascript: link, a right-to-left override, control characters and a very long body. Each one shows as plain text.">
+            <figcaption>Hostile names and messages stay inert text: no markup renders, and no link or script runs.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
     <section id="scope">
       <div class="wrap">
-        <p class="eyebrow">01 / Scope</p>
+        <p class="eyebrow">02 / Scope</p>
         <h2>What the first release is meant to do</h2>
         <ul class="grid four">
           <li><h3>One account</h3><p>Sign-in to a single Matrix account with a password. Other login methods are not decided yet.</p></li>
@@ -78,7 +99,7 @@
 
     <section id="security">
       <div class="wrap">
-        <p class="eyebrow">02 / Security</p>
+        <p class="eyebrow">03 / Security</p>
         <h2>Security approach</h2>
         <p class="section-lede">The design assumes a capable adversary who may target one user directly. Most of these controls are built and tested on Windows; Linux and macOS are in progress, and none has had an independent review.</p>
         <div class="grid two">
@@ -121,7 +142,7 @@
 
     <section id="architecture">
       <div class="wrap">
-        <p class="eyebrow">03 / Architecture</p>
+        <p class="eyebrow">04 / Architecture</p>
         <h2>Architecture</h2>
         <p class="section-lede">Three trust zones. Arrows are the only paths data takes.</p>
         <figure class="diagram">
@@ -171,7 +192,7 @@
 
     <section id="roadmap">
       <div class="wrap">
-        <p class="eyebrow">04 / Roadmap</p>
+        <p class="eyebrow">05 / Roadmap</p>
         <h2>Roadmap</h2>
         <p class="section-lede">Work on several milestones runs at once, but each is complete only when it meets its own security and compatibility goals on every platform. No milestone is complete yet, and there are no dates.</p>
         <ol class="roadmap">
@@ -189,7 +210,7 @@
 
     <section id="progress">
       <div class="wrap">
-        <p class="eyebrow">05 / Progress</p>
+        <p class="eyebrow">06 / Progress</p>
         <h2>Progress</h2>
         <p class="section-lede">As of 26 October 2026.</p>
         <div class="grid two">
@@ -213,7 +234,7 @@
 
     <section id="source">
       <div class="wrap">
-        <p class="eyebrow">06 / Source</p>
+        <p class="eyebrow">07 / Source</p>
         <h2>Source and licence</h2>
         <div class="grid two">
           <article>
