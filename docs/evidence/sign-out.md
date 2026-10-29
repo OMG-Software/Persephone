@@ -155,8 +155,8 @@ deletes the profile as for a sign-out.
   without a logout request, ends `restart_required` with `session_ended`
   well before the next idle check, and the next start is fresh and silent; a
   soft logout deletes nothing; a refusal that `whoami` does not confirm
-  deletes nothing; one confirmed round followed by a good one deletes
-  nothing; a password session whose refresh token is refused too ends (this
+  deletes nothing; a good round between two confirmed ones deletes nothing
+  (this test failed when a good round kept the count); a password session whose refresh token is refused too ends (this
   test failed with the refusal unrecognized).
 * **Limits**: starting fresh still needs a manual restart, as after any
   sign-out (ADR-0008 is proposed, not accepted). A server or proxy that

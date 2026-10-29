@@ -1324,31 +1324,38 @@ fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_ke
     );
 }
 
-/// GIVEN one sync round in which the homeserver ends the session, confirmed
-/// by `whoami`, WHEN the next round is accepted THEN nothing is deleted: the
-/// end must hold for two rounds in a row.
+/// GIVEN two sync rounds in which the homeserver ends the session, each
+/// confirmed by `whoami`, WHEN a good round comes between them THEN nothing
+/// is deleted: the end must hold for two rounds in a row.
 #[test]
-fn given_one_round_that_ends_the_session_then_a_good_round_keeps_the_profile() {
+fn given_a_good_round_between_two_that_end_the_session_then_the_profile_is_kept() {
     let server = Homeserver::signed_in();
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
     let _locked = LockOnDrop(&core);
+    let synced = || {
+        let status = core.session().account_status();
+        status.state == AccountState::SignedIn && status.error.is_none()
+    };
+    // Each status below is set only after its round, `whoami` included, has
+    // been handled.
+    let refused = || core.session().account_status().error == Some(SignInError::SyncFailed);
     wait_for("the first sync", || {
         server.requests_to("/_matrix/client/v3/sync") > 0
     });
     server.refuse_token_once();
-    wait_for("the refused round", || {
-        server.requests_to("/_matrix/client/v3/account/whoami") > 0
-    });
-    let rounds = server.requests_to("/_matrix/client/v3/sync");
-    wait_for("two more rounds", || {
-        server.requests_to("/_matrix/client/v3/sync") > rounds + 1
-    });
+    wait_for("the first refused round", refused);
+    wait_for("a good round", synced);
+    server.refuse_token_once();
+    wait_for("the second refused round", refused);
+    assert_eq!(
+        server.requests_to("/_matrix/client/v3/account/whoami"),
+        2,
+        "both refusals were confirmed"
+    );
     assert!(!core.session().has_ended());
     assert!(!core.finish_ended_session());
     assert!(dir.path().join("store-key.v2").exists());
-    let status = core.session().account_status();
-    assert_eq!((status.state, status.error), (AccountState::SignedIn, None));
 }
 
 /// GIVEN a password session that holds a refresh token WHEN the homeserver
