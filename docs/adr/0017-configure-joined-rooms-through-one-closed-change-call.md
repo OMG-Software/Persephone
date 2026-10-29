@@ -44,6 +44,14 @@ keeps the page's surface small and explicit without a generic capability.
   every power level Persephone shows, this account's level, and what it may
   change by the SDK's power-level rules. The permissions are hints; the
   homeserver decides.
+* The power levels, join rule, history visibility, guest access and topic
+  come from the device's synced state. When this device has not synced one
+  of them, the core asks the homeserver for that one state event. A Sliding
+  Sync server need not resend old state that the list asks for only after it
+  first sent the room. A refusal is `rejected`, no answer is `unavailable`,
+  and invalid power levels are `unavailable`. Only a room that the
+  homeserver says has no power levels (`M_NOT_FOUND`) gets the
+  specification's default levels.
 * `room_members` lists joined, invited, asking and banned members that match
   a filter, at most 100 and within the view budget, with per-member hints for
   remove, ban, unban and changing the level.
@@ -53,7 +61,7 @@ keeps the page's surface small and explicit without a generic capability.
   and published addresses, one power level, one member's level, remove, ban,
   unban, notification mode, and leave. Unknown kinds and fields fail to
   decode at the Tauri boundary and in the core.
-* A level change reads the latest synced power levels and replaces only the
+* A level change reads the power levels as above and replaces only the
   named entry. Published addresses the page was not shown are kept. A
   creator's unlimited level (room version 12) is not changed. Removing an
   address checks that it leads to this room first.
@@ -74,6 +82,9 @@ keeps the page's surface small and explicit without a generic capability.
 * Most settings are read from the device's synced state, so a change shows
   in a fresh read only after the next sync; the page shows it at once
   locally and reads again on the room's next change notification.
+* A room without a guest access event or topic costs one more request for
+  each on every settings read, as the device cannot tell an absent event
+  from one it has not synced.
 * Notification modes are kept on the homeserver, but Persephone does not show
   notifications yet; they apply to the account's other devices.
 * Making an encrypted room public lets anyone who joins receive keys for new
