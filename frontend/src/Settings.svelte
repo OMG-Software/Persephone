@@ -11,17 +11,21 @@
 
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import AccountText from './AccountText.svelte';
   import Icon from './Icon.svelte';
-  import { avatarColour, initials, localpart } from './people';
+  import { avatarColour, initials } from './people';
 
   let {
     userId,
+    ownName = null,
     tab,
     ontab,
     onback,
     children
   }: {
     userId: string | null;
+    // The account's display name, or null when none is set.
+    ownName?: string | null;
     tab: SettingsTab;
     ontab: (tab: SettingsTab) => void;
     onback: () => void;
@@ -45,10 +49,7 @@
     {#if userId}
       <div class="settings-account">
         <span class="avatar small {avatarColour(userId)}" aria-hidden="true">{initials(userId)}</span>
-        <div class="account-text">
-          <bdi class="account-name">{localpart(userId)}</bdi>
-          <bdi class="account-id">{userId}</bdi>
-        </div>
+        <AccountText {userId} name={ownName} />
       </div>
     {/if}
     <nav aria-label="Settings">

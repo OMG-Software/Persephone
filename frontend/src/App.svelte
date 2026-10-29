@@ -26,6 +26,7 @@
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
   import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
+  import { OwnNameKeeper } from './ownName';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
   import {
@@ -43,6 +44,7 @@
     appStatus,
     discardImage,
     discardMessage,
+    displayName,
     pickImage,
     sendImage,
     lockSession,
@@ -454,6 +456,14 @@
   $effect(() => {
     if (signedIn) settingsKeeper.load();
     else settingsKeeper.clear();
+  });
+
+  // The account's display name for its labels. With none set, or none read,
+  // the labels show only the user ID.
+  let ownName = $state<string | null>(null);
+  const ownNameKeeper = new OwnNameKeeper(displayName, (name) => (ownName = name));
+  $effect(() => {
+    ownNameKeeper.account((signedIn ? status?.account.userId : null) ?? null);
   });
 
   // A conversation was started or found: show it in the list and open it.
@@ -1415,13 +1425,17 @@
   {:else if shellOpen && view === 'settings'}
     <Settings
       userId={signedIn ? status.account.userId : null}
+      {ownName}
       tab={settingsTab}
       ontab={(tab) => (settingsTab = tab)}
       onback={closeSettings}
     >
       {#if settingsTab === 'profile'}
         {#if signedIn && status.account.userId}
-          <ProfileSettings userId={status.account.userId} />
+          <ProfileSettings
+            userId={status.account.userId}
+            onsaved={(userId, name) => ownNameKeeper.saved(userId, name)}
+          />
         {:else}
           <section class="settings-page" aria-labelledby="profile-heading">
             <h2 id="profile-heading">Profile</h2>
@@ -1570,6 +1584,7 @@
         {rooms}
         {selected}
         userId={signedIn ? status.account.userId : null}
+        {ownName}
         {shortcut}
         onselect={open}
         onsearch={() => (paletteOpen = rooms !== null)}

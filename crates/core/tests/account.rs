@@ -4,10 +4,11 @@
 #![cfg(feature = "dev-disposable-servers")]
 
 use persephone_contracts::{
-    AccountState, AccountStatus, ContactStatus, ContactTrust, IdentityState, NoticeKind,
-    PendingMessage, PendingState, RoomEncryption, RoomIdentityChanges, RoomList, SecurityError,
-    SecurityOperation, SecurityStatus, SendFailure, SignInError, StoreState, TimelineItem,
-    TimelinePage,
+    AccountState, AccountStatus, ContactStatus, ContactTrust, DisplayName, HistoryVisibility,
+    IdentityState, JoinRule, LevelKey, Membership, NoticeKind, PendingMessage, PendingState,
+    PowerLevel, RoomEncryption, RoomIdentityChanges, RoomList, RoomMembers, RoomSettings,
+    SecurityError, SecurityOperation, SecurityStatus, SendFailure, SignInError, StoreState,
+    TimelineItem, TimelinePage,
 };
 use persephone_core::{
     Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
@@ -39,6 +40,7 @@ const ROOM: &str = "!room:synthetic.test";
 const USER: &str = "@alice:synthetic.test";
 const TOKEN: &str = "syt_synthetic_access_token_7Q2";
 const PASSWORD: &str = "synthetic-password-K8";
+const ALIAS: &str = "#synthetic:synthetic.test";
 
 /// Answers the prompts with fixed values, counts how often each was asked and
 /// keeps the recovery key it is shown.
@@ -113,13 +115,59 @@ impl CredentialSource for Fixed {
     }
 }
 
+/// The full state of `ROOM`, a room version 11 room (Matrix v1.19): its
+/// `m.room.create` has no `creator`, the sender is the creator. The join
+/// rule, history setting and levels differ from the defaults a client
+/// assumes without them, so a test can tell they arrived.
 fn room_state() -> Value {
     json!([
-        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$create","origin_server_ts":1,"content":{"creator":USER,"room_version":"11"}},
+        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$create","origin_server_ts":1,"content":{"room_version":"11"}},
         {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}},
-        {"type":"m.room.name","state_key":"","sender":USER,"event_id":"$name","origin_server_ts":3,"content":{"name":"Synthetic <b>room</b>"}},
-        {"type":"m.room.encryption","state_key":"","sender":USER,"event_id":"$encryption","origin_server_ts":4,"content":{"algorithm":"m.megolm.v1.aes-sha2"}}
+        {"type":"m.room.power_levels","state_key":"","sender":USER,"event_id":"$levels","origin_server_ts":3,"content":{"users":{USER:100},"users_default":0,"events":{"m.room.name":50,"m.room.power_levels":100},"events_default":0,"state_default":50,"ban":50,"kick":50,"redact":50,"invite":0}},
+        {"type":"m.room.join_rules","state_key":"","sender":USER,"event_id":"$rules","origin_server_ts":4,"content":{"join_rule":"public"}},
+        {"type":"m.room.history_visibility","state_key":"","sender":USER,"event_id":"$history","origin_server_ts":5,"content":{"history_visibility":"joined"}},
+        {"type":"m.room.name","state_key":"","sender":USER,"event_id":"$name","origin_server_ts":6,"content":{"name":"Synthetic <b>room</b>"}},
+        {"type":"m.room.topic","state_key":"","sender":USER,"event_id":"$topic","origin_server_ts":7,"content":{"topic":"Synthetic topic"}},
+        {"type":"m.room.encryption","state_key":"","sender":USER,"event_id":"$encryption","origin_server_ts":8,"content":{"algorithm":"m.megolm.v1.aes-sha2"}}
     ])
+}
+
+/// Whether a Sliding Sync `required_state` entry (`[type, state_key]`) asks
+/// for `event`; `*` matches any, `$ME` is this account.
+fn requested(entry: &Value, event: &Value) -> bool {
+    let kind = entry[0].as_str().unwrap_or_default();
+    let key = match entry[1].as_str().unwrap_or_default() {
+        "$ME" => USER,
+        key => key,
+    };
+    (kind == "*" || event["type"] == kind) && (key == "*" || event["state_key"] == key)
+}
+
+/// Native Sliding Sync (MSC4186, which Matrix v1.19 does not include) like a
+/// server answers it: `ROOM` carries only the state that the request's list
+/// asks for, as the SDK sends that list with every request.
+struct SlidingRoom;
+
+impl wiremock::Respond for SlidingRoom {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+        let wanted = body["lists"]["rooms"]["required_state"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let state: Vec<Value> = room_state()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| wanted.iter().any(|entry| requested(entry, event)))
+            .cloned()
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "pos":"sliding-pos","lists":{"rooms":{"count":1}},
+            "rooms":{ROOM:{"initial":true,"joined_count":1,"invited_count":0,"required_state":state,"timeline":[text("$live","live")],"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
+            "extensions":{"e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},"to_device":{"events":[],"next_batch":"to-device-pos"}}
+        }))
+    }
 }
 
 fn text(id: &str, body: &str) -> Value {
@@ -134,17 +182,47 @@ fn edit_of(id: &str, sender: &str, replaces: &str, body: &str) -> Value {
     }})
 }
 
-/// History, newest first as `/messages` backward returns it. `$text` has an
-/// edit by its sender and a forged one by someone else.
+/// `events` with the `room_id` that Matrix v1.19 requires of a ClientEvent,
+/// as `/messages` and `/members` return them (sync leaves it out).
+fn in_room(room_id: &str, mut events: Value) -> Value {
+    for event in events.as_array_mut().unwrap() {
+        event["room_id"] = json!(room_id);
+    }
+    events
+}
+
+/// History of `ROOM`, newest first as `/messages` backward returns it.
+/// `$text` has an edit by its sender and a forged one by someone else.
 fn history() -> Value {
-    json!([
-        edit_of("$forged", "@mallory:synthetic.test", "$text", "I agree to everything"),
-        edit_of("$edit", USER, "$text", "Hello, corrected"),
-        text("$text", "Hello from <script>alert(1)</script>"),
-        {"type":"m.room.message","sender":USER,"event_id":"$image","origin_server_ts":9,"content":{"msgtype":"m.image","body":"cat.png","url":"mxc://synthetic.test/cat"}},
-        {"type":"m.room.encrypted","sender":USER,"event_id":"$secret","origin_server_ts":8,"content":{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK","device_id":"OTHER","sender_key":"c2VuZGVyLWtleQ","session_id":"c2Vzc2lvbi1pZA"}},
-        {"type":"m.reaction","sender":USER,"event_id":"$reaction","origin_server_ts":7,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$text","key":"+1"}}}
-    ])
+    in_room(
+        ROOM,
+        json!([
+            edit_of("$forged", "@mallory:synthetic.test", "$text", "I agree to everything"),
+            edit_of("$edit", USER, "$text", "Hello, corrected"),
+            text("$text", "Hello from <script>alert(1)</script>"),
+            {"type":"m.room.message","sender":USER,"event_id":"$image","origin_server_ts":9,"content":{"msgtype":"m.image","body":"cat.png","url":"mxc://synthetic.test/cat"}},
+            {"type":"m.room.encrypted","sender":USER,"event_id":"$secret","origin_server_ts":8,"content":{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK","device_id":"OTHER","sender_key":"c2VuZGVyLWtleQ","session_id":"c2Vzc2lvbi1pZA"}},
+            {"type":"m.reaction","sender":USER,"event_id":"$reaction","origin_server_ts":7,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$text","key":"+1"}}}
+        ]),
+    )
+}
+
+/// A `/members` answer with these member events in the requested room.
+struct Members(Value);
+
+impl wiremock::Respond for Members {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        // `/_matrix/client/v3/rooms/{roomId}/members`
+        let room_id = request
+            .url
+            .path_segments()
+            .and_then(|mut segments| segments.nth(4))
+            .unwrap_or_default()
+            .replace("%21", "!")
+            .replace("%3A", ":");
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"chunk": in_room(&room_id, self.0.clone())}))
+    }
 }
 
 /// Classic sync like a live room: each response has a new batch token and a
@@ -175,7 +253,7 @@ fn group_state() -> Value {
 
 fn dm_state() -> Value {
     json!([
-        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$dcreate","origin_server_ts":1,"content":{"creator":USER,"room_version":"11"}},
+        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$dcreate","origin_server_ts":1,"content":{"room_version":"11"}},
         {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$djoin","origin_server_ts":2,"content":{"membership":"join"}},
         {"type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$dbob","origin_server_ts":3,"content":{"membership":"join"}},
         {"type":"m.room.encryption","state_key":"","sender":USER,"event_id":"$dencryption","origin_server_ts":4,"content":{"algorithm":"m.megolm.v1.aes-sha2"}}
@@ -187,7 +265,7 @@ const PLAIN: &str = "!zplain:synthetic.test";
 
 fn plain_state() -> Value {
     json!([
-        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$pcreate","origin_server_ts":1,"content":{"creator":USER,"room_version":"11"}},
+        {"type":"m.room.create","state_key":"","sender":USER,"event_id":"$pcreate","origin_server_ts":1,"content":{"room_version":"11"}},
         {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$pjoin","origin_server_ts":2,"content":{"membership":"join"}}
     ])
 }
@@ -227,10 +305,11 @@ impl Homeserver {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let server = runtime.block_on(async {
             let server = MockServer::start().await;
+            // A Matrix v1.19 homeserver; Sliding Sync is an unstable feature.
             let versions = if sliding {
-                json!({"versions":["v1.15"],"unstable_features":{"org.matrix.simplified_msc3575":true}})
+                json!({"versions":["v1.19"],"unstable_features":{"org.matrix.simplified_msc3575":true}})
             } else {
-                json!({"versions":["v1.11"]})
+                json!({"versions":["v1.19"]})
             };
             Mock::given(method("GET"))
                 .and(path("/_matrix/client/versions"))
@@ -272,11 +351,7 @@ impl Homeserver {
                 .await;
             Mock::given(method("POST"))
                 .and(path("/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "pos":"sliding-pos","lists":{"rooms":{"count":1,"ops":[{"op":"SYNC","range":[0,0],"room_ids":[ROOM]}]}},
-                    "rooms":{ROOM:{"initial":true,"joined_count":1,"invited_count":0,"required_state":room_state(),"timeline":[text("$live","live")],"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
-                    "extensions":{"e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},"to_device":{"events":[],"next_batch":"to-device-pos"}}
-                })))
+                .respond_with(SlidingRoom)
                 .mount(&server)
                 .await;
             Mock::given(method("GET"))
@@ -308,6 +383,21 @@ impl Homeserver {
                 .with_priority(1)
                 .mount(&self.server)
                 .await;
+            // Another password fails the step: the same answer with the
+            // error (Matrix v1.19, user-interactive authentication).
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/keys/device_signing/upload"))
+                .and(body_partial_json(json!({"auth": {}})))
+                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                    "errcode": "M_FORBIDDEN",
+                    "error": "Invalid password",
+                    "flows": [{"stages": ["m.login.password"]}],
+                    "params": {},
+                    "session": "uia-session-1"
+                })))
+                .with_priority(2)
+                .mount(&self.server)
+                .await;
             Mock::given(method("POST"))
                 .and(path("/_matrix/client/v3/keys/device_signing/upload"))
                 .respond_with(ResponseTemplate::new(401).set_body_json(json!({
@@ -315,6 +405,7 @@ impl Homeserver {
                     "params": {},
                     "session": "uia-session-1"
                 })))
+                .with_priority(3)
                 .mount(&self.server)
                 .await;
             Mock::given(method("POST"))
@@ -400,9 +491,9 @@ impl Homeserver {
                 .await;
             Mock::given(method("GET"))
                 .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": [
+                .respond_with(Members(json!([
                     {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$m","origin_server_ts":2,"content":{"membership":"join"}}
-                ]})))
+                ])))
                 .mount(&self.server)
                 .await;
             Mock::given(method("PUT"))
@@ -434,14 +525,74 @@ impl Homeserver {
                 .await;
             Mock::given(method("GET"))
                 .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]*dm[^/]*/members$"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunk": [
+                .respond_with(Members(json!([
                     {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$djoin","origin_server_ts":2,"content":{"membership":"join"}},
                     {"type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$dbob","origin_server_ts":3,"content":{"membership":"join"}}
-                ]})))
+                ])))
                 .with_priority(1)
                 .mount(&self.server)
                 .await;
         });
+    }
+
+    /// The requests the room settings make besides synced state, answered
+    /// as Matrix v1.19 specifies: `ROOM` is not in the public directory, has
+    /// the local alias `ALIAS`, and `CONTACT` is invited.
+    fn settings_endpoints(&self) {
+        self.runtime.block_on(async {
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/directory/list/room/[^/]+$"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"visibility": "private"})),
+                )
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/aliases$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"aliases": [ALIAS]})))
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+                .respond_with(Members(json!([
+                    {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}},
+                    {"type":"m.room.member","state_key":CONTACT,"sender":USER,"event_id":"$invite","origin_server_ts":9,"content":{"membership":"invite"}}
+                ])))
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Answers the next `method` request for this account's display name
+    /// with `status` and `body`.
+    fn display_name_answers(&self, method_name: &str, status: u16, body: Value) {
+        self.runtime.block_on(
+            Mock::given(method(method_name))
+                .and(path_regex(
+                    r"^/_matrix/client/v3/profile/[^/]+/displayname$",
+                ))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .up_to_n_times(1)
+                .mount(&self.server),
+        );
+    }
+
+    /// Requests of `method` to this account's display name, in order.
+    fn display_name_requests(&self, method_name: &str) -> Vec<Value> {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == method_name
+                    && request
+                        .url
+                        .path()
+                        .starts_with("/_matrix/client/v3/profile/")
+                    && request.url.path().ends_with("/displayname")
+            })
+            .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+            .collect()
     }
 
     /// Answers sends with 200 from now on.
@@ -640,6 +791,20 @@ fn sign_in(core: &Core, homeserver: &str) -> AccountStatus {
             homeserver: homeserver.into(),
         },
     ))
+}
+
+/// A core signed in to `server`, once `ROOM` is listed with its name.
+fn core_with_room(server: &Homeserver, dir: &Path) -> Core {
+    let core = make_core(dir, Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    // The SDK lists a room before it has computed its name; wait for both.
+    wait_for("the room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .first()
+            .is_some_and(|room| room.display_name.is_some())
+    });
+    core
 }
 
 fn files_contain(root: &Path, needle: &[u8]) -> Vec<String> {
@@ -947,6 +1112,141 @@ fn given_native_sliding_sync_then_it_is_used_and_rooms_arrive() {
     );
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN `ROOM`'s state from Sliding Sync (`sliding`) or classic sync WHEN
+/// its settings and members are read THEN they show the room's own levels,
+/// join rule, history setting and topic, not the defaults a client assumes
+/// without them.
+fn settings_come_from_the_room_state(sliding: bool) {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        sliding,
+        true,
+    );
+    server.settings_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = core_with_room(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+
+    let settings: RoomSettings = value(call(
+        &core,
+        Call::RoomSettings {
+            room_id: ROOM.into(),
+        },
+    ));
+    assert_eq!(settings.join_rule, JoinRule::Public);
+    assert_eq!(settings.history_visibility, HistoryVisibility::Joined);
+    assert_eq!(settings.topic.as_deref(), Some("Synthetic topic"));
+    assert_eq!(settings.own_level.map(PowerLevel::get), Some(100));
+    let level = |key| {
+        settings
+            .levels
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| entry.level.get())
+    };
+    assert_eq!(level(LevelKey::PowerLevels), Some(100));
+    assert_eq!(level(LevelKey::Name), Some(50));
+    // No entry of its own: the state default.
+    assert_eq!(level(LevelKey::Topic), Some(50));
+    assert!(settings.may.power_levels);
+    assert_eq!(settings.published, Some(false));
+    assert_eq!(settings.local_aliases, Some(vec![ALIAS.to_owned()]));
+
+    let members: RoomMembers = value(call(
+        &core,
+        Call::RoomMembers {
+            room_id: ROOM.into(),
+            filter: String::new(),
+        },
+    ));
+    let listed: Vec<_> = members
+        .members
+        .iter()
+        .map(|member| (member.user_id.as_str(), member.membership))
+        .collect();
+    assert_eq!(
+        listed,
+        [(USER, Membership::Join), (CONTACT, Membership::Invite)]
+    );
+}
+
+#[test]
+fn given_native_sliding_sync_then_room_settings_come_from_the_room_state() {
+    settings_come_from_the_room_state(true);
+}
+
+#[test]
+fn given_classic_sync_then_room_settings_come_from_the_room_state() {
+    settings_come_from_the_room_state(false);
+}
+
+/// GIVEN an account without a display name, which a Matrix v1.19
+/// homeserver answers with 404 `M_NOT_FOUND` WHEN the name is read THEN
+/// there is none, not a refusal. Setting one sends it, a blank one deletes
+/// the field, and a refusal is `rejected`. A 404 that is not `M_NOT_FOUND`,
+/// from a server without the endpoint, is a refusal: the name is not known.
+#[test]
+fn given_no_display_name_then_none_is_read_and_one_can_be_set() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = core_with_room(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+
+    server.display_name_answers(
+        "GET",
+        404,
+        json!({"errcode": "M_NOT_FOUND", "error": "Profile field not found"}),
+    );
+    let read: DisplayName = value(call(&core, Call::DisplayName {}));
+    assert_eq!(read.display_name, None);
+
+    server.display_name_answers("PUT", 200, json!({}));
+    let set: DisplayName = value(call(
+        &core,
+        Call::SetDisplayName {
+            name: "  Alice  ".into(),
+        },
+    ));
+    assert_eq!(set.display_name.as_deref(), Some("Alice"));
+    assert_eq!(
+        server.display_name_requests("PUT"),
+        [json!({"displayname": "Alice"})]
+    );
+
+    server.display_name_answers("GET", 200, json!({"displayname": "Alice"}));
+    let read: DisplayName = value(call(&core, Call::DisplayName {}));
+    assert_eq!(read.display_name.as_deref(), Some("Alice"));
+
+    // Matrix v1.16 and later remove a profile field with DELETE.
+    server.display_name_answers("DELETE", 200, json!({}));
+    let removed: DisplayName = value(call(&core, Call::SetDisplayName { name: " ".into() }));
+    assert_eq!(removed.display_name, None);
+    assert_eq!(server.display_name_requests("DELETE").len(), 1);
+
+    server.display_name_answers(
+        "PUT",
+        403,
+        json!({"errcode": "M_FORBIDDEN", "error": "Display names are managed elsewhere"}),
+    );
+    assert_eq!(
+        call(&core, Call::SetDisplayName { name: "Bob".into() }),
+        Outcome::Error(ErrorCode::Rejected)
+    );
+
+    server.display_name_answers(
+        "GET",
+        404,
+        json!({"errcode": "M_UNRECOGNIZED", "error": "Unrecognized request"}),
+    );
+    assert_eq!(
+        call(&core, Call::DisplayName {}),
+        Outcome::Error(ErrorCode::Rejected)
+    );
 }
 
 /// Discovery that fails is an error, not an absence. The SDK discovers the
@@ -2478,17 +2778,36 @@ fn given_image_events_then_load_image_fetches_decrypts_and_decodes_them() {
                 .mount(&server.server)
                 .await;
         }
-        for (media, body) in [
-            ("cat", JPEG.to_vec()),
-            ("secret", encrypted.clone()),
-            ("tampered", tampered),
-            ("huge", JPEG.to_vec()),
+        // Matrix v1.19 requires the content type and, since v1.12, the
+        // disposition: `inline` only for a type safe to show.
+        for (media, body, kind, disposition) in [
+            ("cat", JPEG.to_vec(), "image/jpeg", "inline"),
+            (
+                "secret",
+                encrypted.clone(),
+                "application/octet-stream",
+                "attachment",
+            ),
+            (
+                "tampered",
+                tampered,
+                "application/octet-stream",
+                "attachment",
+            ),
+            ("huge", JPEG.to_vec(), "image/jpeg", "inline"),
         ] {
             Mock::given(method("GET"))
                 .and(path(format!(
                     "/_matrix/client/v1/media/download/synthetic.test/{media}"
                 )))
-                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_raw(body, kind)
+                        .insert_header(
+                            "Content-Disposition",
+                            format!("{disposition}; filename=\"{media}\""),
+                        ),
+                )
                 .mount(&server.server)
                 .await;
         }
@@ -2611,14 +2930,14 @@ impl Homeserver {
     fn upload_endpoint(&self) {
         self.runtime.block_on(async {
             Mock::given(method("GET"))
-                .and(path_regex(r"^/_matrix/(media/v3|client/v1/media)/config$"))
+                .and(path("/_matrix/client/v1/media/config"))
                 .respond_with(
                     ResponseTemplate::new(200).set_body_json(json!({"m.upload.size": 52428800})),
                 )
                 .mount(&self.server)
                 .await;
             Mock::given(method("POST"))
-                .and(path_regex(r"^/_matrix/(media/v3|client/v1/media)/upload$"))
+                .and(path("/_matrix/media/v3/upload"))
                 .respond_with(
                     ResponseTemplate::new(200)
                         .set_body_json(json!({"content_uri": "mxc://synthetic.test/uploaded"})),

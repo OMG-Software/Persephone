@@ -1,10 +1,11 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import type { InviteList, RoomList as Rooms } from '../../crates/contracts/generated/contracts';
+  import AccountText from './AccountText.svelte';
   import Icon from './Icon.svelte';
   import Invites from './Invites.svelte';
   import RoomList from './RoomList.svelte';
-  import { avatarColour, initials, localpart } from './people';
+  import { avatarColour, initials } from './people';
 
   let {
     rooms,
@@ -12,6 +13,7 @@
     inviteBusy = null,
     selected,
     userId,
+    ownName = null,
     shortcut,
     onselect,
     onsearch,
@@ -31,6 +33,8 @@
     selected: string | null;
     // The signed-in account, or null for synthetic data.
     userId: string | null;
+    // The account's display name, or null when none is set.
+    ownName?: string | null;
     // The jump shortcut as this system writes it, such as "Ctrl K".
     shortcut: string;
     onselect: (roomId: string) => void;
@@ -98,10 +102,7 @@
   <div class="account-footer">
     {#if userId}
       <span class="avatar small {avatarColour(userId)}" aria-hidden="true">{initials(userId)}</span>
-      <div class="account-text">
-        <bdi class="account-name">{localpart(userId)}</bdi>
-        <bdi class="account-id">{userId}</bdi>
-      </div>
+      <AccountText {userId} name={ownName} />
     {:else}
       <span class="avatar small c3" aria-hidden="true">?</span>
       <div class="account-text">

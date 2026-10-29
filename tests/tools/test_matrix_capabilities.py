@@ -25,7 +25,7 @@ class _FakeHomeserver:
                 owner.paths.append((self.command, self.path))
                 if self.path == "/_matrix/client/versions":
                     body = json.dumps({
-                        "versions": ["v1.11"],
+                        "versions": ["v1.19"],
                         "unstable_features": {
                             "org.matrix.simplified_msc3575": True,
                             "org.matrix.msc4186": True,
@@ -162,7 +162,7 @@ class MatrixCapabilitiesGatewayTests(unittest.TestCase):
         gateway = self._gateway("discovery-wrong-type")
         with _request(gateway.origin + "/_matrix/client/versions") as response:
             payload = json.load(response)
-        self.assertEqual(payload["versions"], ["v1.11"])
+        self.assertEqual(payload["versions"], ["v1.19"])
         self.assertEqual(payload["unstable_features"]["org.matrix.simplified_msc3575"], "true")
         self.assertEqual(gateway.counts()["versions"], 1)
         self.assertEqual(self.upstream.paths, [])

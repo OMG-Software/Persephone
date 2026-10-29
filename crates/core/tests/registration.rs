@@ -89,7 +89,7 @@ impl Homeserver {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/_matrix/client/versions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"versions":["v1.11"]})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"versions":["v1.19"]})))
                 .mount(&server)
                 .await;
             Mock::given(method("GET"))
@@ -100,6 +100,14 @@ impl Homeserver {
                 .await;
             let unauthorized = |completed: Value| {
                 ResponseTemplate::new(401).set_body_json(json!({
+                    "flows": flows.clone(), "params": {}, "session": SESSION, "completed": completed
+                }))
+            };
+            // A step that failed: the same answer, with the error (Matrix
+            // v1.19, user-interactive authentication).
+            let failed = |completed: Value| {
+                ResponseTemplate::new(401).set_body_json(json!({
+                    "errcode": "M_UNAUTHORIZED", "error": "Invalid registration token",
                     "flows": flows.clone(), "params": {}, "session": SESSION, "completed": completed
                 }))
             };
@@ -127,8 +135,15 @@ impl Homeserver {
                 .await;
             Mock::given(method("POST"))
                 .and(path("/_matrix/client/v3/register"))
-                .respond_with(unauthorized(json!([])))
+                .and(body_partial_json(json!({"auth": {}})))
+                .respond_with(failed(json!([])))
                 .with_priority(3)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/register"))
+                .respond_with(unauthorized(json!([])))
+                .with_priority(4)
                 .mount(&server)
                 .await;
             for (p, body) in [

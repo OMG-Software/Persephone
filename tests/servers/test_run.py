@@ -17,11 +17,14 @@ class RegistrationTests(unittest.TestCase):
             calls.append(json.loads(json.dumps(body)))
             if "session" not in body["auth"]:
                 session = f"session-{body['username']}"
-                challenge = {"session": session}
+                # A Matrix v1.19 authentication challenge.
+                challenge = {
+                    "flows": [{"stages": ["m.login.registration_token"]}],
+                    "params": {}, "session": session}
                 raise HTTPError(
                     "http://127.0.0.1/register", 401, "UIA", {},
                     io.BytesIO(json.dumps(challenge).encode()))
-            return {"user_id": body["username"]}
+            return {"user_id": f"@{body['username']}:localhost"}
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
             output = Path(directory)

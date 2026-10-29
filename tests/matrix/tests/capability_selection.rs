@@ -16,7 +16,7 @@ const VERSIONS_PATH: &str = "/_matrix/client/versions";
 const NATIVE_SYNC_PATH: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
 
 fn capability(native: Option<bool>) -> Value {
-    let mut response = json!({ "versions": ["v1.15"] });
+    let mut response = json!({ "versions": ["v1.19"] });
     if let Some(enabled) = native {
         response["unstable_features"] = json!({
             "org.matrix.simplified_msc3575": enabled
@@ -208,7 +208,7 @@ async fn discovery_errors_never_select_an_engine_or_fall_back() -> Result<()> {
         (
             "wrong-feature-type",
             ResponseTemplate::new(200).set_body_json(json!({
-                "versions": ["v1.15"],
+                "versions": ["v1.19"],
                 "unstable_features": {"org.matrix.simplified_msc3575": "true"}
             })),
             None,
