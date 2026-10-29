@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-proxy-setting"
+description = "Enables the proxy_setting command without any pre-configured scope."
+commands.allow = ["proxy_setting"]
+
+[[permission]]
+identifier = "deny-proxy-setting"
+description = "Denies the proxy_setting command without any pre-configured scope."
+commands.deny = ["proxy_setting"]

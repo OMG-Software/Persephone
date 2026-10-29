@@ -23,6 +23,19 @@ use std::path::{Path, PathBuf};
 pub trait ImagePicker: Send + Sync {
     /// The chosen file, or `None` when the user cancelled.
     fn pick(&self) -> Result<Option<PathBuf>, ErrorCode>;
+
+    /// Any file to send (ADR-0029), or `None` when the user cancelled.
+    /// Unavailable unless the platform provides it.
+    fn pick_file(&self) -> Result<Option<PathBuf>, ErrorCode> {
+        Err(ErrorCode::Unavailable)
+    }
+
+    /// Where to save a received file, offering `suggested` as its name;
+    /// `None` when the user cancelled. Unavailable unless the platform
+    /// provides it.
+    fn save_file(&self, _suggested: &str) -> Result<Option<PathBuf>, ErrorCode> {
+        Err(ErrorCode::Unavailable)
+    }
 }
 
 /// No file dialog on this platform: `unavailable`.

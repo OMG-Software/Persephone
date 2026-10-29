@@ -22,6 +22,9 @@ import type {
   JoinRule,
   LevelKey,
   Membership,
+  HomeserverFound,
+  ProxySetting,
+  NewSessions,
   NotificationLevel,
   NotificationSettings,
   PendingMessage,
@@ -34,6 +37,9 @@ import type {
   RoomLevel,
   RoomMember,
   RoomMembers,
+  RoomActivity,
+  RoomReaders,
+  RoomServers,
   RoomNotifications,
   RoomPermissions,
   RoomSettings,
@@ -70,6 +76,9 @@ export type {
   JoinRule,
   LevelKey,
   Membership,
+  HomeserverFound,
+  ProxySetting,
+  NewSessions,
   NotificationLevel,
   NotificationSettings,
   ProfileList,
@@ -81,6 +90,9 @@ export type {
   RoomLevel,
   RoomMember,
   RoomMembers,
+  RoomActivity,
+  RoomReaders,
+  RoomServers,
   RoomNotifications,
   RoomPermissions,
   RoomSettings,
@@ -176,6 +188,16 @@ export function signIn(homeserver: string): Promise<AccountStatus> {
 }
 
 /**
+ * Starts signing in through the homeserver's OAuth 2.0 provider (ADR-0030).
+ * The core asks before the provider's page opens in the browser, where the
+ * password is entered; this page never sees it. Resolves with the status at
+ * once; the outcome arrives as a session change.
+ */
+export function signInWithOidc(homeserver: string): Promise<AccountStatus> {
+  return invoke<AccountStatus>('sign_in_with_oidc', { homeserver });
+}
+
+/**
  * Starts registering a new account named `username` (a localpart) on
  * `homeserver`. Only these two are sent: the core checks the name is free,
  * then asks for the password and any registration token in its own windows.
@@ -219,8 +241,12 @@ export function recoverWithKey(): Promise<SecurityStatus> {
  * room only from a verified device, in a room that is not encrypted only after
  * `allowUnencrypted`. Progress arrives as a change of the room.
  */
-export function sendMessage(roomId: string, body: string): Promise<PendingMessage> {
-  return invoke<PendingMessage>('send_message', { roomId, body });
+export function sendMessage(
+  roomId: string,
+  body: string,
+  replyTo: string | null = null
+): Promise<PendingMessage> {
+  return invoke<PendingMessage>('send_message', { roomId, body, replyTo });
 }
 
 /** The room's messages sent from this device in this session. */
@@ -326,6 +352,99 @@ export function pickImage(roomId: string): Promise<ImagePick> {
   return invoke<ImagePick>('pick_image', { roomId });
 }
 
+/**
+ * Queues a new version of one of this account's text messages, like
+ * `sendMessage`. The core sends it only if the message is this account's
+ * own text message, and fails it as `rejected` otherwise.
+ */
+export function editMessage(roomId: string, eventId: string, body: string): Promise<PendingMessage> {
+  return invoke<PendingMessage>('edit_message', { roomId, eventId, body });
+}
+
+/**
+ * Who can read a room's new messages: each member, how far this account
+ * trusts them, and how many of their devices receive room keys or are
+ * refused them (ADR-0005). At most 100 members.
+ */
+export function roomReaders(roomId: string): Promise<RoomReaders> {
+  return invoke<RoomReaders>('room_readers', { roomId });
+}
+
+/**
+ * The homeservers with members in a room: each receives the room's messages
+ * and metadata. The most members first, at most 50.
+ */
+export function roomServers(roomId: string): Promise<RoomServers> {
+  return invoke<RoomServers>('room_servers', { roomId });
+}
+
+/**
+ * Asks the core to open a link from a message. The core checks it and asks
+ * the user in its own window first (ADR-0024). Resolves `true` when it
+ * opened and `false` when the user said no.
+ */
+export function openLink(url: string): Promise<boolean> {
+  return invoke<boolean>('open_link', { url });
+}
+
+/**
+ * Who else is typing in a room and, for an event, who else has read up to
+ * it. At most ten names each; `truncated` says more exist.
+ */
+export function roomActivity(roomId: string, eventId: string | null): Promise<RoomActivity> {
+  return invoke<RoomActivity>('room_activity', { roomId, eventId });
+}
+
+/**
+ * Tells a room this account started or stopped typing. Rejected with
+ * `rejected` while the account's setting is off; call it only when on.
+ */
+export function setTyping(roomId: string, typing: boolean): Promise<void> {
+  return invoke<void>('set_typing', { roomId, typing });
+}
+
+/**
+ * Marks a room read up to an event, privately: its fully-read marker and a
+ * private read receipt, which other people do not see.
+ */
+export function markRead(roomId: string, eventId: string): Promise<void> {
+  return invoke<void>('mark_read', { roomId, eventId });
+}
+
+/**
+ * Reacts to an event with a short key, usually an emoji. Sent like a message:
+ * in a room that is not encrypted only after `allowUnencrypted`. A reaction
+ * is taken back with `deleteMessage` on its own event.
+ */
+export function react(roomId: string, eventId: string, key: string): Promise<void> {
+  return invoke<void>('react', { roomId, eventId, key });
+}
+
+/**
+ * Deletes (redacts) a message in a joined room, for everyone. The homeserver
+ * decides whether this account may (`rejected` otherwise).
+ */
+export function deleteMessage(roomId: string, eventId: string): Promise<void> {
+  return invoke<void>('delete_message', { roomId, eventId });
+}
+
+/**
+ * Asks the user for a file to send, in the core's own dialog, and queues it
+ * at once (ADR-0029). Resolves with the queued message, or null when the
+ * user cancelled.
+ */
+export function pickFile(roomId: string): Promise<PendingMessage | null> {
+  return invoke<PendingMessage | null>('pick_file', { roomId });
+}
+
+/**
+ * Saves a received file: the core downloads and decrypts it, then asks where
+ * in its own Save dialog. Resolves `true` when saved, `false` when cancelled.
+ */
+export function saveFile(roomId: string, eventId: string): Promise<boolean> {
+  return invoke<boolean>('save_file', { roomId, eventId });
+}
+
 /** Queues a picked image, by its draft handle, like `sendMessage`. */
 export function sendImage(roomId: string, handle: string): Promise<PendingMessage> {
   return invoke<PendingMessage>('send_image', { roomId, handle });
@@ -429,11 +548,61 @@ export function accountSettings(): Promise<AccountSettings> {
  */
 export function setAccountSettings(settings: AccountSettings): Promise<void> {
   return invoke<void>('set_account_settings', {
-    enterSends: settings.enterSends,
-    chatTextPercent: settings.chatTextPercent,
-    interfaceTextPercent: settings.interfaceTextPercent,
-    desktopNotifications: settings.desktopNotifications
+    settings: {
+      enterSends: settings.enterSends,
+      chatTextPercent: settings.chatTextPercent,
+      interfaceTextPercent: settings.interfaceTextPercent,
+      desktopNotifications: settings.desktopNotifications,
+      sendTyping: settings.sendTyping,
+      sendReadReceipts: settings.sendReadReceipts,
+      idleLockMinutes: settings.idleLockMinutes,
+      notificationNames: settings.notificationNames
+    }
   });
+}
+
+/** The profile's SOCKS5 proxy as `host:port`, or none (ADR-0028). */
+export function proxySetting(): Promise<ProxySetting> {
+  return invoke<ProxySetting>('proxy_setting');
+}
+
+/**
+ * Sets the profile's SOCKS5 proxy (`host:port`), or removes it with `null`.
+ * It applies to connections Persephone makes from its next start.
+ */
+export function setProxySetting(proxy: string | null): Promise<void> {
+  return invoke<void>('set_proxy_setting', { proxy });
+}
+
+/**
+ * Finds the homeserver of a server name such as `example.org`, through its
+ * `.well-known` file, and confirms it speaks Matrix (ADR-0027). Rejects with
+ * `not_found` when no Matrix server is there.
+ */
+export function discoverHomeserver(serverName: string): Promise<HomeserverFound> {
+  return invoke<HomeserverFound>('discover_homeserver', { serverName });
+}
+
+/**
+ * The sessions of this account the user has not been shown yet. The first
+ * time, the current ones are recorded and none is new (ADR-0026).
+ */
+export function newSessions(): Promise<NewSessions> {
+  return invoke<NewSessions>('new_sessions');
+}
+
+/** Records that the user has seen these sessions (at most ten device IDs). */
+export function acknowledgeSessions(deviceIds: string[]): Promise<void> {
+  return invoke<void>('acknowledge_sessions', { deviceIds });
+}
+
+/**
+ * Signs out another session of this account. The core asks for the
+ * password in its own window; no password crosses. Resolves with how it
+ * ended; this device's own ID is `invalid_argument`.
+ */
+export function removeDevice(deviceId: string): Promise<AccountChange> {
+  return invoke<AccountChange>('remove_device', { deviceId });
 }
 
 /**

@@ -103,6 +103,10 @@ pub enum PendingKind {
     Text,
     /// One image; `body` is empty. The pixels are not repeated here.
     Image,
+    /// A new version of one of this account's messages; `body` is its text.
+    Edit,
+    /// One file; `body` is its name (ADR-0029).
+    File,
 }
 
 /// A message the user sent from this device in this session. Only the body
@@ -129,12 +133,17 @@ pub enum TimelineItem {
     Message {
         event_id: String,
         sender: String,
+        /// The text, without a reply's quoted fallback.
         body: String,
         /// When the sender's homeserver says it received the event
         /// (`origin_server_ts`). That server sets it and nothing checks it,
         /// so it can be wrong. `None` when the event has no usable time.
         #[ts(type = "number | null")]
         origin_server_ts: Option<UnixMillis>,
+        /// The event this message replies to, as the sender claims. The
+        /// page shows it only from history it has loaded itself; the
+        /// sender's quoted copy of it is never shown.
+        reply_to: Option<String>,
     },
     Gap {
         next_cursor: Option<String>,
@@ -168,6 +177,136 @@ pub enum TimelineItem {
         /// The file is end-to-end encrypted.
         encrypted: bool,
     },
+    /// An `m.file`, `m.audio` or `m.video` event (ADR-0029). Nothing is
+    /// fetched, played or shown until the user saves it (`save_file`).
+    /// `name` is made safe for a file system and projected like a name;
+    /// `size` is the sender's claim.
+    File {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        name: String,
+        size: Option<u32>,
+        encrypted: bool,
+    },
+    /// A new version of the text message `replaces`, by the same sender:
+    /// the core checked that both events have the same sender. Not shown as
+    /// a line of its own; the page shows `body` in place of the message's,
+    /// marked as edited. The newest edit in the room's order counts.
+    Edit {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        replaces: String,
+        body: String,
+    },
+    /// A reaction (`m.reaction`) to the event `reacts_to`: `key`, usually an
+    /// emoji, projected like a name. Not shown as a line of its own; the
+    /// page counts reactions under the event they react to.
+    Reaction {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        reacts_to: String,
+        key: String,
+    },
+    /// The deletion (redaction) of the event `redacts`. Not shown as a line
+    /// of its own; the page shows that event, if loaded, as deleted. The
+    /// homeserver decided whether `sender` may delete it.
+    Redaction {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        redacts: String,
+    },
+    /// A change to the room's members or state, shown as a line of its own.
+    State {
+        event_id: String,
+        sender: String,
+        /// As for messages.
+        #[ts(type = "number | null")]
+        origin_server_ts: Option<UnixMillis>,
+        change: StateChange,
+    },
+}
+
+/// What a state event changed. Names, topics and user IDs come from the
+/// event and are projected like display names; `sender` is who made the
+/// change and `target` the member it was made to.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StateChange {
+    /// A member joined, left, was invited, removed, banned, and so on.
+    Member {
+        target: String,
+        membership: MembershipChange,
+    },
+    /// A member set (or, with `None`, removed) their display name in this
+    /// room.
+    DisplayName {
+        target: String,
+        name: Option<String>,
+    },
+    /// The room's name was set, or removed (`None`).
+    Name {
+        name: Option<String>,
+    },
+    /// The room's topic was set, or removed (`None`).
+    Topic {
+        topic: Option<String>,
+    },
+    /// The room's picture changed.
+    Avatar {},
+    /// End-to-end encryption was turned on. It cannot be turned off.
+    Encryption {},
+    JoinRule {
+        rule: JoinRule,
+    },
+    HistoryVisibility {
+        visibility: HistoryVisibility,
+    },
+    /// Who may do what (power levels) changed.
+    PowerLevels {},
+    /// The room's published addresses changed.
+    Addresses {},
+    /// The room was created.
+    Created {},
+    /// Which homeservers may take part changed (server ACL).
+    ServerAcl {},
+    /// The room was replaced by a new version.
+    Upgraded {},
+}
+
+/// How a member's membership changed. `sender` made the change; for
+/// `joined`, `left` and `knocked` that is the member themself.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MembershipChange {
+    Joined,
+    Left,
+    Invited,
+    /// The member declined their invitation.
+    InviteRejected,
+    /// The invitation was withdrawn by someone else.
+    InviteWithdrawn,
+    /// Removed by someone else.
+    Kicked,
+    Banned,
+    Unbanned,
+    /// Asked to join.
+    Knocked,
+    /// Withdrew their request to join.
+    KnockWithdrawn,
+    /// Their request to join was refused.
+    KnockDenied,
 }
 
 /// The kind of an image the user picked to send.
@@ -225,6 +364,8 @@ pub enum NoticeKind {
     UntrustedSender,
     /// A kind of event this client does not display yet.
     Unsupported,
+    /// The message was deleted (redacted) by its sender or a moderator.
+    Deleted,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -684,6 +825,41 @@ pub struct DeviceList {
     pub truncated: bool,
 }
 
+/// Reply of `proxy_setting`: the profile's SOCKS5 proxy as `host:port`, or
+/// none (ADR-0028).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProxySetting {
+    pub proxy: Option<String>,
+}
+
+/// Reply of `discover_homeserver`: the homeserver found for a server name,
+/// confirmed to speak Matrix, and whether a `.well-known` file named it
+/// (ADR-0027). The page shows it before signing in to it.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct HomeserverFound {
+    pub homeserver: String,
+    pub from_well_known: bool,
+}
+
+/// A session of this account the user has not been shown yet: its device
+/// ID and name, projected like names (ADR-0026).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NewSession {
+    pub device_id: String,
+    pub display_name: Option<String>,
+}
+
+/// Reply of `new_sessions`: at most ten; `truncated` says more exist.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NewSessions {
+    pub sessions: Vec<NewSession>,
+    pub truncated: bool,
+}
+
 /// Reply of `account_settings`: this account's settings, kept in its
 /// encrypted profile. A setting never saved has its default.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -702,12 +878,31 @@ pub struct AccountSettings {
     /// under the account's push rules, with the sender and room only, never
     /// the text. Off by default.
     pub desktop_notifications: bool,
+    /// Tell the people in a room while this account is typing there
+    /// (typing notices). Off by default (ADR-0023).
+    pub send_typing: bool,
+    /// Show the people in a room how far this account has read (public
+    /// read receipts). Off by default; the fully-read marker and a private
+    /// receipt, which only this account sees, are sent either way
+    /// (ADR-0023).
+    pub send_read_receipts: bool,
+    /// Lock the profile after this many minutes without keyboard or mouse
+    /// input on this computer, from 1 to [`IDLE_LOCK_MINUTES_MAX`]; 0 never
+    /// does. Off (0) by default (ADR-0025).
+    pub idle_lock_minutes: u16,
+    /// Desktop notifications name the sender and room; otherwise they say
+    /// only that a message arrived, and no name leaves the core. On by
+    /// default (ADR-0022).
+    pub notification_names: bool,
 }
 
 /// The smallest text size either setting accepts, in percent.
 pub const TEXT_PERCENT_MIN: u16 = 80;
 /// The largest message text size, in percent.
 pub const CHAT_TEXT_PERCENT_MAX: u16 = 200;
+/// The longest idle time the idle lock accepts, in minutes (a day).
+pub const IDLE_LOCK_MINUTES_MAX: u16 = 24 * 60;
+
 /// The largest interface text size, in percent: the whole interface grows
 /// with it, so it stops before the window's minimum size stops fitting.
 pub const INTERFACE_TEXT_PERCENT_MAX: u16 = 150;
@@ -718,6 +913,7 @@ impl AccountSettings {
         (TEXT_PERCENT_MIN..=CHAT_TEXT_PERCENT_MAX).contains(&self.chat_text_percent)
             && (TEXT_PERCENT_MIN..=INTERFACE_TEXT_PERCENT_MAX)
                 .contains(&self.interface_text_percent)
+            && self.idle_lock_minutes <= IDLE_LOCK_MINUTES_MAX
     }
 }
 
@@ -728,8 +924,68 @@ impl Default for AccountSettings {
             chat_text_percent: 100,
             interface_text_percent: 100,
             desktop_notifications: false,
+            send_typing: false,
+            send_read_receipts: false,
+            idle_lock_minutes: 0,
+            notification_names: true,
         }
     }
+}
+
+/// One homeserver with members in a room: its name, projected like a name,
+/// how many members it has (joined or invited), and whether it is this
+/// account's own.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomServer {
+    pub name: String,
+    pub members: u32,
+    pub own: bool,
+}
+
+/// Reply of `room_servers`: the homeservers that receive a room's messages
+/// and metadata, the most members first, at most 50; `truncated` says more
+/// exist.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomServers {
+    pub servers: Vec<RoomServer>,
+    pub truncated: bool,
+}
+
+/// One member of an encrypted room and the devices that can read its new
+/// messages: under ADR-0005 room keys go only to devices their owner
+/// cross-signed (`receiving`), never to the others (`refused`). From this
+/// computer's crypto store, which may lag behind a device just added.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomReader {
+    pub user_id: String,
+    pub trust: ContactTrust,
+    pub receiving: u32,
+    pub refused: u32,
+    /// This account: its other devices read the room too.
+    pub own: bool,
+}
+
+/// Reply of `room_readers`: who can read a room's new messages, at most 100
+/// members by user ID; `truncated` says more exist.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomReaders {
+    pub readers: Vec<RoomReader>,
+    pub truncated: bool,
+}
+
+/// Reply of `room_activity`: who else is typing in a room, and who else has
+/// read up to the event the page asked about (ADR-0023). Each list holds at
+/// most ten user IDs, projected like names; `truncated` says more exist.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomActivity {
+    pub typing: Vec<String>,
+    pub read_by: Vec<String>,
+    pub truncated: bool,
 }
 
 /// When this account is notified of messages, in every room without a rule
@@ -937,6 +1193,9 @@ pub enum AccountState {
 pub enum SignInError {
     /// The user closed the credential prompt.
     Cancelled,
+    /// The homeserver has no OAuth 2.0 provider to sign in with, or it
+    /// refused to register Persephone (ADR-0030).
+    OidcUnavailable,
     /// The homeserver refused the username or password.
     InvalidCredentials,
     /// The homeserver could not be reached or did not answer as Matrix.
@@ -1215,6 +1474,7 @@ pub fn sample_timeline_page() -> TimelinePage {
                 sender: "@alice:server.invalid".into(),
                 body: "hostile <img src=x onerror=alert(1)>".into(),
                 origin_server_ts: UnixMillis::new(1_767_258_000_000),
+                reply_to: None,
             },
             TimelineItem::Notice {
                 event_id: "$encrypted".into(),
@@ -1231,6 +1491,15 @@ pub fn sample_timeline_page() -> TimelinePage {
                 width: Some(640),
                 height: Some(480),
                 encrypted: true,
+            },
+            TimelineItem::State {
+                event_id: "$joined".into(),
+                sender: "@bob:server.invalid".into(),
+                origin_server_ts: UnixMillis::new(1_767_258_090_000),
+                change: StateChange::Member {
+                    target: "@bob:server.invalid".into(),
+                    membership: MembershipChange::Joined,
+                },
             },
             TimelineItem::Gap { next_cursor: None },
         ],
@@ -1321,7 +1590,16 @@ pub fn generated_typescript() -> String {
         format!("export {}", DisplayName::decl(&config)),
         format!("export {}", DeviceSummary::decl(&config)),
         format!("export {}", DeviceList::decl(&config)),
+        format!("export {}", ProxySetting::decl(&config)),
+        format!("export {}", HomeserverFound::decl(&config)),
+        format!("export {}", NewSession::decl(&config)),
+        format!("export {}", NewSessions::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
+        format!("export {}", RoomActivity::decl(&config)),
+        format!("export {}", RoomServer::decl(&config)),
+        format!("export {}", RoomServers::decl(&config)),
+        format!("export {}", RoomReader::decl(&config)),
+        format!("export {}", RoomReaders::decl(&config)),
         format!("export {}", NotificationLevel::decl(&config)),
         format!("export {}", NotificationSettings::decl(&config)),
         format!("export {}", ThreePidMedium::decl(&config)),
@@ -1333,6 +1611,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", UserMatch::decl(&config)),
         format!("export {}", UserSearch::decl(&config)),
         format!("export {}", NoticeKind::decl(&config)),
+        format!("export {}", MembershipChange::decl(&config)),
+        format!("export {}", StateChange::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),
         format!("export {}", ImageMime::decl(&config)),

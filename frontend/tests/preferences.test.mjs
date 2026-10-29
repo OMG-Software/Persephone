@@ -33,12 +33,16 @@ test('GIVEN Enter to send turned off WHEN keys are pressed THEN Enter starts a l
   );
 });
 
-test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes are normal and desktop notifications are off', () => {
+test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes are normal and nothing extra is sent or shown', () => {
   assert.deepEqual(preferences.DEFAULT_SETTINGS, {
     enterSends: true,
     chatTextPercent: 100,
     interfaceTextPercent: 100,
-    desktopNotifications: false
+    desktopNotifications: false,
+    sendTyping: false,
+    sendReadReceipts: false,
+    idleLockMinutes: 0,
+    notificationNames: true
   });
 });
 
@@ -291,4 +295,22 @@ test('GIVEN a save waiting behind another WHEN the account is signed out meanwhi
   await tick();
   assert.equal(waiting.save.length, 1, 'the queued save was skipped');
   assert.deepEqual(shown.settings, DEFAULT_SETTINGS);
+});
+
+test('GIVEN key presses WHEN checked THEN only Ctrl+Shift+L, or Cmd+Shift+L on macOS, locks', () => {
+  const press = (key, keys = {}) => ({ key, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, ...keys });
+  assert.ok(preferences.isLockShortcut(press('L', { ctrlKey: true, shiftKey: true }), false));
+  assert.ok(preferences.isLockShortcut(press('l', { metaKey: true, shiftKey: true }), true));
+  assert.ok(!preferences.isLockShortcut(press('l', { ctrlKey: true }), false), 'Ctrl+L alone');
+  assert.ok(!preferences.isLockShortcut(press('l', { metaKey: true, shiftKey: true }), false));
+  assert.ok(!preferences.isLockShortcut(press('l', { ctrlKey: true, shiftKey: true, altKey: true }), false));
+  assert.ok(!preferences.isLockShortcut(press('k', { ctrlKey: true, shiftKey: true }), false));
+});
+
+test('GIVEN the idle-lock choices WHEN shown THEN off comes first and each reads plainly', () => {
+  assert.equal(preferences.IDLE_LOCK_CHOICES[0], 0);
+  assert.deepEqual(
+    preferences.IDLE_LOCK_CHOICES.map(preferences.idleLockText),
+    ['Never', 'After 5 minutes', 'After 15 minutes', 'After 30 minutes', 'After 1 hour']
+  );
 });

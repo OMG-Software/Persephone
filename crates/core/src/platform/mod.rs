@@ -10,13 +10,15 @@
 //!
 //! * `key_protector`, `credential_source`, `image_picker`, `read_image_file`,
 //!   `image_worker` and `ui_host`;
+//! * `create_private_file` and `replace_file`, through
+//!   [`files::write`](crate::files::write);
 //! * `default_profile_dir`, through [`store::default_dir`](crate::store::default_dir);
 //! * `start_detached`, which starts the new core of a profile switch
 //!   ([`profiles`](crate::profiles)).
 //!
 //! An OS whose layer is not implemented returns the fail-closed stand-ins:
 //! the vault refuses (`Unsupported`), prompts and the file dialog are
-//! unsupported or unavailable, there is no media worker (`NoWorker`), the
+//! unsupported or unavailable, nothing is saved, there is no media worker (`NoWorker`), the
 //! UI is not started, and there is no default profile directory.
 
 #[cfg(target_os = "linux")]
@@ -58,6 +60,10 @@ mod other {
         None
     }
 
+    pub(crate) fn idle_time() -> Option<std::time::Duration> {
+        None
+    }
+
     pub(crate) fn key_protector() -> Arc<dyn KeyProtector> {
         Arc::new(vault::Unsupported)
     }
@@ -72,6 +78,14 @@ mod other {
 
     pub(crate) fn read_image_file(_: &Path, _: &ResourceBudgets) -> Result<Encoded, ErrorCode> {
         Err(ErrorCode::Unavailable)
+    }
+
+    pub(crate) fn create_private_file(_: &Path) -> std::io::Result<std::fs::File> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    pub(crate) fn replace_file(_: &Path, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
     }
 
     pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {

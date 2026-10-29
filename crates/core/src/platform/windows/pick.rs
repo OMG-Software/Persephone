@@ -67,12 +67,29 @@ pub struct NativeDialog;
 
 impl ImagePicker for NativeDialog {
     fn pick(&self) -> Result<Option<PathBuf>, ErrorCode> {
+        open_dialog(
+            "PNG or JPEG image\0*.png;*.jpg;*.jpeg\0\0",
+            "Choose an image to send",
+        )
+    }
+
+    fn pick_file(&self) -> Result<Option<PathBuf>, ErrorCode> {
+        open_dialog("Any file\0*.*\0\0", "Choose a file to send to this room")
+    }
+
+    fn save_file(&self, suggested: &str) -> Result<Option<PathBuf>, ErrorCode> {
+        save_with("Any file\0*.*\0\0", None, "Save the file", suggested)
+    }
+}
+
+/// Asks for one existing file, offering `filter` (a double-NUL-terminated
+/// list of names and patterns), in a dialog titled `title`.
+fn open_dialog(filter: &str, title: &str) -> Result<Option<PathBuf>, ErrorCode> {
+    {
         // COM for the dialog's shell views.
         let _apartment = super::Apartment::enter();
-        let filter: Vec<u16> = "PNG or JPEG image\0*.png;*.jpg;*.jpeg\0\0"
-            .encode_utf16()
-            .collect();
-        let title = wide("Choose an image to send");
+        let filter: Vec<u16> = filter.encode_utf16().collect();
+        let title = wide(title);
         let mut file = vec![0u16; MAX_PICKED_PATH_UNITS];
         // SAFETY: OPENFILENAMEW is a plain C struct; all-zero is its
         // documented empty state.
@@ -113,10 +130,21 @@ impl ImagePicker for NativeDialog {
 /// replacing a file, does not follow shortcuts, does not change the working
 /// directory and does not add the file to the recent list.
 pub fn save_dialog(title: &str, suggested: &str) -> Result<Option<PathBuf>, ErrorCode> {
+    save_with("Text file\0*.txt\0\0", Some("txt"), title, suggested)
+}
+
+/// Asks where to save a file, as [`save_dialog`] does, offering `filter`
+/// and adding `extension` to a name typed without one.
+fn save_with(
+    filter: &str,
+    extension: Option<&str>,
+    title: &str,
+    suggested: &str,
+) -> Result<Option<PathBuf>, ErrorCode> {
     let _apartment = super::Apartment::enter();
-    let filter: Vec<u16> = "Text file\0*.txt\0\0".encode_utf16().collect();
+    let filter: Vec<u16> = filter.encode_utf16().collect();
     let title = wide(title);
-    let extension = wide("txt");
+    let extension = extension.map(wide);
     let mut file = vec![0u16; MAX_PICKED_PATH_UNITS];
     for (slot, unit) in file.iter_mut().zip(suggested.encode_utf16()) {
         *slot = unit;
@@ -131,7 +159,9 @@ pub fn save_dialog(title: &str, suggested: &str) -> Result<Option<PathBuf>, Erro
     dialog.lpstrFile = file.as_mut_ptr();
     dialog.nMaxFile = file.len() as u32;
     dialog.lpstrTitle = title.as_ptr();
-    dialog.lpstrDefExt = extension.as_ptr();
+    dialog.lpstrDefExt = extension
+        .as_ref()
+        .map_or(std::ptr::null(), |extension| extension.as_ptr());
     dialog.Flags = OFN_EXPLORER
         | OFN_OVERWRITEPROMPT
         | OFN_PATHMUSTEXIST

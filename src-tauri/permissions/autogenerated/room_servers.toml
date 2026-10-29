@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-room-servers"
+description = "Enables the room_servers command without any pre-configured scope."
+commands.allow = ["room_servers"]
+
+[[permission]]
+identifier = "deny-room-servers"
+description = "Denies the room_servers command without any pre-configured scope."
+commands.deny = ["room_servers"]

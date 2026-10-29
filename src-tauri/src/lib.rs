@@ -32,18 +32,20 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart,
-    DeviceList, DisplayName, ImagePick, ImageView, InviteList, NotificationLevel,
-    NotificationSettings, PendingMessage, ProfileList, RoomChange, RoomCreation,
-    RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomSettings, SecurityStatus,
-    StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
+    DeviceList, DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, NewSessions,
+    NotificationLevel, NotificationSettings, PendingMessage, ProfileList, ProxySetting,
+    RoomActivity, RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers,
+    RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
+    ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
     COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
     MAX_DEVICE_ID_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES,
-    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_MEMBER_FILTER_BYTES,
-    MAX_MESSAGE_BYTES, MAX_NOTIFICATION_NAME_BYTES, MAX_PHONE_NUMBER_BYTES, MAX_PROFILES,
-    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_THREE_PID_ADDRESS_BYTES,
-    MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
+    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
+    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES,
+    MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES,
+    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES,
+    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -307,6 +309,20 @@ async fn sign_in(core: State<'_, CoreLink>, homeserver: String) -> Result<Accoun
     relay(core.inner(), Call::SignIn { homeserver }).await
 }
 
+/// Starts signing in through the homeserver's OAuth 2.0 provider (ADR-0030).
+/// Only the homeserver URL crosses; the core asks before the provider's page
+/// opens in the browser, and the password goes to the provider.
+#[tauri::command]
+async fn sign_in_with_oidc(
+    core: State<'_, CoreLink>,
+    homeserver: String,
+) -> Result<AccountStatus, String> {
+    if homeserver.len() > MAX_HOMESERVER_URL_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SignInWithOidc { homeserver }).await
+}
+
 /// Starts registering a new account. Only the homeserver URL and the desired
 /// username cross: the core checks the name, then asks for the password and
 /// any registration token itself, in native prompts.
@@ -356,18 +372,174 @@ async fn recover_with_key(core: State<'_, CoreLink>) -> Result<SecurityStatus, S
     relay(core.inner(), Call::RecoverWithKey {}).await
 }
 
-/// Queues a text message. The core checks the room and body and decides at
-/// send time whether the room needs consent.
+/// Queues a text message, as a reply to `reply_to` when it names an event.
+/// The core checks the room, body and event ID and decides at send time
+/// whether the room needs consent.
 #[tauri::command]
 async fn send_message(
     core: State<'_, CoreLink>,
     room_id: String,
     body: String,
+    reply_to: Option<String>,
 ) -> Result<PendingMessage, String> {
-    if room_id.len() > MAX_ROOM_ID_BYTES || body.len() > MAX_MESSAGE_BYTES {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || body.len() > MAX_MESSAGE_BYTES
+        || reply_to
+            .as_ref()
+            .is_some_and(|event_id| event_id.len() > MAX_EVENT_ID_BYTES)
+    {
         return Err(INVALID_ARGUMENT.to_string());
     }
-    relay(core.inner(), Call::SendMessage { room_id, body }).await
+    relay(
+        core.inner(),
+        Call::SendMessage {
+            room_id,
+            body,
+            reply_to,
+        },
+    )
+    .await
+}
+
+/// Queues a new version of one of this account's text messages. The core
+/// checks the arguments, and at send time that the message is this
+/// account's own text message.
+#[tauri::command]
+async fn edit_message(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+    body: String,
+) -> Result<PendingMessage, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || event_id.len() > MAX_EVENT_ID_BYTES
+        || body.len() > MAX_MESSAGE_BYTES
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::EditMessage {
+            room_id,
+            event_id,
+            body,
+        },
+    )
+    .await
+}
+
+/// Marks a joined room read up to an event, privately: its fully-read
+/// marker and a private read receipt.
+#[tauri::command]
+async fn mark_read(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || event_id.len() > MAX_EVENT_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::MarkRead { room_id, event_id }).await
+}
+
+/// Who can read a joined room's new messages, by member and device.
+#[tauri::command]
+async fn room_readers(core: State<'_, CoreLink>, room_id: String) -> Result<RoomReaders, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RoomReaders { room_id }).await
+}
+
+/// The homeservers with members in a joined room.
+#[tauri::command]
+async fn room_servers(core: State<'_, CoreLink>, room_id: String) -> Result<RoomServers, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RoomServers { room_id }).await
+}
+
+/// Asks the core to open a link from a message. The core checks it and asks
+/// the user in its own window first (ADR-0024); `true` when it opened.
+#[tauri::command]
+async fn open_link(core: State<'_, CoreLink>, url: String) -> Result<bool, String> {
+    if url.len() > MAX_LINK_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::OpenLink { url }).await
+}
+
+/// Who else is typing in a joined room and, for an event, who else has read
+/// up to it.
+#[tauri::command]
+async fn room_activity(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: Option<String>,
+) -> Result<RoomActivity, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || event_id
+            .as_ref()
+            .is_some_and(|event_id| event_id.len() > MAX_EVENT_ID_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RoomActivity { room_id, event_id }).await
+}
+
+/// Tells a joined room this account started or stopped typing; the core
+/// refuses while the account's setting is off (ADR-0023).
+#[tauri::command]
+async fn set_typing(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    typing: bool,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SetTyping { room_id, typing }).await
+}
+
+/// Reacts to an event in a joined room with a short key, usually an emoji.
+/// The core checks the arguments and the room, as for a message.
+#[tauri::command]
+async fn react(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+    key: String,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES
+        || event_id.len() > MAX_EVENT_ID_BYTES
+        || key.len() > MAX_REACTION_KEY_BYTES
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::React {
+            room_id,
+            event_id,
+            key,
+        },
+    )
+    .await
+}
+
+/// Deletes (redacts) an event in a joined room, for everyone. The core
+/// checks the arguments; the homeserver decides whether this account may.
+#[tauri::command]
+async fn delete_message(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+) -> Result<(), String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || event_id.len() > MAX_EVENT_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::DeleteMessage { room_id, event_id }).await
 }
 
 /// The room's messages sent from this device in this session.
@@ -633,6 +805,34 @@ async fn pick_image(core: State<'_, CoreLink>, room_id: String) -> Result<ImageP
     relay(core.inner(), Call::PickImage { room_id }).await
 }
 
+/// Asks the user for a file to send in the core's own dialog and queues it
+/// (ADR-0029); no path crosses. The reply is the queued message, or null
+/// when the user cancelled.
+#[tauri::command]
+async fn pick_file(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<Option<PendingMessage>, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::PickFile { room_id }).await
+}
+
+/// Saves a received file where the user chooses in the core's own dialog
+/// (ADR-0029); `true` when saved, `false` when cancelled.
+#[tauri::command]
+async fn save_file(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+) -> Result<bool, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || event_id.len() > MAX_EVENT_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SaveFile { room_id, event_id }).await
+}
+
 /// Queues a picked image by its draft handle, with the same checks as text.
 #[tauri::command]
 async fn send_image(
@@ -795,26 +995,14 @@ async fn account_settings(core: State<'_, CoreLink>) -> Result<AccountSettings, 
     relay(core.inner(), Call::AccountSettings {}).await
 }
 
-/// Replaces this account's settings. Each setting is a required argument;
-/// the core checks the text sizes' bounds.
+/// Replaces this account's settings. The record refuses missing and unknown
+/// settings; the core checks the text sizes' bounds.
 #[tauri::command]
 async fn set_account_settings(
     core: State<'_, CoreLink>,
-    enter_sends: bool,
-    chat_text_percent: u16,
-    interface_text_percent: u16,
-    desktop_notifications: bool,
+    settings: AccountSettings,
 ) -> Result<(), String> {
-    relay::<()>(
-        core.inner(),
-        Call::SetAccountSettings {
-            enter_sends,
-            chat_text_percent,
-            interface_text_percent,
-            desktop_notifications,
-        },
-    )
-    .await
+    relay::<()>(core.inner(), Call::SetAccountSettings { settings }).await
 }
 
 /// Changes this account's password. Nothing secret crosses: the core asks
@@ -825,6 +1013,70 @@ async fn change_password(
     sign_out_others: bool,
 ) -> Result<AccountChange, String> {
     relay(core.inner(), Call::ChangePassword { sign_out_others }).await
+}
+
+/// The profile's SOCKS5 proxy (ADR-0028).
+#[tauri::command]
+async fn proxy_setting(core: State<'_, CoreLink>) -> Result<ProxySetting, String> {
+    relay(core.inner(), Call::ProxySetting {}).await
+}
+
+/// Sets or removes the profile's SOCKS5 proxy; the core checks the address.
+#[tauri::command]
+async fn set_proxy_setting(core: State<'_, CoreLink>, proxy: Option<String>) -> Result<(), String> {
+    if proxy
+        .as_ref()
+        .is_some_and(|proxy| proxy.len() > MAX_PROXY_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SetProxySetting { proxy }).await
+}
+
+/// Finds the homeserver of a server name through its `.well-known` file
+/// and confirms it speaks Matrix (ADR-0027).
+#[tauri::command]
+async fn discover_homeserver(
+    core: State<'_, CoreLink>,
+    server_name: String,
+) -> Result<HomeserverFound, String> {
+    if server_name.len() > MAX_SERVER_NAME_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::DiscoverHomeserver { server_name }).await
+}
+
+/// The sessions of this account the user has not been shown yet (ADR-0026).
+#[tauri::command]
+async fn new_sessions(core: State<'_, CoreLink>) -> Result<NewSessions, String> {
+    relay(core.inner(), Call::NewSessions {}).await
+}
+
+/// Records that the user has seen these sessions.
+#[tauri::command]
+async fn acknowledge_sessions(
+    core: State<'_, CoreLink>,
+    device_ids: Vec<String>,
+) -> Result<(), String> {
+    if device_ids.len() > MAX_NEW_SESSION_IDS
+        || device_ids.iter().any(|id| id.len() > MAX_DEVICE_ID_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::AcknowledgeSessions { device_ids }).await
+}
+
+/// Signs out another session of this account. Nothing secret crosses: the
+/// core asks for the password in its own window (ADR-0026).
+#[tauri::command]
+async fn remove_device(
+    core: State<'_, CoreLink>,
+    device_id: String,
+) -> Result<AccountChange, String> {
+    if device_id.len() > MAX_DEVICE_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::RemoveDevice { device_id }).await
 }
 
 /// This account's email addresses and phone numbers (ADR-0020).
@@ -996,12 +1248,28 @@ pub fn configure<R: Runtime>(
             unlock_session,
             reset_profile,
             sign_in,
+            sign_in_with_oidc,
             register,
             sign_out,
             security_status,
             set_up_encryption,
             recover_with_key,
             send_message,
+            edit_message,
+            delete_message,
+            react,
+            mark_read,
+            room_activity,
+            set_typing,
+            open_link,
+            room_servers,
+            room_readers,
+            new_sessions,
+            discover_homeserver,
+            proxy_setting,
+            set_proxy_setting,
+            acknowledge_sessions,
+            remove_device,
             pending_messages,
             retry_message,
             discard_message,
@@ -1019,6 +1287,8 @@ pub fn configure<R: Runtime>(
             image_band,
             release_image,
             pick_image,
+            pick_file,
+            save_file,
             send_image,
             discard_image,
             invite_list,
@@ -1069,8 +1339,9 @@ pub fn configure<R: Runtime>(
 }
 
 /// Shows one desktop notification (ADR-0022): the room as the title and the
-/// sender in the body, never message text. Skipped while the main window has
-/// the focus, since the page shows the message then.
+/// sender in the body, never message text, or only that a message arrived
+/// when the core sent no names. Skipped while the main window has the focus,
+/// since the page shows the message then.
 fn toast<R: Runtime>(app: &tauri::AppHandle<R>, room: &str, sender: &str) {
     use tauri_plugin_notification::NotificationExt;
     let focused = app
@@ -1080,12 +1351,18 @@ fn toast<R: Runtime>(app: &tauri::AppHandle<R>, room: &str, sender: &str) {
     if focused {
         return;
     }
-    let _ = app
-        .notification()
-        .builder()
-        .title(room)
-        .body(format!("New message from {sender}"))
-        .show();
+    let (title, body) = toast_text(room, sender);
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// A notification's title and body: named, or plain when the core sent no
+/// names (the account leaves them out).
+pub fn toast_text(room: &str, sender: &str) -> (String, String) {
+    if room.is_empty() && sender.is_empty() {
+        ("Persephone".to_owned(), "New message".to_owned())
+    } else {
+        (room.to_owned(), format!("New message from {sender}"))
+    }
 }
 
 /// Creates the main window: bundled app only, no navigation away from it and

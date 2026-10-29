@@ -32,26 +32,33 @@
 pub mod account;
 pub mod account_changes;
 pub mod account_details;
+pub mod activity;
 pub mod contacts;
 pub mod conversations;
 pub mod credentials;
+pub mod discovery;
+pub mod files;
 pub mod homeserver;
 pub mod identities;
+pub mod links;
 pub mod matrix_views;
 pub mod media;
 pub mod notifications;
+pub mod oauth_login;
 pub mod outbox;
 pub mod passphrase;
 pub mod pick;
 pub mod platform;
 pub mod profiles;
 pub mod prompt_text;
+pub mod proxy;
 pub mod recovery_file;
 pub mod registration;
 pub mod room_settings;
 pub mod security;
 pub mod sending;
 pub mod session;
+pub mod sessions;
 pub mod settings;
 pub mod store;
 pub mod ui_host;
@@ -92,6 +99,10 @@ pub const REVISION: &str = env!("PERSEPHONE_REVISION");
 /// Longest a `lock_session` call waits for admitted work before replying
 /// `locking`; the UI may call again to resume the wait. Covers one sync round.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How often the idle lock compares the computer's idle time with the
+/// account's setting (ADR-0025).
+pub const IDLE_CHECK: Duration = Duration::from_secs(15);
 
 /// Stack for a thread that answers a long call: the SDK's request futures
 /// need more than the default in debug builds, as for the sync thread.
@@ -252,6 +263,11 @@ pub struct Core {
     conversation: conversations::Busy,
     /// One user-directory search at a time.
     search: conversations::Busy,
+    read_marker: conversations::Busy,
+    /// One homeserver discovery at a time.
+    discovery: conversations::Busy,
+    /// One link question at a time.
+    link: conversations::Busy,
     /// Reading or setting the display name, one at a time.
     display_name: conversations::Busy,
     /// One device-list request at a time.
@@ -334,6 +350,32 @@ fn valid_event_id(event_id: &str) -> bool {
     event_id.len() <= MAX_EVENT_ID_BYTES && matrix_sdk::ruma::EventId::parse(event_id).is_ok()
 }
 
+/// A reaction key: some visible text, within the limit, and no control
+/// characters.
+fn valid_reaction_key(key: &str) -> bool {
+    key.len() <= persephone_core_protocol::MAX_REACTION_KEY_BYTES
+        && !key.trim().is_empty()
+        && !key.chars().any(char::is_control)
+}
+
+/// Whether the idle lock should lock now: it is on (`minutes` above 0), the
+/// profile is open, and the computer's idle time is known and at least that
+/// long. An unknown idle time never locks; the page says the lock is
+/// unavailable then (ADR-0025).
+fn idle_lock_due(minutes: u16, state: StoreState, idle: Option<Duration>) -> bool {
+    minutes > 0
+        && state == StoreState::Protected
+        && idle.is_some_and(|idle| idle >= Duration::from_secs(u64::from(minutes) * 60))
+}
+
+/// The event ID, when the SDK accepts it.
+fn parse_event_id(event_id: &str) -> Option<matrix_sdk::ruma::OwnedEventId> {
+    if event_id.len() > MAX_EVENT_ID_BYTES {
+        return None;
+    }
+    matrix_sdk::ruma::OwnedEventId::try_from(event_id).ok()
+}
+
 /// A long call's result as the reply's JSON value.
 fn json<T: Serialize>(result: Result<T, ErrorCode>) -> Result<serde_json::Value, ErrorCode> {
     result.and_then(|value| serde_json::to_value(value).map_err(|_| ErrorCode::Internal))
@@ -383,6 +425,9 @@ impl Core {
             budgets,
             conversation: conversations::Busy::default(),
             search: conversations::Busy::default(),
+            read_marker: conversations::Busy::default(),
+            discovery: conversations::Busy::default(),
+            link: conversations::Busy::default(),
             display_name: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             room_settings: conversations::Busy::default(),
@@ -486,8 +531,25 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            Call::DiscoverHomeserver { server_name } => match self.discover(server_name) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
+            Call::PickFile { room_id } => match self.pick_file(room_id) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
+            Call::SaveFile { room_id, event_id } => match self.save_file(room_id, event_id) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
+            | Call::DeleteMessage { .. }
+            | Call::React { .. }
+            | Call::MarkRead { .. }
+            | Call::SetTyping { .. }
+            | Call::OpenLink { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -495,8 +557,13 @@ impl Core {
             | Call::DisplayName {}
             | Call::SetDisplayName { .. }
             | Call::DeviceList {}
+            | Call::NewSessions {}
+            | Call::AcknowledgeSessions { .. }
+            | Call::RemoveDevice { .. }
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
+            | Call::RoomServers { .. }
+            | Call::RoomReaders { .. }
             | Call::ChangeRoom { .. }
             | Call::ChangePassword { .. }
             | Call::ThreePids {}
@@ -614,6 +681,7 @@ impl Core {
                 ok(&state)
             }
             Call::SignIn { homeserver } => self.sign_in(homeserver),
+            Call::SignInWithOidc { homeserver } => self.sign_in_oidc(homeserver),
             Call::Register {
                 homeserver,
                 username,
@@ -623,7 +691,28 @@ impl Core {
                 ok(&self.session.set_up_encryption(self.credentials.clone()))
             }
             Call::RecoverWithKey {} => ok(&self.session.recover_with_key(self.credentials.clone())),
-            Call::SendMessage { room_id, body } => self.send_message(room_id, body),
+            Call::SendMessage {
+                room_id,
+                body,
+                reply_to,
+            } => {
+                let relation = match reply_to.as_deref().map(parse_event_id) {
+                    None => None,
+                    Some(Some(event_id)) => Some(outbox::Relation::Reply(event_id)),
+                    Some(None) => return Outcome::Error(ErrorCode::InvalidArgument),
+                };
+                self.send_message(room_id, body, relation)
+            }
+            Call::EditMessage {
+                room_id,
+                event_id,
+                body,
+            } => match parse_event_id(event_id) {
+                Some(event_id) => {
+                    self.send_message(room_id, body, Some(outbox::Relation::Replace(event_id)))
+                }
+                None => Outcome::Error(ErrorCode::InvalidArgument),
+            },
             Call::PendingMessages { room_id } => {
                 if valid_room_id(room_id) {
                     bounded(&self.session.pending_messages(room_id))
@@ -646,23 +735,20 @@ impl Core {
                     }
                 }
             }
+            Call::ProxySetting {} => match self.proxy_setting() {
+                Ok(socks) => ok(&persephone_contracts::ProxySetting {
+                    proxy: socks.map(|socks| socks.address()),
+                }),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::SetProxySetting { proxy } => self.set_proxy_setting(proxy.as_deref()),
             Call::AccountSettings {} => match self.session.account_settings() {
                 Ok(Some(settings)) => ok(&settings),
                 Ok(None) => Outcome::Error(ErrorCode::Internal),
                 Err(_) => Outcome::Error(ErrorCode::Locked),
             },
-            Call::SetAccountSettings {
-                enter_sends,
-                chat_text_percent,
-                interface_text_percent,
-                desktop_notifications,
-            } => {
-                let settings = persephone_contracts::AccountSettings {
-                    enter_sends: *enter_sends,
-                    chat_text_percent: *chat_text_percent,
-                    interface_text_percent: *interface_text_percent,
-                    desktop_notifications: *desktop_notifications,
-                };
+            Call::SetAccountSettings { settings } => {
+                let settings = *settings;
                 if !settings.within_bounds() {
                     return Outcome::Error(ErrorCode::InvalidArgument);
                 }
@@ -696,6 +782,9 @@ impl Core {
                 self.verify(flow_id, verification::Action::Cancel)
             }
             Call::ContactStatus { room_id } => self.contact_status(room_id),
+            Call::RoomActivity { room_id, event_id } => {
+                self.room_activity(room_id, event_id.as_deref())
+            }
             Call::IdentityChanges { room_id } => self.identity_changes(room_id),
             Call::AcceptIdentity { room_id, user_id } => self.accept_identity(room_id, user_id),
             Call::VerifyContact { room_id } => {
@@ -722,6 +811,18 @@ impl Core {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
+            Call::DiscoverHomeserver { server_name } => match self.discover(server_name) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::PickFile { room_id } => match self.pick_file(room_id) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::SaveFile { room_id, event_id } => match self.save_file(room_id, event_id) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
             Call::ImageBand { .. } => Outcome::Error(ErrorCode::Unavailable),
             Call::ReleaseImage { handle } => {
                 refused(self.media.release(self.media_generation(), handle))
@@ -733,6 +834,11 @@ impl Core {
             Call::InviteList {} => self.invite_list(),
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
+            | Call::DeleteMessage { .. }
+            | Call::React { .. }
+            | Call::MarkRead { .. }
+            | Call::SetTyping { .. }
+            | Call::OpenLink { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
             | Call::CreateRoom { .. }
@@ -740,8 +846,13 @@ impl Core {
             | Call::DisplayName {}
             | Call::SetDisplayName { .. }
             | Call::DeviceList {}
+            | Call::NewSessions {}
+            | Call::AcknowledgeSessions { .. }
+            | Call::RemoveDevice { .. }
             | Call::RoomSettings { .. }
             | Call::RoomMembers { .. }
+            | Call::RoomServers { .. }
+            | Call::RoomReaders { .. }
             | Call::ChangeRoom { .. }
             | Call::ChangePassword { .. }
             | Call::ThreePids {}
@@ -790,6 +901,11 @@ impl Core {
         enum Work {
             Accept(String),
             Decline(String),
+            Delete(String, matrix_sdk::ruma::OwnedEventId),
+            React(String, matrix_sdk::ruma::OwnedEventId, String),
+            MarkRead(String, matrix_sdk::ruma::OwnedEventId),
+            Typing(String, bool),
+            OpenLink(url::Url),
             Start(OwnedUserId),
             Search(String),
             CreateRoom(String, Vec<OwnedUserId>),
@@ -797,8 +913,13 @@ impl Core {
             DisplayName,
             SetDisplayName(String),
             Devices,
+            NewSessions,
+            AcknowledgeSessions(Vec<String>),
+            RemoveDevice(matrix_sdk::ruma::OwnedDeviceId),
             RoomSettings(String),
             RoomMembers(String, String),
+            RoomServers(String),
+            RoomReaders(String),
             ChangeRoom(String, room_settings::Change),
             ChangePassword(bool),
             ThreePids,
@@ -818,6 +939,29 @@ impl Core {
             Call::DeclineInvite { room_id } if valid_room_id(room_id) => {
                 Work::Decline(room_id.clone())
             }
+            Call::DeleteMessage { room_id, event_id } if valid_room_id(room_id) => Work::Delete(
+                room_id.clone(),
+                parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
+            ),
+            Call::React {
+                room_id,
+                event_id,
+                key,
+            } if valid_room_id(room_id) && valid_reaction_key(key) => Work::React(
+                room_id.clone(),
+                parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
+                key.clone(),
+            ),
+            Call::OpenLink { url } => {
+                Work::OpenLink(links::checked(url).ok_or(ErrorCode::InvalidArgument)?)
+            }
+            Call::SetTyping { room_id, typing } if valid_room_id(room_id) => {
+                Work::Typing(room_id.clone(), *typing)
+            }
+            Call::MarkRead { room_id, event_id } if valid_room_id(room_id) => Work::MarkRead(
+                room_id.clone(),
+                parse_event_id(event_id).ok_or(ErrorCode::InvalidArgument)?,
+            ),
             Call::StartConversation { user_id } => Work::Start(user(user_id)?),
             Call::SearchUsers { term } if conversations::valid_term(term) => {
                 Work::Search(term.clone())
@@ -836,6 +980,18 @@ impl Core {
                 Work::SetDisplayName(name.clone())
             }
             Call::DeviceList {} => Work::Devices,
+            Call::NewSessions {} => Work::NewSessions,
+            Call::AcknowledgeSessions { device_ids }
+                if device_ids.len() <= persephone_core_protocol::MAX_NEW_SESSION_IDS
+                    && device_ids
+                        .iter()
+                        .all(|id| verification::valid_device_id(id)) =>
+            {
+                Work::AcknowledgeSessions(device_ids.clone())
+            }
+            Call::RemoveDevice { device_id } if verification::valid_device_id(device_id) => {
+                Work::RemoveDevice(device_id.as_str().into())
+            }
             Call::RoomSettings { room_id } if valid_room_id(room_id) => {
                 Work::RoomSettings(room_id.clone())
             }
@@ -843,6 +999,12 @@ impl Core {
                 if valid_room_id(room_id) && room_settings::valid_filter(filter) =>
             {
                 Work::RoomMembers(room_id.clone(), filter.clone())
+            }
+            Call::RoomServers { room_id } if valid_room_id(room_id) => {
+                Work::RoomServers(room_id.clone())
+            }
+            Call::RoomReaders { room_id } if valid_room_id(room_id) => {
+                Work::RoomReaders(room_id.clone())
             }
             Call::ChangeRoom { room_id, change } if valid_room_id(room_id) => Work::ChangeRoom(
                 room_id.clone(),
@@ -895,11 +1057,20 @@ impl Core {
         };
         let slot = match work {
             Work::Search(_) => self.search.begin()?,
+            Work::MarkRead(..) | Work::Typing(..) => self.read_marker.begin()?,
+            Work::OpenLink(_) => self.link.begin()?,
             Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
-            Work::Devices => self.devices.begin()?,
+            Work::Devices | Work::NewSessions | Work::AcknowledgeSessions(_) => {
+                self.devices.begin()?
+            }
+            Work::RemoveDevice(_) => self.account_change.begin()?,
             Work::RoomSettings(_) => self.room_settings.begin()?,
-            Work::RoomMembers(..) => self.room_members.begin()?,
-            Work::ChangeRoom(..) => self.room_change.begin()?,
+            Work::RoomMembers(..) | Work::RoomServers(_) | Work::RoomReaders(_) => {
+                self.room_members.begin()?
+            }
+            Work::ChangeRoom(..) | Work::Delete(..) | Work::React(..) => {
+                self.room_change.begin()?
+            }
             Work::ChangePassword(_)
             | Work::RequestEmail(_)
             | Work::RequestPhone(..)
@@ -923,6 +1094,33 @@ impl Core {
                     .with_matrix(generation, async |client| {
                         conversations::decline(&client, room_id).await
                     })
+                    .map(|()| serde_json::Value::Null),
+                Work::Delete(room_id, event_id) => self
+                    .with_matrix(generation, async |client| {
+                        sending::delete(&client, room_id, event_id).await
+                    })
+                    .map(|()| serde_json::Value::Null),
+                Work::MarkRead(room_id, event_id) => {
+                    let public = self.session.sends_read_receipts();
+                    self.with_matrix(generation, async |client| {
+                        sending::mark_read(&client, room_id, event_id, public).await
+                    })
+                    .map(|()| serde_json::Value::Null)
+                }
+                // No lease is held while the question is open.
+                Work::OpenLink(url) => {
+                    links::open(&*self.credentials, url).map(serde_json::Value::Bool)
+                }
+                // Refused, not dropped, while the setting is off: the page
+                // never asks then, so an ask is a mistake to see.
+                Work::Typing(..) if !self.session.sends_typing() => Err(ErrorCode::Rejected),
+                Work::Typing(room_id, typing) => self
+                    .with_matrix(generation, async |client| {
+                        sending::typing(&client, room_id, *typing).await
+                    })
+                    .map(|()| serde_json::Value::Null),
+                Work::React(room_id, event_id, key) => self
+                    .react(generation, room_id, event_id, key)
                     .map(|()| serde_json::Value::Null),
                 Work::Start(user) => json(self.with_matrix(generation, async |client| {
                     conversations::start(&client, user).await
@@ -952,6 +1150,15 @@ impl Core {
                         Outcome::Ok(value) => Ok(value),
                         Outcome::Error(code) => Err(code),
                     }),
+                Work::NewSessions => json(self.with_stores(generation, async |client, stores| {
+                    sessions::new_sessions(&client, stores).await
+                })),
+                Work::AcknowledgeSessions(device_ids) => self
+                    .with_stores(generation, async |client, stores| {
+                        sessions::acknowledge(&client, stores, device_ids).await
+                    })
+                    .map(|()| serde_json::Value::Null),
+                Work::RemoveDevice(device_id) => json(self.remove_device(generation, device_id)),
                 Work::RoomSettings(room_id) => self
                     .with_matrix(generation, async |client| {
                         room_settings::settings(&client, room_id).await
@@ -965,6 +1172,17 @@ impl Core {
                         room_settings::members(&client, room_id, filter).await
                     }))
                 }
+                Work::RoomServers(room_id) => json(self.with_matrix(generation, async |client| {
+                    room_settings::servers(&client, room_id).await
+                })),
+                Work::RoomReaders(room_id) => self
+                    .with_matrix(generation, async |client| {
+                        room_settings::readers(&client, room_id).await
+                    })
+                    .and_then(|readers| match bounded(&readers) {
+                        Outcome::Ok(value) => Ok(value),
+                        Outcome::Error(code) => Err(code),
+                    }),
                 Work::ChangeRoom(room_id, change) => self
                     .with_matrix(generation, async |client| {
                         room_settings::change(&client, room_id, change).await
@@ -1030,6 +1248,39 @@ impl Core {
                 Err(code) => Outcome::Error(code),
             }
         }))
+    }
+
+    /// Signs out another device of this account (ADR-0026): asks for the
+    /// password in the core's own window, with no lease held, then sends the
+    /// removal under a lease of the session in `generation`. This device is
+    /// refused: signing it out is `sign_out`.
+    fn remove_device(
+        &self,
+        generation: u64,
+        device_id: &matrix_sdk::ruma::DeviceId,
+    ) -> Result<persephone_contracts::AccountChange, ErrorCode> {
+        use credentials::PasswordPurpose;
+        let this = self.with_matrix(generation, async |client| {
+            Ok(client.device_id().map(ToOwned::to_owned))
+        })?;
+        if this.as_deref() == Some(device_id) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let (user_id, host) = self.session.account_names().ok_or(ErrorCode::NotFound)?;
+        let user = matrix_sdk::ruma::OwnedUserId::try_from(user_id.as_str())
+            .map_err(|_| ErrorCode::Internal)?;
+        let password = match account_changes::ask_current_password(
+            &*self.credentials,
+            &user_id,
+            &host,
+            PasswordPurpose::RemoveSession,
+        ) {
+            Ok(password) => password,
+            Err(code) => return Ok(code),
+        };
+        self.with_matrix(generation, async |client| {
+            Ok(account_changes::remove_device(&client, &user, &password, device_id).await)
+        })
     }
 
     /// Changes the password (ADR-0019): asks for the current password and
@@ -1162,6 +1413,68 @@ impl Core {
     /// the lease ends. Another generation (the session locked, or another
     /// sign-in, since the call was admitted) is `locked`, and `work` does not
     /// run.
+    /// Sends a reaction under a lease of the session in `generation`, with
+    /// the room's consent read from its stores: `rejected` when the checks
+    /// refuse it, `unavailable` when it may not have reached the homeserver.
+    fn react(
+        &self,
+        generation: u64,
+        room_id: &str,
+        event_id: &matrix_sdk::ruma::EventId,
+        key: &str,
+    ) -> Result<(), ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let outcome = (lease.generation() == generation).then(|| {
+            lease.stores().block_on(async {
+                let consented = sending::consented(lease.stores(), room_id).await;
+                sending::react(&client, room_id, event_id, key, consented).await
+            })
+        });
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        match outcome {
+            None => Err(ErrorCode::Locked),
+            Some(outbox::SendOutcome::Sent(_)) => Ok(()),
+            Some(outbox::SendOutcome::Unknown) => Err(ErrorCode::Unavailable),
+            Some(outbox::SendOutcome::Failed(_)) => Err(ErrorCode::Rejected),
+        }
+    }
+
+    /// Like [`Core::with_matrix`], with the session's stores as well.
+    fn with_stores<T>(
+        &self,
+        generation: u64,
+        work: impl AsyncFnOnce(matrix_sdk::Client, &store::Stores) -> Result<T, ErrorCode>,
+    ) -> Result<T, ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let result = if lease.generation() == generation {
+            lease
+                .stores()
+                .block_on(work(client.clone(), lease.stores()))
+        } else {
+            Err(ErrorCode::Locked)
+        };
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        result
+    }
+
     fn with_matrix<T>(
         &self,
         generation: u64,
@@ -1184,6 +1497,29 @@ impl Core {
         }
         drop(lease);
         result
+    }
+
+    /// Locks the open profile when the account's idle lock is on and this
+    /// computer has had no input for that long (ADR-0025). Returns whether
+    /// it locked.
+    fn lock_if_idle(&self, idle: Option<Duration>) -> bool {
+        let due = idle_lock_due(self.session.idle_lock_minutes(), self.session.state(), idle);
+        if due {
+            self.session.lock(LOCK_TIMEOUT, || self.announce_lock());
+        }
+        due
+    }
+
+    /// Waits up to `timeout` for the UI connection to close; whether it
+    /// closed.
+    fn wait_closed(&self, timeout: Duration) -> bool {
+        let notifications = lock(&self.hub.notifications);
+        let (notifications, _) = self
+            .hub
+            .changed
+            .wait_timeout_while(notifications, timeout, |n| !n.closed)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        notifications.closed
     }
 
     /// Runs when a lock or sign-out has closed admission and advanced the
@@ -1239,22 +1575,16 @@ impl Core {
         };
         let generation = lease.generation();
         let current = || self.session.open_generation() == Some(generation);
-        let encoded = match self.media.http() {
-            Ok(http) => {
-                let encoded = lease.stores().block_on(media::fetch(
-                    &client,
-                    &http,
-                    room_id,
-                    event_id,
-                    &self.budgets,
-                    &current,
-                ));
-                let _context = lease.stores().runtime().enter();
-                drop(http);
-                encoded
-            }
-            Err(code) => Err(code),
-        };
+        // The account's own HTTP client: the core's policy and the
+        // profile's proxy, as for every other request.
+        let encoded = lease.stores().block_on(media::fetch(
+            &client,
+            client.http_client(),
+            room_id,
+            event_id,
+            &self.budgets,
+            &current,
+        ));
         {
             let _context = lease.stores().runtime().enter();
             drop(client);
@@ -1275,6 +1605,175 @@ impl Core {
     /// strip run later, on their own thread, without a lease (nothing there
     /// touches the stores); the draft is kept only if the generation is still
     /// open.
+    /// Admits a homeserver discovery (ADR-0027), one at a time. It runs on
+    /// its own small runtime: it needs no session, and may run before any
+    /// sign-in.
+    fn discover<'a>(&'a self, server_name: &str) -> Result<LongCall<'a>, ErrorCode> {
+        if discovery::origin(server_name).is_none() {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        // The profile's proxy, read now; unreadable refuses (never direct).
+        let proxy = self.proxy_setting()?;
+        let slot = self.discovery.begin()?;
+        let server_name = server_name.to_owned();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            let found = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| ErrorCode::Internal)
+                .and_then(|runtime| {
+                    runtime.block_on(discovery::discover(&server_name, proxy.as_ref()))
+                });
+            refused(found)
+        }))
+    }
+
+    /// The profile's proxy (ADR-0028): `None` without one or for the
+    /// synthetic views; `locked` while the profile is locked, and `internal`
+    /// when the record cannot be read, so nothing connects directly.
+    fn proxy_setting(&self) -> Result<Option<proxy::Socks>, ErrorCode> {
+        if !self.session.is_configured() {
+            return Ok(None);
+        }
+        let lease = self.session.admit().map_err(|error| match error {
+            session::AdmissionError::Locked => ErrorCode::Locked,
+            session::AdmissionError::Saturated => ErrorCode::LimitExceeded,
+        })?;
+        lease
+            .stores()
+            .block_on(proxy::load(lease.stores()))
+            .map_err(|_| ErrorCode::Internal)
+    }
+
+    /// Replaces the profile's proxy; it applies when Persephone next
+    /// connects (ADR-0028).
+    fn set_proxy_setting(&self, proxy: Option<&str>) -> Outcome {
+        let socks = match proxy.map(proxy::Socks::parse) {
+            None => None,
+            Some(Some(socks)) => Some(socks),
+            Some(None) => return Outcome::Error(ErrorCode::InvalidArgument),
+        };
+        if !self.session.is_configured() {
+            return Outcome::Error(ErrorCode::Unavailable);
+        }
+        let lease = match self.session.admit() {
+            Ok(lease) => lease,
+            Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => {
+                return Outcome::Error(ErrorCode::LimitExceeded);
+            }
+        };
+        if lease
+            .stores()
+            .block_on(proxy::save(lease.stores(), socks.as_ref()))
+        {
+            Outcome::Ok(serde_json::Value::Null)
+        } else {
+            Outcome::Error(ErrorCode::Internal)
+        }
+    }
+
+    /// Admits a file pick for a joined room (ADR-0029): the core's file
+    /// dialog, then the read and the queue. One dialog at a time, as for
+    /// images.
+    fn pick_file<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+        if !valid_room_id(room_id) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let generation = match self.source() {
+            Source::Locked => return Err(ErrorCode::Locked),
+            Source::Fixtures | Source::SignedOut => return Err(ErrorCode::NotFound),
+            Source::Matrix(lease, client) => {
+                if !MatrixViews::has_room(&client, room_id) {
+                    return Err(ErrorCode::NotFound);
+                }
+                lease.generation()
+            }
+        };
+        let slot = self.media.begin_pick()?;
+        let room_id = room_id.to_owned();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            let Some(path) = (match self.picker.pick_file() {
+                Ok(path) => path,
+                Err(code) => return Outcome::Error(code),
+            }) else {
+                return Outcome::Ok(serde_json::Value::Null);
+            };
+            // A file chosen after a lock is not read.
+            if self.media_generation() != Some(generation) {
+                return Outcome::Error(ErrorCode::Locked);
+            }
+            let bytes = match pick::read_image_file(&path, &self.budgets) {
+                Ok(bytes) => bytes,
+                Err(code) => return Outcome::Error(code),
+            };
+            let upload = Arc::new(files::FileUpload::new(bytes, &path, self.budgets.clone()));
+            match self.session.send_file(&room_id, upload) {
+                Ok(queued) => ok(&queued),
+                Err(session::SendRefusal::Full) => Outcome::Error(ErrorCode::LimitExceeded),
+                Err(session::SendRefusal::Unavailable) => Outcome::Error(ErrorCode::Unavailable),
+            }
+        }))
+    }
+
+    /// Admits saving a received file (ADR-0029): the download and decrypt
+    /// under a lease, then the core's Save dialog without one, then the
+    /// write. One at a time, as image loads are.
+    fn save_file<'a>(&'a self, room_id: &str, event_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+        if !valid_room_id(room_id) || !valid_event_id(event_id) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let slot = self.media.begin_load()?;
+        let (room_id, event_id) = (room_id.to_owned(), event_id.to_owned());
+        Ok(Box::new(move || {
+            let _slot = slot;
+            refused(self.finish_save(&room_id, &event_id))
+        }))
+    }
+
+    fn finish_save(&self, room_id: &str, event_id: &str) -> Result<bool, ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let generation = lease.generation();
+        let current = || self.session.open_generation() == Some(generation);
+        let fetched = lease.stores().block_on(async {
+            let event = media::room_event(&client, room_id, event_id).await?;
+            let file = files::file_content(&event).ok_or(ErrorCode::NotFound)?;
+            if files::too_large(file.size) {
+                return Err(ErrorCode::Rejected);
+            }
+            let bytes = media::fetch_source(
+                &client,
+                client.http_client(),
+                &file.source,
+                &self.budgets,
+                &current,
+            )
+            .await?;
+            Ok((file.name, bytes))
+        });
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        let (name, bytes) = fetched?;
+        // The dialog may stay open long: no lease is held meanwhile.
+        let Some(path) = self.picker.save_file(&name)? else {
+            return Ok(false);
+        };
+        if !current() {
+            return Err(ErrorCode::Locked);
+        }
+        files::write(&path, bytes.bytes()).map(|()| true)
+    }
+
     fn pick_image<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
         if !valid_room_id(room_id) {
             return Err(ErrorCode::InvalidArgument);
@@ -1352,6 +1851,27 @@ impl Core {
         }
     }
 
+    /// Like `sign_in`, through the homeserver's OAuth 2.0 provider
+    /// (ADR-0030).
+    fn sign_in_oidc(&self, homeserver: &str) -> Outcome {
+        if !self.session.is_configured() {
+            return Outcome::Error(ErrorCode::Unavailable);
+        }
+        if homeserver.len() > MAX_HOMESERVER_URL_BYTES {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        let Ok(homeserver) = Homeserver::parse(homeserver) else {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        };
+        match self
+            .session
+            .sign_in_oidc(homeserver, self.credentials.clone())
+        {
+            Ok(status) => ok(&status),
+            Err(_) => Outcome::Error(ErrorCode::Locked),
+        }
+    }
+
     /// Like `sign_in`, for a new account; the username is checked here
     /// before anything is asked.
     fn register(&self, homeserver: &str, username: &str) -> Outcome {
@@ -1373,13 +1893,18 @@ impl Core {
         }
     }
 
-    fn send_message(&self, room_id: &str, body: &str) -> Outcome {
+    fn send_message(
+        &self,
+        room_id: &str,
+        body: &str,
+        relation: Option<outbox::Relation>,
+    ) -> Outcome {
         if !valid_room_id(room_id) || !valid_body(body) {
             return Outcome::Error(ErrorCode::InvalidArgument);
         }
         match self
             .session
-            .send_message(room_id, zeroize::Zeroizing::new(body.to_owned()))
+            .send_message(room_id, zeroize::Zeroizing::new(body.to_owned()), relation)
         {
             Ok(queued) => ok(&queued),
             Err(session::SendRefusal::Full) => Outcome::Error(ErrorCode::LimitExceeded),
@@ -1392,6 +1917,36 @@ impl Core {
             return Outcome::Error(ErrorCode::InvalidArgument);
         }
         ok(&self.session.verify(action(flow_id.to_owned())))
+    }
+
+    fn room_activity(&self, room_id: &str, event_id: Option<&str>) -> Outcome {
+        if !valid_room_id(room_id) {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        let event_id = match event_id.map(parse_event_id) {
+            None => None,
+            Some(Some(event_id)) => Some(event_id),
+            Some(None) => return Outcome::Error(ErrorCode::InvalidArgument),
+        };
+        let activity = match self.source() {
+            Source::Locked => Err(ErrorCode::Locked),
+            // Synthetic rooms have no one else in them.
+            Source::Fixtures | Source::SignedOut => Ok(persephone_contracts::RoomActivity {
+                typing: Vec::new(),
+                read_by: Vec::new(),
+                truncated: false,
+            }),
+            Source::Matrix(lease, client) => lease.stores().block_on(activity::room_activity(
+                &client,
+                self.session.typing(),
+                room_id,
+                event_id.as_deref(),
+            )),
+        };
+        match activity {
+            Ok(activity) => ok(&activity),
+            Err(code) => Outcome::Error(code),
+        }
     }
 
     fn contact_status(&self, room_id: &str) -> Outcome {
@@ -1607,6 +2162,13 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                 }
             }
         });
+        // The idle lock: checks every `IDLE_CHECK` until the connection
+        // closes, which wakes it at once.
+        let idle = scope.spawn(|| {
+            while !core.wait_closed(IDLE_CHECK) {
+                core.lock_if_idle(platform::os::idle_time());
+            }
+        });
         let mut ready = false;
         let end = loop {
             match receive::<_, Request>(&mut input, &budgets) {
@@ -1677,6 +2239,7 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
         };
         core.close();
         let _ = notifier.join();
+        let _ = idle.join();
         end
     })
 }
@@ -1684,6 +2247,56 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN each setting, profile state and idle time WHEN checked THEN the
+    /// idle lock locks only an open profile, only when on, and only once the
+    /// known idle time reaches the setting.
+    #[test]
+    fn given_idle_times_then_the_idle_lock_locks_only_when_due() {
+        let minutes = |m: u64| Some(Duration::from_secs(m * 60));
+        assert!(idle_lock_due(5, StoreState::Protected, minutes(5)));
+        assert!(idle_lock_due(5, StoreState::Protected, minutes(90)));
+        assert!(!idle_lock_due(
+            5,
+            StoreState::Protected,
+            Some(Duration::from_secs(299))
+        ));
+        assert!(
+            !idle_lock_due(0, StoreState::Protected, minutes(10_000)),
+            "off"
+        );
+        assert!(
+            !idle_lock_due(5, StoreState::Protected, None),
+            "unknown idle time"
+        );
+        for state in [
+            StoreState::Locked,
+            StoreState::Locking,
+            StoreState::Unlocking,
+        ] {
+            assert!(!idle_lock_due(5, state, minutes(90)), "{state:?}");
+        }
+    }
+
+    /// GIVEN reaction keys WHEN checked THEN an emoji or short text passes;
+    /// empty, blank, oversized or control-bearing keys are refused.
+    #[test]
+    fn given_reaction_keys_then_only_short_visible_text_is_accepted() {
+        assert!(valid_reaction_key("👍"));
+        assert!(valid_reaction_key("+1"));
+        assert!(valid_reaction_key(
+            &"x".repeat(persephone_core_protocol::MAX_REACTION_KEY_BYTES)
+        ));
+        for bad in [
+            String::new(),
+            "  ".into(),
+            "a\nb".into(),
+            "\u{7}".into(),
+            "x".repeat(persephone_core_protocol::MAX_REACTION_KEY_BYTES + 1),
+        ] {
+            assert!(!valid_reaction_key(&bad), "{bad:?}");
+        }
+    }
 
     /// GIVEN message bodies WHEN checked THEN text with line breaks and tabs
     /// passes; empty, blank, oversized or control-bearing bodies are refused.
@@ -2040,29 +2653,38 @@ mod tests {
             (Call::AccountSettings {}, ErrorCode::Locked),
             (
                 Call::SetAccountSettings {
-                    enter_sends: false,
-                    chat_text_percent: 100,
-                    interface_text_percent: 100,
-                    desktop_notifications: true,
+                    settings: persephone_contracts::AccountSettings {
+                        enter_sends: false,
+                        chat_text_percent: 100,
+                        interface_text_percent: 100,
+                        desktop_notifications: true,
+                        ..persephone_contracts::AccountSettings::default()
+                    },
                 },
                 ErrorCode::Locked,
             ),
             // Out-of-bounds sizes are refused before anything else.
             (
                 Call::SetAccountSettings {
-                    enter_sends: false,
-                    chat_text_percent: 79,
-                    interface_text_percent: 100,
-                    desktop_notifications: false,
+                    settings: persephone_contracts::AccountSettings {
+                        enter_sends: false,
+                        chat_text_percent: 79,
+                        interface_text_percent: 100,
+                        desktop_notifications: false,
+                        ..persephone_contracts::AccountSettings::default()
+                    },
                 },
                 ErrorCode::InvalidArgument,
             ),
             (
                 Call::SetAccountSettings {
-                    enter_sends: false,
-                    chat_text_percent: 100,
-                    interface_text_percent: 151,
-                    desktop_notifications: false,
+                    settings: persephone_contracts::AccountSettings {
+                        enter_sends: false,
+                        chat_text_percent: 100,
+                        interface_text_percent: 151,
+                        desktop_notifications: false,
+                        ..persephone_contracts::AccountSettings::default()
+                    },
                 },
                 ErrorCode::InvalidArgument,
             ),

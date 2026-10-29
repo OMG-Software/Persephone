@@ -2,7 +2,7 @@
 
 * Status: proposed
 * Deciders: project owner (decision pending)
-* Date: 2026-10-27
+* Date: 2026-10-28
 
 Technical Story: on 27 October 2026 the owner asked for a notification level
 (mentions only, all activity, or none) and for desktop notifications
@@ -52,6 +52,9 @@ by the UI process's Rust code".
   at most 512 bytes each, and skips the account's own events and events
   older than two minutes. It sends them as `Event::Notification`; only the
   latest one waits, so the queue stays bounded.
+* A second setting, on by default, keeps the names; turned off (owner
+  request, 28 October 2026), the core sends the notification with no names
+  at all, and the toast says only "New message".
 * The UI process shows it with `tauri-plugin-notification` 2.7.0's Rust API
   (room as title, "New message from" the sender as body) while the main
   window is not focused, and never forwards it to the page. The plugin is
@@ -72,8 +75,10 @@ by the UI process's Rust code".
   line now names `rand_chacha 0.3.1`, as two versions are present).
 * The plugin injects a small script that redefines `window.Notification`;
   its calls are denied by the capability.
-* Sender and room names still reach the OS notification centre, which may
-  keep a history; the setting is off by default for this reason.
+* While desktop notifications are on, sender and room names reach the OS
+  notification centre, which may keep a history, until the user turns names
+  off: names are on by default once notifications are. Desktop
+  notifications themselves are off by default for this reason.
 * On Windows, a toast from an application that is not installed (no Start
   menu shortcut with Persephone's application ID) may not show.
 * The level and toasts were tested against a mock homeserver only.

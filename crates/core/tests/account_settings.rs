@@ -9,8 +9,9 @@
 #![cfg(feature = "dev-disposable-servers")]
 
 use persephone_contracts::{
-    AccountChange, AccountState, IdentityState, NotificationLevel, NotificationSettings,
-    RecoveryState, SecurityError, SecurityOperation, SecurityStatus, ThreePidList, ThreePidMedium,
+    AccountChange, AccountSettings, AccountState, IdentityState, NotificationLevel,
+    NotificationSettings, RecoveryState, SecurityError, SecurityOperation, SecurityStatus,
+    ThreePidList, ThreePidMedium,
 };
 use persephone_core::{
     Core,
@@ -873,10 +874,12 @@ fn given_desktop_notifications_then_only_names_wait_to_be_shown() {
         call(
             &core,
             Call::SetAccountSettings {
-                enter_sends: true,
-                chat_text_percent: 100,
-                interface_text_percent: 100,
-                desktop_notifications: true,
+                settings: AccountSettings {
+                    chat_text_percent: 100,
+                    interface_text_percent: 100,
+                    desktop_notifications: true,
+                    ..AccountSettings::default()
+                },
             }
         ),
         Outcome::Ok(Value::Null)

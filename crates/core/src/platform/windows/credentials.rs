@@ -17,9 +17,10 @@ use windows_sys::Win32::{
         CredUnPackAuthenticationBufferW,
     },
     System::Com::CoTaskMemFree,
+    UI::Shell::ShellExecuteW,
     UI::WindowsAndMessaging::{
         IDNO, IDOK, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
-        MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW,
+        MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW, SW_SHOWNORMAL,
     },
 };
 use zeroize::Zeroizing;
@@ -176,6 +177,35 @@ impl CredentialSource for NativePrompt {
     fn confirm_recovery_key_change(&self) -> Result<bool, PromptError> {
         let (caption, message) = prompt_text::RECOVERY_KEY_CHANGE;
         yes_or_no(caption, message)
+    }
+
+    fn confirm_open_link(&self, caption: &str, message: &str) -> Result<bool, PromptError> {
+        yes_or_no(caption, message)
+    }
+
+    fn open_link(&self, url: &str) -> Result<(), PromptError> {
+        let operation = wide("open");
+        let file = wide(url);
+        // SAFETY: both strings are NUL-terminated and live for the call; no
+        // owner window, parameters or directory. The URL was checked to be an
+        // http or https link (`links::checked`), so the shell hands it to the
+        // default browser.
+        let result = unsafe {
+            ShellExecuteW(
+                null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                null(),
+                null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW reports success as a value above 32.
+        if result as usize > 32 {
+            Ok(())
+        } else {
+            Err(PromptError::Failed)
+        }
     }
 
     fn choose_recovery_key_file(&self) -> Result<Option<PathBuf>, PromptError> {

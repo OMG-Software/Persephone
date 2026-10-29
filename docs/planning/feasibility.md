@@ -65,7 +65,10 @@ Minimum supported OS/CPU versions remain undecided until packaged tests exist.
   follows from SSR escaping alone.
 * Keep worker pixels in bounded binary frames and reserve bytes before body
   allocation. Prototype payload ceilings total 200 MiB within a 256 MiB
-  admission ceiling, leaving 56 MiB unadmitted headroom. Runtime/allocator/
+  admission ceiling, leaving 56 MiB unadmitted headroom.
+  [ADR-0031](../adr/0031-reserve-the-sdks-copies-of-a-send-in-a-budget-of-their-own.md)
+  adds a 100 MiB class for the SDK's copies of a send and raises the
+  ceiling to 356 MiB, keeping the headroom. Runtime/allocator/
   webview copies and decoder scratch are additional memory requiring measurement.
 * Keep real account data out until unlock, store coverage, process containment,
   and lifecycle gates have concrete evidence. Missing secrets never select an

@@ -25,11 +25,15 @@
     changeRoom,
     inviteUser,
     roomMembers,
+    roomServers,
+    roomReaders,
     roomSettings,
     type LevelKey,
     type RoomChange,
     type RoomMember,
     type RoomMembers,
+    type RoomServers,
+    type RoomReaders,
     type RoomSettings
   } from './bridge';
 
@@ -165,6 +169,61 @@
     }
   }
 
+  // The homeservers with members here, read when the Security tab opens.
+  let servers = $state<RoomServers | null>(null);
+  let serversFailure = $state<string | null>(null);
+
+  // Who can read new messages here, read when the Security tab opens.
+  let readers = $state<RoomReaders | null>(null);
+  let readersFailure = $state<string | null>(null);
+
+  async function loadReaders() {
+    try {
+      readers = await roomReaders(roomId);
+      readersFailure = null;
+    } catch (reason) {
+      readersFailure = failureText(reason);
+    }
+  }
+
+  // Fixed text per trust level; the core sends codes only.
+  const readerTrust: Record<string, string> = {
+    verified: 'Verified',
+    unverified: 'Not verified',
+    no_identity: 'No encryption identity: receives no keys',
+    changed: 'Identity changed',
+    verified_changed: 'Identity changed since you verified them',
+    unknown: 'Not known yet'
+  };
+
+  let securityLoading = false;
+  let securityAgain = false;
+  async function loadSecurity() {
+    if (securityLoading) {
+      securityAgain = true;
+      return;
+    }
+    securityLoading = true;
+    try {
+      do {
+        securityAgain = false;
+        await loadServers();
+        await loadReaders();
+      } while (securityAgain);
+    } finally {
+      securityLoading = false;
+    }
+  }
+
+  async function loadServers() {
+    try {
+      servers = await roomServers(roomId);
+      serversFailure = null;
+    } catch (reason) {
+      serversFailure = failureText(reason);
+    }
+  }
+
   onMount(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialog?.showModal();
@@ -182,6 +241,7 @@
     if (seen !== null && now !== seen) {
       loadSettings();
       if (tab === 'people') loadMembers();
+      if (tab === 'security') loadSecurity();
     }
     seen = now;
   });
@@ -195,6 +255,7 @@
     // Read again on every visit: members may have changed meanwhile. The
     // old list stays shown until the new one arrives.
     if (next === 'people') loadMembers();
+    if (next === 'security') loadSecurity();
   }
 
   async function apply(change: RoomChange, success = 'Saved.') {
@@ -739,6 +800,66 @@
           </p>
         </fieldset>
       {:else if tab === 'security'}
+        {#if settings.encryption === 'encrypted'}
+          <section class="panel" aria-labelledby="readers-heading">
+            <h4 id="readers-heading">Who can read new messages</h4>
+            <p class="note">
+              Room keys go only to devices their owner has signed. A device that is not signed
+              receives no keys and cannot read new messages. This is what this computer knows; a
+              device added a moment ago may not show yet.
+            </p>
+            {#if readersFailure}
+              <p role="alert" class="error">{readersFailure}</p>
+            {:else if readers === null}
+              <p class="note" role="status">Reading the members' devices…</p>
+            {:else}
+              <ul class="reader-list">
+                {#each readers.readers as reader (reader.userId)}
+                  <li>
+                    <bdi class="server-name">{reader.userId}</bdi>{reader.own ? ' (you)' : ''}
+                    <span class="note">
+                      {readerTrust[reader.trust] ?? readerTrust.unknown} ·
+                      {reader.receiving}
+                      {reader.receiving === 1 ? 'device reads' : 'devices read'}{reader.refused > 0
+                        ? ` · ${reader.refused} not signed, refused`
+                        : ''}
+                    </span>
+                  </li>
+                {/each}
+              </ul>
+              {#if readers.truncated}
+                <p class="note">More members are here than are listed.</p>
+              {/if}
+            {/if}
+          </section>
+        {/if}
+        <section class="panel" aria-labelledby="servers-heading">
+          <h4 id="servers-heading">Servers in this room</h4>
+          <p class="note">
+            Each of these homeservers has members here, so it receives the room's messages (encrypted,
+            if the room is) and who sent them and when.
+          </p>
+          {#if serversFailure}
+            <p role="alert" class="error">{serversFailure}</p>
+          {:else if servers === null}
+            <p class="note" role="status">Reading the servers…</p>
+          {:else}
+            <ul class="server-list">
+              {#each servers.servers as server (server.name)}
+                <li>
+                  <bdi class="server-name">{server.name}</bdi>
+                  <span class="note"
+                    >{server.members}
+                    {server.members === 1 ? 'member' : 'members'}{server.own ? ' · your server' : ''}</span
+                  >
+                </li>
+              {/each}
+            </ul>
+            {#if servers.truncated}
+              <p class="note">More servers have members here than are listed.</p>
+            {/if}
+          {/if}
+        </section>
         <section class="panel" aria-labelledby="encryption-heading">
           <h4 id="encryption-heading">Encryption</h4>
           {#if settings.encryption === 'encrypted'}

@@ -47,6 +47,21 @@ fn serde_rejects_unknown_fields_and_variants() {
     let unknown_gap_field = r#"{"kind":"gap","next_cursor":null,"extra":true}"#;
     assert!(serde_json::from_str::<persephone_contracts::TimelineItem>(unknown_gap_field).is_err());
 
+    let state = r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"member","target":"@a:s","membership":"joined"}}"#;
+    assert!(serde_json::from_str::<persephone_contracts::TimelineItem>(state).is_ok());
+    for invalid in [
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"member","target":"@a:s","membership":"joined","extra":1}}"#,
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"member","target":"@a:s","membership":"teleported"}}"#,
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"weather"}}"#,
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null,"change":{"type":"encryption","algorithm":"none"}}"#,
+        r#"{"kind":"state","event_id":"$e","sender":"@a:s","origin_server_ts":null}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<persephone_contracts::TimelineItem>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+
     let unknown_nested_field = r#"{"roomId":"!r:s","items":[{"kind":"gap","next_cursor":null,"extra":true}],"nextCursor":null}"#;
     assert!(
         serde_json::from_str::<persephone_contracts::TimelinePage>(unknown_nested_field).is_err()
@@ -287,7 +302,8 @@ fn image_contracts_reject_unknown_fields_and_out_of_range_values() {
         )
     };
     assert!(serde_json::from_str::<PendingMessage>(&pending(r#""image""#)).is_ok());
-    assert!(serde_json::from_str::<PendingMessage>(&pending(r#""file""#)).is_err());
+    assert!(serde_json::from_str::<PendingMessage>(&pending(r#""file""#)).is_ok());
+    assert!(serde_json::from_str::<PendingMessage>(&pending(r#""video""#)).is_err());
     assert!(serde_json::from_str::<PendingMessage>(&pending("null")).is_err());
 }
 
@@ -419,6 +435,16 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
 
     let defaults = AccountSettings::default();
     assert!(defaults.enter_sends && !defaults.desktop_notifications);
+    assert!(!defaults.send_typing && !defaults.send_read_receipts);
+    assert_eq!(defaults.idle_lock_minutes, 0);
+    assert!(defaults.notification_names);
+    assert!(
+        !AccountSettings {
+            idle_lock_minutes: persephone_contracts::IDLE_LOCK_MINUTES_MAX + 1,
+            ..defaults
+        }
+        .within_bounds()
+    );
     assert_eq!(
         (defaults.chat_text_percent, defaults.interface_text_percent),
         (100, 100)
@@ -429,7 +455,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true}"#
     );
     for invalid in [
         r#"{}"#,
@@ -437,7 +463,10 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         r#"{"enterSends":null,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#,
         r#"{"enterSends":"true","chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#,
         r#"{"enterSends":true,"chatTextPercent":-1,"interfaceTextPercent":100,"desktopNotifications":false}"#,
-        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"userId":"@a:s"}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"userId":"@a:s"}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":-5}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":"yes","sendReadReceipts":false}"#,
     ] {
         assert!(
             serde_json::from_str::<AccountSettings>(invalid).is_err(),

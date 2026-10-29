@@ -90,6 +90,7 @@ pub enum SecretPrompt<'a> {
 pub enum PasswordPurpose {
     ChangePassword,
     AddThreePid,
+    RemoveSession,
 }
 
 /// Which step of choosing a new account password a prompt is for.
@@ -150,6 +151,19 @@ pub trait CredentialSource: Send + Sync {
     /// `Ok(None)` when the user chose not to save it. Unsupported unless a
     /// source provides it.
     fn choose_recovery_key_file(&self) -> Result<Option<PathBuf>, PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
+    /// Asks whether to open a link (ADR-0024), with the question from
+    /// `links::question`. `Ok(true)` only for an explicit yes. Unsupported
+    /// unless a source provides it.
+    fn confirm_open_link(&self, _caption: &str, _message: &str) -> Result<bool, PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
+    /// Opens a checked link in the user's default browser (ADR-0024).
+    /// Unsupported unless a source provides it.
+    fn open_link(&self, _url: &str) -> Result<(), PromptError> {
         Err(PromptError::Unsupported)
     }
 

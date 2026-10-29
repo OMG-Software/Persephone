@@ -51,6 +51,28 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.createRoom('Plans', ['@b:s']), 'create_room', { name: 'Plans', invite: ['@b:s'] }],
     [() => bridge.inviteUser('!r:s', '@b:s'), 'invite_user', { roomId: '!r:s', userId: '@b:s' }],
     [() => bridge.displayName(), 'display_name', {}],
+    [() => bridge.sendMessage('!r:s', 'hi'), 'send_message', { roomId: '!r:s', body: 'hi', replyTo: null }],
+    [() => bridge.deleteMessage('!r:s', '$mine'), 'delete_message', { roomId: '!r:s', eventId: '$mine' }],
+    [() => bridge.react('!r:s', '$e', '👍'), 'react', { roomId: '!r:s', eventId: '$e', key: '👍' }],
+    [() => bridge.markRead('!r:s', '$e'), 'mark_read', { roomId: '!r:s', eventId: '$e' }],
+    [() => bridge.pickFile('!r:s'), 'pick_file', { roomId: '!r:s' }],
+    [() => bridge.saveFile('!r:s', '$f'), 'save_file', { roomId: '!r:s', eventId: '$f' }],
+    [() => bridge.roomActivity('!r:s', '$e'), 'room_activity', { roomId: '!r:s', eventId: '$e' }],
+    [() => bridge.roomActivity('!r:s', null), 'room_activity', { roomId: '!r:s', eventId: null }],
+    [() => bridge.setTyping('!r:s', true), 'set_typing', { roomId: '!r:s', typing: true }],
+    [() => bridge.openLink('https://example.org/'), 'open_link', { url: 'https://example.org/' }],
+    [() => bridge.roomServers('!r:s'), 'room_servers', { roomId: '!r:s' }],
+    [() => bridge.roomReaders('!r:s'), 'room_readers', { roomId: '!r:s' }],
+    [
+      () => bridge.editMessage('!r:s', '$mine', 'fixed'),
+      'edit_message',
+      { roomId: '!r:s', eventId: '$mine', body: 'fixed' }
+    ],
+    [
+      () => bridge.sendMessage('!r:s', 'yes', '$asked'),
+      'send_message',
+      { roomId: '!r:s', body: 'yes', replyTo: '$asked' }
+    ],
     [() => bridge.setDisplayName('Al'), 'set_display_name', { name: 'Al' }],
     [() => bridge.deviceList(), 'device_list', {}],
     [() => bridge.accountSettings(), 'account_settings', {}],
@@ -60,12 +82,35 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           enterSends: false,
           chatTextPercent: 120,
           interfaceTextPercent: 90,
-          desktopNotifications: true
+          desktopNotifications: true,
+          sendTyping: true,
+          sendReadReceipts: false,
+          idleLockMinutes: 15,
+          notificationNames: false
         }),
       'set_account_settings',
-      { enterSends: false, chatTextPercent: 120, interfaceTextPercent: 90, desktopNotifications: true }
+      {
+        settings: {
+          enterSends: false,
+          chatTextPercent: 120,
+          interfaceTextPercent: 90,
+          desktopNotifications: true,
+          sendTyping: true,
+          sendReadReceipts: false,
+          idleLockMinutes: 15,
+          notificationNames: false
+        }
+      }
     ],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
+    [() => bridge.newSessions(), 'new_sessions', {}],
+    [() => bridge.signInWithOidc('https://e.org'), 'sign_in_with_oidc', { homeserver: 'https://e.org' }],
+    [() => bridge.proxySetting(), 'proxy_setting', {}],
+    [() => bridge.setProxySetting('127.0.0.1:9050'), 'set_proxy_setting', { proxy: '127.0.0.1:9050' }],
+    [() => bridge.setProxySetting(null), 'set_proxy_setting', { proxy: null }],
+    [() => bridge.discoverHomeserver('example.org'), 'discover_homeserver', { serverName: 'example.org' }],
+    [() => bridge.acknowledgeSessions(['D']), 'acknowledge_sessions', { deviceIds: ['D'] }],
+    [() => bridge.removeDevice('D'), 'remove_device', { deviceId: 'D' }],
     [() => bridge.threePids(), 'three_pids', {}],
     [() => bridge.requestEmailToken('a@example.org'), 'request_email_token', { email: 'a@example.org' }],
     [
@@ -111,14 +156,24 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       chatTextPercent: 100,
       interfaceTextPercent: 100,
       desktopNotifications: false,
+      sendTyping: false,
+      sendReadReceipts: false,
+      idleLockMinutes: 0,
+      notificationNames: true,
       theme: 'dark'
     })
   );
   assert.deepEqual(made.args, {
-    enterSends: true,
-    chatTextPercent: 100,
-    interfaceTextPercent: 100,
-    desktopNotifications: false
+    settings: {
+      enterSends: true,
+      chatTextPercent: 100,
+      interfaceTextPercent: 100,
+      desktopNotifications: false,
+      sendTyping: false,
+      sendReadReceipts: false,
+      idleLockMinutes: 0,
+      notificationNames: true
+    }
   });
 });
 

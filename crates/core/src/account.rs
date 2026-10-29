@@ -25,7 +25,10 @@ use crate::views::MAX_ROOMS;
 use futures_core::Stream;
 use matrix_sdk::{
     Client,
-    authentication::matrix::MatrixSession,
+    authentication::{
+        matrix::MatrixSession,
+        oauth::{ClientId, OAuthSession, UserSession},
+    },
     config::{RequestConfig, StoreConfig, SyncSettings},
     cross_process_lock::CrossProcessLockConfig,
     encryption::{BackupDownloadStrategy, EncryptionSettings},
@@ -45,16 +48,31 @@ use zeroize::Zeroizing;
 pub const ACCOUNT_KEY: &str = "persephone.account.v1";
 const MAX_SAVED_ACCOUNT_BYTES: usize = 64 * 1024;
 pub const DEVICE_NAME: &str = "Persephone";
+/// The page that names Persephone to an OAuth provider (ADR-0030).
+pub const PROJECT_URI: &str = "https://omg-software.github.io/Persephone/";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Long-poll wait for one sync round. A lock waits for at most one round.
 pub const SYNC_POLL: Duration = Duration::from_secs(5);
 /// Most batches [`take_key_rooms`] takes in one call; later ones wait.
 const MAX_KEY_BATCHES: usize = 64;
 
+/// The saved account: a password session (`session`), or an OAuth one
+/// (`oauth`, ADR-0030), never both. Records from before OAuth have only
+/// `session`, and still read.
 #[derive(Serialize, Deserialize)]
 struct SavedAccount {
     homeserver: String,
-    session: MatrixSession,
+    #[serde(default)]
+    session: Option<MatrixSession>,
+    #[serde(default)]
+    oauth: Option<SavedOAuth>,
+}
+
+/// An OAuth session, in parts the SDK can serialize.
+#[derive(Serialize, Deserialize)]
+struct SavedOAuth {
+    client_id: String,
+    user: UserSession,
 }
 
 /// Builds a client over the open stores. Must run inside the stores' runtime.
@@ -65,10 +83,17 @@ pub async fn build_client(homeserver: &Homeserver, stores: &Stores) -> Result<Cl
         .event_cache_store(sdk.event_cache.clone())
         .media_store(sdk.media.clone())
         .crypto_store(sdk.crypto.clone());
-    let http = homeserver::http_client().map_err(|_| SignInError::Failed)?;
+    // An unreadable proxy record refuses the connection: never direct.
+    let proxy = crate::proxy::load(stores)
+        .await
+        .map_err(|_| SignInError::Failed)?;
+    let http = homeserver::http_client(proxy.as_ref()).map_err(|_| SignInError::Failed)?;
     Client::builder()
         .homeserver_url(homeserver.url().as_str())
         .respect_login_well_known(false)
+        // An access token with a refresh token expires; the SDK refreshes
+        // it, and the sync loop saves the new tokens (`save_if_refreshed`).
+        .handle_refresh_tokens()
         .http_client(http)
         .request_config(
             RequestConfig::new()
@@ -131,15 +156,31 @@ pub async fn save_session(
     homeserver: &Homeserver,
     stores: &Stores,
 ) -> Result<String, SignInError> {
-    let session = client.matrix_auth().session().ok_or(SignInError::Failed)?;
-    let user_id = session.meta.user_id.to_string();
-    let saved = Zeroizing::new(
-        serde_json::to_vec(&SavedAccount {
-            homeserver: homeserver.url().to_string(),
-            session,
-        })
-        .map_err(|_| SignInError::Failed)?,
-    );
+    let (saved, user_id) = match client.oauth().full_session() {
+        Some(oauth) => {
+            let user_id = oauth.user.meta.user_id.to_string();
+            let saved = SavedAccount {
+                homeserver: homeserver.url().to_string(),
+                session: None,
+                oauth: Some(SavedOAuth {
+                    client_id: oauth.client_id.as_str().to_owned(),
+                    user: oauth.user,
+                }),
+            };
+            (saved, user_id)
+        }
+        None => {
+            let session = client.matrix_auth().session().ok_or(SignInError::Failed)?;
+            let user_id = session.meta.user_id.to_string();
+            let saved = SavedAccount {
+                homeserver: homeserver.url().to_string(),
+                session: Some(session),
+                oauth: None,
+            };
+            (saved, user_id)
+        }
+    };
+    let saved = Zeroizing::new(serde_json::to_vec(&saved).map_err(|_| SignInError::Failed)?);
     stores
         .crypto()
         .set_custom_value(ACCOUNT_KEY, saved.to_vec())
@@ -168,13 +209,145 @@ pub async fn restore(stores: &Stores) -> Result<Option<(Client, String)>, SignIn
     // refuses a plain-HTTP account saved by one with it.
     let homeserver =
         Homeserver::parse(&saved.homeserver).map_err(|_| SignInError::HomeserverRefused)?;
-    let user_id = saved.session.meta.user_id.to_string();
     let client = build_client(&homeserver, stores).await?;
-    client
-        .restore_session(saved.session)
-        .await
-        .map_err(|_| SignInError::Failed)?;
+    let user_id = match (saved.session, saved.oauth) {
+        (Some(session), None) => {
+            let user_id = session.meta.user_id.to_string();
+            client
+                .restore_session(session)
+                .await
+                .map_err(|_| SignInError::Failed)?;
+            user_id
+        }
+        (None, Some(oauth)) => {
+            let user_id = oauth.user.meta.user_id.to_string();
+            client
+                .restore_session(OAuthSession {
+                    client_id: ClientId::new(oauth.client_id),
+                    user: oauth.user,
+                })
+                .await
+                .map_err(|_| SignInError::Failed)?;
+            user_id
+        }
+        // Neither or both: not a record this build wrote.
+        _ => return Err(SignInError::Failed),
+    };
     Ok(Some((client, user_id)))
+}
+
+/// Saves the session again when the SDK refreshed its access token since
+/// `last` (the token last saved), so a restart restores the new one. An
+/// OAuth session refreshes; a password session does only if the server gave
+/// it a refresh token, which sign-in does not ask for, but it is saved the
+/// same way if it does. Returns the token now saved.
+pub async fn save_if_refreshed(
+    client: &Client,
+    stores: &Stores,
+    last: Option<Zeroizing<String>>,
+) -> Option<Zeroizing<String>> {
+    let now = Zeroizing::new(client.access_token()?);
+    if last.as_ref().is_some_and(|last| **last == *now) {
+        return last;
+    }
+    let homeserver = Homeserver::parse(client.homeserver().as_str()).ok()?;
+    match save_session(client, &homeserver, stores).await {
+        Ok(_) => Some(now),
+        Err(_) => last,
+    }
+}
+
+/// An OAuth sign-in that is started (ADR-0030): the loopback redirect and the
+/// provider's page, which the user has yet to be asked about.
+pub struct OAuthStart {
+    redirect: crate::oauth_login::Redirect,
+    authorization: matrix_sdk::authentication::oauth::OAuthAuthorizationData,
+}
+
+impl OAuthStart {
+    /// The provider's page to open in the browser.
+    pub fn url(&self) -> &url::Url {
+        &self.authorization.url
+    }
+}
+
+/// Starts signing in through the homeserver's OAuth 2.0 provider (ADR-0030):
+/// reads its metadata, binds the loopback redirect, and registers as a
+/// native client with it. Nothing is asked here: the caller asks the user,
+/// with no lease held, then finishes with [`finish_oauth`] or
+/// [`abort_oauth`].
+pub async fn start_oauth(client: &Client) -> Result<OAuthStart, SignInError> {
+    use crate::oauth_login::Redirect;
+    use matrix_sdk::authentication::oauth::registration::{
+        ApplicationType, ClientMetadata, Localized, OAuthGrantType,
+    };
+    // A server without an OAuth provider has none to offer.
+    client
+        .oauth()
+        .server_metadata()
+        .await
+        .map_err(|_| SignInError::OidcUnavailable)?;
+    let redirect = Redirect::bind().await.map_err(|_| SignInError::Failed)?;
+    let redirect_uri = redirect.uri();
+    let project = url::Url::parse(PROJECT_URI).map_err(|_| SignInError::Failed)?;
+    let mut metadata = ClientMetadata::new(
+        ApplicationType::Native,
+        vec![OAuthGrantType::AuthorizationCode {
+            redirect_uris: vec![redirect_uri.clone()],
+        }],
+        Localized::new(project, []),
+    );
+    metadata.client_name = Some(Localized::new(DEVICE_NAME.to_owned(), []));
+    let metadata = matrix_sdk::ruma::serde::Raw::new(&metadata).map_err(|_| SignInError::Failed)?;
+    let authorization = client
+        .oauth()
+        .login(redirect_uri, None, Some(metadata.into()), None)
+        .build()
+        .await
+        .map_err(|_| SignInError::OidcUnavailable)?;
+    Ok(OAuthStart {
+        redirect,
+        authorization,
+    })
+}
+
+/// Forgets a started sign-in the user declined.
+pub async fn abort_oauth(client: &Client, start: OAuthStart) {
+    client.oauth().abort_login(&start.authorization.state).await;
+}
+
+/// Finishes a started sign-in once the provider's page is open: waits for
+/// the redirect (until `abandoned`), finishes the login and saves the
+/// session encrypted. Returns the user ID.
+pub async fn finish_oauth(
+    client: &Client,
+    homeserver: &Homeserver,
+    stores: &Stores,
+    start: OAuthStart,
+    abandoned: impl Fn() -> bool,
+) -> Result<String, SignInError> {
+    use crate::oauth_login::RedirectError;
+    use matrix_sdk::utils::UrlOrQuery;
+    let OAuthStart {
+        redirect,
+        authorization,
+    } = start;
+    let query = match redirect.wait(abandoned).await {
+        Ok(query) => query,
+        Err(error) => {
+            client.oauth().abort_login(&authorization.state).await;
+            return Err(match error {
+                RedirectError::TimedOut | RedirectError::Abandoned => SignInError::Cancelled,
+                RedirectError::Failed => SignInError::Failed,
+            });
+        }
+    };
+    client
+        .oauth()
+        .finish_login(UrlOrQuery::Query(query))
+        .await
+        .map_err(|error| sign_in_error(&error))?;
+    save_session(client, homeserver, stores).await
 }
 
 /// The selected sync engine. Selection follows successful capability
@@ -211,9 +384,9 @@ pub async fn select_engine(client: &Client) -> Result<Engine, SignInError> {
                 ])
                 .timeline_limit(20),
         )
+        // Typing notices and receipts are received to be shown; whether this
+        // account sends its own is a setting (ADR-0023).
         .with_all_extensions()
-        .without_typing_extension()
-        .without_receipt_extension()
         .poll_timeout(SYNC_POLL)
         .network_timeout(REQUEST_TIMEOUT)
         .build()
@@ -346,6 +519,30 @@ mod tests {
         EncryptionSettings as KeySettings, OlmMachine, encrypt_room_key_export,
         types::EventEncryptionAlgorithm, vodozemac::Curve25519PublicKey,
     };
+
+    /// GIVEN a saved account from before OAuth and an OAuth one WHEN read
+    /// THEN the first is a password session and the second an OAuth one,
+    /// tokens and client ID kept, and an OAuth record writes back the same.
+    #[test]
+    fn given_saved_accounts_of_both_kinds_then_each_reads_back() {
+        let old: SavedAccount = serde_json::from_str(
+            r#"{"homeserver":"https://example.org/","session":{"user_id":"@me:example.org","device_id":"ME","access_token":"a"}}"#,
+        )
+        .unwrap();
+        assert!(old.session.is_some() && old.oauth.is_none());
+
+        let oauth: SavedAccount = serde_json::from_str(
+            r#"{"homeserver":"https://example.org/","oauth":{"client_id":"client-1","user":{"user_id":"@me:example.org","device_id":"ME","access_token":"a","refresh_token":"r"}}}"#,
+        )
+        .unwrap();
+        let saved = oauth.oauth.as_ref().unwrap();
+        assert!(oauth.session.is_none());
+        assert_eq!(saved.client_id, "client-1");
+        assert_eq!(saved.user.tokens.refresh_token.as_deref(), Some("r"));
+        let again: SavedAccount =
+            serde_json::from_slice(&serde_json::to_vec(&oauth).unwrap()).unwrap();
+        assert_eq!(again.oauth.unwrap().user.meta.user_id, "@me:example.org");
+    }
 
     /// GIVEN a signed-in client watching its room keys WHEN three keys for two
     /// rooms are imported (the way a backup download stores them) THEN one

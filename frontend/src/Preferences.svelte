@@ -2,7 +2,14 @@
   import { onMount } from 'svelte';
   import { notificationLevel, setNotificationLevel, type AccountSettings, type NotificationLevel } from './bridge';
   import { notificationLevelText } from './accountChanges';
-  import { CHAT_TEXT_SIZES, INTERFACE_TEXT_SIZES } from './preferences';
+  import ProxySettings from './ProxySettings.svelte';
+  import { notWindows } from './image';
+  import {
+    CHAT_TEXT_SIZES,
+    IDLE_LOCK_CHOICES,
+    INTERFACE_TEXT_SIZES,
+    idleLockText
+  } from './preferences';
 
   // This account's preferences. The settings are kept in its encrypted
   // profile through the caller; the notification level is the account's
@@ -20,6 +27,9 @@
     // stored ones.
     onchange: (patch: Partial<AccountSettings>) => void;
   } = $props();
+
+  // Whether the core cannot read this computer's idle time (ADR-0025).
+  const idleUnavailable = notWindows();
 
   let level = $state<NotificationLevel | null>(null);
   let levelBusy = $state(false);
@@ -149,9 +159,70 @@
       />
       <span>Show desktop notifications</span>
     </label>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.notificationNames}
+        disabled={!settings.desktopNotifications}
+        onchange={(event) => onchange({ notificationNames: event.currentTarget.checked })}
+      />
+      <span>Show who wrote and in which room</span>
+    </label>
     <p class="note">
-      A notification shows who wrote and in which room, never the message itself. It shows only while
-      Persephone's window is not in front.
+      {settings.notificationNames
+        ? 'A notification shows who wrote and in which room, never the message itself.'
+        : 'A notification says only that a message arrived: no names, no message.'} It shows only
+      while Persephone's window is not in front. Your system may keep a history of notifications.
+    </p>
+  </div>
+  <div class="panel">
+    <h3>Connection</h3>
+    <ProxySettings />
+  </div>
+  <div class="panel">
+    <h3>Privacy</h3>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.sendTyping}
+        onchange={(event) => onchange({ sendTyping: event.currentTarget.checked })}
+      />
+      <span>Tell people when you are typing</span>
+    </label>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.sendReadReceipts}
+        onchange={(event) => onchange({ sendReadReceipts: event.currentTarget.checked })}
+      />
+      <span>Show people how far you have read</span>
+    </label>
+    <p class="note">
+      Both are off by default: each tells the homeserver and everyone in the room when you are
+      active. You still see other people's. Your other devices always learn what you have read.
+    </p>
+    <label for="idle-lock">Lock Persephone when this computer is not used</label>
+    <!-- Only Windows reads the computer's idle time yet (ADR-0025); elsewhere
+         the setting could not take effect, so it is not offered. -->
+    <select
+      id="idle-lock"
+      class="field"
+      disabled={idleUnavailable}
+      value={idleUnavailable ? 0 : settings.idleLockMinutes}
+      onchange={(event) => onchange({ idleLockMinutes: Number(event.currentTarget.value) })}
+    >
+      {#each IDLE_LOCK_CHOICES as minutes (minutes)}
+        <option value={minutes}>{idleLockText(minutes)}</option>
+      {/each}
+    </select>
+    <p class="note">
+      {idleUnavailable
+        ? 'Not available on this system yet: Persephone cannot read how long it has been idle.'
+        : 'Counts time without keyboard or mouse input on this computer, in any program. Locking closes the profile; your passphrase opens it again.'}
+      Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
     </p>
   </div>
   {#if failure}

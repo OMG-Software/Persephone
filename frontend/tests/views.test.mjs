@@ -8,6 +8,7 @@ let Timeline;
 let SignIn;
 let Security;
 let Composer;
+let Message;
 let ServerPicker;
 let Verification;
 let JumpPalette;
@@ -39,6 +40,7 @@ before(async () => {
   ({ default: SignIn } = await vite.ssrLoadModule('/src/SignIn.svelte'));
   ({ default: Security } = await vite.ssrLoadModule('/src/Security.svelte'));
   ({ default: Composer } = await vite.ssrLoadModule('/src/Composer.svelte'));
+  ({ default: Message } = await vite.ssrLoadModule('/src/Message.svelte'));
   ({ default: ServerPicker } = await vite.ssrLoadModule('/src/ServerPicker.svelte'));
   ({ default: Verification } = await vite.ssrLoadModule('/src/Verification.svelte'));
   ({ default: JumpPalette } = await vite.ssrLoadModule('/src/JumpPalette.svelte'));
@@ -153,6 +155,113 @@ test('notices render as fixed text with an isolated sender, never as content', (
   assert.match(html, /from a device its owner has not verified/);
 });
 
+test('GIVEN state changes with hostile names WHEN rendered THEN each line is fixed text with every name isolated', () => {
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [
+        {
+          kind: 'state',
+          event_id: '$1',
+          sender: '@a:example.invalid',
+          origin_server_ts: null,
+          change: { type: 'member', target: hostileName, membership: 'kicked' }
+        },
+        {
+          kind: 'state',
+          event_id: '$2',
+          sender: hostileName,
+          origin_server_ts: null,
+          change: { type: 'topic', topic: '<script>alert(1)</script>' }
+        },
+        {
+          kind: 'state',
+          event_id: '$3',
+          sender: '@c:example.invalid',
+          origin_server_ts: null,
+          change: { type: 'encryption' }
+        }
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  });
+  assert.doesNotMatch(html, /<(?:img|script)\b/i);
+  // Without Svelte's hydration markers, which sit between the parts.
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.match(shown, /<bdi>@a:example\.invalid<\/bdi> removed <bdi>&lt;img/);
+  assert.match(shown, /changed the topic to <bdi>&lt;script>/);
+  assert.match(shown, /<bdi>@c:example\.invalid<\/bdi> turned on end-to-end encryption/);
+});
+
+test('GIVEN replies WHEN rendered THEN a loaded message is quoted as isolated text, and a missing one is named only', () => {
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [
+        { kind: 'message', event_id: '$1', sender: hostileName, body: 'asked <b>', origin_server_ts: null, reply_to: null },
+        { kind: 'message', event_id: '$2', sender: '@b:example.invalid', body: 'answer', origin_server_ts: null, reply_to: '$1' },
+        { kind: 'message', event_id: '$3', sender: '@b:example.invalid', body: 'late', origin_server_ts: null, reply_to: '$gone' }
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {},
+      onreply: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(shown, /<img|<b>/);
+  assert.match(shown, /In reply to <bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>: <span dir="auto">asked &lt;b><\/span>/);
+  assert.match(shown, /In reply to an earlier message/);
+  assert.equal((shown.match(/>\s*Reply <span class="visually-hidden">/g) ?? []).length, 3);
+});
+
+test('GIVEN the first unread message WHEN rendered THEN one New messages line comes just before it', () => {
+  const msg = (id) => ({ kind: 'message', event_id: id, sender: '@b:example.invalid', body: id, origin_server_ts: null, reply_to: null });
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [msg('$1'), msg('$2'), msg('$3')],
+      unreadFrom: '$2',
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.equal((shown.match(/New messages/g) ?? []).length, 1);
+  assert.ok(shown.indexOf('New messages') > shown.indexOf('>$1<'));
+  assert.ok(shown.indexOf('New messages') < shown.indexOf('>$2<'));
+});
+
+test('GIVEN reactions WHEN rendered THEN keys are isolated text with counts, and our own is pressed', () => {
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      ownUserId: '@me:example.invalid',
+      items: [
+        { kind: 'message', event_id: '$1', sender: '@a:example.invalid', body: 'hi', origin_server_ts: null, reply_to: null },
+        { kind: 'reaction', event_id: '$r1', sender: '@me:example.invalid', reacts_to: '$1', key: '<b>bold</b>', origin_server_ts: null },
+        { kind: 'reaction', event_id: '$r2', sender: '@a:example.invalid', reacts_to: '$1', key: '👍', origin_server_ts: null }
+      ],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {},
+      onreact: () => {},
+      onunreact: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(shown, /<b>/);
+  assert.match(shown, /aria-pressed="true"[^>]*><bdi>&lt;b>bold&lt;\/b><\/bdi> <span class="count">1<\/span>/);
+  assert.match(shown, /aria-pressed="false"[^>]*><bdi>👍<\/bdi> <span class="count">1<\/span>/);
+});
+
 test('the sign-in form asks only for the homeserver; the password goes to a native window', () => {
   const signedOut = { state: 'signed_out', userId: null, error: null };
   const form = (mode = 'sign_in', username = '') => ({ homeserver: 'https://matrix.org', mode, username });
@@ -169,7 +278,10 @@ test('the sign-in form asks only for the homeserver; the password goes to a nati
   assert.match(html, /<bdi class="server-value">matrix\.org<\/bdi>/, 'matrix.org until changed');
   assert.match(html, />Continue</);
   assert.doesNotMatch(html, /type="password"/i, 'no password field in the page');
-  assert.doesNotMatch(html, /<input/, 'the server is chosen in the picker; nothing else is asked');
+  // The sign-in form itself; the proxy has its own form under Connection.
+  const signInForm = html.slice(html.indexOf('<form'), html.indexOf('</form>'));
+  assert.doesNotMatch(signInForm, /<input/, 'the server is chosen in the picker; nothing else is asked');
+  assert.match(html, /<details class="connection"><summary>Connection<\/summary>[\s\S]*id="proxy-address"/);
   assert.match(html, /This page never sees your password/);
   assert.match(html, /<button type="button" class="link"[^>]*>\s*Create an account\s*<\/button>/);
 
@@ -199,7 +311,8 @@ test('GIVEN the create-account mode WHEN it shows THEN only a username is asked,
   const empty = view('');
   assert.match(empty, /<h2 id="sign-in-heading">Create an account<\/h2>/);
   assert.match(empty, /<input id="register-username" class="field mono" type="text"/);
-  assert.equal((empty.match(/<input/g) ?? []).length, 1, 'the username is the only field');
+  const registerForm = empty.slice(empty.indexOf('<form'), empty.indexOf('</form>'));
+  assert.equal((registerForm.match(/<input/g) ?? []).length, 1, 'the username is the only field');
   assert.doesNotMatch(empty, /type="password"/i, 'the password goes to a native window');
   assert.match(empty, /<button type="submit" class="primary wide" disabled[^>]*>\s*Create account/);
   assert.match(empty, /This page never sees them/);
@@ -227,23 +340,25 @@ test('GIVEN the create-account mode WHEN it shows THEN only a username is asked,
   assert.match(view('newbie', { state: 'signing_in', userId: null, error: null }), /Checking the name/);
 });
 
-test('GIVEN the server picker WHEN another server is chosen THEN it asks only for a URL', () => {
+test('GIVEN the server picker WHEN another server is chosen THEN it asks only for a name or address', () => {
   const picker = (current) =>
     render(ServerPicker, { props: { current, onchoose: () => {}, oncancel: () => {} } }).body;
 
   const matrixOrg = picker('https://matrix.org');
   assert.match(matrixOrg, /<dialog[^>]*aria-labelledby="picker-heading"/);
   assert.equal((matrixOrg.match(/type="radio"/g) ?? []).length, 2);
-  assert.doesNotMatch(matrixOrg, /type="url"/, 'no address field until another server is chosen');
+  assert.doesNotMatch(matrixOrg, /id="homeserver"/, 'no address field until another server is chosen');
   assert.match(matrixOrg, />Use matrix\.org</);
 
   const other = picker(hostileName);
   assert.match(other, /<label for="homeserver" class="visually-hidden">Homeserver address<\/label>/);
-  assert.match(other, /<input id="homeserver"[^>]*type="url"[^>]*required/);
+  assert.match(other, /<input id="homeserver"[^>]*type="text"[^>]*required/);
   assert.match(other, /value="&lt;img src=x onerror=alert\(1\)>"/, 'the typed address stays text');
   assert.doesNotMatch(other, /<img/);
   assert.doesNotMatch(other, /type="password"/i);
-  assert.match(other, />Use this server</);
+  // A name, not an address: it is looked up before it is used.
+  assert.match(other, />Find server</);
+  assert.match(picker('https://chat.example.org'), />Use this server</);
 });
 
 test('the encryption panel offers the step that fits and never asks for a secret itself', () => {
@@ -417,6 +532,57 @@ test('every room is labelled with its encryption in the list and the header', ()
   assert.match(timeline('not_encrypted'), /class="enc-icon large not_encrypted"/);
   // Unknown never claims encryption.
   assert.deepEqual(labels(timeline('unknown')), ['Encryption unknown']);
+});
+
+test('GIVEN links in a message WHEN rendered THEN web links are buttons, never anchors, and other schemes stay text', () => {
+  const body = 'go https://example.org/a?b=<i>c</i> or javascript:alert(1)';
+  const withLinks = render(Message, {
+    props: { name: '@a:s', body, onlink: () => {} }
+  }).body.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(withLinks, /<a\b|href=|<i>/);
+  assert.match(withLinks, /<button type="button" class="link body-link" title="Open https:\/\/example\.org\/a\?b=">https:\/\/example\.org\/a\?b=<\/button>/);
+  assert.match(withLinks, /&lt;i>c&lt;\/i> or javascript:alert\(1\)/);
+  const without = render(Message, { props: { name: '@a:s', body } }).body;
+  assert.doesNotMatch(without, /<button[^>]*body-link/);
+});
+
+test('GIVEN others typing and reading WHEN shown THEN each name is isolated text, and many are counted', () => {
+  const composer = (typing, typingCut = false) =>
+    render(Composer, {
+      props: {
+        pending: [],
+        blocked: null,
+        encryption: 'encrypted',
+        roomName: 'general',
+        draftVersion: 0,
+        onsend: async () => true,
+        onretry: () => {},
+        ondiscard: () => {},
+        onallow: () => {},
+        typing,
+        typingCut
+      }
+    }).body.replace(/<!--.*?-->/g, '');
+  assert.match(composer([hostileName]), /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi> is typing…/);
+  assert.match(composer(['@a:s', '@b:s']), /<bdi>@a:s<\/bdi> and <bdi>@b:s<\/bdi> are typing…/);
+  assert.match(composer(['@a:s', '@b:s', '@c:s']), /Several people are typing…/);
+  assert.match(composer(['@a:s'], true), /Several people are typing…/);
+  assert.doesNotMatch(composer([]), /typing…/);
+
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [],
+      readBy: [hostileName, '@b:s'],
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(shown, /<img/);
+  assert.match(shown, /Seen by <bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>,\s*<bdi>@b:s<\/bdi>/);
 });
 
 test('GIVEN a room that is not encrypted WHEN the composer shows THEN it warns, and only then', () => {
@@ -918,11 +1084,25 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     enterSends: true,
     chatTextPercent: 125,
     interfaceTextPercent: 100,
-    desktopNotifications: false
+    desktopNotifications: false,
+    sendTyping: false,
+    sendReadReceipts: false,
+    idleLockMinutes: 0,
+    notificationNames: true
   };
   const html = render(Preferences, {
     props: { settings, failure: null, mac: false, onchange: () => {} }
   }).body;
+  const nameless = render(Preferences, {
+    props: {
+      settings: { ...settings, desktopNotifications: true, notificationNames: false },
+      failure: null,
+      mac: false,
+      onchange: () => {}
+    }
+  }).body;
+  assert.match(nameless, /says only that a message arrived: no names, no message/);
+  assert.match(html, /Show who wrote and in which room/);
   assert.match(html, /<label for="chat-text-size">Message text</);
   assert.match(html, /<label for="interface-text-size">Interface</);
   assert.match(html, /<option value="200">200%/);
@@ -946,14 +1126,63 @@ test('GIVEN the account page WHEN it shows THEN passwords are never asked on the
   assert.match(html, /does not share them with an\s+identity server/);
 });
 
+test('GIVEN a received file WHEN shown THEN its name is isolated text, nothing loads, and Save asks the core', async () => {
+  const { default: FileMessage } = await vite.ssrLoadModule('/src/FileMessage.svelte');
+  const html = render(FileMessage, {
+    props: {
+      roomId: '!r:example.invalid',
+      item: {
+        kind: 'file',
+        event_id: '$f',
+        sender: '@a:example.invalid',
+        origin_server_ts: null,
+        name: hostileName,
+        size: 2_500_000,
+        encrypted: true
+      }
+    }
+  }).body.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(html, /<(?:img|a|video|audio|iframe|object|embed)\b/);
+  assert.match(html, /<bdi class="file-name">&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  assert.match(html, /2\.4 MB · encrypted/);
+  assert.match(html, />\s*Save…/);
+});
+
+test('GIVEN new sessions WHEN the alert shows THEN names are isolated text and each session can be signed out', async () => {
+  const { default: NewSessions } = await vite.ssrLoadModule('/src/NewSessions.svelte');
+  const html = render(NewSessions, {
+    props: {
+      found: {
+        sessions: [
+          { deviceId: 'ABC', displayName: hostileName },
+          { deviceId: 'DEF', displayName: null }
+        ],
+        truncated: true
+      },
+      onknown: () => {},
+      onremove: () => {}
+    }
+  }).body.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /role="alert"/);
+  assert.match(html, /New sessions signed in/);
+  assert.match(html, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  assert.equal((html.match(/>Sign it out</g) ?? []).length, 2);
+  assert.match(html, />It was me</);
+  assert.match(html, /More new sessions are in Settings/);
+});
+
 test('GIVEN sessions WHEN this device cannot vouch THEN no Verify shows, and WHEN it can THEN only other unverified sessions get one', async () => {
   // Without a host the list does not load in server rendering, so the
   // offer is checked through the component's own rules.
   const source = await import('node:fs/promises').then(({ readFile }) =>
     readFile(new URL('../src/Devices.svelte', import.meta.url), 'utf8')
   );
-  assert.match(source, /\{#if !device\.current && !device\.verified && canVerify\}/);
+  // Other sessions get actions; Verify only when unverified and this device
+  // can vouch, Sign out always.
+  assert.match(source, /\{#if !device\.current\}[\s\S]*\{#if !device\.verified && canVerify\}/);
   assert.match(source, /onverify\(device\.deviceId\)/);
+  assert.match(source, /onclick=\{\(\) => remove\(device\.deviceId\)\}/);
   const html = render(Devices, { props: { canVerify: true } }).body;
   assert.doesNotMatch(html, />Verify</, 'nothing listed yet');
 });

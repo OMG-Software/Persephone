@@ -34,7 +34,7 @@ use crate::views::project_name;
 use matrix_sdk::{
     Client, HttpError,
     ruma::{
-        OwnedClientSecret, OwnedSessionId, UInt, UserId,
+        DeviceId, OwnedClientSecret, OwnedSessionId, UInt, UserId,
         api::{
             client::{
                 account::change_password,
@@ -204,6 +204,28 @@ pub async fn change_password(
         request.logout_devices = sign_out_others;
         request.auth = auth;
         client.send(request).await.map_err(matrix_sdk::Error::from)
+    })
+    .await;
+    match result {
+        Ok(_) => AccountChange::Done,
+        Err(code) => code,
+    }
+}
+
+/// Signs out another device of this account, with the password if the
+/// homeserver asks for it (ADR-0026).
+pub async fn remove_device(
+    client: &Client,
+    user_id: &UserId,
+    password: &Zeroizing<String>,
+    device_id: &DeviceId,
+) -> AccountChange {
+    let devices = [device_id.to_owned()];
+    let result = with_password(user_id, password, async |auth| {
+        client
+            .delete_devices(&devices, auth)
+            .await
+            .map_err(matrix_sdk::Error::from)
     })
     .await;
     match result {

@@ -6,7 +6,8 @@
       "event_id": "$event",
       "sender": "@alice:server.invalid",
       "body": "hostile <img src=x onerror=alert(1)>",
-      "origin_server_ts": 1767258000000
+      "origin_server_ts": 1767258000000,
+      "reply_to": null
     },
     {
       "kind": "notice",
@@ -25,6 +26,17 @@
       "width": 640,
       "height": 480,
       "encrypted": true
+    },
+    {
+      "kind": "state",
+      "event_id": "$joined",
+      "sender": "@bob:server.invalid",
+      "origin_server_ts": 1767258090000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "joined"
+      }
     },
     {
       "kind": "gap",

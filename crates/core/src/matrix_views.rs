@@ -12,8 +12,25 @@
 //!   disappears. An encrypted event that cannot be shown becomes a notice
 //!   saying why: `withheld` (the sender withheld the key from this device),
 //!   `untrusted_sender` (the sending device is not signed by its owner, which
-//!   the decryption settings refuse; ADR-0005) or `undecryptable`. State
-//!   events, reactions and other non-message events are not shown.
+//!   the decryption settings refuse; ADR-0005) or `undecryptable`.
+//! * Membership changes and changes to the room's name, topic, picture,
+//!   encryption, access, history visibility, power levels, addresses, server
+//!   ACL and version are `state` items (`state_change`): who joined or was
+//!   removed, and who changed what, matters most in an encrypted room. A
+//!   change of picture alone, a redacted state event, and other state are not
+//!   shown. A reaction is a `reaction` item naming the event it reacts to,
+//!   with its key projected like a name; other non-message events are not
+//!   shown.
+//! * An edit (`m.replace`) of a text message is an `edit` item only when its
+//!   sender sent the edited message, compared by full user ID: anyone can
+//!   send an edit naming someone else's message. The edited message's sender
+//!   comes from the same page, from up to `MAX_KNOWN_SENDERS` remembered, or
+//!   from the homeserver for up to `MAX_EDIT_LOOKUPS` edits a page; an edit
+//!   that cannot be checked is left out. An edit is never shown as a message
+//!   of its own.
+//! * A deleted (redacted) message is a `deleted` notice, and a deletion is a
+//!   `redaction` item naming the deleted event, so the page can mark a
+//!   message it already shows.
 //! * A page holds at most `MAX_PAGE_ITEMS` items and `MAX_PAGE_BYTES`
 //!   serialized. The SDK cannot resume inside a fetched chunk, so a chunk that
 //!   would exceed the byte budget is fetched again with half the limit, down to
@@ -29,16 +46,24 @@ use matrix_sdk::{
     deserialized_responses::{TimelineEvent, TimelineEventKind, UnableToDecryptReason},
     room::MessagesOptions,
     ruma::{
-        RoomId, UInt,
+        EventId, OwnedEventId, OwnedUserId, RoomId, UInt,
         events::{
-            AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
-            room::message::MessageType,
+            AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+            SyncStateEvent,
+            room::{
+                member::MembershipChange as Change,
+                message::{
+                    MessageType, OriginalSyncRoomMessageEvent, Relation,
+                    sanitize::remove_plain_reply_fallback,
+                },
+                redaction::SyncRoomRedactionEvent,
+            },
         },
     },
 };
 use persephone_contracts::{
-    ContactStatus, NoticeKind, RoomEncryption, RoomList, RoomSummary, TimelineItem, TimelinePage,
-    UnixMillis,
+    ContactStatus, MembershipChange, NoticeKind, RoomEncryption, RoomList, RoomSummary,
+    StateChange, TimelineItem, TimelinePage, UnixMillis,
 };
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
@@ -57,9 +82,18 @@ struct Cursors {
     entries: VecDeque<(u64, String, String)>,
 }
 
+/// Most senders of editable messages remembered, across all rooms.
+pub const MAX_KNOWN_SENDERS: usize = 512;
+/// Most edited messages a page reads from the homeserver to check an edit's
+/// sender; an edit beyond them is left out of that page.
+pub const MAX_EDIT_LOOKUPS: usize = 8;
+
 #[derive(Default)]
 pub struct MatrixViews {
     cursors: Mutex<Cursors>,
+    /// Oldest first: (room, event, sender) of messages an edit may replace,
+    /// so an edit's sender can be checked without asking the homeserver.
+    senders: Mutex<VecDeque<(String, OwnedEventId, OwnedUserId)>>,
 }
 
 fn room_id(raw: &str) -> Result<&RoomId, ErrorCode> {
@@ -77,18 +111,114 @@ fn joined_room(client: &Client, raw: &str) -> Result<matrix_sdk::Room, ErrorCode
         .ok_or(ErrorCode::NotFound)
 }
 
-/// The visible form of one event, or `None` for events not shown.
-fn project(event: &TimelineEvent) -> Option<TimelineItem> {
-    let event_id = event.event_id()?.to_string();
-    let sender = project_name(event.sender()?.as_str());
-    // Read from the raw event, so an encrypted one has its time too. `UInt`
-    // is at most 2^53 - 1, which `UnixMillis` holds.
-    let origin_server_ts = event
+/// The event's `origin_server_ts`. Read from the raw event, so an encrypted
+/// one has its time too. `UInt` is at most 2^53 - 1, which `UnixMillis`
+/// holds.
+fn server_time(event: &TimelineEvent) -> Option<UnixMillis> {
+    event
         .raw()
         .get_field::<UInt>("origin_server_ts")
         .ok()
         .flatten()
-        .and_then(|millis| UnixMillis::new(millis.into()));
+        .and_then(|millis| UnixMillis::new(millis.into()))
+}
+
+/// The event as an original (not redacted) `m.room.message`.
+fn room_message(event: &TimelineEvent) -> Option<OriginalSyncRoomMessageEvent> {
+    match event.raw().deserialize() {
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(message),
+        ))) => Some(message),
+        _ => None,
+    }
+}
+
+/// The text of a text, notice or emote message.
+fn text_body(msgtype: &MessageType) -> Option<&str> {
+    match msgtype {
+        MessageType::Text(text) => Some(&text.body),
+        MessageType::Notice(notice) => Some(&notice.body),
+        MessageType::Emote(emote) => Some(&emote.body),
+        _ => None,
+    }
+}
+
+/// The sender of the event when an edit may replace it: an original text
+/// message (`m.text`, not a notice or emote) that is not an edit itself, the
+/// same rule `sending::own_text_message` applies before this account sends
+/// an edit.
+fn editable_sender(event: &TimelineEvent) -> Option<OwnedUserId> {
+    let message = room_message(event)?;
+    let editable = matches!(message.content.msgtype, MessageType::Text(_))
+        && !matches!(message.content.relates_to, Some(Relation::Replacement(_)));
+    editable.then_some(message.sender)
+}
+
+/// What an edit (`m.replace`) claims, before its sender is checked against
+/// the edited message's.
+struct EditClaim {
+    replaces: OwnedEventId,
+    sender: OwnedUserId,
+    /// The projected new text.
+    body: String,
+}
+
+/// The claim of an edit whose new content is text, or `None` for any other
+/// event.
+fn edit_claim(event: &TimelineEvent) -> Option<EditClaim> {
+    let message = room_message(event)?;
+    let Some(Relation::Replacement(replacement)) = &message.content.relates_to else {
+        return None;
+    };
+    let body = text_body(&replacement.new_content.msgtype)?;
+    Some(EditClaim {
+        replaces: replacement.event_id.clone(),
+        sender: message.sender.clone(),
+        body: project_body(body),
+    })
+}
+
+/// Whether the event is a message (plain, encrypted or a sticker) that was
+/// deleted: the homeserver keeps the deletion in `unsigned`.
+fn deleted_message(event: &TimelineEvent) -> bool {
+    let raw = event.raw();
+    let is_message = raw
+        .get_field::<String>("type")
+        .ok()
+        .flatten()
+        .is_some_and(|kind| {
+            matches!(
+                kind.as_str(),
+                "m.room.message" | "m.room.encrypted" | "m.sticker"
+            )
+        });
+    let state = raw
+        .get_field::<serde_json::Value>("state_key")
+        .ok()
+        .flatten()
+        .is_some();
+    let redacted = raw
+        .get_field::<serde_json::Value>("unsigned")
+        .ok()
+        .flatten()
+        .is_some_and(|unsigned| unsigned.get("redacted_because").is_some());
+    is_message && !state && redacted
+}
+
+/// The visible form of one event, or `None` for events not shown. An edit
+/// is never shown as a message; `MatrixViews::timeline_page` checks it.
+fn project(event: &TimelineEvent) -> Option<TimelineItem> {
+    let event_id = event.event_id()?.to_string();
+    let sender = project_name(event.sender()?.as_str());
+    let origin_server_ts = server_time(event);
+    if deleted_message(event) {
+        return Some(TimelineItem::Notice {
+            event_id,
+            sender,
+            notice: NoticeKind::Deleted,
+            origin_server_ts,
+        });
+    }
     if let TimelineEventKind::UnableToDecrypt { utd_info, .. } = &event.kind {
         return Some(TimelineItem::Notice {
             event_id,
@@ -113,33 +243,94 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             origin_server_ts,
         });
     }
-    let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
-        SyncMessageLikeEvent::Original(message),
-    ))) = event.raw().deserialize()
-    else {
-        return None;
+    let message = match event.raw().deserialize() {
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+            SyncMessageLikeEvent::Original(message),
+        ))) => message,
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(
+            SyncMessageLikeEvent::Original(reaction),
+        ))) => {
+            let key = project_name(&reaction.content.relates_to.key);
+            if key.trim().is_empty() {
+                return None;
+            }
+            return Some(TimelineItem::Reaction {
+                event_id,
+                sender,
+                origin_server_ts,
+                reacts_to: reaction.content.relates_to.event_id.to_string(),
+                key,
+            });
+        }
+        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(
+            SyncRoomRedactionEvent::Original(redaction),
+        ))) => {
+            // Room version 11 moved `redacts` into the content.
+            let redacts = redaction
+                .content
+                .redacts
+                .as_ref()
+                .or(redaction.redacts.as_ref())?;
+            return Some(TimelineItem::Redaction {
+                event_id,
+                sender,
+                origin_server_ts,
+                redacts: redacts.to_string(),
+            });
+        }
+        Ok(AnySyncTimelineEvent::State(state)) => {
+            return state_change(&state).map(|change| TimelineItem::State {
+                event_id,
+                sender,
+                origin_server_ts,
+                change,
+            });
+        }
+        _ => return None,
+    };
+    // A reply's quoted fallback is the sender's copy of another event: it
+    // can say anything, so it is dropped and the page quotes the event
+    // itself from history it loaded.
+    let reply_to = match &message.content.relates_to {
+        Some(Relation::Reply(reply)) => Some(reply.in_reply_to.event_id.to_string()),
+        Some(Relation::Replacement(_)) => return None,
+        _ => None,
+    };
+    let text = |body: &str| {
+        project_body(if reply_to.is_some() {
+            remove_plain_reply_fallback(body)
+        } else {
+            body
+        })
     };
     Some(match &message.content.msgtype {
-        MessageType::Text(text) => TimelineItem::Message {
+        MessageType::Text(text_content) => TimelineItem::Message {
             event_id,
             sender,
-            body: project_body(&text.body),
+            body: text(&text_content.body),
             origin_server_ts,
+            reply_to,
         },
         MessageType::Notice(notice) => TimelineItem::Message {
             event_id,
             sender,
-            body: project_body(&notice.body),
+            body: text(&notice.body),
             origin_server_ts,
+            reply_to,
         },
         MessageType::Emote(emote) => TimelineItem::Message {
             event_id,
             sender,
-            body: project_body(&emote.body),
+            body: text(&emote.body),
             origin_server_ts,
+            reply_to,
         },
         MessageType::Image(image) => {
             crate::media::timeline_item(event_id, sender, origin_server_ts, image)
+        }
+        MessageType::File(_) | MessageType::Audio(_) | MessageType::Video(_) => {
+            let file = crate::files::file_parts(&message.content.msgtype)?;
+            crate::files::timeline_item(event_id, sender, origin_server_ts, &file)
         }
         _ => TimelineItem::Notice {
             event_id,
@@ -147,6 +338,77 @@ fn project(event: &TimelineEvent) -> Option<TimelineItem> {
             notice: NoticeKind::Unsupported,
             origin_server_ts,
         },
+    })
+}
+
+/// A name or topic as shown: projected, and `None` when empty.
+fn shown_text(raw: &str) -> Option<String> {
+    let shown = project_name(raw);
+    (!shown.trim().is_empty()).then_some(shown)
+}
+
+/// What a state event changed, or `None` for a change not shown.
+fn state_change(event: &AnySyncStateEvent) -> Option<StateChange> {
+    use crate::room_settings::{history_visibility, join_rule};
+    Some(match event {
+        AnySyncStateEvent::RoomMember(SyncStateEvent::Original(member)) => {
+            let target = project_name(member.state_key.as_str());
+            let membership = match member.membership_change() {
+                Change::Joined | Change::InvitationAccepted => MembershipChange::Joined,
+                Change::Left => MembershipChange::Left,
+                Change::Invited | Change::KnockAccepted => MembershipChange::Invited,
+                Change::InvitationRejected => MembershipChange::InviteRejected,
+                Change::InvitationRevoked => MembershipChange::InviteWithdrawn,
+                Change::Kicked => MembershipChange::Kicked,
+                Change::Banned | Change::KickedAndBanned => MembershipChange::Banned,
+                Change::Unbanned => MembershipChange::Unbanned,
+                Change::Knocked => MembershipChange::Knocked,
+                Change::KnockRetracted => MembershipChange::KnockWithdrawn,
+                Change::KnockDenied => MembershipChange::KnockDenied,
+                Change::ProfileChanged {
+                    displayname_change: Some(change),
+                    ..
+                } => {
+                    return Some(StateChange::DisplayName {
+                        target,
+                        name: change.new.and_then(shown_text),
+                    });
+                }
+                // A new picture alone, no change, or one ruma cannot name.
+                _ => return None,
+            };
+            StateChange::Member { target, membership }
+        }
+        AnySyncStateEvent::RoomName(SyncStateEvent::Original(name)) => StateChange::Name {
+            name: shown_text(&name.content.name),
+        },
+        AnySyncStateEvent::RoomTopic(SyncStateEvent::Original(topic)) => StateChange::Topic {
+            topic: shown_text(&topic.content.topic),
+        },
+        AnySyncStateEvent::RoomAvatar(SyncStateEvent::Original(_)) => StateChange::Avatar {},
+        AnySyncStateEvent::RoomEncryption(SyncStateEvent::Original(_)) => {
+            StateChange::Encryption {}
+        }
+        AnySyncStateEvent::RoomJoinRules(SyncStateEvent::Original(rules)) => {
+            StateChange::JoinRule {
+                rule: join_rule(Some(rules.content.join_rule.clone())),
+            }
+        }
+        AnySyncStateEvent::RoomHistoryVisibility(SyncStateEvent::Original(history)) => {
+            StateChange::HistoryVisibility {
+                visibility: history_visibility(Some(history.content.history_visibility.clone())),
+            }
+        }
+        AnySyncStateEvent::RoomPowerLevels(SyncStateEvent::Original(_)) => {
+            StateChange::PowerLevels {}
+        }
+        AnySyncStateEvent::RoomCanonicalAlias(SyncStateEvent::Original(_)) => {
+            StateChange::Addresses {}
+        }
+        AnySyncStateEvent::RoomCreate(SyncStateEvent::Original(_)) => StateChange::Created {},
+        AnySyncStateEvent::RoomServerAcl(SyncStateEvent::Original(_)) => StateChange::ServerAcl {},
+        AnySyncStateEvent::RoomTombstone(SyncStateEvent::Original(_)) => StateChange::Upgraded {},
+        _ => return None,
     })
 }
 
@@ -200,6 +462,76 @@ impl MatrixViews {
             .find(|(n, r, _)| *n == number && r == room)
             .map(|(_, _, token)| token.clone())
             .ok_or(ErrorCode::NotFound)
+    }
+
+    fn senders(&self) -> MutexGuard<'_, VecDeque<(String, OwnedEventId, OwnedUserId)>> {
+        self.senders
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Remembers the sender of an event an edit may replace.
+    fn remember_sender(&self, room: &str, event: &TimelineEvent) {
+        let (Some(event_id), Some(sender)) = (event.event_id(), editable_sender(event)) else {
+            return;
+        };
+        let mut senders = self.senders();
+        if senders
+            .iter()
+            .any(|(r, id, _)| r == room && *id == event_id)
+        {
+            return;
+        }
+        senders.push_back((room.to_owned(), event_id.to_owned(), sender));
+        while senders.len() > MAX_KNOWN_SENDERS {
+            senders.pop_front();
+        }
+    }
+
+    fn known_sender(&self, room: &str, event_id: &EventId) -> Option<OwnedUserId> {
+        self.senders()
+            .iter()
+            .find(|(r, id, _)| r == room && id == event_id)
+            .map(|(_, _, sender)| sender.clone())
+    }
+
+    /// The edit as a timeline item when its sender sent the edited message,
+    /// which must be a text message that is not an edit itself. The edited
+    /// message's sender comes from `chunk`, from those remembered, or, while
+    /// `lookups` allows, from the homeserver; otherwise the edit is left out.
+    async fn checked_edit(
+        &self,
+        joined: &matrix_sdk::Room,
+        room: &str,
+        chunk: &[TimelineEvent],
+        edit: &TimelineEvent,
+        claim: EditClaim,
+        lookups: &mut usize,
+    ) -> Option<TimelineItem> {
+        let event_id = edit.event_id()?.to_string();
+        let in_chunk = chunk
+            .iter()
+            .find(|event| event.event_id() == Some(&*claim.replaces));
+        let original_sender = match in_chunk {
+            Some(event) => editable_sender(event),
+            None => match self.known_sender(room, &claim.replaces) {
+                Some(sender) => Some(sender),
+                None if *lookups < MAX_EDIT_LOOKUPS => {
+                    *lookups += 1;
+                    let original = joined.event(&claim.replaces, None).await.ok()?;
+                    self.remember_sender(room, &original);
+                    editable_sender(&original)
+                }
+                None => None,
+            },
+        };
+        (original_sender? == claim.sender).then(|| TimelineItem::Edit {
+            event_id,
+            sender: project_name(claim.sender.as_str()),
+            origin_server_ts: server_time(edit),
+            replaces: claim.replaces.to_string(),
+            body: claim.body,
+        })
     }
 
     pub fn has_room(client: &Client, room: &str) -> bool {
@@ -267,8 +599,26 @@ impl MatrixViews {
                 .await
                 .map_err(|_| ErrorCode::Unavailable)?;
             // Backward pagination returns newest first; pages read oldest first.
-            let mut items: Vec<TimelineItem> =
-                messages.chunk.iter().rev().filter_map(project).collect();
+            let mut items = Vec::new();
+            let mut lookups = 0;
+            for event in messages.chunk.iter().rev() {
+                self.remember_sender(room, event);
+                let item = match edit_claim(event) {
+                    Some(claim) => {
+                        self.checked_edit(
+                            &joined,
+                            room,
+                            &messages.chunk,
+                            event,
+                            claim,
+                            &mut lookups,
+                        )
+                        .await
+                    }
+                    None => project(event),
+                };
+                items.extend(item);
+            }
             let bytes: usize = items
                 .iter()
                 .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |v| v.len()))
@@ -494,6 +844,334 @@ mod tests {
             Some(TimelineItem::Image { .. })
         ));
         assert!(crate::media::image_content(&broken).is_none());
+    }
+
+    /// GIVEN a reply with a quoted fallback, which the sender writes and can
+    /// make say anything WHEN projected THEN the item names the event it
+    /// replies to and its body is only the reply's own text; text that only
+    /// looks like a quote, outside a reply, is kept.
+    #[test]
+    fn given_a_reply_then_the_fallback_is_dropped_and_the_event_named() {
+        let reply = project(&plain_event(serde_json::json!({
+            "msgtype": "m.text",
+            "body": "> <@bob:example.org> I never said this\n> second line\n\nmy answer",
+            "m.relates_to": { "m.in_reply_to": { "event_id": "$asked" } },
+        })))
+        .unwrap();
+        let TimelineItem::Message { body, reply_to, .. } = reply else {
+            panic!("a message: {reply:?}");
+        };
+        assert_eq!(body, "my answer");
+        assert_eq!(reply_to.as_deref(), Some("$asked"));
+
+        let quote = project(&plain_event(serde_json::json!({
+            "msgtype": "m.text",
+            "body": "> <@bob:example.org> quoted\n\nmine",
+        })))
+        .unwrap();
+        let TimelineItem::Message { body, reply_to, .. } = quote else {
+            panic!("a message");
+        };
+        assert_eq!(body, "> <@bob:example.org> quoted\n\nmine");
+        assert_eq!(reply_to, None);
+    }
+
+    fn raw_event(event: serde_json::Value) -> TimelineEvent {
+        TimelineEvent::from_plaintext(
+            matrix_sdk::ruma::serde::Raw::from_json_string(event.to_string()).unwrap(),
+        )
+    }
+
+    /// GIVEN a deleted message, plain or encrypted, and a deleted reaction
+    /// WHEN projected THEN each message is a `deleted` notice from its
+    /// sender, never an undecryptable one, and the reaction stays hidden.
+    #[test]
+    fn given_deleted_events_then_messages_show_as_deleted() {
+        let unsigned = serde_json::json!({ "redacted_because": {
+            "type": "m.room.redaction", "sender": "@mod:example.org",
+            "event_id": "$why", "origin_server_ts": 2, "content": {}
+        }});
+        for kind in ["m.room.message", "m.room.encrypted"] {
+            let item = project(&raw_event(serde_json::json!({
+                "type": kind, "event_id": "$gone", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+            })));
+            let Some(TimelineItem::Notice { notice, sender, .. }) = item else {
+                panic!("a notice: {item:?}");
+            };
+            assert_eq!(
+                (notice, sender.as_str()),
+                (NoticeKind::Deleted, "@alice:example.org")
+            );
+        }
+        let reaction = project(&raw_event(serde_json::json!({
+            "type": "m.reaction", "event_id": "$r", "sender": "@alice:example.org",
+            "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+        })));
+        assert!(reaction.is_none(), "{reaction:?}");
+    }
+
+    /// GIVEN reactions with a normal, a hostile and an empty key WHEN
+    /// projected THEN each names the event it reacts to with its key as
+    /// bounded, inert text, and one with nothing to show is left out.
+    #[test]
+    fn given_reactions_then_keys_are_projected_and_empty_ones_dropped() {
+        let reaction = |key: &str| {
+            project(&raw_event(serde_json::json!({
+                "type": "m.reaction", "event_id": "$r", "sender": "@bob:example.org",
+                "origin_server_ts": 1,
+                "content": { "m.relates_to": {
+                    "rel_type": "m.annotation", "event_id": "$liked", "key": key
+                }},
+            })))
+        };
+        let Some(TimelineItem::Reaction { reacts_to, key, .. }) = reaction("👍") else {
+            panic!("a reaction");
+        };
+        assert_eq!((reacts_to.as_str(), key.as_str()), ("$liked", "👍"));
+        let hostile = format!("\u{202E}<b>{}", "x".repeat(300));
+        let Some(TimelineItem::Reaction { key, .. }) = reaction(&hostile) else {
+            panic!("a reaction");
+        };
+        assert!(!key.contains('\u{202E}'));
+        assert!(key.chars().count() <= crate::views::MAX_DISPLAY_NAME_CHARS + 1);
+        assert!(reaction("   ").is_none());
+    }
+
+    /// GIVEN a deletion, in the old form (`redacts` beside the content) and
+    /// the room version 11 form (in the content) WHEN projected THEN it is a
+    /// `redaction` item naming the deleted event.
+    #[test]
+    fn given_a_deletion_then_it_names_the_deleted_event() {
+        for (top, content) in [
+            (Some("$target"), serde_json::json!({})),
+            (None, serde_json::json!({ "redacts": "$target" })),
+        ] {
+            let mut event = serde_json::json!({
+                "type": "m.room.redaction", "event_id": "$del", "sender": "@mod:example.org",
+                "origin_server_ts": 1, "content": content,
+            });
+            if let Some(top) = top {
+                event["redacts"] = top.into();
+            }
+            let item = project(&raw_event(event));
+            let Some(TimelineItem::Redaction {
+                redacts, sender, ..
+            }) = item
+            else {
+                panic!("a redaction: {item:?}");
+            };
+            assert_eq!(
+                (redacts.as_str(), sender.as_str()),
+                ("$target", "@mod:example.org")
+            );
+        }
+    }
+
+    fn state_event(
+        kind: &str,
+        sender: &str,
+        state_key: &str,
+        content: serde_json::Value,
+        prev_content: Option<serde_json::Value>,
+    ) -> TimelineEvent {
+        let mut event = serde_json::json!({
+            "type": kind,
+            "event_id": "$state",
+            "sender": sender,
+            "state_key": state_key,
+            "origin_server_ts": 1_767_258_000_000u64,
+            "content": content,
+        });
+        if let Some(prev) = prev_content {
+            event["unsigned"] = serde_json::json!({ "prev_content": prev });
+        }
+        TimelineEvent::from_plaintext(
+            matrix_sdk::ruma::serde::Raw::from_json_string(event.to_string()).unwrap(),
+        )
+    }
+
+    fn change_of(event: &TimelineEvent) -> Option<StateChange> {
+        match project(event) {
+            Some(TimelineItem::State { change, .. }) => Some(change),
+            None => None,
+            Some(other) => panic!("a state item or nothing: {other:?}"),
+        }
+    }
+
+    fn member(
+        sender: &str,
+        target: &str,
+        membership: &str,
+        prev: Option<&str>,
+    ) -> Option<StateChange> {
+        change_of(&state_event(
+            "m.room.member",
+            sender,
+            target,
+            serde_json::json!({ "membership": membership }),
+            prev.map(|prev| serde_json::json!({ "membership": prev })),
+        ))
+    }
+
+    /// GIVEN membership events WHEN projected THEN each names the member
+    /// and what happened to them, telling a member leaving from one removed
+    /// by someone else.
+    #[test]
+    fn given_membership_events_then_each_becomes_a_member_change() {
+        const A: &str = "@alice:example.org";
+        const B: &str = "@bob:example.org";
+        let change = |membership| {
+            Some(StateChange::Member {
+                target: B.into(),
+                membership,
+            })
+        };
+        for (sender, membership, prev, expected) in [
+            (B, "join", None, MembershipChange::Joined),
+            (B, "join", Some("invite"), MembershipChange::Joined),
+            (B, "leave", Some("join"), MembershipChange::Left),
+            (A, "leave", Some("join"), MembershipChange::Kicked),
+            (A, "ban", Some("join"), MembershipChange::Banned),
+            (A, "leave", Some("ban"), MembershipChange::Unbanned),
+            (A, "invite", None, MembershipChange::Invited),
+            (B, "leave", Some("invite"), MembershipChange::InviteRejected),
+            (
+                A,
+                "leave",
+                Some("invite"),
+                MembershipChange::InviteWithdrawn,
+            ),
+            (B, "knock", None, MembershipChange::Knocked),
+            (B, "leave", Some("knock"), MembershipChange::KnockWithdrawn),
+        ] {
+            assert_eq!(
+                member(sender, B, membership, prev),
+                change(expected),
+                "{sender} {prev:?} -> {membership}"
+            );
+        }
+        // No change at all is not shown.
+        assert_eq!(member(B, B, "join", Some("join")), None);
+    }
+
+    /// GIVEN a member changing their display name, to something hostile or
+    /// to nothing, or only their picture WHEN projected THEN the name is
+    /// inert bounded text, a removed name is `None`, and a picture change
+    /// alone is not shown.
+    #[test]
+    fn given_profile_changes_then_names_are_projected_and_pictures_alone_hidden() {
+        const B: &str = "@bob:example.org";
+        let profile = |content: serde_json::Value, prev: serde_json::Value| {
+            change_of(&state_event("m.room.member", B, B, content, Some(prev)))
+        };
+        let hostile = format!("Admin\u{202E}\n{}", "x".repeat(500));
+        let Some(StateChange::DisplayName { target, name }) = profile(
+            serde_json::json!({ "membership": "join", "displayname": hostile }),
+            serde_json::json!({ "membership": "join", "displayname": "Bob" }),
+        ) else {
+            panic!("a display name change");
+        };
+        assert_eq!(target, B);
+        let name = name.unwrap();
+        assert!(
+            !name.contains('\u{202E}') && !name.contains('\n'),
+            "{name:?}"
+        );
+        assert!(name.chars().count() <= crate::views::MAX_DISPLAY_NAME_CHARS + 1);
+        assert_eq!(
+            profile(
+                serde_json::json!({ "membership": "join" }),
+                serde_json::json!({ "membership": "join", "displayname": "Bob" }),
+            ),
+            Some(StateChange::DisplayName {
+                target: B.into(),
+                name: None
+            })
+        );
+        assert_eq!(
+            profile(
+                serde_json::json!({ "membership": "join", "avatar_url": "mxc://s/new" }),
+                serde_json::json!({ "membership": "join", "avatar_url": "mxc://s/old" }),
+            ),
+            None
+        );
+    }
+
+    /// GIVEN changes to the room's state WHEN projected THEN each security-
+    /// relevant one is shown, names and topics are projected and empty ones
+    /// are `None`, and an unknown state type is not shown.
+    #[test]
+    fn given_room_state_events_then_known_changes_are_shown() {
+        const A: &str = "@alice:example.org";
+        let room = |kind: &str, content: serde_json::Value| {
+            change_of(&state_event(kind, A, "", content, None))
+        };
+        assert_eq!(
+            room(
+                "m.room.name",
+                serde_json::json!({ "name": "Plans\u{202E}" })
+            ),
+            Some(StateChange::Name {
+                name: Some("Plans\u{FFFD}".into())
+            })
+        );
+        assert_eq!(
+            room("m.room.name", serde_json::json!({ "name": "" })),
+            Some(StateChange::Name { name: None })
+        );
+        assert_eq!(
+            room(
+                "m.room.topic",
+                serde_json::json!({ "topic": "line one\nline two" })
+            ),
+            Some(StateChange::Topic {
+                topic: Some("line one line two".into())
+            })
+        );
+        assert_eq!(
+            room(
+                "m.room.encryption",
+                serde_json::json!({ "algorithm": "m.megolm.v1.aes-sha2" })
+            ),
+            Some(StateChange::Encryption {})
+        );
+        assert_eq!(
+            room(
+                "m.room.join_rules",
+                serde_json::json!({ "join_rule": "public" })
+            ),
+            Some(StateChange::JoinRule {
+                rule: persephone_contracts::JoinRule::Public
+            })
+        );
+        assert_eq!(
+            room(
+                "m.room.history_visibility",
+                serde_json::json!({ "history_visibility": "world_readable" })
+            ),
+            Some(StateChange::HistoryVisibility {
+                visibility: persephone_contracts::HistoryVisibility::WorldReadable
+            })
+        );
+        assert_eq!(
+            room(
+                "m.room.power_levels",
+                serde_json::json!({ "users": { A: 100 } })
+            ),
+            Some(StateChange::PowerLevels {})
+        );
+        assert_eq!(
+            room(
+                "m.room.server_acl",
+                serde_json::json!({ "allow": ["*"], "deny": [] })
+            ),
+            Some(StateChange::ServerAcl {})
+        );
+        assert_eq!(
+            room("org.example.custom", serde_json::json!({ "x": 1 })),
+            None
+        );
     }
 
     #[test]

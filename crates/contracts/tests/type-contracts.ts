@@ -92,8 +92,8 @@ const missingBandRows: ImageView = { handle: "h", width: 1, height: 1, bands: 1 
 const missingKind: PendingMessage = {
   localId: 1,
   roomId: "!r:s",
-  // @ts-expect-error a pending message says whether it is text or an image
-  kind: "file",
+  // @ts-expect-error a pending message is text, an image, an edit or a file
+  kind: "video",
   body: "",
   state: "queued",
   eventId: null,

@@ -133,6 +133,7 @@ pub fn secret<'a>(request: &SecretPrompt<'a>) -> SecretText<'a> {
             caption: match purpose {
                 PasswordPurpose::ChangePassword => "Change your Matrix password",
                 PasswordPurpose::AddThreePid => "Add an email address or phone number",
+                PasswordPurpose::RemoveSession => "Sign out a session",
             },
             message: format!(
                 "Enter the current password for {user_id} on {host} to approve {}. \
@@ -140,6 +141,7 @@ pub fn secret<'a>(request: &SecretPrompt<'a>) -> SecretText<'a> {
                 match purpose {
                     PasswordPurpose::ChangePassword => "the new password",
                     PasswordPurpose::AddThreePid => "adding it to your account",
+                    PasswordPurpose::RemoveSession => "signing out the session",
                 }
             ),
             field: Some(user_id),

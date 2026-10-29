@@ -17,8 +17,9 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    AccountChange, AccountState, DeviceList, IdentityState, InviteList, NotificationSettings,
-    RecoveryState, RoomList, SecurityOperation, SecurityStatus, ThreePidList, VerificationPhase,
+    AccountChange, AccountSettings, AccountState, DeviceList, IdentityState, InviteList,
+    NotificationSettings, RecoveryState, RoomList, SecurityOperation, SecurityStatus, ThreePidList,
+    VerificationPhase,
 };
 use persephone_core::{
     Core,
@@ -243,10 +244,12 @@ fn live_account_settings() {
     let _ = call(
         &core,
         Call::SetAccountSettings {
-            enter_sends: true,
-            chat_text_percent: 110,
-            interface_text_percent: 100,
-            desktop_notifications: true,
+            settings: AccountSettings {
+                chat_text_percent: 110,
+                interface_text_percent: 100,
+                desktop_notifications: true,
+                ..AccountSettings::default()
+            },
         },
     );
     let bob = runtime.block_on(sdk_client(

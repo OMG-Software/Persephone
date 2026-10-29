@@ -9,8 +9,38 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   enterSends: true,
   chatTextPercent: 100,
   interfaceTextPercent: 100,
-  desktopNotifications: false
+  desktopNotifications: false,
+  sendTyping: false,
+  sendReadReceipts: false,
+  idleLockMinutes: 0,
+  notificationNames: true
 };
+
+/** The idle-lock choices offered, in minutes; 0 never locks (ADR-0025). */
+export const IDLE_LOCK_CHOICES: readonly number[] = [0, 5, 15, 30, 60];
+
+/** How an idle-lock choice reads. */
+export function idleLockText(minutes: number): string {
+  if (minutes === 0) return 'Never';
+  if (minutes === 60) return 'After 1 hour';
+  return `After ${minutes} minutes`;
+}
+
+/**
+ * Whether a key press is the lock-now shortcut: Ctrl+Shift+L, or
+ * ⌘⇧L on macOS.
+ */
+export function isLockShortcut(
+  event: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'ctrlKey' | 'metaKey' | 'altKey'>,
+  mac: boolean
+): boolean {
+  return (
+    (mac ? event.metaKey : event.ctrlKey) &&
+    event.shiftKey &&
+    !event.altKey &&
+    event.key.toLowerCase() === 'l'
+  );
+}
 
 /**
  * The text sizes offered, in percent of the normal size. The core refuses

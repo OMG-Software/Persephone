@@ -157,17 +157,19 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false}),
             ),
             // A reply carrying a secret is refused by the contract.
-            Call::SendMessage { room_id, body } => match body.as_str() {
-                "hello" => Ok(serde_json::json!({
-                    "localId": 1, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
-                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
-                })),
-                // A reply carrying the transaction ID is refused by the contract.
-                _ => Ok(serde_json::json!({
-                    "localId": 2, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
-                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64, "transactionId": "t"
-                })),
-            },
+            Call::SendMessage { room_id, body, .. } | Call::EditMessage { room_id, body, .. } => {
+                match body.as_str() {
+                    "hello" => Ok(serde_json::json!({
+                        "localId": 1, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
+                        "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
+                    })),
+                    // A reply carrying the transaction ID is refused by the contract.
+                    _ => Ok(serde_json::json!({
+                        "localId": 2, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
+                        "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64, "transactionId": "t"
+                    })),
+                }
+            }
             Call::PendingMessages { .. } => Ok(serde_json::json!([])),
             Call::RetryMessage { local_id } | Call::DiscardMessage { local_id } => match local_id {
                 1 => Ok(serde_json::Value::Null),
@@ -187,6 +189,9 @@ impl CoreTransport for FakeCore {
                 ),
                 _ => Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null})),
             },
+            Call::SignInWithOidc { .. } => {
+                Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
+            }
             Call::SignIn { homeserver } => match homeserver.as_str() {
                 "https://matrix.example.org" => {
                     Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
@@ -216,6 +221,34 @@ impl CoreTransport for FakeCore {
                 ],
                 "truncated": false
             })),
+            Call::MarkRead { .. } => Ok(serde_json::Value::Null),
+            Call::PickFile { .. } => Ok(serde_json::Value::Null),
+            Call::SaveFile { event_id, .. } => Ok(serde_json::Value::Bool(event_id == "$f")),
+            Call::RoomReaders { .. } => Ok(serde_json::json!({
+                "readers": [{"userId": "@b:example.invalid", "trust": "verified",
+                    "receiving": 2, "refused": 1, "own": false}],
+                "truncated": false
+            })),
+            Call::RoomServers { .. } => Ok(serde_json::json!({
+                "servers": [{"name": "example.invalid", "members": 2, "own": true}],
+                "truncated": false
+            })),
+            Call::OpenLink { url } => Ok(serde_json::Value::Bool(url == "https://example.org/")),
+            Call::RoomActivity { .. } => Ok(serde_json::json!({
+                "typing": ["@b:example.invalid"], "readBy": [], "truncated": false
+            })),
+            Call::SetTyping { typing, .. } => match typing {
+                true => Ok(serde_json::Value::Null),
+                false => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
+            Call::React { key, .. } => match key.as_str() {
+                "👍" => Ok(serde_json::Value::Null),
+                _ => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
+            Call::DeleteMessage { event_id, .. } => match event_id.as_str() {
+                "$mine" => Ok(serde_json::Value::Null),
+                _ => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
             Call::AcceptInvite { room_id } | Call::DeclineInvite { room_id } => {
                 match room_id.as_str() {
                     "!inv:example.invalid" => Ok(serde_json::Value::Null),
@@ -265,11 +298,31 @@ impl CoreTransport for FakeCore {
             },
             Call::AccountSettings {} => Ok(serde_json::json!({
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
-                "desktopNotifications": true
+                "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
+                "idleLockMinutes": 0, "notificationNames": true
             })),
-            Call::SetAccountSettings { enter_sends, .. } => match enter_sends {
+            Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
                 false => Err(CoreError::Core(ErrorCode::Locked)),
+            },
+            Call::DiscoverHomeserver { server_name } => match server_name.as_str() {
+                "example.invalid" => Ok(serde_json::json!({
+                    "homeserver": "https://matrix.example.invalid/", "fromWellKnown": true
+                })),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
+            Call::ProxySetting {} => Ok(serde_json::json!({"proxy": "127.0.0.1:9050"})),
+            Call::SetProxySetting { proxy } => match proxy.as_deref() {
+                None | Some("127.0.0.1:9050") => Ok(serde_json::Value::Null),
+                Some(_) => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+            },
+            Call::NewSessions {} => Ok(serde_json::json!({
+                "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
+            })),
+            Call::AcknowledgeSessions { .. } => Ok(serde_json::Value::Null),
+            Call::RemoveDevice { device_id } => match device_id.as_str() {
+                "NEWDEV" => Ok(serde_json::json!("done")),
+                _ => Ok(serde_json::json!("invalid_password")),
             },
             Call::ChangePassword { sign_out_others } => match sign_out_others {
                 true => Ok(serde_json::json!("done")),
@@ -599,12 +652,28 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-unlock-session",
             "allow-reset-profile",
             "allow-sign-in",
+            "allow-sign-in-with-oidc",
+            "allow-discover-homeserver",
+            "allow-proxy-setting",
+            "allow-set-proxy-setting",
             "allow-register",
             "allow-sign-out",
             "allow-security-status",
             "allow-set-up-encryption",
             "allow-recover-with-key",
             "allow-send-message",
+            "allow-edit-message",
+            "allow-delete-message",
+            "allow-react",
+            "allow-mark-read",
+            "allow-room-activity",
+            "allow-set-typing",
+            "allow-open-link",
+            "allow-room-servers",
+            "allow-room-readers",
+            "allow-new-sessions",
+            "allow-acknowledge-sessions",
+            "allow-remove-device",
             "allow-pending-messages",
             "allow-retry-message",
             "allow-discard-message",
@@ -622,6 +691,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-image-band",
             "allow-release-image",
             "allow-pick-image",
+            "allow-pick-file",
+            "allow-save-file",
             "allow-send-image",
             "allow-discard-image",
             "allow-invite-list",
@@ -1035,10 +1106,192 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
         "invalid_argument"
     );
     assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "hi", "replyTo": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
         core.calls.load(Ordering::SeqCst),
         calls,
-        "oversized body never crossed"
+        "oversized body and reply target never crossed"
     );
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "hello", "replyTo": "$e"})
+        )
+        .unwrap()["state"],
+        "queued"
+    );
+    assert_eq!(
+        invoke(
+            "edit_message",
+            serde_json::json!({"roomId": room, "eventId": "$mine", "body": "hello"})
+        )
+        .unwrap()["state"],
+        "queued"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255)), "body": "x"}),
+        serde_json::json!({"roomId": room, "eventId": "$mine", "body": "x".repeat(16 * 1024 + 1)}),
+    ] {
+        assert_eq!(
+            invoke("edit_message", args).unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized edits never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "delete_message",
+            serde_json::json!({"roomId": room, "eventId": "$mine"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke(
+            "delete_message",
+            serde_json::json!({"roomId": room, "eventId": "$theirs"})
+        )
+        .unwrap_err(),
+        "rejected"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "delete_message",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "an oversized event ID never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "react",
+            serde_json::json!({"roomId": room, "eventId": "$e", "key": "👍"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"roomId": room, "eventId": "$e", "key": "x".repeat(65)}),
+        serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255)), "key": "👍"}),
+    ] {
+        assert_eq!(invoke("react", args).unwrap_err(), "invalid_argument");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized reactions never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "mark_read",
+            serde_json::json!({"roomId": room, "eventId": "$e"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "mark_read",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        invoke(
+            "room_activity",
+            serde_json::json!({"roomId": room, "eventId": "$e"})
+        )
+        .unwrap()["typing"][0],
+        "@b:example.invalid"
+    );
+    assert_eq!(
+        invoke(
+            "set_typing",
+            serde_json::json!({"roomId": room, "typing": true})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke(
+            "set_typing",
+            serde_json::json!({"roomId": room, "typing": false})
+        )
+        .unwrap_err(),
+        "rejected"
+    );
+    assert_eq!(
+        invoke(
+            "open_link",
+            serde_json::json!({"url": "https://example.org/"})
+        ),
+        Ok(serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        invoke("room_servers", serde_json::json!({"roomId": room})).unwrap()["servers"][0]["members"],
+        2
+    );
+    assert_eq!(
+        invoke("pick_file", serde_json::json!({"roomId": room})),
+        Ok(serde_json::Value::Null),
+        "cancelled"
+    );
+    assert_eq!(
+        invoke(
+            "save_file",
+            serde_json::json!({"roomId": room, "eventId": "$f"})
+        ),
+        Ok(serde_json::Value::Bool(true))
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "save_file",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        invoke("room_readers", serde_json::json!({"roomId": room})).unwrap()["readers"][0]["refused"],
+        1
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "open_link",
+            serde_json::json!({"url": format!("https://example.org/{}", "a".repeat(2048))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        invoke(
+            "room_activity",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
         invoke("pending_messages", serde_json::json!({"roomId": room})),
         Ok(serde_json::json!([]))
@@ -1294,8 +1547,10 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         120
     );
     let settings = |enter_sends: bool| {
-        serde_json::json!({"enterSends": enter_sends, "chatTextPercent": 100,
-            "interfaceTextPercent": 100, "desktopNotifications": false})
+        serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
+            "interfaceTextPercent": 100, "desktopNotifications": false,
+            "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
+            "notificationNames": true}})
     };
     assert!(invoke("set_account_settings", settings(true)).is_ok());
     assert_eq!(
@@ -1388,6 +1643,84 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         .is_err(),
         "a code outside the contract"
     );
+    assert_eq!(
+        invoke("new_sessions", serde_json::json!({})).unwrap()["sessions"][0]["deviceId"],
+        "NEWDEV"
+    );
+    assert_eq!(
+        invoke(
+            "sign_in_with_oidc",
+            serde_json::json!({"homeserver": "https://matrix.example.invalid"})
+        )
+        .unwrap()["state"],
+        "signing_in"
+    );
+    assert_eq!(
+        invoke(
+            "discover_homeserver",
+            serde_json::json!({"serverName": "example.invalid"})
+        )
+        .unwrap()["homeserver"],
+        "https://matrix.example.invalid/"
+    );
+    assert_eq!(
+        invoke(
+            "discover_homeserver",
+            serde_json::json!({"serverName": "x".repeat(262)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        invoke("proxy_setting", serde_json::json!({})).unwrap()["proxy"],
+        "127.0.0.1:9050"
+    );
+    for proxy in [serde_json::json!("127.0.0.1:9050"), serde_json::Value::Null] {
+        assert_eq!(
+            invoke("set_proxy_setting", serde_json::json!({ "proxy": proxy })),
+            Ok(serde_json::Value::Null)
+        );
+    }
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "set_proxy_setting",
+            serde_json::json!({"proxy": "h".repeat(301)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        invoke(
+            "acknowledge_sessions",
+            serde_json::json!({"deviceIds": ["NEWDEV"]})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke("remove_device", serde_json::json!({"deviceId": "NEWDEV"})).unwrap(),
+        "done"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    let eleven: Vec<String> = (0..11).map(|n| format!("D{n}")).collect();
+    assert_eq!(
+        invoke(
+            "acknowledge_sessions",
+            serde_json::json!({"deviceIds": eleven})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        invoke(
+            "remove_device",
+            serde_json::json!({"deviceId": "D".repeat(256)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     let listed = invoke("three_pids", serde_json::json!({})).unwrap();
     assert_eq!(listed["threePids"][0]["medium"], "email");
     assert_eq!(
@@ -2026,5 +2359,23 @@ fn given_unreachable_core_then_an_image_band_is_a_generic_error() {
         )
         .unwrap_err(),
         "core_unavailable"
+    );
+}
+
+/// GIVEN a notification with names and one without WHEN its text is made
+/// THEN the first names the room and sender, and the second says only that a
+/// message arrived.
+#[test]
+fn given_notifications_with_and_without_names_then_only_named_ones_show_names() {
+    assert_eq!(
+        persephone_desktop::toast_text("Plans", "@bob:example.invalid"),
+        (
+            "Plans".to_owned(),
+            "New message from @bob:example.invalid".to_owned()
+        )
+    );
+    assert_eq!(
+        persephone_desktop::toast_text("", ""),
+        ("Persephone".to_owned(), "New message".to_owned())
     );
 }

@@ -1,11 +1,12 @@
 //! The Windows platform layer: DPAPI, CredUI prompts, the file dialog and
-//! read, the contained media worker, the UI's Job, and the default profile
+//! read, saving a file, the contained media worker, the UI's Job, and the default profile
 //! directory.
 
 pub mod credentials;
 pub mod media;
 pub mod pick;
 pub mod profile;
+pub mod save;
 pub mod ui;
 pub mod vault;
 
@@ -50,6 +51,25 @@ impl Drop for Apartment {
     }
 }
 
+/// How long this computer has had no keyboard or mouse input, from
+/// `GetLastInputInfo` (ADR-0025). Its tick count wraps every 49.7 days; the
+/// difference is taken with wrapping, which is right for any idle time
+/// shorter than that.
+pub(crate) fn idle_time() -> Option<std::time::Duration> {
+    use windows_sys::Win32::{
+        System::SystemInformation::GetTickCount,
+        UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+    };
+    let mut info = LASTINPUTINFO {
+        cbSize: u32::try_from(std::mem::size_of::<LASTINPUTINFO>()).ok()?,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a correctly sized LASTINPUTINFO that lives for the
+    // call; GetTickCount takes nothing.
+    let (read, now) = unsafe { (GetLastInputInfo(&mut info), GetTickCount()) };
+    (read != 0).then(|| std::time::Duration::from_millis(now.wrapping_sub(info.dwTime).into()))
+}
+
 pub(crate) fn default_profile_dir() -> Option<PathBuf> {
     profile::default_dir()
 }
@@ -71,6 +91,14 @@ pub(crate) fn read_image_file(
     budgets: &ResourceBudgets,
 ) -> Result<Encoded, ErrorCode> {
     pick::read(path, budgets)
+}
+
+pub(crate) fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    save::create_private_file(path)
+}
+
+pub(crate) fn replace_file(partial: &Path, path: &Path) -> std::io::Result<()> {
+    save::replace_file(partial, path)
 }
 
 pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {

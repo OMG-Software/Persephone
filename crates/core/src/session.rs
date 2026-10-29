@@ -33,6 +33,7 @@
 //! blocked by an open prompt and nothing else can change the stores meanwhile.
 
 use crate::account;
+use crate::activity;
 use crate::contacts;
 use crate::credentials::{CredentialSource, NewPassword, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
@@ -58,6 +59,7 @@ use matrix_sdk::{
             direct::DirectEventContent,
             key::verification::request::ToDeviceKeyVerificationRequestEvent,
             room::message::{MessageType, OriginalSyncRoomMessageEvent},
+            typing::SyncTypingEvent,
         },
     },
 };
@@ -69,7 +71,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -227,6 +229,16 @@ struct Shared {
     /// The account's desktop-notification setting, kept here so the sync's
     /// notification handler need not read the store (ADR-0022).
     toasts: AtomicBool,
+    /// Whether those notifications name the sender and room.
+    toast_names: AtomicBool,
+    /// The account's settings for typing notices and public read receipts,
+    /// kept here so sending them need not read the store (ADR-0023).
+    send_typing: AtomicBool,
+    send_receipts: AtomicBool,
+    /// The account's idle lock, in minutes (0: off; ADR-0025).
+    idle_lock_minutes: AtomicU16,
+    /// Who is typing in each room, from the sync.
+    typing: Arc<activity::Typing>,
     security: Mutex<SecurityShared>,
     outbox: Mutex<Outbox>,
 }
@@ -511,11 +523,25 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
     let host = Homeserver::parse(client.homeserver().as_str())
         .map(|homeserver| homeserver.display_host())
         .unwrap_or_default();
-    let toasts = lease
+    let loaded = lease
         .stores()
         .block_on(settings::load(lease.stores()))
-        .is_some_and(|settings| settings.desktop_notifications);
-    shared.toasts.store(toasts, Ordering::SeqCst);
+        .unwrap_or_default();
+    shared
+        .toasts
+        .store(loaded.desktop_notifications, Ordering::SeqCst);
+    shared
+        .toast_names
+        .store(loaded.notification_names, Ordering::SeqCst);
+    shared
+        .send_typing
+        .store(loaded.send_typing, Ordering::SeqCst);
+    shared
+        .send_receipts
+        .store(loaded.send_read_receipts, Ordering::SeqCst);
+    shared
+        .idle_lock_minutes
+        .store(loaded.idle_lock_minutes, Ordering::SeqCst);
     let installed = lease.commit(|| {
         *guard(&shared.account) = Some(ActiveAccount {
             client: client.clone(),
@@ -611,10 +637,25 @@ fn run_sync(
             std::future::ready(())
         })
     };
+    // Typing notices are ephemeral: kept as they arrive, for the page to ask.
+    let typing = shared.typing.clone();
+    let typing_handler = {
+        let _context = runtime.enter();
+        client.add_event_handler(move |event: SyncTypingEvent, room: matrix_sdk::Room| {
+            typing.set(
+                room.room_id().as_str(),
+                event.content.user_ids.iter().map(|user| &**user),
+            );
+            std::future::ready(())
+        })
+    };
     // The SDK keeps notification handlers as long as the client, so this one
     // holds the session only weakly.
     let mut notifying = false;
     let notified: Weak<Shared> = Arc::downgrade(shared);
+    // The access token last saved, so a refreshed OAuth token is saved once
+    // (ADR-0030); `None` until the first round saves or confirms it.
+    let mut saved_token: Option<Zeroizing<String>> = None;
     loop {
         let lease = match shared.admit() {
             Ok(lease) => lease,
@@ -645,7 +686,12 @@ fn run_sync(
                                 notifications::shown(&notification, &room, &client).await
                                 && let Some(listener) = shared.listener()
                             {
-                                listener.notify(&room, &sender);
+                                // Without names, none leaves the core.
+                                if shared.toast_names.load(Ordering::SeqCst) {
+                                    listener.notify(&room, &sender);
+                                } else {
+                                    listener.notify("", "");
+                                }
                             }
                         }
                     })
@@ -670,7 +716,12 @@ fn run_sync(
                     .map(Box::pin);
             }
             let rooms =
-                account::sync_round(&client, engine.as_ref().expect("selected above")).await?;
+                account::sync_round(&client, engine.as_ref().expect("selected above")).await;
+            // Saved even when the round failed: the SDK may have refreshed the
+            // token, spending the old refresh token, before the error.
+            saved_token =
+                account::save_if_refreshed(&client, lease.stores(), saved_token.take()).await;
+            let rooms = rooms?;
             let keyed = match keys.as_mut() {
                 Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
                 None => None,
@@ -726,6 +777,7 @@ fn run_sync(
     }
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
+    client.remove_event_handler(typing_handler);
     drop(identities);
     drop(keys);
     drop(engine);
@@ -981,11 +1033,22 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
         let outcome = lease.stores().block_on(async {
             let consented = sending::consented(lease.stores(), &job.room_id).await;
             match &job.content {
-                Content::Text(body) => {
+                Content::Text(body, relation) => {
                     sending::send(
                         &client,
                         &job.room_id,
                         body,
+                        relation.as_ref(),
+                        job.transaction_id.clone(),
+                        consented,
+                    )
+                    .await
+                }
+                Content::File(file) => {
+                    sending::send_file(
+                        &client,
+                        &job.room_id,
+                        file,
                         job.transaction_id.clone(),
                         consented,
                     )
@@ -1178,6 +1241,11 @@ impl Session {
                 listener: Mutex::new(None),
                 client_ran: AtomicBool::new(false),
                 toasts: AtomicBool::new(false),
+                toast_names: AtomicBool::new(true),
+                send_typing: AtomicBool::new(false),
+                send_receipts: AtomicBool::new(false),
+                idle_lock_minutes: AtomicU16::new(0),
+                typing: Arc::default(),
             }),
             transition: Mutex::new(()),
         }
@@ -1319,6 +1387,157 @@ impl Session {
         Ok(self.account_status())
     }
 
+    /// Starts signing in to `homeserver` through its OAuth 2.0 provider
+    /// (ADR-0030) on a worker thread and returns the status at once, like
+    /// [`Session::sign_in`]. One lease covers starting the login (the
+    /// provider's page); the question in the core's own window runs with no
+    /// lease held, as the password prompt does; a second lease, in the same
+    /// generation, covers the redirect wait and the install. A lock in
+    /// between abandons the attempt, and abandons the wait within half a
+    /// second.
+    pub fn sign_in_oidc(
+        &self,
+        homeserver: Homeserver,
+        source: Arc<dyn CredentialSource>,
+    ) -> Result<AccountStatus, AdmissionError> {
+        if self.state() != StoreState::Protected {
+            return Err(AdmissionError::Locked);
+        }
+        {
+            let mut status = guard(&self.shared.status);
+            if matches!(
+                status.state,
+                AccountState::SigningIn | AccountState::SignedIn
+            ) {
+                return Ok(status.clone());
+            }
+            *status = AccountStatus {
+                state: AccountState::SigningIn,
+                user_id: None,
+                error: None,
+            };
+        }
+        if let Some(listener) = self.shared.listener() {
+            listener.session_changed();
+        }
+        let shared = self.shared.clone();
+        let started = lock(&self.shared).generation;
+        let spawned = std::thread::Builder::new()
+            .name("core-sign-in-oidc".into())
+            .spawn(move || {
+                let still_current = || {
+                    let inner = lock(&shared);
+                    inner.generation == started && inner.state == StoreState::Protected
+                };
+                let admitted = || match shared.admit() {
+                    Ok(lease) if lease.generation == started => Some(lease),
+                    _ => None,
+                };
+                // Reports the end of an attempt that did not sign in.
+                let end = |lease: Option<Lease>, error: SignInError| {
+                    let current = lease.is_some_and(|lease| lease.commit(|| ()).is_ok());
+                    shared.set_status(if current {
+                        failed(error)
+                    } else {
+                        AccountStatus::signed_out()
+                    });
+                };
+                // First lease: the client and the provider's page.
+                let Some(lease) = admitted() else {
+                    shared.set_status(AccountStatus::signed_out());
+                    return;
+                };
+                shared.client_ran.store(true, Ordering::SeqCst);
+                let runtime = lease.stores().runtime().handle().clone();
+                let begun = lease.stores().block_on(async {
+                    let client = account::build_client(&homeserver, lease.stores()).await?;
+                    match account::start_oauth(&client).await {
+                        Ok(start) => Ok((client, start)),
+                        Err(error) => {
+                            drop(client);
+                            Err(error)
+                        }
+                    }
+                });
+                let (client, start) = match begun {
+                    Ok(begun) => begun,
+                    Err(error) => {
+                        end(Some(lease), error);
+                        return;
+                    }
+                };
+                drop(lease);
+                // Dropped inside its runtime, as everywhere else.
+                let discard = |client: Client| {
+                    let _context = runtime.enter();
+                    drop(client);
+                };
+                // The question, with no lease held: it may stay open long.
+                let answer =
+                    match crate::oauth_login::question(&homeserver.display_host(), start.url()) {
+                        None => Err(SignInError::Failed),
+                        Some((caption, message)) => {
+                            match source.confirm_open_link(caption, &message) {
+                                Ok(true) => source
+                                    .open_link(start.url().as_str())
+                                    .map(|()| true)
+                                    .map_err(|_| SignInError::Failed),
+                                Ok(false) | Err(PromptError::Cancelled) => Ok(false),
+                                Err(PromptError::Unsupported) => Err(SignInError::Unsupported),
+                                Err(_) => Err(SignInError::Failed),
+                            }
+                        }
+                    };
+                // Second lease, in the same generation: a lock in between
+                // abandons the attempt.
+                let Some(lease) = admitted() else {
+                    discard(client);
+                    shared.set_status(AccountStatus::signed_out());
+                    return;
+                };
+                match answer {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => {
+                        lease
+                            .stores()
+                            .block_on(account::abort_oauth(&client, start));
+                        discard(client);
+                        end(Some(lease), answer.err().unwrap_or(SignInError::Cancelled));
+                        return;
+                    }
+                }
+                let result = lease.stores().block_on(async {
+                    match account::finish_oauth(&client, &homeserver, lease.stores(), start, || {
+                        !still_current()
+                    })
+                    .await
+                    {
+                        Ok(user_id) => Ok((client, user_id)),
+                        Err(error) => {
+                            drop(client);
+                            Err(error)
+                        }
+                    }
+                });
+                match result {
+                    Ok((client, user_id)) => install(&shared, lease, client, user_id),
+                    Err(error) => {
+                        let current = lease.commit(|| ()).is_ok();
+                        drop(lease);
+                        shared.set_status(if current {
+                            failed(error)
+                        } else {
+                            AccountStatus::signed_out()
+                        });
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.shared.set_status(failed(SignInError::Failed));
+        }
+        Ok(self.account_status())
+    }
+
     /// Starts registering `username` on `homeserver` on a worker thread and
     /// returns the status at once, like [`Session::sign_in`]. The name is
     /// checked first; the password and any registration token are asked for
@@ -1433,6 +1652,7 @@ impl Session {
         // unsent messages are dropped.
         *guard(&self.shared.security) = SecurityShared::default();
         guard(&self.shared.outbox).clear();
+        self.shared.typing.clear();
         // No lease remains, so the sync loop is between rounds and will see
         // the lock at its next admission; join it, then drop the client inside
         // the stores' runtime before closing them.
@@ -1506,10 +1726,7 @@ impl Session {
                     // Before the request: an interrupted sign-out must never
                     // restore this account on the next start.
                     let began = store::begin_sign_out(&dir).is_ok();
-                    let revoked = lease
-                        .stores()
-                        .block_on(client.matrix_auth().logout())
-                        .is_ok();
+                    let revoked = lease.stores().block_on(client.logout()).is_ok();
                     break (began, revoked);
                 }
                 Ok(None) | Err(AdmissionError::Locked) => return Ok(self.state()),
@@ -1543,6 +1760,7 @@ impl Session {
         &self,
         room_id: &str,
         body: Zeroizing<String>,
+        relation: Option<crate::outbox::Relation>,
     ) -> Result<PendingMessage, SendRefusal> {
         if guard(&self.shared.account).is_none() {
             return Err(SendRefusal::Unavailable);
@@ -1554,7 +1772,32 @@ impl Session {
             if inner.state != StoreState::Protected {
                 return Err(SendRefusal::Unavailable);
             }
-            guard(&self.shared.outbox).queue(room_id, body)
+            guard(&self.shared.outbox).queue(room_id, body, relation)
+        }
+        .ok_or(SendRefusal::Full)?;
+        if let Some(listener) = self.shared.listener() {
+            listener.outbox_changed(room_id);
+        }
+        Ok(queued)
+    }
+
+    /// Queues a picked file for the signed-in account, like
+    /// [`Session::send_image`] (ADR-0029).
+    pub fn send_file(
+        &self,
+        room_id: &str,
+        file: Arc<crate::files::FileUpload>,
+    ) -> Result<PendingMessage, SendRefusal> {
+        if guard(&self.shared.account).is_none() {
+            return Err(SendRefusal::Unavailable);
+        }
+        let queued = {
+            // As for text: nothing queued here outlives a lock.
+            let inner = lock(&self.shared);
+            if inner.state != StoreState::Protected {
+                return Err(SendRefusal::Unavailable);
+            }
+            guard(&self.shared.outbox).queue_file(room_id, file)
         }
         .ok_or(SendRefusal::Full)?;
         if let Some(listener) = self.shared.listener() {
@@ -1643,6 +1886,28 @@ impl Session {
         Ok(lease.stores().block_on(settings::load(lease.stores())))
     }
 
+    /// Whether the account's settings send typing notices (ADR-0023).
+    pub fn sends_typing(&self) -> bool {
+        self.shared.send_typing.load(Ordering::SeqCst)
+    }
+
+    /// Whether the account's settings send public read receipts (ADR-0023).
+    pub fn sends_read_receipts(&self) -> bool {
+        self.shared.send_receipts.load(Ordering::SeqCst)
+    }
+
+    /// The account's idle lock in minutes, 0 when off (ADR-0025). It stays
+    /// as last loaded while the profile is locked or signed out, which is
+    /// harmless: only an open profile can be locked.
+    pub fn idle_lock_minutes(&self) -> u16 {
+        self.shared.idle_lock_minutes.load(Ordering::SeqCst)
+    }
+
+    /// Who is typing in each room, from the sync.
+    pub fn typing(&self) -> &activity::Typing {
+        &self.shared.typing
+    }
+
     /// Replaces this account's settings. `Ok(false)` when the store could
     /// not be written.
     pub fn set_account_settings(&self, value: AccountSettings) -> Result<bool, AdmissionError> {
@@ -1656,9 +1921,22 @@ impl Session {
         let committed = saved
             && lease
                 .commit(|| {
-                    self.shared
+                    let shared = &self.shared;
+                    shared
                         .toasts
-                        .store(value.desktop_notifications, Ordering::SeqCst)
+                        .store(value.desktop_notifications, Ordering::SeqCst);
+                    shared
+                        .toast_names
+                        .store(value.notification_names, Ordering::SeqCst);
+                    shared
+                        .send_typing
+                        .store(value.send_typing, Ordering::SeqCst);
+                    shared
+                        .send_receipts
+                        .store(value.send_read_receipts, Ordering::SeqCst);
+                    shared
+                        .idle_lock_minutes
+                        .store(value.idle_lock_minutes, Ordering::SeqCst);
                 })
                 .is_ok();
         Ok(committed)
