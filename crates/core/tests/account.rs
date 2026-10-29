@@ -1130,6 +1130,7 @@ fn settings_come_from_the_room_state(sliding: bool) {
     server.settings_endpoints();
     let dir = TempDir::new().unwrap();
     let core = core_with_room(&server, dir.path());
+    let _locked = LockOnDrop(&core);
 
     let settings: RoomSettings = value(call(
         &core,
@@ -1185,14 +1186,16 @@ fn given_classic_sync_then_room_settings_come_from_the_room_state() {
 }
 
 /// GIVEN an account without a display name, which a Matrix v1.19
-/// homeserver answers with 404 WHEN the name is read THEN there is none, not
-/// a refusal. Setting one sends it, a blank one deletes the field, and a
-/// refusal is `rejected`.
+/// homeserver answers with 404 `M_NOT_FOUND` WHEN the name is read THEN
+/// there is none, not a refusal. Setting one sends it, a blank one deletes
+/// the field, and a refusal is `rejected`. A 404 that is not `M_NOT_FOUND`,
+/// from a server without the endpoint, is a refusal: the name is not known.
 #[test]
 fn given_no_display_name_then_none_is_read_and_one_can_be_set() {
     let server = Homeserver::signed_in();
     let dir = TempDir::new().unwrap();
     let core = core_with_room(&server, dir.path());
+    let _locked = LockOnDrop(&core);
 
     server.display_name_answers(
         "GET",
@@ -1232,6 +1235,16 @@ fn given_no_display_name_then_none_is_read_and_one_can_be_set() {
     );
     assert_eq!(
         call(&core, Call::SetDisplayName { name: "Bob".into() }),
+        Outcome::Error(ErrorCode::Rejected)
+    );
+
+    server.display_name_answers(
+        "GET",
+        404,
+        json!({"errcode": "M_UNRECOGNIZED", "error": "Unrecognized request"}),
+    );
+    assert_eq!(
+        call(&core, Call::DisplayName {}),
         Outcome::Error(ErrorCode::Rejected)
     );
 }

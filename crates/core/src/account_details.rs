@@ -11,7 +11,7 @@
 //!   the request is `rejected`. Nothing is retried.
 
 use crate::views::project_name;
-use matrix_sdk::Client;
+use matrix_sdk::{Client, ruma::api::error::ErrorKind};
 use persephone_contracts::{DeviceList, DeviceSummary, DisplayName, UnixMillis};
 use persephone_core_protocol::{ErrorCode, MAX_DISPLAY_NAME_BYTES};
 
@@ -24,18 +24,14 @@ pub fn valid_display_name(name: &str) -> bool {
     name.len() <= MAX_DISPLAY_NAME_BYTES && !name.chars().any(char::is_control)
 }
 
-/// This account's display name. The homeserver answers 404 when none is set
-/// (Matrix v1.19, `GET /profile/{userId}/{keyName}`), so that is no name.
+/// This account's display name. The homeserver answers `M_NOT_FOUND` when
+/// none is set (Matrix v1.19, `GET /profile/{userId}/{keyName}`), so that is
+/// no name. Any other refusal, such as `M_UNRECOGNIZED` from a server without
+/// the endpoint, is `rejected`: the name is not known.
 pub async fn display_name(client: &Client) -> Result<DisplayName, ErrorCode> {
     let name = match client.account().get_display_name().await {
         Ok(name) => name,
-        Err(error)
-            if error
-                .as_client_api_error()
-                .is_some_and(|api| api.status_code.as_u16() == 404) =>
-        {
-            None
-        }
+        Err(error) if matches!(error.client_api_error_kind(), Some(ErrorKind::NotFound)) => None,
         Err(error) => return Err(request_error(&error)),
     };
     Ok(DisplayName {
