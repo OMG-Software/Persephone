@@ -237,6 +237,12 @@ impl SessionListener for Hub {
         notifications.toast = Some((room.to_owned(), sender.to_owned()));
         self.changed.notify_all();
     }
+
+    /// Wakes the watch in [`serve`], which finishes the ended session.
+    fn session_ended(&self) {
+        let _notifications = lock(&self.notifications);
+        self.changed.notify_all();
+    }
 }
 
 enum Source {
@@ -1510,14 +1516,25 @@ impl Core {
         due
     }
 
+    /// Deletes the profile once the homeserver ended the session
+    /// ([`Session::finish_ended`]), and tells the UI. Returns whether a
+    /// session had ended.
+    pub fn finish_ended_session(&self) -> bool {
+        self.session
+            .finish_ended(LOCK_TIMEOUT, || self.announce_lock())
+            .is_some()
+    }
+
     /// Waits up to `timeout` for the UI connection to close; whether it
-    /// closed.
+    /// closed. Returns early, `false`, when the homeserver ended the session.
     fn wait_closed(&self, timeout: Duration) -> bool {
         let notifications = lock(&self.hub.notifications);
         let (notifications, _) = self
             .hub
             .changed
-            .wait_timeout_while(notifications, timeout, |n| !n.closed)
+            .wait_timeout_while(notifications, timeout, |n| {
+                !n.closed && !self.session.has_ended()
+            })
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         notifications.closed
     }
@@ -2163,10 +2180,14 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
             }
         });
         // The idle lock: checks every `IDLE_CHECK` until the connection
-        // closes, which wakes it at once.
+        // closes, which wakes it at once. A session the homeserver ended
+        // wakes it too, and is finished here, off the sync thread that the
+        // lock joins.
         let idle = scope.spawn(|| {
             while !core.wait_closed(IDLE_CHECK) {
-                core.lock_if_idle(platform::os::idle_time());
+                if !core.finish_ended_session() {
+                    core.lock_if_idle(platform::os::idle_time());
+                }
             }
         });
         let mut ready = false;

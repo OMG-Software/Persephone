@@ -231,6 +231,9 @@ fn run(options: Options) -> ExitCode {
             }
         }
     };
+    // A session the homeserver ended and the window closed before it was
+    // finished: its profile is still marked for the next start to wipe.
+    core.finish_ended_session();
     // Exit locks through the same path as a requested lock: admission closes,
     // admitted work finishes, then the stores close.
     let state = core.session().lock(EXIT_LOCK_TIMEOUT, || {}).0;

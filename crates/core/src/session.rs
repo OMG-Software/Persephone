@@ -85,6 +85,10 @@ const MAX_SYNC_BACKOFF: Duration = Duration::from_secs(30);
 /// Shortest time between the starts of two sync rounds. A homeserver should
 /// long-poll; one that answers at once must not make the core spin.
 const MIN_SYNC_INTERVAL: Duration = Duration::from_millis(500);
+/// Failed sync rounds in a row in which the homeserver must end the session
+/// (`account::session_ended`) before the profile is deleted. The rounds are
+/// a backoff apart, so one faulty moment of a server or proxy is not enough.
+const ENDED_ROUNDS: u8 = 2;
 /// How often the sending thread checks for queued messages.
 const SEND_TICK: Duration = Duration::from_millis(100);
 /// How often the security thread checks for work.
@@ -144,6 +148,9 @@ pub trait SessionListener: Send + Sync {
     /// room's and sender's projected names, never its text. Called only while
     /// desktop notifications are on.
     fn notify(&self, _room: &str, _sender: &str) {}
+    /// The homeserver ended the session; [`Session::finish_ended`] deletes
+    /// the profile. Called on the sync thread, which then stops.
+    fn session_ended(&self) {}
 }
 
 /// Why a message was not queued.
@@ -226,6 +233,9 @@ struct Shared {
     listener: Mutex<Option<Arc<dyn SessionListener>>>,
     /// Set once any SDK client was built over these stores.
     client_ran: AtomicBool,
+    /// Set by the sync loop when the homeserver ended the session; cleared
+    /// once [`Session::finish_ended`] has locked the stores.
+    ended: AtomicBool,
     /// The account's desktop-notification setting, kept here so the sync's
     /// notification handler need not read the store (ADR-0022).
     toasts: AtomicBool,
@@ -656,6 +666,11 @@ fn run_sync(
     // The access token last saved, so a refreshed OAuth token is saved once
     // (ADR-0030); `None` until the first round saves or confirms it.
     let mut saved_token: Option<Zeroizing<String>> = None;
+    // How the SDK reports a refused or refreshed token; a receiver, not a
+    // task. Read after a failed round only.
+    let mut changes = client.subscribe_to_session_changes();
+    // Rounds in a row that ended the session; anything else starts again.
+    let mut ended_rounds = 0u8;
     loop {
         let lease = match shared.admit() {
             Ok(lease) => lease,
@@ -732,9 +747,34 @@ fn run_sync(
             };
             Ok::<_, SignInError>((rooms, keyed, changed))
         });
-        let committed = lease.commit(|| ()).is_ok();
+        let refused = outcome.is_err()
+            && lease
+                .stores()
+                .block_on(account::session_ended(&client, &mut changes));
+        ended_rounds = if refused {
+            ended_rounds.saturating_add(1)
+        } else {
+            0
+        };
+        let ended = ended_rounds >= ENDED_ROUNDS;
+        // Recorded only while this session is still the open one: after a
+        // lock, the next start finds the refused token again.
+        let committed = lease
+            .commit(|| {
+                if ended {
+                    shared.ended.store(true, Ordering::SeqCst);
+                }
+            })
+            .is_ok();
         drop(lease);
         if !committed {
+            break;
+        }
+        if ended {
+            // Nothing more to sync; the session deletes the profile.
+            if let Some(listener) = shared.listener() {
+                listener.session_ended();
+            }
             break;
         }
         match outcome {
@@ -778,6 +818,7 @@ fn run_sync(
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
     client.remove_event_handler(typing_handler);
+    drop(changes);
     drop(identities);
     drop(keys);
     drop(engine);
@@ -1240,6 +1281,7 @@ impl Session {
                 outbox: Mutex::default(),
                 listener: Mutex::new(None),
                 client_ran: AtomicBool::new(false),
+                ended: AtomicBool::new(false),
                 toasts: AtomicBool::new(false),
                 toast_names: AtomicBool::new(true),
                 send_typing: AtomicBool::new(false),
@@ -1751,6 +1793,47 @@ impl Session {
             },
         });
         Ok(state)
+    }
+
+    /// Whether the homeserver ended the session and
+    /// [`Session::finish_ended`] has not finished it yet.
+    pub fn has_ended(&self) -> bool {
+        self.shared.ended.load(Ordering::SeqCst)
+    }
+
+    /// Finishes a session the homeserver ended (`account::session_ended`):
+    /// deletes this device's local profile as [`Session::sign_out`] does, but
+    /// asks the homeserver nothing, since it already ended the session. The
+    /// marker records the session as revoked, so the next start wipes the
+    /// profile without a warning and opens a new, empty one.
+    ///
+    /// Returns `None` when no session ended. A lock that has not finished in
+    /// `timeout` leaves the end waiting, and the next call goes on with it.
+    pub fn finish_ended(&self, timeout: Duration, announce: impl FnOnce()) -> Option<StoreState> {
+        if !self.has_ended() {
+            return None;
+        }
+        let Some(dir) = self.profile.clone() else {
+            self.shared.ended.store(false, Ordering::SeqCst);
+            return None;
+        };
+        let marked = store::mark_signed_out(&dir, true).is_ok();
+        let (state, _) = self.lock(timeout, announce);
+        if state == StoreState::Locking {
+            return Some(state);
+        }
+        self.shared.ended.store(false, Ordering::SeqCst);
+        // The sync loop has stopped, so this status is not overwritten.
+        self.shared.set_status(AccountStatus {
+            state: AccountState::SignedOut,
+            user_id: None,
+            error: Some(if marked {
+                SignInError::SessionEnded
+            } else {
+                SignInError::Failed
+            }),
+        });
+        Some(state)
     }
 
     /// Queues a message for the signed-in account. The room and body were
