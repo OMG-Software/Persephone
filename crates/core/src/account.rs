@@ -17,6 +17,11 @@
 //! from the key backup, which the SDK asks only once a message fails to
 //! decrypt. [`take_key_rooms`] names the rooms that got keys since it was last
 //! called, so the page can fetch them again (`session.rs`).
+//!
+//! The homeserver can end the session itself: the device was signed out
+//! elsewhere, or the account was reset or removed. [`session_ended`] tells
+//! the sync loop when that happened, and the session then deletes this
+//! device's profile as a sign-out does.
 
 use crate::credentials::Credentials;
 use crate::homeserver::{self, Homeserver};
@@ -24,7 +29,7 @@ use crate::store::Stores;
 use crate::views::MAX_ROOMS;
 use futures_core::Stream;
 use matrix_sdk::{
-    Client,
+    Client, SessionChange,
     authentication::{
         matrix::MatrixSession,
         oauth::{ClientId, OAuthSession, UserSession},
@@ -42,6 +47,7 @@ use matrix_sdk_crypto::{
 use persephone_contracts::SignInError;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, pin::Pin, task::Poll, time::Duration};
+use tokio::sync::broadcast::{Receiver, error::TryRecvError};
 use zeroize::Zeroizing;
 
 /// Crypto-store custom value holding the saved account.
@@ -421,6 +427,35 @@ pub async fn sync_round(client: &Client, engine: &Engine) -> Result<Vec<String>,
                 .chain(response.rooms.invited.keys())
                 .map(ToString::to_string)
                 .collect())
+        }
+    }
+}
+
+/// Whether the homeserver ended this session for good, as the SDK reports it
+/// in `changes` (from `Client::subscribe_to_session_changes`): an unknown
+/// access token without soft logout, once any refresh was refused. Asked
+/// after a failed sync round. A second request must be refused the same way,
+/// so one stray answer never deletes the profile. A soft logout does not end
+/// the session: the account still exists and the device may sign in again.
+pub async fn session_ended(client: &Client, changes: &mut Receiver<SessionChange>) -> bool {
+    if !hard_logout(changes) {
+        return false;
+    }
+    // Its result is not needed: the SDK reports a refused token in `changes`.
+    let _ = client.whoami().await;
+    hard_logout(changes)
+}
+
+/// Whether the newest change waiting in `changes` ends the session. The SDK
+/// keeps only the newest change for a receiver that falls behind.
+fn hard_logout(changes: &mut Receiver<SessionChange>) -> bool {
+    let mut ended = false;
+    loop {
+        match changes.try_recv() {
+            Ok(SessionChange::UnknownToken(token)) => ended = !token.soft_logout,
+            Ok(SessionChange::TokensRefreshed) => ended = false,
+            Err(TryRecvError::Lagged(_)) => {}
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return ended,
         }
     }
 }

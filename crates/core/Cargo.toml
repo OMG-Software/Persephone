@@ -40,7 +40,7 @@ matrix-sdk-sqlite = { version = "=0.19.1", features = ["bundled", "crypto-store"
 # connector, which reqwest already builds; no other crate.
 reqwest = { version = "=0.13.5", default-features = false, features = ["socks"] }
 # net and io-util: the OAuth sign-in's loopback redirect (ADR-0030).
-tokio = { version = "=1.53.3", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "=1.53.3", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "=2.5.8"
 zeroize = "=1.9.1"
 

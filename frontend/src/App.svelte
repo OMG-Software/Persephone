@@ -1805,6 +1805,15 @@
             Signing out did not finish: this device's local data could not be deleted. Restart
             Persephone and sign out again.
           </p>
+        {:else if status.store === 'restart_required' && status.account.state === 'signed_out' && status.account.error === 'session_ended'}
+          <p role="alert" class="error">
+            The homeserver ended this session. It was signed out from another device, or the
+            account was reset or removed.
+          </p>
+          <p class="auth-note">
+            This device's keys were deleted. Restart Persephone to start again with a new profile;
+            the rest of this device's local data is deleted as it starts.
+          </p>
         {:else if status.store === 'restart_required' && status.account.state === 'signed_out'}
           <p class="auth-note">
             Signed out, and this device's keys were deleted. Restart Persephone to sign in again;

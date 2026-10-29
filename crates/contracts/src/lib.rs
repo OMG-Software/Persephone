@@ -1209,6 +1209,10 @@ pub enum SignInError {
     /// Signed out locally, but the homeserver could not be told: the server
     /// session may stay active until it expires or is revoked elsewhere.
     SessionNotRevoked,
+    /// Signed out because the homeserver ended the session: it was signed
+    /// out from another device, or the account was reset, deactivated or
+    /// removed. This device's local profile is deleted as for a sign-out.
+    SessionEnded,
     /// Registering: someone already has that username.
     UsernameTaken,
     /// Registering: the homeserver does not accept that username.
