@@ -555,6 +555,21 @@ impl Homeserver {
         });
     }
 
+    /// Refuses every refresh token from now on, as a homeserver does once it
+    /// ended the session.
+    fn refuse_refresh(&self) {
+        self.runtime.block_on(
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/refresh"))
+                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                    "errcode": "M_UNKNOWN_TOKEN",
+                    "error": "Unknown refresh token",
+                    "soft_logout": false
+                })))
+                .mount(&self.server),
+        );
+    }
+
     /// Refuses the access token without soft logout in one sync round and
     /// its `whoami`, then answers as before.
     fn refuse_token_once(&self) {
@@ -1334,6 +1349,28 @@ fn given_one_round_that_ends_the_session_then_a_good_round_keeps_the_profile() {
     assert!(dir.path().join("store-key.v2").exists());
     let status = core.session().account_status();
     assert_eq!((status.state, status.error), (AccountState::SignedIn, None));
+}
+
+/// GIVEN a password session that holds a refresh token WHEN the homeserver
+/// refuses the access token and then the refresh token THEN the session has
+/// ended, as for a session without one.
+#[test]
+fn given_a_refused_refresh_token_then_the_session_ends() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"refresh_token":"synthetic_refresh_token","device_id":"PERSEPHONE1"}),
+        ),
+        false,
+        true,
+    );
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+    server.refuse_refresh();
+    server.refuse_token(false, true);
+    wait_for("the session to end", || core.session().has_ended());
+    assert!(server.requests_to("/_matrix/client/v3/refresh") > 0);
 }
 
 #[test]

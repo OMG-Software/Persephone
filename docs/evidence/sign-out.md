@@ -135,8 +135,9 @@ deletes the profile as for a sign-out.
   (`invalid_grant` for OAuth). The sync loop reads it only after a failed
   round. Only `soft_logout: false` counts, and only if a second request
   (`whoami`) is refused the same way, judged from its own error (an unknown
-  token with no refresh token, or an OAuth refresh refused with
-  `invalid_grant`), since the account's other requests share the signal. The
+  token with no refresh token, a refresh token the homeserver refuses the
+  same way, or an OAuth refresh refused with `invalid_grant`), since the
+  account's other requests share the signal. The
   end must hold in two failed rounds in a row, a backoff apart, so one faulty
   moment of a server or proxy never deletes the profile. A soft logout keeps
   the profile: the account still exists, and sync keeps failing with
@@ -155,7 +156,8 @@ deletes the profile as for a sign-out.
   well before the next idle check, and the next start is fresh and silent; a
   soft logout deletes nothing; a refusal that `whoami` does not confirm
   deletes nothing; one confirmed round followed by a good one deletes
-  nothing.
+  nothing; a password session whose refresh token is refused too ends (this
+  test failed with the refusal unrecognized).
 * **Limits**: starting fresh still needs a manual restart, as after any
   sign-out (ADR-0008 is proposed, not accepted). A server or proxy that
   wrongly refuses the token without soft logout for two rounds in a row

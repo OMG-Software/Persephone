@@ -450,21 +450,23 @@ pub async fn session_ended(client: &Client, changes: &mut Receiver<SessionChange
 }
 
 /// Whether a request's error ends the session: the access token was refused
-/// without soft logout and there was no refresh token to try, or the OAuth
-/// provider refused the refresh token (`invalid_grant`). A refresh that
-/// failed for another reason, such as the network, does not.
+/// without soft logout and there was no refresh token to try, or the refresh
+/// token was refused too (by the homeserver the same way, or by the OAuth
+/// provider with `invalid_grant`). A refresh that failed for another reason,
+/// such as the network, does not.
 fn ends_session(error: &HttpError) -> bool {
     if let Some(ErrorKind::UnknownToken(token)) = error.client_api_error_kind() {
         return !token.soft_logout;
     }
-    let HttpError::RefreshToken(RefreshTokenError::OAuth(oauth)) = error else {
-        return false;
-    };
-    matches!(
-        &**oauth,
-        OAuthError::RefreshToken(RequestTokenError::ServerResponse(response))
-            if *response.error() == BasicErrorResponseType::InvalidGrant
-    )
+    match error {
+        HttpError::RefreshToken(RefreshTokenError::MatrixAuth(refresh)) => ends_session(refresh),
+        HttpError::RefreshToken(RefreshTokenError::OAuth(oauth)) => matches!(
+            &**oauth,
+            OAuthError::RefreshToken(RequestTokenError::ServerResponse(response))
+                if *response.error() == BasicErrorResponseType::InvalidGrant
+        ),
+        _ => false,
+    }
 }
 
 /// Whether the newest change waiting in `changes` ends the session. The SDK
