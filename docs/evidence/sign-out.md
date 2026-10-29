@@ -134,9 +134,13 @@ deletes the profile as for a sign-out.
   sends once an access token is refused and any refresh was refused too
   (`invalid_grant` for OAuth). The sync loop reads it only after a failed
   round. Only `soft_logout: false` counts, and only if a second request
-  (`whoami`) is refused the same way, so one stray answer never deletes the
-  profile. A soft logout keeps the profile: the account still exists, and sync
-  keeps failing with `sync_failed`.
+  (`whoami`) is refused the same way, judged from its own error (an unknown
+  token with no refresh token, or an OAuth refresh refused with
+  `invalid_grant`), since the account's other requests share the signal. The
+  end must hold in two failed rounds in a row, a backoff apart, so one faulty
+  moment of a server or proxy never deletes the profile. A soft logout keeps
+  the profile: the account still exists, and sync keeps failing with
+  `sync_failed`.
 * **Order** ([`session.rs`](../../crates/core/src/session.rs)
   `finish_ended`): the sync loop records the end under its lease and stops.
   The core's watch thread in `serve` (the idle-lock thread, woken at once)
@@ -150,13 +154,14 @@ deletes the profile as for a sign-out.
   without a logout request, ends `restart_required` with `session_ended`
   well before the next idle check, and the next start is fresh and silent; a
   soft logout deletes nothing; a refusal that `whoami` does not confirm
-  deletes nothing.
+  deletes nothing; one confirmed round followed by a good one deletes
+  nothing.
 * **Limits**: starting fresh still needs a manual restart, as after any
-  sign-out (ADR-0008 is proposed, not accepted). The SDK also sends the
-  signal when a refresh of a password session with a refresh token fails for
-  another reason; Persephone does not ask for refresh tokens at password
-  sign-in, and the second request must still be refused. Not checked against
-  Merovingian or Synapse.
+  sign-out (ADR-0008 is proposed, not accepted). A server or proxy that
+  wrongly refuses the token without soft logout for two rounds in a row
+  still deletes the profile; encrypted history without a key backup is then
+  lost, as after a sign-out. The OAuth path (`invalid_grant`) has no mock
+  test. Not checked against Merovingian or Synapse.
 
 ## Limits
 

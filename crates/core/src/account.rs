@@ -29,10 +29,13 @@ use crate::store::Stores;
 use crate::views::MAX_ROOMS;
 use futures_core::Stream;
 use matrix_sdk::{
-    Client, SessionChange,
+    Client, HttpError, RefreshTokenError, SessionChange,
     authentication::{
         matrix::MatrixSession,
-        oauth::{ClientId, OAuthSession, UserSession},
+        oauth::{
+            ClientId, OAuthError, OAuthSession, UserSession,
+            error::{BasicErrorResponseType, RequestTokenError},
+        },
     },
     config::{RequestConfig, StoreConfig, SyncSettings},
     cross_process_lock::CrossProcessLockConfig,
@@ -435,15 +438,33 @@ pub async fn sync_round(client: &Client, engine: &Engine) -> Result<Vec<String>,
 /// in `changes` (from `Client::subscribe_to_session_changes`): an unknown
 /// access token without soft logout, once any refresh was refused. Asked
 /// after a failed sync round. A second request must be refused the same way,
-/// so one stray answer never deletes the profile. A soft logout does not end
-/// the session: the account still exists and the device may sign in again.
+/// judged from its own answer: `changes` is shared with the account's other
+/// requests. A soft logout does not end the session: the account still
+/// exists and the device may sign in again.
 pub async fn session_ended(client: &Client, changes: &mut Receiver<SessionChange>) -> bool {
-    if !hard_logout(changes) {
-        return false;
-    }
-    // Its result is not needed: the SDK reports a refused token in `changes`.
-    let _ = client.whoami().await;
     hard_logout(changes)
+        && client
+            .whoami()
+            .await
+            .is_err_and(|error| ends_session(&error))
+}
+
+/// Whether a request's error ends the session: the access token was refused
+/// without soft logout and there was no refresh token to try, or the OAuth
+/// provider refused the refresh token (`invalid_grant`). A refresh that
+/// failed for another reason, such as the network, does not.
+fn ends_session(error: &HttpError) -> bool {
+    if let Some(ErrorKind::UnknownToken(token)) = error.client_api_error_kind() {
+        return !token.soft_logout;
+    }
+    let HttpError::RefreshToken(RefreshTokenError::OAuth(oauth)) = error else {
+        return false;
+    };
+    matches!(
+        &**oauth,
+        OAuthError::RefreshToken(RequestTokenError::ServerResponse(response))
+            if *response.error() == BasicErrorResponseType::InvalidGrant
+    )
 }
 
 /// Whether the newest change waiting in `changes` ends the session. The SDK

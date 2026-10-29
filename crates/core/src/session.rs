@@ -85,6 +85,10 @@ const MAX_SYNC_BACKOFF: Duration = Duration::from_secs(30);
 /// Shortest time between the starts of two sync rounds. A homeserver should
 /// long-poll; one that answers at once must not make the core spin.
 const MIN_SYNC_INTERVAL: Duration = Duration::from_millis(500);
+/// Failed sync rounds in a row in which the homeserver must end the session
+/// (`account::session_ended`) before the profile is deleted. The rounds are
+/// a backoff apart, so one faulty moment of a server or proxy is not enough.
+const ENDED_ROUNDS: u8 = 2;
 /// How often the sending thread checks for queued messages.
 const SEND_TICK: Duration = Duration::from_millis(100);
 /// How often the security thread checks for work.
@@ -665,6 +669,8 @@ fn run_sync(
     // How the SDK reports a refused or refreshed token; a receiver, not a
     // task. Read after a failed round only.
     let mut changes = client.subscribe_to_session_changes();
+    // Rounds in a row that ended the session; anything else starts again.
+    let mut ended_rounds = 0u8;
     loop {
         let lease = match shared.admit() {
             Ok(lease) => lease,
@@ -741,10 +747,16 @@ fn run_sync(
             };
             Ok::<_, SignInError>((rooms, keyed, changed))
         });
-        let ended = outcome.is_err()
+        let refused = outcome.is_err()
             && lease
                 .stores()
                 .block_on(account::session_ended(&client, &mut changes));
+        ended_rounds = if refused {
+            ended_rounds.saturating_add(1)
+        } else {
+            0
+        };
+        let ended = ended_rounds >= ENDED_ROUNDS;
         // Recorded only while this session is still the open one: after a
         // lock, the next start finds the refused token again.
         let committed = lease

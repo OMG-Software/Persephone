@@ -555,6 +555,30 @@ impl Homeserver {
         });
     }
 
+    /// Refuses the access token without soft logout in one sync round and
+    /// its `whoami`, then answers as before.
+    fn refuse_token_once(&self) {
+        let refused = ResponseTemplate::new(401).set_body_json(json!({
+            "errcode": "M_UNKNOWN_TOKEN",
+            "error": "Unknown access token",
+            "soft_logout": false
+        }));
+        self.runtime.block_on(async {
+            for (verb, endpoint) in [
+                ("GET", "/_matrix/client/v3/sync"),
+                ("GET", "/_matrix/client/v3/account/whoami"),
+            ] {
+                Mock::given(method(verb))
+                    .and(path(endpoint))
+                    .respond_with(refused.clone())
+                    .up_to_n_times(1)
+                    .with_priority(1)
+                    .mount(&self.server)
+                    .await;
+            }
+        });
+    }
+
     fn uri(&self) -> String {
         self.server.uri()
     }
@@ -1159,8 +1183,10 @@ fn given_the_homeserver_ends_the_session_then_the_profile_is_deleted_and_the_nex
         wait_for("the first sync", || {
             server.requests_to("/_matrix/client/v3/sync") > 0
         });
-        let (close, quiet) = std::sync::mpsc::channel::<()>();
         std::thread::scope(|scope| {
+            // Inside the scope, so a failing assertion drops the sender and
+            // the UI closes before the scope waits for it.
+            let (close, quiet) = std::sync::mpsc::channel::<()>();
             let serving = scope.spawn(|| serve(&core, QuietUi(quiet), std::io::sink()));
             let refused = Instant::now();
             server.refuse_token(false, true);
@@ -1189,7 +1215,10 @@ fn given_the_homeserver_ends_the_session_then_the_profile_is_deleted_and_the_nex
             0,
             "nothing is left on the homeserver to revoke"
         );
-        assert!(server.requests_to("/_matrix/client/v3/account/whoami") > 0);
+        assert!(
+            server.requests_to("/_matrix/client/v3/account/whoami") >= 2,
+            "confirmed in two rounds"
+        );
         assert_eq!(
             call(&core, Call::RoomList {}),
             Outcome::Error(ErrorCode::Locked)
@@ -1267,6 +1296,35 @@ fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_ke
         core.session().account_status().error,
         Some(SignInError::SyncFailed)
     );
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN one sync round in which the homeserver ends the session, confirmed
+/// by `whoami`, WHEN the next round is accepted THEN nothing is deleted: the
+/// end must hold for two rounds in a row.
+#[test]
+fn given_one_round_that_ends_the_session_then_a_good_round_keeps_the_profile() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the first sync", || {
+        server.requests_to("/_matrix/client/v3/sync") > 0
+    });
+    server.refuse_token_once();
+    wait_for("the refused round", || {
+        server.requests_to("/_matrix/client/v3/account/whoami") > 0
+    });
+    let rounds = server.requests_to("/_matrix/client/v3/sync");
+    wait_for("two more rounds", || {
+        server.requests_to("/_matrix/client/v3/sync") > rounds + 1
+    });
+    assert!(!core.session().has_ended());
+    assert!(!core.finish_ended_session());
+    assert!(dir.path().join("store-key.v2").exists());
+    let status = core.session().account_status();
+    assert_eq!((status.state, status.error), (AccountState::SignedIn, None));
     // Stops the sync loop: the mock server goes back to a shared pool.
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
