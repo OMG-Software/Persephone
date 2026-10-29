@@ -1239,6 +1239,9 @@ fn given_a_soft_logout_then_the_profile_is_kept() {
         core.session().account_status().state,
         AccountState::SignedIn
     );
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
 }
 
 /// GIVEN a sync round refused as if the session ended WHEN a second request
@@ -1264,6 +1267,9 @@ fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_ke
         core.session().account_status().error,
         Some(SignInError::SyncFailed)
     );
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
 }
 
 #[test]
