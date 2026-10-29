@@ -1,10 +1,24 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { deviceList, type DeviceList } from './bridge';
+  import { deviceList, removeDevice, type DeviceList } from './bridge';
+  import { changeText } from './accountChanges';
   import { fullTime, toDate } from './time';
 
   // The devices (sessions) signed in to this account, as the homeserver
   // lists them. Their IDs and names are the homeserver's word: isolated text.
+  // A verified device can ask another one to compare emoji; the comparison
+  // then shows on its own screen.
+  let {
+    canVerify = false,
+    busy = false,
+    onverify = () => {}
+  }: {
+    // This device is verified, so it can vouch for the others.
+    canVerify?: boolean;
+    busy?: boolean;
+    onverify?: (deviceId: string) => void;
+  } = $props();
+
   let devices = $state<DeviceList | null>(null);
   let loading = $state(false);
   let failure = $state<string | null>(null);
@@ -29,6 +43,30 @@
     }
   }
 
+  // Signing out another session: the core asks for the password itself.
+  let removing = $state<string | null>(null);
+  let removed = $state<string | null>(null);
+
+  async function remove(deviceId: string) {
+    if (removing) return;
+    removing = deviceId;
+    removed = null;
+    failure = null;
+    try {
+      const outcome = await removeDevice(deviceId);
+      if (outcome === 'done') {
+        removed = 'The session was signed out.';
+        await load();
+      } else {
+        failure = changeText(outcome);
+      }
+    } catch (reason) {
+      failure = failures[String(reason)] ?? 'The session could not be signed out.';
+    } finally {
+      removing = null;
+    }
+  }
+
   onMount(load);
 </script>
 
@@ -36,7 +74,7 @@
   <h2 id="devices-heading">Sessions</h2>
   <p class="lede">
     Every device signed in to your account. A session you do not recognise could read your
-    messages: sign it out from a device you trust.
+    messages: sign it out. Persephone asks for your password in its own window first.
   </p>
   {#if devices}
     <ul class="device-list" aria-label="Signed-in sessions">
@@ -57,9 +95,35 @@
               · last seen <time datetime={seen.toISOString()}>{fullTime(seen)}</time>
             {/if}
           </p>
+          {#if !device.current}
+            <div class="actions">
+              {#if !device.verified && canVerify}
+                <button
+                  type="button"
+                  class="secondary"
+                  disabled={busy}
+                  aria-label={`Verify ${device.displayName ?? device.deviceId}`}
+                  onclick={() => onverify(device.deviceId)}>Verify</button
+                >
+              {/if}
+              <button
+                type="button"
+                class="danger"
+                disabled={removing !== null}
+                aria-label={`Sign out ${device.displayName ?? device.deviceId}`}
+                onclick={() => remove(device.deviceId)}
+                >{removing === device.deviceId ? 'Signing out…' : 'Sign out'}</button
+              >
+            </div>
+          {/if}
         </li>
       {/each}
     </ul>
+    {#if !canVerify && devices.devices.some((device) => !device.current && !device.verified)}
+      <p class="note">
+        To verify your other sessions, first verify this one in Security &amp; encryption.
+      </p>
+    {/if}
     {#if devices.truncated}
       <p class="note">Showing the first {devices.devices.length} sessions.</p>
     {/if}
@@ -68,6 +132,9 @@
   {/if}
   {#if failure}
     <p role="alert" class="error">{failure}</p>
+  {/if}
+  {#if removed}
+    <p role="status" class="note">{removed}</p>
   {/if}
   <div class="actions">
     <button type="button" class="secondary" disabled={loading} onclick={load}>

@@ -25,6 +25,19 @@
 * [0016 - Create encrypted rooms and answer every invitation](0016-create-encrypted-rooms-and-answer-every-invitation.md)
 * [0017 - Configure joined rooms through one closed change call](0017-configure-joined-rooms-through-one-closed-change-call.md)
 * [0018 - Register accounts with secrets entered in the core](0018-register-accounts-with-secrets-in-the-core.md)
+* [0019 - Change the password with secrets entered in the core](0019-change-the-password-with-secrets-entered-in-the-core.md)
+* [0020 - Add email addresses and phone numbers without an identity server](0020-add-email-addresses-and-phone-numbers-without-an-identity-server.md)
+* [0021 - Save the recovery key to a file from the core](0021-save-the-recovery-key-to-a-file-from-the-core.md)
+* [0022 - Notify through push rules and content-free desktop notifications](0022-notify-through-push-rules-and-content-free-desktop-notifications.md)
+* [0023 - Show typing notices and read receipts, and send them only when turned on](0023-show-typing-and-receipts-and-send-them-only-when-turned-on.md)
+* [0024 - Open links only after the core asks in its own window](0024-open-links-only-after-the-core-asks-in-its-own-window.md)
+* [0025 - Lock after system idle time measured in the core](0025-lock-after-system-idle-time-measured-in-the-core.md)
+* [0026 - Alert on new sessions, and sign them out with the password in the core](0026-alert-on-new-sessions-and-sign-them-out-with-the-password-in-the-core.md)
+* [0027 - Discover the homeserver through .well-known in the core](0027-discover-the-homeserver-through-well-known-in-the-core.md)
+* [0028 - Route every connection through the profile's SOCKS5 proxy](0028-route-every-connection-through-the-profiles-socks5-proxy.md)
+* [0029 - Send and save files through the core's own dialogs](0029-send-and-save-files-through-the-cores-own-dialogs.md)
+* [0030 - Sign in with OIDC through the browser and a loopback redirect](0030-sign-in-with-oidc-through-the-browser-and-a-loopback-redirect.md)
+* [0031 - Reserve the SDK's copies of a send in a budget of their own](0031-reserve-the-sdks-copies-of-a-send-in-a-budget-of-their-own.md)
 
 ## Superseded Records
 

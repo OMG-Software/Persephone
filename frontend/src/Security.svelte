@@ -8,7 +8,8 @@
     onsetup,
     onrecover,
     onsetuprecovery,
-    onverify
+    onverify,
+    onchangekey = () => {}
   }: {
     security: SecurityStatus;
     busy: boolean;
@@ -16,6 +17,8 @@
     onrecover: () => void;
     onsetuprecovery: () => void;
     onverify: () => void;
+    // Replaces the recovery key; the core warns, shows and saves it.
+    onchangekey?: () => void;
   } = $props();
 
   // A running verification has its own screen; no second one starts meanwhile.
@@ -128,6 +131,18 @@
     {/if}
     {#if recoveryText[security.recovery]}
       <p>{recoveryText[security.recovery]}</p>
+    {/if}
+    {#if security.identity === 'verified' && security.recovery === 'enabled'}
+      <p>
+        Persephone does not keep your recovery key, so it cannot show it again. To get a key you can
+        save, make a new one: Persephone shows it in its own window and offers to save it to a file.
+        The old key stops working.
+      </p>
+      <div class="actions">
+        <button type="button" disabled={waiting} class="secondary" onclick={onchangekey}
+          >Change recovery key…</button
+        >
+      </div>
     {/if}
     {#if security.error}
       <p role="alert" class="error">{errorText[security.error] ?? errorText.failed}</p>

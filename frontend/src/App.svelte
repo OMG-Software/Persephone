@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import markUrl from './assets/mark.svg';
+  import AccountPage from './AccountPage.svelte';
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
   import Devices from './Devices.svelte';
@@ -10,6 +11,7 @@
   import JumpPalette from './JumpPalette.svelte';
   import NewConversation from './NewConversation.svelte';
   import NewRoom from './NewRoom.svelte';
+  import Preferences from './Preferences.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
   import RoomSettings from './RoomSettings.svelte';
   import Security from './Security.svelte';
@@ -17,14 +19,24 @@
   import Sidebar from './Sidebar.svelte';
   import SignIn, { type SignInForm } from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
+  import NewSessionsAlert from './NewSessions.svelte';
+  import { changeText } from './accountChanges';
   import TipButton from './TipButton.svelte';
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate } from './people';
-  import { DEFAULT_SETTINGS, SettingsKeeper } from './preferences';
+  import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { securityErrorText } from './securityText';
-  import { mergeNewest } from './timeline';
+  import {
+    applyRelations,
+    firstUnread,
+    mergeNewest,
+    newestEvent,
+    quoteOf,
+    type Quote
+  } from './timeline';
+  import { TypingNotifier } from './typing';
   import {
     accountSettings,
     allowUnencrypted,
@@ -38,11 +50,24 @@
     pendingMessages,
     retryMessage,
     sendMessage,
+    editMessage,
+    deleteMessage,
+    react,
+    markRead,
+    newSessions,
+    acknowledgeSessions,
+    removeDevice,
+    roomActivity,
+    setTyping,
+    openLink,
+    pickFile,
     recoverWithKey,
     securityStatus,
     setUpEncryption,
     setUpRecovery,
     verifyThisDevice,
+    verifyDevice,
+    changeRecoveryKey,
     acceptVerification,
     confirmVerification,
     cancelVerification,
@@ -56,6 +81,7 @@
     acceptInvite,
     declineInvite,
     signIn,
+    signInWithOidc,
     register,
     subscribeRoom,
     timelinePage,
@@ -69,6 +95,8 @@
     type InviteList,
     type RoomIdentityChanges,
     type PendingMessage,
+    type RoomActivity,
+    type NewSessions,
     type RoomList as Rooms,
     type SecurityStatus,
     type StoreState,
@@ -90,20 +118,44 @@
   // whether the last attempt to find out failed.
   let changes = $state<RoomIdentityChanges | null>(null);
   let changesFailed = $state(false);
-  // The room whose contact this page last asked to verify, and the room in
-  // which it last asked to accept a new identity: the core reports why that
-  // failed in the security status, shown in that room, each in its own place.
+  // The room whose contact this page last asked to verify, the room in which
+  // it last asked to accept a new identity, and the session it last asked to
+  // verify: the core reports why that failed in the security status, shown
+  // in that room or on the Sessions page, each in its own place.
   let contactAsked = $state<string | null>(null);
   let identityAsked = $state<string | null>(null);
+  let deviceAsked = $state<string | null>(null);
   // Messages sent from this device in the selected room.
   let pending = $state<PendingMessage[]>([]);
+  // The message the next one replies to, in the selected room.
+  let replyingTo = $state<{ eventId: string; quote: Quote } | null>(null);
+  // The message of this account the draft is a new version of, and the
+  // draft from before the edit began, put back when the edit ends.
+  let editingMessage = $state<{ eventId: string; savedDraft: string } | null>(null);
+  // One of this account's messages waiting for "Delete" to be confirmed,
+  // and whether the deletion is being sent.
+  let confirmingDelete = $state<{ roomId: string; eventId: string } | null>(null);
+  // Where the "New messages" line goes in the selected room, fixed when it
+  // opens, and the event this room was last marked read at.
+  let unreadFrom = $state<string | null>(null);
+  let markedRead: string | null = null;
+  // Who else is typing in the selected room, and who has read its newest
+  // event (ADR-0023).
+  let activity = $state<RoomActivity | null>(null);
+  // Sends this account's typing notices in the selected room while the
+  // setting is on.
+  let typingNotifier: TypingNotifier | null = null;
+  let deleting = $state(false);
   // Sending in a room that is not encrypted asks once first (ADR-0005); the
   // core also refuses until the consent is recorded.
   // `image` is true when the question is about sending the attached image.
   let confirmingPlain = $state<{
     roomId: string;
     body: string | null;
+    replyTo: string | null;
     retryId: number | null;
+    // A reaction waiting for the consent, if the question is about it.
+    reaction?: { eventId: string; key: string } | null;
     image: boolean;
   } | null>(null);
   // A picked image waiting for Send or Cancel. The core holds it under the
@@ -143,6 +195,7 @@
   // they load and while no account is signed in.
   let settings = $state<AccountSettings>(DEFAULT_SETTINGS);
   let settingsFailure = $state<string | null>(null);
+  const scale = $derived(textScale(settings));
   const settingsKeeper = new SettingsKeeper(
     { load: accountSettings, save: setAccountSettings },
     (next, failure) => {
@@ -257,6 +310,14 @@
       ? securityErrorText[security.error]
       : null
   );
+  // Why the core could not start verifying the session the Sessions page
+  // asked for (such as `cannot_sign_devices`); a flow that did start has its
+  // own screen.
+  const deviceFailure = $derived(
+    deviceAsked !== null && flow === null && security?.operation === 'idle' && security.error
+      ? securityErrorText[security.error]
+      : null
+  );
   // A refused request (`securityFailure`) or what the core reported after
   // asking in its own window.
   const identityFailure = $derived(
@@ -274,6 +335,12 @@
 
   // Ctrl K (⌘K on macOS) opens the jump palette from the room view.
   function shortcutKey(event: KeyboardEvent) {
+    // Lock at once, from anywhere, while the profile is open.
+    if (isLockShortcut(event, mac)) {
+      event.preventDefault();
+      if (status?.store === 'protected') void toggleLock();
+      return;
+    }
     if (!(mac ? event.metaKey : event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'k') {
       return;
     }
@@ -443,7 +510,11 @@
     changesFailed = false;
     contactAsked = null;
     identityAsked = null;
+    deviceAsked = null;
     confirmingPlain = null;
+    replyingTo = null;
+    editingMessage = null;
+    confirmingDelete = null;
     // The core dropped every image handle with the session.
     imageDraft = null;
     attaching = false;
@@ -464,9 +535,72 @@
     load();
   }
 
+  // New sessions of this account not yet shown (ADR-0026), and whether the
+  // alert's action is running.
+  let newFound = $state<NewSessions | null>(null);
+  let sessionsBusy = $state(false);
+  let sessionsFailure = $state<string | null>(null);
+
+  // Reads the new sessions from the core's store; no network request. Best
+  // effort: the next check tries again.
+  async function checkSessions() {
+    const generation = sessionGeneration;
+    try {
+      const found = await newSessions();
+      if (generation === sessionGeneration && !sessionsBusy) {
+        newFound = found.sessions.length > 0 ? found : null;
+      }
+    } catch {
+      // Shown as nothing until the next check.
+    }
+  }
+
+  // Checked when signed in, on each security change and every minute.
+  $effect(() => {
+    if (!signedIn) {
+      newFound = null;
+      return;
+    }
+    checkSessions();
+    const timer = setInterval(checkSessions, 60_000);
+    return () => clearInterval(timer);
+  });
+
+  async function sessionsKnown() {
+    const found = newFound;
+    if (!found || sessionsBusy) return;
+    sessionsBusy = true;
+    sessionsFailure = null;
+    try {
+      await acknowledgeSessions(found.sessions.map((session) => session.deviceId));
+      newFound = null;
+    } catch (reason) {
+      sessionsFailure = describe(reason);
+    } finally {
+      sessionsBusy = false;
+    }
+    checkSessions();
+  }
+
+  async function removeNewSession(deviceId: string) {
+    if (sessionsBusy) return;
+    sessionsBusy = true;
+    sessionsFailure = null;
+    try {
+      const outcome = await removeDevice(deviceId);
+      if (outcome !== 'done') sessionsFailure = changeText(outcome);
+    } catch (reason) {
+      sessionsFailure = describe(reason);
+    } finally {
+      sessionsBusy = false;
+    }
+    checkSessions();
+  }
+
   // The account's encryption state changed: fetch it again. Nothing else
   // changes.
   async function refreshSecurity() {
+    checkSessions();
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {
@@ -556,12 +690,13 @@
     }
   }
 
-  // `asked` names the room whose contact this action verifies, or in which
-  // it accepts a new identity; every other action clears both, so a later
+  // `asked` names the room whose contact this action verifies, the room in
+  // which it accepts a new identity, or the session it verifies; every other
+  // action clears all three, so a later
   // failure is not shown in that room. `explain` turns a refusal into text.
   async function startSecurity(
     start: () => Promise<SecurityStatus>,
-    asked: { room: string; kind: 'contact' | 'identity' } | null = null,
+    asked: { room: string; kind: 'contact' | 'identity' } | { device: string; kind: 'device' } | null = null,
     explain: (reason: unknown) => string = describe
   ) {
     if (securityBusy) return;
@@ -569,6 +704,7 @@
     securityFailure = null;
     contactAsked = asked?.kind === 'contact' ? asked.room : null;
     identityAsked = asked?.kind === 'identity' ? asked.room : null;
+    deviceAsked = asked?.kind === 'device' ? asked.device : null;
     const generation = sessionGeneration;
     const request = ++securityRequest;
     try {
@@ -615,6 +751,20 @@
             ? 'Use the homeserver\'s base address, such as https://matrix.example.org, with no path, query or fragment.'
             : describe(reason);
       }
+    } finally {
+      signingIn = false;
+    }
+  }
+
+  async function startSso(homeserver: string) {
+    if (signingIn) return;
+    signingIn = true;
+    const generation = sessionGeneration;
+    try {
+      const account = await signInWithOidc(homeserver);
+      if (generation === sessionGeneration && status) status = { ...status, account };
+    } catch (reason) {
+      if (generation === sessionGeneration) error = describe(reason);
     } finally {
       signingIn = false;
     }
@@ -750,6 +900,17 @@
     changes = null;
     changesFailed = false;
     confirmingPlain = null;
+    replyingTo = null;
+    confirmingDelete = null;
+    unreadFrom = null;
+    markedRead = null;
+    activity = null;
+    typingNotifier?.stop();
+    typingNotifier = null;
+    if (editingMessage) {
+      draft = editingMessage.savedDraft;
+      editingMessage = null;
+    }
     nextCursor = null;
     error = null;
     loading = true;
@@ -763,7 +924,14 @@
       if (!current(roomId, generation)) return;
       items = page.items;
       nextCursor = page.nextCursor;
+      const ownUserId = status?.account.userId ?? null;
+      unreadFrom = firstUnread(
+        applyRelations(page.items, ownUserId),
+        selectedRoom?.unreadCount ?? 0,
+        ownUserId
+      );
       if (signedIn) {
+        loadActivity(roomId, generation);
         loadPending(roomId, generation);
         loadContact(roomId, generation);
         loadChanges(roomId, generation);
@@ -792,7 +960,10 @@
         const page = await timelinePage(roomId, null);
         if (!current(roomId, generation)) return;
         items = mergeNewest(items, page.items);
-        if (signedIn) await loadPending(roomId, generation);
+        if (signedIn) {
+          loadActivity(roomId, generation);
+          await loadPending(roomId, generation);
+        }
       } while (changedAgain);
     } catch (reason) {
       if (current(roomId, generation)) error = describe(reason);
@@ -821,10 +992,18 @@
     }
   }
 
-  async function queue(roomId: string, body: string, generation: number): Promise<boolean> {
+  async function queue(
+    roomId: string,
+    body: string,
+    replyTo: string | null,
+    generation: number
+  ): Promise<boolean> {
     try {
-      await sendMessage(roomId, body);
-      if (current(roomId, generation)) await loadPending(roomId, generation);
+      await sendMessage(roomId, body, replyTo);
+      if (current(roomId, generation)) {
+        if (replyTo !== null && replyingTo?.eventId === replyTo) replyingTo = null;
+        await loadPending(roomId, generation);
+      }
       return true;
     } catch (reason) {
       if (current(roomId, generation)) {
@@ -837,14 +1016,169 @@
     }
   }
 
+  // Deletes the message waiting for confirmation. The deletion arrives as a
+  // change of the room, which then shows the message as deleted.
+  async function confirmDelete() {
+    const asked = confirmingDelete;
+    if (!asked || deleting) return;
+    const generation = sessionGeneration;
+    deleting = true;
+    try {
+      await deleteMessage(asked.roomId, asked.eventId);
+      if (current(asked.roomId, generation)) confirmingDelete = null;
+    } catch (reason) {
+      if (current(asked.roomId, generation)) {
+        confirmingDelete = null;
+        error =
+          String(reason) === 'rejected'
+            ? 'The homeserver did not allow this message to be deleted.'
+            : describe(reason);
+      }
+    } finally {
+      deleting = false;
+    }
+  }
+
+  async function sendReaction(roomId: string, eventId: string, key: string) {
+    const generation = sessionGeneration;
+    try {
+      await react(roomId, eventId, key);
+    } catch (reason) {
+      if (current(roomId, generation)) {
+        error =
+          String(reason) === 'rejected'
+            ? 'The reaction was not sent. Check that this device is verified and no one in this room changed their identity.'
+            : describe(reason);
+      }
+    }
+  }
+
+  // Reacts to a message; in a room that is not encrypted, asks first like a
+  // message does.
+  function reactTo(eventId: string, key: string) {
+    const roomId = selected;
+    if (!roomId) return;
+    if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(roomId)) {
+      confirmingPlain = {
+        roomId,
+        body: null,
+        replyTo: null,
+        retryId: null,
+        image: false,
+        reaction: { eventId, key }
+      };
+      return;
+    }
+    void sendReaction(roomId, eventId, key);
+  }
+
+  // Who is typing and who has read the newest event. Best effort: the next
+  // change of the room asks again.
+  async function loadActivity(roomId: string, generation: number) {
+    try {
+      const found = await roomActivity(roomId, newestEvent(items));
+      if (current(roomId, generation)) activity = found;
+    } catch {
+      // Shown as nothing until the next change.
+    }
+  }
+
+  // Tells the selected room this account is typing, while the setting is on.
+  function typed() {
+    const roomId = selected;
+    if (!roomId || !settings.sendTyping) return;
+    typingNotifier ??= new TypingNotifier((typing) => {
+      setTyping(roomId, typing).catch(() => {});
+    });
+    typingNotifier.input();
+  }
+
+  // Marks the selected room read once its newest event has been seen. Best
+  // effort: a failure is tried again with the next newest event.
+  async function readTo(eventId: string) {
+    const roomId = selected;
+    if (!roomId || eventId === markedRead) return;
+    markedRead = eventId;
+    try {
+      await markRead(roomId, eventId);
+    } catch {
+      if (markedRead === eventId) markedRead = null;
+    }
+  }
+
+  // Asks the core to open a link; it shows the address and asks first.
+  async function followLink(url: string) {
+    try {
+      await openLink(url);
+    } catch (reason) {
+      error =
+        String(reason) === 'invalid_argument'
+          ? 'Persephone opens only web links (http and https) without a name or password in them.'
+          : describe(reason);
+    }
+  }
+
+  // Takes back one of this account's reactions by deleting its event.
+  async function unreact(reactionEventId: string) {
+    const roomId = selected;
+    if (!roomId) return;
+    const generation = sessionGeneration;
+    try {
+      await deleteMessage(roomId, reactionEventId);
+    } catch (reason) {
+      if (current(roomId, generation)) error = describe(reason);
+    }
+  }
+
+  function startEdit(eventId: string, body: string) {
+    replyingTo = null;
+    editingMessage = { eventId, savedDraft: editingMessage?.savedDraft ?? draft };
+    draft = body;
+  }
+
+  function endEdit() {
+    if (!editingMessage) return;
+    draft = editingMessage.savedDraft;
+    editingMessage = null;
+  }
+
+  // Sends the draft as a new version of the message being edited. In a room
+  // that is not encrypted the core asks for consent like any message: the
+  // edit then waits with "Send unencrypted".
+  async function sendEdit(roomId: string, eventId: string, body: string): Promise<boolean> {
+    const generation = sessionGeneration;
+    try {
+      await editMessage(roomId, eventId, body);
+    } catch (reason) {
+      if (current(roomId, generation)) {
+        error =
+          String(reason) === 'limit_exceeded'
+            ? 'Too many messages are waiting to send. Wait, or discard some.'
+            : describe(reason);
+      }
+      return false;
+    }
+    if (current(roomId, generation)) {
+      const saved = editingMessage?.eventId === eventId ? editingMessage.savedDraft : '';
+      editingMessage = null;
+      draft = saved;
+      await loadPending(roomId, generation);
+    }
+    // The composer keeps the draft put back above.
+    return false;
+  }
+
   async function sendText(body: string): Promise<boolean> {
     const roomId = selected;
     if (!roomId) return false;
+    typingNotifier?.stop();
+    if (editingMessage) return sendEdit(roomId, editingMessage.eventId, body);
+    const replyTo = replyingTo?.eventId ?? null;
     if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(roomId)) {
-      confirmingPlain = { roomId, body, retryId: null, image: false };
+      confirmingPlain = { roomId, body, replyTo, retryId: null, image: false };
       return false;
     }
-    return queue(roomId, body, sessionGeneration);
+    return queue(roomId, body, replyTo, sessionGeneration);
   }
 
   async function confirmPlain() {
@@ -860,10 +1194,14 @@
     }
     if (!current(asked.roomId, generation)) return;
     confirmedRooms.add(asked.roomId);
-    if (asked.body !== null && (await queue(asked.roomId, asked.body, generation))) {
+    if (
+      asked.body !== null &&
+      (await queue(asked.roomId, asked.body, asked.replyTo, generation))
+    ) {
       draftVersion += 1;
     }
     if (asked.retryId !== null) changeMessage(retryMessage, asked.retryId);
+    if (asked.reaction) await sendReaction(asked.roomId, asked.reaction.eventId, asked.reaction.key);
     if (asked.image && imageDraft?.roomId === asked.roomId) {
       await queueImage(asked.roomId, imageDraft.preview.handle, generation);
     }
@@ -892,6 +1230,32 @@
     }
   }
 
+  // Asks the core for a file to send; the core queues it at once, and the
+  // pending list shows it (ADR-0029).
+  let attachingFile = $state(false);
+  async function attachFile() {
+    const roomId = selected;
+    if (!roomId || attachingFile) return;
+    const generation = sessionGeneration;
+    attachingFile = true;
+    imageError = null;
+    try {
+      const queued = await pickFile(roomId);
+      if (queued && current(roomId, generation)) await loadPending(roomId, generation);
+    } catch (reason) {
+      if (current(roomId, generation)) {
+        imageError =
+          String(reason) === 'limit_exceeded'
+            ? 'An image or file is already waiting to send. Wait until it is sent, or discard it.'
+            : String(reason) === 'rejected'
+              ? 'That file cannot be sent: it is empty, larger than 20 MB, or not a plain file.'
+              : 'The file could not be attached. Files work on Windows only for now.';
+      }
+    } finally {
+      if (generation === sessionGeneration) attachingFile = false;
+    }
+  }
+
   function cancelImage() {
     const draft = imageDraft;
     imageDraft = null;
@@ -906,7 +1270,7 @@
     const draft = imageDraft;
     if (!draft || draft.roomId !== selected || sendingImage) return;
     if (selectedRoom?.encryption === 'not_encrypted' && !confirmedRooms.has(draft.roomId)) {
-      confirmingPlain = { roomId: draft.roomId, body: null, retryId: null, image: true };
+      confirmingPlain = { roomId: draft.roomId, body: null, replyTo: null, retryId: null, image: true };
       return;
     }
     await queueImage(draft.roomId, draft.preview.handle, sessionGeneration);
@@ -1020,7 +1384,9 @@
   </TipButton>
 {/snippet}
 
-<main>
+<!-- The account's text sizes: the interface zooms as a whole, and message
+     text has its own size (style.css). -->
+<main style:--ui-scale={scale.interface} style:--chat-scale={scale.chat}>
   {#if !status}
     <div class="centred">
       <section class="auth-card" aria-label="Persephone">
@@ -1057,6 +1423,7 @@
           bind:form={signInForm}
           onsignin={startSignIn}
           onregister={startRegister}
+          onsso={startSso}
         />
         {#if error}
           <p role="alert" class="error">{error}</p>
@@ -1082,9 +1449,28 @@
             <p class="lede">No account is signed in. All rooms and messages here are synthetic test data.</p>
           </section>
         {/if}
+      {:else if settingsTab === 'account'}
+        {#if signedIn}
+          <AccountPage native={mac ? 'macOS' : 'Windows'} />
+        {:else}
+          <section class="settings-page" aria-labelledby="account-heading">
+            <h2 id="account-heading">Account</h2>
+            <p class="lede">No account is signed in, so there is no password or address to change.</p>
+          </section>
+        {/if}
       {:else if settingsTab === 'devices'}
         {#if signedIn}
-          <Devices />
+          <Devices
+            canVerify={security?.identity === 'verified'}
+            busy={securityBusy}
+            onverify={(deviceId) =>
+              startSecurity(() => verifyDevice(deviceId), { device: deviceId, kind: 'device' })}
+          />
+          {#if securityFailure}
+            <p role="alert" class="error">{securityFailure}</p>
+          {:else if deviceFailure}
+            <p role="alert" class="error">{deviceFailure}</p>
+          {/if}
         {:else}
           <section class="settings-page" aria-labelledby="devices-heading">
             <h2 id="devices-heading">Sessions</h2>
@@ -1092,34 +1478,19 @@
           </section>
         {/if}
       {:else if settingsTab === 'preferences'}
-        <section class="settings-page" aria-labelledby="preferences-heading">
-          <h2 id="preferences-heading">Preferences</h2>
-          {#if signedIn}
-            <p class="lede">These settings belong to this account and are kept in its encrypted profile.</p>
-            <div class="panel">
-              <label class="switch-row">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  checked={settings.enterSends}
-                  onchange={(event) =>
-                    settingsKeeper.change({ ...settings, enterSends: event.currentTarget.checked })}
-                />
-                <span>Enter sends the message</span>
-              </label>
-              <p class="note">
-                {settings.enterSends
-                  ? 'Enter sends. Shift+Enter starts a new line.'
-                  : `Enter starts a new line. ${mac ? '⌘Enter' : 'Ctrl+Enter'} sends.`}
-              </p>
-            </div>
-            {#if settingsFailure}
-              <p role="alert" class="error">{settingsFailure}</p>
-            {/if}
-          {:else}
+        {#if signedIn}
+          <Preferences
+            {settings}
+            failure={settingsFailure}
+            {mac}
+            onchange={(patch) => settingsKeeper.change(patch)}
+          />
+        {:else}
+          <section class="settings-page" aria-labelledby="preferences-heading">
+            <h2 id="preferences-heading">Preferences</h2>
             <p class="lede">No account is signed in. Settings belong to an account, so there are none to change.</p>
-          {/if}
-        </section>
+          </section>
+        {/if}
       {:else if settingsTab === 'accounts'}
         <Accounts />
         {#if !status || status.store === 'not_configured'}
@@ -1137,6 +1508,7 @@
             onrecover={() => startSecurity(recoverWithKey)}
             onsetuprecovery={() => startSecurity(setUpRecovery)}
             onverify={() => startSecurity(verifyThisDevice)}
+            onchangekey={() => startSecurity(changeRecoveryKey)}
           />
         {:else}
           <section class="settings-page" aria-labelledby="security-heading">
@@ -1252,6 +1624,17 @@
         {/snippet}
       </Sidebar>
       <div class="pane">
+        <!-- Above any room: a new session may be someone else's, so the alert
+             does not wait for a room to be opened. -->
+        {#if newFound}
+          <NewSessionsAlert
+            found={newFound}
+            busy={sessionsBusy}
+            failure={sessionsFailure}
+            onknown={sessionsKnown}
+            onremove={removeNewSession}
+          />
+        {/if}
         {#if selectedRoom}
           <Timeline
             title={selectedRoom.displayName ?? selectedRoom.roomId}
@@ -1270,6 +1653,25 @@
               ? () => (invitingTo = selectedRoom.roomId)
               : undefined}
             onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
+            onreply={sendBlocked === null
+              ? (eventId) => {
+                  const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), eventId);
+                  if (!quote) return;
+                  endEdit();
+                  replyingTo = { eventId, quote };
+                }
+              : undefined}
+            ownUserId={signedIn ? status.account.userId : null}
+            onedit={sendBlocked === null ? startEdit : undefined}
+            ondelete={signedIn
+              ? (eventId) => (confirmingDelete = { roomId: selectedRoom.roomId, eventId })
+              : undefined}
+            onreact={sendBlocked === null ? reactTo : undefined}
+            onunreact={signedIn ? unreact : undefined}
+            {unreadFrom}
+            onread={signedIn ? readTo : undefined}
+            readBy={activity?.readBy ?? []}
+            onlink={signedIn ? followLink : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
@@ -1298,13 +1700,34 @@
             />
           {/if}
           {#if signedIn}
+            {#if confirmingDelete}
+              <div class="confirm" role="alertdialog" aria-labelledby="delete-question">
+                <p id="delete-question">
+                  Delete this message for everyone? Other people's devices and servers may already
+                  have a copy.
+                </p>
+                <button type="button" class="danger" disabled={deleting} onclick={confirmDelete}>
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  disabled={deleting}
+                  onclick={() => (confirmingDelete = null)}
+                >
+                  Keep
+                </button>
+              </div>
+            {/if}
             {#if confirmingPlain}
               <div class="confirm" role="alertdialog" aria-labelledby="plain-question">
                 <p id="plain-question">
                   This room is not encrypted: the homeserver and anyone with access to it can read
                   what you send here. {confirmingPlain.image
                     ? 'Send unencrypted messages in this room, starting with this image?'
-                    : 'Send unencrypted messages in this room?'}
+                    : confirmingPlain.reaction
+                      ? 'Send unencrypted messages in this room, starting with this reaction?'
+                      : 'Send unencrypted messages in this room?'}
                 </p>
                 <button type="button" class="danger" onclick={confirmPlain}>Send unencrypted</button>
                 <button type="button" class="secondary" onclick={() => (confirmingPlain = null)}>
@@ -1323,15 +1746,30 @@
               onretry={(localId) => changeMessage(retryMessage, localId)}
               ondiscard={(localId) => changeMessage(discardMessage, localId)}
               onallow={(localId) =>
-                (confirmingPlain = { roomId: selectedRoom.roomId, body: null, retryId: localId, image: false })}
+                (confirmingPlain = {
+                  roomId: selectedRoom.roomId,
+                  body: null,
+                  replyTo: null,
+                  retryId: localId,
+                  image: false
+                })}
               {imageDraft}
               {attaching}
               {sendingImage}
               {imageError}
               onattach={attachImage}
+              {attachingFile}
+              onattachfile={attachFile}
               onsendimage={sendAttached}
               oncancelimage={cancelImage}
               enterSends={settings.enterSends}
+              replyingTo={replyingTo?.quote ?? null}
+              oncancelreply={() => (replyingTo = null)}
+              editing={editingMessage !== null}
+              oncanceledit={endEdit}
+              typing={activity?.typing ?? []}
+              typingCut={activity?.truncated ?? false}
+              ontyping={signedIn && settings.sendTyping ? typed : undefined}
             />
           {/if}
         {:else}
@@ -1388,6 +1826,15 @@
           <p role="alert" class="error">
             Signing out did not finish: this device's local data could not be deleted. Restart
             Persephone and sign out again.
+          </p>
+        {:else if status.store === 'restart_required' && status.account.state === 'signed_out' && status.account.error === 'session_ended'}
+          <p role="alert" class="error">
+            The homeserver ended this session. It was signed out from another device, or the
+            account was reset or removed.
+          </p>
+          <p class="auth-note">
+            This device's keys were deleted. Restart Persephone to start again with a new profile;
+            the rest of this device's local data is deleted as it starts.
           </p>
         {:else if status.store === 'restart_required' && status.account.state === 'signed_out'}
           <p class="auth-note">

@@ -36,6 +36,12 @@ use std::{
 /// The default profile (ADR-0013):
 /// `~/Library/Application Support/OMG-Software/Persephone/profile`. A
 /// missing or relative `HOME` gives `None`.
+/// No idle time is read here yet: the idle lock is unavailable
+/// (ADR-0025).
+pub(crate) fn idle_time() -> Option<std::time::Duration> {
+    None
+}
+
 pub(crate) fn default_profile_dir() -> Option<PathBuf> {
     super::unix::absolute(env::var_os("HOME")).map(|home| {
         home.join("Library")
@@ -68,6 +74,16 @@ pub(crate) fn read_image_file(
     budgets: &ResourceBudgets,
 ) -> Result<Encoded, ErrorCode> {
     super::unix::read_image_file(path, budgets)
+}
+
+/// Saving a file (ADR-0029): see `unix::create_private_file`.
+pub(crate) fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    super::unix::create_private_file(path)
+}
+
+/// Saving a file (ADR-0029): see `unix::replace_file`.
+pub(crate) fn replace_file(partial: &Path, path: &Path) -> std::io::Result<()> {
+    super::unix::replace_file(partial, path)
 }
 
 /// The contained media worker next to the core: the broker's rlimit

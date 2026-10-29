@@ -11,8 +11,9 @@ use persephone_contracts::{
     TimelineItem, TimelinePage,
 };
 use persephone_core::{
-    Core,
+    Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
     credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
+    serve,
     session::AdmissionError,
 };
 use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
@@ -173,6 +174,14 @@ fn text(id: &str, body: &str) -> Value {
     json!({"type":"m.room.message","sender":USER,"event_id":id,"origin_server_ts":10,"content":{"msgtype":"m.text","body":body}})
 }
 
+fn edit_of(id: &str, sender: &str, replaces: &str, body: &str) -> Value {
+    json!({"type":"m.room.message","sender":sender,"event_id":id,"origin_server_ts":11,"content":{
+        "msgtype":"m.text","body":format!("* {body}"),
+        "m.new_content":{"msgtype":"m.text","body":body},
+        "m.relates_to":{"rel_type":"m.replace","event_id":replaces}
+    }})
+}
+
 /// `events` with the `room_id` that Matrix v1.19 requires of a ClientEvent,
 /// as `/messages` and `/members` return them (sync leaves it out).
 fn in_room(room_id: &str, mut events: Value) -> Value {
@@ -183,10 +192,13 @@ fn in_room(room_id: &str, mut events: Value) -> Value {
 }
 
 /// History of `ROOM`, newest first as `/messages` backward returns it.
+/// `$text` has an edit by its sender and a forged one by someone else.
 fn history() -> Value {
     in_room(
         ROOM,
         json!([
+            edit_of("$forged", "@mallory:synthetic.test", "$text", "I agree to everything"),
+            edit_of("$edit", USER, "$text", "Hello, corrected"),
             text("$text", "Hello from <script>alert(1)</script>"),
             {"type":"m.room.message","sender":USER,"event_id":"$image","origin_server_ts":9,"content":{"msgtype":"m.image","body":"cat.png","url":"mxc://synthetic.test/cat"}},
             {"type":"m.room.encrypted","sender":USER,"event_id":"$secret","origin_server_ts":8,"content":{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEnACgAkLmt6qF84IK","device_id":"OTHER","sender_key":"c2VuZGVyLWtleQ","session_id":"c2Vzc2lvbi1pZA"}},
@@ -663,6 +675,76 @@ impl Homeserver {
         );
     }
 
+    /// Refuses the access token in sync from now on, as a homeserver does
+    /// once the device was signed out elsewhere or the account was reset or
+    /// removed; `soft_logout` as the spec's soft logout. `whoami_too`:
+    /// whether `whoami` refuses it as well, or still answers.
+    fn refuse_token(&self, soft_logout: bool, whoami_too: bool) {
+        let refused = ResponseTemplate::new(401).set_body_json(json!({
+            "errcode": "M_UNKNOWN_TOKEN",
+            "error": "Unknown access token",
+            "soft_logout": soft_logout
+        }));
+        self.runtime.block_on(async {
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/sync"))
+                .respond_with(refused.clone())
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/account/whoami"))
+                .respond_with(if whoami_too {
+                    refused
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"user_id": USER, "device_id": "PERSEPHONE1"}))
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Refuses every refresh token from now on, as a homeserver does once it
+    /// ended the session.
+    fn refuse_refresh(&self) {
+        self.runtime.block_on(
+            Mock::given(method("POST"))
+                .and(path("/_matrix/client/v3/refresh"))
+                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                    "errcode": "M_UNKNOWN_TOKEN",
+                    "error": "Unknown refresh token",
+                    "soft_logout": false
+                })))
+                .mount(&self.server),
+        );
+    }
+
+    /// Refuses the access token without soft logout in one sync round and
+    /// its `whoami`, then answers as before.
+    fn refuse_token_once(&self) {
+        let refused = ResponseTemplate::new(401).set_body_json(json!({
+            "errcode": "M_UNKNOWN_TOKEN",
+            "error": "Unknown access token",
+            "soft_logout": false
+        }));
+        self.runtime.block_on(async {
+            for (verb, endpoint) in [
+                ("GET", "/_matrix/client/v3/sync"),
+                ("GET", "/_matrix/client/v3/account/whoami"),
+            ] {
+                Mock::given(method(verb))
+                    .and(path(endpoint))
+                    .respond_with(refused.clone())
+                    .up_to_n_times(1)
+                    .with_priority(1)
+                    .mount(&self.server)
+                    .await;
+            }
+        });
+    }
+
     fn uri(&self) -> String {
         self.server.uri()
     }
@@ -791,7 +873,9 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                 cursor: None,
             },
         ));
-        // Oldest first; the reaction is not shown; nothing is hidden silently.
+        // Oldest first; nothing is hidden silently. The reaction names the
+        // message it reacts to. Only the sender's own edit is an edit: the
+        // forged one, by someone else, is left out.
         let shown: Vec<String> = page
             .items
             .iter()
@@ -807,14 +891,33 @@ fn given_valid_credentials_then_rooms_and_history_come_from_the_homeserver_and_s
                     ..
                 } => format!("{event_id}:image:{name}:{encrypted}"),
                 TimelineItem::Gap { .. } => "gap".into(),
+                TimelineItem::Edit {
+                    event_id,
+                    replaces,
+                    body,
+                    ..
+                } => format!("{event_id}:edit:{replaces}={body}"),
+                TimelineItem::State { event_id, .. } => format!("{event_id}:state"),
+                TimelineItem::File { event_id, name, .. } => format!("{event_id}:file:{name}"),
+                TimelineItem::Reaction {
+                    event_id,
+                    reacts_to,
+                    key,
+                    ..
+                } => format!("{event_id}:reacts:{reacts_to}:{key}"),
+                TimelineItem::Redaction {
+                    event_id, redacts, ..
+                } => format!("{event_id}:redacts:{redacts}"),
             })
             .collect();
         assert_eq!(
             shown,
             [
+                "$reaction:reacts:$text:+1".to_string(),
                 format!("$secret:{:?}", NoticeKind::Undecryptable),
                 "$image:image:cat.png:false".to_string(),
                 "$text=Hello from <script>alert(1)</script>".to_string(),
+                "$edit:edit:$text=Hello, corrected".to_string(),
             ]
         );
         assert_eq!(page.next_cursor.as_deref(), Some("m1.0"));
@@ -1355,6 +1458,206 @@ fn given_the_server_cannot_revoke_then_sign_out_still_wipes_and_warns() {
         !dir.path().join("store-key.v2").exists(),
         "key deleted anyway"
     );
+}
+
+/// A UI connection that sends nothing until its sender drops, then closes.
+struct QuietUi(std::sync::mpsc::Receiver<()>);
+
+impl std::io::Read for QuietUi {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        let _ = self.0.recv();
+        Ok(0)
+    }
+}
+
+/// Locks the session when dropped, also when the test fails first. Locking
+/// stops the sync loop, which would otherwise go on polling the mock server
+/// after wiremock hands it to another test.
+struct LockOnDrop<'a>(&'a Core);
+
+impl Drop for LockOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.session().lock(LOCK_TIMEOUT, || {});
+    }
+}
+
+/// GIVEN a signed-in account and a connected UI WHEN the homeserver ends the
+/// session (it refuses the token without soft logout, and again when asked
+/// once more) THEN the core deletes the key at once, without waiting for the
+/// next idle check and without asking the homeserver to log out, and ends
+/// `restart_required` saying why; and the next start wipes the profile and
+/// opens a new, empty one with no warning.
+#[test]
+fn given_the_homeserver_ends_the_session_then_the_profile_is_deleted_and_the_next_start_is_fresh() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    {
+        let core = signed_in_core(&server, dir.path());
+        let _locked = LockOnDrop(&core);
+        wait_for("the first sync", || {
+            server.requests_to("/_matrix/client/v3/sync") > 0
+        });
+        std::thread::scope(|scope| {
+            // Inside the scope, so a failing assertion drops the sender and
+            // the UI closes before the scope waits for it.
+            let (close, quiet) = std::sync::mpsc::channel::<()>();
+            let serving = scope.spawn(|| serve(&core, QuietUi(quiet), std::io::sink()));
+            let refused = Instant::now();
+            server.refuse_token(false, true);
+            wait_for("the session to end", || {
+                core.session().account_status().error == Some(SignInError::SessionEnded)
+            });
+            assert!(refused.elapsed() < IDLE_CHECK / 2, "woken, not polled");
+            drop(close);
+            assert_eq!(serving.join().unwrap(), ServeEnd::UiClosed);
+        });
+        let status = core.session().account_status();
+        assert_eq!(
+            (status.state, status.user_id, status.error),
+            (
+                AccountState::SignedOut,
+                None,
+                Some(SignInError::SessionEnded)
+            )
+        );
+        assert_eq!(core.session().state(), StoreState::RestartRequired);
+        assert!(!core.session().has_ended(), "finished once");
+        assert!(!dir.path().join("store-key.v2").exists(), "key deleted");
+        assert!(dir.path().join("signed-out").exists());
+        assert_eq!(
+            server.requests_to("/_matrix/client/v3/logout"),
+            0,
+            "nothing is left on the homeserver to revoke"
+        );
+        assert!(
+            server.requests_to("/_matrix/client/v3/account/whoami") >= 2,
+            "confirmed in two rounds"
+        );
+        assert_eq!(
+            call(&core, Call::RoomList {}),
+            Outcome::Error(ErrorCode::Locked)
+        );
+    }
+
+    let never = Fixed::new(Err(PromptError::Failed));
+    let core = make_core(dir.path(), never.clone());
+    assert_eq!(
+        core.session().state(),
+        StoreState::Protected,
+        "fresh profile"
+    );
+    let status = core.session().account_status();
+    assert_eq!(
+        (status.state, status.error),
+        (AccountState::SignedOut, None),
+        "the homeserver ended the session: nothing may stay active there"
+    );
+    assert!(!dir.path().join("signed-out").exists(), "wipe finished");
+    assert_eq!(never.asked.load(Ordering::SeqCst), 0);
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::Locked, "no account restored");
+}
+
+/// GIVEN a signed-in account WHEN the homeserver asks for a soft logout (the
+/// account and device still exist) THEN nothing is deleted: sync fails and
+/// says so.
+#[test]
+fn given_a_soft_logout_then_the_profile_is_kept() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+    server.refuse_token(true, true);
+    wait_for("a refused round", || {
+        core.session().account_status().error == Some(SignInError::SyncFailed)
+    });
+    let rounds = server.requests_to("/_matrix/client/v3/sync");
+    wait_for("another refused round", || {
+        server.requests_to("/_matrix/client/v3/sync") > rounds
+    });
+    assert!(!core.session().has_ended());
+    assert!(!core.finish_ended_session());
+    assert!(dir.path().join("store-key.v2").exists());
+    assert_eq!(core.session().state(), StoreState::Protected);
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedIn
+    );
+}
+
+/// GIVEN a sync round refused as if the session ended WHEN a second request
+/// is still accepted THEN nothing is deleted: one stray answer is not enough.
+#[test]
+fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_kept() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+    server.refuse_token(false, false);
+    wait_for("the second request", || {
+        server.requests_to("/_matrix/client/v3/account/whoami") > 0
+    });
+    let rounds = server.requests_to("/_matrix/client/v3/sync");
+    wait_for("another refused round", || {
+        server.requests_to("/_matrix/client/v3/sync") > rounds
+    });
+    assert!(!core.session().has_ended());
+    assert!(!core.finish_ended_session());
+    assert!(dir.path().join("store-key.v2").exists());
+    assert_eq!(core.session().state(), StoreState::Protected);
+    assert_eq!(
+        core.session().account_status().error,
+        Some(SignInError::SyncFailed)
+    );
+}
+
+/// GIVEN one sync round in which the homeserver ends the session, confirmed
+/// by `whoami`, WHEN the next round is accepted THEN nothing is deleted: the
+/// end must hold for two rounds in a row.
+#[test]
+fn given_one_round_that_ends_the_session_then_a_good_round_keeps_the_profile() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+    wait_for("the first sync", || {
+        server.requests_to("/_matrix/client/v3/sync") > 0
+    });
+    server.refuse_token_once();
+    wait_for("the refused round", || {
+        server.requests_to("/_matrix/client/v3/account/whoami") > 0
+    });
+    let rounds = server.requests_to("/_matrix/client/v3/sync");
+    wait_for("two more rounds", || {
+        server.requests_to("/_matrix/client/v3/sync") > rounds + 1
+    });
+    assert!(!core.session().has_ended());
+    assert!(!core.finish_ended_session());
+    assert!(dir.path().join("store-key.v2").exists());
+    let status = core.session().account_status();
+    assert_eq!((status.state, status.error), (AccountState::SignedIn, None));
+}
+
+/// GIVEN a password session that holds a refresh token WHEN the homeserver
+/// refuses the access token and then the refresh token THEN the session has
+/// ended, as for a session without one.
+#[test]
+fn given_a_refused_refresh_token_then_the_session_ends() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"refresh_token":"synthetic_refresh_token","device_id":"PERSEPHONE1"}),
+        ),
+        false,
+        true,
+    );
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+    server.refuse_refresh();
+    server.refuse_token(false, true);
+    wait_for("the session to end", || core.session().has_ended());
+    assert!(server.requests_to("/_matrix/client/v3/refresh") > 0);
 }
 
 #[test]
@@ -1937,6 +2240,7 @@ fn send(core: &Core, room_id: &str, body: &str) -> Outcome {
         Call::SendMessage {
             room_id: room_id.into(),
             body: body.into(),
+            reply_to: None,
         },
     )
 }

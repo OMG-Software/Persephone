@@ -289,6 +289,7 @@ impl Fixtures {
                 sender: message.sender.clone(),
                 body: project_body(&message.body),
                 origin_server_ts: message.origin_server_ts,
+                reply_to: None,
             };
             let size = serde_json::to_vec(&item)
                 .map_err(|_| ErrorCode::Internal)?
@@ -378,7 +379,12 @@ mod tests {
                     TimelineItem::Message { event_id, .. } => event_id.clone(),
                     TimelineItem::Gap { .. }
                     | TimelineItem::Notice { .. }
-                    | TimelineItem::Image { .. } => unreachable!(),
+                    | TimelineItem::Image { .. }
+                    | TimelineItem::Edit { .. }
+                    | TimelineItem::Redaction { .. }
+                    | TimelineItem::Reaction { .. }
+                    | TimelineItem::File { .. }
+                    | TimelineItem::State { .. } => unreachable!(),
                 })
                 .collect();
             seen.splice(0..0, ids);
@@ -408,7 +414,12 @@ mod tests {
                     } => origin_server_ts.map(UnixMillis::get),
                     TimelineItem::Gap { .. }
                     | TimelineItem::Notice { .. }
-                    | TimelineItem::Image { .. } => unreachable!(),
+                    | TimelineItem::Image { .. }
+                    | TimelineItem::Edit { .. }
+                    | TimelineItem::Redaction { .. }
+                    | TimelineItem::Reaction { .. }
+                    | TimelineItem::File { .. }
+                    | TimelineItem::State { .. } => unreachable!(),
                 })
                 .collect()
         };

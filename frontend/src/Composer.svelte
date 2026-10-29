@@ -11,6 +11,7 @@
   import { isolate } from './people';
   import { composerKey } from './preferences';
   import { clockTime, fullTime, toDate } from './time';
+  import type { Quote } from './timeline';
 
   let {
     pending,
@@ -25,12 +26,21 @@
     onallow,
     imageDraft = null,
     attaching = false,
+    attachingFile = false,
+    onattachfile = () => {},
     sendingImage = false,
     imageError = null,
     onattach = () => {},
     onsendimage = () => {},
     oncancelimage = () => {},
-    enterSends = true
+    enterSends = true,
+    replyingTo = null,
+    oncancelreply = () => {},
+    editing = false,
+    oncanceledit = () => {},
+    typing = [],
+    typingCut = false,
+    ontyping
   }: {
     // Messages sent from this device that the timeline does not show yet.
     pending: PendingMessage[];
@@ -51,6 +61,9 @@
     // dialog is open or the image is being queued.
     imageDraft?: ImageDraft | null;
     attaching?: boolean;
+    // Whether the core's dialog for a file to send is open (ADR-0029).
+    attachingFile?: boolean;
+    onattachfile?: () => void;
     sendingImage?: boolean;
     // Why the last attach or image send failed, as fixed text.
     imageError?: string | null;
@@ -60,6 +73,18 @@
     // Whether Enter sends (Shift+Enter starts a line) or starts a line
     // (Ctrl+Enter sends). A setting; on by default.
     enterSends?: boolean;
+    // The message the next one replies to, quoted from the loaded history.
+    replyingTo?: Quote | null;
+    oncancelreply?: () => void;
+    // The draft is a new version of one of this account's messages.
+    editing?: boolean;
+    oncanceledit?: () => void;
+    // Who else is typing here, and whether more are than named.
+    typing?: string[];
+    typingCut?: boolean;
+    // Called on each change of the draft; absent while this account does
+    // not send typing notices.
+    ontyping?: () => void;
   } = $props();
 
   // The core's limit is 16 KiB of UTF-8; this length is only a first stop.
@@ -118,6 +143,12 @@
 
   // See `composerKey` for which keys send.
   function keydown(event: KeyboardEvent) {
+    if (event.key === 'Escape' && (replyingTo || editing)) {
+      event.preventDefault();
+      if (editing) oncanceledit();
+      else oncancelreply();
+      return;
+    }
     if (composerKey(event, enterSends) === 'send') {
       event.preventDefault();
       form?.requestSubmit();
@@ -133,6 +164,13 @@
         <li>
           {#if message.kind === 'image'}
             <p class="pending-image"><Icon name="image" />Image</p>
+          {:else if message.kind === 'file'}
+            <p class="pending-image">
+              <Icon name="paperclip" /><span class="pending-kind">File:</span>
+              <bdi>{message.body}</bdi>
+            </p>
+          {:else if message.kind === 'edit'}
+            <p dir="auto"><span class="pending-kind">Edit:</span> {message.body}</p>
           {:else}
             <p dir="auto">{message.body}</p>
           {/if}
@@ -173,6 +211,30 @@
     <p class="error image-error" role="alert">{imageError}</p>
   {/if}
 
+  <p class="typing" aria-live="polite">
+    {#if typing.length > 2 || (typing.length > 0 && typingCut)}
+      Several people are typing…
+    {:else if typing.length === 2}
+      <bdi>{typing[0]}</bdi> and <bdi>{typing[1]}</bdi> are typing…
+    {:else if typing.length === 1}
+      <bdi>{typing[0]}</bdi> is typing…
+    {/if}
+  </p>
+
+  {#if editing}
+    <div class="replying">
+      <p>Editing your message</p>
+      <button type="button" class="link" onclick={oncanceledit}>Cancel edit</button>
+    </div>
+  {:else if replyingTo}
+    <div class="replying">
+      <p>
+        Replying to <bdi>{replyingTo.sender}</bdi>: <span dir="auto">{replyingTo.text}</span>
+      </p>
+      <button type="button" class="link" onclick={oncancelreply}>Cancel reply</button>
+    </div>
+  {/if}
+
   <form class="composer" class:plain={notEncrypted} bind:this={form} onsubmit={submit}>
     {#if notEncrypted}
       <!-- The warning sits on the composer, where the risk is. -->
@@ -211,6 +273,16 @@
       >
         <Icon name="image" />
       </button>
+      <button
+        type="button"
+        class="attach"
+        aria-label={attachingFile ? 'Choosing a file…' : 'Attach a file'}
+        title="Attach a file"
+        disabled={blocked !== null || attachingFile}
+        onclick={onattachfile}
+      >
+        <Icon name="paperclip" />
+      </button>
       <label for="composer-text" class="visually-hidden"
         >{notEncrypted ? 'Message (not encrypted)' : 'Message'}</label
       >
@@ -224,6 +296,7 @@
         dir="auto"
         aria-keyshortcuts={enterSends ? 'Enter' : 'Control+Enter Meta+Enter'}
         onkeydown={keydown}
+        oninput={ontyping}
       ></textarea>
       {#if encryption === 'encrypted'}
         <span class="enc-note"><Icon name="lock" />Encrypted</span>

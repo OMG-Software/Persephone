@@ -22,9 +22,10 @@
 //! refuses until the SDK provides a stop-and-join contract.
 //!
 //! Encryption setup (`security.rs`) runs on its own thread, one lease per
-//! step, like sync. Its prompts run on short-lived threads without a lease, so
-//! a prompt left open never holds up a lock; an answer given after a lock (or
-//! a lock and unlock) is dropped.
+//! step, like sync. So do changing the recovery key (ADR-0021) and
+//! verifying another of the account's devices. Its prompts run on
+//! short-lived threads without a lease, so a prompt left open never holds up
+//! a lock; an answer given after a lock (or a lock and unlock) is dropped.
 //!
 //! Unlocking and resetting the profile ask for the passphrase (ADR-0006) in
 //! the core's own window. They run on a worker thread in the `unlocking`
@@ -32,13 +33,16 @@
 //! blocked by an open prompt and nothing else can change the stores meanwhile.
 
 use crate::account;
+use crate::activity;
 use crate::contacts;
 use crate::credentials::{CredentialSource, NewPassword, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
 use crate::identities;
 use crate::media::ImageUpload;
+use crate::notifications;
 use crate::outbox::{Content, Outbox};
 use crate::passphrase::Unlock;
+use crate::recovery_file;
 use crate::registration::{self, Registered};
 use crate::security;
 use crate::sending;
@@ -55,6 +59,7 @@ use matrix_sdk::{
             direct::DirectEventContent,
             key::verification::request::ToDeviceKeyVerificationRequestEvent,
             room::message::{MessageType, OriginalSyncRoomMessageEvent},
+            typing::SyncTypingEvent,
         },
     },
 };
@@ -65,8 +70,8 @@ use persephone_contracts::{
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex, MutexGuard, Weak,
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -80,6 +85,10 @@ const MAX_SYNC_BACKOFF: Duration = Duration::from_secs(30);
 /// Shortest time between the starts of two sync rounds. A homeserver should
 /// long-poll; one that answers at once must not make the core spin.
 const MIN_SYNC_INTERVAL: Duration = Duration::from_millis(500);
+/// Failed sync rounds in a row in which the homeserver must end the session
+/// (`account::session_ended`) before the profile is deleted. The rounds are
+/// a backoff apart, so one faulty moment of a server or proxy is not enough.
+const ENDED_ROUNDS: u8 = 2;
 /// How often the sending thread checks for queued messages.
 const SEND_TICK: Duration = Duration::from_millis(100);
 /// How often the security thread checks for work.
@@ -135,6 +144,13 @@ pub trait SessionListener: Send + Sync {
     /// list names different contacts. Account data touches no room, so a
     /// sync round that brings only this reports no rooms.
     fn direct_rooms_changed(&self) {}
+    /// A message to show as a desktop notification arrived (ADR-0022): the
+    /// room's and sender's projected names, never its text. Called only while
+    /// desktop notifications are on.
+    fn notify(&self, _room: &str, _sender: &str) {}
+    /// The homeserver ended the session; [`Session::finish_ended`] deletes
+    /// the profile. Called on the sync thread, which then stops.
+    fn session_ended(&self) {}
 }
 
 /// Why a message was not queued.
@@ -183,6 +199,11 @@ enum SecurityCommand {
         user_id: OwnedUserId,
         was_verified: bool,
     },
+    /// Replace the recovery key; the user said yes in the core's own window
+    /// (ADR-0021).
+    ResetRecoveryKey {
+        source: Arc<dyn CredentialSource>,
+    },
 }
 
 struct SecurityShared {
@@ -212,6 +233,22 @@ struct Shared {
     listener: Mutex<Option<Arc<dyn SessionListener>>>,
     /// Set once any SDK client was built over these stores.
     client_ran: AtomicBool,
+    /// Set by the sync loop when the homeserver ended the session; cleared
+    /// once [`Session::finish_ended`] has locked the stores.
+    ended: AtomicBool,
+    /// The account's desktop-notification setting, kept here so the sync's
+    /// notification handler need not read the store (ADR-0022).
+    toasts: AtomicBool,
+    /// Whether those notifications name the sender and room.
+    toast_names: AtomicBool,
+    /// The account's settings for typing notices and public read receipts,
+    /// kept here so sending them need not read the store (ADR-0023).
+    send_typing: AtomicBool,
+    send_receipts: AtomicBool,
+    /// The account's idle lock, in minutes (0: off; ADR-0025).
+    idle_lock_minutes: AtomicU16,
+    /// Who is typing in each room, from the sync.
+    typing: Arc<activity::Typing>,
     security: Mutex<SecurityShared>,
     outbox: Mutex<Outbox>,
 }
@@ -496,6 +533,25 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
     let host = Homeserver::parse(client.homeserver().as_str())
         .map(|homeserver| homeserver.display_host())
         .unwrap_or_default();
+    let loaded = lease
+        .stores()
+        .block_on(settings::load(lease.stores()))
+        .unwrap_or_default();
+    shared
+        .toasts
+        .store(loaded.desktop_notifications, Ordering::SeqCst);
+    shared
+        .toast_names
+        .store(loaded.notification_names, Ordering::SeqCst);
+    shared
+        .send_typing
+        .store(loaded.send_typing, Ordering::SeqCst);
+    shared
+        .send_receipts
+        .store(loaded.send_read_receipts, Ordering::SeqCst);
+    shared
+        .idle_lock_minutes
+        .store(loaded.idle_lock_minutes, Ordering::SeqCst);
     let installed = lease.commit(|| {
         *guard(&shared.account) = Some(ActiveAccount {
             client: client.clone(),
@@ -591,6 +647,30 @@ fn run_sync(
             std::future::ready(())
         })
     };
+    // Typing notices are ephemeral: kept as they arrive, for the page to ask.
+    let typing = shared.typing.clone();
+    let typing_handler = {
+        let _context = runtime.enter();
+        client.add_event_handler(move |event: SyncTypingEvent, room: matrix_sdk::Room| {
+            typing.set(
+                room.room_id().as_str(),
+                event.content.user_ids.iter().map(|user| &**user),
+            );
+            std::future::ready(())
+        })
+    };
+    // The SDK keeps notification handlers as long as the client, so this one
+    // holds the session only weakly.
+    let mut notifying = false;
+    let notified: Weak<Shared> = Arc::downgrade(shared);
+    // The access token last saved, so a refreshed OAuth token is saved once
+    // (ADR-0030); `None` until the first round saves or confirms it.
+    let mut saved_token: Option<Zeroizing<String>> = None;
+    // How the SDK reports a refused or refreshed token; a receiver, not a
+    // task. Read after a failed round only.
+    let mut changes = client.subscribe_to_session_changes();
+    // Rounds in a row that ended the session; anything else starts again.
+    let mut ended_rounds = 0u8;
     loop {
         let lease = match shared.admit() {
             Ok(lease) => lease,
@@ -604,6 +684,34 @@ fn run_sync(
         };
         let started = Instant::now();
         let outcome = lease.stores().block_on(async {
+            if !notifying {
+                notifying = true;
+                let notified = notified.clone();
+                client
+                    .register_notification_handler(move |notification, room, client| {
+                        let notified = notified.clone();
+                        async move {
+                            let Some(shared) = notified.upgrade() else {
+                                return;
+                            };
+                            if !shared.toasts.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            if let Some((room, sender)) =
+                                notifications::shown(&notification, &room, &client).await
+                                && let Some(listener) = shared.listener()
+                            {
+                                // Without names, none leaves the core.
+                                if shared.toast_names.load(Ordering::SeqCst) {
+                                    listener.notify(&room, &sender);
+                                } else {
+                                    listener.notify("", "");
+                                }
+                            }
+                        }
+                    })
+                    .await;
+            }
             if keys.is_none() {
                 keys = client
                     .encryption()
@@ -623,7 +731,12 @@ fn run_sync(
                     .map(Box::pin);
             }
             let rooms =
-                account::sync_round(&client, engine.as_ref().expect("selected above")).await?;
+                account::sync_round(&client, engine.as_ref().expect("selected above")).await;
+            // Saved even when the round failed: the SDK may have refreshed the
+            // token, spending the old refresh token, before the error.
+            saved_token =
+                account::save_if_refreshed(&client, lease.stores(), saved_token.take()).await;
+            let rooms = rooms?;
             let keyed = match keys.as_mut() {
                 Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
                 None => None,
@@ -634,9 +747,34 @@ fn run_sync(
             };
             Ok::<_, SignInError>((rooms, keyed, changed))
         });
-        let committed = lease.commit(|| ()).is_ok();
+        let refused = outcome.is_err()
+            && lease
+                .stores()
+                .block_on(account::session_ended(&client, &mut changes));
+        ended_rounds = if refused {
+            ended_rounds.saturating_add(1)
+        } else {
+            0
+        };
+        let ended = ended_rounds >= ENDED_ROUNDS;
+        // Recorded only while this session is still the open one: after a
+        // lock, the next start finds the refused token again.
+        let committed = lease
+            .commit(|| {
+                if ended {
+                    shared.ended.store(true, Ordering::SeqCst);
+                }
+            })
+            .is_ok();
         drop(lease);
         if !committed {
+            break;
+        }
+        if ended {
+            // Nothing more to sync; the session deletes the profile.
+            if let Some(listener) = shared.listener() {
+                listener.session_ended();
+            }
             break;
         }
         match outcome {
@@ -679,6 +817,8 @@ fn run_sync(
     }
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
+    client.remove_event_handler(typing_handler);
+    drop(changes);
     drop(identities);
     drop(keys);
     drop(engine);
@@ -803,8 +943,25 @@ fn run_security(
                     // A request that came in after the start was queued is
                     // kept: replacing it would leave the other device waiting.
                     Some(SecurityCommand::Verify(
-                        VerifyAction::Start | VerifyAction::StartContact(_),
+                        VerifyAction::Start
+                        | VerifyAction::StartContact(_)
+                        | VerifyAction::StartDevice(_),
                     )) if flow.as_ref().is_some_and(|flow| !flow.is_over()) => (None, None),
+                    Some(SecurityCommand::Verify(VerifyAction::StartDevice(device_id))) => {
+                        match verification::start_device(&client, &user_id, &device_id).await {
+                            Ok(new) => {
+                                flow = Some(new);
+                                (None, None)
+                            }
+                            Err(error) => (Some(error), None),
+                        }
+                    }
+                    Some(SecurityCommand::ResetRecoveryKey { source }) => {
+                        match security::reset_recovery_key(&client).await {
+                            Ok(key) => (None, Some((key, source))),
+                            Err(error) => (Some(error), None),
+                        }
+                    }
                     Some(SecurityCommand::Verify(VerifyAction::StartContact(room_id))) => {
                         match verification::start_contact(&client, &room_id).await {
                             Ok(new) => {
@@ -917,11 +1074,22 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
         let outcome = lease.stores().block_on(async {
             let consented = sending::consented(lease.stores(), &job.room_id).await;
             match &job.content {
-                Content::Text(body) => {
+                Content::Text(body, relation) => {
                     sending::send(
                         &client,
                         &job.room_id,
                         body,
+                        relation.as_ref(),
+                        job.transaction_id.clone(),
+                        consented,
+                    )
+                    .await
+                }
+                Content::File(file) => {
+                    sending::send_file(
+                        &client,
+                        &job.room_id,
+                        file,
                         job.transaction_id.clone(),
                         consented,
                     )
@@ -953,11 +1121,12 @@ fn run_sender(shared: &Arc<Shared>, client: Client, runtime: tokio::runtime::Han
     drop(client);
 }
 
-/// Shows a new recovery key in the credential source's own window. Recovery
-/// is already enabled with this key, so it is shown even when a lock or
-/// sign-out began meanwhile; only the failure report is dropped then. The
-/// window waits for the user, so it has its own thread; the key is zeroed
-/// when that thread ends.
+/// Shows a new recovery key in the credential source's own window, then
+/// offers to save it to a file chosen in the core's own Save dialog
+/// (ADR-0021). Recovery is already enabled with this key, so it is shown
+/// even when a lock or sign-out began meanwhile; only the failure report is
+/// dropped then. The windows wait for the user, so they have their own
+/// thread; the key is zeroed when that thread ends.
 fn show_recovery_key(
     shared: &Arc<Shared>,
     generation: u64,
@@ -973,6 +1142,19 @@ fn show_recovery_key(
             if source.show_recovery_key(&shown_user, &key).is_err() {
                 display_shared.with_security(generation, |security| {
                     security.status.error = Some(SecurityError::RecoveryKeyNotShown);
+                });
+                return;
+            }
+            let saved = match source.choose_recovery_key_file() {
+                Ok(Some(path)) => recovery_file::write(&path, &key).is_ok(),
+                // Not saving it is the user's choice; a platform without the
+                // dialog has shown the key, which is enough.
+                Ok(None) | Err(PromptError::Cancelled | PromptError::Unsupported) => true,
+                Err(PromptError::Invalid | PromptError::Failed) => false,
+            };
+            if !saved {
+                display_shared.with_security(generation, |security| {
+                    security.status.error = Some(SecurityError::RecoveryKeyNotSaved);
                 });
             }
         });
@@ -997,8 +1179,9 @@ fn queue_verification(security: &mut SecurityShared, action: VerifyAction) -> bo
     });
     let allowed = match &action {
         VerifyAction::Start => security.status.identity == IdentityState::Unverified && over,
-        // Only a verified device vouches for someone else.
-        VerifyAction::StartContact(_) => {
+        // Only a verified device vouches for someone else, or for another
+        // of the account's devices.
+        VerifyAction::StartContact(_) | VerifyAction::StartDevice(_) => {
             security.status.identity == IdentityState::Verified && over
         }
         VerifyAction::Accept(id) => flow
@@ -1098,6 +1281,13 @@ impl Session {
                 outbox: Mutex::default(),
                 listener: Mutex::new(None),
                 client_ran: AtomicBool::new(false),
+                ended: AtomicBool::new(false),
+                toasts: AtomicBool::new(false),
+                toast_names: AtomicBool::new(true),
+                send_typing: AtomicBool::new(false),
+                send_receipts: AtomicBool::new(false),
+                idle_lock_minutes: AtomicU16::new(0),
+                typing: Arc::default(),
             }),
             transition: Mutex::new(()),
         }
@@ -1239,6 +1429,157 @@ impl Session {
         Ok(self.account_status())
     }
 
+    /// Starts signing in to `homeserver` through its OAuth 2.0 provider
+    /// (ADR-0030) on a worker thread and returns the status at once, like
+    /// [`Session::sign_in`]. One lease covers starting the login (the
+    /// provider's page); the question in the core's own window runs with no
+    /// lease held, as the password prompt does; a second lease, in the same
+    /// generation, covers the redirect wait and the install. A lock in
+    /// between abandons the attempt, and abandons the wait within half a
+    /// second.
+    pub fn sign_in_oidc(
+        &self,
+        homeserver: Homeserver,
+        source: Arc<dyn CredentialSource>,
+    ) -> Result<AccountStatus, AdmissionError> {
+        if self.state() != StoreState::Protected {
+            return Err(AdmissionError::Locked);
+        }
+        {
+            let mut status = guard(&self.shared.status);
+            if matches!(
+                status.state,
+                AccountState::SigningIn | AccountState::SignedIn
+            ) {
+                return Ok(status.clone());
+            }
+            *status = AccountStatus {
+                state: AccountState::SigningIn,
+                user_id: None,
+                error: None,
+            };
+        }
+        if let Some(listener) = self.shared.listener() {
+            listener.session_changed();
+        }
+        let shared = self.shared.clone();
+        let started = lock(&self.shared).generation;
+        let spawned = std::thread::Builder::new()
+            .name("core-sign-in-oidc".into())
+            .spawn(move || {
+                let still_current = || {
+                    let inner = lock(&shared);
+                    inner.generation == started && inner.state == StoreState::Protected
+                };
+                let admitted = || match shared.admit() {
+                    Ok(lease) if lease.generation == started => Some(lease),
+                    _ => None,
+                };
+                // Reports the end of an attempt that did not sign in.
+                let end = |lease: Option<Lease>, error: SignInError| {
+                    let current = lease.is_some_and(|lease| lease.commit(|| ()).is_ok());
+                    shared.set_status(if current {
+                        failed(error)
+                    } else {
+                        AccountStatus::signed_out()
+                    });
+                };
+                // First lease: the client and the provider's page.
+                let Some(lease) = admitted() else {
+                    shared.set_status(AccountStatus::signed_out());
+                    return;
+                };
+                shared.client_ran.store(true, Ordering::SeqCst);
+                let runtime = lease.stores().runtime().handle().clone();
+                let begun = lease.stores().block_on(async {
+                    let client = account::build_client(&homeserver, lease.stores()).await?;
+                    match account::start_oauth(&client).await {
+                        Ok(start) => Ok((client, start)),
+                        Err(error) => {
+                            drop(client);
+                            Err(error)
+                        }
+                    }
+                });
+                let (client, start) = match begun {
+                    Ok(begun) => begun,
+                    Err(error) => {
+                        end(Some(lease), error);
+                        return;
+                    }
+                };
+                drop(lease);
+                // Dropped inside its runtime, as everywhere else.
+                let discard = |client: Client| {
+                    let _context = runtime.enter();
+                    drop(client);
+                };
+                // The question, with no lease held: it may stay open long.
+                let answer =
+                    match crate::oauth_login::question(&homeserver.display_host(), start.url()) {
+                        None => Err(SignInError::Failed),
+                        Some((caption, message)) => {
+                            match source.confirm_open_link(caption, &message) {
+                                Ok(true) => source
+                                    .open_link(start.url().as_str())
+                                    .map(|()| true)
+                                    .map_err(|_| SignInError::Failed),
+                                Ok(false) | Err(PromptError::Cancelled) => Ok(false),
+                                Err(PromptError::Unsupported) => Err(SignInError::Unsupported),
+                                Err(_) => Err(SignInError::Failed),
+                            }
+                        }
+                    };
+                // Second lease, in the same generation: a lock in between
+                // abandons the attempt.
+                let Some(lease) = admitted() else {
+                    discard(client);
+                    shared.set_status(AccountStatus::signed_out());
+                    return;
+                };
+                match answer {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => {
+                        lease
+                            .stores()
+                            .block_on(account::abort_oauth(&client, start));
+                        discard(client);
+                        end(Some(lease), answer.err().unwrap_or(SignInError::Cancelled));
+                        return;
+                    }
+                }
+                let result = lease.stores().block_on(async {
+                    match account::finish_oauth(&client, &homeserver, lease.stores(), start, || {
+                        !still_current()
+                    })
+                    .await
+                    {
+                        Ok(user_id) => Ok((client, user_id)),
+                        Err(error) => {
+                            drop(client);
+                            Err(error)
+                        }
+                    }
+                });
+                match result {
+                    Ok((client, user_id)) => install(&shared, lease, client, user_id),
+                    Err(error) => {
+                        let current = lease.commit(|| ()).is_ok();
+                        drop(lease);
+                        shared.set_status(if current {
+                            failed(error)
+                        } else {
+                            AccountStatus::signed_out()
+                        });
+                    }
+                }
+            });
+        if spawned.is_err() {
+            self.shared.set_status(failed(SignInError::Failed));
+        }
+        Ok(self.account_status())
+    }
+
     /// Starts registering `username` on `homeserver` on a worker thread and
     /// returns the status at once, like [`Session::sign_in`]. The name is
     /// checked first; the password and any registration token are asked for
@@ -1353,6 +1694,7 @@ impl Session {
         // unsent messages are dropped.
         *guard(&self.shared.security) = SecurityShared::default();
         guard(&self.shared.outbox).clear();
+        self.shared.typing.clear();
         // No lease remains, so the sync loop is between rounds and will see
         // the lock at its next admission; join it, then drop the client inside
         // the stores' runtime before closing them.
@@ -1426,10 +1768,7 @@ impl Session {
                     // Before the request: an interrupted sign-out must never
                     // restore this account on the next start.
                     let began = store::begin_sign_out(&dir).is_ok();
-                    let revoked = lease
-                        .stores()
-                        .block_on(client.matrix_auth().logout())
-                        .is_ok();
+                    let revoked = lease.stores().block_on(client.logout()).is_ok();
                     break (began, revoked);
                 }
                 Ok(None) | Err(AdmissionError::Locked) => return Ok(self.state()),
@@ -1456,6 +1795,47 @@ impl Session {
         Ok(state)
     }
 
+    /// Whether the homeserver ended the session and
+    /// [`Session::finish_ended`] has not finished it yet.
+    pub fn has_ended(&self) -> bool {
+        self.shared.ended.load(Ordering::SeqCst)
+    }
+
+    /// Finishes a session the homeserver ended (`account::session_ended`):
+    /// deletes this device's local profile as [`Session::sign_out`] does, but
+    /// asks the homeserver nothing, since it already ended the session. The
+    /// marker records the session as revoked, so the next start wipes the
+    /// profile without a warning and opens a new, empty one.
+    ///
+    /// Returns `None` when no session ended. A lock that has not finished in
+    /// `timeout` leaves the end waiting, and the next call goes on with it.
+    pub fn finish_ended(&self, timeout: Duration, announce: impl FnOnce()) -> Option<StoreState> {
+        if !self.has_ended() {
+            return None;
+        }
+        let Some(dir) = self.profile.clone() else {
+            self.shared.ended.store(false, Ordering::SeqCst);
+            return None;
+        };
+        let marked = store::mark_signed_out(&dir, true).is_ok();
+        let (state, _) = self.lock(timeout, announce);
+        if state == StoreState::Locking {
+            return Some(state);
+        }
+        self.shared.ended.store(false, Ordering::SeqCst);
+        // The sync loop has stopped, so this status is not overwritten.
+        self.shared.set_status(AccountStatus {
+            state: AccountState::SignedOut,
+            user_id: None,
+            error: Some(if marked {
+                SignInError::SessionEnded
+            } else {
+                SignInError::Failed
+            }),
+        });
+        Some(state)
+    }
+
     /// Queues a message for the signed-in account. The room and body were
     /// checked by the caller; whether the account is in the room and whether
     /// the room needs consent are decided when it is sent.
@@ -1463,6 +1843,7 @@ impl Session {
         &self,
         room_id: &str,
         body: Zeroizing<String>,
+        relation: Option<crate::outbox::Relation>,
     ) -> Result<PendingMessage, SendRefusal> {
         if guard(&self.shared.account).is_none() {
             return Err(SendRefusal::Unavailable);
@@ -1474,7 +1855,32 @@ impl Session {
             if inner.state != StoreState::Protected {
                 return Err(SendRefusal::Unavailable);
             }
-            guard(&self.shared.outbox).queue(room_id, body)
+            guard(&self.shared.outbox).queue(room_id, body, relation)
+        }
+        .ok_or(SendRefusal::Full)?;
+        if let Some(listener) = self.shared.listener() {
+            listener.outbox_changed(room_id);
+        }
+        Ok(queued)
+    }
+
+    /// Queues a picked file for the signed-in account, like
+    /// [`Session::send_image`] (ADR-0029).
+    pub fn send_file(
+        &self,
+        room_id: &str,
+        file: Arc<crate::files::FileUpload>,
+    ) -> Result<PendingMessage, SendRefusal> {
+        if guard(&self.shared.account).is_none() {
+            return Err(SendRefusal::Unavailable);
+        }
+        let queued = {
+            // As for text: nothing queued here outlives a lock.
+            let inner = lock(&self.shared);
+            if inner.state != StoreState::Protected {
+                return Err(SendRefusal::Unavailable);
+            }
+            guard(&self.shared.outbox).queue_file(room_id, file)
         }
         .ok_or(SendRefusal::Full)?;
         if let Some(listener) = self.shared.listener() {
@@ -1563,6 +1969,28 @@ impl Session {
         Ok(lease.stores().block_on(settings::load(lease.stores())))
     }
 
+    /// Whether the account's settings send typing notices (ADR-0023).
+    pub fn sends_typing(&self) -> bool {
+        self.shared.send_typing.load(Ordering::SeqCst)
+    }
+
+    /// Whether the account's settings send public read receipts (ADR-0023).
+    pub fn sends_read_receipts(&self) -> bool {
+        self.shared.send_receipts.load(Ordering::SeqCst)
+    }
+
+    /// The account's idle lock in minutes, 0 when off (ADR-0025). It stays
+    /// as last loaded while the profile is locked or signed out, which is
+    /// harmless: only an open profile can be locked.
+    pub fn idle_lock_minutes(&self) -> u16 {
+        self.shared.idle_lock_minutes.load(Ordering::SeqCst)
+    }
+
+    /// Who is typing in each room, from the sync.
+    pub fn typing(&self) -> &activity::Typing {
+        &self.shared.typing
+    }
+
     /// Replaces this account's settings. `Ok(false)` when the store could
     /// not be written.
     pub fn set_account_settings(&self, value: AccountSettings) -> Result<bool, AdmissionError> {
@@ -1573,7 +2001,36 @@ impl Session {
         let saved = lease
             .stores()
             .block_on(settings::save(lease.stores(), value));
-        Ok(saved && lease.commit(|| ()).is_ok())
+        let committed = saved
+            && lease
+                .commit(|| {
+                    let shared = &self.shared;
+                    shared
+                        .toasts
+                        .store(value.desktop_notifications, Ordering::SeqCst);
+                    shared
+                        .toast_names
+                        .store(value.notification_names, Ordering::SeqCst);
+                    shared
+                        .send_typing
+                        .store(value.send_typing, Ordering::SeqCst);
+                    shared
+                        .send_receipts
+                        .store(value.send_read_receipts, Ordering::SeqCst);
+                    shared
+                        .idle_lock_minutes
+                        .store(value.idle_lock_minutes, Ordering::SeqCst);
+                })
+                .is_ok();
+        Ok(committed)
+    }
+
+    /// The signed-in account's user ID and its homeserver as the prompts
+    /// name it, or `None` without one.
+    pub fn account_names(&self) -> Option<(String, String)> {
+        guard(&self.shared.account)
+            .as_ref()
+            .map(|account| (account.user_id.clone(), account.host.clone()))
     }
 
     /// The account's encryption state; `unknown` without a signed-in account.
@@ -1704,6 +2161,62 @@ impl Session {
                             user_id,
                             was_verified,
                         });
+                        security.status.operation = SecurityOperation::Working;
+                    }
+                    Ok(false) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(SecurityError::Cancelled);
+                    }
+                    Err(error) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(security_prompt_error(error));
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
+            });
+        }
+        self.security_status()
+    }
+
+    /// Starts replacing the recovery key (ADR-0021), for a verified device
+    /// whose recovery is set up: the core warns in its own window that the
+    /// old key stops working, and only an explicit yes leaves the command for
+    /// the security thread, which shows the new key and offers to save it.
+    /// The window runs on its own thread without a lease, like the identity
+    /// question. Does nothing while another operation runs.
+    pub fn change_recovery_key(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
+        if guard(&self.shared.account).is_none() {
+            return self.security_status();
+        }
+        let Some(started) = self.shared.open_generation() else {
+            return self.security_status();
+        };
+        let accepted = self.shared.with_security(started, |security| {
+            let free = security.status.identity == IdentityState::Verified
+                && security.status.recovery == RecoveryState::Enabled
+                && security.status.operation == SecurityOperation::Idle
+                && security.command.is_none();
+            if free {
+                security.status.operation = SecurityOperation::WaitingForConfirmation;
+                security.status.error = None;
+            }
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
+        }
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-recovery-change".into())
+            .spawn(move || {
+                let answer = source.confirm_recovery_key_change();
+                shared.with_security(started, |security| match answer {
+                    Ok(true) => {
+                        security.command = Some(SecurityCommand::ResetRecoveryKey { source });
                         security.status.operation = SecurityOperation::Working;
                     }
                     Ok(false) => {
@@ -2070,6 +2583,44 @@ mod tests {
             Some(SecurityCommand::Verify(VerifyAction::StartContact(ref room))) if room == "!dm:s"
         ));
         assert_eq!(verified.status.operation, SecurityOperation::Working);
+    }
+
+    /// GIVEN this device's state WHEN it asks to verify another of the
+    /// account's devices THEN only a verified device with no open flow and
+    /// nothing running queues it.
+    #[test]
+    fn given_a_device_verification_then_only_a_verified_idle_device_queues_it() {
+        let device = || VerifyAction::StartDevice("OTHER".into());
+        for identity in [
+            IdentityState::Unknown,
+            IdentityState::None,
+            IdentityState::Unverified,
+        ] {
+            let mut security = unverified();
+            security.status.identity = identity;
+            assert!(!queue_verification(&mut security, device()), "{identity:?}");
+            assert!(security.command.is_none());
+        }
+        let mut verified = unverified();
+        verified.status.identity = IdentityState::Verified;
+        verified.status.verification = flow(VerificationPhase::Compare);
+        assert!(
+            !queue_verification(&mut verified, device()),
+            "a flow is open"
+        );
+        verified.status.verification = flow(VerificationPhase::Cancelled);
+        verified.status.operation = SecurityOperation::WaitingForConfirmation;
+        assert!(!queue_verification(&mut verified, device()), "busy");
+        verified.status.operation = SecurityOperation::Idle;
+        assert!(queue_verification(&mut verified, device()));
+        assert!(matches!(
+            verified.command,
+            Some(SecurityCommand::Verify(VerifyAction::StartDevice(ref id))) if id == "OTHER"
+        ));
+        assert!(
+            !queue_verification(&mut verified, device()),
+            "a second one waits for the first"
+        );
     }
 
     /// GIVEN each phase WHEN an action arrives THEN only the action for that

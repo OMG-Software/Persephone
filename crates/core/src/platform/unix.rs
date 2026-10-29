@@ -1,6 +1,6 @@
-//! Code that Linux and macOS share: reading a picked image file, and the
-//! wrapping layer that the Secret Service and Keychain vaults put around the
-//! store key.
+//! Code that Linux and macOS share: reading a picked image file, saving a
+//! file without widening who can read it, and the wrapping layer that the
+//! Secret Service and Keychain vaults put around the store key.
 
 use crate::media::{Encoded, MAX_ENCODED_BYTES};
 use crate::vault::{KeyProtector, VaultError};
@@ -50,6 +50,26 @@ pub fn read_image_file(path: &Path, budgets: &ResourceBudgets) -> Result<Encoded
     let mut encoded = Encoded::reserve(budgets, size)?;
     encoded.fill_exactly(&mut file)?;
     Ok(encoded)
+}
+
+/// Creates `path`, which must not exist, for writing, readable and writable
+/// by its owner only (ADR-0029), so the folder's defaults never expose the
+/// bytes while they are written.
+pub fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Puts the written `partial` file at `path` (a link there is replaced
+/// itself). The file keeps its owner-only mode even over a file that had
+/// another: copying a mode would widen the ACL mask, which could switch on
+/// a named entry that the folder's default ACL gave `partial` and the old
+/// file never had. Copying the ACL itself would need libacl.
+pub fn replace_file(partial: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(partial, path)
 }
 
 /// Bytes of a wrapping secret.
@@ -310,5 +330,31 @@ mod tests {
             Err(ErrorCode::Rejected)
         ));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// GIVEN a new file WHEN created private THEN only its owner may read or
+    /// write it; GIVEN a file already there with a wider mode WHEN replaced
+    /// THEN the saved file is still owner-only, as is a new one.
+    #[test]
+    fn given_a_saved_file_then_its_mode_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let partial = dir.path().join("partial");
+        std::io::Write::write_all(&mut create_private_file(&partial).unwrap(), b"new").unwrap();
+        assert_eq!(mode(&partial), 0o600);
+        assert!(create_private_file(&partial).is_err(), "never over a file");
+
+        let existing = dir.path().join("existing.pdf");
+        std::fs::write(&existing, b"old").unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o640)).unwrap();
+        replace_file(&partial, &existing).unwrap();
+        assert_eq!(std::fs::read(&existing).unwrap(), b"new");
+        assert_eq!(mode(&existing), 0o600);
+
+        let fresh = dir.path().join("fresh.pdf");
+        std::io::Write::write_all(&mut create_private_file(&partial).unwrap(), b"fresh").unwrap();
+        replace_file(&partial, &fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o600);
     }
 }

@@ -120,6 +120,51 @@ intent before the logout request and reports an unconfirmed revocation after an
 interrupted sign-out; the account and store tests cover it, and it was not run
 live.
 
+## Session ended by the homeserver
+
+Added 29 October 2026; checked with mock-homeserver tests only, not run live.
+
+Before this, a session the homeserver ended (the device signed out from
+another one, a password reset that signs out every device, an account
+deactivated, reset or removed) showed nothing but failing sync. Now the core
+deletes the profile as for a sign-out.
+
+* **Signal** ([`account.rs`](../../crates/core/src/account.rs)
+  `session_ended`): the SDK's own `SessionChange::UnknownToken`, which it
+  sends once an access token is refused and any refresh was refused too
+  (`invalid_grant` for OAuth). The sync loop reads it only after a failed
+  round. Only `soft_logout: false` counts, and only if a second request
+  (`whoami`) is refused the same way, judged from its own error (an unknown
+  token with no refresh token, a refresh token the homeserver refuses the
+  same way, or an OAuth refresh refused with `invalid_grant`), since the
+  account's other requests share the signal. The
+  end must hold in two failed rounds in a row, a backoff apart, so one faulty
+  moment of a server or proxy never deletes the profile. A soft logout keeps
+  the profile: the account still exists, and sync keeps failing with
+  `sync_failed`.
+* **Order** ([`session.rs`](../../crates/core/src/session.rs)
+  `finish_ended`): the sync loop records the end under its lease and stops.
+  The core's watch thread in `serve` (the idle-lock thread, woken at once)
+  then writes the marker as `revoked`, since nothing on the homeserver is left
+  to revoke, deletes the key and locks as a sign-out does. No logout request
+  is sent. Exit does the same if the window closed first. The account becomes
+  `signed_out` with `session_ended` (`failed` if the marker or key could not
+  be written), and the page says why. The next start wipes the profile without
+  a warning and opens a new, empty one.
+* **Tests** (account, mock homeserver): an ended session deletes the key
+  without a logout request, ends `restart_required` with `session_ended`
+  well before the next idle check, and the next start is fresh and silent; a
+  soft logout deletes nothing; a refusal that `whoami` does not confirm
+  deletes nothing; one confirmed round followed by a good one deletes
+  nothing; a password session whose refresh token is refused too ends (this
+  test failed with the refusal unrecognized).
+* **Limits**: starting fresh still needs a manual restart, as after any
+  sign-out (ADR-0008 is proposed, not accepted). A server or proxy that
+  wrongly refuses the token without soft logout for two rounds in a row
+  still deletes the profile; encrypted history without a key backup is then
+  lost, as after a sign-out. The OAuth path (`invalid_grant`) has no mock
+  test. Not checked against Merovingian or Synapse.
+
 ## Limits
 
 * The live runs do not show that the old access token is refused afterwards;

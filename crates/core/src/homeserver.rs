@@ -5,8 +5,10 @@
 //! accepted. The `dev-disposable-servers` feature, for the disposable servers in
 //! `tools/servers`, also accepts `http://127.0.0.1:<port>` and
 //! `http://[::1]:<port>`; it is off by default and in CI. Every connection uses
-//! TLS 1.3 or later, no ambient proxy and no redirects.
+//! TLS 1.3 or later, no ambient proxy and no redirects; only the profile's own
+//! SOCKS5 proxy, when one is set (ADR-0028).
 
+use crate::proxy::Socks;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use url::{Host, Url};
 
@@ -83,12 +85,17 @@ impl Homeserver {
 
 /// The single HTTP client policy for Matrix connections: TLS 1.3 minimum, no
 /// ambient proxy, no redirects (as the P0 fixtures' `policy_http_client_builder`).
-pub fn http_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
+/// With `proxy`, every request goes through that SOCKS5 proxy, which also
+/// resolves the names (ADR-0028).
+pub fn http_client(proxy: Option<&Socks>) -> reqwest::Result<reqwest::Client> {
+    let builder = reqwest::Client::builder()
         .tls_version_min(reqwest::tls::Version::TLS_1_3)
         .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
+        .redirect(reqwest::redirect::Policy::none());
+    match proxy {
+        Some(socks) => builder.proxy(socks.reqwest()?).build(),
+        None => builder.build(),
+    }
 }
 
 #[cfg(test)]
@@ -166,8 +173,12 @@ mod tests {
         }
     }
 
+    /// GIVEN no proxy and a SOCKS5 proxy WHEN the policy client is built
+    /// THEN both build.
     #[test]
     fn given_the_policy_client_then_it_builds() {
-        assert!(http_client().is_ok());
+        assert!(http_client(None).is_ok());
+        let socks = Socks::parse("127.0.0.1:9050").unwrap();
+        assert!(http_client(Some(&socks)).is_ok());
     }
 }

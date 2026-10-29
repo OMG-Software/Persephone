@@ -30,6 +30,9 @@ tauri = { version = "=2.12.4", default-features = false, features = [
   "common-controls-v6",
   "custom-protocol",
 ] }
+# ADR-0022: desktop notifications (Windows toasts), shown from Rust only. No
+# capability grants the page any of its commands; the plugin has no features.
+tauri-plugin-notification = { version = "=2.7.0", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # Linux and macOS: moving the core channel off descriptors 0 and 1.

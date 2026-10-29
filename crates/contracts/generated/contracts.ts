@@ -2,7 +2,7 @@ export type StoreState = "not_configured" | "protected" | "locked" | "locking" |
 
 export type AccountState = "signed_out" | "signing_in" | "signed_in" | "sign_in_failed";
 
-export type SignInError = "cancelled" | "invalid_credentials" | "unreachable" | "homeserver_refused" | "unsupported" | "sync_failed" | "session_not_revoked" | "username_taken" | "invalid_username" | "username_reserved" | "registration_disabled" | "token_rejected" | "weak_password" | "unsupported_registration" | "rate_limited" | "failed";
+export type SignInError = "cancelled" | "oidc_unavailable" | "invalid_credentials" | "unreachable" | "homeserver_refused" | "unsupported" | "sync_failed" | "session_not_revoked" | "session_ended" | "username_taken" | "invalid_username" | "username_reserved" | "registration_disabled" | "token_rejected" | "weak_password" | "unsupported_registration" | "rate_limited" | "failed";
 
 export type AccountStatus = { state: AccountState, 
 /**
@@ -31,7 +31,7 @@ export type RecoveryState = "unknown" | "disabled" | "incomplete" | "enabled";
 
 export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_confirmation" | "working";
 
-export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "failed";
+export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "cannot_sign_devices" | "device_not_found" | "recovery_key_not_saved" | "failed";
 
 export type VerificationPhase = "incoming" | "waiting" | "compare" | "confirmed" | "done" | "cancelled";
 
@@ -101,7 +101,7 @@ export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
 export type SendFailure = "confirmation_required" | "device_not_verified" | "identity_changed" | "not_joined" | "rejected" | "failed";
 
-export type PendingKind = "text" | "image";
+export type PendingKind = "text" | "image" | "edit" | "file";
 
 export type PendingMessage = { localId: number, roomId: string, kind: PendingKind, body: string, state: PendingState, eventId: string | null, failure: SendFailure | null, 
 /**
@@ -247,11 +247,95 @@ verified: boolean, };
 
 export type DeviceList = { devices: Array<DeviceSummary>, truncated: boolean, };
 
+export type ProxySetting = { proxy: string | null, };
+
+export type HomeserverFound = { homeserver: string, fromWellKnown: boolean, };
+
+export type NewSession = { deviceId: string, displayName: string | null, };
+
+export type NewSessions = { sessions: Array<NewSession>, truncated: boolean, };
+
 export type AccountSettings = { 
 /**
  * Enter sends a message; otherwise it starts a new line. On by default.
  */
-enterSends: boolean, };
+enterSends: boolean, 
+/**
+ * The size of message text, in percent of the normal size, from
+ * [`TEXT_PERCENT_MIN`] to [`CHAT_TEXT_PERCENT_MAX`]. 100 by default.
+ */
+chatTextPercent: number, 
+/**
+ * The size of the rest of the interface, in percent of the normal size,
+ * from [`TEXT_PERCENT_MIN`] to [`INTERFACE_TEXT_PERCENT_MAX`]. 100 by
+ * default.
+ */
+interfaceTextPercent: number, 
+/**
+ * Show a desktop notification (a toast) for a message that notifies
+ * under the account's push rules, with the sender and room only, never
+ * the text. Off by default.
+ */
+desktopNotifications: boolean, 
+/**
+ * Tell the people in a room while this account is typing there
+ * (typing notices). Off by default (ADR-0023).
+ */
+sendTyping: boolean, 
+/**
+ * Show the people in a room how far this account has read (public
+ * read receipts). Off by default; the fully-read marker and a private
+ * receipt, which only this account sees, are sent either way
+ * (ADR-0023).
+ */
+sendReadReceipts: boolean, 
+/**
+ * Lock the profile after this many minutes without keyboard or mouse
+ * input on this computer, from 1 to [`IDLE_LOCK_MINUTES_MAX`]; 0 never
+ * does. Off (0) by default (ADR-0025).
+ */
+idleLockMinutes: number, 
+/**
+ * Desktop notifications name the sender and room; otherwise they say
+ * only that a message arrived, and no name leaves the core. On by
+ * default (ADR-0022).
+ */
+notificationNames: boolean, };
+
+export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
+
+export type RoomServer = { name: string, members: number, own: boolean, };
+
+export type RoomServers = { servers: Array<RoomServer>, truncated: boolean, };
+
+export type RoomReader = { userId: string, trust: ContactTrust, receiving: number, refused: number, 
+/**
+ * This account: its other devices read the room too.
+ */
+own: boolean, };
+
+export type RoomReaders = { readers: Array<RoomReader>, truncated: boolean, };
+
+export type NotificationLevel = "all" | "mentions" | "none" | "custom";
+
+export type NotificationSettings = { level: NotificationLevel, };
+
+export type ThreePidMedium = "email" | "msisdn";
+
+export type ThreePid = { medium: ThreePidMedium, address: string, };
+
+export type ThreePidList = { threePids: Array<ThreePid>, truncated: boolean, 
+/**
+ * The homeserver lets this account add and remove them (its
+ * `m.3pid_changes` capability, on unless it says otherwise).
+ */
+canChange: boolean, 
+/**
+ * An address is waiting to be confirmed: `add_three_pid` adds it.
+ */
+pending: ThreePid | null, };
+
+export type AccountChange = "done" | "token_sent" | "cancelled" | "unsupported" | "invalid_password" | "weak_password" | "not_confirmed" | "in_use" | "denied" | "medium_not_supported" | "changes_disabled" | "unsupported_auth" | "nothing_pending" | "rate_limited" | "unreachable" | "failed";
 
 export type ProfileSlot = { slot: number, 
 /**
@@ -273,15 +357,29 @@ displayName: string | null, };
 
 export type UserSearch = { users: Array<UserMatch>, truncated: boolean, };
 
-export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported";
+export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported" | "deleted";
 
-export type TimelineItem = { "kind": "message", event_id: string, sender: string, body: string, 
+export type MembershipChange = "joined" | "left" | "invited" | "invite_rejected" | "invite_withdrawn" | "kicked" | "banned" | "unbanned" | "knocked" | "knock_withdrawn" | "knock_denied";
+
+export type StateChange = { "type": "member", target: string, membership: MembershipChange, } | { "type": "display_name", target: string, name: string | null, } | { "type": "name", name: string | null, } | { "type": "topic", topic: string | null, } | { "type": "avatar", } | { "type": "encryption", } | { "type": "join_rule", rule: JoinRule, } | { "type": "history_visibility", visibility: HistoryVisibility, } | { "type": "power_levels", } | { "type": "addresses", } | { "type": "created", } | { "type": "server_acl", } | { "type": "upgraded", };
+
+export type TimelineItem = { "kind": "message", event_id: string, sender: string, 
+/**
+ * The text, without a reply's quoted fallback.
+ */
+body: string, 
 /**
  * When the sender's homeserver says it received the event
  * (`origin_server_ts`). That server sets it and nothing checks it,
  * so it can be wrong. `None` when the event has no usable time.
  */
-origin_server_ts: number | null, } | { "kind": "gap", next_cursor: string | null, } | { "kind": "notice", event_id: string, sender: string, notice: NoticeKind, 
+origin_server_ts: number | null, 
+/**
+ * The event this message replies to, as the sender claims. The
+ * page shows it only from history it has loaded itself; the
+ * sender's quoted copy of it is never shown.
+ */
+reply_to: string | null, } | { "kind": "gap", next_cursor: string | null, } | { "kind": "notice", event_id: string, sender: string, notice: NoticeKind, 
 /**
  * As for messages.
  */
@@ -301,7 +399,27 @@ width: number | null, height: number | null,
 /**
  * The file is end-to-end encrypted.
  */
-encrypted: boolean, };
+encrypted: boolean, } | { "kind": "file", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, name: string, size: number | null, encrypted: boolean, } | { "kind": "edit", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, replaces: string, body: string, } | { "kind": "reaction", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, reacts_to: string, key: string, } | { "kind": "redaction", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, redacts: string, } | { "kind": "state", event_id: string, sender: string, 
+/**
+ * As for messages.
+ */
+origin_server_ts: number | null, change: StateChange, };
 
 export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, };
 
@@ -335,7 +453,8 @@ export const timelinePageFixture = {
       "event_id": "$event",
       "sender": "@alice:server.invalid",
       "body": "hostile <img src=x onerror=alert(1)>",
-      "origin_server_ts": 1767258000000
+      "origin_server_ts": 1767258000000,
+      "reply_to": null
     },
     {
       "kind": "notice",
@@ -354,6 +473,17 @@ export const timelinePageFixture = {
       "width": 640,
       "height": 480,
       "encrypted": true
+    },
+    {
+      "kind": "state",
+      "event_id": "$joined",
+      "sender": "@bob:server.invalid",
+      "origin_server_ts": 1767258090000,
+      "change": {
+        "type": "member",
+        "target": "@bob:server.invalid",
+        "membership": "joined"
+      }
     },
     {
       "kind": "gap",

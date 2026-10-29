@@ -406,6 +406,41 @@ fn encoded(budgets: &ResourceBudgets, bytes: &[u8]) -> Encoded {
 
 const JPEG: &[u8] = b"\xff\xd8\xff\xe0 jpeg body \xff\xd9";
 
+/// GIVEN an image to send WHEN it is copied for the SDK THEN the upload
+/// stays in `EncodedInFlight` and the copy, with the SDK's own copies, is
+/// reserved in `OutgoingSend`: [`SENT_COPIES`] times the image in all, all
+/// released when the send ends.
+#[test]
+fn given_an_image_copied_for_send_then_the_sdk_copies_are_reserved_apart() {
+    let budgets = budgets();
+    let upload = ImageUpload::for_tests(&budgets, JPEG);
+    let (copy, permit) = upload.copy_for_send().unwrap();
+    assert_eq!(copy, JPEG);
+    let length = JPEG.len() as u64;
+    assert_eq!(budgets.class_used(BudgetClass::EncodedInFlight), length);
+    assert_eq!(
+        budgets.class_used(BudgetClass::OutgoingSend),
+        (SENT_COPIES - 1) * length
+    );
+    drop((copy, permit));
+    assert_eq!(budgets.class_used(BudgetClass::OutgoingSend), 0);
+}
+
+/// GIVEN an image of the largest size sent, while a received image of the
+/// largest size downloads WHEN it is copied for the SDK THEN every copy
+/// fits; a second send at the same time does not.
+#[test]
+fn given_the_largest_image_then_its_send_fits_beside_downloads() {
+    let budgets = budgets();
+    let largest = vec![0xff; MAX_SENT_BYTES as usize];
+    let upload = ImageUpload::for_tests(&budgets, &largest);
+    let downloading = Encoded::reserve(&budgets, MAX_ENCODED_BYTES).unwrap();
+    let (copy, _permit) = upload.copy_for_send().unwrap();
+    assert_eq!(copy.len() as u64, MAX_SENT_BYTES);
+    assert_eq!(upload.copy_for_send().err(), Some(ErrorCode::LimitExceeded));
+    drop(downloading);
+}
+
 /// GIVEN a picked JPEG WHEN the draft is prepared THEN the worker strips it
 /// and decodes the stripped copy (two runs), the preview has the oriented,
 /// fitted size, and the draft sends exactly the stripped bytes with the
@@ -681,7 +716,7 @@ fn fetch_with(
         .enable_all()
         .build()
         .unwrap();
-    let http = crate::homeserver::http_client().unwrap();
+    let http = crate::homeserver::http_client(None).unwrap();
     let result = runtime.block_on(download(&http, url, token, cap, &budgets, current));
     (result, budgets)
 }

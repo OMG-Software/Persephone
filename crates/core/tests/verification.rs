@@ -303,3 +303,111 @@ fn given_both_devices_start_a_comparison_then_the_flow_follows_the_one_kept() {
         assert_compares(&this, &other, &mut flow, &theirs).await;
     });
 }
+
+/// This device with cross-signing set up (so it holds the self-signing key)
+/// and the account's other device, each knowing the other's keys.
+async fn two_devices(server: &MockServer) -> (Client, Client) {
+    Mock::given(any())
+        .respond_with(Homeserver::default())
+        .mount(server)
+        .await;
+    let this = signed_in(server, THIS).await;
+    let other = signed_in(server, OTHER).await;
+    sync(&this).await;
+    sync(&other).await;
+    this.encryption()
+        .bootstrap_cross_signing(None)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        sync(&this).await;
+        sync(&other).await;
+    }
+    (this, other)
+}
+
+/// GIVEN this device holds the account's self-signing key WHEN it asks the
+/// account's other device, by its ID, to verify each other and both confirm
+/// the same emoji THEN the request reaches that device, the flow ends done,
+/// and this device's store holds the other device as signed by the account.
+#[test]
+fn given_a_verified_device_then_it_verifies_another_device_by_id() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let server = MockServer::start().await;
+        let (this, other) = two_devices(&server).await;
+        let mut flow = verification::start_device(&this, &user(), OTHER)
+            .await
+            .expect("the request is sent to the other device");
+        assert!(!flow.is_contact(), "it verifies the account's own device");
+        sync(&other).await;
+        let request = other
+            .encryption()
+            .get_verification_request(&user(), flow.flow_id())
+            .await
+            .expect("the other device received the request");
+        request.accept().await.unwrap();
+        let theirs = request
+            .start_sas()
+            .await
+            .unwrap()
+            .expect("the other device starts a comparison");
+        assert_compares(&this, &other, &mut flow, &theirs).await;
+
+        let id = flow.flow_id().to_owned();
+        flow.act(&this, &verification::Action::Confirm(id))
+            .await
+            .unwrap();
+        theirs.confirm().await.unwrap();
+        for _ in 0..6 {
+            sync(&this).await;
+            flow.drive().await;
+            sync(&other).await;
+            if flow.view().phase == VerificationPhase::Done {
+                break;
+            }
+        }
+        assert_eq!(flow.view().phase, VerificationPhase::Done);
+        let device = this
+            .encryption()
+            .get_device(&user(), &matrix_sdk::ruma::OwnedDeviceId::from(OTHER))
+            .await
+            .unwrap()
+            .expect("the other device is known");
+        assert!(device.is_verified(), "this device trusts the other one now");
+    });
+}
+
+/// GIVEN this device WHEN it asks to verify itself, a device the account
+/// does not have, or another device while it lacks the self-signing key
+/// THEN each is refused with its own code and no request is sent.
+#[test]
+fn given_a_device_this_device_cannot_verify_then_it_is_refused() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let server = MockServer::start().await;
+        let (this, other) = two_devices(&server).await;
+        for (device, expected) in [
+            (THIS, persephone_contracts::SecurityError::DeviceNotFound),
+            (
+                "NOSUCHDEVICE",
+                persephone_contracts::SecurityError::DeviceNotFound,
+            ),
+        ] {
+            assert_eq!(
+                verification::start_device(&this, &user(), device)
+                    .await
+                    .err(),
+                Some(expected),
+                "{device}"
+            );
+        }
+        // The other device never received the private cross-signing keys.
+        assert_eq!(
+            verification::start_device(&other, &user(), THIS)
+                .await
+                .err(),
+            Some(persephone_contracts::SecurityError::CannotSignDevices)
+        );
+    });
+}

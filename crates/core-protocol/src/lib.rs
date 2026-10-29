@@ -14,7 +14,7 @@
 //! the core's frames with [`receive_from_core`], which checks the pixel
 //! frame's header against its reply before it allocates the body.
 
-pub use persephone_contracts::RoomChange;
+pub use persephone_contracts::{AccountSettings, NotificationLevel, RoomChange, ThreePidMedium};
 use persephone_media_protocol::{
     FrameError, FrameHeader, FrameKind, MAX_DIMENSION, MIB, RGBA_BYTES_PER_PIXEL, ReceivedFrame,
     ResourceBudgets, read_frame, write_frame,
@@ -67,6 +67,32 @@ pub enum Call {
     SignIn {
         homeserver: String,
     },
+    /// The profile's SOCKS5 proxy (ADR-0028). Available whenever the profile
+    /// is unlocked, signed in or not.
+    ProxySetting {},
+    /// Set the profile's SOCKS5 proxy as `host:port` (or after `socks5://`),
+    /// at most [`MAX_PROXY_BYTES`]; null removes it. It applies to
+    /// connections made afterwards.
+    SetProxySetting {
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        proxy: Option<String>,
+    },
+    /// Find the homeserver of a server name such as `example.org`, through
+    /// its `.well-known/matrix/client` file, and confirm it speaks Matrix
+    /// (ADR-0027). Answered when done; `not_found` when no Matrix server is
+    /// there.
+    DiscoverHomeserver {
+        server_name: String,
+    },
+    /// Sign in to this homeserver through its OAuth 2.0 provider (OIDC,
+    /// ADR-0030). The core asks in its own window before the provider's page
+    /// opens in the browser; the password goes to the provider, never here.
+    /// Replies at once like `SignIn`; the outcome arrives as
+    /// [`Event::SessionChanged`].
+    SignInWithOidc {
+        homeserver: String,
+    },
     /// Register a new account named `username` (a localpart) on this
     /// homeserver, then sign in to it. The core checks that the name is free
     /// first, then asks for the password (twice) and, when the homeserver
@@ -97,6 +123,66 @@ pub enum Call {
     SendMessage {
         room_id: String,
         body: String,
+        /// The event in this room the message replies to. Required, though
+        /// it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        reply_to: Option<String>,
+    },
+    /// Queue a new version of one of this account's text messages in this
+    /// room. Replies like `SendMessage`. When it is sent, the core checks
+    /// that the message is this account's own text message, and fails it
+    /// as `rejected` otherwise.
+    EditMessage {
+        room_id: String,
+        event_id: String,
+        body: String,
+    },
+    /// Open a link from a message in the user's browser. The core checks it
+    /// (only http and https, at most [`MAX_LINK_BYTES`]) and asks in its own
+    /// window first (ADR-0024). Replies `true` when opened, `false` when the
+    /// user said no; `invalid_argument` for a refused link.
+    OpenLink {
+        url: String,
+    },
+    /// Who else is typing in a joined room and, when `event_id` is given,
+    /// who else has read up to that event.
+    RoomActivity {
+        room_id: String,
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        event_id: Option<String>,
+    },
+    /// Tell a joined room this account started or stopped typing. Refused as
+    /// `rejected` while the account's settings do not send typing notices
+    /// (ADR-0023).
+    SetTyping {
+        room_id: String,
+        typing: bool,
+    },
+    /// Mark a joined room read up to this event: its fully-read marker and
+    /// a private read receipt, which only this account's devices see, and a
+    /// public read receipt when the account's settings send them
+    /// (ADR-0023).
+    MarkRead {
+        room_id: String,
+        event_id: String,
+    },
+    /// React to this event in a joined room with `key`, usually an emoji:
+    /// some visible text of at most [`MAX_REACTION_KEY_BYTES`], without
+    /// control characters. Sent like a message: in an encrypted room it is
+    /// encrypted, in a room that is not, only after `allow_unencrypted`, and
+    /// not while a member's identity change waits (`rejected` then). A
+    /// reaction is taken back with `delete_message` on its own event.
+    React {
+        room_id: String,
+        event_id: String,
+        key: String,
+    },
+    /// Delete (redact) this event in a joined room, for everyone. The
+    /// homeserver decides whether this account may.
+    DeleteMessage {
+        room_id: String,
+        event_id: String,
     },
     /// The room's messages sent from this device in this session.
     PendingMessages {
@@ -191,6 +277,19 @@ pub enum Call {
     DiscardImage {
         handle: String,
     },
+    /// Ask the user for a file to send in this room, in the core's own file
+    /// dialog, and queue it at once (ADR-0029); the page never names a path.
+    /// Replies with the queued message, or null when the user cancelled.
+    PickFile {
+        room_id: String,
+    },
+    /// Download and decrypt the file of this event, then ask the user where
+    /// to save it in the core's own Save dialog and write it (ADR-0029).
+    /// Replies `true` when saved and `false` when the user cancelled.
+    SaveFile {
+        room_id: String,
+        event_id: String,
+    },
     /// Room invitations this account has not answered, direct-message or
     /// not, from this homeserver or another one.
     InviteList {},
@@ -225,11 +324,77 @@ pub enum Call {
     DeviceList {},
     /// This account's settings, kept in its encrypted profile.
     AccountSettings {},
-    /// Replace this account's settings. Every setting is a required field,
-    /// so the page always sends the whole set.
+    /// The sessions of this account the user has not been shown yet
+    /// (ADR-0026). The first time, the current ones are recorded and none
+    /// is new.
+    NewSessions {},
+    /// Record that the user has seen these sessions (at most
+    /// [`MAX_NEW_SESSION_IDS`] device IDs, as `new_sessions` gave them).
+    AcknowledgeSessions {
+        device_ids: Vec<String>,
+    },
+    /// Sign out another session of this account (ADR-0026). The core asks
+    /// for the account password in its own window. Replies when done with
+    /// an `AccountChange` code; this device's own ID is `invalid_argument`
+    /// (use `sign_out`).
+    RemoveDevice {
+        device_id: String,
+    },
+    /// Replace this account's settings. Every setting is a required field
+    /// of the record, which refuses unknown ones, so the page always sends
+    /// the whole set. Text sizes outside their bounds are
+    /// `invalid_argument`.
     SetAccountSettings {
-        /// Enter sends a message; otherwise it starts a new line.
-        enter_sends: bool,
+        settings: AccountSettings,
+    },
+    /// Change this account's password (ADR-0019). The core asks for the
+    /// current password and the new one (twice) in its own windows; nothing
+    /// secret crosses this channel. `sign_out_others` signs out every other
+    /// device of the account, as the specification does by default. Replies
+    /// when done with an `AccountChange` code.
+    ChangePassword {
+        sign_out_others: bool,
+    },
+    /// The email addresses and phone numbers on this account (ADR-0020).
+    ThreePids {},
+    /// Ask the homeserver to send a confirmation link to this email address,
+    /// to add it. Replaces any address waiting to be added. Never binds it
+    /// to an identity server.
+    RequestEmailToken {
+        email: String,
+    },
+    /// Ask the homeserver to send a code to this phone number, given as a
+    /// two-letter country code and the number as dialled there.
+    RequestPhoneToken {
+        country: String,
+        phone_number: String,
+    },
+    /// Add the address waiting to be added, once it is confirmed. The core
+    /// asks for a phone's code and for the account password in its own
+    /// windows.
+    AddThreePid {},
+    /// Remove an email address or phone number from this account.
+    RemoveThreePid {
+        medium: ThreePidMedium,
+        address: String,
+    },
+    /// Ask another of this account's devices to verify each other by
+    /// comparing emoji, from a verified device. Progress arrives as
+    /// [`Event::SecurityChanged`], as for `VerifyThisDevice`.
+    VerifyDevice {
+        device_id: String,
+    },
+    /// Replace the recovery key (ADR-0021). The core warns in its own window
+    /// that the old key stops working, then shows the new key there and
+    /// offers to save it to a file it writes itself. The key never crosses
+    /// this channel. Replies at once with the status.
+    ChangeRecoveryKey {},
+    /// This account's notification level, from its push rules (ADR-0022).
+    NotificationLevel {},
+    /// Set this account's notification level in its push rules. `custom`
+    /// is `invalid_argument`.
+    SetNotificationLevel {
+        level: NotificationLevel,
     },
     /// The local profiles (accounts) on this computer, by slot number. No
     /// path or account name crosses.
@@ -265,6 +430,17 @@ pub enum Call {
         room_id: String,
         filter: String,
     },
+    /// The homeservers with members (joined or invited) in a joined room:
+    /// every one of them receives its messages and metadata.
+    RoomServers {
+        room_id: String,
+    },
+    /// Who can read a joined room's new messages: each joined or invited
+    /// member, how far this account trusts them, and how many of their
+    /// devices receive room keys or are refused them (ADR-0005).
+    RoomReaders {
+        room_id: String,
+    },
     /// Change one setting of a joined room, or act on one member. The
     /// homeserver decides whether this account may.
     ChangeRoom {
@@ -272,6 +448,31 @@ pub enum Call {
         change: RoomChange,
     },
 }
+
+/// Longest email address either side accepts, in bytes (RFC 5321's path
+/// limit less its angle brackets).
+pub const MAX_EMAIL_BYTES: usize = 254;
+
+/// Longest phone number either side accepts, in bytes.
+pub const MAX_PHONE_NUMBER_BYTES: usize = 32;
+
+/// The exact length of a country code (ISO 3166-1 alpha-2).
+pub const COUNTRY_CODE_BYTES: usize = 2;
+
+/// Longest 3PID address either side accepts in `remove_three_pid`.
+pub const MAX_THREE_PID_ADDRESS_BYTES: usize = MAX_EMAIL_BYTES;
+
+/// Most email addresses and phone numbers a `three_pids` reply lists.
+pub const MAX_THREE_PIDS: usize = 50;
+
+/// Most device IDs one `acknowledge_sessions` call carries.
+pub const MAX_NEW_SESSION_IDS: usize = 10;
+
+/// Longest device ID either side accepts in a call.
+pub const MAX_DEVICE_ID_BYTES: usize = 255;
+
+/// Longest room or sender name in a [`Event::Notification`], in bytes.
+pub const MAX_NOTIFICATION_NAME_BYTES: usize = 512;
 
 /// Longest room topic either side accepts, in bytes.
 pub const MAX_TOPIC_BYTES: usize = 4096;
@@ -339,6 +540,12 @@ pub const MAX_DISPLAY_NAME_BYTES: usize = 256;
 /// Most local profiles (slots 1 to this number) on one computer.
 pub const MAX_PROFILES: u32 = 8;
 
+/// Longest link either side accepts in `open_link`, in bytes.
+pub const MAX_LINK_BYTES: usize = 2048;
+
+/// Longest reaction key either side accepts, in bytes.
+pub const MAX_REACTION_KEY_BYTES: usize = 64;
+
 /// Longest event ID either side accepts in a call (the Matrix limit).
 pub const MAX_EVENT_ID_BYTES: usize = 255;
 
@@ -359,6 +566,13 @@ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
 /// Longest username (localpart) either side accepts when registering.
 pub const MAX_USERNAME_BYTES: usize = 255;
+
+/// Longest proxy address either side accepts, in bytes.
+pub const MAX_PROXY_BYTES: usize = 300;
+
+/// Longest server name either side accepts in `discover_homeserver`, in
+/// bytes (a DNS name and a port).
+pub const MAX_SERVER_NAME_BYTES: usize = 261;
 
 /// Longest homeserver URL either side accepts in a call.
 pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
@@ -386,6 +600,16 @@ pub enum Event {
     /// The account's encryption state changed: ask for `security_status`.
     /// Coalesced; it does not clear what the UI shows.
     SecurityChanged {},
+    /// A message arrived that the account's push rules say to notify of, and
+    /// desktop notifications are on (ADR-0022). The UI process shows a
+    /// desktop notification with these names and never forwards it to the
+    /// page. Names only, never message text; each is projected and at most
+    /// [`MAX_NOTIFICATION_NAME_BYTES`]. Both are empty when the account's
+    /// settings leave names out. Coalesced: only the latest waits.
+    Notification {
+        room: String,
+        sender: String,
+    },
 }
 
 /// Every frame from the core to the UI: a reply to a call, or an event.
@@ -842,8 +1066,141 @@ mod tests {
                 r#"{"id":1,"call":{"command":"display_name"}}"#,
             ),
             (
+                Call::SendMessage {
+                    room_id: "!r:s".into(),
+                    body: "yes".into(),
+                    reply_to: Some("$e".into()),
+                },
+                r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"yes","reply_to":"$e"}}"#,
+            ),
+            (
+                Call::SendMessage {
+                    room_id: "!r:s".into(),
+                    body: "hi".into(),
+                    reply_to: None,
+                },
+                r#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"hi","reply_to":null}}"#,
+            ),
+            (
+                Call::PickFile {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"pick_file","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::SaveFile {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                },
+                r#"{"id":1,"call":{"command":"save_file","room_id":"!r:s","event_id":"$e"}}"#,
+            ),
+            (
+                Call::RoomReaders {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"room_readers","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::RoomServers {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"room_servers","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::OpenLink {
+                    url: "https://example.org/".into(),
+                },
+                r#"{"id":1,"call":{"command":"open_link","url":"https://example.org/"}}"#,
+            ),
+            (
+                Call::RoomActivity {
+                    room_id: "!r:s".into(),
+                    event_id: Some("$e".into()),
+                },
+                r#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s","event_id":"$e"}}"#,
+            ),
+            (
+                Call::SetTyping {
+                    room_id: "!r:s".into(),
+                    typing: true,
+                },
+                r#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s","typing":true}}"#,
+            ),
+            (
+                Call::MarkRead {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                },
+                r#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s","event_id":"$e"}}"#,
+            ),
+            (
+                Call::React {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                    key: "👍".into(),
+                },
+                r#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e","key":"👍"}}"#,
+            ),
+            (
+                Call::DeleteMessage {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                },
+                r#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s","event_id":"$e"}}"#,
+            ),
+            (
+                Call::EditMessage {
+                    room_id: "!r:s".into(),
+                    event_id: "$e".into(),
+                    body: "fixed".into(),
+                },
+                r#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":"$e","body":"fixed"}}"#,
+            ),
+            (
                 Call::SetDisplayName { name: "Al".into() },
                 r#"{"id":1,"call":{"command":"set_display_name","name":"Al"}}"#,
+            ),
+            (
+                Call::NewSessions {},
+                r#"{"id":1,"call":{"command":"new_sessions"}}"#,
+            ),
+            (
+                Call::SignInWithOidc {
+                    homeserver: "https://example.org/".into(),
+                },
+                r#"{"id":1,"call":{"command":"sign_in_with_oidc","homeserver":"https://example.org/"}}"#,
+            ),
+            (
+                Call::ProxySetting {},
+                r#"{"id":1,"call":{"command":"proxy_setting"}}"#,
+            ),
+            (
+                Call::SetProxySetting {
+                    proxy: Some("127.0.0.1:9050".into()),
+                },
+                r#"{"id":1,"call":{"command":"set_proxy_setting","proxy":"127.0.0.1:9050"}}"#,
+            ),
+            (
+                Call::SetProxySetting { proxy: None },
+                r#"{"id":1,"call":{"command":"set_proxy_setting","proxy":null}}"#,
+            ),
+            (
+                Call::DiscoverHomeserver {
+                    server_name: "example.org".into(),
+                },
+                r#"{"id":1,"call":{"command":"discover_homeserver","server_name":"example.org"}}"#,
+            ),
+            (
+                Call::AcknowledgeSessions {
+                    device_ids: vec!["DEV".into()],
+                },
+                r#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":["DEV"]}}"#,
+            ),
+            (
+                Call::RemoveDevice {
+                    device_id: "DEV".into(),
+                },
+                r#"{"id":1,"call":{"command":"remove_device","device_id":"DEV"}}"#,
             ),
             (
                 Call::DeviceList {},
@@ -854,8 +1211,19 @@ mod tests {
                 r#"{"id":1,"call":{"command":"account_settings"}}"#,
             ),
             (
-                Call::SetAccountSettings { enter_sends: false },
-                r#"{"id":1,"call":{"command":"set_account_settings","enter_sends":false}}"#,
+                Call::SetAccountSettings {
+                    settings: AccountSettings {
+                        enter_sends: false,
+                        chat_text_percent: 120,
+                        interface_text_percent: 90,
+                        desktop_notifications: true,
+                        send_typing: false,
+                        send_read_receipts: true,
+                        idle_lock_minutes: 15,
+                        notification_names: false,
+                    },
+                },
+                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false}}}"#,
             ),
             (
                 Call::ProfileList {},
@@ -897,6 +1265,12 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":"false"}}"#,
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":null}}"#,
             br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"theme":"x"}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":100,"interface_text_percent":100}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":true,"chatTextPercent":-1,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false}}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":true,"chatTextPercent":70000,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false}}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false}}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"extra":1}}}"#,
+            br#"{"id":1,"call":{"command":"set_account_settings","enter_sends":true,"chat_text_percent":100,"interface_text_percent":100,"desktop_notifications":false}}"#,
             br#"{"id":1,"call":{"command":"profile_list","all":true}}"#,
             br#"{"id":1,"call":{"command":"add_profile","dir":"C:\\x"}}"#,
             br#"{"id":1,"call":{"command":"switch_profile"}}"#,
@@ -914,6 +1288,120 @@ mod tests {
                 String::from_utf8_lossy(body)
             );
         }
+    }
+
+    /// GIVEN the account calls of ADR-0019 to ADR-0022 WHEN sent THEN only
+    /// their documented, non-secret arguments cross: no password, code,
+    /// recovery key or path field exists, and anything else is refused.
+    #[test]
+    fn given_account_change_calls_then_they_have_a_strict_wire_form() {
+        let budgets = ResourceBudgets::default();
+        for (call, wire) in [
+            (
+                Call::ChangePassword {
+                    sign_out_others: true,
+                },
+                r#"{"id":1,"call":{"command":"change_password","sign_out_others":true}}"#,
+            ),
+            (
+                Call::ThreePids {},
+                r#"{"id":1,"call":{"command":"three_pids"}}"#,
+            ),
+            (
+                Call::RequestEmailToken {
+                    email: "a@example.org".into(),
+                },
+                r#"{"id":1,"call":{"command":"request_email_token","email":"a@example.org"}}"#,
+            ),
+            (
+                Call::RequestPhoneToken {
+                    country: "GB".into(),
+                    phone_number: "07700900123".into(),
+                },
+                r#"{"id":1,"call":{"command":"request_phone_token","country":"GB","phone_number":"07700900123"}}"#,
+            ),
+            (
+                Call::AddThreePid {},
+                r#"{"id":1,"call":{"command":"add_three_pid"}}"#,
+            ),
+            (
+                Call::RemoveThreePid {
+                    medium: ThreePidMedium::Msisdn,
+                    address: "447700900123".into(),
+                },
+                r#"{"id":1,"call":{"command":"remove_three_pid","medium":"msisdn","address":"447700900123"}}"#,
+            ),
+            (
+                Call::VerifyDevice {
+                    device_id: "ABCDEF".into(),
+                },
+                r#"{"id":1,"call":{"command":"verify_device","device_id":"ABCDEF"}}"#,
+            ),
+            (
+                Call::ChangeRecoveryKey {},
+                r#"{"id":1,"call":{"command":"change_recovery_key"}}"#,
+            ),
+            (
+                Call::NotificationLevel {},
+                r#"{"id":1,"call":{"command":"notification_level"}}"#,
+            ),
+            (
+                Call::SetNotificationLevel {
+                    level: NotificationLevel::Mentions,
+                },
+                r#"{"id":1,"call":{"command":"set_notification_level","level":"mentions"}}"#,
+            ),
+        ] {
+            let request = Request { id: 1, call };
+            let mut sent = Vec::new();
+            send(&mut sent, &request).unwrap();
+            assert_eq!(String::from_utf8(sent[17..].to_vec()).unwrap(), wire);
+            let mut reader = Cursor::new(sent);
+            assert_eq!(
+                receive::<_, Request>(&mut reader, &budgets).unwrap(),
+                request
+            );
+        }
+        for body in [
+            &br#"{"id":1,"call":{"command":"change_password"}}"#[..],
+            br#"{"id":1,"call":{"command":"change_password","sign_out_others":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"change_password","sign_out_others":true,"new_password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"three_pids","medium":"email"}}"#,
+            br#"{"id":1,"call":{"command":"request_email_token"}}"#,
+            br#"{"id":1,"call":{"command":"request_email_token","email":"a@b","id_server":"is.example"}}"#,
+            br#"{"id":1,"call":{"command":"request_phone_token","phone_number":"1"}}"#,
+            br#"{"id":1,"call":{"command":"add_three_pid","sid":"s"}}"#,
+            br#"{"id":1,"call":{"command":"add_three_pid","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"remove_three_pid","medium":"fax","address":"1"}}"#,
+            br#"{"id":1,"call":{"command":"remove_three_pid","address":"a@b"}}"#,
+            br#"{"id":1,"call":{"command":"verify_device"}}"#,
+            br#"{"id":1,"call":{"command":"verify_device","device_id":null}}"#,
+            br#"{"id":1,"call":{"command":"change_recovery_key","key":"x"}}"#,
+            br#"{"id":1,"call":{"command":"change_recovery_key","path":"C:\\x"}}"#,
+            br#"{"id":1,"call":{"command":"set_notification_level"}}"#,
+            br#"{"id":1,"call":{"command":"set_notification_level","level":"loud"}}"#,
+        ] {
+            let mut reader = Cursor::new(frame(FrameKind::Control, body));
+            assert!(
+                matches!(
+                    receive::<_, Request>(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+        // The notification event carries two names and nothing else.
+        let event = CoreMessage::Event(Event::Notification {
+            room: "Plans".into(),
+            sender: "Bob".into(),
+        });
+        let mut sent = Vec::new();
+        send(&mut sent, &event).unwrap();
+        assert_eq!(
+            String::from_utf8(sent[17..].to_vec()).unwrap(),
+            r#"{"event":{"notification":{"room":"Plans","sender":"Bob"}}}"#
+        );
     }
 
     /// GIVEN the room settings calls WHEN sent THEN they cross in the
@@ -1122,6 +1610,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"unlock_session","passphrase":"x"}}"#,
             br#"{"id":1,"call":{"command":"reset_profile","confirm":true}}"#,
             br#"{"id":1,"call":{"command":"sign_in"}}"#,
+            br#"{"id":1,"call":{"command":"sign_in_with_oidc"}}"#,
+            br#"{"id":1,"call":{"command":"sign_in_with_oidc","homeserver":"https://h","code":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":"https://h","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"sign_in","homeserver":null}}"#,
             br#"{"id":1,"call":{"command":"register","homeserver":"https://h"}}"#,
@@ -1136,6 +1626,39 @@ mod tests {
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","encrypted":false}}"#,
             br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","txn_id":"t"}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x"}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","reply_to":1}}"#,
+            br#"{"id":1,"call":{"command":"send_message","room_id":"!r:s","body":"x","reply_to":null,"edit":"$e"}}"#,
+            br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","body":"x"}}"#,
+            br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e"}}"#,
+            br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"room_activity","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"open_link"}}"#,
+            br#"{"id":1,"call":{"command":"room_servers"}}"#,
+            br#"{"id":1,"call":{"command":"pick_file","room_id":"!r:s","path":"C:/x"}}"#,
+            br#"{"id":1,"call":{"command":"save_file","room_id":"!r:s","event_id":"$e","path":"C:/x"}}"#,
+            br#"{"id":1,"call":{"command":"save_file","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"new_sessions","all":true}}"#,
+            br#"{"id":1,"call":{"command":"discover_homeserver"}}"#,
+            br#"{"id":1,"call":{"command":"set_proxy_setting"}}"#,
+            br#"{"id":1,"call":{"command":"set_proxy_setting","proxy":"h:1","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"proxy_setting","proxy":null}}"#,
+            br#"{"id":1,"call":{"command":"discover_homeserver","server_name":"e.org","url":"x"}}"#,
+            br#"{"id":1,"call":{"command":"acknowledge_sessions"}}"#,
+            br#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":"DEV"}}"#,
+            br#"{"id":1,"call":{"command":"remove_device"}}"#,
+            br#"{"id":1,"call":{"command":"remove_device","device_id":"DEV","password":"x"}}"#,
+            br#"{"id":1,"call":{"command":"room_readers","room_id":"!r:s","all":true}}"#,
+            br#"{"id":1,"call":{"command":"room_servers","room_id":"!r:s","limit":5}}"#,
+            br#"{"id":1,"call":{"command":"open_link","url":"https://e.org","confirmed":true}}"#,
+            br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"set_typing","room_id":"!r:s","typing":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"mark_read","room_id":"!r:s","event_id":"$e","public":true}}"#,
+            br#"{"id":1,"call":{"command":"react","room_id":"!r:s","event_id":"$e","key":null}}"#,
+            br#"{"id":1,"call":{"command":"delete_message","room_id":"!r:s","event_id":"$e","reason":"spam"}}"#,
+            br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":null,"body":"x"}}"#,
+            br#"{"id":1,"call":{"command":"edit_message","room_id":"!r:s","event_id":"$e","body":"x","sender":"@b:s"}}"#,
             br#"{"id":1,"call":{"command":"retry_message","local_id":-1}}"#,
             br#"{"id":1,"call":{"command":"retry_message","local_id":4294967296}}"#,
             br#"{"id":1,"call":{"command":"discard_message","local_id":"1"}}"#,

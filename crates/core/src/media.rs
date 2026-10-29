@@ -76,6 +76,26 @@ use zeroize::Zeroizing;
 
 /// Largest encoded image, downloaded or picked (the media plan's limit).
 pub const MAX_ENCODED_BYTES: u64 = 20 * MIB;
+/// Copies of an image or file alive at the peak of one send, counted in its
+/// length (matrix-sdk 0.19.1 `Room::send_attachment`): the outbox's; the
+/// SDK's input, kept for the whole call; the upload buffer, which the
+/// request keeps for a retry after a token refresh (a clone in a room that
+/// is not encrypted, or the encrypted copy, whose capacity can reach twice
+/// the length as it grows); the clone of the request that is sent; and the
+/// HTTP body serialized from it. Five in a room that is not encrypted, six
+/// in one that is. The outbox's copy is in `EncodedInFlight`; the others
+/// are in `OutgoingSend` (ADR-0031).
+pub const SENT_COPIES: u64 = 6;
+/// Largest image (after stripping) or file sent: the same as one received.
+/// Picked files are read at most [`MAX_ENCODED_BYTES`], checked on the open
+/// file before anything is read, and a stripped image is an encoded frame of
+/// at most that size, so neither needs a check of its own. One send's SDK
+/// copies fit `OutgoingSend`; one attachment is sent at a time
+/// (`outbox::MAX_UNSENT_IMAGES`).
+pub const MAX_SENT_BYTES: u64 = MAX_ENCODED_BYTES;
+const _: () = assert!(MAX_ENCODED_BYTES <= MAX_SENT_BYTES);
+const _: () =
+    assert!((SENT_COPIES - 1) * MAX_SENT_BYTES <= persephone_media_protocol::OUTGOING_SEND_LIMIT);
 /// Received and preview images are scaled down to fit this square; 2048 x
 /// 2048 RGBA is 16 MiB, so four fit the `RetainedPixels` budget.
 pub const MAX_SHOWN_SIDE: u32 = 2048;
@@ -476,12 +496,17 @@ impl ImageUpload {
         self.bytes.is_empty()
     }
 
-    /// A copy for the SDK, which takes the data by value, reserved like the
-    /// upload itself. The SDK's copy is not zeroed.
+    /// A copy for the SDK, which takes the data by value, reserved in
+    /// `OutgoingSend` before it is allocated together with the copies the SDK
+    /// makes while it uploads (all but the upload's own of [`SENT_COPIES`]).
+    /// No SDK copy is zeroed.
     pub fn copy_for_send(&self) -> Result<(Vec<u8>, BudgetPermit), ErrorCode> {
         let permit = self
             .budgets
-            .try_acquire(BudgetClass::EncodedInFlight, self.bytes.len() as u64)
+            .try_acquire(
+                BudgetClass::OutgoingSend,
+                (SENT_COPIES - 1) * self.bytes.len() as u64,
+            )
             .map_err(|_| ErrorCode::LimitExceeded)?;
         let mut copy = Vec::new();
         copy.try_reserve_exact(self.bytes.len())
@@ -669,7 +694,6 @@ pub struct MediaService {
     /// One worker run at a time; admitted work waits here, bounded by the
     /// admission limits.
     worker_slot: Mutex<()>,
-    http: Mutex<Option<reqwest::Client>>,
 }
 
 impl MediaService {
@@ -681,7 +705,6 @@ impl MediaService {
             loads: AtomicUsize::new(0),
             picks: AtomicUsize::new(0),
             worker_slot: Mutex::new(()),
-            http: Mutex::new(None),
         }
     }
 
@@ -701,17 +724,6 @@ impl MediaService {
             return Err(ErrorCode::LimitExceeded);
         }
         take_slot(&self.picks, MAX_PICKS)
-    }
-
-    /// The HTTP client for downloads, with the core's connection policy.
-    pub fn http(&self) -> Result<reqwest::Client, ErrorCode> {
-        let mut http = guard(&self.http);
-        if let Some(client) = http.as_ref() {
-            return Ok(client.clone());
-        }
-        let client = crate::homeserver::http_client().map_err(|_| ErrorCode::Unavailable)?;
-        *http = Some(client.clone());
-        Ok(client)
     }
 
     /// Decodes one image in the worker.
@@ -1219,7 +1231,42 @@ pub async fn fetch(
     {
         return Err(ErrorCode::Rejected);
     }
-    let (uri, encryption) = match &image.source {
+    fetch_source(client, http, &image.source, budgets, current).await
+}
+
+/// The event `event_id` in the joined room `room_id`, from the homeserver,
+/// decrypted when it can be.
+pub async fn room_event(
+    client: &Client,
+    room_id: &str,
+    event_id: &str,
+) -> Result<TimelineEvent, ErrorCode> {
+    let room_id = <&RoomId>::try_from(room_id).map_err(|_| ErrorCode::InvalidArgument)?;
+    let event_id = <&EventId>::try_from(event_id).map_err(|_| ErrorCode::InvalidArgument)?;
+    let room = client
+        .get_room(room_id)
+        .filter(|room| room.state() == RoomState::Joined)
+        .ok_or(ErrorCode::NotFound)?;
+    room.event(event_id, None)
+        .await
+        .map_err(|error| match error {
+            matrix_sdk::Error::Http(http) if matches!(*http, HttpError::Api(_)) => {
+                ErrorCode::NotFound
+            }
+            _ => ErrorCode::Unavailable,
+        })
+}
+
+/// Downloads `source` (at most [`MAX_ENCODED_BYTES`]) and decrypts it when
+/// it is encrypted.
+pub async fn fetch_source(
+    client: &Client,
+    http: &reqwest::Client,
+    source: &MediaSource,
+    budgets: &ResourceBudgets,
+    current: &(dyn Fn() -> bool + Sync),
+) -> Result<Encoded, ErrorCode> {
+    let (uri, encryption) = match source {
         MediaSource::Plain(uri) => (uri.clone(), None),
         MediaSource::Encrypted(file) => (
             file.url.clone(),

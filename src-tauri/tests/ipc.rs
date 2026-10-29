@@ -157,17 +157,19 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false}),
             ),
             // A reply carrying a secret is refused by the contract.
-            Call::SendMessage { room_id, body } => match body.as_str() {
-                "hello" => Ok(serde_json::json!({
-                    "localId": 1, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
-                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
-                })),
-                // A reply carrying the transaction ID is refused by the contract.
-                _ => Ok(serde_json::json!({
-                    "localId": 2, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
-                    "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64, "transactionId": "t"
-                })),
-            },
+            Call::SendMessage { room_id, body, .. } | Call::EditMessage { room_id, body, .. } => {
+                match body.as_str() {
+                    "hello" => Ok(serde_json::json!({
+                        "localId": 1, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
+                        "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64
+                    })),
+                    // A reply carrying the transaction ID is refused by the contract.
+                    _ => Ok(serde_json::json!({
+                        "localId": 2, "roomId": room_id, "kind": "text", "body": body, "state": "queued",
+                        "eventId": null, "failure": null, "queuedAt": 1_767_258_000_000_u64, "transactionId": "t"
+                    })),
+                }
+            }
             Call::PendingMessages { .. } => Ok(serde_json::json!([])),
             Call::RetryMessage { local_id } | Call::DiscardMessage { local_id } => match local_id {
                 1 => Ok(serde_json::Value::Null),
@@ -187,6 +189,9 @@ impl CoreTransport for FakeCore {
                 ),
                 _ => Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null})),
             },
+            Call::SignInWithOidc { .. } => {
+                Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
+            }
             Call::SignIn { homeserver } => match homeserver.as_str() {
                 "https://matrix.example.org" => {
                     Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
@@ -216,6 +221,34 @@ impl CoreTransport for FakeCore {
                 ],
                 "truncated": false
             })),
+            Call::MarkRead { .. } => Ok(serde_json::Value::Null),
+            Call::PickFile { .. } => Ok(serde_json::Value::Null),
+            Call::SaveFile { event_id, .. } => Ok(serde_json::Value::Bool(event_id == "$f")),
+            Call::RoomReaders { .. } => Ok(serde_json::json!({
+                "readers": [{"userId": "@b:example.invalid", "trust": "verified",
+                    "receiving": 2, "refused": 1, "own": false}],
+                "truncated": false
+            })),
+            Call::RoomServers { .. } => Ok(serde_json::json!({
+                "servers": [{"name": "example.invalid", "members": 2, "own": true}],
+                "truncated": false
+            })),
+            Call::OpenLink { url } => Ok(serde_json::Value::Bool(url == "https://example.org/")),
+            Call::RoomActivity { .. } => Ok(serde_json::json!({
+                "typing": ["@b:example.invalid"], "readBy": [], "truncated": false
+            })),
+            Call::SetTyping { typing, .. } => match typing {
+                true => Ok(serde_json::Value::Null),
+                false => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
+            Call::React { key, .. } => match key.as_str() {
+                "👍" => Ok(serde_json::Value::Null),
+                _ => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
+            Call::DeleteMessage { event_id, .. } => match event_id.as_str() {
+                "$mine" => Ok(serde_json::Value::Null),
+                _ => Err(CoreError::Core(ErrorCode::Rejected)),
+            },
             Call::AcceptInvite { room_id } | Call::DeclineInvite { room_id } => {
                 match room_id.as_str() {
                     "!inv:example.invalid" => Ok(serde_json::Value::Null),
@@ -263,11 +296,63 @@ impl CoreTransport for FakeCore {
                 "Al" => Ok(serde_json::json!({"displayName": "Al"})),
                 _ => Err(CoreError::Core(ErrorCode::Rejected)),
             },
-            Call::AccountSettings {} => Ok(serde_json::json!({"enterSends": false})),
-            Call::SetAccountSettings { enter_sends } => match enter_sends {
+            Call::AccountSettings {} => Ok(serde_json::json!({
+                "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
+                "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
+                "idleLockMinutes": 0, "notificationNames": true
+            })),
+            Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
                 false => Err(CoreError::Core(ErrorCode::Locked)),
             },
+            Call::DiscoverHomeserver { server_name } => match server_name.as_str() {
+                "example.invalid" => Ok(serde_json::json!({
+                    "homeserver": "https://matrix.example.invalid/", "fromWellKnown": true
+                })),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
+            Call::ProxySetting {} => Ok(serde_json::json!({"proxy": "127.0.0.1:9050"})),
+            Call::SetProxySetting { proxy } => match proxy.as_deref() {
+                None | Some("127.0.0.1:9050") => Ok(serde_json::Value::Null),
+                Some(_) => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+            },
+            Call::NewSessions {} => Ok(serde_json::json!({
+                "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
+            })),
+            Call::AcknowledgeSessions { .. } => Ok(serde_json::Value::Null),
+            Call::RemoveDevice { device_id } => match device_id.as_str() {
+                "NEWDEV" => Ok(serde_json::json!("done")),
+                _ => Ok(serde_json::json!("invalid_password")),
+            },
+            Call::ChangePassword { sign_out_others } => match sign_out_others {
+                true => Ok(serde_json::json!("done")),
+                // A code outside the contract must not reach the page.
+                false => Ok(serde_json::json!("password_was_hunter2")),
+            },
+            Call::ThreePids {} => Ok(serde_json::json!({
+                "threePids": [{"medium": "email", "address": "<b>a</b>@example.invalid"}],
+                "truncated": false, "canChange": true, "pending": null
+            })),
+            Call::RequestEmailToken { email } => match email.as_str() {
+                "a@example.invalid" => Ok(serde_json::json!("token_sent")),
+                _ => Ok(serde_json::json!("medium_not_supported")),
+            },
+            Call::RequestPhoneToken { .. } => Ok(serde_json::json!("token_sent")),
+            Call::AddThreePid {} => Ok(serde_json::json!("not_confirmed")),
+            Call::RemoveThreePid { .. } => Ok(serde_json::json!("done")),
+            Call::VerifyDevice { device_id } => Ok(serde_json::json!({
+                "identity": "verified", "recovery": "enabled", "operation": "working",
+                "error": null, "canSetUpRecovery": false,
+                "verification": {"flowId": device_id, "phase": "waiting", "emoji": [],
+                    "otherDevice": null, "contact": null}
+            })),
+            Call::ChangeRecoveryKey {} => Ok(serde_json::json!({
+                "identity": "verified", "recovery": "enabled",
+                "operation": "waiting_for_confirmation", "error": null,
+                "verification": null, "canSetUpRecovery": false
+            })),
+            Call::NotificationLevel {} => Ok(serde_json::json!({"level": "custom"})),
+            Call::SetNotificationLevel { .. } => Ok(serde_json::Value::Null),
             Call::DeviceList {} => Ok(serde_json::json!({
                 "devices": [{
                     "deviceId": "ME",
@@ -447,6 +532,13 @@ fn given_core_plugin_commands_then_every_one_is_denied() {
         "plugin:resources|close",
         "plugin:menu|new",
         "plugin:tray|new",
+        // ADR-0022: the notification plugin is used from Rust only.
+        "plugin:notification|notify",
+        "plugin:notification|request_permission",
+        "plugin:notification|is_permission_granted",
+        "plugin:notification|register_action_types",
+        "plugin:notification|register_listener",
+        "plugin:notification|remove_active",
     ] {
         assert!(
             call(cmd, app_origin(), serde_json::json!({})).is_err(),
@@ -560,12 +652,28 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-unlock-session",
             "allow-reset-profile",
             "allow-sign-in",
+            "allow-sign-in-with-oidc",
+            "allow-discover-homeserver",
+            "allow-proxy-setting",
+            "allow-set-proxy-setting",
             "allow-register",
             "allow-sign-out",
             "allow-security-status",
             "allow-set-up-encryption",
             "allow-recover-with-key",
             "allow-send-message",
+            "allow-edit-message",
+            "allow-delete-message",
+            "allow-react",
+            "allow-mark-read",
+            "allow-room-activity",
+            "allow-set-typing",
+            "allow-open-link",
+            "allow-room-servers",
+            "allow-room-readers",
+            "allow-new-sessions",
+            "allow-acknowledge-sessions",
+            "allow-remove-device",
             "allow-pending-messages",
             "allow-retry-message",
             "allow-discard-message",
@@ -583,6 +691,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-image-band",
             "allow-release-image",
             "allow-pick-image",
+            "allow-pick-file",
+            "allow-save-file",
             "allow-send-image",
             "allow-discard-image",
             "allow-invite-list",
@@ -600,6 +710,16 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-device-list",
             "allow-account-settings",
             "allow-set-account-settings",
+            "allow-change-password",
+            "allow-three-pids",
+            "allow-request-email-token",
+            "allow-request-phone-token",
+            "allow-add-three-pid",
+            "allow-remove-three-pid",
+            "allow-verify-device",
+            "allow-change-recovery-key",
+            "allow-notification-level",
+            "allow-set-notification-level",
             "allow-profile-list",
             "allow-add-profile",
             "allow-switch-profile"
@@ -986,10 +1106,192 @@ fn given_sending_commands_then_bounded_arguments_cross_and_replies_are_checked()
         "invalid_argument"
     );
     assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "hi", "replyTo": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
         core.calls.load(Ordering::SeqCst),
         calls,
-        "oversized body never crossed"
+        "oversized body and reply target never crossed"
     );
+    assert_eq!(
+        invoke(
+            "send_message",
+            serde_json::json!({"roomId": room, "body": "hello", "replyTo": "$e"})
+        )
+        .unwrap()["state"],
+        "queued"
+    );
+    assert_eq!(
+        invoke(
+            "edit_message",
+            serde_json::json!({"roomId": room, "eventId": "$mine", "body": "hello"})
+        )
+        .unwrap()["state"],
+        "queued"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255)), "body": "x"}),
+        serde_json::json!({"roomId": room, "eventId": "$mine", "body": "x".repeat(16 * 1024 + 1)}),
+    ] {
+        assert_eq!(
+            invoke("edit_message", args).unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized edits never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "delete_message",
+            serde_json::json!({"roomId": room, "eventId": "$mine"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke(
+            "delete_message",
+            serde_json::json!({"roomId": room, "eventId": "$theirs"})
+        )
+        .unwrap_err(),
+        "rejected"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "delete_message",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "an oversized event ID never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "react",
+            serde_json::json!({"roomId": room, "eventId": "$e", "key": "👍"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"roomId": room, "eventId": "$e", "key": "x".repeat(65)}),
+        serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255)), "key": "👍"}),
+    ] {
+        assert_eq!(invoke("react", args).unwrap_err(), "invalid_argument");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized reactions never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "mark_read",
+            serde_json::json!({"roomId": room, "eventId": "$e"})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "mark_read",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        invoke(
+            "room_activity",
+            serde_json::json!({"roomId": room, "eventId": "$e"})
+        )
+        .unwrap()["typing"][0],
+        "@b:example.invalid"
+    );
+    assert_eq!(
+        invoke(
+            "set_typing",
+            serde_json::json!({"roomId": room, "typing": true})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke(
+            "set_typing",
+            serde_json::json!({"roomId": room, "typing": false})
+        )
+        .unwrap_err(),
+        "rejected"
+    );
+    assert_eq!(
+        invoke(
+            "open_link",
+            serde_json::json!({"url": "https://example.org/"})
+        ),
+        Ok(serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        invoke("room_servers", serde_json::json!({"roomId": room})).unwrap()["servers"][0]["members"],
+        2
+    );
+    assert_eq!(
+        invoke("pick_file", serde_json::json!({"roomId": room})),
+        Ok(serde_json::Value::Null),
+        "cancelled"
+    );
+    assert_eq!(
+        invoke(
+            "save_file",
+            serde_json::json!({"roomId": room, "eventId": "$f"})
+        ),
+        Ok(serde_json::Value::Bool(true))
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "save_file",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        invoke("room_readers", serde_json::json!({"roomId": room})).unwrap()["readers"][0]["refused"],
+        1
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "open_link",
+            serde_json::json!({"url": format!("https://example.org/{}", "a".repeat(2048))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        invoke(
+            "room_activity",
+            serde_json::json!({"roomId": room, "eventId": format!("${}", "e".repeat(255))})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
         invoke("pending_messages", serde_json::json!({"roomId": room})),
         Ok(serde_json::json!([]))
@@ -1241,23 +1543,27 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
     assert_eq!(devices["devices"][0]["current"], true);
     assert!(devices["devices"][0].get("lastSeenIp").is_none());
     assert_eq!(
-        invoke("account_settings", serde_json::json!({})).unwrap(),
-        serde_json::json!({"enterSends": false})
+        invoke("account_settings", serde_json::json!({})).unwrap()["chatTextPercent"],
+        120
     );
+    let settings = |enter_sends: bool| {
+        serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
+            "interfaceTextPercent": 100, "desktopNotifications": false,
+            "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
+            "notificationNames": true}})
+    };
+    assert!(invoke("set_account_settings", settings(true)).is_ok());
+    assert_eq!(
+        invoke("set_account_settings", settings(false)).unwrap_err(),
+        "locked"
+    );
+    // Every setting is required: an older page's call does not cross.
     assert!(
         invoke(
             "set_account_settings",
             serde_json::json!({"enterSends": true})
         )
-        .is_ok()
-    );
-    assert_eq!(
-        invoke(
-            "set_account_settings",
-            serde_json::json!({"enterSends": false})
-        )
-        .unwrap_err(),
-        "locked"
+        .is_err()
     );
     assert_eq!(
         invoke("profile_list", serde_json::json!({})).unwrap()["profiles"][1]["slot"],
@@ -1305,6 +1611,287 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         core.calls.load(Ordering::SeqCst),
         calls,
         "oversized arguments never crossed"
+    );
+}
+
+/// The account-change commands (ADR-0019 to ADR-0022) relay only codes,
+/// addresses and IDs; no password, code, key or path argument exists. Bad
+/// arguments never reach the core, and replies outside the contract are
+/// refused.
+#[test]
+fn given_account_change_commands_then_only_non_secret_arguments_cross() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    assert_eq!(
+        invoke(
+            "change_password",
+            serde_json::json!({"signOutOthers": true})
+        )
+        .unwrap(),
+        "done"
+    );
+    assert!(
+        invoke(
+            "change_password",
+            serde_json::json!({"signOutOthers": false})
+        )
+        .is_err(),
+        "a code outside the contract"
+    );
+    assert_eq!(
+        invoke("new_sessions", serde_json::json!({})).unwrap()["sessions"][0]["deviceId"],
+        "NEWDEV"
+    );
+    assert_eq!(
+        invoke(
+            "sign_in_with_oidc",
+            serde_json::json!({"homeserver": "https://matrix.example.invalid"})
+        )
+        .unwrap()["state"],
+        "signing_in"
+    );
+    assert_eq!(
+        invoke(
+            "discover_homeserver",
+            serde_json::json!({"serverName": "example.invalid"})
+        )
+        .unwrap()["homeserver"],
+        "https://matrix.example.invalid/"
+    );
+    assert_eq!(
+        invoke(
+            "discover_homeserver",
+            serde_json::json!({"serverName": "x".repeat(262)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        invoke("proxy_setting", serde_json::json!({})).unwrap()["proxy"],
+        "127.0.0.1:9050"
+    );
+    for proxy in [serde_json::json!("127.0.0.1:9050"), serde_json::Value::Null] {
+        assert_eq!(
+            invoke("set_proxy_setting", serde_json::json!({ "proxy": proxy })),
+            Ok(serde_json::Value::Null)
+        );
+    }
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        invoke(
+            "set_proxy_setting",
+            serde_json::json!({"proxy": "h".repeat(301)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        invoke(
+            "acknowledge_sessions",
+            serde_json::json!({"deviceIds": ["NEWDEV"]})
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        invoke("remove_device", serde_json::json!({"deviceId": "NEWDEV"})).unwrap(),
+        "done"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    let eleven: Vec<String> = (0..11).map(|n| format!("D{n}")).collect();
+    assert_eq!(
+        invoke(
+            "acknowledge_sessions",
+            serde_json::json!({"deviceIds": eleven})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        invoke(
+            "remove_device",
+            serde_json::json!({"deviceId": "D".repeat(256)})
+        )
+        .unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    let listed = invoke("three_pids", serde_json::json!({})).unwrap();
+    assert_eq!(listed["threePids"][0]["medium"], "email");
+    assert_eq!(
+        invoke(
+            "request_email_token",
+            serde_json::json!({"email": "a@example.invalid"})
+        )
+        .unwrap(),
+        "token_sent"
+    );
+    assert_eq!(
+        invoke(
+            "request_phone_token",
+            serde_json::json!({"country": "GB", "phoneNumber": "07700900123"})
+        )
+        .unwrap(),
+        "token_sent"
+    );
+    assert_eq!(
+        invoke("add_three_pid", serde_json::json!({})).unwrap(),
+        "not_confirmed"
+    );
+    assert_eq!(
+        invoke(
+            "remove_three_pid",
+            serde_json::json!({"medium": "msisdn", "address": "447700900123"})
+        )
+        .unwrap(),
+        "done"
+    );
+    assert_eq!(
+        invoke("verify_device", serde_json::json!({"deviceId": "OTHER"})).unwrap()["verification"]
+            ["flowId"],
+        "OTHER"
+    );
+    assert_eq!(
+        invoke("change_recovery_key", serde_json::json!({})).unwrap()["operation"],
+        "waiting_for_confirmation"
+    );
+    assert_eq!(
+        invoke("notification_level", serde_json::json!({})).unwrap()["level"],
+        "custom"
+    );
+    assert!(
+        invoke(
+            "set_notification_level",
+            serde_json::json!({"level": "mentions"})
+        )
+        .is_ok()
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for (cmd, args) in [
+        (
+            "request_email_token",
+            serde_json::json!({"email": "a".repeat(255)}),
+        ),
+        (
+            "request_phone_token",
+            serde_json::json!({"country": "GBR", "phoneNumber": "1"}),
+        ),
+        (
+            "request_phone_token",
+            serde_json::json!({"country": "GB", "phoneNumber": "1".repeat(33)}),
+        ),
+        (
+            "remove_three_pid",
+            serde_json::json!({"medium": "email", "address": "a".repeat(255)}),
+        ),
+        ("verify_device", serde_json::json!({"deviceId": ""})),
+        (
+            "verify_device",
+            serde_json::json!({"deviceId": "D".repeat(256)}),
+        ),
+        (
+            "set_notification_level",
+            serde_json::json!({"level": "custom"}),
+        ),
+    ] {
+        assert_eq!(invoke(cmd, args).unwrap_err(), "invalid_argument", "{cmd}");
+    }
+    // Missing or unknown kinds of argument fail before the handler runs.
+    for (cmd, args) in [
+        ("change_password", serde_json::json!({})),
+        (
+            "remove_three_pid",
+            serde_json::json!({"medium": "fax", "address": "1"}),
+        ),
+        (
+            "set_notification_level",
+            serde_json::json!({"level": "loud"}),
+        ),
+    ] {
+        assert!(invoke(cmd, args).is_err(), "{cmd}");
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "refused arguments never crossed"
+    );
+}
+
+/// GIVEN a desktop-notification event from the core WHEN it is dispatched
+/// THEN only the toaster sees its names, the latest one waits for the toaster
+/// to be installed, no page channel gets anything, and oversized names are
+/// dropped.
+#[test]
+fn given_a_notification_event_then_only_the_toaster_sees_it() {
+    use std::sync::Mutex;
+    let delivered: Arc<Mutex<Vec<u32>>> = Arc::default();
+    let record = delivered.clone();
+    let subscriptions = Arc::new(Subscriptions::default());
+    let app = configure(
+        mock_builder().channel_interceptor(move |_, callback, _, _| {
+            record.lock().unwrap().push(callback.0);
+            true
+        }),
+        FakeCore::new(true),
+        subscriptions.clone(),
+    )
+    .build(context())
+    .unwrap();
+    let window = create_main_window(&app).unwrap();
+    get_ipc_response(
+        &window,
+        request(
+            "watch_session",
+            app_origin(),
+            serde_json::json!({"onChange": "__CHANNEL__:3"}),
+        ),
+    )
+    .unwrap();
+    get_ipc_response(
+        &window,
+        request(
+            "subscribe_room",
+            app_origin(),
+            serde_json::json!({"roomId": "!r:example.invalid", "onChange": "__CHANNEL__:4"}),
+        ),
+    )
+    .unwrap();
+    // Before a toaster is set, only the latest notification is kept, and
+    // shown once it is.
+    for room in ["Earlier", "Plans"] {
+        subscriptions.dispatch(Event::Notification {
+            room: room.into(),
+            sender: "Bob".into(),
+        });
+    }
+    let toasts: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let shown = toasts.clone();
+    subscriptions.set_toaster(Box::new(move |room, sender| {
+        shown.lock().unwrap().push((room.into(), sender.into()));
+    }));
+    subscriptions.dispatch(Event::Notification {
+        room: "Later".into(),
+        sender: "Ann".into(),
+    });
+    subscriptions.dispatch(Event::Notification {
+        room: "x".repeat(513),
+        sender: "Bob".into(),
+    });
+    assert_eq!(
+        *toasts.lock().unwrap(),
+        vec![
+            ("Plans".to_owned(), "Bob".to_owned()),
+            ("Later".to_owned(), "Ann".to_owned())
+        ]
+    );
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "no page channel was told"
     );
 }
 
@@ -1772,5 +2359,23 @@ fn given_unreachable_core_then_an_image_band_is_a_generic_error() {
         )
         .unwrap_err(),
         "core_unavailable"
+    );
+}
+
+/// GIVEN a notification with names and one without WHEN its text is made
+/// THEN the first names the room and sender, and the second says only that a
+/// message arrived.
+#[test]
+fn given_notifications_with_and_without_names_then_only_named_ones_show_names() {
+    assert_eq!(
+        persephone_desktop::toast_text("Plans", "@bob:example.invalid"),
+        (
+            "Plans".to_owned(),
+            "New message from @bob:example.invalid".to_owned()
+        )
+    );
+    assert_eq!(
+        persephone_desktop::toast_text("", ""),
+        ("Persephone".to_owned(), "New message".to_owned())
     );
 }

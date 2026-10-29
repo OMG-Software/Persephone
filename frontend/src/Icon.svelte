@@ -16,7 +16,8 @@
       | 'image'
       | 'plus'
       | 'users'
-      | 'close';
+      | 'close'
+      | 'paperclip';
     class?: string;
   } = $props();
 </script>
@@ -46,6 +47,8 @@
     <rect x="3" y="5" width="18" height="14" rx="2" />
     <circle cx="9" cy="10" r="1.5" />
     <path d="m21 16-5-5-9 8" />
+  {:else if name === 'paperclip'}
+    <path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.5 7" />
   {:else if name === 'plus'}
     <path d="M12 5v14M5 12h14" />
   {:else if name === 'users'}

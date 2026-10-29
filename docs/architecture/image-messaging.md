@@ -143,6 +143,7 @@ travel in row bands instead:
 | Item | Limit |
 | --- | --- |
 | Encoded file, download or selection | 20 MiB, checked before allocation |
+| Image or file sent | 20 MiB after stripping; the SDK's copies of one send (input, upload buffer, request clone, HTTP body) are reserved in a 100 MiB `OutgoingSend` budget ([ADR-0031](../adr/0031-reserve-the-sdks-copies-of-a-send-in-a-budget-of-their-own.md)) |
 | Decoded image | 8192 per side, 16 megapixels, 64 MiB RGBA |
 | Displayed image | Scaled to fit 2048 × 2048 |
 | Retained pixels | 64 MiB, least recently used evicted |
