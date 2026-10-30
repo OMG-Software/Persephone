@@ -4,6 +4,13 @@
 //!   except the directory listing and the local addresses, which are asked of
 //!   the homeserver; when it does not answer, those two are unknown and the
 //!   rest is still sent.
+//! * A state event the settings, members or a level change need that this
+//!   device has not synced is asked of the homeserver, one event at a time:
+//!   the power levels, join rule, history setting, guest access and topic.
+//!   A Sliding Sync server sends only the state the list asks for, and it
+//!   need not send state that the list asked for only after the server first
+//!   sent the room. The room's creation event must be synced; without it the
+//!   levels cannot be read and the reply is `unavailable`.
 //! * Names, the topic and the room version are projected like names (the
 //!   topic like a message body). Addresses and user IDs are sent unchanged
 //!   when they are valid, visible ASCII, so the page can name them back
@@ -13,7 +20,7 @@
 //!   rules, including the unlimited level of room creators in newer room
 //!   versions. It is a hint for the page: the homeserver decides.
 //! * Each change is one homeserver request, after the page's arguments are
-//!   validated. A level change reads the latest synced power levels and
+//!   validated. A level change reads the power levels as above and
 //!   replaces only the named entry, so entries this client does not show are
 //!   kept. Published addresses this client could not send to the page are
 //!   kept when the page sets the others.
@@ -34,17 +41,31 @@ use matrix_sdk::{
     notification_settings::RoomNotificationMode,
     ruma::{
         Int, OwnedRoomAliasId, OwnedUserId, RoomAliasId, RoomId, ServerName, UserId,
-        api::client::room::{Visibility, aliases},
+        api::{
+            client::{
+                room::{Visibility, aliases},
+                state::get_state_event_for_key,
+            },
+            error::ErrorKind,
+        },
         events::{
-            StateEventType, TimelineEventType,
+            AnyStateEventContent, StateEventType, TimelineEventType,
             room::{
                 guest_access::{GuestAccess, RoomGuestAccessEventContent},
-                history_visibility::HistoryVisibility as Visible,
-                join_rules::JoinRule as Rule,
+                history_visibility::{
+                    HistoryVisibility as Visible, RoomHistoryVisibilityEventContent,
+                },
+                join_rules::{JoinRule as Rule, RoomJoinRulesEventContent},
                 member::MembershipState,
-                power_levels::{RoomPowerLevels, RoomPowerLevelsEventContent, UserPowerLevel},
+                power_levels::{
+                    RoomPowerLevels, RoomPowerLevelsEventContent, RoomPowerLevelsSource,
+                    UserPowerLevel,
+                },
+                topic::RoomTopicEventContent,
             },
         },
+        room_version_rules::AuthorizationRules,
+        serde::Raw,
     },
 };
 use persephone_contracts::{
@@ -56,6 +77,7 @@ use persephone_core_protocol::{
     ErrorCode, MAX_ALIAS_BYTES, MAX_ALT_ALIASES, MAX_LISTED_MEMBERS, MAX_MEMBER_FILTER_BYTES,
     MAX_ROOM_NAME_BYTES, MAX_TOPIC_BYTES, MAX_USER_ID_BYTES,
 };
+use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 
 /// A change the page asked for, after validation.
@@ -202,12 +224,93 @@ fn own_user(client: &Client) -> Result<OwnedUserId, ErrorCode> {
         .ok_or(ErrorCode::NotFound)
 }
 
-/// The room's power levels as last synced; `unavailable` if they cannot be
-/// read.
-async fn power_levels(room: &Room) -> Result<RoomPowerLevels, ErrorCode> {
-    room.power_levels()
+/// The room's `event_type` state event content, asked of the homeserver
+/// (`GET /rooms/{roomId}/state/{eventType}/`); `None` when the room has none
+/// (`M_NOT_FOUND`). Another refusal is `rejected`; no answer is
+/// `unavailable`.
+async fn fetch_state(
+    client: &Client,
+    room: &Room,
+    event_type: StateEventType,
+) -> Result<Option<Raw<AnyStateEventContent>>, ErrorCode> {
+    let request = get_state_event_for_key::v3::Request::new(
+        room.room_id().to_owned(),
+        event_type,
+        String::new(),
+    );
+    match client.send(request).await {
+        Ok(response) => Ok(Some(response.into_content())),
+        Err(error) if matches!(error.client_api_error_kind(), Some(ErrorKind::NotFound)) => {
+            Ok(None)
+        }
+        Err(error) if error.client_api_error_kind().is_some() => Err(ErrorCode::Rejected),
+        Err(_) => Err(ErrorCode::Unavailable),
+    }
+}
+
+/// The content of a state event this device has not synced, asked of the
+/// homeserver; `None` when it is synced (read it from the room), the room
+/// has none, or its content is not valid for its type. The room's own
+/// accessors give the specification's default in the last two cases too.
+async fn unsynced<C: DeserializeOwned>(
+    client: &Client,
+    room: &Room,
+    event_type: StateEventType,
+) -> Result<Option<C>, ErrorCode> {
+    if matches!(
+        room.get_state_event(event_type.clone(), "").await,
+        Ok(Some(_))
+    ) {
+        return Ok(None);
+    }
+    Ok(fetch_state(client, room, event_type)
+        .await?
+        .and_then(|content| content.deserialize_as_unchecked().ok()))
+}
+
+/// The room's power levels as last synced or, when this device has not
+/// synced them, as the homeserver has them; a room without any has the
+/// specification's defaults. The room's creators must be synced, and
+/// content that is not valid power levels is `unavailable`.
+async fn power_levels(client: &Client, room: &Room) -> Result<RoomPowerLevels, ErrorCode> {
+    if let Ok(levels) = room.power_levels().await {
+        return Ok(levels);
+    }
+    let creators = room.creators().ok_or(ErrorCode::Unavailable)?;
+    let rules = room.clone_info().room_version_rules_or_default();
+    let content = fetch_state(client, room, StateEventType::RoomPowerLevels).await?;
+    fetched_levels(content, &rules.authorization, creators)
+}
+
+/// The power levels the homeserver sent (`None`: it has none) for a room
+/// with these `rules` and `creators`. Content that is not valid power
+/// levels for the room version, such as a creator listed in `users` in
+/// room version 12, is `unavailable`: a change could not send it back.
+fn fetched_levels(
+    content: Option<Raw<AnyStateEventContent>>,
+    rules: &AuthorizationRules,
+    creators: Vec<OwnedUserId>,
+) -> Result<RoomPowerLevels, ErrorCode> {
+    let source = match content {
+        Some(content) => RoomPowerLevelsSource::Original(
+            content
+                .deserialize_as_unchecked()
+                .map_err(|_| ErrorCode::Unavailable)?,
+        ),
+        None => RoomPowerLevelsSource::None,
+    };
+    let levels = RoomPowerLevels::new(source, rules, creators);
+    RoomPowerLevelsEventContent::try_from(levels.clone()).map_err(|_| ErrorCode::Unavailable)?;
+    Ok(levels)
+}
+
+/// Sends `levels` as the room's new power levels.
+async fn send_levels(room: &Room, levels: RoomPowerLevels) -> Result<(), ErrorCode> {
+    let content = RoomPowerLevelsEventContent::try_from(levels).map_err(|_| ErrorCode::Internal)?;
+    room.send_state_event(content)
         .await
-        .map_err(|_| ErrorCode::Unavailable)
+        .map(drop)
+        .map_err(|error| request_error(&error))
 }
 
 /// The state event a level key names, for the keys kept in `events`.
@@ -346,7 +449,39 @@ fn notifications(mode: Option<RoomNotificationMode>) -> RoomNotifications {
 pub async fn settings(client: &Client, room_id: &str) -> Result<RoomSettings, ErrorCode> {
     let room = joined(client, room_id)?;
     let own = own_user(client)?;
-    let levels = power_levels(&room).await?;
+    let levels = power_levels(client, &room).await?;
+    let rule =
+        match unsynced::<RoomJoinRulesEventContent>(client, &room, StateEventType::RoomJoinRules)
+            .await?
+        {
+            Some(content) => Some(content.join_rule),
+            None => room.join_rule(),
+        };
+    let history = match unsynced::<RoomHistoryVisibilityEventContent>(
+        client,
+        &room,
+        StateEventType::RoomHistoryVisibility,
+    )
+    .await?
+    {
+        Some(content) => Some(content.history_visibility),
+        None => room.history_visibility(),
+    };
+    let guest_access = match unsynced::<RoomGuestAccessEventContent>(
+        client,
+        &room,
+        StateEventType::RoomGuestAccess,
+    )
+    .await?
+    {
+        Some(content) => content.guest_access,
+        None => room.guest_access(),
+    };
+    let topic =
+        match unsynced::<RoomTopicEventContent>(client, &room, StateEventType::RoomTopic).await? {
+            Some(content) => Some(content.topic),
+            None => room.topic(),
+        };
     let encryption = encryption(&room).await;
     let published = match room.privacy_settings().get_room_visibility().await {
         Ok(Visibility::Public) => Some(true),
@@ -383,7 +518,7 @@ pub async fn settings(client: &Client, room_id: &str) -> Result<RoomSettings, Er
     Ok(RoomSettings {
         room_id: room.room_id().to_string(),
         name: room.name().map(|name| project_name(&name)),
-        topic: room.topic().map(|topic| project_body(&topic)),
+        topic: topic.map(|topic| project_body(&topic)),
         canonical_alias: room
             .canonical_alias()
             .and_then(|alias| identifier(alias.as_str())),
@@ -393,9 +528,9 @@ pub async fn settings(client: &Client, room_id: &str) -> Result<RoomSettings, Er
             .map(ToString::to_string)
             .collect(),
         local_aliases,
-        join_rule: join_rule(room.join_rule()),
-        history_visibility: history_visibility(room.history_visibility()),
-        guest_access: room.guest_access() == GuestAccess::CanJoin,
+        join_rule: join_rule(rule),
+        history_visibility: history_visibility(history),
+        guest_access: guest_access == GuestAccess::CanJoin,
         encryption,
         published,
         room_version: room.version().map(|version| project_name(version.as_str())),
@@ -559,7 +694,7 @@ pub async fn members(
 ) -> Result<RoomMembers, ErrorCode> {
     let room = joined(client, room_id)?;
     let own = own_user(client)?;
-    let levels = power_levels(&room).await?;
+    let levels = power_levels(client, &room).await?;
     let all = room
         .members(
             RoomMemberships::JOIN
@@ -690,24 +825,23 @@ pub async fn change(client: &Client, room_id: &str, change: &Change) -> Result<(
                 .map_err(|error| request_error(&error))
         }
         Change::Level(key, level) => {
-            let mut levels = power_levels(&room).await?;
+            let mut levels = power_levels(client, &room).await?;
             set_level(&mut levels, *key, *level);
-            let content =
-                RoomPowerLevelsEventContent::try_from(levels).map_err(|_| ErrorCode::Internal)?;
-            room.send_state_event(content)
-                .await
-                .map(drop)
-                .map_err(|error| request_error(&error))
+            send_levels(&room, levels).await
         }
         Change::MemberLevel(user, level) => {
-            let levels = power_levels(&room).await?;
+            let mut levels = power_levels(client, &room).await?;
             if levels.for_user(user) == UserPowerLevel::Infinite {
                 return Err(ErrorCode::InvalidArgument);
             }
-            room.update_power_levels(vec![(user, *level)])
-                .await
-                .map(drop)
-                .map_err(|error| request_error(&error))
+            // As the SDK's `update_power_levels`, which reads only synced
+            // levels: a member at the default level needs no entry.
+            if *level == levels.users_default {
+                levels.users.remove(user);
+            } else {
+                levels.users.insert(user.clone(), *level);
+            }
+            send_levels(&room, levels).await
         }
         Change::Kick(user) | Change::Ban(user) | Change::Unban(user) if *user == own => {
             Err(ErrorCode::InvalidArgument)
@@ -1156,6 +1290,58 @@ mod tests {
         assert_eq!(
             notifications(Some(RoomNotificationMode::MentionsAndKeywordsOnly)),
             RoomNotifications::Mentions
+        );
+    }
+
+    fn content(json: &str) -> Option<Raw<AnyStateEventContent>> {
+        Some(Raw::from_json_string(json.to_owned()).unwrap())
+    }
+
+    /// GIVEN power levels the homeserver sent because this device had not
+    /// synced them WHEN read THEN valid ones are used as sent and none are
+    /// the specification's defaults; content that is not power levels, or
+    /// that lists a room version 12 creator in `users`, is `unavailable`.
+    #[test]
+    fn given_fetched_power_levels_then_only_valid_ones_are_used() {
+        let creator = UserId::parse("@creator:s").unwrap();
+        let other = UserId::parse("@other:s").unwrap();
+        let v12 = &RoomVersionRules::V12.authorization;
+
+        let levels = fetched_levels(
+            content(r#"{"users":{"@other:s":50},"state_default":75}"#),
+            v12,
+            vec![creator.clone()],
+        )
+        .unwrap();
+        assert_eq!(levels.for_user(&other), UserPowerLevel::Int(50.into()));
+        assert_eq!(levels.for_user(&creator), UserPowerLevel::Infinite);
+        assert_eq!(levels.state_default, Int::from(75));
+
+        let none = fetched_levels(None, v12, vec![creator.clone()]).unwrap();
+        assert_eq!(none.state_default, Int::from(50));
+        assert_eq!(none.users_default, Int::from(0));
+
+        assert_eq!(
+            fetched_levels(
+                content(r#"{"users":{"@creator:s":100}}"#),
+                v12,
+                vec![creator.clone()]
+            )
+            .err(),
+            Some(ErrorCode::Unavailable)
+        );
+        // Before room version 12 a creator has an entry like anyone else.
+        assert!(
+            fetched_levels(
+                content(r#"{"users":{"@creator:s":100}}"#),
+                &RoomVersionRules::V11.authorization,
+                vec![creator.clone()]
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            fetched_levels(content(r#"{"users":"not a map"}"#), v12, vec![creator]).err(),
+            Some(ErrorCode::Unavailable)
         );
     }
 }

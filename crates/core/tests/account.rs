@@ -6,9 +6,9 @@
 use persephone_contracts::{
     AccountState, AccountStatus, ContactStatus, ContactTrust, DisplayName, HistoryVisibility,
     IdentityState, JoinRule, LevelKey, Membership, NoticeKind, PendingMessage, PendingState,
-    PowerLevel, RoomEncryption, RoomIdentityChanges, RoomList, RoomMembers, RoomSettings,
-    SecurityError, SecurityOperation, SecurityStatus, SendFailure, SignInError, StoreState,
-    TimelineItem, TimelinePage,
+    PowerLevel, RoomChange, RoomEncryption, RoomIdentityChanges, RoomList, RoomMembers,
+    RoomSettings, SecurityError, SecurityOperation, SecurityStatus, SendFailure, SignInError,
+    StoreState, TimelineItem, TimelinePage,
 };
 use persephone_core::{
     Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
@@ -145,8 +145,23 @@ fn requested(entry: &Value, event: &Value) -> bool {
 
 /// Native Sliding Sync (MSC4186, which Matrix v1.19 does not include) like a
 /// server answers it: `ROOM` carries only the state that the request's list
-/// asks for, as the SDK sends that list with every request.
-struct SlidingRoom;
+/// asks for, as the SDK sends that list with every request, less the
+/// `withheld` event types.
+struct SlidingRoom {
+    withheld: &'static [&'static str],
+}
+
+/// The state a server that first sent `ROOM` before the list asked for more
+/// leaves out: the list then asked only for these five of `room_state`'s
+/// types besides the room's name, address, encryption, creation and this
+/// account's membership.
+const LATER_STATE: &[&str] = &[
+    "m.room.power_levels",
+    "m.room.join_rules",
+    "m.room.history_visibility",
+    "m.room.topic",
+    "m.room.guest_access",
+];
 
 impl wiremock::Respond for SlidingRoom {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
@@ -160,6 +175,12 @@ impl wiremock::Respond for SlidingRoom {
             .unwrap()
             .iter()
             .filter(|event| wanted.iter().any(|entry| requested(entry, event)))
+            .filter(|event| {
+                !self
+                    .withheld
+                    .iter()
+                    .any(|kind| event["type"].as_str() == Some(kind))
+            })
             .cloned()
             .collect();
         ResponseTemplate::new(200).set_body_json(json!({
@@ -205,6 +226,31 @@ fn history() -> Value {
             {"type":"m.reaction","sender":USER,"event_id":"$reaction","origin_server_ts":7,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$text","key":"+1"}}}
         ]),
     )
+}
+
+/// `GET /rooms/{roomId}/state/{eventType}/` as Matrix v1.19 answers it for
+/// `ROOM`: the content of its event of that type, or 404 `M_NOT_FOUND`.
+struct RoomStateEvent;
+
+impl wiremock::Respond for RoomStateEvent {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let kind = request
+            .url
+            .path_segments()
+            .and_then(|mut segments| segments.nth(6))
+            .unwrap_or_default()
+            .to_owned();
+        match room_state()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == kind.as_str() && event["state_key"] == "")
+        {
+            Some(event) => ResponseTemplate::new(200).set_body_json(event["content"].clone()),
+            None => ResponseTemplate::new(404)
+                .set_body_json(json!({"errcode": "M_NOT_FOUND", "error": "no such state"})),
+        }
+    }
 }
 
 /// A `/members` answer with these member events in the requested room.
@@ -351,7 +397,7 @@ impl Homeserver {
                 .await;
             Mock::given(method("POST"))
                 .and(path("/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"))
-                .respond_with(SlidingRoom)
+                .respond_with(SlidingRoom { withheld: &[] })
                 .mount(&server)
                 .await;
             Mock::given(method("GET"))
@@ -537,9 +583,15 @@ impl Homeserver {
 
     /// The requests the room settings make besides synced state, answered
     /// as Matrix v1.19 specifies: `ROOM` is not in the public directory, has
-    /// the local alias `ALIAS`, and `CONTACT` is invited.
+    /// the local alias `ALIAS`, and `CONTACT` is invited. Its state events
+    /// are `room_state`; it has no guest access event.
     fn settings_endpoints(&self) {
         self.runtime.block_on(async {
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/state/[^/]+/?$"))
+                .respond_with(RoomStateEvent)
+                .mount(&self.server)
+                .await;
             Mock::given(method("GET"))
                 .and(path_regex(r"^/_matrix/client/v3/directory/list/room/[^/]+$"))
                 .respond_with(
@@ -757,6 +809,87 @@ impl Homeserver {
             .filter(|request| request.url.path() == endpoint)
             .count()
     }
+
+    /// Requests for a state event of type `kind` of any room.
+    fn state_requests(&self, kind: &str) -> usize {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "GET"
+                    && request.url.path_segments().is_some_and(|segments| {
+                        let segments: Vec<_> = segments.collect();
+                        segments.get(5) == Some(&"state") && segments.get(6) == Some(&kind)
+                    })
+            })
+            .count()
+    }
+
+    /// Sliding Sync like a server that sent `ROOM` on this connection before
+    /// the list asked for `LATER_STATE`, and does not send it now: per room
+    /// it sends only state that changed since.
+    fn withhold_later_state(&self) {
+        self.runtime.block_on(
+            Mock::given(method("POST"))
+                .and(path(
+                    "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+                ))
+                .respond_with(SlidingRoom {
+                    withheld: LATER_STATE,
+                })
+                .with_priority(1)
+                .mount(&self.server),
+        );
+    }
+
+    /// Accepts every state event sent to a room.
+    fn state_events_accepted(&self) {
+        self.runtime.block_on(
+            Mock::given(method("PUT"))
+                .and(path_regex(
+                    r"^/_matrix/client/v3/rooms/[^/]+/state/[^/]+/?$",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"event_id": "$sent"})),
+                )
+                .mount(&self.server),
+        );
+    }
+
+    /// The content of the last power levels sent to a room.
+    fn sent_power_levels(&self) -> Value {
+        let requests = self
+            .runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default();
+        let sent = requests
+            .iter()
+            .rev()
+            .find(|request| {
+                request.method.as_str() == "PUT"
+                    && request.url.path().contains("/state/m.room.power_levels")
+            })
+            .expect("power levels were sent");
+        serde_json::from_slice(&sent.body).unwrap()
+    }
+
+    /// Answers at most the next two requests for `ROOM`'s `kind` state
+    /// event (a settings and a members read) with `status` and `body`, ahead
+    /// of `settings_endpoints`.
+    fn state_answers(&self, kind: &str, status: u16, body: Value) {
+        self.runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/state/{}/?$",
+                    kind.replace('.', r"\.")
+                )))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .with_priority(1)
+                .up_to_n_times(2)
+                .mount(&self.server),
+        );
+    }
 }
 
 fn make_core(dir: &Path, source: Arc<dyn CredentialSource>) -> Core {
@@ -796,15 +929,22 @@ fn sign_in(core: &Core, homeserver: &str) -> AccountStatus {
 /// A core signed in to `server`, once `ROOM` is listed with its name.
 fn core_with_room(server: &Homeserver, dir: &Path) -> Core {
     let core = make_core(dir, Fixed::new(Ok(())));
-    sign_in(&core, &server.uri());
+    sign_in_to_room(&core, server);
+    core
+}
+
+/// Signs `core` in to `server` and waits until `ROOM` is listed with its
+/// name. A test that guards the core with `LockOnDrop` first stops the sync
+/// loop even when this times out.
+fn sign_in_to_room(core: &Core, server: &Homeserver) {
+    sign_in(core, &server.uri());
     // The SDK lists a room before it has computed its name; wait for both.
     wait_for("the room", || {
-        value::<RoomList>(call(&core, Call::RoomList {}))
+        value::<RoomList>(call(core, Call::RoomList {}))
             .rooms
             .first()
             .is_some_and(|room| room.display_name.is_some())
     });
-    core
 }
 
 fn files_contain(root: &Path, needle: &[u8]) -> Vec<String> {
@@ -1129,8 +1269,9 @@ fn settings_come_from_the_room_state(sliding: bool) {
     );
     server.settings_endpoints();
     let dir = TempDir::new().unwrap();
-    let core = core_with_room(&server, dir.path());
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
     let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
 
     let settings: RoomSettings = value(call(
         &core,
@@ -1156,6 +1297,8 @@ fn settings_come_from_the_room_state(sliding: bool) {
     assert!(settings.may.power_levels);
     assert_eq!(settings.published, Some(false));
     assert_eq!(settings.local_aliases, Some(vec![ALIAS.to_owned()]));
+    // No guest access event: the homeserver answers `M_NOT_FOUND`.
+    assert!(!settings.guest_access);
 
     let members: RoomMembers = value(call(
         &core,
@@ -1173,11 +1316,148 @@ fn settings_come_from_the_room_state(sliding: bool) {
         listed,
         [(USER, Membership::Join), (CONTACT, Membership::Invite)]
     );
+    assert_eq!(
+        server.state_requests("m.room.power_levels"),
+        0,
+        "synced levels are not asked again"
+    );
 }
 
 #[test]
 fn given_native_sliding_sync_then_room_settings_come_from_the_room_state() {
     settings_come_from_the_room_state(true);
+}
+
+/// GIVEN Sliding Sync that sent `ROOM` without the power levels, join rule,
+/// history setting and topic, as a server does that first sent the room
+/// before the list asked for them WHEN its settings and members are read
+/// THEN the core asks the homeserver for those events and shows the room's
+/// own values, not "could not be reached" or the defaults; a member's level
+/// change starts from them. Guest access, which is off without an event, is
+/// on as the homeserver answers.
+#[test]
+fn given_sliding_sync_without_the_later_state_then_the_homeserver_is_asked() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.withhold_later_state();
+    server.settings_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
+    server.state_answers(
+        "m.room.guest_access",
+        200,
+        json!({"guest_access": "can_join"}),
+    );
+
+    let settings: RoomSettings = value(call(
+        &core,
+        Call::RoomSettings {
+            room_id: ROOM.into(),
+        },
+    ));
+    assert_eq!(settings.join_rule, JoinRule::Public);
+    assert_eq!(settings.history_visibility, HistoryVisibility::Joined);
+    assert_eq!(settings.topic.as_deref(), Some("Synthetic topic"));
+    assert!(settings.guest_access);
+    assert_eq!(settings.own_level.map(PowerLevel::get), Some(100));
+    assert!(settings.may.power_levels);
+    assert!(server.state_requests("m.room.power_levels") > 0);
+    assert!(server.state_requests("m.room.guest_access") > 0);
+
+    let members: RoomMembers = value(call(
+        &core,
+        Call::RoomMembers {
+            room_id: ROOM.into(),
+            filter: String::new(),
+        },
+    ));
+    let own = members.members.iter().find(|member| member.own).unwrap();
+    assert_eq!(own.level.map(PowerLevel::get), Some(100));
+    let invited = members
+        .members
+        .iter()
+        .find(|member| member.user_id == CONTACT)
+        .unwrap();
+    assert!(invited.can_change_level);
+
+    server.state_events_accepted();
+    assert_eq!(
+        call(
+            &core,
+            Call::ChangeRoom {
+                room_id: ROOM.into(),
+                change: RoomChange::MemberLevel {
+                    user_id: CONTACT.into(),
+                    level: PowerLevel::new(50).unwrap(),
+                },
+            },
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    let sent = server.sent_power_levels();
+    assert_eq!(sent["users"][USER], 100, "the existing entries are kept");
+    assert_eq!(sent["users"][CONTACT], 50);
+    assert_eq!(sent["events"]["m.room.power_levels"], 100);
+    assert_eq!(sent["events"]["m.room.name"], 50);
+}
+
+/// GIVEN Sliding Sync without `ROOM`'s power levels WHEN the homeserver
+/// refuses them (`M_FORBIDDEN`) or answers content that is not power levels
+/// THEN the settings and members are `rejected` or `unavailable`, never
+/// the defaults a room without power levels has.
+#[test]
+fn given_unsynced_levels_that_cannot_be_read_then_settings_fail_closed() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.withhold_later_state();
+    server.settings_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
+    let settings = || {
+        call(
+            &core,
+            Call::RoomSettings {
+                room_id: ROOM.into(),
+            },
+        )
+    };
+    let members = || {
+        call(
+            &core,
+            Call::RoomMembers {
+                room_id: ROOM.into(),
+                filter: String::new(),
+            },
+        )
+    };
+
+    server.state_answers(
+        "m.room.power_levels",
+        403,
+        json!({"errcode": "M_FORBIDDEN", "error": "not allowed"}),
+    );
+    assert_eq!(settings(), Outcome::Error(ErrorCode::Rejected));
+    assert_eq!(members(), Outcome::Error(ErrorCode::Rejected));
+
+    server.state_answers("m.room.power_levels", 200, json!({"users": "not a map"}));
+    assert_eq!(settings(), Outcome::Error(ErrorCode::Unavailable));
+    assert_eq!(members(), Outcome::Error(ErrorCode::Unavailable));
 }
 
 #[test]
