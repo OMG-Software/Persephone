@@ -155,9 +155,19 @@ deletes the profile as for a sign-out.
   without a logout request, ends `restart_required` with `session_ended`
   well before the next idle check, and the next start is fresh and silent; a
   soft logout deletes nothing; a refusal that `whoami` does not confirm
-  deletes nothing; a good round between two confirmed ones deletes nothing
-  (this test failed when a good round kept the count); a password session whose refresh token is refused too ends (this
-  test failed with the refusal unrecognized).
+  deletes nothing; a good round between two confirmed ones deletes nothing,
+  and each of its refusals, `whoami` and sync, is checked as answered once; a
+  password session whose refresh token is refused too ends (this test failed
+  with the refusal unrecognized).
+* **Negative control** for the good round, run 30 October 2026 on Windows 11
+  Pro x64 (build 26300), Rust 1.99.1, debug build, source `41c7b00` with the
+  test change of the next commit, the committed `Cargo.lock`. With
+  `crates/core/src/session.rs` changed so that a good round keeps
+  `ended_rounds` instead of resetting it to 0, `cargo test --locked -p
+  persephone-core --features dev-disposable-servers --test account
+  given_a_good_round_between` exited 101: the assertion
+  `!core.session().has_ended()` failed. With the source restored, the same
+  file's 37 tests passed (exit 0). The output was not kept.
 * **Limits**: starting fresh still needs a manual restart, as after any
   sign-out (ADR-0008 is proposed, not accepted). A server or proxy that
   wrongly refuses the token without soft logout for two rounds in a row
