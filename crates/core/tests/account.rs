@@ -874,9 +874,9 @@ impl Homeserver {
         serde_json::from_slice(&sent.body).unwrap()
     }
 
-    /// Answers the next two requests for `ROOM`'s `kind` state event (one
-    /// settings and one members read) with `status` and `body`, ahead of
-    /// `settings_endpoints`.
+    /// Answers at most the next two requests for `ROOM`'s `kind` state
+    /// event (a settings and a members read) with `status` and `body`, ahead
+    /// of `settings_endpoints`.
     fn state_answers(&self, kind: &str, status: u16, body: Value) {
         self.runtime.block_on(
             Mock::given(method("GET"))
@@ -929,15 +929,22 @@ fn sign_in(core: &Core, homeserver: &str) -> AccountStatus {
 /// A core signed in to `server`, once `ROOM` is listed with its name.
 fn core_with_room(server: &Homeserver, dir: &Path) -> Core {
     let core = make_core(dir, Fixed::new(Ok(())));
-    sign_in(&core, &server.uri());
+    sign_in_to_room(&core, server);
+    core
+}
+
+/// Signs `core` in to `server` and waits until `ROOM` is listed with its
+/// name. A test that guards the core with `LockOnDrop` first stops the sync
+/// loop even when this times out.
+fn sign_in_to_room(core: &Core, server: &Homeserver) {
+    sign_in(core, &server.uri());
     // The SDK lists a room before it has computed its name; wait for both.
     wait_for("the room", || {
-        value::<RoomList>(call(&core, Call::RoomList {}))
+        value::<RoomList>(call(core, Call::RoomList {}))
             .rooms
             .first()
             .is_some_and(|room| room.display_name.is_some())
     });
-    core
 }
 
 fn files_contain(root: &Path, needle: &[u8]) -> Vec<String> {
@@ -1262,8 +1269,9 @@ fn settings_come_from_the_room_state(sliding: bool) {
     );
     server.settings_endpoints();
     let dir = TempDir::new().unwrap();
-    let core = core_with_room(&server, dir.path());
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
     let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
 
     let settings: RoomSettings = value(call(
         &core,
@@ -1289,6 +1297,8 @@ fn settings_come_from_the_room_state(sliding: bool) {
     assert!(settings.may.power_levels);
     assert_eq!(settings.published, Some(false));
     assert_eq!(settings.local_aliases, Some(vec![ALIAS.to_owned()]));
+    // No guest access event: the homeserver answers `M_NOT_FOUND`.
+    assert!(!settings.guest_access);
 
     let members: RoomMembers = value(call(
         &core,
@@ -1323,8 +1333,8 @@ fn given_native_sliding_sync_then_room_settings_come_from_the_room_state() {
 /// before the list asked for them WHEN its settings and members are read
 /// THEN the core asks the homeserver for those events and shows the room's
 /// own values, not "could not be reached" or the defaults; a member's level
-/// change starts from them. The room has no guest access event, which the
-/// homeserver answers with `M_NOT_FOUND`: guest access is off.
+/// change starts from them. Guest access, which is off without an event, is
+/// on as the homeserver answers.
 #[test]
 fn given_sliding_sync_without_the_later_state_then_the_homeserver_is_asked() {
     let server = Homeserver::start(
@@ -1338,8 +1348,14 @@ fn given_sliding_sync_without_the_later_state_then_the_homeserver_is_asked() {
     server.withhold_later_state();
     server.settings_endpoints();
     let dir = TempDir::new().unwrap();
-    let core = core_with_room(&server, dir.path());
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
     let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
+    server.state_answers(
+        "m.room.guest_access",
+        200,
+        json!({"guest_access": "can_join"}),
+    );
 
     let settings: RoomSettings = value(call(
         &core,
@@ -1350,7 +1366,7 @@ fn given_sliding_sync_without_the_later_state_then_the_homeserver_is_asked() {
     assert_eq!(settings.join_rule, JoinRule::Public);
     assert_eq!(settings.history_visibility, HistoryVisibility::Joined);
     assert_eq!(settings.topic.as_deref(), Some("Synthetic topic"));
-    assert!(!settings.guest_access);
+    assert!(settings.guest_access);
     assert_eq!(settings.own_level.map(PowerLevel::get), Some(100));
     assert!(settings.may.power_levels);
     assert!(server.state_requests("m.room.power_levels") > 0);
@@ -1409,8 +1425,9 @@ fn given_unsynced_levels_that_cannot_be_read_then_settings_fail_closed() {
     server.withhold_later_state();
     server.settings_endpoints();
     let dir = TempDir::new().unwrap();
-    let core = core_with_room(&server, dir.path());
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
     let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
     let settings = || {
         call(
             &core,
