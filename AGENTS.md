@@ -51,6 +51,7 @@ Run these commands from the repository root. Use the committed root `Cargo.lock`
 | --- | --- |
 | `python tools/dev.py bootstrap` | Install locked frontend dependencies |
 | `python tools/dev.py check` | Rust, frontend, contract drift, and Python harness checks |
+| `python tools/dev.py build [--release]` | Build the frontend, Wasm guest, and app executables (debug or release); no tests |
 | `python tools/dev.py rust` | Build frontend and Wasm guest; run Rust format, tests, and Clippy |
 | `python tools/dev.py frontend` | Svelte checks, static build, and Node tests with LCOV coverage |
 | `python tools/dev.py contracts` | Generated DTO/fixture drift and TypeScript checks |
