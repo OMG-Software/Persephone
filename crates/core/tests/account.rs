@@ -29,7 +29,7 @@ use std::{
 };
 use tempfile::TempDir;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Respond, ResponseTemplate,
     matchers::{body_partial_json, method, path, path_regex},
 };
 use zeroize::Zeroizing;
@@ -335,6 +335,17 @@ impl wiremock::Respond for LiveRoom {
             "rooms":{"join":rooms},
             "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
         }))
+    }
+}
+
+/// A response that counts the requests it answered. It counts answers, not
+/// matches: a mock that has used up its answers matches nothing more.
+struct Counted(ResponseTemplate, Arc<AtomicUsize>);
+
+impl Respond for Counted {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        self.0.clone()
     }
 }
 
@@ -774,27 +785,34 @@ impl Homeserver {
     }
 
     /// Refuses the access token without soft logout in one sync round and
-    /// its `whoami`, then answers as before.
-    fn refuse_token_once(&self) {
+    /// its `whoami`, then answers as before. `whoami` is refused first, so a
+    /// sync refused at once finds it ready. Returns how many times each of
+    /// `whoami` and sync was refused.
+    fn refuse_token_once(&self) -> [Arc<AtomicUsize>; 2] {
         let refused = ResponseTemplate::new(401).set_body_json(json!({
             "errcode": "M_UNKNOWN_TOKEN",
             "error": "Unknown access token",
             "soft_logout": false
         }));
+        let counts = [(); 2].map(|()| Arc::new(AtomicUsize::new(0)));
         self.runtime.block_on(async {
-            for (verb, endpoint) in [
-                ("GET", "/_matrix/client/v3/sync"),
-                ("GET", "/_matrix/client/v3/account/whoami"),
-            ] {
-                Mock::given(method(verb))
+            for (endpoint, count) in [
+                "/_matrix/client/v3/account/whoami",
+                "/_matrix/client/v3/sync",
+            ]
+            .into_iter()
+            .zip(&counts)
+            {
+                Mock::given(method("GET"))
                     .and(path(endpoint))
-                    .respond_with(refused.clone())
+                    .respond_with(Counted(refused.clone(), Arc::clone(count)))
                     .up_to_n_times(1)
                     .with_priority(1)
                     .mount(&self.server)
                     .await;
             }
         });
+        counts
     }
 
     fn uri(&self) -> String {
@@ -1904,31 +1922,42 @@ fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_ke
     );
 }
 
-/// GIVEN one sync round in which the homeserver ends the session, confirmed
-/// by `whoami`, WHEN the next round is accepted THEN nothing is deleted: the
-/// end must hold for two rounds in a row.
+/// GIVEN two sync rounds in which the homeserver ends the session, each
+/// confirmed by `whoami`, WHEN a good round comes between them THEN nothing
+/// is deleted: the end must hold for two rounds in a row.
 #[test]
-fn given_one_round_that_ends_the_session_then_a_good_round_keeps_the_profile() {
+fn given_a_good_round_between_two_that_end_the_session_then_the_profile_is_kept() {
     let server = Homeserver::signed_in();
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
     let _locked = LockOnDrop(&core);
+    let synced = || {
+        let status = core.session().account_status();
+        status.state == AccountState::SignedIn && status.error.is_none()
+    };
+    // Each status below is set only after its round, `whoami` included, has
+    // been handled.
+    let refused = || core.session().account_status().error == Some(SignInError::SyncFailed);
     wait_for("the first sync", || {
         server.requests_to("/_matrix/client/v3/sync") > 0
     });
-    server.refuse_token_once();
-    wait_for("the refused round", || {
-        server.requests_to("/_matrix/client/v3/account/whoami") > 0
+    let first = server.refuse_token_once();
+    wait_for("the first refused round", refused);
+    wait_for("a good round", synced);
+    let second = server.refuse_token_once();
+    // A good round that kept the count would end the session here instead.
+    wait_for("the second refused round", || {
+        refused() || core.session().has_ended()
     });
-    let rounds = server.requests_to("/_matrix/client/v3/sync");
-    wait_for("two more rounds", || {
-        server.requests_to("/_matrix/client/v3/sync") > rounds + 1
-    });
+    // One `whoami` refusal and one sync refusal each, so `whoami` confirmed
+    // both rounds.
+    for (round, counts) in [("first", first), ("second", second)] {
+        let refused = counts.map(|count| count.load(Ordering::SeqCst));
+        assert_eq!(refused, [1, 1], "the {round} round's refusals");
+    }
     assert!(!core.session().has_ended());
     assert!(!core.finish_ended_session());
     assert!(dir.path().join("store-key.v2").exists());
-    let status = core.session().account_status();
-    assert_eq!((status.state, status.error), (AccountState::SignedIn, None));
 }
 
 /// GIVEN a password session that holds a refresh token WHEN the homeserver
