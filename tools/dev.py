@@ -170,8 +170,6 @@ def main():
         core_and_worker += ["-p", "persephone-media-worker", "--bin", "persephone-media-worker"]
         run(["cargo", "build", *cargo_flags, *profile, *core_and_worker], environment)
         run(["cargo", "build", *cargo_flags, *profile, "-p", "persephone-desktop", "--bin", "persephone-ui"], environment)
-        executable = "persephone.exe" if os.name == "nt" else "persephone"
-        print(f"Built {ROOT / '.local/build/rust' / ('release' if args.release else 'debug') / executable}", flush=True)
     if args.command in ("check", "frontend", "bootstrap"):
         if not npm:
             parser.error("npm is required; install Node.js and make npm available on PATH")
