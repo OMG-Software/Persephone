@@ -1,8 +1,10 @@
 # Sends the source to SonarQube Cloud for static analysis on pushes to main
 # and on pull requests from this repository. It first runs the frontend checks
 # (python tools/dev.py frontend), whose Node tests write the LCOV line coverage
-# of the frontend's TypeScript; Rust is not built here. The analysis settings
-# are in sonar-project.properties at the repository root.
+# of the frontend's TypeScript, then the Rust tests instrumented (python
+# tools/dev.py coverage), which write the LCOV line coverage of the Rust
+# crates. The analysis settings are in sonar-project.properties at the
+# repository root.
 # Pull requests from forks get no SONAR_TOKEN, so the job is skipped for them.
 # The project must use CI-based analysis: Automatic Analysis is turned off in
 # SonarQube Cloud. Actions are pinned to full commit SHAs; the tag each was
@@ -22,12 +24,20 @@ concurrency:
   group: sonar-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # The toolchain check.yml pins, with the LLVM tools that coverage needs.
+  RUST_TOOLCHAIN: "1.99.1"
+  # tools/dev.py requires this cargo-llvm-cov release (LLVM_COV_VERSION).
+  CARGO_LLVM_COV_VERSION: "0.9.1"
+  CARGO_TERM_COLOR: always
+
 jobs:
   sonarqube:
     name: SonarQube
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The instrumented Rust build and tests take most of it.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,12 +53,37 @@ jobs:
         with:
           node-version: "24.15.0"
 
-      # Only downloaded npm packages are cached, as in check.yml.
+      - name: Install Tauri prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component llvm-tools --target wasm32-unknown-unknown
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+
+      # Only downloaded packages are cached, as in check.yml, and the
+      # cargo-llvm-cov build.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .local/cache/npm
-          key: npm-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-
+          path: |
+            .local/cache/cargo/registry/index
+            .local/cache/cargo/registry/cache
+            .local/cache/cargo/git/db
+            .local/cache/npm
+          key: deps-sonar-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: deps-sonar-${{ runner.os }}-
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: llvm-cov
+        with:
+          path: .local/tools/cargo-llvm-cov
+          key: cargo-llvm-cov-${{ env.CARGO_LLVM_COV_VERSION }}-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install cargo-llvm-cov
+        if: steps.llvm-cov.outputs.cache-hit != 'true'
+        run: cargo install --locked --root .local/tools/cargo-llvm-cov cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION"
 
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
@@ -56,6 +91,12 @@ jobs:
       # Writes .local/coverage/frontend/lcov.info.
       - name: Frontend checks and coverage
         run: python tools/dev.py frontend
+
+      # Writes .local/coverage/rust/lcov.info.
+      - name: Rust tests and coverage
+        run: |
+          export PATH="$PWD/.local/tools/cargo-llvm-cov/bin:$PATH"
+          python tools/dev.py coverage
 
       - name: Cache SonarQube packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

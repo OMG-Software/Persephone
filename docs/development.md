@@ -65,9 +65,19 @@ python tools/dev.py check
 python tools/dev.py rust
 python tools/dev.py frontend
 python tools/dev.py contracts
+python tools/dev.py coverage
 python tools/dev.py audit
 python tools/dev.py sandbox --offline
 ```
+
+`coverage` runs the Rust tests instrumented and writes the Rust crates' line coverage to `.local/coverage/rust/lcov.info`, as the SonarQube workflow does. Instrumented builds go to `.local/build/rust-coverage`. It needs the LLVM tools component and cargo-llvm-cov 0.9.1 on `PATH`; `dev.py` refuses another version:
+
+```powershell
+rustup component add llvm-tools
+cargo install --locked --root .local/tools/cargo-llvm-cov cargo-llvm-cov --version 0.9.1
+```
+
+Then add `.local/tools/cargo-llvm-cov/bin` to `PATH`. The contained media worker cannot write a coverage profile, so it runs uninstrumented and its own package's tests are left out of `coverage`; `check` still runs them.
 
 `check` runs Rust formatting, workspace tests and Clippy, frontend check/build/tests (the tests write the frontend TypeScript's line coverage to `.local/coverage/frontend/lcov.info`; the SonarQube workflow runs `frontend` for it), generated-contract drift/TypeScript checks, disposable-server registration tests, and restart-controller tests. It does not run live homeservers, the native containment program or dependency audit. `audit` queries OSV and needs network access; it cannot run offline. Add `--offline` to supported Cargo, frontend, contract, bootstrap, or sandbox commands when using cached dependencies.
 

@@ -54,6 +54,7 @@ Run these commands from the repository root. Use the committed root `Cargo.lock`
 | `python tools/dev.py rust` | Build frontend and Wasm guest; run Rust format, tests, and Clippy |
 | `python tools/dev.py frontend` | Svelte checks, static build, and Node tests with LCOV coverage |
 | `python tools/dev.py contracts` | Generated DTO/fixture drift and TypeScript checks |
+| `python tools/dev.py coverage` | Instrumented Rust tests writing LCOV for SonarQube; needs cargo-llvm-cov 0.9.1 |
 | `python tools/dev.py audit` | Network-dependent OSV dependency audit |
 | `python tools/dev.py sandbox --offline` | Separate Windows native containment gate |
 
