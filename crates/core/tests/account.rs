@@ -1406,6 +1406,7 @@ fn given_sliding_sync_without_the_later_state_then_the_homeserver_is_asked() {
     assert_eq!(sent["users"][USER], 100, "the existing entries are kept");
     assert_eq!(sent["users"][CONTACT], 50);
     assert_eq!(sent["events"]["m.room.power_levels"], 100);
+    assert_eq!(sent["events"]["m.room.name"], 50);
 }
 
 /// GIVEN Sliding Sync without `ROOM`'s power levels WHEN the homeserver

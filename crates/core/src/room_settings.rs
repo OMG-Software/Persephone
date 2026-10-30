@@ -64,6 +64,7 @@ use matrix_sdk::{
                 topic::RoomTopicEventContent,
             },
         },
+        room_version_rules::AuthorizationRules,
         serde::Raw,
     },
 };
@@ -277,7 +278,20 @@ async fn power_levels(client: &Client, room: &Room) -> Result<RoomPowerLevels, E
     }
     let creators = room.creators().ok_or(ErrorCode::Unavailable)?;
     let rules = room.clone_info().room_version_rules_or_default();
-    let source = match fetch_state(client, room, StateEventType::RoomPowerLevels).await? {
+    let content = fetch_state(client, room, StateEventType::RoomPowerLevels).await?;
+    fetched_levels(content, &rules.authorization, creators)
+}
+
+/// The power levels the homeserver sent (`None`: it has none) for a room
+/// with these `rules` and `creators`. Content that is not valid power
+/// levels for the room version, such as a creator listed in `users` in
+/// room version 12, is `unavailable`: a change could not send it back.
+fn fetched_levels(
+    content: Option<Raw<AnyStateEventContent>>,
+    rules: &AuthorizationRules,
+    creators: Vec<OwnedUserId>,
+) -> Result<RoomPowerLevels, ErrorCode> {
+    let source = match content {
         Some(content) => RoomPowerLevelsSource::Original(
             content
                 .deserialize_as_unchecked()
@@ -285,7 +299,9 @@ async fn power_levels(client: &Client, room: &Room) -> Result<RoomPowerLevels, E
         ),
         None => RoomPowerLevelsSource::None,
     };
-    Ok(RoomPowerLevels::new(source, &rules.authorization, creators))
+    let levels = RoomPowerLevels::new(source, rules, creators);
+    RoomPowerLevelsEventContent::try_from(levels.clone()).map_err(|_| ErrorCode::Unavailable)?;
+    Ok(levels)
 }
 
 /// Sends `levels` as the room's new power levels.
@@ -1274,6 +1290,58 @@ mod tests {
         assert_eq!(
             notifications(Some(RoomNotificationMode::MentionsAndKeywordsOnly)),
             RoomNotifications::Mentions
+        );
+    }
+
+    fn content(json: &str) -> Option<Raw<AnyStateEventContent>> {
+        Some(Raw::from_json_string(json.to_owned()).unwrap())
+    }
+
+    /// GIVEN power levels the homeserver sent because this device had not
+    /// synced them WHEN read THEN valid ones are used as sent and none are
+    /// the specification's defaults; content that is not power levels, or
+    /// that lists a room version 12 creator in `users`, is `unavailable`.
+    #[test]
+    fn given_fetched_power_levels_then_only_valid_ones_are_used() {
+        let creator = UserId::parse("@creator:s").unwrap();
+        let other = UserId::parse("@other:s").unwrap();
+        let v12 = &RoomVersionRules::V12.authorization;
+
+        let levels = fetched_levels(
+            content(r#"{"users":{"@other:s":50},"state_default":75}"#),
+            v12,
+            vec![creator.clone()],
+        )
+        .unwrap();
+        assert_eq!(levels.for_user(&other), UserPowerLevel::Int(50.into()));
+        assert_eq!(levels.for_user(&creator), UserPowerLevel::Infinite);
+        assert_eq!(levels.state_default, Int::from(75));
+
+        let none = fetched_levels(None, v12, vec![creator.clone()]).unwrap();
+        assert_eq!(none.state_default, Int::from(50));
+        assert_eq!(none.users_default, Int::from(0));
+
+        assert_eq!(
+            fetched_levels(
+                content(r#"{"users":{"@creator:s":100}}"#),
+                v12,
+                vec![creator.clone()]
+            )
+            .err(),
+            Some(ErrorCode::Unavailable)
+        );
+        // Before room version 12 a creator has an entry like anyone else.
+        assert!(
+            fetched_levels(
+                content(r#"{"users":{"@creator:s":100}}"#),
+                &RoomVersionRules::V11.authorization,
+                vec![creator.clone()]
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            fetched_levels(content(r#"{"users":"not a map"}"#), v12, vec![creator]).err(),
+            Some(ErrorCode::Unavailable)
         );
     }
 }
