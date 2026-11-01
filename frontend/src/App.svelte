@@ -88,6 +88,7 @@
     roomList,
     roomDraft,
     saveRoomDraft,
+    type RoomDraft,
     roomPreferences,
     type RoomPreference,
     type LocalSearchHit,
@@ -186,9 +187,8 @@
   let textSending = $state(false);
   let roomOpenRequest = 0;
   let timelineEpoch = 0;
-  const draftKeeper = new DraftKeeper({ load: roomDraft, save: saveRoomDraft }, /**
-   * Restore new-message text and its reply quote without replacing an active event edit.
-   */ (next, failure, ready) => {
+  /** Restore new-message text and its reply quote without replacing an active event edit. */
+  function showDraft(next: RoomDraft, failure: string | null, ready: boolean) {
     draftFailure = failure;
     draftReady = ready;
     if (editingMessage) return;
@@ -198,7 +198,8 @@
       quote: quoteOf(applyRelations(items, status?.account.userId ?? null), next.replyTo)
         ?? { sender: 'Earlier message', text: 'Reply context is not loaded.' }
     };
-  });
+  }
+  const draftKeeper = new DraftKeeper({ load: roomDraft, save: saveRoomDraft }, showDraft);
   /** Keep the editor and room-bound store in sync; edits to an existing event stay separate. */
   function changeDraft(body = draft) {
     draft = body;
@@ -1284,6 +1285,15 @@
     editingMessage = null;
   }
 
+  /** Attach a reply to loaded context and leave event-edit mode before saving the draft. */
+  function replyToMessage(eventId: string) {
+    const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), eventId);
+    if (!quote) return;
+    endEdit();
+    replyingTo = { eventId, quote };
+    changeDraft();
+  }
+
   // Sends the draft as a new version of the message being edited. In a room
   // that is not encrypted the core asks for consent like any message: the
   // edit then waits with "Send unencrypted".
@@ -1516,13 +1526,15 @@
     if (!current(hit.roomId, generation)) return;
     const request = roomOpenRequest;
     const contentEpoch = timelineEpoch;
+    /** Reject context after a session, room-open request or timeline filter change. */
+    function searchContextCurrent() {
+      return current(hit.roomId, generation) && request === roomOpenRequest && contentEpoch === timelineEpoch;
+    }
     searchLocation = 'Looking for the message in bounded history pages…';
     loading = true;
     try {
       const context = await findSearchContext(hit.roomId, hit.eventId, items, nextCursor,
-        timelinePage, /**
-         * Reject context after a session, room-open request or timeline filter change.
-         */ () => current(hit.roomId, generation) && request === roomOpenRequest && contentEpoch === timelineEpoch);
+        timelinePage, searchContextCurrent);
       if (!context) return;
       items = context.items;
       nextCursor = context.cursor;
@@ -1892,15 +1904,7 @@
               : undefined}
             onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
             onreply={sendBlocked === null && draftReady && !textSending
-              ? /**
-                 * Keep replies attached to loaded context and leave event-edit mode before saving the draft.
-                 */ (eventId) => {
-                  const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), eventId);
-                  if (!quote) return;
-                  endEdit();
-                  replyingTo = { eventId, quote };
-                  changeDraft();
-                }
+              ? replyToMessage
               : undefined}
             ownUserId={signedIn ? status.account.userId : null}
             onedit={sendBlocked === null ? startEdit : undefined}

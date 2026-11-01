@@ -6,14 +6,14 @@ export const SEARCH_CONTEXT_ITEMS = 500;
 /** Merge chronological pages without duplicate event IDs. Preserve visible gaps. */
 function mergeContext(older: TimelineItem[], newer: TimelineItem[]): TimelineItem[] {
   const seen = new Set<string>();
-  return [...older, ...newer].filter(/**
-   * Keep every gap and the first occurrence of each chronological event ID.
-   */ (item) => {
+  /** Keep every gap and the first occurrence of each chronological event ID. */
+  function keepItem(item: TimelineItem): boolean {
     if (item.kind === 'gap') return true;
     if (seen.has(item.event_id)) return false;
     seen.add(item.event_id);
     return true;
-  });
+  }
+  return [...older, ...newer].filter(keepItem);
 }
 
 /** Refuse a page that cannot fit in the bounded context without losing its cursor. */
@@ -48,8 +48,14 @@ export async function findSearchContext(
   } else {
     items = mergeContext([], initial);
   }
-  /** Only a retained event can satisfy the search; a gap has no event identity. */
-  const found = () => items.some((item) => item.kind !== 'gap' && item.event_id === eventId);
+  /** Gaps have no event identity and cannot match a cached search result. */
+  function isTarget(item: TimelineItem): boolean {
+    return item.kind !== 'gap' && item.event_id === eventId;
+  }
+  /** Only an event in the retained context can satisfy the search. */
+  function found(): boolean {
+    return items.some(isTarget);
+  }
   const seenCursors = new Set<string>();
   while (current() && !found() && cursor !== null && count < SEARCH_CONTEXT_PAGES) {
     if (seenCursors.has(cursor) || items.length >= SEARCH_CONTEXT_ITEMS) break;

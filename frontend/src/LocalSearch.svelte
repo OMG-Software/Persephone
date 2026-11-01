@@ -15,16 +15,16 @@
   let failure = $state<string | null>(null);
   let request = 0;
   let lastRoom: string | null | undefined;
-  $effect(/**
-   * Invalidate pending results and errors when the selected room changes.
-   */ () => {
+  /** Invalidate pending results and errors when the selected room changes. */
+  function clearRoomResults() {
     if (roomId === lastRoom) return;
     lastRoom = roomId;
     request += 1;
     results = null;
     busy = false;
     failure = null;
-  });
+  }
+  $effect(clearRoomResults);
   onDestroy(() => { request += 1; results = null; term = ''; });
   /** Search cached text only; request IDs prevent older results replacing a newer view. */
   async function search(event: SubmitEvent) {

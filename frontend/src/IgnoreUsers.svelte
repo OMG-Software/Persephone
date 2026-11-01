@@ -11,14 +11,14 @@
   let failure = $state<string | null>(null);
   let active = true;
   onDestroy(() => { active = false; });
+  /** Preserve the last list on failure and clear its old error after a successful reload. */
+  function showList(reply: { users: IgnoredUsers | null; failure: string | null }) {
+    if (reply.users) users = reply.users;
+    failure = reply.failure;
+  }
   /** Reload the list and clear a previous error when the request succeeds. */
   function load() {
-    return loadIgnoredUsers(ignoredUsers, () => active, /**
-     * Preserve the last list on failure and clear its old error after a successful reload.
-     */ (reply) => {
-      if (reply.users) users = reply.users;
-      failure = reply.failure;
-    });
+    return loadIgnoredUsers(ignoredUsers, () => active, showList);
   }
   onMount(load);
   /** Save the confirmed setting, then refresh the visible ignored-user list. */

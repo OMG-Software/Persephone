@@ -228,9 +228,8 @@
     }
   }
 
-  onMount(/**
-   * Open settings and invalidate pending updates before returning focus on close.
-   */ () => {
+  /** Open settings and invalidate pending updates before returning focus on close. */
+  function mountSettings() {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialog?.showModal();
     loadSettings();
@@ -239,7 +238,8 @@
       dialog?.close();
       previous?.focus();
     };
-  });
+  }
+  onMount(mountSettings);
 
   // The room changed (a sync): read again what is shown.
   let seen: number | null = null;

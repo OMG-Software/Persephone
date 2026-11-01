@@ -109,9 +109,9 @@ export class DraftKeeper {
   beginEdit() { this.#editing = true; }
   endEdit() { this.#editing = false; }
 
-  /** Protecting keys takes priority over unsaved work. Do not wait for a
-   * failed, oversized, or stalled draft write before lock or sign-out. The
-   * core owns any admitted write until its lifecycle transition finishes. */
+  /** Start a lock or sign-out request without waiting for autosave. The core
+   * owns admitted writes; sign-out attempts server logout before locking.
+   * Starting the request does not prove that session protection is complete. */
   protect<T>(action: () => Promise<T>): Promise<T> {
     this.#cancelTimer();
     return action();
@@ -131,25 +131,26 @@ export class DraftKeeper {
     const revision = this.#revision;
     const roomId = this.#room;
     const draft = { ...this.#draft };
-    const save = this.#saving.then(/**
-     * Save the captured revision in order; publish completion only to its owning session and selection.
-     */ async () => {
-      if (epoch !== this.#epoch) return false;
+    const keeper = this;
+    /** Save the captured revision in order; publish completion only to its owning session and selection. */
+    async function saveSnapshot() {
+      if (epoch !== keeper.#epoch) return false;
       try {
-        await this.#core.save(roomId, draft);
-        if (epoch !== this.#epoch) return false;
-        if (selection === this.#selection && revision === this.#revision) {
-          this.#dirty = false;
-          this.#ready = true;
-          this.#discardRequested = false;
-          this.#show(this.#draft, null, true);
+        await keeper.#core.save(roomId, draft);
+        if (epoch !== keeper.#epoch) return false;
+        if (selection === keeper.#selection && revision === keeper.#revision) {
+          keeper.#dirty = false;
+          keeper.#ready = true;
+          keeper.#discardRequested = false;
+          keeper.#show(keeper.#draft, null, true);
         }
         return true;
       } catch {
-        if (epoch === this.#epoch && selection === this.#selection) this.#show(this.#draft, DRAFT_SAVE_FAILED, this.#ready);
+        if (epoch === keeper.#epoch && selection === keeper.#selection) keeper.#show(keeper.#draft, DRAFT_SAVE_FAILED, keeper.#ready);
         return false;
       }
-    });
+    }
+    const save = this.#saving.then(saveSnapshot);
     this.#saving = save.then(() => {});
     const saved = await save;
     // More typing while a save was in flight must also finish before leaving.

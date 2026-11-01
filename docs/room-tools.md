@@ -28,10 +28,11 @@ durable-save guarantee. A crash before a save completes can lose text.
 The frontend requests lock and confirmed sign-out without waiting for its
 draft-save promise or for a message to enter the send queue. Lock closes core
 admission and announces the UI clear before it waits for admitted work.
-Sign-out first attempts a homeserver logout. While that request is pending,
-sign-out has not yet closed admission, cleared the UI or protected the session.
-It then attempts to record local sign-out and remove the stored key before
-calling lock.
+Sign-out first attempts to record a local marker so an interrupted sign-out
+does not restore the account on the next start. It then attempts a homeserver
+logout. While that request is pending, sign-out has not yet closed admission,
+cleared the UI or protected the session. After the request, it attempts to
+record the revocation result and remove the stored key, then calls lock.
 Lock completion still waits for admitted work, including draft writes that
 hold a session lease. A timeout can leave the core in `locking`; it does not
 authorize store handoff. Unsaved text can be lost. Normal room and account

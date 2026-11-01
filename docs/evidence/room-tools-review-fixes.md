@@ -97,3 +97,28 @@ Raw frontend output is in ignored
 Rust runtime tests and live/platform acceptance checks were not repeated for
 these comment-only edits. CodeRabbit's exact documentation metric requires a
 new remote review; the local documentation audit is only an approximation.
+
+## Named callback follow-up, 1 November 2026
+
+CodeRabbit's review of `96b2869e9300478357df1472d6fb9ce2ab34b654` reported
+70.15% documentation coverage, still below 80%. Most new comments placed directly
+on anonymous callbacks did not improve that metric. The callbacks now have
+named declarations with conventional function comments. Direct diff review
+confirmed the same callback bodies, state reads, request guards and invocation
+order. The serialized draft-save helper captures the same `DraftKeeper`
+instance explicitly. No tests or dependencies changed.
+
+That review also identified the local marker written before server logout.
+The guides now describe all stages: attempt the marker write, attempt logout,
+attempt revocation-result recording and key removal, then call lock. The
+admission/UI limitation during the request remains explicit.
+
+`python tools/dev.py frontend` completed with exit 0 on the Windows host above:
+zero Svelte errors/warnings, a successful production build and 178 passing Node
+tests, none skipped. These include draft-save ordering and failure cases,
+ignored-list recovery, grouping and search-context bounds. Raw output is in
+ignored `.local/runs/room-tools/coderabbit-named-callbacks-frontend.log`.
+Markdown links, evidence JSON syntax and `git diff --check` also passed. Rust
+source did not change in this follow-up; native UI, live-server and other
+acceptance gates were not repeated. A new CodeRabbit run must confirm its
+documentation metric on the pushed revision.

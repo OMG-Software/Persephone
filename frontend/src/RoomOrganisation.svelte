@@ -11,14 +11,14 @@
   let failure = $state<string | null>(null);
   let active = true;
   onDestroy(() => { active = false; });
-  $effect(/**
-   * Restore the selected room's grouping controls from the current profile preferences.
-   */ () => {
+  /** Restore the selected room's grouping controls from the current profile preferences. */
+  function restoreGrouping() {
     const preference = preferences.find((entry) => entry.roomId === roomId);
     section = preference?.section ?? '';
     favourite = preference?.favourite ?? false;
     failure = null;
-  });
+  }
+  $effect(restoreGrouping);
   /** Save the profile-local room grouping after enforcing the UI byte limit. */
   async function save(event: SubmitEvent) {
     event.preventDefault();

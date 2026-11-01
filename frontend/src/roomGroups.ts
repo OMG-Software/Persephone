@@ -1,5 +1,10 @@
 import type { RoomPreference, RoomSummary } from '../../crates/contracts/generated/contracts';
 
+/** Use exact label order so section sorting does not depend on the device locale. */
+function compareSections([left]: [string, RoomSummary[]], [right]: [string, RoomSummary[]]): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** Preserve room order within groups. A favourite appears only in Favourites.
  * Unassigned rooms use the default group; named sections sort by their exact labels.
  */
@@ -19,9 +24,7 @@ export function groupRooms(rooms: RoomSummary[], preferences: RoomPreference[]) 
   }
   return [
     ...(favourites.length ? [{ name: 'Favourites', rooms: favourites }] : []),
-    ...[...sections].sort(/**
-     * Use exact label order so section sorting does not depend on the device locale.
-     */ ([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    ...[...sections].sort(compareSections)
       .map(([name, entries]) => ({ name, rooms: entries })),
     ...(other.length ? [{ name: 'Rooms', rooms: other }] : [])
   ];
