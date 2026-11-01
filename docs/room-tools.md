@@ -1,9 +1,14 @@
 # Room tools
 
-Updated 1 November 2026. The owner requested these features on this date.
-The current source implements them; their technical ADRs remain proposed and
-[automated checks pass](evidence/room-tools.md). Native UI and live-server
-acceptance remain open. No acceptance gate is closed.
+Updated 1 November 2026. Owner requests on this date added drafts, search,
+ignore/report, room organisation, date navigation, shared pins, attachment
+browsing, search filters and connection health. Their requirements are
+approved; [ADR-0032](adr/0032-keep-bounded-room-drafts-in-the-encrypted-profile.md)
+to [ADR-0036](adr/0036-bound-room-navigation-and-inspection-in-the-core.md)
+remain proposed. The features are implemented, and automated checks are
+recorded in [room-navigation and media health evidence](evidence/room-navigation-media-health.md).
+Native UI and live-server acceptance remain open. No acceptance or security
+gate is closed.
 
 ## Drafts
 
@@ -128,3 +133,65 @@ The SDK event-cache subscription retains sync events for local search. It adds
 background work and does not prove full shutdown. Lock after a client has run
 still requires restart (`restart_required`). See the
 [SDK lifecycle contract](architecture/sdk-lifecycle.md).
+
+## Date navigation
+
+Jump to date sends the room ID and requested timestamp to the homeserver. It
+sends no search term. The core requests the first event at or after the time
+(`since`). It tries the last event before the time (`until`) only when the
+first request returns HTTP 404. The result uses bounded event context and
+marks the newer end with a gap. Its page cursor resumes before the oldest
+retained item. It does not scan history to simulate a date lookup. The server
+still learns the room and time.
+
+Focused date and pinned-message context does not send read markers. If a live
+room update invalidates focused context, the client cancels an in-flight
+context request and clears the displayed focused timeline. It removes received
+reply and saved-reply quote text but keeps your draft and edit body. The UI
+shows **Room changed. Return to latest to refresh.** Select **Return to latest**
+to load the current room view. The client does not silently replace focused
+context with a new timeline.
+
+## Shared pinned messages
+
+Pins use standard `m.room.pinned_events` room state. The state contains event
+IDs only; it stores no plaintext snippets. Matrix room state is unencrypted
+metadata, including in encrypted rooms. The core reads current state and
+checks the user's current power level before a write. A list can contain at
+most 100 IDs. State replacement has no compare-and-swap guarantee, so
+concurrent writers can overwrite one another. This is shared room metadata,
+not a private profile setting.
+
+## Attachment browser
+
+The browser scans one history chunk of at most 50 raw events per page, then
+filters the projected items by attachment kind, exact sender and date. It
+uses opaque cursors scoped to the room. A page can contain no attachments and
+still have a next cursor. It returns metadata only and marks coverage partial.
+It does not fetch media. An explicit existing media action is required for a
+download or display. The UI retains at most 500 items. Gaps, undecryptable
+events, redactions, byte limits and the bounded page history can hide matches.
+
+## Search filters
+
+Local cache search accepts an exact sender, inclusive start time and exclusive
+end time with the query. Dates use the original message timestamp, even when
+the displayed text comes from an edit or redaction reconstruction. Unknown
+timestamps do not match a date filter. Filters create no index and do not
+cause cache growth or an HTTP request. Search remains partial because of
+cache gaps, undecryptable events and work and byte limits.
+
+## Connection health
+
+The panel shows a manual snapshot of existing generation-fenced sync metrics.
+It adds no probe or background task. The displayed timestamps use the local
+computer clock. They do not prove current connectivity. Locking resets the
+snapshot and generation fencing rejects stale sync updates.
+
+## Verification state
+
+The implementation is in place, and automated checks are recorded in the
+[verification record](evidence/room-navigation-media-health.md). Native UI
+and live-server acceptance remain open. Existing SDK drain and restart
+requirements remain unresolved. Passing feature checks do not establish a
+complete SDK shutdown or production readiness.

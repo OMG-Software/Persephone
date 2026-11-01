@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-event-context"
+description = "Enables the event_context command without any pre-configured scope."
+commands.allow = ["event_context"]
+
+[[permission]]
+identifier = "deny-event-context"
+description = "Denies the event_context command without any pre-configured scope."
+commands.deny = ["event_context"]

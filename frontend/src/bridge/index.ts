@@ -37,6 +37,13 @@ import type {
   RoomPreferences,
   LocalSearchHit,
   LocalSearchResults,
+  LocalSearchFilters,
+  FocusedTimeline,
+  PinnedMessages,
+  AttachmentKind,
+  AttachmentPage,
+  ConnectionHealth,
+  SyncMode,
   IgnoredUsers,
   RoomIdentityChanges,
   RoomInvite,
@@ -96,6 +103,13 @@ export type {
   RoomPreferences,
   LocalSearchHit,
   LocalSearchResults,
+  LocalSearchFilters,
+  FocusedTimeline,
+  PinnedMessages,
+  AttachmentKind,
+  AttachmentPage,
+  ConnectionHealth,
+  SyncMode,
   IgnoredUsers,
   RoomIdentityChanges,
   RoomInvite,
@@ -156,8 +170,38 @@ export function setRoomPreference(preference: RoomPreference): Promise<void> {
 }
 
 /** Search existing local cache entries; this call does not fetch server history. */
-export function searchMessages(term: string, roomId: string | null): Promise<LocalSearchResults> {
-  return invoke<LocalSearchResults>('search_messages', { term, roomId });
+export function searchMessages(term: string, roomId: string | null, filters: LocalSearchFilters = { sender: null, fromMs: null, beforeMs: null }): Promise<LocalSearchResults> {
+  return invoke<LocalSearchResults>('search_messages', { term, roomId, filters });
+}
+
+/** Locate history near an explicit date; only the core talks to the homeserver. */
+export function jumpToDate(roomId: string, timestampMs: number): Promise<FocusedTimeline> {
+  return invoke<FocusedTimeline>('jump_to_date', { roomId, timestampMs });
+}
+
+/** Load bounded context for an explicit event without exposing pagination tokens. */
+export function eventContext(roomId: string, eventId: string): Promise<FocusedTimeline> {
+  return invoke<FocusedTimeline>('event_context', { roomId, eventId });
+}
+
+/** Read shared room pins and the core's current management permission. */
+export function pinnedMessages(roomId: string): Promise<PinnedMessages> {
+  return invoke<PinnedMessages>('pinned_messages', { roomId });
+}
+
+/** Change shared pin references after the core checks membership and permission. */
+export function setPinned(roomId: string, eventId: string, pinned: boolean): Promise<void> {
+  return invoke<void>('set_pinned', { roomId, eventId, pinned });
+}
+
+/** Browse bounded attachment metadata. Loading or saving bytes remains explicit. */
+export function attachments(roomId: string, cursor: string | null, kind: AttachmentKind, filters: LocalSearchFilters): Promise<AttachmentPage> {
+  return invoke<AttachmentPage>('attachments', { roomId, cursor, kind, filters });
+}
+
+/** Read observations from existing sync work, without a new network probe. */
+export function connectionHealth(): Promise<ConnectionHealth> {
+  return invoke<ConnectionHealth>('connection_health');
 }
 
 /** Read the ignored Matrix user IDs for the active profile. */

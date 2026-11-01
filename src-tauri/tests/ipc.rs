@@ -50,6 +50,19 @@ impl CoreTransport for FakeCore {
             Call::RoomPreferences {} => Ok(
                 serde_json::json!({"rooms":[{"roomId":"!r:example.invalid","favourite":true,"section":"Work"}]}),
             ),
+            Call::JumpToDate { room_id, .. } | Call::EventContext { room_id, .. } => Ok(
+                serde_json::json!({"page":{"roomId":room_id,"items":[],"nextCursor":null},"eventId":"$match"}),
+            ),
+            Call::PinnedMessages { room_id } => Ok(
+                serde_json::json!({"roomId":room_id,"eventIds":["$match"],"items":[],"canManage":true,"truncated":false}),
+            ),
+            Call::Attachments { room_id, .. } => Ok(
+                serde_json::json!({"roomId":room_id,"items":[],"nextCursor":null,"scanned":2,"partial":true}),
+            ),
+            Call::SetPinned { .. } => Ok(serde_json::Value::Null),
+            Call::ConnectionHealth {} => Ok(
+                serde_json::json!({"accountState":"signed_out","storeState":"protected","syncMode":"unknown","lastAttemptAt":null,"lastSuccessAt":null,"consecutiveFailures":0,"retryDelayMs":0,"lastError":null}),
+            ),
             Call::SearchMessages { term, .. } => Ok(
                 serde_json::json!({"results":[{"roomId":"!r:example.invalid","eventId":"$match","sender":"@bob:example.invalid","body":term}],"scanned":2,"truncated":true}),
             ),
@@ -670,6 +683,12 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-room-preferences",
             "allow-set-room-preference",
             "allow-search-messages",
+            "allow-jump-to-date",
+            "allow-event-context",
+            "allow-pinned-messages",
+            "allow-set-pinned",
+            "allow-attachments",
+            "allow-connection-health",
             "allow-ignored-users",
             "allow-set-ignored-user",
             "allow-report-abuse",
@@ -2428,7 +2447,7 @@ fn personal_commands_cross_only_with_bounded_input_and_typed_replies() {
         ),
         (
             "search_messages",
-            serde_json::json!({"term":"<b>term</b>","roomId":null}),
+            serde_json::json!({"term":"<b>term</b>","roomId":null,"filters":{"sender":null,"fromMs":null,"beforeMs":null}}),
         ),
         ("ignored_users", serde_json::json!({})),
         (
@@ -2474,11 +2493,11 @@ fn personal_limits_reject_before_relay_and_nested_extra_fields_are_refused() {
         ),
         (
             "search_messages",
-            serde_json::json!({"term":"é".repeat(65),"roomId":null}),
+            serde_json::json!({"term":"é".repeat(65),"roomId":null,"filters":{"sender":null,"fromMs":null,"beforeMs":null}}),
         ),
         (
             "search_messages",
-            serde_json::json!({"term":"  ","roomId":null}),
+            serde_json::json!({"term":"  ","roomId":null,"filters":{"sender":null,"fromMs":null,"beforeMs":null}}),
         ),
         (
             "set_ignored_user",
@@ -2500,4 +2519,81 @@ fn personal_limits_reject_before_relay_and_nested_extra_fields_are_refused() {
         );
     }
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn navigation_commands_allow_local_views_and_deny_remote_origins_before_relay() {
+    let fake = FakeCore::new(true);
+    let app = app_with(fake.clone());
+    let window = create_main_window(&app).unwrap();
+    let filters = serde_json::json!({"sender":null,"fromMs":null,"beforeMs":null});
+    for (cmd, body) in [
+        (
+            "jump_to_date",
+            serde_json::json!({"roomId":"!r:s","timestampMs":0}),
+        ),
+        (
+            "event_context",
+            serde_json::json!({"roomId":"!r:s","eventId":"$e"}),
+        ),
+        ("pinned_messages", serde_json::json!({"roomId":"!r:s"})),
+        (
+            "set_pinned",
+            serde_json::json!({"roomId":"!r:s","eventId":"$e","pinned":true}),
+        ),
+        (
+            "attachments",
+            serde_json::json!({"roomId":"!r:s","cursor":null,"kind":"all","filters":filters}),
+        ),
+        ("connection_health", serde_json::json!({})),
+    ] {
+        assert!(
+            invoke_on(&window, cmd, app_origin(), body.clone()).is_ok(),
+            "{cmd}"
+        );
+        let calls = fake.calls.load(Ordering::SeqCst);
+        assert!(
+            invoke_on(&window, cmd, "https://evil.invalid", body.clone()).is_err(),
+            "{cmd}"
+        );
+        assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+        for (field, invalid) in [
+            ("roomId", serde_json::json!("x".repeat(256))),
+            ("eventId", serde_json::json!("x".repeat(1025))),
+            ("cursor", serde_json::json!("x".repeat(4097))),
+            ("timestampMs", serde_json::json!(9_007_199_254_740_992_u64)),
+        ] {
+            if body.get(field).is_none() {
+                continue;
+            }
+            let mut bad = body.clone();
+            bad[field] = invalid;
+            assert!(
+                invoke_on(&window, cmd, app_origin(), bad).is_err(),
+                "{cmd} {field}"
+            );
+            assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+        }
+    }
+    for cmd in ["search_messages", "attachments"] {
+        for filters in [
+            serde_json::json!({"sender":null,"fromMs":1,"beforeMs":1}),
+            serde_json::json!({"sender":"@a:\ns","fromMs":null,"beforeMs":null}),
+            serde_json::json!({"sender":null,"fromMs":null,"beforeMs":null,"url":"unsafe"}),
+            serde_json::json!({"sender":null,"fromMs":9_007_199_254_740_992_u64,"beforeMs":null}),
+            serde_json::json!({"sender":null,"fromMs":null}),
+        ] {
+            let body = if cmd == "search_messages" {
+                serde_json::json!({"term":"text","roomId":null,"filters":filters})
+            } else {
+                serde_json::json!({"roomId":"!r:s","cursor":null,"kind":"all","filters":filters})
+            };
+            let calls = fake.calls.load(Ordering::SeqCst);
+            assert!(
+                invoke_on(&window, cmd, app_origin(), body).is_err(),
+                "{cmd}"
+            );
+            assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+        }
+    }
 }

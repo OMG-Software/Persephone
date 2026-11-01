@@ -3,11 +3,15 @@
   import { searchMessages, type LocalSearchHit, type LocalSearchResults } from './bridge';
   import { byteLength } from './drafts';
   import FeatureDialog from './FeatureDialog.svelte';
+  import SearchFilters from './SearchFilters.svelte';
+  import { searchFilters } from './roomTools';
   import SearchHit from './SearchHit.svelte';
 
   let { roomId, onselect, onclose }: {
     roomId: string | null; onselect: (hit: LocalSearchHit) => void; onclose: () => void;
   } = $props();
+  let sender = $state(''); let from = $state(''); let before = $state('');
+  const filters = $derived(searchFilters(sender, from, before));
   let term = $state('');
   let scope = $state('all');
   let results = $state<LocalSearchResults | null>(null);
@@ -25,17 +29,18 @@
     failure = null;
   }
   $effect(clearRoomResults);
+  $effect(() => { sender; from; before; results = null; });
   onDestroy(() => { request += 1; results = null; term = ''; });
   /** Search cached text only; request IDs prevent older results replacing a newer view. */
   async function search(event: SubmitEvent) {
     event.preventDefault();
-    if (busy || !term.trim() || byteLength(term) > 128) return;
+    if (busy || !filters || !term.trim() || byteLength(term) > 128) return;
     const asked = ++request;
     busy = true;
     results = null;
     failure = null;
     try {
-      const reply = await searchMessages(term, scope === 'room' ? roomId : null);
+      const reply = await searchMessages(term, scope === 'room' ? roomId : null, filters);
       if (asked === request) results = reply;
     } catch {
       if (asked === request) failure = 'The local search failed. Try again after the room cache is available.';
@@ -55,7 +60,9 @@
       <option value="all">All cached rooms</option>
       <option value="room" disabled={!roomId}>Current room</option>
     </select>
-    <button type="submit" class="primary" disabled={busy || !term.trim() || byteLength(term) > 128}>{busy ? 'Searching…' : 'Search'}</button>
+    <SearchFilters bind:sender bind:from bind:before disabled={busy} />
+    {#if !filters}<p role="alert" class="error">Enter a valid Matrix ID and date range. From must be before Before.</p>{/if}
+    <button type="submit" class="primary" disabled={busy || !filters || !term.trim() || byteLength(term) > 128}>{busy ? 'Searching…' : 'Search'}</button>
   </form>
   {#if byteLength(term) > 128}<p role="alert" class="error">The search text exceeds 128 UTF-8 bytes.</p>{/if}
   {#if failure}<p role="alert" class="error">{failure}</p>{/if}

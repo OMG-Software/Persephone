@@ -58,6 +58,7 @@ pub mod proxy;
 pub mod recovery_file;
 pub mod registration;
 pub mod room_settings;
+pub mod room_tools;
 pub mod security;
 pub mod sending;
 pub mod session;
@@ -547,6 +548,11 @@ impl Core {
             | Call::RoomPreferences {}
             | Call::SetRoomPreference { .. }
             | Call::SearchMessages { .. }
+            | Call::JumpToDate { .. }
+            | Call::EventContext { .. }
+            | Call::PinnedMessages { .. }
+            | Call::SetPinned { .. }
+            | Call::Attachments { .. }
             | Call::IgnoredUsers {}
             | Call::SetIgnoredUser { .. }
             | Call::ReportAbuse { .. } => match self.personal_call(&request.call) {
@@ -661,6 +667,11 @@ impl Core {
             | Call::RoomPreferences {}
             | Call::SetRoomPreference { .. }
             | Call::SearchMessages { .. }
+            | Call::JumpToDate { .. }
+            | Call::EventContext { .. }
+            | Call::PinnedMessages { .. }
+            | Call::SetPinned { .. }
+            | Call::Attachments { .. }
             | Call::IgnoredUsers {}
             | Call::SetIgnoredUser { .. }
             | Call::ReportAbuse { .. } => match self.personal_call(call) {
@@ -674,6 +685,7 @@ impl Core {
                 store: self.session.state(),
                 account: self.account(),
             }),
+            Call::ConnectionHealth {} => ok(&self.session.connection_health()),
             Call::RoomList {} => match self.source() {
                 Source::Fixtures => ok(&lock(&self.fixtures).room_list()),
                 Source::Locked => Outcome::Error(ErrorCode::Locked),
@@ -936,6 +948,13 @@ impl Core {
             Call::SearchMessages { room_id, .. } => {
                 room_id.as_ref().is_none_or(|id| valid_room_id(id))
             }
+            Call::JumpToDate { room_id, .. }
+            | Call::PinnedMessages { room_id }
+            | Call::Attachments { room_id, .. } => valid_room_id(room_id),
+            Call::EventContext { room_id, event_id }
+            | Call::SetPinned {
+                room_id, event_id, ..
+            } => valid_room_id(room_id) && valid_event_id(event_id),
             Call::SetIgnoredUser { user_id, .. } => conversations::parse_user(user_id).is_some(),
             Call::ReportAbuse {
                 room_id, event_id, ..
@@ -949,7 +968,12 @@ impl Core {
             return Err(ErrorCode::NotFound);
         }
         let slot = match call {
-            Call::SearchMessages { .. } => Some(self.local_search.begin()?),
+            Call::SearchMessages { .. }
+            | Call::JumpToDate { .. }
+            | Call::EventContext { .. }
+            | Call::PinnedMessages { .. }
+            | Call::Attachments { .. } => Some(self.local_search.begin()?),
+            Call::SetPinned { .. } => Some(self.abuse.begin()?),
             Call::SetIgnoredUser { .. } | Call::ReportAbuse { .. } => Some(self.abuse.begin()?),
             Call::SaveRoomDraft { .. } | Call::SetRoomPreference { .. } => {
                 Some(self.personal.begin()?)
@@ -981,9 +1005,48 @@ impl Core {
                     Call::SetRoomPreference { preference } => {
                         json(personal::set_preference(stores, preference).await)
                     }
-                    Call::SearchMessages { term, room_id } => {
-                        json(local_search::search(&client, stores, term, room_id.as_deref()).await)
+                    Call::SearchMessages {
+                        term,
+                        room_id,
+                        filters,
+                    } => json(
+                        local_search::search(&client, stores, term, room_id.as_deref(), filters)
+                            .await,
+                    ),
+                    Call::JumpToDate {
+                        room_id,
+                        timestamp_ms,
+                    } => json(
+                        room_tools::jump_to_date(&client, &self.matrix, room_id, *timestamp_ms)
+                            .await,
+                    ),
+                    Call::EventContext { room_id, event_id } => json(
+                        room_tools::event_context(&client, &self.matrix, room_id, event_id).await,
+                    ),
+                    Call::PinnedMessages { room_id } => {
+                        json(room_tools::pinned_messages(&client, &self.matrix, room_id).await)
                     }
+                    Call::SetPinned {
+                        room_id,
+                        event_id,
+                        pinned,
+                    } => json(room_tools::set_pinned(&client, room_id, event_id, *pinned).await),
+                    Call::Attachments {
+                        room_id,
+                        cursor,
+                        kind,
+                        filters,
+                    } => json(
+                        room_tools::attachments(
+                            &client,
+                            &self.matrix,
+                            room_id,
+                            cursor.as_deref(),
+                            *kind,
+                            filters,
+                        )
+                        .await,
+                    ),
                     Call::IgnoredUsers {} => json(abuse::ignored_users(&client).await),
                     Call::SetIgnoredUser { user_id, ignored } => {
                         json(abuse::set_ignored(&client, user_id, *ignored).await)
@@ -2423,6 +2486,7 @@ mod tests {
             Call::SearchMessages {
                 term: "text".into(),
                 room_id: None,
+                filters: persephone_contracts::LocalSearchFilters::default(),
             },
             Call::IgnoredUsers {},
             Call::SetIgnoredUser {
@@ -2448,6 +2512,7 @@ mod tests {
             Call::SearchMessages {
                 term: "text".into(),
                 room_id: Some("not-a-room".into()),
+                filters: persephone_contracts::LocalSearchFilters::default(),
             },
             Call::SetIgnoredUser {
                 user_id: "not-a-user".into(),

@@ -406,14 +406,16 @@ pub struct RoomPreference {
 /// missing field. Keep that distinction at the untrusted request boundary.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum RequiredNullableString {
-    Value(String),
+enum RequiredNullable<T> {
+    Value(T),
     Null,
 }
 
-impl RequiredNullableString {
+type RequiredNullableString = RequiredNullable<String>;
+
+impl<T> RequiredNullable<T> {
     /// Convert the validated wire value to the application's optional value.
-    fn into_option(self) -> Option<String> {
+    fn into_option(self) -> Option<T> {
         match self {
             Self::Value(value) => Some(value),
             Self::Null => None,
@@ -479,6 +481,156 @@ pub struct LocalSearchResults {
     pub results: Vec<LocalSearchHit>,
     pub truncated: bool,
     pub scanned: u32,
+}
+
+/// Optional exact sender and original-event time range. All fields are required
+/// on the wire, with null meaning no filter. The upper time bound is exclusive.
+#[derive(Clone, Debug, Default, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LocalSearchFilters {
+    pub sender: Option<String>,
+    #[ts(type = "number | null")]
+    pub from_ms: Option<UnixMillis>,
+    #[ts(type = "number | null")]
+    pub before_ms: Option<UnixMillis>,
+}
+
+impl<'de> Deserialize<'de> for LocalSearchFilters {
+    /// Preserve required-nullable fields at the untrusted command boundary.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            sender: RequiredNullableString,
+            from_ms: RequiredNullable<UnixMillis>,
+            before_ms: RequiredNullable<UnixMillis>,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            sender: input.sender.into_option(),
+            from_ms: input.from_ms.into_option(),
+            before_ms: input.before_ms.into_option(),
+        })
+    }
+}
+
+/// A bounded context window. Its cursor resumes before the oldest retained item.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FocusedTimeline {
+    pub page: TimelinePage,
+    pub event_id: String,
+}
+
+/// Shared room pin references and the displayable content available to this
+/// device. A reference can be unavailable or hidden by local ignore policy.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PinnedMessages {
+    pub room_id: String,
+    pub event_ids: Vec<String>,
+    pub items: Vec<TimelineItem>,
+    pub can_manage: bool,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    #[default]
+    All,
+    Images,
+    Files,
+}
+
+/// A filtered history window, not a complete media index. Media bytes and URLs
+/// remain in the core; existing explicit load/save commands retrieve content.
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AttachmentPage {
+    pub room_id: String,
+    pub items: Vec<TimelineItem>,
+    pub next_cursor: Option<String>,
+    pub scanned: u32,
+    pub partial: bool,
+}
+
+impl<'de> Deserialize<'de> for AttachmentPage {
+    /// Require an explicit cursor or null, so a missing field cannot hide a page.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            room_id: String,
+            items: Vec<TimelineItem>,
+            next_cursor: RequiredNullableString,
+            scanned: u32,
+            partial: bool,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            room_id: input.room_id,
+            items: input.items,
+            next_cursor: input.next_cursor.into_option(),
+            scanned: input.scanned,
+            partial: input.partial,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMode {
+    #[default]
+    Unknown,
+    Sliding,
+    Classic,
+}
+
+/// Observations from existing sync work, with no diagnostic payloads, tokens,
+/// paths or message data. Computer-clock timestamps do not establish freshness.
+#[derive(Clone, Debug, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConnectionHealth {
+    pub account_state: AccountState,
+    pub store_state: StoreState,
+    pub sync_mode: SyncMode,
+    #[ts(type = "number | null")]
+    pub last_attempt_at: Option<UnixMillis>,
+    #[ts(type = "number | null")]
+    pub last_success_at: Option<UnixMillis>,
+    pub consecutive_failures: u32,
+    pub retry_delay_ms: u32,
+    pub last_error: Option<SignInError>,
+}
+
+impl<'de> Deserialize<'de> for ConnectionHealth {
+    /// A missing observation is explicit null, not a missing protocol field.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            account_state: AccountState,
+            store_state: StoreState,
+            sync_mode: SyncMode,
+            last_attempt_at: RequiredNullable<UnixMillis>,
+            last_success_at: RequiredNullable<UnixMillis>,
+            consecutive_failures: u32,
+            retry_delay_ms: u32,
+            last_error: RequiredNullable<SignInError>,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            account_state: input.account_state,
+            store_state: input.store_state,
+            sync_mode: input.sync_mode,
+            last_attempt_at: input.last_attempt_at.into_option(),
+            last_success_at: input.last_success_at.into_option(),
+            consecutive_failures: input.consecutive_failures,
+            retry_delay_ms: input.retry_delay_ms,
+            last_error: input.last_error.into_option(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -1683,6 +1835,13 @@ pub fn generated_typescript() -> String {
         format!("export {}", RoomPreferences::decl(&config)),
         format!("export {}", LocalSearchHit::decl(&config)),
         format!("export {}", LocalSearchResults::decl(&config)),
+        format!("export {}", LocalSearchFilters::decl(&config)),
+        format!("export {}", FocusedTimeline::decl(&config)),
+        format!("export {}", PinnedMessages::decl(&config)),
+        format!("export {}", AttachmentKind::decl(&config)),
+        format!("export {}", AttachmentPage::decl(&config)),
+        format!("export {}", SyncMode::decl(&config)),
+        format!("export {}", ConnectionHealth::decl(&config)),
         format!("export {}", IgnoredUsers::decl(&config)),
         format!("export {}", InviteSummary::decl(&config)),
         format!("export {}", InviteList::decl(&config)),
@@ -1757,6 +1916,116 @@ mod personal_contract_tests {
             .unwrap()
             .insert("extra".into(), true.into());
         assert!(serde_json::from_value::<T>(json).is_err());
+    }
+
+    #[test]
+    fn attachment_page_requires_an_explicit_nullable_cursor() {
+        let page = serde_json::json!({"roomId":"!room:example.invalid","items":[],"nextCursor":null,"scanned":0,"partial":true});
+        for cursor in [serde_json::Value::Null, serde_json::json!("opaque-cursor")] {
+            let mut input = page.clone();
+            input["nextCursor"] = cursor;
+            let decoded: AttachmentPage = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), input);
+        }
+        let mut missing = page.clone();
+        missing.as_object_mut().unwrap().remove("nextCursor");
+        assert!(serde_json::from_value::<AttachmentPage>(missing).is_err());
+        for cursor in [
+            serde_json::json!(false),
+            serde_json::json!(1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let mut input = page.clone();
+            input["nextCursor"] = cursor;
+            assert!(serde_json::from_value::<AttachmentPage>(input).is_err());
+        }
+        for duplicate in [
+            r#"{"roomId":"!room:example.invalid","items":[],"nextCursor":null,"nextCursor":"opaque-cursor","scanned":0,"partial":true}"#,
+            r#"{"roomId":"!room:example.invalid","items":[],"nextCursor":null,"nextCursor":null,"scanned":0,"partial":true}"#,
+        ] {
+            assert!(serde_json::from_str::<AttachmentPage>(duplicate).is_err());
+        }
+    }
+
+    #[test]
+    fn navigation_fixtures_round_trip_and_reject_unexpected_data() {
+        fn fixture<T: DeserializeOwned + Serialize>(wire: &str) {
+            let value: serde_json::Value = serde_json::from_str(wire).unwrap();
+            let decoded: T = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+            let mut extra = value;
+            extra["accessToken"] = "secret".into();
+            assert!(serde_json::from_value::<T>(extra).is_err());
+        }
+        fixture::<FocusedTimeline>(include_str!("../fixtures/focused-timeline.json"));
+        fixture::<PinnedMessages>(include_str!("../fixtures/pinned-messages.json"));
+        fixture::<AttachmentPage>(include_str!("../fixtures/attachment-page.json"));
+        fixture::<ConnectionHealth>(include_str!("../fixtures/connection-health.json"));
+        fixture::<LocalSearchFilters>(include_str!("../fixtures/local-search-filters.json"));
+        let mut focused: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/focused-timeline.json")).unwrap();
+        focused["page"]["url"] = "mxc://unsafe".into();
+        assert!(serde_json::from_value::<FocusedTimeline>(focused).is_err());
+        assert!(serde_json::from_str::<AttachmentKind>("\"videos\"").is_err());
+        assert!(serde_json::from_str::<SyncMode>("\"polling\"").is_err());
+    }
+
+    #[test]
+    fn navigation_nullable_fields_are_required_strict_and_javascript_safe() {
+        let filters = serde_json::json!({"sender":null,"fromMs":null,"beforeMs":null});
+        let health = serde_json::json!({"accountState":"signed_out","storeState":"protected","syncMode":"unknown","lastAttemptAt":null,"lastSuccessAt":null,"consecutiveFailures":0,"retryDelayMs":0,"lastError":null});
+        for (value, fields, is_health) in [
+            (filters, vec!["sender", "fromMs", "beforeMs"], false),
+            (
+                health,
+                vec!["lastAttemptAt", "lastSuccessAt", "lastError"],
+                true,
+            ),
+        ] {
+            let accepts = |v: serde_json::Value| {
+                if is_health {
+                    serde_json::from_value::<ConnectionHealth>(v).is_ok()
+                } else {
+                    serde_json::from_value::<LocalSearchFilters>(v).is_ok()
+                }
+            };
+            assert!(accepts(value.clone()));
+            let mut extra = value.clone();
+            extra["token"] = "secret".into();
+            assert!(!accepts(extra));
+            for field in fields {
+                let mut missing = value.clone();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(!accepts(missing));
+                let mut wrong = value.clone();
+                wrong[field] = serde_json::json!([]);
+                assert!(!accepts(wrong));
+                let wire = serde_json::to_string(&value).unwrap();
+                let duplicate = format!("{},\"{}\":null}}", &wire[..wire.len() - 1], field);
+                assert!(if is_health {
+                    serde_json::from_str::<ConnectionHealth>(&duplicate).is_err()
+                } else {
+                    serde_json::from_str::<LocalSearchFilters>(&duplicate).is_err()
+                });
+                if field != "sender" && field != "lastError" {
+                    for (time, valid) in [
+                        (0_u64, true),
+                        (9_007_199_254_740_991, true),
+                        (9_007_199_254_740_992, false),
+                    ] {
+                        let mut input = value.clone();
+                        input[field] = time.into();
+                        assert_eq!(accepts(input), valid);
+                    }
+                    for time in [serde_json::json!(-1), serde_json::json!(0.5)] {
+                        let mut input = value.clone();
+                        input[field] = time;
+                        assert!(!accepts(input));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

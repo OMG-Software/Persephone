@@ -155,3 +155,24 @@ test('GIVEN a pending dialog operation WHEN dismissal is disabled THEN its Close
     assert.equal(/\bdisabled\b/.test(close), closeDisabled);
   }
 });
+
+
+test('GIVEN hostile pin metadata WHEN rendered THEN isolate inert text and disable unauthorized unpin', async () => {
+  const { default: Row } = await vite.ssrLoadModule('/src/PinnedMessageRow.svelte');
+  const hostile = '<img src=x onerror=alert(1)>';
+  const { body: html } = render(Row, { props: {
+    item: { kind: 'message', sender: hostile, body: hostile }, canManage: false, busy: false, onview() {}, onunpin() {}
+  } });
+  assert.match(html, /<bdi>&lt;img/);
+  assert.match(html, /dir="auto"/);
+  assert.doesNotMatch(html, /<img\b/);
+  assert.match(html, /disabled[^>]*>Unpin/);
+});
+
+test('GIVEN unavailable pinned content WHEN rendered THEN retain a view control and explain absence', async () => {
+  const { default: Row } = await vite.ssrLoadModule('/src/PinnedMessageRow.svelte');
+  const { body: html } = render(Row, { props: { canManage: true, busy: false, onview() {}, onunpin() {} } });
+  assert.match(html, /Message content is unavailable/);
+  assert.match(html, /View in timeline/);
+  assert.doesNotMatch(html, /disabled/);
+});

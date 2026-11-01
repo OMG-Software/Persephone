@@ -1,0 +1,8 @@
+{
+  "page": {
+    "roomId": "!room:example.invalid",
+    "items": [],
+    "nextCursor": null
+  },
+  "eventId": "$event"
+}

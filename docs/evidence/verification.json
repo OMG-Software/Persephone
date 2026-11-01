@@ -1899,6 +1899,32 @@
         "frontend/vite.config.js": "b06c69c4796f6489c9850ae26b58a2cc118e8ff911f05af70912119e6794c6a2",
         "tools/dev.py": "5be730630002bf244f233aa907ba9a2768bf260cbf8b721c2c5798c09872e593"
       }
+    },
+    {
+      "name": "workspace_check_room_navigation_media_health",
+      "command": "python tools/dev.py check",
+      "checked_on": "2026-11-01",
+      "exit_code": 0,
+      "host": "Windows x64, OS 10.0.26300.0; debug/test builds and release Wasm guest",
+      "branch": "codex/room-navigation-media-health",
+      "base_commit": "ba09f42a97ec7fa981c2279fb313cc31a1544ac1",
+      "working_tree_clean": false,
+      "source": "Base plus final feature source; normalized hashes in room-navigation-media-health-sources.json. Guide/evidence edits followed the check.",
+      "source_manifest_sha256": "0d5c8c234306f90f5f151774e3dc5658569796ca72113111672f9e7fbf9a7a22",
+      "cargo_lock_sha256": "a3e9b1bfb9026a4b20fcc50b4859a68297e8e60ea28bf49e8604f0ccb57ff129",
+      "frontend_lock_sha256": "7588fe64addd065bd5b358e92001923bb7b2496bac0925a67637d6339ae7a89a",
+      "rust_tests_passed": 798,
+      "rust_tests_ignored": 2,
+      "frontend_tests_passed": 189,
+      "server_registration_tests_passed": 2,
+      "development_controller_tests_passed": 50,
+      "total_tests_passed": 1039,
+      "counting": "Successful executions in check-verified.log, not unique cases; excludes earlier runs.",
+      "includes": "Rust format, guest/worker builds, workspace and development-feature tests/Clippy, Svelte checks/build/Node coverage, generated DTO drift, TypeScript contracts and Python harnesses.",
+      "earlier_attempts": "Focused sandbox store/file failures resolved by native override; four full-check Clippy errors corrected; a passing intermediate run preceded the final strict cursor correction. See report.",
+      "not_run": "Native UI/accessibility, live homeservers, Linux/macOS runtime, native containment gate, release package or dependency audit. SDK drain remains unresolved.",
+      "report": "room-navigation-media-health.md",
+      "raw_log": ".local/runs/room-navigation-media-health/check-verified.log"
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

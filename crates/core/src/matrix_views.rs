@@ -115,7 +115,7 @@ pub(crate) fn joined_room(client: &Client, raw: &str) -> Result<matrix_sdk::Room
 
 /// Ignore message content, while retaining room state and deletions. A
 /// moderator's redaction must still remove another sender's earlier text.
-fn ignored_content(
+pub(crate) fn ignored_content(
     event: &TimelineEvent,
     ignored: &std::collections::BTreeSet<OwnedUserId>,
 ) -> bool {
@@ -140,7 +140,7 @@ fn ignored_content(
 /// The event's `origin_server_ts`. Read from the raw event, so an encrypted
 /// one has its time too. `UInt` is at most 2^53 - 1, which `UnixMillis`
 /// holds.
-fn server_time(event: &TimelineEvent) -> Option<UnixMillis> {
+pub(crate) fn server_time(event: &TimelineEvent) -> Option<UnixMillis> {
     event
         .raw()
         .get_field::<UInt>("origin_server_ts")
@@ -457,7 +457,7 @@ impl MatrixViews {
     }
 
     /// Stores a homeserver token and returns the cursor the UI sees.
-    fn remember(&self, room: &str, token: String) -> String {
+    pub(crate) fn remember(&self, room: &str, token: String) -> String {
         let mut cursors = self.cursors();
         let number = cursors.next;
         cursors.next += 1;
@@ -468,7 +468,7 @@ impl MatrixViews {
         format!("{CURSOR_PREFIX}{number}")
     }
 
-    fn token(&self, room: &str, cursor: &str) -> Result<String, ErrorCode> {
+    pub(crate) fn token(&self, room: &str, cursor: &str) -> Result<String, ErrorCode> {
         if cursor.len() > MAX_CURSOR_BYTES {
             return Err(ErrorCode::InvalidArgument);
         }
@@ -605,6 +605,45 @@ impl MatrixViews {
                 .collect(),
             truncated,
         }
+    }
+
+    /// Project a fetched chunk with the normal ignore and edit-identity rules.
+    pub(crate) async fn project_chunk(
+        &self,
+        client: &Client,
+        joined: &matrix_sdk::Room,
+        chunk: &[TimelineEvent],
+    ) -> Result<Vec<TimelineItem>, ErrorCode> {
+        let ignored = crate::abuse::ignored_set(client).await?;
+        let room = joined.room_id().as_str();
+        let mut items = Vec::new();
+        let mut lookups = 0;
+        for event in chunk {
+            if event
+                .event_id()
+                .is_some_and(|id| id.as_str().len() > persephone_core_protocol::MAX_EVENT_ID_BYTES)
+                || event
+                    .raw()
+                    .get_field::<String>("room_id")
+                    .map_err(|_| ErrorCode::Rejected)?
+                    .is_some_and(|id| id != room)
+            {
+                return Err(ErrorCode::Rejected);
+            }
+            if ignored_content(event, &ignored) {
+                continue;
+            }
+            self.remember_sender(room, event);
+            let item = match edit_claim(event) {
+                Some(claim) => {
+                    self.checked_edit(joined, room, chunk, event, claim, &mut lookups)
+                        .await
+                }
+                None => project(event),
+            };
+            items.extend(item);
+        }
+        Ok(items)
     }
 
     /// One bounded page of history older than `cursor`, or the newest page.

@@ -4,6 +4,9 @@
   import AccountPage from './AccountPage.svelte';
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
+  import RoomTools from './RoomTools.svelte';
+  import ConnectionHealth from './ConnectionHealth.svelte';
+  import { jumpToDate, eventContext, setPinned, type FocusedTimeline } from './bridge';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
   import ReportAbuse from './ReportAbuse.svelte';
@@ -227,6 +230,11 @@
   let preferences = $state<RoomPreference[]>([]);
   let preferenceRequest = 0;
   let preferenceFailure = $state<string | null>(null);
+  let roomTool = $state<'jump' | 'pins' | 'attachments' | null>(null);
+  let healthOpen = $state(false);
+  let focusedContext = $state(false);
+  let pinBusy = $state(false);
+  let cancelContext: (() => void) | null = null;
   let searchOpen = $state(false);
   let savedDraftsOpen = $state(false);
   let ignoreOpen = $state(false);
@@ -301,7 +309,7 @@
   });
   // Advanced on every session change. Replies to calls made before the change
   // are discarded, so nothing from a locked session is shown again.
-  let sessionGeneration = 0;
+  let sessionGeneration = $state(0);
 
   // The one room with live updates, and a queue that keeps subscribe and
   // unsubscribe calls in order: the host runs commands concurrently.
@@ -422,7 +430,7 @@
     }
     // Native modal dialogs keep pointer focus inside. Keep the global room
     // shortcut inside the same boundary, especially during saved-draft removal.
-    if (savedDraftsOpen || searchOpen || ignoreOpen || reportTarget || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
+    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
     if (chatShown && rooms && !paletteOpen) {
       event.preventDefault();
       paletteOpen = true;
@@ -582,6 +590,7 @@
   // The session changed: drop everything shown from it. Pending fetches see
   // the cleared selection and discard their results.
   function reset() {
+    cancelContext?.(); cancelContext = null;
     sessionGeneration += 1;
     roomOpenRequest += 1;
     draftKeeper.clear();
@@ -589,6 +598,7 @@
     preferences = [];
     preferenceFailure = null;
     searchOpen = false;
+    roomTool = null; healthOpen = false; focusedContext = false; pinBusy = false;
     savedDraftsOpen = false;
     ignoreOpen = false;
     reportTarget = null;
@@ -999,6 +1009,7 @@
 
   /** Flush the old room before changing selection; request and epoch guards reject stale history. */
   async function open(roomId: string) {
+    cancelContext?.(); cancelContext = null;
     if (savedDraftsOpen) return;
     const generation = sessionGeneration;
     const request = ++roomOpenRequest;
@@ -1012,6 +1023,7 @@
     const contentEpoch = ++timelineEpoch;
     focusEvent = null;
     searchLocation = null;
+    roomTool = null; focusedContext = false;
     items = [];
     pending = [];
     contact = null;
@@ -1070,9 +1082,37 @@
     }
   }
 
+  /** Remove focused content on any room invalidation, without fetching or marking it read. */
+  function invalidateFocusedContext() {
+    cancelContext?.(); cancelContext = null;
+    timelineEpoch += 1;
+    items = [];
+    nextCursor = null;
+    focusEvent = null;
+    clearReplyContext();
+    roomTool = null;
+    focusedContext = true;
+    loading = false;
+    error = null;
+    searchLocation = 'Room changed. Return to latest to refresh.';
+  }
+
+  /** Remove received quote text while keeping the user's draft and edit body. */
+  function clearReplyContext() {
+    if (replyingTo) replyingTo = { eventId: replyingTo.eventId, quote: { sender: 'Earlier message', text: 'Reply context is not loaded.' } };
+    if (editingMessage?.savedReply) {
+      editingMessage = { ...editingMessage, savedReply: { eventId: editingMessage.savedReply.eventId,
+        quote: { sender: 'Earlier message', text: 'Reply context is not loaded.' } } };
+    }
+  }
+
   /** Refresh the newest page, coalescing overlapping invalidations and rejecting stale content. */
   async function refresh(roomId: string, generation: number) {
     if (!current(roomId, generation)) return;
+    if (focusedContext) {
+      invalidateFocusedContext();
+      return;
+    }
     if (opening || refreshing) {
       changedAgain = true;
       return;
@@ -1232,6 +1272,7 @@
   // Marks the selected room read once its newest event has been seen. Best
   // effort: a failure is tried again with the next newest event.
   async function readTo(eventId: string) {
+    if (focusedContext) return;
     const roomId = selected;
     if (!roomId || eventId === markedRead) return;
     markedRead = eventId;
@@ -1466,6 +1507,9 @@
   // The user left the room from its settings: nothing of it stays shown.
   /** Clear room-bound UI only after the homeserver accepted the leave operation. */
   function leftRoom() {
+    cancelContext?.(); cancelContext = null;
+    roomOpenRequest += 1; timelineEpoch += 1;
+    roomTool = null; focusedContext = false; loading = false;
     // The Leave gate saved the new-message draft while the room was joined.
     // Release only the UI's room-bound copy after the homeserver accepted Leave.
     editingMessage = null;
@@ -1512,7 +1556,7 @@
       items = [...page.items, ...items];
       nextCursor = page.nextCursor;
     } catch (reason) {
-      if (current(roomId, generation)) error = describe(reason);
+      if (current(roomId, generation) && contentEpoch === timelineEpoch) error = describe(reason);
     } finally {
       if (current(roomId, generation) && contentEpoch === timelineEpoch) loading = false;
     }
@@ -1553,6 +1597,7 @@
 
   /** Drop the old visible timeline immediately, then reload it with the changed ignore filter. */
   async function ignoredChanged() {
+    cancelContext?.(); cancelContext = null;
     const roomId = selected;
     if (!roomId) return;
     const generation = sessionGeneration;
@@ -1561,11 +1606,8 @@
     items = [];
     focusEvent = null;
     searchLocation = null;
-    if (replyingTo) replyingTo = { eventId: replyingTo.eventId, quote: { sender: 'Earlier message', text: 'Reply context is not loaded.' } };
-    if (editingMessage?.savedReply) {
-      editingMessage = { ...editingMessage, savedReply: { eventId: editingMessage.savedReply.eventId,
-        quote: { sender: 'Earlier message', text: 'Reply context is not loaded.' } } };
-    }
+    roomTool = null; focusedContext = false;
+    clearReplyContext();
     nextCursor = null;
     loading = true;
     try {
@@ -1577,6 +1619,48 @@
       if (current(roomId, generation) && contentEpoch === timelineEpoch) loading = false;
     }
   }
+  /** Apply server context only while room, session, request and epoch match. */
+  async function locateRoomContext(fetch: (roomId: string) => Promise<FocusedTimeline>) {
+    if (!selected || loading) throw new Error('The timeline is busy.');
+    const roomId = selected;
+    const generation = sessionGeneration;
+    const request = roomOpenRequest;
+    const epoch = ++timelineEpoch;
+    const previousContext = focusedContext;
+    focusedContext = true;
+    loading = true;
+    const valid = () => current(roomId, generation) && request === roomOpenRequest && epoch === timelineEpoch;
+    cancelContext = () => {
+      if (valid()) { timelineEpoch += 1; loading = false; focusedContext = previousContext; }
+    };
+    try {
+      const context = await fetch(roomId);
+      if (!valid()) return;
+      items = context.page.items;
+      nextCursor = context.page.nextCursor;
+      focusedContext = true;
+      focusEvent = null;
+      refreshDraftQuote();
+      cancelContext = null;
+      roomTool = null;
+      searchLocation = 'Message context is shown. Newer messages can be outside this view.';
+      await tick();
+      if (valid()) focusEvent = context.eventId;
+    } catch (reason) { if (valid()) { error = describe(reason); focusedContext = previousContext; } throw reason; }
+    finally { if (valid()) { loading = false; cancelContext = null; } }
+  }
+
+  /** Pin through the core; reopen the panel only for the original room request. */
+  async function pinMessage(eventId: string) {
+    if (!selected || pinBusy) return;
+    const roomId = selected; const generation = sessionGeneration; const request = roomOpenRequest;
+    const valid = () => current(roomId, generation) && request === roomOpenRequest;
+    pinBusy = true;
+    try { await setPinned(roomId, eventId, true); if (valid()) roomTool = 'pins'; }
+    catch { if (valid()) error = 'The message could not be pinned. Room permission may be required.'; }
+    finally { if (generation === sessionGeneration) pinBusy = false; }
+  }
+
 </script>
 
 
@@ -1862,6 +1946,7 @@
         {#if signedIn}
           <div class="feature-actions" aria-label="Message tools">
             <button type="button" class="secondary" onclick={() => (searchOpen = true)}>Search cached messages</button>
+            <button type="button" class="secondary" onclick={() => (healthOpen = true)}>Connection health</button>
             <button type="button" class="secondary" onclick={() => (ignoreOpen = true)}>Ignored users</button>
             <button type="button" class="secondary" onclick={openSavedDrafts}>Saved drafts</button>
           </div>
@@ -1884,6 +1969,14 @@
             {#key selectedRoom.roomId}
               <RoomOrganisation roomId={selectedRoom.roomId} {preferences} onchanged={preferenceChanged} />
             {/key}
+          {/if}
+          {#if signedIn}
+            <div class="feature-actions" aria-label="Room tools">
+              <button type="button" class="secondary" onclick={() => (roomTool = 'jump')}>Jump to date</button>
+              <button type="button" class="secondary" onclick={() => (roomTool = 'pins')}>Pinned messages</button>
+              <button type="button" class="secondary" onclick={() => (roomTool = 'attachments')}>Attachments</button>
+              {#if focusedContext}<button type="button" class="secondary" onclick={() => selected && open(selected)}>Return to latest</button>{/if}
+            </div>
           {/if}
           {#if searchLocation}<p class="note search-location" role="status">{searchLocation}</p>{/if}
           <Timeline
@@ -1909,6 +2002,7 @@
             ownUserId={signedIn ? status.account.userId : null}
             onedit={sendBlocked === null ? startEdit : undefined}
             onreport={signedIn ? (eventId, sender) => (reportTarget = { roomId: selectedRoom.roomId, eventId, sender }) : undefined}
+            onpin={signedIn && !pinBusy ? pinMessage : undefined}
             {focusEvent}
             ondelete={signedIn
               ? (eventId) => (confirmingDelete = { roomId: selectedRoom.roomId, eventId })
@@ -1916,7 +2010,7 @@
             onreact={sendBlocked === null ? reactTo : undefined}
             onunreact={signedIn ? unreact : undefined}
             {unreadFrom}
-            onread={signedIn ? readTo : undefined}
+            onread={signedIn && !focusedContext ? readTo : undefined}
             readBy={activity?.readBy ?? []}
             onlink={signedIn ? followLink : undefined}
           />
@@ -2044,6 +2138,16 @@
       </div>
       {#if paletteOpen && rooms}
         <JumpPalette rooms={rooms.rooms} onselect={open} onclose={() => (paletteOpen = false)} />
+      {/if}
+      {#if healthOpen && signedIn}
+        {#key sessionGeneration}<ConnectionHealth onclose={() => (healthOpen = false)} />{/key}
+      {/if}
+      {#if roomTool && selected && signedIn}
+        {#key selected + ':' + sessionGeneration + ':' + roomTool}
+          <RoomTools roomId={selected} mode={roomTool} onclose={() => { cancelContext?.(); cancelContext = null; roomTool = null; }}
+            ondate={(timestamp) => locateRoomContext((roomId) => jumpToDate(roomId, timestamp))}
+            onevent={(eventId) => locateRoomContext((roomId) => eventContext(roomId, eventId))} />
+        {/key}
       {/if}
       {#if searchOpen && signedIn}
         <LocalSearch roomId={selected} onselect={locateSearchResult} onclose={() => (searchOpen = false)} />
