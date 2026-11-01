@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import type { InviteList, RoomList as Rooms } from '../../crates/contracts/generated/contracts';
+  import type { InviteList, RoomList as Rooms, RoomPreference } from '../../crates/contracts/generated/contracts';
   import AccountText from './AccountText.svelte';
   import Icon from './Icon.svelte';
   import Invites from './Invites.svelte';
@@ -12,6 +12,7 @@
     invites = null,
     inviteBusy = null,
     selected,
+    preferences = [],
     userId,
     ownName = null,
     shortcut,
@@ -31,6 +32,7 @@
     // The room whose invitation is being answered, if any.
     inviteBusy?: string | null;
     selected: string | null;
+    preferences?: RoomPreference[];
     // The signed-in account, or null for synthetic data.
     userId: string | null;
     // The account's display name, or null when none is set.
@@ -93,7 +95,7 @@
       />
     {/if}
     {#if rooms}
-      <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} {onselect} />
+      <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} {onselect} {preferences} />
     {:else}
       <p class="note" role="status">Loading rooms…</p>
     {/if}

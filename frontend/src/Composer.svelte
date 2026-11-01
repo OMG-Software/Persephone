@@ -12,12 +12,14 @@
   import { composerKey } from './preferences';
   import { clockTime, fullTime, toDate } from './time';
   import type { Quote } from './timeline';
+  import { byteLength, MAX_DRAFT_BYTES } from './drafts';
 
   let {
     pending,
     blocked,
     encryption,
     roomName,
+    roomId = '',
     draft = $bindable(''),
     draftVersion,
     onsend,
@@ -40,7 +42,8 @@
     oncanceledit = () => {},
     typing = [],
     typingCut = false,
-    ontyping
+    ontyping,
+    onchange = () => {}
   }: {
     // Messages sent from this device that the timeline does not show yet.
     pending: PendingMessage[];
@@ -48,6 +51,7 @@
     blocked: string | null;
     encryption: RoomEncryption;
     roomName: string;
+    roomId?: string;
     // The unsent text. The caller keeps it, so it survives while another
     // screen, such as a verification, replaces the room view.
     draft?: string;
@@ -85,6 +89,7 @@
     // Called on each change of the draft; absent while this account does
     // not send typing notices.
     ontyping?: () => void;
+    onchange?: (body: string) => void;
   } = $props();
 
   // The core's limit is 16 KiB of UTF-8; this length is only a first stop.
@@ -130,12 +135,15 @@
     }
   }
 
+  /** Submit a snapshot and clear it only if no newer text replaced it during the request. */
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (sending || !draft.trim()) return;
+    if (sending || !draft.trim() || byteLength(draft) > MAX_DRAFT_BYTES) return;
+    const submitted = draft;
+    const room = roomId;
     sending = true;
     try {
-      if (await onsend(draft)) draft = '';
+      if (await onsend(submitted) && room === roomId && draft === submitted) draft = '';
     } finally {
       sending = false;
     }
@@ -296,7 +304,7 @@
         dir="auto"
         aria-keyshortcuts={enterSends ? 'Enter' : 'Control+Enter Meta+Enter'}
         onkeydown={keydown}
-        oninput={ontyping}
+        oninput={(event) => { onchange(event.currentTarget.value); ontyping?.(); }}
       ></textarea>
       {#if encryption === 'encrypted'}
         <span class="enc-note"><Icon name="lock" />Encrypted</span>
@@ -306,7 +314,7 @@
         class="send"
         aria-label={sending ? 'Sending…' : 'Send'}
         title="Send"
-        disabled={blocked !== null || sending || !draft.trim()}
+        disabled={blocked !== null || sending || !draft.trim() || byteLength(draft) > MAX_DRAFT_BYTES}
       >
         <Icon name="send" />
       </button>

@@ -1,10 +1,11 @@
 # Architecture and development plan
 
-19 October 2026. This is the implementation blueprint for Persephone. Tauri and
+Original blueprint: 19 October 2026. Tauri and
 Sliding Sync preference are accepted decisions; the module layout, starting
 budgets, and other implementation choices below are recommendations to validate
-in the first development milestones. No application has been scaffolded or
-security-tested yet.
+in the first development milestones. The original blueprint predates the
+application scaffold. Use the current [milestone status](#milestone-status)
+for implemented work and its evidence.
 
 P0 has started: the [feasibility workbench](../planning/feasibility.md) records isolated
 shared components, completed checks and open gates. These results do not establish
@@ -22,8 +23,11 @@ The first usable release includes one account, login/session restoration, room
 list, paginated history, text and image messaging, and encrypted conversations.
 Device verification and recovery handling are part of that encrypted experience.
 Calls, multiple simultaneous accounts, plugins, rich HTML, remote web embeds,
-full-text search, durable offline sending, and custom themes are outside the
-initial implementation scope; later inclusion needs an explicit decision.
+server-side or indexed full-text search, durable offline sending, and custom
+themes are outside the initial implementation scope. On 1 November 2026 the
+owner added bounded local cache search, per-room drafts, ignore/report controls,
+and local favourites/sections. These requirements are approved; their designs
+remain proposed in ADR-0032 to ADR-0035. See [Room tools](../room-tools.md).
 
 Accepted decisions take precedence over recommendations here:
 
@@ -316,8 +320,12 @@ create a replacement cryptographic identity when storage is unreadable.
 Use one account-scoped SDK state/crypto store and only the SDK-supported event
 cache needed by the chosen integration. Keep app settings separate and do not
 mirror raw events into another database. Avoid additional persisted decrypted
-history, draft, search, or media caches in the MVP. Session restoration metadata
-and tokens need their own protection review.
+history, search, or media caches in the MVP. The owner-requested draft feature
+is an exception: one bounded JSON record in the encrypted crypto store keeps
+text and reply references. Local room organisation uses a second bounded record.
+Search reads SDK cache chunks and creates no new index. The SDK event-cache
+subscription adds background work; it does not prove complete SDK shutdown.
+Session restoration metadata and tokens need their own protection review.
 
 OS credential facilities are candidates for random store-unlocking material:
 Windows credential/DPAPI APIs, macOS Keychain, and Linux Secret Service. Record
@@ -522,8 +530,8 @@ developed in parallel where independent, but feature acceptance follows its gate
 
 ### Milestone status
 
-24 October 2026, updated 26 October 2026 (default profile, new conversations,
-release workflow). This is the single progress summary; other pages link here. A
+24 October 2026, updated 1 November 2026 (room tools and source-level
+authentication status). This is the single progress summary; other pages link here. A
 deliverable is **done** when it is built and its own evidence passes, **partial**
 when only part is built or only some platforms or cases pass, and **not
 started** otherwise. A milestone's exit gate is met only when its exit evidence
@@ -548,12 +556,13 @@ above passes; none has.
 | P2 | Pixel transport | Done (Windows) | Raw row bands of at most 1 MiB from the core through the UI process to a page canvas ([design](image-messaging.md#pixel-transport), [live run](../evidence/image-messaging.md)); the UI process does not count band responses awaiting delivery to the web view |
 | P2 | Baseline limits | Partial | Frame and page budgets, UI Job limits; no aggregate memory admission across features |
 | P3 | SDK integration | Partial | [Sign-in evidence](../evidence/matrix-sign-in.md): one client in the core over the encrypted stores |
-| P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; [sign-out](../evidence/sign-out.md) revokes the session and deletes the local profile; with no `--profile`, the core opens a per-user default profile ([ADR-0013](../adr/0013-open-a-default-profile-when-none-is-given.md), still proposed); no SSO or `.well-known` discovery |
+| P3 | Authentication, discovery, restore | Partial | Native-prompt password sign-in and restore; [sign-out](../evidence/sign-out.md) revokes the session and deletes the local profile; with no `--profile`, the core opens a per-user default profile ([ADR-0013](../adr/0013-open-a-default-profile-when-none-is-given.md), still proposed). Source includes `.well-known` discovery ([ADR-0027](../adr/0027-discover-the-homeserver-through-well-known-in-the-core.md)) and OIDC ([ADR-0030](../adr/0030-sign-in-with-oidc-through-the-browser-and-a-loopback-redirect.md)); no live OAuth-provider run is recorded |
 | P3 | Sliding default, classic fallback | Partial | Initial selection passes live on Merovingian, Synapse and classic-only Synapse; no runtime mode switch |
 | P3 | Room and timeline projection | Partial | Room list, history paging, notices and live events; gap and dedup coverage incomplete |
 | P4 | Encrypted text experience | Partial | [Encryption setup](../evidence/encryption-setup.md): key policy ([ADR-0005](../adr/0005-share-room-keys-only-with-cross-signed-devices.md)), cross-signing and recovery set-up, recovery-key verification; [sending](../evidence/encrypted-sending.md) with consent for unencrypted rooms and delivery states; [own-device verification](../evidence/own-device-verification.md) and [contact verification](../evidence/contact-verification.md) in existing direct-message rooms by comparing emoji, in both directions; [identity changes](../evidence/identity-changes.md) pause sending until accepted or verified ([ADR-0007](../adr/0007-block-sending-to-a-changed-contact-identity-until-approved.md)); [exit runs](../evidence/encrypted-text-exit-runs.md): unclear-delivery retry, new and unsigned devices, withheld keys, recovery on a clean profile. New encrypted direct conversations by Matrix ID, optional directory search, and accepting or declining direct-message invitations ([ADR-0014](../adr/0014-start-encrypted-direct-conversations-by-matrix-id.md), 26 October 2026) have automated tests only; no live run is recorded. Every listed exit item has passing live runs on Windows against an SDK peer, and [Element Web](../evidence/element-web-interop.md) verified, sent and read encrypted text with Persephone on both servers (24 October 2026; Element uses the same crypto crate). Not yet: the [native window hand checks](../evidence/native-windows-hand-checks.md) (prepared, not run), Linux and macOS |
 | P5 | Image messaging | Partial | [Design](image-messaging.md) and [ADR-0009](../adr/0009-strip-sent-image-metadata-and-load-received-images-on-request.md): metadata stripped in the guest, received images loaded only on request, pixels sent to the page in raw row bands. [Live run](../evidence/image-messaging.md) with Element Web on both servers, Sliding and classic sync: click to load, encrypted and unencrypted send, metadata removed, source unchanged, hostile files refused, lock during a load; a truncated JPEG drew partially and was fixed afterwards (tests only, not rerun live). Not yet: Element's own display of a sent image (its service worker did not load in the test browser), release builds (the debug worker exceeds the time limits at 12 megapixels), Linux and macOS (no contained worker) |
 | P6 | Product and operational hardening | Partial | Keyboard and screen-reader checks not done; failed windows detected and retried on Windows; this host's WebView2 crash dumps all fail inside a third-party overlay hook, not tested with it removed ([window retry](../evidence/window-retry.md)) |
+| P6 | Drafts, local search, ignore/report and room organisation | Partial | Source implementation added on 1 November 2026. [Room tools](../room-tools.md) describes bounds, profile ownership and disclosures. [Coordinated automated checks](../evidence/room-tools.md) pass, including UI race and encrypted-record reopen tests; live homeserver and native UI acceptance remain open. Existing quick room switching and room mute remain separate controls |
 | P7 | Release readiness | Partial | Signed draft-release workflow ([ADR-0012](../adr/0012-sign-and-publish-releases-as-drafts.md), [release guide](../release.md)) with SBOM and third-party notices; a dry run of the `p7/release-cargo-about-cli` branch passed on 25 October 2026 (run 40174476995). The `v0.0.1` tag run (40233921317) stopped at `preflight` because the Apple and GPG signing secrets are not set, so no signed release exists. [Security policy](../../SECURITY.md) for private reports. Not started: update plan, independent security review, compatibility report |
 
 Feasibility checks do not grant permission to ship unverified controls.

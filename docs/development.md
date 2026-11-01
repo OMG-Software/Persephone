@@ -55,6 +55,25 @@ The `contracts` and `media-protocol` crates are shared building blocks. They rem
 
 Historical evidence reports preserve command paths, source hashes, and package-resolution facts from before this layout was created. Those old paths identify the recorded run inputs. The [evidence index](README.md#evidence) links the reports; use this guide for current locations and commands.
 
+## Room-tool ownership
+
+`crates/core/src/personal.rs` keeps bounded drafts and room organisation in the
+encrypted crypto store. `crates/core/src/local_search.rs` reads the encrypted
+SDK event cache without HTTP or a separate index. `crates/core/src/abuse.rs`
+uses standard Matrix ignore account data and event reports. The core owns all
+store, key and SDK operations; Tauri and the frontend relay typed commands and
+show inert text. Personal-record writes and ignore-list writes need serialized
+mutation gates to prevent lost updates.
+
+Personal calls retain a session lease at admission and fence their final reply
+with `Lease::commit`. Search and abuse operations have separate Busy gates.
+
+The SDK event cache must subscribe before sync to retain cache events. This
+subscription adds SDK background work. It does not establish stop-and-join
+ownership. The existing `restart_required` lifecycle limitation remains. See
+[Room tools](room-tools.md), its [verification record](evidence/room-tools.md),
+and the [SDK lifecycle contract](architecture/sdk-lifecycle.md).
+
 ## Toolchain and commands
 
 Install Python, Rust/Cargo, and Node.js with npm available on `PATH`, plus the WebAssembly target for the decoder guest (`rustup target add wasm32-unknown-unknown`). On Windows, use the MSVC Rust target and its native build tools. Install the locked frontend dependencies once, then run checks from the repository root:

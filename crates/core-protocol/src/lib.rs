@@ -22,6 +22,60 @@ use persephone_media_protocol::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
 
+pub const MAX_LOCAL_SEARCH_BYTES: usize = 128;
+pub const MAX_SECTION_BYTES: usize = 64;
+pub const MAX_REPORT_REASON_BYTES: usize = 1000;
+
+/// Cheap checks for the relay and authoritative receiver. Identifier syntax
+/// and encrypted-record capacity are checked by the core as well.
+pub fn personal_call_within_limits(call: &Call) -> bool {
+    let text = |value: &str, max: usize| value.len() <= max && !value.chars().any(char::is_control);
+    let body = |value: &str, max: usize| {
+        value.len() <= max
+            && !value
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+    };
+    match call {
+        Call::RoomDraft { room_id } => text(room_id, MAX_ROOM_ID_BYTES),
+        Call::SaveRoomDraft { room_id, draft } => {
+            text(room_id, MAX_ROOM_ID_BYTES)
+                && body(&draft.body, MAX_MESSAGE_BYTES)
+                && draft
+                    .reply_to
+                    .as_ref()
+                    .is_none_or(|id| text(id, MAX_EVENT_ID_BYTES))
+        }
+        Call::RoomPreferences {} | Call::RoomDrafts {} | Call::IgnoredUsers {} => true,
+        Call::SetRoomPreference { preference } => {
+            text(&preference.room_id, MAX_ROOM_ID_BYTES)
+                && preference
+                    .section
+                    .as_ref()
+                    .is_none_or(|s| !s.trim().is_empty() && text(s, MAX_SECTION_BYTES))
+        }
+        Call::SearchMessages { term, room_id } => {
+            !term.trim().is_empty()
+                && text(term, MAX_LOCAL_SEARCH_BYTES)
+                && room_id
+                    .as_ref()
+                    .is_none_or(|id| text(id, MAX_ROOM_ID_BYTES))
+        }
+        Call::SetIgnoredUser { user_id, .. } => text(user_id, MAX_USER_ID_BYTES),
+        Call::ReportAbuse {
+            room_id,
+            event_id,
+            reason,
+        } => {
+            text(room_id, MAX_ROOM_ID_BYTES)
+                && text(event_id, MAX_EVENT_ID_BYTES)
+                && !reason.trim().is_empty()
+                && body(reason, MAX_REPORT_REASON_BYTES)
+        }
+        _ => false,
+    }
+}
+
 /// A command the UI may ask the core to run. Unknown commands and unknown
 /// fields fail to decode.
 ///
@@ -33,6 +87,36 @@ use std::io::{self, Read, Write};
 pub enum Call {
     AppStatus {},
     RoomList {},
+    /// Encrypted per-room text draft. No draft is kept in the UI host.
+    RoomDraft {
+        room_id: String,
+    },
+    RoomDrafts {},
+    SaveRoomDraft {
+        room_id: String,
+        draft: persephone_contracts::RoomDraft,
+    },
+    RoomPreferences {},
+    SetRoomPreference {
+        preference: persephone_contracts::RoomPreference,
+    },
+    /// Search only bounded local history; never send the term to a server.
+    SearchMessages {
+        term: String,
+        #[serde(deserialize_with = "Option::deserialize")]
+        room_id: Option<String>,
+    },
+    IgnoredUsers {},
+    SetIgnoredUser {
+        user_id: String,
+        ignored: bool,
+    },
+    /// Explicit report to this account's homeserver, not the project.
+    ReportAbuse {
+        room_id: String,
+        event_id: String,
+        reason: String,
+    },
     /// A page of a room's history, older than `cursor` (or the newest page).
     TimelinePage {
         room_id: String,
@@ -2031,5 +2115,57 @@ mod tests {
         let huge = serde_json::Value::String("x".repeat(200 * 1024));
         assert!(send(&mut wire, &huge).is_err());
         assert!(wire.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod personal_tests {
+    use super::*;
+
+    #[test]
+    fn personal_wire_round_trips_and_requires_nullable_fields() {
+        for json in [
+            r#"{"command":"room_draft","room_id":"!r:s"}"#,
+            r#"{"command":"save_room_draft","room_id":"!r:s","draft":{"body":"draft","replyTo":null}}"#,
+            r#"{"command":"room_preferences"}"#,
+            r#"{"command":"set_room_preference","preference":{"roomId":"!r:s","favourite":true,"section":null}}"#,
+            r#"{"command":"search_messages","term":"text","room_id":null}"#,
+            r#"{"command":"ignored_users"}"#,
+            r#"{"command":"set_ignored_user","user_id":"@u:s","ignored":true}"#,
+            r#"{"command":"report_abuse","room_id":"!r:s","event_id":"$e","reason":"Spam"}"#,
+        ] {
+            let call: Call = serde_json::from_str(json).unwrap();
+            assert!(personal_call_within_limits(&call));
+            assert_eq!(
+                serde_json::from_str::<Call>(&serde_json::to_string(&call).unwrap()).unwrap(),
+                call
+            );
+        }
+        for json in [
+            r#"{"command":"room_preferences","extra":0}"#,
+            r#"{"command":"search_messages","term":"text"}"#,
+            r#"{"command":"save_room_draft","room_id":"!r:s","draft":{"body":"draft"}}"#,
+            r#"{"command":"save_room_draft","room_id":"!r:s","draft":{"body":"draft","replyTo":null,"path":"bad"}}"#,
+            r#"{"command":"set_room_preference","preference":{"roomId":"!r:s","favourite":true}}"#,
+        ] {
+            assert!(serde_json::from_str::<Call>(json).is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn personal_limits_count_utf8_bytes_and_reject_control_characters() {
+        let search = |term| Call::SearchMessages {
+            term,
+            room_id: None,
+        };
+        assert!(personal_call_within_limits(&search("é".repeat(64))));
+        for text in ["é".repeat(65), " ".into(), "a\nb".into()] {
+            assert!(!personal_call_within_limits(&search(text)));
+        }
+        assert!(!personal_call_within_limits(&Call::ReportAbuse {
+            room_id: "!r:s".into(),
+            event_id: "$e".into(),
+            reason: "x".repeat(1001)
+        }));
     }
 }

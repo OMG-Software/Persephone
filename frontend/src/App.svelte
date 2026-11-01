@@ -1,9 +1,17 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import markUrl from './assets/mark.svg';
   import AccountPage from './AccountPage.svelte';
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
+  import LocalSearch from './LocalSearch.svelte';
+  import IgnoreUsers from './IgnoreUsers.svelte';
+  import ReportAbuse from './ReportAbuse.svelte';
+  import RoomOrganisation from './RoomOrganisation.svelte';
+  import SavedDrafts from './SavedDrafts.svelte';
+  import StoredRoomGroups from './StoredRoomGroups.svelte';
+  import { DraftKeeper } from './drafts';
+  import { findSearchContext } from './searchNavigation';
   import Devices from './Devices.svelte';
   import Icon from './Icon.svelte';
   import IdentityChanges from './IdentityChanges.svelte';
@@ -78,6 +86,12 @@
     acceptIdentity,
     signOut,
     roomList,
+    roomDraft,
+    saveRoomDraft,
+    type RoomDraft,
+    roomPreferences,
+    type RoomPreference,
+    type LocalSearchHit,
     inviteList,
     acceptInvite,
     declineInvite,
@@ -132,7 +146,7 @@
   let replyingTo = $state<{ eventId: string; quote: Quote } | null>(null);
   // The message of this account the draft is a new version of, and the
   // draft from before the edit began, put back when the edit ends.
-  let editingMessage = $state<{ eventId: string; savedDraft: string } | null>(null);
+  let editingMessage = $state<{ eventId: string; savedDraft: string; savedReply: typeof replyingTo } | null>(null);
   // One of this account's messages waiting for "Delete" to be confirmed,
   // and whether the deletion is being sent.
   let confirmingDelete = $state<{ roomId: string; eventId: string } | null>(null);
@@ -168,6 +182,66 @@
   let draftVersion = $state(0);
   // The composer's unsent text, kept here so it outlives the composer.
   let draft = $state('');
+  let draftFailure = $state<string | null>(null);
+  let draftReady = $state(false);
+  let textSending = $state(false);
+  let roomOpenRequest = 0;
+  let timelineEpoch = 0;
+  /** Restore new-message text and its reply quote without replacing an active event edit. */
+  function showDraft(next: RoomDraft, failure: string | null, ready: boolean) {
+    draftFailure = failure;
+    draftReady = ready;
+    if (editingMessage) return;
+    draft = next.body;
+    replyingTo = next.replyTo === null ? null : {
+      eventId: next.replyTo,
+      quote: quoteOf(applyRelations(items, status?.account.userId ?? null), next.replyTo)
+        ?? { sender: 'Earlier message', text: 'Reply context is not loaded.' }
+    };
+  }
+  const draftKeeper = new DraftKeeper({ load: roomDraft, save: saveRoomDraft }, showDraft);
+  /** Keep the editor and room-bound store in sync; edits to an existing event stay separate. */
+  function changeDraft(body = draft) {
+    draft = body;
+    if (!editingMessage) draftKeeper.update({ body, replyTo: replyingTo?.eventId ?? null });
+  }
+  /** Replace a placeholder reply quote after its event enters the loaded timeline. */
+  function refreshDraftQuote() {
+    if (!replyingTo) return;
+    const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), replyingTo.eventId);
+    if (quote) replyingTo = { ...replyingTo, quote };
+  }
+  /** Explicitly clear the current room draft, including a reply reference. */
+  async function discardDraft() {
+    if (editingMessage) endEdit();
+    draft = '';
+    replyingTo = null;
+    await draftKeeper.discard();
+  }
+  /** Stop account switching while text is sending or the current draft cannot be persisted. */
+  async function prepareAccountSwitch() {
+    if (textSending) return false;
+    const generation = sessionGeneration;
+    return await draftKeeper.flush() && generation === sessionGeneration;
+  }
+  let preferences = $state<RoomPreference[]>([]);
+  let preferenceRequest = 0;
+  let preferenceFailure = $state<string | null>(null);
+  let searchOpen = $state(false);
+  let savedDraftsOpen = $state(false);
+  let ignoreOpen = $state(false);
+  let reportTarget = $state<{ roomId: string; eventId: string; sender: string } | null>(null);
+  let focusEvent = $state<string | null>(null);
+  let searchLocation = $state<string | null>(null);
+  /** Open the manager even when a full draft cannot be saved, so another draft can be removed. */
+  async function openSavedDrafts() {
+    if (textSending) { error = 'Wait for the message to enter the send queue before managing drafts.'; return; }
+    const generation = sessionGeneration;
+    // A full draft record can make this save fail. The manager must still
+    // open so another room's draft can be discarded without losing this text.
+    await draftKeeper.flush();
+    if (generation === sessionGeneration) savedDraftsOpen = true;
+  }
   // Rooms confirmed while this page runs; the core keeps the consent itself.
   let confirmedRooms = new Set<string>();
   let unavailable = $state(false);
@@ -335,6 +409,7 @@
   const shortcut = mac ? '⌘K' : 'Ctrl K';
 
   // Ctrl K (⌘K on macOS) opens the jump palette from the room view.
+  /** Give the lock shortcut priority, then open the room palette only outside modal flows. */
   function shortcutKey(event: KeyboardEvent) {
     // Lock at once, from anywhere, while the profile is open.
     if (isLockShortcut(event, mac)) {
@@ -345,6 +420,9 @@
     if (!(mac ? event.metaKey : event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'k') {
       return;
     }
+    // Native modal dialogs keep pointer focus inside. Keep the global room
+    // shortcut inside the same boundary, especially during saved-draft removal.
+    if (savedDraftsOpen || searchOpen || ignoreOpen || reportTarget || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
     if (chatShown && rooms && !paletteOpen) {
       event.preventDefault();
       paletteOpen = true;
@@ -386,6 +464,7 @@
   const describe = (reason: unknown) =>
     messages[String(reason)] ?? 'The Persephone core is unavailable.';
 
+  /** Rebuild visible account state while rejecting results from an old session generation. */
   async function load() {
     const generation = sessionGeneration;
     let reply: AppStatus;
@@ -398,7 +477,10 @@
     if (generation !== sessionGeneration) return;
     status = reply;
     if (reply.store !== 'protected' && reply.store !== 'not_configured') return;
-    if (reply.account.state === 'signed_in') refreshSecurity();
+    if (reply.account.state === 'signed_in') {
+      refreshSecurity();
+      loadPreferences();
+    }
     const request = ++roomsRequest;
     try {
       const list = await roomList();
@@ -410,6 +492,30 @@
       if (generation === sessionGeneration) error = describe(reason);
     }
     refreshInvites();
+  }
+
+  /** Ignore preference replies from an older account session or request. */
+  async function loadPreferences() {
+    const generation = sessionGeneration;
+    const request = ++preferenceRequest;
+    try {
+      const reply = await roomPreferences();
+      if (generation === sessionGeneration && request === preferenceRequest) {
+        preferences = reply.rooms;
+        preferenceFailure = null;
+      }
+    } catch {
+      if (generation === sessionGeneration && request === preferenceRequest) {
+        preferenceFailure = 'The room groups could not be loaded.';
+      }
+    }
+  }
+
+  /** Apply a successful room preference write and invalidate an in-flight list read. */
+  function preferenceChanged(preference: RoomPreference) {
+    preferenceRequest += 1;
+    preferences = [...preferences.filter((entry) => entry.roomId !== preference.roomId),
+      ...(preference.favourite || preference.section !== null ? [preference] : [])];
   }
 
   // Invitations change with the room list. A failure keeps the last list;
@@ -477,6 +583,18 @@
   // the cleared selection and discard their results.
   function reset() {
     sessionGeneration += 1;
+    roomOpenRequest += 1;
+    draftKeeper.clear();
+    draftReady = false;
+    preferences = [];
+    preferenceFailure = null;
+    searchOpen = false;
+    savedDraftsOpen = false;
+    ignoreOpen = false;
+    reportTarget = null;
+    focusEvent = null;
+    searchLocation = null;
+    textSending = false;
     // A question about the old session no longer applies.
     confirmingSignOut = false;
     view = 'chat';
@@ -779,13 +897,14 @@
     }
   }
 
+  /** Start sign-out without waiting for draft persistence; the core attempts server logout before locking. */
   async function confirmSignOut() {
     if (switching) return;
     confirmingSignOut = false;
     switching = true;
     const generation = sessionGeneration;
     try {
-      const store = await signOut();
+      const store = await draftKeeper.protect(signOut);
       if (generation === sessionGeneration && status) status = { ...status, store };
     } catch (reason) {
       if (generation === sessionGeneration) {
@@ -799,13 +918,14 @@
     }
   }
 
+  /** Lock or unlock the active store and ignore status from a session that changed meanwhile. */
   async function toggleLock() {
     if (!status || switching || confirmingSignOut) return;
     switching = true;
     const generation = sessionGeneration;
     try {
       const store = status.store === 'protected' || status.store === 'locking'
-        ? await lockSession()
+        ? await draftKeeper.protect(lockSession)
         : await unlockSession();
       // A session change during the call already reloaded the status.
       if (generation === sessionGeneration && status) status = { ...status, store };
@@ -877,13 +997,21 @@
     return subscriptions;
   }
 
+  /** Flush the old room before changing selection; request and epoch guards reject stale history. */
   async function open(roomId: string) {
+    if (savedDraftsOpen) return;
     const generation = sessionGeneration;
+    const request = ++roomOpenRequest;
+    if (textSending) { error = 'Wait for the message to enter the send queue before changing rooms.'; return; }
+    if (!(await draftKeeper.flush()) || generation !== sessionGeneration || request !== roomOpenRequest) return;
     // An attached image belongs to the room it was picked for.
     if (imageDraft && imageDraft.roomId !== roomId) cancelImage();
     imageError = null;
     if (roomSettingsOf !== roomId) roomSettingsOf = null;
     selected = roomId;
+    const contentEpoch = ++timelineEpoch;
+    focusEvent = null;
+    searchLocation = null;
     items = [];
     pending = [];
     contact = null;
@@ -897,10 +1025,10 @@
     activity = null;
     typingNotifier?.stop();
     typingNotifier = null;
-    if (editingMessage) {
-      draft = editingMessage.savedDraft;
-      editingMessage = null;
-    }
+    editingMessage = null;
+    draftReady = false;
+    const restoringDraft = signedIn ? draftKeeper.select(roomId) : Promise.resolve();
+    if (!signedIn) draft = '';
     nextCursor = null;
     error = null;
     loading = true;
@@ -911,8 +1039,10 @@
       await follow(roomId, generation);
       if (!current(roomId, generation)) return;
       const page = await timelinePage(roomId, null);
-      if (!current(roomId, generation)) return;
+      if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
       items = page.items;
+      // The restore may finish before history; replace the fallback quote now.
+      refreshDraftQuote();
       nextCursor = page.nextCursor;
       const ownUserId = status?.account.userId ?? null;
       unreadFrom = firstUnread(
@@ -929,14 +1059,18 @@
     } catch (reason) {
       if (current(roomId, generation)) error = describe(reason);
     } finally {
+      await restoringDraft;
       if (current(roomId, generation)) {
-        loading = false;
         opening = false;
-        if (changedAgain) refresh(roomId, generation);
+        if (contentEpoch === timelineEpoch) {
+          loading = false;
+          if (changedAgain) refresh(roomId, generation);
+        }
       }
     }
   }
 
+  /** Refresh the newest page, coalescing overlapping invalidations and rejecting stale content. */
   async function refresh(roomId: string, generation: number) {
     if (!current(roomId, generation)) return;
     if (opening || refreshing) {
@@ -944,11 +1078,12 @@
       return;
     }
     refreshing = true;
+    const contentEpoch = timelineEpoch;
     try {
       do {
         changedAgain = false;
         const page = await timelinePage(roomId, null);
-        if (!current(roomId, generation)) return;
+        if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
         items = mergeNewest(items, page.items);
         if (signedIn) {
           loadActivity(roomId, generation);
@@ -982,19 +1117,28 @@
     }
   }
 
+  /** Send once; clear only the unchanged new-message draft and retain text typed during the send. */
   async function queue(
     roomId: string,
     body: string,
     replyTo: string | null,
     generation: number
   ): Promise<boolean> {
+    if (textSending) return false;
+    textSending = true;
     try {
       await sendMessage(roomId, body, replyTo);
       if (current(roomId, generation)) {
-        if (replyTo !== null && replyingTo?.eventId === replyTo) replyingTo = null;
+        if (!editingMessage && draft === body && (replyingTo?.eventId ?? null) === replyTo) {
+          draft = '';
+          replyingTo = null;
+          draftKeeper.update({ body: '', replyTo: null });
+          await draftKeeper.flush();
+        }
         await loadPending(roomId, generation);
       }
-      return true;
+      // The parent owns clearing. New text typed during the request stays.
+      return false;
     } catch (reason) {
       if (current(roomId, generation)) {
         error =
@@ -1003,6 +1147,8 @@
             : describe(reason);
       }
       return false;
+    } finally {
+      if (generation === sessionGeneration) textSending = false;
     }
   }
 
@@ -1120,21 +1266,38 @@
     }
   }
 
+  /** Enter edit mode only when the new-message draft is ready and no send is active. */
   function startEdit(eventId: string, body: string) {
+    if (!draftReady || textSending) return;
+    const savedReply = editingMessage?.savedReply ?? replyingTo;
+    draftKeeper.beginEdit();
     replyingTo = null;
-    editingMessage = { eventId, savedDraft: editingMessage?.savedDraft ?? draft };
+    editingMessage = { eventId, savedDraft: editingMessage?.savedDraft ?? draft, savedReply };
     draft = body;
   }
 
+  /** Restore the saved new-message body and reply when editing is cancelled. */
   function endEdit() {
     if (!editingMessage) return;
+    draftKeeper.endEdit();
     draft = editingMessage.savedDraft;
+    replyingTo = editingMessage.savedReply;
     editingMessage = null;
+  }
+
+  /** Attach a reply to loaded context and leave event-edit mode before saving the draft. */
+  function replyToMessage(eventId: string) {
+    const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), eventId);
+    if (!quote) return;
+    endEdit();
+    replyingTo = { eventId, quote };
+    changeDraft();
   }
 
   // Sends the draft as a new version of the message being edited. In a room
   // that is not encrypted the core asks for consent like any message: the
   // edit then waits with "Send unencrypted".
+  /** Restore the displaced new-message draft only if this edit still belongs to the active session. */
   async function sendEdit(roomId: string, eventId: string, body: string): Promise<boolean> {
     const generation = sessionGeneration;
     try {
@@ -1150,8 +1313,11 @@
     }
     if (current(roomId, generation)) {
       const saved = editingMessage?.eventId === eventId ? editingMessage.savedDraft : '';
+      const savedReply = editingMessage?.eventId === eventId ? editingMessage.savedReply : null;
+      draftKeeper.endEdit();
       editingMessage = null;
       draft = saved;
+      replyingTo = savedReply;
       await loadPending(roomId, generation);
     }
     // The composer keeps the draft put back above.
@@ -1298,7 +1464,13 @@
   }
 
   // The user left the room from its settings: nothing of it stays shown.
+  /** Clear room-bound UI only after the homeserver accepted the leave operation. */
   function leftRoom() {
+    // The Leave gate saved the new-message draft while the room was joined.
+    // Release only the UI's room-bound copy after the homeserver accepted Leave.
+    editingMessage = null;
+    draftKeeper.clear();
+    draftReady = false;
     roomSettingsOf = null;
     if (imageDraft) cancelImage();
     selected = null;
@@ -1327,20 +1499,82 @@
       : null
   );
 
+  /** Prepend one bounded history page if the selected room and content epoch still match. */
   async function older() {
     if (!selected || !nextCursor) return;
     const roomId = selected;
     const generation = sessionGeneration;
+    const contentEpoch = timelineEpoch;
     loading = true;
     try {
       const page = await timelinePage(roomId, nextCursor);
-      if (!current(roomId, generation)) return;
+      if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
       items = [...page.items, ...items];
       nextCursor = page.nextCursor;
     } catch (reason) {
       if (current(roomId, generation)) error = describe(reason);
     } finally {
-      if (current(roomId, generation)) loading = false;
+      if (current(roomId, generation) && contentEpoch === timelineEpoch) loading = false;
+    }
+  }
+
+  /** Load bounded timeline context for a cached hit, then focus it only if the room request is current. */
+  async function locateSearchResult(hit: LocalSearchHit) {
+    searchOpen = false;
+    const generation = sessionGeneration;
+    await open(hit.roomId);
+    if (!current(hit.roomId, generation)) return;
+    const request = roomOpenRequest;
+    const contentEpoch = timelineEpoch;
+    /** Reject context after a session, room-open request or timeline filter change. */
+    function searchContextCurrent() {
+      return current(hit.roomId, generation) && request === roomOpenRequest && contentEpoch === timelineEpoch;
+    }
+    searchLocation = 'Looking for the message in bounded history pages…';
+    loading = true;
+    try {
+      const context = await findSearchContext(hit.roomId, hit.eventId, items, nextCursor,
+        timelinePage, searchContextCurrent);
+      if (!context) return;
+      items = context.items;
+      nextCursor = context.cursor;
+      await tick();
+      if (!current(hit.roomId, generation) || request !== roomOpenRequest || contentEpoch !== timelineEpoch) return;
+      focusEvent = context.found ? hit.eventId : null;
+      searchLocation = context.found
+        ? 'The matching message is selected in the timeline.'
+        : 'This cached result is outside the available bounded timeline context. The message could not be located.';
+    } catch {
+      if (current(hit.roomId, generation) && request === roomOpenRequest && contentEpoch === timelineEpoch) searchLocation = 'The cached result context could not be loaded.';
+    } finally {
+      if (current(hit.roomId, generation) && request === roomOpenRequest && contentEpoch === timelineEpoch) loading = false;
+    }
+  }
+
+  /** Drop the old visible timeline immediately, then reload it with the changed ignore filter. */
+  async function ignoredChanged() {
+    const roomId = selected;
+    if (!roomId) return;
+    const generation = sessionGeneration;
+    // Drop old content before the filtered page arrives. Draft state stays.
+    const contentEpoch = ++timelineEpoch;
+    items = [];
+    focusEvent = null;
+    searchLocation = null;
+    if (replyingTo) replyingTo = { eventId: replyingTo.eventId, quote: { sender: 'Earlier message', text: 'Reply context is not loaded.' } };
+    if (editingMessage?.savedReply) {
+      editingMessage = { ...editingMessage, savedReply: { eventId: editingMessage.savedReply.eventId,
+        quote: { sender: 'Earlier message', text: 'Reply context is not loaded.' } } };
+    }
+    nextCursor = null;
+    loading = true;
+    try {
+      const page = await timelinePage(roomId, null);
+      if (current(roomId, generation) && contentEpoch === timelineEpoch) { items = page.items; nextCursor = page.nextCursor; refreshDraftQuote(); }
+    } catch {
+      if (current(roomId, generation) && contentEpoch === timelineEpoch) error = 'The filtered timeline could not be loaded. Try opening this room again.';
+    } finally {
+      if (current(roomId, generation) && contentEpoch === timelineEpoch) loading = false;
     }
   }
 </script>
@@ -1430,6 +1664,13 @@
       ontab={(tab) => (settingsTab = tab)}
       onback={closeSettings}
     >
+      {#if draftFailure}
+        <div class="draft-status" role="alert"><p class="error">{draftFailure}</p>
+          <button type="button" class="secondary" onclick={() => draftKeeper.retry()}>Retry draft</button>
+          <button type="button" class="secondary" onclick={discardDraft}>Discard draft</button>
+          <button type="button" class="secondary" onclick={closeSettings}>Return to room</button>
+        </div>
+      {/if}
       {#if settingsTab === 'profile'}
         {#if signedIn && status.account.userId}
           <ProfileSettings
@@ -1485,7 +1726,7 @@
           </section>
         {/if}
       {:else if settingsTab === 'accounts'}
-        <Accounts />
+        <Accounts beforechange={prepareAccountSwitch} />
         {#if !status || status.store === 'not_configured'}
           <section class="settings-page" aria-labelledby="accounts-demo-heading">
             <h2 id="accounts-demo-heading">Accounts</h2>
@@ -1583,6 +1824,7 @@
       <Sidebar
         {rooms}
         {selected}
+        {preferences}
         userId={signedIn ? status.account.userId : null}
         {ownName}
         {shortcut}
@@ -1617,6 +1859,15 @@
         {/snippet}
       </Sidebar>
       <div class="pane">
+        {#if signedIn}
+          <div class="feature-actions" aria-label="Message tools">
+            <button type="button" class="secondary" onclick={() => (searchOpen = true)}>Search cached messages</button>
+            <button type="button" class="secondary" onclick={() => (ignoreOpen = true)}>Ignored users</button>
+            <button type="button" class="secondary" onclick={openSavedDrafts}>Saved drafts</button>
+          </div>
+          {#if preferenceFailure}<p class="error" role="alert">{preferenceFailure} <button type="button" class="link" onclick={loadPreferences}>Try again</button></p>{/if}
+          {#if rooms}<StoredRoomGroups {preferences} joinedRooms={rooms.rooms.map((room) => room.roomId)} onchanged={preferenceChanged} />{/if}
+        {/if}
         <!-- Above any room: a new session may be someone else's, so the alert
              does not wait for a room to be opened. -->
         {#if newFound}
@@ -1629,6 +1880,12 @@
           />
         {/if}
         {#if selectedRoom}
+          {#if signedIn}
+            {#key selectedRoom.roomId}
+              <RoomOrganisation roomId={selectedRoom.roomId} {preferences} onchanged={preferenceChanged} />
+            {/key}
+          {/if}
+          {#if searchLocation}<p class="note search-location" role="status">{searchLocation}</p>{/if}
           <Timeline
             title={selectedRoom.displayName ?? selectedRoom.roomId}
             roomId={selectedRoom.roomId}
@@ -1646,16 +1903,13 @@
               ? () => (invitingTo = selectedRoom.roomId)
               : undefined}
             onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
-            onreply={sendBlocked === null
-              ? (eventId) => {
-                  const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), eventId);
-                  if (!quote) return;
-                  endEdit();
-                  replyingTo = { eventId, quote };
-                }
+            onreply={sendBlocked === null && draftReady && !textSending
+              ? replyToMessage
               : undefined}
             ownUserId={signedIn ? status.account.userId : null}
             onedit={sendBlocked === null ? startEdit : undefined}
+            onreport={signedIn ? (eventId, sender) => (reportTarget = { roomId: selectedRoom.roomId, eventId, sender }) : undefined}
+            {focusEvent}
             ondelete={signedIn
               ? (eventId) => (confirmingDelete = { roomId: selectedRoom.roomId, eventId })
               : undefined}
@@ -1730,7 +1984,8 @@
             {/if}
             <Composer
               pending={visiblePending}
-              blocked={sendBlocked}
+              blocked={draftReady ? sendBlocked : 'Loading the saved draft…'}
+              roomId={selectedRoom.roomId}
               encryption={selectedRoom.encryption}
               roomName={selectedRoom.displayName ?? selectedRoom.roomId}
               bind:draft
@@ -1757,13 +2012,22 @@
               oncancelimage={cancelImage}
               enterSends={settings.enterSends}
               replyingTo={replyingTo?.quote ?? null}
-              oncancelreply={() => (replyingTo = null)}
+              oncancelreply={() => { replyingTo = null; changeDraft(); }}
               editing={editingMessage !== null}
               oncanceledit={endEdit}
               typing={activity?.typing ?? []}
               typingCut={activity?.truncated ?? false}
               ontyping={signedIn && settings.sendTyping ? typed : undefined}
+              onchange={changeDraft}
             />
+            {#if draftFailure}
+              <div class="draft-status" role="alert"><p class="error">{draftFailure}</p>
+                <button type="button" class="secondary" onclick={() => draftKeeper.retry()}>Retry draft</button>
+              </div>
+            {/if}
+            {#if !editingMessage && (draft || replyingTo || draftFailure)}
+              <button type="button" class="link discard-draft" disabled={textSending} onclick={discardDraft}>Discard draft</button>
+            {/if}
           {/if}
         {:else}
           <section class="empty-pane" aria-label="No room selected">
@@ -1780,6 +2044,19 @@
       </div>
       {#if paletteOpen && rooms}
         <JumpPalette rooms={rooms.rooms} onselect={open} onclose={() => (paletteOpen = false)} />
+      {/if}
+      {#if searchOpen && signedIn}
+        <LocalSearch roomId={selected} onselect={locateSearchResult} onclose={() => (searchOpen = false)} />
+      {/if}
+      {#if savedDraftsOpen && signedIn}
+        <SavedDrafts {selected} onclose={() => (savedDraftsOpen = false)} />
+      {/if}
+      {#if ignoreOpen && signedIn}
+        <IgnoreUsers onchanged={ignoredChanged} onclose={() => (ignoreOpen = false)} />
+      {/if}
+      {#if reportTarget && signedIn}
+        <ReportAbuse roomId={reportTarget.roomId} eventId={reportTarget.eventId} sender={reportTarget.sender}
+          onclose={() => (reportTarget = null)} onmanageignore={() => { reportTarget = null; ignoreOpen = true; }} />
       {/if}
       {#if newConversationOpen && signedIn}
         <NewConversation onopen={openConversation} onclose={() => (newConversationOpen = false)} />
@@ -1799,6 +2076,7 @@
           roomId={roomSettingsOf}
           roomName={selectedRoom.displayName ?? selectedRoom.roomId}
           changes={roomChanges}
+          beforeleave={prepareAccountSwitch}
           onleft={leftRoom}
           onclose={() => (roomSettingsOf = null)}
         />

@@ -7,9 +7,12 @@ scaffold and must not handle real chats.
 
 The [verification ledger](../evidence/verification.json) records passing,
 failing and unrun checks with source hashes. Its newest workspace check entry
-(`workspace_check_after_p5_image_messaging`, 24 October 2026) passed 524 tests
-(454 Rust, 55 frontend, 2 server-registration and 13 controller tests) on a
-working tree with uncommitted fixes. Recorded CI results are in the
+(`workspace_check_after_room_tools`, 1 November 2026) passed 979 test executions
+(757 Rust, 170 frontend, 2 server-registration and 50 controller/tool tests)
+on a working tree with uncommitted feature changes. Core tests repeat under a
+development feature; these are execution counts, not unique cases. Two image
+benchmarks remain ignored. [Room tools evidence](../evidence/room-tools.md)
+records the tested sources and limits. Recorded CI results are in the
 [Development guide](../development.md#continuous-integration). The dependency
 audit completed against the single root lockfile. The recorded live smoke passed
 on both disposable homeservers; the native sandbox gate remains a failure, now
@@ -110,6 +113,35 @@ Minimum supported OS/CPU versions remain undecided until packaged tests exist.
    [milestone status](../architecture/development-plan.md#milestone-status).
    Production unlock, cross-signing, human verification and crash/corruption
    recovery remain separate requirements.
+
+## Room-tool acceptance work added on 1 November 2026
+
+The owner requested the four features described in [Room tools](../room-tools.md).
+Their [verification record](../evidence/room-tools.md) now records passing
+coordinated automated checks. Historical runs do not verify these additions.
+The list below remains the acceptance checklist; completed automated parts
+are identified in that record, while live/native parts remain open:
+
+1. Complete the relevant Rust, protocol, contract and frontend checks. Record
+   commands, source and lockfile identities, tool versions and exit statuses.
+2. Reopen draft and room-organisation records, test profile isolation and wrong
+   keys, inspect encrypted artifacts, and reject malformed/over-limit records
+   without replacing them. Verify that deletion frees bounded room slots.
+3. Exercise debounced saves across rapid room changes, edits, successful sends,
+   save errors, lock and profile changes. A late load or save must not replace
+   another room's text. A failed save must remain visible.
+4. Demonstrate search without HTTP, history pagination or key requests, with an
+   observable request control. Cover cache restart persistence, gaps,
+   undecrypted events, limits, edits, redactions and the complete ignore set.
+   Show the partial-coverage notice even when no matches are found.
+5. Run ignore/unignore and confirmed reports against disposable Merovingian
+   first, then a standard reference homeserver. Check sent report fields and
+   failure handling. Verify that the reason disclosure is clear and that
+   ignoring does not claim to revoke room access.
+6. Inventory event-cache subscription tasks in the SDK lifecycle review. Do not
+   treat persistence or passing wrapper tests as proof of full SDK drain.
+7. Run keyboard and screen-reader checks for the new controls. Record Windows,
+   Linux and macOS separately; an unavailable runtime remains unverified.
 
 ## Reproduction and artifact policy
 

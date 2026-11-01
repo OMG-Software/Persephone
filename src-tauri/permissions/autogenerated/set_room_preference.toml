@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-room-preference"
+description = "Enables the set_room_preference command without any pre-configured scope."
+commands.allow = ["set_room_preference"]
+
+[[permission]]
+identifier = "deny-set-room-preference"
+description = "Denies the set_room_preference command without any pre-configured scope."
+commands.deny = ["set_room_preference"]

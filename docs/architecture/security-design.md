@@ -2,7 +2,7 @@
 
 19 October 2026. Planning only: no controls have been implemented or tested. The high-risk-user objective and Tauri framework choice are confirmed; the ADR's security constraints apply, while detailed mechanisms and defaults remain proposals.
 
-26 October 2026 update: [Why a web view](#why-a-web-view) describes controls as built, with their evidence. The other sections still record the 19 October plan. For current state, use the [milestone status](development-plan.md#milestone-status).
+26 October 2026 update: [Why a web view](#why-a-web-view) describes controls as built, with their evidence. The [room-tool boundaries](#room-tool-boundaries-added-on-1-november-2026) were added on 1 November 2026; automated checks pass, while live/native acceptance remains open. The other sections still record the 19 October plan. For current state, use the [milestone status](development-plan.md#milestone-status).
 
 The framework choice is now accepted: [ADR-0000](../adr/0000-use-tauri-for-the-desktop-client.md)
 selects Tauri with a Rust core and locally bundled web UI. The record's security
@@ -72,6 +72,34 @@ This split is a design candidate. Prove it works with the selected toolkit, SDK,
 - Minimize retained media and diagnostic data. Logs must exclude secrets and message bodies; any diagnostic export requires a separate disclosure review.
 - Inventory metadata by recipient: homeserver, federated servers, other room members, OS services, and network observers. Optional receipt/presence/typing choices reduce particular disclosures but do not remove room membership or traffic-pattern exposure.
 - Proxy/Tor support, DNS behavior, and traffic-correlation defenses require a separate network design and leak tests; do not label the baseline client anonymous.
+
+## Room-tool boundaries added on 1 November 2026
+
+The owner requested drafts, local message search, ignore/report controls and
+room organisation. Their technical designs remain proposed (ADR-0032 to
+ADR-0035); [automated verification passed](../evidence/room-tools.md), with
+live/native acceptance still open.
+
+- The core validates drafts and room preferences, then writes bounded records
+  in the encrypted crypto store. The UI has no persistence authority. Malformed
+  records fail closed instead of becoming empty records that a save overwrites.
+- Search reads existing SDK cache chunks only. It does not use HTTP, fetch
+  history, request keys or create an index. Only already-decrypted message
+  text is searched. Snippets stay inert text, and the UI must state that
+  coverage is partial. The cache subscription adds SDK background work to the
+  unresolved lifecycle inventory; `restart_required` remains necessary.
+- Ignore changes use Matrix account data on the user's homeserver. Filtering
+  uses the full ignore set rather than the bounded display list. Ignore hides
+  message content, not room state, membership or keys already shared.
+- An explicit report discloses its event reference and reason to the user's
+  own homeserver. It attaches no message body. The reason is server-readable
+  even for an encrypted room. The UI must require confirmation before sending.
+- Favourites and named sections remain local to the encrypted profile. They
+  are not Matrix `m.tag` account data and do not synchronise to other devices.
+
+See [Room tools](../room-tools.md) for resource bounds. These source-level
+controls do not close the storage, lifecycle, platform or independent-review
+gates.
 
 ## UI choices
 

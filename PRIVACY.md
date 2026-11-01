@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 26 October 2026
+Last updated: 1 November 2026
 
 This policy tells you what data the Persephone project collects, what the
 Persephone app sends and stores, and where other parties process data. It
@@ -41,11 +41,19 @@ private report, and GitHub stores it. Send only what the report needs (see
 
 ## What the app sends, and to whom
 
-The app connects only to the homeserver that you enter at sign-in. The
+The app connects to the homeserver that you choose at sign-in. The
 sign-in screen suggests `https://matrix.org`; you can enter a different
 server. The app accepts only `https://` addresses. Every connection uses TLS
 1.3 or later, with certificate checks. The app does not follow redirects and
 does not use a proxy that is set in the system.
+
+Homeserver discovery contacts the server name you enter and checks the
+discovered homeserver. The sign-in page shows the discovered address before
+sign-in. Browser sign-in opens the homeserver's authentication provider in
+your browser and uses a loopback callback to complete authentication. That
+provider and browser have their own privacy policies. A configured profile
+SOCKS5 proxy applies to connections the core makes; it does not configure
+your external browser.
 
 The homeserver receives what the Matrix protocol needs. This includes:
 
@@ -60,7 +68,9 @@ The homeserver receives what the Matrix protocol needs. This includes:
 
 If you set up a key backup or a recovery key, the homeserver also stores your
 encrypted room-key backup. Persephone does not do this automatically; you
-start it. Persephone shows a new recovery key once and does not store it.
+start it. The core can show a new recovery key and save it to a file you
+choose. Such an exported file remains outside the encrypted profile and needs
+your protection; it is not an automatic browser-storage copy.
 
 The homeserver shares room data with the other servers whose users are in
 the room. The other people in a room receive your messages and can see your
@@ -104,6 +114,29 @@ In a room that is not encrypted, the homeserver can read your messages. The
 app labels such a room and asks you to confirm before you send the first
 message there. An encrypted send never falls back to plain text.
 
+### Ignoring users and reporting messages
+
+The ignore list is Matrix account data stored on your homeserver. Its operator
+can read the user IDs on that list. Other clients for the same account can use
+it. Ignoring hides message content from those users in Persephone's timeline
+and local search. Room state events can still appear. Ignoring does not remove
+a user from a room, revoke their access, or withdraw keys already shared.
+
+Reporting requires an explicit confirmation. The app sends the room ID, event
+ID and your required reason to your own homeserver. It does not attach the
+message body. The homeserver operator can read the reason even when the room
+is encrypted. Do not put message text or other private data in the reason
+unless you intend to disclose it. A report is not a promise of moderation.
+
+### Local message search
+
+Message search reads only the SDK's existing encrypted local event cache. The
+query causes no HTTP request, history download, or room-key request. The app
+creates no separate search index. It searches only text already decrypted in
+that cache. Missing history, undecrypted events and resource limits mean the
+results do not cover all messages. User-directory search described above is a
+different operation and does send its query to your homeserver.
+
 ### Images
 
 * **Received images.** The app shows a placeholder for each received image.
@@ -126,13 +159,25 @@ The app keeps your account in a local profile. The profile holds the Matrix
 SDK's databases: account state, the message cache, the media cache and the
 encryption keys.
 
+The profile also keeps per-room text drafts and their reply event references,
+favourites and named room sections. They use bounded encrypted records in the
+SDK crypto store. The app does not upload them as Matrix room tags or keep
+them in browser storage. Each profile has its own records. Draft text and
+search results are visible to the UI while it shows them; keeping keys in the
+core does not hide displayed content from a compromised UI.
+
+Search itself sends no query or history request. Selecting a search result can
+request normal room history to locate that message. Saved drafts can remain
+after leaving a room. Use Saved drafts to view or discard those local records.
+
 * A random 32-byte key encrypts the values in these databases.
 * Your profile passphrase protects that key. You choose the passphrase when
   you create the profile. The app has no way to recover a forgotten
   passphrase.
 * The operating system's keystore adds a second layer. On Windows this is
-  DPAPI. The design uses Secret Service on Linux and the Keychain on macOS;
-  these two are not complete yet. If no keystore is available, the profile
+  DPAPI. The Linux Secret Service adapter is not implemented. The macOS
+  Keychain adapter is implemented but has no recorded native app run.
+  If no keystore is available, the profile
   stays locked. The app never writes an unprotected key instead.
 
 The app keeps images that you load in memory only. It drops them when you

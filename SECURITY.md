@@ -1,6 +1,6 @@
 # Security policy
 
-Last updated: 24 October 2026
+Last updated: 1 November 2026
 
 Persephone is in early development. Its security gates are still open, and it
 is not ready for high-risk use. We still want to hear about every security
@@ -18,6 +18,13 @@ Use GitHub's private vulnerability reporting:
    report.
 
 Do not report a vulnerability in a public issue, pull request or discussion.
+
+The app's **Report abuse** action sends a message report to your own Matrix
+homeserver. It does not report a Persephone vulnerability to this project.
+For app vulnerabilities, use the private GitHub route above. Draft isolation,
+local-search disclosure, ignored-user filtering, and encrypted room preferences
+are part of the app's existing security scope. See [Room tools](docs/room-tools.md)
+for their data boundaries and current verification limits.
 
 ## What to include
 

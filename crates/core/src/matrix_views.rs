@@ -103,12 +103,38 @@ fn room_id(raw: &str) -> Result<&RoomId, ErrorCode> {
     <&RoomId>::try_from(raw).map_err(|_| ErrorCode::InvalidArgument)
 }
 
-fn joined_room(client: &Client, raw: &str) -> Result<matrix_sdk::Room, ErrorCode> {
+/// Require a valid room ID and locally known joined membership before a room
+/// operation. A known invited or left room does not grant this authority.
+pub(crate) fn joined_room(client: &Client, raw: &str) -> Result<matrix_sdk::Room, ErrorCode> {
     let id = room_id(raw)?;
     client
         .get_room(id)
         .filter(|room| room.state() == RoomState::Joined)
         .ok_or(ErrorCode::NotFound)
+}
+
+/// Ignore message content, while retaining room state and deletions. A
+/// moderator's redaction must still remove another sender's earlier text.
+fn ignored_content(
+    event: &TimelineEvent,
+    ignored: &std::collections::BTreeSet<OwnedUserId>,
+) -> bool {
+    event
+        .sender()
+        .is_some_and(|sender| ignored.contains(&sender))
+        && event
+            .raw()
+            .get_field::<serde_json::Value>("state_key")
+            .ok()
+            .flatten()
+            .is_none()
+        && event
+            .raw()
+            .get_field::<String>("type")
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some("m.room.redaction")
 }
 
 /// The event's `origin_server_ts`. Read from the raw event, so an encrypted
@@ -581,7 +607,9 @@ impl MatrixViews {
         }
     }
 
-    /// One page of history older than `cursor`, or the newest page.
+    /// One bounded page of history older than `cursor`, or the newest page.
+    /// Refuse unreadable ignore state before fetching and filter ignored
+    /// message content while preserving state events and redactions.
     pub async fn timeline_page(
         &self,
         client: &Client,
@@ -589,6 +617,7 @@ impl MatrixViews {
         cursor: Option<&str>,
     ) -> Result<TimelinePage, ErrorCode> {
         let joined = joined_room(client, room)?;
+        let ignored = crate::abuse::ignored_set(client).await?;
         let from = cursor.map(|cursor| self.token(room, cursor)).transpose()?;
         let mut limit = MAX_PAGE_ITEMS;
         loop {
@@ -602,6 +631,9 @@ impl MatrixViews {
             let mut items = Vec::new();
             let mut lookups = 0;
             for event in messages.chunk.iter().rev() {
+                if ignored_content(event, &ignored) {
+                    continue;
+                }
                 self.remember_sender(room, event);
                 let item = match edit_claim(event) {
                     Some(claim) => {
@@ -649,6 +681,27 @@ impl MatrixViews {
 mod tests {
     use super::*;
     use matrix_sdk::deserialized_responses::{VerificationLevel, WithheldCode};
+
+    #[test]
+    fn given_ignored_sender_then_message_content_is_hidden_but_state_and_deletions_remain() {
+        let ignored = [matrix_sdk::ruma::user_id!("@alice:example.org").to_owned()].into();
+        assert!(ignored_content(
+            &plain_event(serde_json::json!({"msgtype":"m.text","body":"hidden"})),
+            &ignored
+        ));
+        let state = state_event(
+            "m.room.encryption",
+            "@alice:example.org",
+            "",
+            serde_json::json!({"algorithm":"m.megolm.v1.aes-sha2"}),
+            None,
+        );
+        assert!(!ignored_content(&state, &ignored));
+        let redaction = raw_event(
+            serde_json::json!({"type":"m.room.redaction","event_id":"$delete","sender":"@alice:example.org","origin_server_ts":1,"content":{"redacts":"$target"}}),
+        );
+        assert!(!ignored_content(&redaction, &ignored));
+    }
 
     /// GIVEN each reason the SDK gives for not decrypting WHEN projected THEN
     /// an untrusted sender and a withheld key get their own notice, and every

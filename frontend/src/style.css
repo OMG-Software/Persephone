@@ -2650,3 +2650,44 @@ mark {
   flex: 0 0 64px;
   text-transform: uppercase;
 }
+
+/* Cached search, room grouping, and explicit moderation controls. */
+.feature-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.feature-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--ink);
+  background: var(--card);
+  overflow-wrap: anywhere;
+}
+
+.feature-dialog::backdrop { background: #0008; }
+.feature-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.feature-dialog form, .room-organisation form { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+.feature-dialog p { margin: 12px 0; }
+.feature-dialog input, .feature-dialog textarea, .feature-dialog select, .room-organisation input { min-width: 0; max-width: 100%; }
+.feature-dialog textarea { min-height: 80px; }
+.room-organisation { padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.room-organisation summary { cursor: pointer; }
+.room-organisation input[type='checkbox'] { width: auto; }
+.room-organisation form { max-width: 480px; }
+.local-results { padding: 0; list-style: none; }
+.local-results li { margin: 8px 0; }
+.search-result { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 12px; text-align: start; overflow-wrap: anywhere; }
+.search-result span { max-width: 100%; }
+.search-selected { outline: 2px solid var(--accent, #1d7a5a); outline-offset: -2px; }
+.search-location, .draft-status { padding: 8px 16px; }
+.report-message { margin: 0 0 8px 64px; }
+.discard-draft { align-self: flex-start; margin: 4px 16px 8px; }
+.draft-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; user-select: text; }

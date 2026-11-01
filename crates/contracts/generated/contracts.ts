@@ -111,6 +111,18 @@ queuedAt: number, };
 
 export type RoomList = { rooms: Array<RoomSummary>, truncated: boolean, };
 
+export type RoomDraft = { body: string, replyTo: string | null, };
+
+export type RoomPreference = { roomId: string, favourite: boolean, section: string | null, };
+
+export type RoomPreferences = { rooms: Array<RoomPreference>, };
+
+export type LocalSearchHit = { roomId: string, eventId: string, sender: string, body: string, };
+
+export type LocalSearchResults = { results: Array<LocalSearchHit>, truncated: boolean, scanned: number, };
+
+export type IgnoredUsers = { users: Array<string>, truncated: boolean, };
+
 export type InviteSummary = { roomId: string, 
 /**
  * The room's name, from the invitation's room state, if it has one.

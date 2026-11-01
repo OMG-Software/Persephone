@@ -29,6 +29,7 @@
 //! together under the output lock. Serving ends only after such threads
 //! finish, including an open file dialog.
 
+pub mod abuse;
 pub mod account;
 pub mod account_changes;
 pub mod account_details;
@@ -41,12 +42,14 @@ pub mod files;
 pub mod homeserver;
 pub mod identities;
 pub mod links;
+pub mod local_search;
 pub mod matrix_views;
 pub mod media;
 pub mod notifications;
 pub mod oauth_login;
 pub mod outbox;
 pub mod passphrase;
+pub mod personal;
 pub mod pick;
 pub mod platform;
 pub mod profiles;
@@ -269,6 +272,10 @@ pub struct Core {
     conversation: conversations::Busy,
     /// One user-directory search at a time.
     search: conversations::Busy,
+    /// Serializes encrypted record read/modify/write operations.
+    personal: conversations::Busy,
+    local_search: conversations::Busy,
+    abuse: conversations::Busy,
     read_marker: conversations::Busy,
     /// One homeserver discovery at a time.
     discovery: conversations::Busy,
@@ -418,6 +425,8 @@ fn empty_rooms() -> RoomList {
 }
 
 impl Core {
+    /// Create an unconfigured core with synthetic views and separate admission
+    /// gates. A real account and its stores are supplied by `with_session`.
     pub fn new(fixtures: views::Fixtures) -> Self {
         let budgets = Arc::new(ResourceBudgets::default());
         Self {
@@ -431,6 +440,9 @@ impl Core {
             budgets,
             conversation: conversations::Busy::default(),
             search: conversations::Busy::default(),
+            personal: conversations::Busy::default(),
+            local_search: conversations::Busy::default(),
+            abuse: conversations::Busy::default(),
             read_marker: conversations::Busy::default(),
             discovery: conversations::Busy::default(),
             link: conversations::Busy::default(),
@@ -529,6 +541,18 @@ impl Core {
             })
         };
         match &request.call {
+            Call::RoomDraft { .. }
+            | Call::RoomDrafts {}
+            | Call::SaveRoomDraft { .. }
+            | Call::RoomPreferences {}
+            | Call::SetRoomPreference { .. }
+            | Call::SearchMessages { .. }
+            | Call::IgnoredUsers {}
+            | Call::SetIgnoredUser { .. }
+            | Call::ReportAbuse { .. } => match self.personal_call(&request.call) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::LoadImage { room_id, event_id } => match self.load_image(room_id, event_id) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
@@ -627,8 +651,22 @@ impl Core {
         }
     }
 
+    /// Complete a normal request synchronously, including admitted long calls.
+    /// Store-backed room tools never fall back to the synthetic view source.
     fn outcome(&self, call: &Call) -> Outcome {
         match call {
+            Call::RoomDraft { .. }
+            | Call::RoomDrafts {}
+            | Call::SaveRoomDraft { .. }
+            | Call::RoomPreferences {}
+            | Call::SetRoomPreference { .. }
+            | Call::SearchMessages { .. }
+            | Call::IgnoredUsers {}
+            | Call::SetIgnoredUser { .. }
+            | Call::ReportAbuse { .. } => match self.personal_call(call) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
             Call::AppStatus {} => ok(&AppStatus {
                 version: env!("CARGO_PKG_VERSION").into(),
                 revision: REVISION.into(),
@@ -881,6 +919,100 @@ impl Core {
             Call::AddProfile {} => self.switch(|profiles| profiles.request_new().map(|_| ())),
             Call::SwitchProfile { slot } => self.switch(|profiles| profiles.request_switch(*slot)),
         }
+    }
+
+    /// Local profile operations and explicit abuse operations. Retain a lease
+    /// from admission to completion and fence the reply against lock/sign-out.
+    fn personal_call<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
+        use persephone_core_protocol::personal_call_within_limits;
+        if !personal_call_within_limits(call) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let ids_valid = match call {
+            Call::RoomDraft { room_id } | Call::SaveRoomDraft { room_id, .. } => {
+                valid_room_id(room_id)
+            }
+            Call::SetRoomPreference { preference } => valid_room_id(&preference.room_id),
+            Call::SearchMessages { room_id, .. } => {
+                room_id.as_ref().is_none_or(|id| valid_room_id(id))
+            }
+            Call::SetIgnoredUser { user_id, .. } => conversations::parse_user(user_id).is_some(),
+            Call::ReportAbuse {
+                room_id, event_id, ..
+            } => valid_room_id(room_id) && valid_event_id(event_id),
+            _ => true,
+        };
+        if !ids_valid {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        if !self.session.is_configured() {
+            return Err(ErrorCode::NotFound);
+        }
+        let slot = match call {
+            Call::SearchMessages { .. } => Some(self.local_search.begin()?),
+            Call::SetIgnoredUser { .. } | Call::ReportAbuse { .. } => Some(self.abuse.begin()?),
+            Call::SaveRoomDraft { .. } | Call::SetRoomPreference { .. } => {
+                Some(self.personal.begin()?)
+            }
+            // Reads do not mutate a record. Opening a room and loading its
+            // organisation at the same time must not reject either read.
+            _ => None,
+        };
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let call = call.clone();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            let stores = lease.stores();
+            let result = stores.block_on(async {
+                match &call {
+                    Call::RoomDraft { room_id } => {
+                        json(personal::load_draft(stores, room_id).await)
+                    }
+                    Call::RoomDrafts {} => json(personal::draft_rooms(stores).await),
+                    Call::SaveRoomDraft { room_id, draft } => {
+                        json(personal::save_draft(stores, room_id, draft).await)
+                    }
+                    Call::RoomPreferences {} => json(personal::preferences(stores).await),
+                    Call::SetRoomPreference { preference } => {
+                        json(personal::set_preference(stores, preference).await)
+                    }
+                    Call::SearchMessages { term, room_id } => {
+                        json(local_search::search(&client, stores, term, room_id.as_deref()).await)
+                    }
+                    Call::IgnoredUsers {} => json(abuse::ignored_users(&client).await),
+                    Call::SetIgnoredUser { user_id, ignored } => {
+                        json(abuse::set_ignored(&client, user_id, *ignored).await)
+                    }
+                    Call::ReportAbuse {
+                        room_id,
+                        event_id,
+                        reason,
+                    } => json(abuse::report(&client, room_id, event_id, reason).await),
+                    _ => Err(ErrorCode::InvalidArgument),
+                }
+            });
+            {
+                let _context = stores.runtime().enter();
+                drop(client);
+            }
+            lease
+                .commit(|| match result {
+                    Ok(value) => {
+                        if matches!(call, Call::SetIgnoredUser { .. }) {
+                            self.hub.mark_list_changed(&[], true);
+                            self.hub.room_keys_arrived(&KeyRooms::All);
+                        }
+                        bounded(&value)
+                    }
+                    Err(code) => Outcome::Error(code),
+                })
+                .unwrap_or(Outcome::Error(ErrorCode::Locked))
+        }))
     }
 
     fn invite_list(&self) -> Outcome {
@@ -2268,6 +2400,71 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn personal_commands_reject_bad_input_and_have_no_demo_or_signed_out_store() {
+        let core = Core::default();
+        let valid = [
+            Call::RoomDraft {
+                room_id: "!r:s".into(),
+            },
+            Call::SaveRoomDraft {
+                room_id: "!r:s".into(),
+                draft: persephone_contracts::RoomDraft::default(),
+            },
+            Call::RoomPreferences {},
+            Call::SetRoomPreference {
+                preference: persephone_contracts::RoomPreference {
+                    room_id: "!r:s".into(),
+                    favourite: true,
+                    section: None,
+                },
+            },
+            Call::SearchMessages {
+                term: "text".into(),
+                room_id: None,
+            },
+            Call::IgnoredUsers {},
+            Call::SetIgnoredUser {
+                user_id: "@user:s".into(),
+                ignored: true,
+            },
+            Call::ReportAbuse {
+                room_id: "!r:s".into(),
+                event_id: "$e".into(),
+                reason: "Spam".into(),
+            },
+        ];
+        for call in valid {
+            assert!(matches!(
+                core.handle(&Request { id: 1, call }).outcome,
+                Outcome::Error(ErrorCode::NotFound)
+            ));
+        }
+        for call in [
+            Call::RoomDraft {
+                room_id: "not-a-room".into(),
+            },
+            Call::SearchMessages {
+                term: "text".into(),
+                room_id: Some("not-a-room".into()),
+            },
+            Call::SetIgnoredUser {
+                user_id: "not-a-user".into(),
+                ignored: true,
+            },
+            Call::ReportAbuse {
+                room_id: "!r:s".into(),
+                event_id: "not-an-event".into(),
+                reason: "Spam".into(),
+            },
+        ] {
+            assert!(matches!(
+                core.handle(&Request { id: 1, call }).outcome,
+                Outcome::Error(ErrorCode::InvalidArgument)
+            ));
+        }
+    }
 
     /// GIVEN each setting, profile state and idle time WHEN checked THEN the
     /// idle lock locks only an open profile, only when on, and only once the

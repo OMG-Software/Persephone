@@ -76,6 +76,16 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.setDisplayName('Al'), 'set_display_name', { name: 'Al' }],
     [() => bridge.deviceList(), 'device_list', {}],
     [() => bridge.accountSettings(), 'account_settings', {}],
+    [() => bridge.roomDraft('!r:s'), 'room_draft', { roomId: '!r:s' }],
+    [() => bridge.roomDrafts(), 'room_drafts', {}],
+    [() => bridge.saveRoomDraft('!r:s', { body: 'draft', replyTo: '$e' }), 'save_room_draft', { roomId: '!r:s', draft: { body: 'draft', replyTo: '$e' } }],
+    [() => bridge.roomPreferences(), 'room_preferences', {}],
+    [() => bridge.setRoomPreference({ roomId: '!r:s', favourite: true, section: 'Work' }), 'set_room_preference', { preference: { roomId: '!r:s', favourite: true, section: 'Work' } }],
+    [() => bridge.searchMessages('hello', null), 'search_messages', { term: 'hello', roomId: null }],
+    [() => bridge.searchMessages('hello', '!r:s'), 'search_messages', { term: 'hello', roomId: '!r:s' }],
+    [() => bridge.ignoredUsers(), 'ignored_users', {}],
+    [() => bridge.setIgnoredUser('@a:s', true), 'set_ignored_user', { userId: '@a:s', ignored: true }],
+    [() => bridge.reportAbuse('!r:s', '$e', 'spam'), 'report_abuse', { roomId: '!r:s', eventId: '$e', reason: 'spam' }],
     [
       () =>
         bridge.setAccountSettings({

@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import LevelPicker from './LevelPicker.svelte';
+  import { leaveAfterDraftFlush } from './roomLeave';
   import { avatarColour, initials, localpart, looksLikeUserId } from './people';
   import {
     HISTORY,
@@ -45,6 +46,7 @@
     roomName,
     changes,
     onleft,
+    beforeleave = async () => true,
     onclose
   }: {
     roomId: string;
@@ -54,6 +56,7 @@
     // again, since the device's copy of the room's state follows the sync.
     changes: number;
     onleft: () => void;
+    beforeleave?: () => Promise<boolean>;
     onclose: () => void;
   } = $props();
 
@@ -83,6 +86,7 @@
   let settings = $state<RoomSettings | null>(null);
   let loadFailure = $state<string | null>(null);
   let busy = $state(false);
+  let active = true;
   let failure = $state<string | null>(null);
   let done = $state<string | null>(null);
   // A change that needs a yes first.
@@ -224,15 +228,18 @@
     }
   }
 
-  onMount(() => {
+  /** Open settings and invalidate pending updates before returning focus on close. */
+  function mountSettings() {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialog?.showModal();
     loadSettings();
     return () => {
+      active = false;
       dialog?.close();
       previous?.focus();
     };
-  });
+  }
+  onMount(mountSettings);
 
   // The room changed (a sync): read again what is shown.
   let seen: number | null = null;
@@ -258,6 +265,7 @@
     if (next === 'security') loadSecurity();
   }
 
+  /** Apply one room change; leaving first passes the unsaved-draft gate. */
   async function apply(change: RoomChange, success = 'Saved.') {
     if (busy) return;
     busy = true;
@@ -265,11 +273,16 @@
     done = null;
     confirming = null;
     try {
-      await changeRoom(roomId, change);
       if (change.kind === 'leave') {
+        const left = await leaveAfterDraftFlush(beforeleave, () => changeRoom(roomId, change), () => active);
+        if (!left) {
+          if (active) failure = 'The room was not left. Close room settings, then retry or discard the unsaved draft.';
+          return;
+        }
         onleft();
         return;
       }
+      await changeRoom(roomId, change);
       if (settings) settings = applyLocally(settings, change);
       if (members) members = applyToMembers(members, change);
       if (change.kind === 'name') savedName = name = change.name.trim();

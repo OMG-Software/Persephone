@@ -49,8 +49,11 @@ On Windows, the app can do these things today:
 - Keep an encrypted local profile that opens only with your passphrase
   ([ADR-0006](docs/adr/0006-require-an-unlock-secret-for-the-local-profile.md)).
 - Sign in with a password through the core's own native prompt, and sign out.
-  Sign-out revokes the session and deletes the local profile. SSO and
-  `.well-known` discovery are not supported yet.
+  Sign-out revokes the session and deletes the local profile. Source also
+  includes `.well-known` discovery and browser-based OIDC sign-in. No live
+  OAuth-provider run is recorded; see proposed
+  [ADR-0027](docs/adr/0027-discover-the-homeserver-through-well-known-in-the-core.md)
+  and [ADR-0030](docs/adr/0030-sign-in-with-oidc-through-the-browser-and-a-loopback-redirect.md).
 - Show the room list and message history. Sliding Sync is preferred, with
   classic sync as the fallback.
 - Send and receive encrypted text. Room keys go only to cross-signed devices,
@@ -63,6 +66,14 @@ On Windows, the app can do these things today:
   This is new and has automated tests only; no live run is recorded yet.
 - Send and receive images. Received images load only when you ask. Sent images
   have their metadata removed.
+
+The current source also adds per-room text and reply drafts, local favourites
+and room sections, bounded search of the encrypted local message cache, and
+ignore and report controls. Drafts and room organisation stay in the encrypted
+profile. Search sends no query to a server and has partial coverage. Ignore
+lists and explicit reports go to your homeserver. Coordinated automated checks
+pass; native UI and live-server acceptance remain open. See
+[Room tools](docs/room-tools.md) and its [verification record](docs/evidence/room-tools.md).
 
 Not done yet: Linux and macOS runs, keyboard and screen-reader checks, signed
 releases, and an independent security review.

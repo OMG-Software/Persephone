@@ -28,12 +28,29 @@ after a lock timeout, and store close only after the wait completes. Its drain
 proof refuses to stand for a full SDK drain. See the
 [session owner evidence](../evidence/session-owner.md).
 
+Sign-out first attempts to write a local marker for crash recovery, then
+attempts the homeserver logout before it calls `lock`. During that network
+request, it holds a session lease but has not yet closed admission or announced
+the UI clear. After the request, it attempts to record the revocation result
+and remove the stored key before locking. The immediate logout-start requirement
+above remains unmet during that request. The [room tools guide](../room-tools.md)
+describes this ordering; a frontend request does not prove that session
+protection is complete.
+
 The core now runs an SDK client over those stores
 ([sign-in evidence](../evidence/matrix-sign-in.md)). Its sync loop and sign-in
 take a lease per complete operation, but the SDK's own background tasks do not.
 Because the completion surface below is still missing, a session whose client
 ran locks to `restart_required`: the stores close and are never reopened in that
 process.
+
+As of 1 November 2026, client setup also subscribes the SDK event cache before
+sync. Local message search reads that cache without HTTP or a separate index.
+The subscription activates SDK room-update, ignore-list, cache-shrink,
+redecryption, thread-subscriber and persistence work. This work is part of the
+remaining SDK task inventory. A completed search or application lease does not
+prove that these SDK tasks stopped. The `restart_required` rule remains.
+See [room tools](../room-tools.md) and its [verification record](../evidence/room-tools.md).
 
 ## Required SDK completion surface
 

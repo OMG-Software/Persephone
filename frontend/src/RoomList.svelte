@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { RoomSummary } from '../../crates/contracts/generated/contracts';
+  import type { RoomPreference, RoomSummary } from '../../crates/contracts/generated/contracts';
+  import { groupRooms } from './roomGroups';
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
 
@@ -7,21 +8,25 @@
     rooms,
     truncated,
     selected,
+    preferences = [],
     onselect
   }: {
     rooms: RoomSummary[];
     truncated: boolean;
     selected: string | null;
+    preferences?: RoomPreference[];
     onselect: (roomId: string) => void;
   } = $props();
 
   const unreadLabel = (count: number) => (count > 999 ? '999+' : String(count));
+  const groups = $derived(groupRooms(rooms, preferences));
 </script>
 
 <nav aria-label="Rooms">
-  <p class="section-label">Rooms</p>
-  <ul>
-    {#each rooms as room (room.roomId)}
+  {#each groups as group, index (index)}
+    <p class="section-label"><bdi>{group.name}</bdi></p>
+    <ul aria-label={group.name}>
+    {#each group.rooms as room (room.roomId)}
       <li>
         <button
           type="button"
@@ -42,6 +47,7 @@
       </li>
     {/each}
   </ul>
+  {/each}
   {#if rooms.length === 0}
     <p class="note">No rooms yet.</p>
   {/if}

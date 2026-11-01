@@ -385,6 +385,109 @@ pub struct RoomList {
     pub truncated: bool,
 }
 
+/// Text kept in the protected profile until it is sent or cleared.
+#[derive(Clone, Debug, Default, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomDraft {
+    pub body: String,
+    pub reply_to: Option<String>,
+}
+
+/// This profile's room organisation. The section is untrusted text.
+#[derive(Clone, Debug, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomPreference {
+    pub room_id: String,
+    pub favourite: bool,
+    pub section: Option<String>,
+}
+
+/// A present string or JSON null. Unlike Option, this wire type refuses a
+/// missing field. Keep that distinction at the untrusted request boundary.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RequiredNullableString {
+    Value(String),
+    Null,
+}
+
+impl RequiredNullableString {
+    /// Convert the validated wire value to the application's optional value.
+    fn into_option(self) -> Option<String> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Null => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RoomDraft {
+    /// Require replyTo even when null, and reject unknown or duplicate fields.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            body: String,
+            reply_to: RequiredNullableString,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            body: input.body,
+            reply_to: input.reply_to.into_option(),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RoomPreference {
+    /// Require section even when null, and reject unknown or duplicate fields.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            room_id: String,
+            favourite: bool,
+            section: RequiredNullableString,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            room_id: input.room_id,
+            favourite: input.favourite,
+            section: input.section.into_option(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomPreferences {
+    pub rooms: Vec<RoomPreference>,
+}
+
+/// A match in the local message cache. All text is untrusted.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LocalSearchHit {
+    pub room_id: String,
+    pub event_id: String,
+    pub sender: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LocalSearchResults {
+    pub results: Vec<LocalSearchHit>,
+    pub truncated: bool,
+    pub scanned: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct IgnoredUsers {
+    pub users: Vec<String>,
+    pub truncated: bool,
+}
+
 /// An invitation to a room that this account has not answered. Names are the
 /// inviter's word, projected like any name.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -1575,6 +1678,12 @@ pub fn generated_typescript() -> String {
         format!("export {}", PendingKind::decl(&config)),
         format!("export {}", PendingMessage::decl(&config)),
         format!("export {}", RoomList::decl(&config)),
+        format!("export {}", RoomDraft::decl(&config)),
+        format!("export {}", RoomPreference::decl(&config)),
+        format!("export {}", RoomPreferences::decl(&config)),
+        format!("export {}", LocalSearchHit::decl(&config)),
+        format!("export {}", LocalSearchResults::decl(&config)),
+        format!("export {}", IgnoredUsers::decl(&config)),
         format!("export {}", InviteSummary::decl(&config)),
         format!("export {}", InviteList::decl(&config)),
         format!("export {}", ConversationStart::decl(&config)),
@@ -1634,4 +1743,125 @@ pub fn generated_typescript() -> String {
         serde_json::to_string_pretty(&sample_timeline_page()).expect("DTO serializes")
     ));
     output
+}
+
+#[cfg(test)]
+mod personal_contract_tests {
+    use super::*;
+    use serde::de::DeserializeOwned;
+
+    fn strict_round_trip<T: DeserializeOwned + Serialize + PartialEq + std::fmt::Debug>(value: T) {
+        let mut json = serde_json::to_value(&value).unwrap();
+        assert_eq!(serde_json::from_value::<T>(json.clone()).unwrap(), value);
+        json.as_object_mut()
+            .unwrap()
+            .insert("extra".into(), true.into());
+        assert!(serde_json::from_value::<T>(json).is_err());
+    }
+
+    #[test]
+    fn personal_views_round_trip_and_reject_unknown_fields() {
+        strict_round_trip(RoomDraft {
+            body: "<script> inert draft\n".into(),
+            reply_to: Some("$reply".into()),
+        });
+        strict_round_trip(RoomPreference {
+            room_id: "!room:server.invalid".into(),
+            favourite: true,
+            section: Some("Work".into()),
+        });
+        strict_round_trip(RoomPreferences { rooms: Vec::new() });
+        strict_round_trip(LocalSearchHit {
+            room_id: "!room:server.invalid".into(),
+            event_id: "$event".into(),
+            sender: "@user:server.invalid".into(),
+            body: "<img> inert match".into(),
+        });
+        strict_round_trip(LocalSearchResults {
+            results: Vec::new(),
+            truncated: false,
+            scanned: u32::MAX,
+        });
+        strict_round_trip(IgnoredUsers {
+            users: vec!["@user:server.invalid".into()],
+            truncated: false,
+        });
+    }
+
+    #[test]
+    fn personal_views_use_camel_case_and_require_nullable_fields() {
+        assert_eq!(
+            serde_json::to_value(RoomDraft::default()).unwrap(),
+            serde_json::json!({ "body": "", "replyTo": null })
+        );
+        assert!(
+            serde_json::from_value::<RoomDraft>(serde_json::json!({ "body": "draft" })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<RoomPreference>(
+                serde_json::json!({ "roomId": "!room:server.invalid", "favourite": false })
+            )
+            .is_err()
+        );
+        let types = generated_typescript();
+        for name in [
+            "RoomDraft",
+            "RoomPreference",
+            "RoomPreferences",
+            "LocalSearchHit",
+            "LocalSearchResults",
+            "IgnoredUsers",
+        ] {
+            assert!(types.contains(&format!("export type {name} =")), "{name}");
+        }
+    }
+
+    #[test]
+    fn required_nullable_strings_accept_null_or_string_and_reject_missing_wrong_or_duplicate_fields()
+     {
+        for value in [serde_json::Value::Null, serde_json::json!("$reply")] {
+            let input = serde_json::json!({"body":"draft", "replyTo":value});
+            let draft: RoomDraft = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(draft).unwrap(), input);
+            let input = serde_json::json!({"roomId":"!r:s", "favourite":false, "section":value});
+            let preference: RoomPreference = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(preference).unwrap(), input);
+        }
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<RoomDraft>(
+                    serde_json::json!({"body":"draft", "replyTo":value})
+                )
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<RoomPreference>(
+                    serde_json::json!({"roomId":"!r:s", "favourite":false, "section":value})
+                )
+                .is_err()
+            );
+        }
+        for input in [
+            r#"{"body":"draft"}"#,
+            r#"{"body":"draft","replyTo":null,"replyTo":"$reply"}"#,
+            r#"{"body":"draft","replyTo":null,"extra":false}"#,
+        ] {
+            assert!(serde_json::from_str::<RoomDraft>(input).is_err(), "{input}");
+        }
+        for input in [
+            r#"{"roomId":"!r:s","favourite":false}"#,
+            r#"{"roomId":"!r:s","favourite":false,"section":null,"section":"Work"}"#,
+            r#"{"roomId":"!r:s","favourite":false,"section":null,"extra":false}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<RoomPreference>(input).is_err(),
+                "{input}"
+            );
+        }
+    }
 }

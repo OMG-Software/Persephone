@@ -129,7 +129,8 @@ pub fn recent(sent: MilliSecondsSinceUnixEpoch, now: MilliSecondsSinceUnixEpoch)
 
 /// The room and sender names to show for `notification`, or `None` when it
 /// is not shown: the account's own event, an invitation, an old event, or
-/// one without a sender.
+/// one without a sender. Ignore state is read locally; an ignored sender or
+/// unreadable ignore state suppresses the notification.
 pub async fn shown(
     notification: &Notification,
     room: &Room,
@@ -139,6 +140,14 @@ pub async fn shown(
         return None;
     };
     let sender: OwnedUserId = event.get_field("sender").ok()??;
+    // State events still flow through sync, but ignored senders never toast.
+    if crate::abuse::ignored_set(client)
+        .await
+        .ok()?
+        .contains(&sender)
+    {
+        return None;
+    }
     if client.user_id() == Some(&*sender) {
         return None;
     }

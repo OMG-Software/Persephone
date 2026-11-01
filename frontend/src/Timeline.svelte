@@ -32,6 +32,8 @@
     ownUserId = null,
     onedit,
     ondelete,
+    onreport,
+    focusEvent = null,
     onreact,
     onunreact,
     unreadFrom = null,
@@ -68,6 +70,8 @@
     // Asks to delete one of this account's messages; absent where deleting
     // is not offered.
     ondelete?: (eventId: string) => void;
+    onreport?: (eventId: string, sender: string) => void;
+    focusEvent?: string | null;
     // Reacts to a message, or takes back this account's reaction by its
     // event; absent where reacting is not offered.
     onreact?: (eventId: string, key: string) => void;
@@ -121,6 +125,18 @@
   // reader is comes from scrolling, not from measuring during an update: by
   // then a tall new message may already be in the page.
   let scroller = $state<HTMLElement | null>(null);
+  /** Focus a loaded search hit and stop following the newest message while it is selected. */
+  function focusSearchHit() {
+    if (!focusEvent || !scroller) return;
+    const target = [...scroller.querySelectorAll<HTMLElement>('[data-event-id]')]
+      .find((element) => element.dataset.eventId === focusEvent);
+    if (target) {
+      atEnd = false;
+      target.scrollIntoView({ block: 'center' });
+      target.focus({ preventScroll: true });
+    }
+  }
+  $effect(focusSearchHit);
   let atEnd = $state(true);
   function scrolled() {
     if (scroller) atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
@@ -202,7 +218,9 @@
       {/if}
       <ol>
         {#each shown as item, index (key(item, index))}
-          <li>
+          <li data-event-id={item.kind === 'gap' ? undefined : item.event_id}
+            tabindex="-1"
+            class:search-selected={focusEvent !== null && item.kind !== 'gap' && item.event_id === focusEvent}>
             {#if dividers[index]}
               <p class="day-divider"><span>{dividers[index]}</span></p>
             {/if}
@@ -256,6 +274,9 @@
               </p>
             {:else}
               <p class="gap">Some messages are not shown here.</p>
+            {/if}
+            {#if onreport && item.kind !== 'gap' && item.kind !== 'state' && ownUserId !== null && item.sender !== ownUserId}
+              <button type="button" class="link report-message" onclick={() => onreport(item.event_id, item.sender)}>Report message<span class="visually-hidden"> from <bdi>{item.sender}</bdi></span></button>
             {/if}
           </li>
         {/each}
