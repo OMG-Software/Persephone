@@ -197,21 +197,25 @@
         ?? { sender: 'Earlier message', text: 'Reply context is not loaded.' }
     };
   });
+  /** Keep the editor and room-bound store in sync; edits to an existing event stay separate. */
   function changeDraft(body = draft) {
     draft = body;
     if (!editingMessage) draftKeeper.update({ body, replyTo: replyingTo?.eventId ?? null });
   }
+  /** Replace a placeholder reply quote after its event enters the loaded timeline. */
   function refreshDraftQuote() {
     if (!replyingTo) return;
     const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), replyingTo.eventId);
     if (quote) replyingTo = { ...replyingTo, quote };
   }
+  /** Explicitly clear the current room draft, including a reply reference. */
   async function discardDraft() {
     if (editingMessage) endEdit();
     draft = '';
     replyingTo = null;
     await draftKeeper.discard();
   }
+  /** Stop account switching while text is sending or the current draft cannot be persisted. */
   async function prepareAccountSwitch() {
     if (textSending) return false;
     const generation = sessionGeneration;
@@ -226,6 +230,7 @@
   let reportTarget = $state<{ roomId: string; eventId: string; sender: string } | null>(null);
   let focusEvent = $state<string | null>(null);
   let searchLocation = $state<string | null>(null);
+  /** Open the manager even when a full draft cannot be saved, so another draft can be removed. */
   async function openSavedDrafts() {
     if (textSending) { error = 'Wait for the message to enter the send queue before managing drafts.'; return; }
     const generation = sessionGeneration;
@@ -401,6 +406,7 @@
   const shortcut = mac ? '⌘K' : 'Ctrl K';
 
   // Ctrl K (⌘K on macOS) opens the jump palette from the room view.
+  /** Give the lock shortcut priority, then open the room palette only outside modal flows. */
   function shortcutKey(event: KeyboardEvent) {
     // Lock at once, from anywhere, while the profile is open.
     if (isLockShortcut(event, mac)) {
@@ -455,6 +461,7 @@
   const describe = (reason: unknown) =>
     messages[String(reason)] ?? 'The Persephone core is unavailable.';
 
+  /** Rebuild visible account state while rejecting results from an old session generation. */
   async function load() {
     const generation = sessionGeneration;
     let reply: AppStatus;
@@ -484,6 +491,7 @@
     refreshInvites();
   }
 
+  /** Ignore preference replies from an older account session or request. */
   async function loadPreferences() {
     const generation = sessionGeneration;
     const request = ++preferenceRequest;
@@ -500,6 +508,7 @@
     }
   }
 
+  /** Apply a successful room preference write and invalidate an in-flight list read. */
   function preferenceChanged(preference: RoomPreference) {
     preferenceRequest += 1;
     preferences = [...preferences.filter((entry) => entry.roomId !== preference.roomId),
@@ -885,6 +894,7 @@
     }
   }
 
+  /** Start sign-out without waiting for draft persistence; key protection takes priority. */
   async function confirmSignOut() {
     if (switching) return;
     confirmingSignOut = false;
@@ -905,6 +915,7 @@
     }
   }
 
+  /** Lock or unlock the active store and ignore status from a session that changed meanwhile. */
   async function toggleLock() {
     if (!status || switching || confirmingSignOut) return;
     switching = true;
@@ -983,6 +994,7 @@
     return subscriptions;
   }
 
+  /** Flush the old room before changing selection; request and epoch guards reject stale history. */
   async function open(roomId: string) {
     if (savedDraftsOpen) return;
     const generation = sessionGeneration;
@@ -1055,6 +1067,7 @@
     }
   }
 
+  /** Refresh the newest page, coalescing overlapping invalidations and rejecting stale content. */
   async function refresh(roomId: string, generation: number) {
     if (!current(roomId, generation)) return;
     if (opening || refreshing) {
@@ -1101,6 +1114,7 @@
     }
   }
 
+  /** Send once; clear only the unchanged new-message draft and retain text typed during the send. */
   async function queue(
     roomId: string,
     body: string,
@@ -1249,6 +1263,7 @@
     }
   }
 
+  /** Enter edit mode only when the new-message draft is ready and no send is active. */
   function startEdit(eventId: string, body: string) {
     if (!draftReady || textSending) return;
     const savedReply = editingMessage?.savedReply ?? replyingTo;
@@ -1258,6 +1273,7 @@
     draft = body;
   }
 
+  /** Restore the saved new-message body and reply when editing is cancelled. */
   function endEdit() {
     if (!editingMessage) return;
     draftKeeper.endEdit();
@@ -1269,6 +1285,7 @@
   // Sends the draft as a new version of the message being edited. In a room
   // that is not encrypted the core asks for consent like any message: the
   // edit then waits with "Send unencrypted".
+  /** Restore the displaced new-message draft only if this edit still belongs to the active session. */
   async function sendEdit(roomId: string, eventId: string, body: string): Promise<boolean> {
     const generation = sessionGeneration;
     try {
@@ -1435,6 +1452,7 @@
   }
 
   // The user left the room from its settings: nothing of it stays shown.
+  /** Clear room-bound UI only after the homeserver accepted the leave operation. */
   function leftRoom() {
     // The Leave gate saved the new-message draft while the room was joined.
     // Release only the UI's room-bound copy after the homeserver accepted Leave.
@@ -1469,6 +1487,7 @@
       : null
   );
 
+  /** Prepend one bounded history page if the selected room and content epoch still match. */
   async function older() {
     if (!selected || !nextCursor) return;
     const roomId = selected;
@@ -1487,6 +1506,7 @@
     }
   }
 
+  /** Load bounded timeline context for a cached hit, then focus it only if the room request is current. */
   async function locateSearchResult(hit: LocalSearchHit) {
     searchOpen = false;
     const generation = sessionGeneration;
@@ -1515,6 +1535,7 @@
     }
   }
 
+  /** Drop the old visible timeline immediately, then reload it with the changed ignore filter. */
   async function ignoredChanged() {
     const roomId = selected;
     if (!roomId) return;

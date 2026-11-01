@@ -25,10 +25,12 @@ Save errors stay visible. Automated race checks pass; native UI checks remain
 open in the verification record. A visible unsaved draft is not a
 durable-save guarantee. A crash before a save completes can lose text.
 
-Lock and confirmed sign-out start immediately. They do not wait for a draft
-save or for a message to enter the send queue. Unsaved text can be lost when
-protecting the profile; a failed save must not prevent key protection. Normal
-room and account switches wait for draft saving and show failures.
+The frontend requests lock and confirmed sign-out without waiting for its
+draft-save promise or for a message to enter the send queue. The core stops
+admission and clears the UI, but completion still waits for admitted work,
+including draft writes that hold a session lease. A timeout can leave the core
+in `locking`; it does not authorize store handoff. Unsaved text can be lost.
+Normal room and account switches wait for draft saving and show failures.
 
 The core accepts at most 16 KiB of UTF-8 body text per draft, 100 rooms and
 100 KiB of aggregate draft bodies. The serialized record must fit 112 KiB, so
@@ -54,9 +56,12 @@ message does not exist. Limits are 100 rooms, 2,000 scanned events, 50 results
 and 512 UTF-8 bytes per snippet. Gaps, undecrypted events and byte/work limits
 can reduce coverage further. Results are bounded to one 112 KiB reply. Selecting
 a result can fetch up to five normal history pages to locate it, keeping at
-most 500 timeline items. This navigation sends room history requests, but does
-not send the search term. If the message cannot be located within these limits,
-the UI says so.
+most 500 timeline items. It stops before an older page would exceed this limit
+and keeps the cursor needed to read that page later. It does not remove recent
+items to fit an older page. If the starting context exceeds 500 items, it loads
+a fresh newest page within the same five-request limit. This navigation sends
+room history requests, but does not send the search term. If the message cannot
+be located within these limits, the UI says so.
 
 The cache grows from SDK sync updates. History fetched directly for the
 timeline is not guaranteed to be in this cache. Reads of separate chunks are

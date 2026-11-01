@@ -130,38 +130,47 @@ export function roomList(): Promise<RoomList> {
   return invoke<RoomList>('room_list');
 }
 
+/** Load the encrypted profile's saved draft for one room. */
 export function roomDraft(roomId: string): Promise<RoomDraft> {
   return invoke<RoomDraft>('room_draft', { roomId });
 }
 
+/** List room IDs with stored drafts; this does not join or inspect those rooms. */
 export function roomDrafts(): Promise<string[]> {
   return invoke<string[]>('room_drafts');
 }
 
+/** Persist a room draft through the core's bounded, encrypted storage path. */
 export function saveRoomDraft(roomId: string, draft: RoomDraft): Promise<void> {
   return invoke<void>('save_room_draft', { roomId, draft });
 }
 
+/** Load profile-local favourites and section assignments. */
 export function roomPreferences(): Promise<RoomPreferences> {
   return invoke<RoomPreferences>('room_preferences');
 }
 
+/** Store one validated profile-local room preference. */
 export function setRoomPreference(preference: RoomPreference): Promise<void> {
   return invoke<void>('set_room_preference', { preference });
 }
 
+/** Search existing local cache entries; this call does not fetch server history. */
 export function searchMessages(term: string, roomId: string | null): Promise<LocalSearchResults> {
   return invoke<LocalSearchResults>('search_messages', { term, roomId });
 }
 
+/** Read the ignored Matrix user IDs for the active profile. */
 export function ignoredUsers(): Promise<IgnoredUsers> {
   return invoke<IgnoredUsers>('ignored_users');
 }
 
+/** Change the profile's ignore list; timeline filtering is applied by the core. */
 export function setIgnoredUser(userId: string, ignored: boolean): Promise<void> {
   return invoke<void>('set_ignored_user', { userId, ignored });
 }
 
+/** Submit a report to the account's homeserver; the operator receives its reason. */
 export function reportAbuse(roomId: string, eventId: string, reason: string): Promise<void> {
   return invoke<void>('report_abuse', { roomId, eventId, reason });
 }

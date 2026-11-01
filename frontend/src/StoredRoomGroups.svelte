@@ -9,6 +9,7 @@
   let failure = $state<string | null>(null);
   let active = true;
   onDestroy(() => { active = false; });
+  /** Remove a stale profile preference; this operation does not change room membership. */
   async function remove(roomId: string) {
     if (busy) return;
     busy = true;

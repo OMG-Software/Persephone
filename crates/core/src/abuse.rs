@@ -25,6 +25,7 @@ pub const MAX_IGNORED_USERS: usize = 100;
 pub const MAX_REASON_BYTES: usize = 1000;
 const MAX_ACCOUNT_DATA_BYTES: usize = 256 * 1024;
 
+/// Read local account data only. Reject oversized or malformed ignore state.
 async fn ignored_content(client: &Client) -> Result<IgnoredUserListEventContent, ErrorCode> {
     let raw = client
         .account()
@@ -50,6 +51,8 @@ pub async fn ignored_set(client: &Client) -> Result<BTreeSet<OwnedUserId>, Error
         .collect())
 }
 
+/// Return a bounded display list and mark any omitted users as truncated.
+/// Filtering must use `ignored_set` to retain every ignored user.
 pub async fn ignored_users(client: &Client) -> Result<IgnoredUsers, ErrorCode> {
     let users = ignored_set(client).await?;
     Ok(IgnoredUsers {
@@ -62,6 +65,7 @@ pub async fn ignored_users(client: &Client) -> Result<IgnoredUsers, ErrorCode> {
     })
 }
 
+/// Reject excessive bytes and controls before parsing a Matrix user ID.
 fn checked_user(raw: &str) -> Result<&UserId, ErrorCode> {
     if raw.len() > 255 || raw.chars().any(char::is_control) {
         return Err(ErrorCode::InvalidArgument);
@@ -69,6 +73,7 @@ fn checked_user(raw: &str) -> Result<&UserId, ErrorCode> {
     <&UserId>::try_from(raw).map_err(|_| ErrorCode::InvalidArgument)
 }
 
+/// Distinguish a server refusal from transport or SDK failure without details.
 fn failure(error: matrix_sdk::Error) -> ErrorCode {
     if error.as_client_api_error().is_some() {
         ErrorCode::Rejected
@@ -121,6 +126,7 @@ pub async fn set_ignored(client: &Client, user_id: &str, ignored: bool) -> Resul
         .map_err(|_| ErrorCode::Unavailable)
 }
 
+/// Require a bounded, nonblank reason while preserving tabs and line breaks.
 fn checked_reason(reason: &str) -> Result<(), ErrorCode> {
     if reason.trim().is_empty()
         || reason.len() > MAX_REASON_BYTES
@@ -315,9 +321,25 @@ mod tests {
 
     #[tokio::test]
     async fn given_large_or_invalid_ignore_state_then_filter_is_complete_or_fails_closed() {
-        let server = wiremock::MockServer::start().await;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, path_regex},
+        };
+        let server = MockServer::start().await;
         let client = test_client(&server.uri(), &[]).await;
-        let before = server.received_requests().await.unwrap().len();
+        Mock::given(path_regex(
+            r"^/_matrix/client/v3/user/[^/]+/account_data/m\.ignored_user_list$",
+        ))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/unrelated-background"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
         let users: serde_json::Map<_, _> = (0..101)
             .map(|n| (format!("@user{n}:example.org"), serde_json::json!({})))
             .collect();
@@ -329,11 +351,14 @@ mod tests {
         let display = ignored_users(&client).await.unwrap();
         assert_eq!(display.users.len(), 100);
         assert!(display.truncated);
-        assert_eq!(
-            set_ignored(&client, "@new:example.org", true).await,
-            Err(ErrorCode::LimitExceeded)
+        // SDK initialization can leave unrelated HTTP work running. A
+        // concurrent control request must not affect the ignore assertion.
+        let (unrelated, rejected) = tokio::join!(
+            reqwest::get(format!("{}/unrelated-background", server.uri())),
+            set_ignored(&client, "@new:example.org", true),
         );
-        assert_eq!(server.received_requests().await.unwrap().len(), before);
+        assert_eq!(unrelated.unwrap().status(), reqwest::StatusCode::OK);
+        assert_eq!(rejected, Err(ErrorCode::LimitExceeded));
         changes.account_data.insert(
             GlobalAccountDataEventType::IgnoredUserList,
             Raw::new(
@@ -344,5 +369,6 @@ mod tests {
         );
         client.state_store().save_changes(&changes).await.unwrap();
         assert_eq!(ignored_set(&client).await, Err(ErrorCode::Unavailable));
+        server.verify().await;
     }
 }

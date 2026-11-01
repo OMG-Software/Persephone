@@ -38,10 +38,13 @@ struct Drafts {
     rooms: Vec<StoredDraft>,
 }
 
+/// Bound identifier bytes before parsing Matrix syntax.
 fn valid_room_id(room_id: &str) -> bool {
     room_id.len() <= MAX_ID_BYTES && RoomId::parse(room_id).is_ok()
 }
 
+/// Preserve message whitespace and bidi text within the draft byte budget.
+/// Reject other controls and invalid or excessive reply identifiers.
 fn valid_draft(draft: &RoomDraft) -> bool {
     draft.body.len() <= MAX_DRAFT_BYTES
         && !draft
@@ -54,6 +57,7 @@ fn valid_draft(draft: &RoomDraft) -> bool {
             .is_none_or(|id| id.len() <= MAX_ID_BYTES && EventId::parse(id).is_ok())
 }
 
+/// Require a nonblank, trimmed section label with bounded UTF-8 bytes.
 fn valid_section(section: &str) -> bool {
     !section.is_empty()
         && section.len() <= MAX_SECTION_BYTES
@@ -61,6 +65,8 @@ fn valid_section(section: &str) -> bool {
         && !section.chars().any(char::is_control)
 }
 
+/// Validate stored entries, unique rooms, and the aggregate body budget.
+/// Empty drafts must be removed so they do not consume room slots.
 fn valid_drafts(drafts: &Drafts) -> bool {
     let mut rooms = BTreeSet::new();
     drafts.rooms.len() <= MAX_PERSONAL_ROOMS
@@ -78,6 +84,7 @@ fn valid_drafts(drafts: &Drafts) -> bool {
             <= MAX_TOTAL_DRAFT_BYTES
 }
 
+/// Bound rooms and distinct sections, and reject duplicate or empty entries.
 fn valid_preferences(preferences: &RoomPreferences) -> bool {
     let mut rooms = BTreeSet::new();
     let mut sections = BTreeSet::new();
@@ -94,6 +101,7 @@ fn valid_preferences(preferences: &RoomPreferences) -> bool {
         && sections.len() <= MAX_SECTIONS
 }
 
+/// Refuse excessive stored JSON before parsing; report corrupt data generically.
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ErrorCode> {
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(ErrorCode::Internal);
@@ -101,6 +109,7 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ErrorCode> {
     serde_json::from_slice(bytes).map_err(|_| ErrorCode::Internal)
 }
 
+/// Treat missing drafts as empty, but fail closed on corrupt existing data.
 async fn draft_record(stores: &Stores) -> Result<Drafts, ErrorCode> {
     let Some(bytes) = stores
         .crypto()
@@ -117,6 +126,7 @@ async fn draft_record(stores: &Stores) -> Result<Drafts, ErrorCode> {
     Ok(drafts)
 }
 
+/// Check the serialized byte budget before replacing an encrypted record.
 async fn write<T: Serialize>(stores: &Stores, key: &str, record: &T) -> Result<(), ErrorCode> {
     let bytes = serde_json::to_vec(record).map_err(|_| ErrorCode::Internal)?;
     if bytes.len() > MAX_RECORD_BYTES {
@@ -129,6 +139,8 @@ async fn write<T: Serialize>(stores: &Stores, key: &str, record: &T) -> Result<(
         .map_err(|_| ErrorCode::Internal)
 }
 
+/// Load one local draft, or return an empty draft when the room has no entry.
+/// Invalid identifiers and corrupt stored records remain errors.
 pub async fn load_draft(stores: &Stores, room_id: &str) -> Result<RoomDraft, ErrorCode> {
     if !valid_room_id(room_id) {
         return Err(ErrorCode::InvalidArgument);
@@ -176,6 +188,7 @@ pub async fn save_draft(
     write(stores, DRAFTS_KEY, &drafts).await
 }
 
+/// Load validated local room preferences. Only a missing record means empty.
 pub async fn preferences(stores: &Stores) -> Result<RoomPreferences, ErrorCode> {
     let Some(bytes) = stores
         .crypto()

@@ -115,6 +115,8 @@ async fn room_list(core: State<'_, CoreLink>) -> Result<RoomList, String> {
     relay(core.inner(), Call::RoomList {}).await
 }
 
+/// Reject excessive personal-data arguments before relay; the core validates
+/// identifiers, session authority, and stored data again.
 async fn personal_relay<T: DeserializeOwned + Send + 'static>(
     core: &CoreLink,
     call: Call,
@@ -125,6 +127,7 @@ async fn personal_relay<T: DeserializeOwned + Send + 'static>(
     relay(core, call).await
 }
 
+/// Relay a local draft read without giving the UI access to the profile store.
 #[tauri::command]
 async fn room_draft(
     core: State<'_, CoreLink>,
@@ -133,11 +136,13 @@ async fn room_draft(
     personal_relay(core.inner(), Call::RoomDraft { room_id }).await
 }
 
+/// List saved draft room IDs, including drafts outside the joined room list.
 #[tauri::command]
 async fn room_drafts(core: State<'_, CoreLink>) -> Result<Vec<String>, String> {
     personal_relay(core.inner(), Call::RoomDrafts {}).await
 }
 
+/// Relay a bounded local draft replacement or clear to the core mutation gate.
 #[tauri::command]
 async fn save_room_draft(
     core: State<'_, CoreLink>,
@@ -147,6 +152,7 @@ async fn save_room_draft(
     personal_relay(core.inner(), Call::SaveRoomDraft { room_id, draft }).await
 }
 
+/// Read local room organisation through the keyless core channel.
 #[tauri::command]
 async fn room_preferences(
     core: State<'_, CoreLink>,
@@ -154,6 +160,7 @@ async fn room_preferences(
     personal_relay(core.inner(), Call::RoomPreferences {}).await
 }
 
+/// Relay one room preference; the core serializes and validates the mutation.
 #[tauri::command]
 async fn set_room_preference(
     core: State<'_, CoreLink>,
@@ -162,6 +169,7 @@ async fn set_room_preference(
     personal_relay(core.inner(), Call::SetRoomPreference { preference }).await
 }
 
+/// Request a bounded search of cached text without starting server search.
 #[tauri::command]
 async fn search_messages(
     core: State<'_, CoreLink>,
@@ -171,6 +179,7 @@ async fn search_messages(
     personal_relay(core.inner(), Call::SearchMessages { term, room_id }).await
 }
 
+/// Read the bounded ignore display list; filtering remains in the core.
 #[tauri::command]
 async fn ignored_users(
     core: State<'_, CoreLink>,
@@ -178,6 +187,7 @@ async fn ignored_users(
     personal_relay(core.inner(), Call::IgnoredUsers {}).await
 }
 
+/// Relay an explicit ignore change to the core and the account homeserver.
 #[tauri::command]
 async fn set_ignored_user(
     core: State<'_, CoreLink>,
@@ -187,6 +197,7 @@ async fn set_ignored_user(
     personal_relay(core.inner(), Call::SetIgnoredUser { user_id, ignored }).await
 }
 
+/// Relay a confirmed event reference and reason for submission by the core.
 #[tauri::command]
 async fn report_abuse(
     core: State<'_, CoreLink>,

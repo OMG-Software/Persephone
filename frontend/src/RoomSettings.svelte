@@ -263,6 +263,7 @@
     if (next === 'security') loadSecurity();
   }
 
+  /** Apply one room change; leaving first passes the unsaved-draft gate. */
   async function apply(change: RoomChange, success = 'Saved.') {
     if (busy) return;
     busy = true;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { ignoredUsers, setIgnoredUser, type IgnoredUsers } from './bridge';
+  import { loadIgnoredUsers } from './ignoredUsers.ts';
   import FeatureDialog from './FeatureDialog.svelte';
   let { onclose, onchanged }: { onclose: () => void; onchanged: () => void } = $props();
   let users = $state<IgnoredUsers | null>(null);
@@ -10,11 +11,15 @@
   let failure = $state<string | null>(null);
   let active = true;
   onDestroy(() => { active = false; });
-  async function load() {
-    try { const reply = await ignoredUsers(); if (active) users = reply; }
-    catch { if (active) failure = 'The ignored-user list could not be loaded.'; }
+  /** Reload the list and clear a previous error when the request succeeds. */
+  function load() {
+    return loadIgnoredUsers(ignoredUsers, () => active, (reply) => {
+      if (reply.users) users = reply.users;
+      failure = reply.failure;
+    });
   }
   onMount(load);
+  /** Save the confirmed setting, then refresh the visible ignored-user list. */
   async function apply() {
     if (!confirming || busy) return;
     const asked = confirming;

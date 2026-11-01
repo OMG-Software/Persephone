@@ -5,6 +5,11 @@ Native UI, live homeserver and platform acceptance remain open. The
 [user guide](../room-tools.md) describes the feature limits. ADR-0032 to
 ADR-0035 remain proposed; this result does not accept their technical designs.
 
+Later correction, 1 November 2026: the lock/sign-out wording below now separates
+frontend invocation from core completion. The original run identity and source
+manifest are retained. A [separate review-fix run](room-tools-review-fixes.md)
+records the later implementation and regression checks.
+
 ## Run identity
 
 | Field | Value |
@@ -56,7 +61,10 @@ runs and interrupted builds do not replace this final result.
 - Draft save ordering, delayed restoration, failed restoration without an
   empty overwrite, edits kept separate from new-message drafts, profile
   changes, capacity recovery through inactive-draft removal, and leave-time
-  handling. A stalled or refused draft cannot delay lock or sign-out.
+  handling. The frontend starts lock or sign-out without waiting for its
+  draft-save promise. These tests use a mock action; they do not prove core
+  completion during a stalled write. Admitted writes hold a session lease,
+  and the core waits for those leases. A timeout can leave it in `locking`.
 - Local search traverses an encrypted SQLite cache fixture with 17 chunks
   of 128 events. It stops at 2,000 scanned events and 50 results. An explicit
   SDK HTTP control increments the request recorder; searching then leaves the

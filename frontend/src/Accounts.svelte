@@ -35,6 +35,7 @@
     }
   });
 
+  /** Wait for the owner to protect its draft before starting a profile change. */
   async function confirm() {
     const target = asking;
     if (target === null || switching) return;

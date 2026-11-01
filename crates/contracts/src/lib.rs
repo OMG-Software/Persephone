@@ -386,22 +386,75 @@ pub struct RoomList {
 }
 
 /// Text kept in the protected profile until it is sent or cleared.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RoomDraft {
     pub body: String,
-    #[serde(deserialize_with = "Option::deserialize")]
     pub reply_to: Option<String>,
 }
 
 /// This profile's room organisation. The section is untrusted text.
-#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RoomPreference {
     pub room_id: String,
     pub favourite: bool,
-    #[serde(deserialize_with = "Option::deserialize")]
     pub section: Option<String>,
+}
+
+/// A present string or JSON null. Unlike Option, this wire type refuses a
+/// missing field. Keep that distinction at the untrusted request boundary.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RequiredNullableString {
+    Value(String),
+    Null,
+}
+
+impl RequiredNullableString {
+    /// Convert the validated wire value to the application's optional value.
+    fn into_option(self) -> Option<String> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Null => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RoomDraft {
+    /// Require replyTo even when null, and reject unknown or duplicate fields.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            body: String,
+            reply_to: RequiredNullableString,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            body: input.body,
+            reply_to: input.reply_to.into_option(),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RoomPreference {
+    /// Require section even when null, and reject unknown or duplicate fields.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            room_id: String,
+            favourite: bool,
+            section: RequiredNullableString,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            room_id: input.room_id,
+            favourite: input.favourite,
+            section: input.section.into_option(),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -1760,6 +1813,55 @@ mod personal_contract_tests {
             "IgnoredUsers",
         ] {
             assert!(types.contains(&format!("export type {name} =")), "{name}");
+        }
+    }
+
+    #[test]
+    fn required_nullable_strings_accept_null_or_string_and_reject_missing_wrong_or_duplicate_fields()
+     {
+        for value in [serde_json::Value::Null, serde_json::json!("$reply")] {
+            let input = serde_json::json!({"body":"draft", "replyTo":value});
+            let draft: RoomDraft = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(draft).unwrap(), input);
+            let input = serde_json::json!({"roomId":"!r:s", "favourite":false, "section":value});
+            let preference: RoomPreference = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(preference).unwrap(), input);
+        }
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(1),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                serde_json::from_value::<RoomDraft>(
+                    serde_json::json!({"body":"draft", "replyTo":value})
+                )
+                .is_err()
+            );
+            assert!(
+                serde_json::from_value::<RoomPreference>(
+                    serde_json::json!({"roomId":"!r:s", "favourite":false, "section":value})
+                )
+                .is_err()
+            );
+        }
+        for input in [
+            r#"{"body":"draft"}"#,
+            r#"{"body":"draft","replyTo":null,"replyTo":"$reply"}"#,
+            r#"{"body":"draft","replyTo":null,"extra":false}"#,
+        ] {
+            assert!(serde_json::from_str::<RoomDraft>(input).is_err(), "{input}");
+        }
+        for input in [
+            r#"{"roomId":"!r:s","favourite":false}"#,
+            r#"{"roomId":"!r:s","favourite":false,"section":null,"section":"Work"}"#,
+            r#"{"roomId":"!r:s","favourite":false,"section":null,"extra":false}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<RoomPreference>(input).is_err(),
+                "{input}"
+            );
         }
     }
 }

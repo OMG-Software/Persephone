@@ -17,6 +17,7 @@
     favourite = preference?.favourite ?? false;
     failure = null;
   });
+  /** Save the profile-local room grouping after enforcing the UI byte limit. */
   async function save(event: SubmitEvent) {
     event.preventDefault();
     if (busy || byteLength(section.trim()) > 64) return;

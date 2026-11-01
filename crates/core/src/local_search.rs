@@ -34,6 +34,7 @@ const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_SCAN_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNKS: usize = 2000;
 
+/// Validate the byte and control limits before case folding the query.
 fn checked_term(term: &str) -> Result<String, ErrorCode> {
     if term.trim().is_empty() || term.len() > 128 || term.chars().any(char::is_control) {
         return Err(ErrorCode::InvalidArgument);
@@ -41,6 +42,7 @@ fn checked_term(term: &str) -> Result<String, ErrorCode> {
     Ok(term.to_lowercase())
 }
 
+/// Search plain text message kinds only; omit media and custom message types.
 fn body(msgtype: &MessageType) -> Option<&str> {
     match msgtype {
         MessageType::Text(text) => Some(&text.body),
@@ -98,6 +100,8 @@ pub async fn search(
     search_cache(client, &stores.sdk().event_cache, term, room_id).await
 }
 
+/// Apply room, event, chunk, and byte budgets to local cache reads.
+/// Fail on unreadable ignore state and recheck it before publishing results.
 async fn search_cache(
     client: &Client,
     cache: &impl EventCacheStore,

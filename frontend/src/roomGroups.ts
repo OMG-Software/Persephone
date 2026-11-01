@@ -1,6 +1,8 @@
 import type { RoomPreference, RoomSummary } from '../../crates/contracts/generated/contracts';
 
-/** Preserve room order within groups. A favourite appears only in Favourites. */
+/** Preserve room order within groups. A favourite appears only in Favourites.
+ * Unassigned rooms use the default group; named sections sort by their exact labels.
+ */
 export function groupRooms(rooms: RoomSummary[], preferences: RoomPreference[]) {
   const byRoom = new Map(preferences.map((entry) => [entry.roomId, entry]));
   const favourites: RoomSummary[] = [];

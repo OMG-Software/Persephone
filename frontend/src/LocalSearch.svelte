@@ -24,6 +24,7 @@
     failure = null;
   });
   onDestroy(() => { request += 1; results = null; term = ''; });
+  /** Search cached text only; request IDs prevent older results replacing a newer view. */
   async function search(event: SubmitEvent) {
     event.preventDefault();
     if (busy || !term.trim() || byteLength(term) > 128) return;

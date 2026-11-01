@@ -135,6 +135,7 @@
     }
   }
 
+  /** Submit a snapshot and clear it only if no newer text replaced it during the request. */
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (sending || !draft.trim() || byteLength(draft) > MAX_DRAFT_BYTES) return;

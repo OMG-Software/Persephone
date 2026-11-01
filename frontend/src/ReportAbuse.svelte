@@ -12,6 +12,7 @@
   let failure = $state<string | null>(null);
   let active = true;
   onDestroy(() => { active = false; reason = ''; });
+  /** Send one bounded report and ignore completion after this dialog closes. */
   async function report(event: SubmitEvent) {
     event.preventDefault();
     if (busy || sent || !reason.trim() || byteLength(reason) > 1000) return;

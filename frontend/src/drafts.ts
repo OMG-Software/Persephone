@@ -33,6 +33,7 @@ export class DraftKeeper {
     this.#show = show;
   }
 
+  /** Invalidate pending reads and writes when the owning account session ends. */
   clear() {
     this.#epoch += 1;
     this.#selection += 1;
@@ -77,6 +78,7 @@ export class DraftKeeper {
     }
   }
 
+  /** Accept edits only after the selected room has loaded; oversized text stays unsaved. */
   update(draft: RoomDraft) {
     if (!this.#room || this.#editing || !this.#ready) return false;
     this.#revision += 1;
@@ -153,6 +155,7 @@ export class DraftKeeper {
     return saved;
   }
 
+  /** Retry a failed load or save without replacing the current editor contents. */
   async retry() {
     if (this.#loadFailed && this.#room && !this.#dirty) {
       await this.select(this.#room);
@@ -161,6 +164,7 @@ export class DraftKeeper {
     return this.flush();
   }
 
+  /** Cancel the pending debounce so callers can flush or invalidate immediately. */
   #cancelTimer() {
     if (this.#timer !== null) clearTimeout(this.#timer);
     this.#timer = null;

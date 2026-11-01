@@ -14,6 +14,7 @@
   let request = 0;
   let active = true;
   onDestroy(() => { active = false; request += 1; preview = null; rooms = null; });
+  /** Refresh the room IDs while discarding any reply from an earlier request. */
   async function load() {
     const asked = ++request;
     busy = true;
@@ -23,6 +24,7 @@
     finally { if (active && asked === request) busy = false; }
   }
   onMount(load);
+  /** Preview stored content without joining its room or changing the active editor. */
   async function view(roomId: string) {
     if (busy) return;
     const asked = ++request;
@@ -34,6 +36,7 @@
     catch { if (active && asked === request) failure = 'This saved draft could not be loaded.'; }
     finally { if (active && asked === request) busy = false; }
   }
+  /** Remove only an inactive draft, rechecking selection immediately before the write. */
   async function discard() {
     if (busy || !preview || preview.roomId === selected) return;
     const roomId = preview.roomId;
