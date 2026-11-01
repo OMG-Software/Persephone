@@ -85,11 +85,18 @@
         <p class="eyebrow">02 / Scope</p>
         <h2>What the first release is meant to do</h2>
         <ul class="grid four">
-          <li><h3>One account</h3><p>Sign-in to a single Matrix account with a password. Other login methods are not decided yet.</p></li>
+          <li><h3>Separate profiles</h3><p>One account open at a time, with separate encrypted profiles. Password and browser sign-in are implemented; platform and live acceptance checks remain open.</p></li>
           <li><h3>Rooms and history</h3><p>Room list and message history, using Sliding Sync with a classic sync fallback.</p></li>
           <li><h3>Text and images</h3><p>Text and images. Sent images lose their location and other metadata; received images load only when you ask.</p></li>
           <li><h3>Encrypted chats</h3><p>End-to-end encrypted rooms, emoji verification, key recovery, and a pause when a contact's identity changes.</p></li>
         </ul>
+        <p class="note">
+          New source features include encrypted per-room text drafts, local favourites and room
+          sections, cached message search, and controls to ignore users and report abuse.
+          Search stays on your device. Reports go to your own homeserver after confirmation.
+          See the <a href="https://github.com/OMG-Software/Persephone/blob/main/docs/room-tools.md">room tools guide</a>
+          for limits and verification status.
+        </p>
         <p class="note">
           Persephone is tested against both <strong>Merovingian</strong> and Synapse, including a
           server without Sliding Sync, and its encrypted chats are also tested with Element Web.

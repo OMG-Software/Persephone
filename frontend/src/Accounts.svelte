@@ -7,7 +7,10 @@
   // outside its encrypted profile, so they are numbered (ADR-0015).
   // Switching closes this window: the core locks this account, then starts
   // again with the other one and asks for its passphrase.
-  let { compact = false }: { compact?: boolean } = $props();
+  let { compact = false, beforechange = async () => true }: {
+    compact?: boolean;
+    beforechange?: () => Promise<boolean>;
+  } = $props();
 
   let profiles = $state<ProfileList | null>(null);
   // The slot to switch to while its question is open, or 'new'.
@@ -38,6 +41,11 @@
     switching = true;
     failure = null;
     try {
+      if (!(await beforechange())) {
+        failure = 'The account switch did not start. Return to the room, then retry or discard its unsaved draft.';
+        switching = false;
+        return;
+      }
       await (target === 'new' ? addProfile() : switchProfile(target));
       // The core closes this window next.
     } catch (reason) {

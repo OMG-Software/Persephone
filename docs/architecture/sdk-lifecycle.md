@@ -35,6 +35,14 @@ Because the completion surface below is still missing, a session whose client
 ran locks to `restart_required`: the stores close and are never reopened in that
 process.
 
+As of 1 November 2026, client setup also subscribes the SDK event cache before
+sync. Local message search reads that cache without HTTP or a separate index.
+The subscription activates SDK room-update, ignore-list, cache-shrink,
+redecryption, thread-subscriber and persistence work. This work is part of the
+remaining SDK task inventory. A completed search or application lease does not
+prove that these SDK tasks stopped. The `restart_required` rule remains.
+See [room tools](../room-tools.md) and its [verification record](../evidence/room-tools.md).
+
 ## Required SDK completion surface
 
 The preferred resolution preserves SDK-owned cryptography and adds or obtains

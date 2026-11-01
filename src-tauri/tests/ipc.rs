@@ -40,6 +40,26 @@ impl CoreTransport for FakeCore {
             return Err(CoreError::Unavailable);
         }
         match call {
+            Call::RoomDrafts {} => Ok(serde_json::json!(["!left:example.invalid"])),
+            Call::RoomDraft { room_id } if room_id == "!bad:example.invalid" => {
+                Ok(serde_json::json!({"body":"x","replyTo":null,"key":"secret"}))
+            }
+            Call::RoomDraft { .. } => {
+                Ok(serde_json::json!({"body":"<script>inert</script>","replyTo":"$reply"}))
+            }
+            Call::RoomPreferences {} => Ok(
+                serde_json::json!({"rooms":[{"roomId":"!r:example.invalid","favourite":true,"section":"Work"}]}),
+            ),
+            Call::SearchMessages { term, .. } => Ok(
+                serde_json::json!({"results":[{"roomId":"!r:example.invalid","eventId":"$match","sender":"@bob:example.invalid","body":term}],"scanned":2,"truncated":true}),
+            ),
+            Call::IgnoredUsers {} => {
+                Ok(serde_json::json!({"users":["@bob:example.invalid"],"truncated":false}))
+            }
+            Call::SaveRoomDraft { .. }
+            | Call::SetRoomPreference { .. }
+            | Call::SetIgnoredUser { .. }
+            | Call::ReportAbuse { .. } => Ok(serde_json::Value::Null),
             Call::AppStatus {} => Ok(
                 serde_json::json!({"version": "9.9.9", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}}),
             ),
@@ -644,6 +664,15 @@ fn given_shell_config_then_security_settings_are_restrictive() {
         serde_json::json!([
             "allow-app-status",
             "allow-room-list",
+            "allow-room-draft",
+            "allow-room-drafts",
+            "allow-save-room-draft",
+            "allow-room-preferences",
+            "allow-set-room-preference",
+            "allow-search-messages",
+            "allow-ignored-users",
+            "allow-set-ignored-user",
+            "allow-report-abuse",
             "allow-timeline-page",
             "allow-subscribe-room",
             "allow-unsubscribe-room",
@@ -2378,4 +2407,97 @@ fn given_notifications_with_and_without_names_then_only_named_ones_show_names() 
         persephone_desktop::toast_text("", ""),
         ("Persephone".to_owned(), "New message".to_owned())
     );
+}
+
+#[test]
+fn personal_commands_cross_only_with_bounded_input_and_typed_replies() {
+    let cases = [
+        ("room_drafts", serde_json::json!({})),
+        (
+            "room_draft",
+            serde_json::json!({"roomId":"!r:example.invalid"}),
+        ),
+        (
+            "save_room_draft",
+            serde_json::json!({"roomId":"!r:example.invalid","draft":{"body":"draft","replyTo":null}}),
+        ),
+        ("room_preferences", serde_json::json!({})),
+        (
+            "set_room_preference",
+            serde_json::json!({"preference":{"roomId":"!r:example.invalid","favourite":true,"section":"Work"}}),
+        ),
+        (
+            "search_messages",
+            serde_json::json!({"term":"<b>term</b>","roomId":null}),
+        ),
+        ("ignored_users", serde_json::json!({})),
+        (
+            "set_ignored_user",
+            serde_json::json!({"userId":"@bob:example.invalid","ignored":true}),
+        ),
+        (
+            "report_abuse",
+            serde_json::json!({"roomId":"!r:example.invalid","eventId":"$event","reason":"Spam"}),
+        ),
+    ];
+    for (cmd, body) in cases {
+        assert!(call(cmd, app_origin(), body.clone()).is_ok(), "{cmd}");
+        assert!(call(cmd, "https://evil.invalid", body).is_err(), "{cmd}");
+    }
+    assert_eq!(
+        call(
+            "room_draft",
+            app_origin(),
+            serde_json::json!({"roomId":"!bad:example.invalid"})
+        ),
+        Err(serde_json::json!("core_unavailable"))
+    );
+}
+
+#[test]
+fn personal_limits_reject_before_relay_and_nested_extra_fields_are_refused() {
+    let fake = FakeCore::new(true);
+    let app = app_with(fake.clone());
+    let window = create_main_window(&app).unwrap();
+    let cases = [
+        (
+            "save_room_draft",
+            serde_json::json!({"roomId":"!r:s","draft":{"body":"x".repeat(16385),"replyTo":null}}),
+        ),
+        (
+            "save_room_draft",
+            serde_json::json!({"roomId":"!r:s","draft":{"body":"x","replyTo":null,"path":"unsafe"}}),
+        ),
+        (
+            "set_room_preference",
+            serde_json::json!({"preference":{"roomId":"!r:s","favourite":true,"section":"é".repeat(33)}}),
+        ),
+        (
+            "search_messages",
+            serde_json::json!({"term":"é".repeat(65),"roomId":null}),
+        ),
+        (
+            "search_messages",
+            serde_json::json!({"term":"  ","roomId":null}),
+        ),
+        (
+            "set_ignored_user",
+            serde_json::json!({"userId":"x".repeat(256),"ignored":true}),
+        ),
+        (
+            "report_abuse",
+            serde_json::json!({"roomId":"!r:s","eventId":"$e","reason":"x".repeat(1001)}),
+        ),
+        (
+            "report_abuse",
+            serde_json::json!({"roomId":"!r:s","eventId":"$e","reason":" "}),
+        ),
+    ];
+    for (cmd, body) in cases {
+        assert!(
+            get_ipc_response(&window, request(cmd, app_origin(), body)).is_err(),
+            "{cmd}"
+        );
+    }
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
 }

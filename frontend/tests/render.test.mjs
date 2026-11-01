@@ -48,6 +48,74 @@ test('message view contains no raw HTML insertion or attribute spreading', async
   assert.doesNotMatch(source, /\.\.\.\w+/);
 });
 
+test('GIVEN hostile local-search content WHEN a result renders THEN metadata and snippets remain inert', async () => {
+  const { default: SearchHit } = await vite.ssrLoadModule('/src/SearchHit.svelte');
+  const hostile = '<img src=x onerror=alert(1)><script>alert(2)</script>';
+  const { body: html } = render(SearchHit, { props: {
+    hit: { roomId: hostile, eventId: hostile, sender: hostile, body: hostile }, onselect() {}
+  } });
+  assert.match(html, /&lt;img/);
+  assert.match(html, /&lt;script>/);
+  assert.match(html, /<bdi>/);
+  assert.match(html, /dir="auto"/);
+  assert.doesNotMatch(html, /<(?:img|script)\b/i);
+});
+
+test('GIVEN hostile custom section names WHEN rooms render THEN names remain isolated and inert', async () => {
+  const { default: RoomList } = await vite.ssrLoadModule('/src/RoomList.svelte');
+  const { body: html } = render(RoomList, { props: {
+    rooms: [{ roomId: '!r:s', displayName: '<script>room</script>', unreadCount: 0, encryption: 'encrypted', contact: false }],
+    preferences: [{ roomId: '!r:s', favourite: false, section: '<img src=x onerror=alert(1)>' }],
+    selected: null, truncated: false, onselect() {}
+  } });
+  assert.match(html, /<bdi>&lt;img/);
+  assert.match(html, /&lt;script>/);
+  assert.doesNotMatch(html, /<(?:img|script)\b/i);
+});
+
+test('GIVEN a report dialog WHEN rendered THEN report disclosure and separate ignore confirmation are visible', async () => {
+  const { default: ReportAbuse } = await vite.ssrLoadModule('/src/ReportAbuse.svelte');
+  const { body: html } = render(ReportAbuse, { props: {
+    roomId: '!r:s', eventId: '$<script>x</script>', sender: '@<img>:s', onclose() {}, onmanageignore() {}
+  } });
+  assert.match(html, /own homeserver receives this room ID, event ID, and reason/);
+  assert.match(html, /operator can read the reason/);
+  assert.match(html, /Confirm and send report/);
+  assert.match(html, /Ignoring is a separate action/);
+  assert.match(html, /shared rooms/);
+  assert.match(html, /Manage ignored users/);
+  assert.match(html, /sender text above can be shortened/);
+  assert.doesNotMatch(html, /<(?:img|script)\b/i);
+});
+
+test('GIVEN projected timeline sender text WHEN a report is offered THEN it never authorizes an ignore request', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../src/ReportAbuse.svelte', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /setIgnoredUser|ignoredUsers/);
+  assert.match(source, /reportAbuse\(roomId, eventId, reason\)/);
+});
+
+test('GIVEN a hostile saved draft WHEN previewed THEN body and reply reference remain inert and isolated', async () => {
+  const { default: DraftPreview } = await vite.ssrLoadModule('/src/DraftPreview.svelte');
+  const hostile = '<script>alert(1)</script><img src=x onerror=alert(2)>';
+  const { body: html } = render(DraftPreview, { props: { roomId: hostile, draft: { body: hostile, replyTo: hostile } } });
+  assert.match(html, /<pre[^>]*dir="auto"/);
+  assert.match(html, /<bdi>&lt;script>/);
+  assert.doesNotMatch(html, /<(?:img|script)\b/i);
+});
+
+test('GIVEN orphaned room preferences WHEN listed THEN cleanup names only local profile changes', async () => {
+  const { default: StoredRoomGroups } = await vite.ssrLoadModule('/src/StoredRoomGroups.svelte');
+  const { body: html } = render(StoredRoomGroups, { props: {
+    preferences: [{ roomId: '!left:<script>x</script>', favourite: true, section: '<img src=x>' }, { roomId: '!joined:s', favourite: true, section: null }],
+    joinedRooms: ['!joined:s'], onchanged() {}
+  } });
+  assert.match(html, /Remove saved group/);
+  assert.match(html, /only changes the local profile/);
+  assert.doesNotMatch(html, /!joined:s/);
+  assert.doesNotMatch(html, /<(?:img|script)\b/i);
+});
+
 test('GIVEN the Lock button WHEN rendered THEN help text describes it and says what Lock does', async () => {
   const { default: TipButton } = await vite.ssrLoadModule('/src/TipButton.svelte');
   const { LOCK_HELP } = await import('../src/help.ts');

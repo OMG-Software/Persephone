@@ -115,6 +115,96 @@ async fn room_list(core: State<'_, CoreLink>) -> Result<RoomList, String> {
     relay(core.inner(), Call::RoomList {}).await
 }
 
+async fn personal_relay<T: DeserializeOwned + Send + 'static>(
+    core: &CoreLink,
+    call: Call,
+) -> Result<T, String> {
+    if !persephone_core_protocol::personal_call_within_limits(&call) {
+        return Err(INVALID_ARGUMENT.to_owned());
+    }
+    relay(core, call).await
+}
+
+#[tauri::command]
+async fn room_draft(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<persephone_contracts::RoomDraft, String> {
+    personal_relay(core.inner(), Call::RoomDraft { room_id }).await
+}
+
+#[tauri::command]
+async fn room_drafts(core: State<'_, CoreLink>) -> Result<Vec<String>, String> {
+    personal_relay(core.inner(), Call::RoomDrafts {}).await
+}
+
+#[tauri::command]
+async fn save_room_draft(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    draft: persephone_contracts::RoomDraft,
+) -> Result<(), String> {
+    personal_relay(core.inner(), Call::SaveRoomDraft { room_id, draft }).await
+}
+
+#[tauri::command]
+async fn room_preferences(
+    core: State<'_, CoreLink>,
+) -> Result<persephone_contracts::RoomPreferences, String> {
+    personal_relay(core.inner(), Call::RoomPreferences {}).await
+}
+
+#[tauri::command]
+async fn set_room_preference(
+    core: State<'_, CoreLink>,
+    preference: persephone_contracts::RoomPreference,
+) -> Result<(), String> {
+    personal_relay(core.inner(), Call::SetRoomPreference { preference }).await
+}
+
+#[tauri::command]
+async fn search_messages(
+    core: State<'_, CoreLink>,
+    term: String,
+    room_id: Option<String>,
+) -> Result<persephone_contracts::LocalSearchResults, String> {
+    personal_relay(core.inner(), Call::SearchMessages { term, room_id }).await
+}
+
+#[tauri::command]
+async fn ignored_users(
+    core: State<'_, CoreLink>,
+) -> Result<persephone_contracts::IgnoredUsers, String> {
+    personal_relay(core.inner(), Call::IgnoredUsers {}).await
+}
+
+#[tauri::command]
+async fn set_ignored_user(
+    core: State<'_, CoreLink>,
+    user_id: String,
+    ignored: bool,
+) -> Result<(), String> {
+    personal_relay(core.inner(), Call::SetIgnoredUser { user_id, ignored }).await
+}
+
+#[tauri::command]
+async fn report_abuse(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+    reason: String,
+) -> Result<(), String> {
+    personal_relay(
+        core.inner(),
+        Call::ReportAbuse {
+            room_id,
+            event_id,
+            reason,
+        },
+    )
+    .await
+}
+
 /// Length checks here keep obviously bad input off the core channel; the core
 /// validates authoritatively.
 #[tauri::command]
@@ -1240,6 +1330,15 @@ pub fn configure<R: Runtime>(
         .invoke_handler(tauri::generate_handler![
             app_status,
             room_list,
+            room_draft,
+            room_drafts,
+            save_room_draft,
+            room_preferences,
+            set_room_preference,
+            search_messages,
+            ignored_users,
+            set_ignored_user,
+            report_abuse,
             timeline_page,
             subscribe_room,
             unsubscribe_room,

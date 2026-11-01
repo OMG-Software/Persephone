@@ -139,6 +139,14 @@ pub async fn shown(
         return None;
     };
     let sender: OwnedUserId = event.get_field("sender").ok()??;
+    // State events still flow through sync, but ignored senders never toast.
+    if crate::abuse::ignored_set(client)
+        .await
+        .ok()?
+        .contains(&sender)
+    {
+        return None;
+    }
     if client.user_id() == Some(&*sender) {
         return None;
     }

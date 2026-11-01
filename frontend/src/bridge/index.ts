@@ -32,6 +32,12 @@ import type {
   ProfileSlot,
   RoomChange,
   RoomCreation,
+  RoomDraft,
+  RoomPreference,
+  RoomPreferences,
+  LocalSearchHit,
+  LocalSearchResults,
+  IgnoredUsers,
   RoomIdentityChanges,
   RoomInvite,
   RoomLevel,
@@ -85,6 +91,12 @@ export type {
   ProfileSlot,
   RoomChange,
   RoomCreation,
+  RoomDraft,
+  RoomPreference,
+  RoomPreferences,
+  LocalSearchHit,
+  LocalSearchResults,
+  IgnoredUsers,
   RoomIdentityChanges,
   RoomInvite,
   RoomLevel,
@@ -116,6 +128,42 @@ export function appStatus(): Promise<AppStatus> {
 
 export function roomList(): Promise<RoomList> {
   return invoke<RoomList>('room_list');
+}
+
+export function roomDraft(roomId: string): Promise<RoomDraft> {
+  return invoke<RoomDraft>('room_draft', { roomId });
+}
+
+export function roomDrafts(): Promise<string[]> {
+  return invoke<string[]>('room_drafts');
+}
+
+export function saveRoomDraft(roomId: string, draft: RoomDraft): Promise<void> {
+  return invoke<void>('save_room_draft', { roomId, draft });
+}
+
+export function roomPreferences(): Promise<RoomPreferences> {
+  return invoke<RoomPreferences>('room_preferences');
+}
+
+export function setRoomPreference(preference: RoomPreference): Promise<void> {
+  return invoke<void>('set_room_preference', { preference });
+}
+
+export function searchMessages(term: string, roomId: string | null): Promise<LocalSearchResults> {
+  return invoke<LocalSearchResults>('search_messages', { term, roomId });
+}
+
+export function ignoredUsers(): Promise<IgnoredUsers> {
+  return invoke<IgnoredUsers>('ignored_users');
+}
+
+export function setIgnoredUser(userId: string, ignored: boolean): Promise<void> {
+  return invoke<void>('set_ignored_user', { userId, ignored });
+}
+
+export function reportAbuse(roomId: string, eventId: string, reason: string): Promise<void> {
+  return invoke<void>('report_abuse', { roomId, eventId, reason });
 }
 
 /** One page older than `cursor`, or the newest page when it is null. */

@@ -38,6 +38,10 @@
 * [0029 - Send and save files through the core's own dialogs](0029-send-and-save-files-through-the-cores-own-dialogs.md)
 * [0030 - Sign in with OIDC through the browser and a loopback redirect](0030-sign-in-with-oidc-through-the-browser-and-a-loopback-redirect.md)
 * [0031 - Reserve the SDK's copies of a send in a budget of their own](0031-reserve-the-sdks-copies-of-a-send-in-a-budget-of-their-own.md)
+* [0032 - Keep bounded room drafts in the encrypted profile](0032-keep-bounded-room-drafts-in-the-encrypted-profile.md)
+* [0033 - Search only the existing encrypted event cache](0033-search-only-the-existing-encrypted-event-cache.md)
+* [0034 - Ignore users and report events through the homeserver](0034-ignore-users-and-report-events-through-the-homeserver.md)
+* [0035 - Keep favourites and room sections local to the profile](0035-keep-favourites-and-room-sections-local-to-the-profile.md)
 
 ## Superseded Records
 

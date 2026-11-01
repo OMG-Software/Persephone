@@ -97,7 +97,7 @@ pub async fn build_client(homeserver: &Homeserver, stores: &Stores) -> Result<Cl
         .await
         .map_err(|_| SignInError::Failed)?;
     let http = homeserver::http_client(proxy.as_ref()).map_err(|_| SignInError::Failed)?;
-    Client::builder()
+    let client = Client::builder()
         .homeserver_url(homeserver.url().as_str())
         .respect_login_well_known(false)
         // An access token with a refresh token expires; the SDK refreshes
@@ -123,7 +123,15 @@ pub async fn build_client(homeserver: &Homeserver, stores: &Stores) -> Result<Cl
         })
         .build()
         .await
-        .map_err(|_| SignInError::Failed)
+        .map_err(|_| SignInError::Failed)?;
+    // Persist sync history in the existing encrypted SDK event cache. Search
+    // reads this cache directly and never starts network pagination/decryption.
+    // These SDK tasks retain the existing restart-required lifecycle limit.
+    client
+        .event_cache()
+        .subscribe()
+        .map_err(|_| SignInError::Failed)?;
+    Ok(client)
 }
 
 fn sign_in_error(error: &matrix_sdk::Error) -> SignInError {

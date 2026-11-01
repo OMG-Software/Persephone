@@ -10,6 +10,7 @@
 - [Security design](architecture/security-design.md): proposed threat boundaries, controls, and release gates, and why the web view is the more secure design.
 - [Development guide](development.md): workspace commands, toolchain requirements, and local data layout.
 - [Release guide](release.md): signing secrets, cutting a draft release, and verifying downloads.
+- [Room tools](room-tools.md): drafts, partial local message search, ignore/report disclosures, favourites and room sections; new source slice with verification pending.
 
 ## Decisions
 
@@ -29,10 +30,16 @@
 - [ADR-0012](adr/0012-sign-and-publish-releases-as-drafts.md): release artifacts are signed (PFX for Windows, Developer ID for macOS, cosign and GPG checksums) and published as drafts.
 - [ADR-0013](adr/0013-open-a-default-profile-when-none-is-given.md) (proposed; already implemented, owner decision pending): with no `--profile`, the core opens a fixed per-user local profile folder; synthetic rooms only with `--demo`.
 - [ADR-0014](adr/0014-start-encrypted-direct-conversations-by-matrix-id.md): start an encrypted direct conversation by exact Matrix ID, with user-directory search behind a switch that is off by default; accept or decline direct-message invitations; refuse people without a cross-signing identity.
+- [ADR-0032](adr/0032-keep-bounded-room-drafts-in-the-encrypted-profile.md) (proposed): bounded text and reply drafts in the encrypted profile.
+- [ADR-0033](adr/0033-search-only-the-existing-encrypted-event-cache.md) (proposed): bounded local cache search with no HTTP or new index and explicit partial coverage.
+- [ADR-0034](adr/0034-ignore-users-and-report-events-through-the-homeserver.md) (proposed): standard Matrix ignore account data and explicit reports to the account's homeserver.
+- [ADR-0035](adr/0035-keep-favourites-and-room-sections-local-to-the-profile.md) (proposed): local encrypted favourites and named sections, without Matrix room tags.
 
 ## Evidence
 
 Run records and supporting artifacts are grouped under [evidence](evidence). The [verification ledger](evidence/verification.json) records the checks, statuses, and source hashes. Historical evidence preserves original command lines and paths as provenance; use the Development guide for current commands and locations.
+
+- [Room tools](evidence/room-tools.md): coordinated checks passed on 1 November 2026; source hashes, behavior coverage, and remaining live/native acceptance work.
 
 - [Independent recipients with SAS-verified devices](evidence/verified-recipients.md): two-user verification and bidirectional encrypted messaging on both disposable homeservers.
 - [Encrypted native Sliding Sync and classic transition](evidence/encrypted-sliding-sync.md): sync-handler delivery, key/device continuity, and continued encrypted messaging across a completed-operation switch.

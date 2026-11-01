@@ -385,6 +385,56 @@ pub struct RoomList {
     pub truncated: bool,
 }
 
+/// Text kept in the protected profile until it is sent or cleared.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomDraft {
+    pub body: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub reply_to: Option<String>,
+}
+
+/// This profile's room organisation. The section is untrusted text.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomPreference {
+    pub room_id: String,
+    pub favourite: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub section: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomPreferences {
+    pub rooms: Vec<RoomPreference>,
+}
+
+/// A match in the local message cache. All text is untrusted.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LocalSearchHit {
+    pub room_id: String,
+    pub event_id: String,
+    pub sender: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LocalSearchResults {
+    pub results: Vec<LocalSearchHit>,
+    pub truncated: bool,
+    pub scanned: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct IgnoredUsers {
+    pub users: Vec<String>,
+    pub truncated: bool,
+}
+
 /// An invitation to a room that this account has not answered. Names are the
 /// inviter's word, projected like any name.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -1575,6 +1625,12 @@ pub fn generated_typescript() -> String {
         format!("export {}", PendingKind::decl(&config)),
         format!("export {}", PendingMessage::decl(&config)),
         format!("export {}", RoomList::decl(&config)),
+        format!("export {}", RoomDraft::decl(&config)),
+        format!("export {}", RoomPreference::decl(&config)),
+        format!("export {}", RoomPreferences::decl(&config)),
+        format!("export {}", LocalSearchHit::decl(&config)),
+        format!("export {}", LocalSearchResults::decl(&config)),
+        format!("export {}", IgnoredUsers::decl(&config)),
         format!("export {}", InviteSummary::decl(&config)),
         format!("export {}", InviteList::decl(&config)),
         format!("export {}", ConversationStart::decl(&config)),
@@ -1634,4 +1690,76 @@ pub fn generated_typescript() -> String {
         serde_json::to_string_pretty(&sample_timeline_page()).expect("DTO serializes")
     ));
     output
+}
+
+#[cfg(test)]
+mod personal_contract_tests {
+    use super::*;
+    use serde::de::DeserializeOwned;
+
+    fn strict_round_trip<T: DeserializeOwned + Serialize + PartialEq + std::fmt::Debug>(value: T) {
+        let mut json = serde_json::to_value(&value).unwrap();
+        assert_eq!(serde_json::from_value::<T>(json.clone()).unwrap(), value);
+        json.as_object_mut()
+            .unwrap()
+            .insert("extra".into(), true.into());
+        assert!(serde_json::from_value::<T>(json).is_err());
+    }
+
+    #[test]
+    fn personal_views_round_trip_and_reject_unknown_fields() {
+        strict_round_trip(RoomDraft {
+            body: "<script> inert draft\n".into(),
+            reply_to: Some("$reply".into()),
+        });
+        strict_round_trip(RoomPreference {
+            room_id: "!room:server.invalid".into(),
+            favourite: true,
+            section: Some("Work".into()),
+        });
+        strict_round_trip(RoomPreferences { rooms: Vec::new() });
+        strict_round_trip(LocalSearchHit {
+            room_id: "!room:server.invalid".into(),
+            event_id: "$event".into(),
+            sender: "@user:server.invalid".into(),
+            body: "<img> inert match".into(),
+        });
+        strict_round_trip(LocalSearchResults {
+            results: Vec::new(),
+            truncated: false,
+            scanned: u32::MAX,
+        });
+        strict_round_trip(IgnoredUsers {
+            users: vec!["@user:server.invalid".into()],
+            truncated: false,
+        });
+    }
+
+    #[test]
+    fn personal_views_use_camel_case_and_require_nullable_fields() {
+        assert_eq!(
+            serde_json::to_value(RoomDraft::default()).unwrap(),
+            serde_json::json!({ "body": "", "replyTo": null })
+        );
+        assert!(
+            serde_json::from_value::<RoomDraft>(serde_json::json!({ "body": "draft" })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<RoomPreference>(
+                serde_json::json!({ "roomId": "!room:server.invalid", "favourite": false })
+            )
+            .is_err()
+        );
+        let types = generated_typescript();
+        for name in [
+            "RoomDraft",
+            "RoomPreference",
+            "RoomPreferences",
+            "LocalSearchHit",
+            "LocalSearchResults",
+            "IgnoredUsers",
+        ] {
+            assert!(types.contains(&format!("export type {name} =")), "{name}");
+        }
+    }
 }
