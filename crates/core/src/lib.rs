@@ -425,6 +425,8 @@ fn empty_rooms() -> RoomList {
 }
 
 impl Core {
+    /// Create an unconfigured core with synthetic views and separate admission
+    /// gates. A real account and its stores are supplied by `with_session`.
     pub fn new(fixtures: views::Fixtures) -> Self {
         let budgets = Arc::new(ResourceBudgets::default());
         Self {
@@ -649,6 +651,8 @@ impl Core {
         }
     }
 
+    /// Complete a normal request synchronously, including admitted long calls.
+    /// Store-backed room tools never fall back to the synthetic view source.
     fn outcome(&self, call: &Call) -> Outcome {
         match call {
             Call::RoomDraft { .. }

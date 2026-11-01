@@ -28,6 +28,12 @@ after a lock timeout, and store close only after the wait completes. Its drain
 proof refuses to stand for a full SDK drain. See the
 [session owner evidence](../evidence/session-owner.md).
 
+Sign-out still attempts the homeserver logout before it calls `lock`. During
+that network request, it holds a session lease but has not yet closed admission
+or announced the UI clear. The immediate logout-start requirement above remains
+unmet for that interval. The [room tools guide](../room-tools.md) describes this
+ordering; a frontend request does not prove that session protection is complete.
+
 The core now runs an SDK client over those stores
 ([sign-in evidence](../evidence/matrix-sign-in.md)). Its sync loop and sign-in
 take a lease per complete operation, but the SDK's own background tasks do not.

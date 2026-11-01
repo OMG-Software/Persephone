@@ -6,7 +6,9 @@ export const SEARCH_CONTEXT_ITEMS = 500;
 /** Merge chronological pages without duplicate event IDs. Preserve visible gaps. */
 function mergeContext(older: TimelineItem[], newer: TimelineItem[]): TimelineItem[] {
   const seen = new Set<string>();
-  return [...older, ...newer].filter((item) => {
+  return [...older, ...newer].filter(/**
+   * Keep every gap and the first occurrence of each chronological event ID.
+   */ (item) => {
     if (item.kind === 'gap') return true;
     if (seen.has(item.event_id)) return false;
     seen.add(item.event_id);
@@ -46,6 +48,7 @@ export async function findSearchContext(
   } else {
     items = mergeContext([], initial);
   }
+  /** Only a retained event can satisfy the search; a gap has no event identity. */
   const found = () => items.some((item) => item.kind !== 'gap' && item.event_id === eventId);
   const seenCursors = new Set<string>();
   while (current() && !found() && cursor !== null && count < SEARCH_CONTEXT_PAGES) {

@@ -186,7 +186,9 @@
   let textSending = $state(false);
   let roomOpenRequest = 0;
   let timelineEpoch = 0;
-  const draftKeeper = new DraftKeeper({ load: roomDraft, save: saveRoomDraft }, (next, failure, ready) => {
+  const draftKeeper = new DraftKeeper({ load: roomDraft, save: saveRoomDraft }, /**
+   * Restore new-message text and its reply quote without replacing an active event edit.
+   */ (next, failure, ready) => {
     draftFailure = failure;
     draftReady = ready;
     if (editingMessage) return;
@@ -894,7 +896,7 @@
     }
   }
 
-  /** Start sign-out without waiting for draft persistence; key protection takes priority. */
+  /** Start sign-out without waiting for draft persistence; the core attempts server logout before locking. */
   async function confirmSignOut() {
     if (switching) return;
     confirmingSignOut = false;
@@ -1518,7 +1520,9 @@
     loading = true;
     try {
       const context = await findSearchContext(hit.roomId, hit.eventId, items, nextCursor,
-        timelinePage, () => current(hit.roomId, generation) && request === roomOpenRequest && contentEpoch === timelineEpoch);
+        timelinePage, /**
+         * Reject context after a session, room-open request or timeline filter change.
+         */ () => current(hit.roomId, generation) && request === roomOpenRequest && contentEpoch === timelineEpoch);
       if (!context) return;
       items = context.items;
       nextCursor = context.cursor;
@@ -1888,7 +1892,9 @@
               : undefined}
             onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
             onreply={sendBlocked === null && draftReady && !textSending
-              ? (eventId) => {
+              ? /**
+                 * Keep replies attached to loaded context and leave event-edit mode before saving the draft.
+                 */ (eventId) => {
                   const quote = quoteOf(applyRelations(items, status?.account.userId ?? null), eventId);
                   if (!quote) return;
                   endEdit();

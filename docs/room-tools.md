@@ -26,11 +26,16 @@ open in the verification record. A visible unsaved draft is not a
 durable-save guarantee. A crash before a save completes can lose text.
 
 The frontend requests lock and confirmed sign-out without waiting for its
-draft-save promise or for a message to enter the send queue. The core stops
-admission and clears the UI, but completion still waits for admitted work,
-including draft writes that hold a session lease. A timeout can leave the core
-in `locking`; it does not authorize store handoff. Unsaved text can be lost.
-Normal room and account switches wait for draft saving and show failures.
+draft-save promise or for a message to enter the send queue. Lock closes core
+admission and announces the UI clear before it waits for admitted work.
+Sign-out first attempts a homeserver logout. While that request is pending,
+sign-out has not yet closed admission, cleared the UI or protected the session.
+It then attempts to record local sign-out and remove the stored key before
+calling lock.
+Lock completion still waits for admitted work, including draft writes that
+hold a session lease. A timeout can leave the core in `locking`; it does not
+authorize store handoff. Unsaved text can be lost. Normal room and account
+switches wait for draft saving and show failures.
 
 The core accepts at most 16 KiB of UTF-8 body text per draft, 100 rooms and
 100 KiB of aggregate draft bodies. The serialized record must fit 112 KiB, so

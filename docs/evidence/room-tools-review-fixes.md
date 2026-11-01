@@ -68,3 +68,32 @@ Linux/macOS runtime check, native containment gate, release package test or
 dependency audit was run. The SDK drain and restart-required limits remain.
 The new local tests do not establish remote Windows CI, SonarQube gate or
 CodeRabbit approval. These require checks of the pushed revision.
+
+## Later documentation follow-up, 1 November 2026
+
+Checks for commit `b2bd663a3d0ac35f6de977223bc48772f4e91d79` completed
+successfully on GitHub: Windows, macOS, both Ubuntu runners, Arch, Debian,
+Fedora, openSUSE and SonarQube. SonarQube reported a passing quality gate with
+zero new issues. CodeRabbit's completed review still requested a guide
+correction and reported 65.67% docstring coverage against an 80% threshold.
+These observations apply to that commit, not to later edits.
+
+The follow-up changes only comments and documentation. Direct inspection of
+`Session::sign_out` confirmed that server logout precedes local key removal and
+`lock`. The room tools and lifecycle guides now state that admission and UI
+clearing have not started during that network request. Function and callback
+comments describe persistence ordering, focus restoration, stale-result guards
+and failure behavior. The earlier source manifests remain historical records.
+
+Local checks on Windows x64, using the tools listed above:
+
+- `python tools/dev.py frontend`: exit 0; Svelte reported zero errors/warnings,
+  the production build passed and all 178 Node tests passed, with none skipped.
+- `cargo fmt --all -- --check`: exit 0.
+- `git diff --check`, local Markdown links and JSON syntax: passed.
+
+Raw frontend output is in ignored
+`.local/runs/room-tools/coderabbit-followup-frontend.log`. No tests changed.
+Rust runtime tests and live/platform acceptance checks were not repeated for
+these comment-only edits. CodeRabbit's exact documentation metric requires a
+new remote review; the local documentation audit is only an approximation.

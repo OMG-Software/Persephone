@@ -13,7 +13,9 @@
   onDestroy(() => { active = false; });
   /** Reload the list and clear a previous error when the request succeeds. */
   function load() {
-    return loadIgnoredUsers(ignoredUsers, () => active, (reply) => {
+    return loadIgnoredUsers(ignoredUsers, () => active, /**
+     * Preserve the last list on failure and clear its old error after a successful reload.
+     */ (reply) => {
       if (reply.users) users = reply.users;
       failure = reply.failure;
     });

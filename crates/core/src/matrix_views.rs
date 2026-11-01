@@ -103,6 +103,8 @@ fn room_id(raw: &str) -> Result<&RoomId, ErrorCode> {
     <&RoomId>::try_from(raw).map_err(|_| ErrorCode::InvalidArgument)
 }
 
+/// Require a valid room ID and locally known joined membership before a room
+/// operation. A known invited or left room does not grant this authority.
 pub(crate) fn joined_room(client: &Client, raw: &str) -> Result<matrix_sdk::Room, ErrorCode> {
     let id = room_id(raw)?;
     client
@@ -605,7 +607,9 @@ impl MatrixViews {
         }
     }
 
-    /// One page of history older than `cursor`, or the newest page.
+    /// One bounded page of history older than `cursor`, or the newest page.
+    /// Refuse unreadable ignore state before fetching and filter ignored
+    /// message content while preserving state events and redactions.
     pub async fn timeline_page(
         &self,
         client: &Client,

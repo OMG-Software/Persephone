@@ -125,7 +125,9 @@
   // reader is comes from scrolling, not from measuring during an update: by
   // then a tall new message may already be in the page.
   let scroller = $state<HTMLElement | null>(null);
-  $effect(() => {
+  $effect(/**
+   * Focus a loaded search hit and stop following the newest message while it is selected.
+   */ () => {
     if (!focusEvent || !scroller) return;
     const target = [...scroller.querySelectorAll<HTMLElement>('[data-event-id]')]
       .find((element) => element.dataset.eventId === focusEvent);

@@ -15,7 +15,9 @@
   let failure = $state<string | null>(null);
   let request = 0;
   let lastRoom: string | null | undefined;
-  $effect(() => {
+  $effect(/**
+   * Invalidate pending results and errors when the selected room changes.
+   */ () => {
     if (roomId === lastRoom) return;
     lastRoom = roomId;
     request += 1;

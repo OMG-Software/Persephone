@@ -131,7 +131,9 @@ export class DraftKeeper {
     const revision = this.#revision;
     const roomId = this.#room;
     const draft = { ...this.#draft };
-    const save = this.#saving.then(async () => {
+    const save = this.#saving.then(/**
+     * Save the captured revision in order; publish completion only to its owning session and selection.
+     */ async () => {
       if (epoch !== this.#epoch) return false;
       try {
         await this.#core.save(roomId, draft);

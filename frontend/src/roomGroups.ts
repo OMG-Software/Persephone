@@ -19,7 +19,9 @@ export function groupRooms(rooms: RoomSummary[], preferences: RoomPreference[]) 
   }
   return [
     ...(favourites.length ? [{ name: 'Favourites', rooms: favourites }] : []),
-    ...[...sections].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    ...[...sections].sort(/**
+     * Use exact label order so section sorting does not depend on the device locale.
+     */ ([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([name, entries]) => ({ name, rooms: entries })),
     ...(other.length ? [{ name: 'Rooms', rooms: other }] : [])
   ];

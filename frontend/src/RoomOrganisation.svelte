@@ -11,7 +11,9 @@
   let failure = $state<string | null>(null);
   let active = true;
   onDestroy(() => { active = false; });
-  $effect(() => {
+  $effect(/**
+   * Restore the selected room's grouping controls from the current profile preferences.
+   */ () => {
     const preference = preferences.find((entry) => entry.roomId === roomId);
     section = preference?.section ?? '';
     favourite = preference?.favourite ?? false;

@@ -8,6 +8,8 @@
 //! executables loaded version 5 and failed with STATUS_ENTRYPOINT_NOT_FOUND.
 //! The same manifest is embedded here in every artifact this crate links.
 
+/// Generate permissions only for registered commands and embed the Windows
+/// manifest in every MSVC artifact, including test executables.
 fn main() {
     let mut attributes =
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[

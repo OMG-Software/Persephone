@@ -228,7 +228,9 @@
     }
   }
 
-  onMount(() => {
+  onMount(/**
+   * Open settings and invalidate pending updates before returning focus on close.
+   */ () => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialog?.showModal();
     loadSettings();
