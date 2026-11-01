@@ -39,7 +39,7 @@
   }
 </script>
 
-<FeatureDialog title="Ignored users" {onclose}>
+<FeatureDialog title="Ignored users" {onclose} closeDisabled={busy}>
   <p>Ignoring hides that user's messages. It does not remove them from shared rooms or stop them from reading messages there. Room state changes still apply. Reports are separate.</p>
   <form onsubmit={(event) => { event.preventDefault(); confirming = { userId: userId.trim(), ignored: true }; }}>
     <label for="ignore-user-id">Exact Matrix ID, for example @name:example.org</label>

@@ -88,6 +88,10 @@ empty list.
 Ignoring does not remove the user, revoke room access or withdraw shared keys.
 Room mute is a separate notification control.
 
+The ignored-user dialog cannot be dismissed while an ignore change is pending.
+This keeps the dialog active until it can refresh the visible timeline after
+success. Account and session changes still invalidate pending UI results.
+
 Report a message only after you intend to disclose its reference and your
 reason to your own homeserver. Enter a nonempty reason of at most 1,000 UTF-8
 bytes and confirm the report. The request contains the room ID, event ID and
@@ -100,6 +104,10 @@ Server support, policy and response determine any moderation action.
 Mark a room as a favourite or give it a named section to organise the room list.
 These choices belong to the encrypted local profile. They are not uploaded as
 Matrix `m.tag` data and do not follow the account to another device.
+
+Unsaved grouping edits and save errors stay visible when another room's
+preferences change. Changing rooms or changing this room's saved values restores
+the controls from those saved values.
 
 The core trims section names and requires 1 to 64 UTF-8 bytes with no controls.
 At most 100 room preferences and 16 distinct sections are stored. Clear both

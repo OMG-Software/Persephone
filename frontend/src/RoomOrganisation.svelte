@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
   import { setRoomPreference, type RoomPreference } from './bridge';
   import { byteLength } from './drafts';
+  import { RoomGroupRestoration } from './roomGroupRestoration.ts';
   let { roomId, preferences, onchanged }: {
     roomId: string; preferences: RoomPreference[]; onchanged: (preference: RoomPreference) => void;
   } = $props();
@@ -11,11 +12,15 @@
   let failure = $state<string | null>(null);
   let active = true;
   onDestroy(() => { active = false; });
-  /** Restore the selected room's grouping controls from the current profile preferences. */
+  const savedSection = $derived(preferences.find((entry) => entry.roomId === roomId)?.section ?? '');
+  const savedFavourite = $derived(preferences.find((entry) => entry.roomId === roomId)?.favourite ?? false);
+  const restoration = new RoomGroupRestoration();
+  /** Restore only this room's changed saved values; preserve unsaved edits and save errors. */
   function restoreGrouping() {
-    const preference = preferences.find((entry) => entry.roomId === roomId);
-    section = preference?.section ?? '';
-    favourite = preference?.favourite ?? false;
+    const saved = restoration.changed(roomId, savedSection, savedFavourite);
+    if (!saved) return;
+    section = saved.section;
+    favourite = saved.favourite;
     failure = null;
   }
   $effect(restoreGrouping);

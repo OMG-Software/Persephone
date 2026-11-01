@@ -122,3 +122,33 @@ Markdown links, evidence JSON syntax and `git diff --check` also passed. Rust
 source did not change in this follow-up; native UI, live-server and other
 acceptance gates were not repeated. A new CodeRabbit run must confirm its
 documentation metric on the pushed revision.
+
+## Grouping and pending-ignore follow-up, 1 November 2026
+
+CodeRabbit's review of `7a96a4ef58dd9cd4b2cd5815056f27da79da2dd8` identified
+two UI defects. Unrelated preference-array replacements could discard unsaved
+grouping edits and clear an error. Dismissing the ignored-user dialog during a
+save could suppress its successful timeline invalidation. Both were verified
+against the source before correction.
+
+The grouping form now derives saved primitives and restores only when its room
+or saved values change. A bounded in-memory snapshot distinguishes room changes
+even when the saved values are identical. Ignore saves disable dialog dismissal
+through the existing `closeDisabled` property. The session-reset guard remains
+before the success callback.
+
+`python tools/dev.py frontend` completed with exit 0 on the Windows host above:
+zero Svelte errors/warnings, a successful production build and 182 passing Node
+tests, none skipped. Three new restoration-policy cases cover unrelated list
+updates, retained edits/errors, saved-value changes and room changes. One new
+SSR case checks enabled and disabled Close controls. These tests do not execute
+native dialog cancellation or a screen-reader flow. Raw output is in ignored
+`.local/runs/room-tools/room-group-ignore-review-check.log`. Diff whitespace,
+local Markdown links and evidence JSON were checked. Rust and live/platform
+acceptance checks were not repeated for this frontend change.
+
+The prior remote review reported 71.83% documentation coverage against 80%; that
+warning is not resolved by this UI correction. Its separate inferred risk of
+server/local ignore-state divergence after local persistence failure also
+remains outside these two UI fixes. No new claim of atomic ignore updates or
+production readiness is made. Remote results require the pushed revision.

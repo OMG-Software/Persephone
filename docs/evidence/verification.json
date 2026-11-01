@@ -1873,6 +1873,32 @@
       "not_run": "No live homeserver, native UI/accessibility, Linux/macOS runtime, native containment, release package or dependency audit check. Remote review outcomes require the pushed revision.",
       "report": "room-tools-review-fixes.md",
       "raw_log": ".local/runs/room-tools/review-fixes-check.log"
+    },
+    {
+      "name": "frontend_check_after_room_group_and_pending_ignore_review",
+      "command": "python tools/dev.py frontend",
+      "checked_on": "2026-11-01",
+      "exit_code": 0,
+      "host": "Windows x64; Node 24.15.0, npm 11.13.0, Python 3.14.4",
+      "base_commit": "7a96a4ef58dd9cd4b2cd5815056f27da79da2dd8",
+      "source": "Base plus grouping-restoration and pending-ignore UI fixes; recorded before commit.",
+      "frontend_tests_passed": 182,
+      "frontend_tests_skipped": 0,
+      "includes": "Svelte check (zero errors/warnings), production build, Node tests and coverage.",
+      "new_tests": "Three grouping-restoration behavior cases and one rendered dialog Close-control case.",
+      "not_run": "Native dialog cancellation, screen-reader flow, live homeservers, Rust runtime tests, other platform acceptance or containment.",
+      "report": "room-tools-review-fixes.md",
+      "raw_log": ".local/runs/room-tools/room-group-ignore-review-check.log",
+      "source_sha256": {
+        "frontend/src/RoomOrganisation.svelte": "32fcebcf4dab61ab3bbdf60cedaccb80012969d390517c1b5f15c02cbf860870",
+        "frontend/src/IgnoreUsers.svelte": "ad09cf32347fbb0029fa35f217d11b45ca817f7e692bdd196822674bd2cd7ebf",
+        "frontend/src/roomGroupRestoration.ts": "27a523f400cf544e1d9e790e2195a3df65df7cf00b7814c37d4460c329a106e9",
+        "frontend/tests/room-group-restoration.test.mjs": "2dca4835ae9a72363a48492605eedaacd0b635838ce5bc1af042665c376eb720",
+        "frontend/tests/render.test.mjs": "f7e56a3a1e2b57577fc06f3f2461d9633187ae9cad0971acdb83ee42b92858a3",
+        "frontend/package-lock.json": "7588fe64addd065bd5b358e92001923bb7b2496bac0925a67637d6339ae7a89a",
+        "frontend/vite.config.js": "b06c69c4796f6489c9850ae26b58a2cc118e8ff911f05af70912119e6794c6a2",
+        "tools/dev.py": "5be730630002bf244f233aa907ba9a2768bf260cbf8b721c2c5798c09872e593"
+      }
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

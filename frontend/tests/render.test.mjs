@@ -141,3 +141,17 @@ test('GIVEN the Lock button WHEN rendered THEN help text describes it and says w
   assert.match(LOCK_HELP, /passphrase/);
   assert.match(LOCK_HELP, /restart Persephone/);
 });
+
+test('GIVEN a pending dialog operation WHEN dismissal is disabled THEN its Close control is disabled', async () => {
+  const { default: FeatureDialog } = await vite.ssrLoadModule('/src/FeatureDialog.svelte');
+  const { createRawSnippet } = await vite.ssrLoadModule('svelte');
+  for (const closeDisabled of [true, false]) {
+    const { body: html } = render(FeatureDialog, { props: {
+      title: 'Operation', onclose() {}, closeDisabled,
+      children: createRawSnippet(() => ({ render: () => '<p>Pending operation</p>' }))
+    } });
+    const close = html.match(/<button\b[^>]*>Close<\/button>/)?.[0];
+    assert.ok(close, html);
+    assert.equal(/\bdisabled\b/.test(close), closeDisabled);
+  }
+});
