@@ -649,7 +649,8 @@ impl MatrixViews {
             // Invalid relation scope suppresses only this preview. Validate
             // the original and local ignore state before returning, so a bad
             // relation cannot mask a separate authority or store failure.
-            self.project_chunk(client, joined, std::slice::from_ref(&original))
+            // No preview can survive this branch, so do not fetch edit parents.
+            self.project_chunk_inner(client, joined, std::slice::from_ref(&original), false)
                 .await?;
             return Ok(Vec::new());
         }

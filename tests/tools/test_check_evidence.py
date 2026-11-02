@@ -160,6 +160,42 @@ class CheckEvidenceTests(unittest.TestCase):
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"File symlinks unavailable: {error}")
 
+    def test_given_comment_backticks_then_real_links_outside_comments_remain_checked(self):
+        """Prevent comment backticks from hiding links before or after comments."""
+        for text in [
+            '<!-- ` -->\n[real](missing.md)\n`code`',
+            '<!-- `` -->\n[real](missing.md "Title")\n``code``',
+            '<!-- `\n[comment](ignored.md)\n-->[real](missing.md)\n`code`',
+            '[real](missing.md)<!-- ` -->`code`',
+            '<!-- ` --><!-- another ` -->[real](missing.md)\n`code`',
+            '<!-- ` -->\n\n[real](missing.md)\n`code`',
+            r'\<!-- [real](missing.md) -->',
+            r'\\\<!-- [real](missing.md) -->',
+            '`a <!-- b` [real](missing.md) -->',
+        ]:
+            with self.subTest(text=text):
+                (self.root / "guide.md").write_text(text, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Missing local Markdown target"):
+                    self.run_checker("--markdown", "guide.md")
+
+    def test_given_comments_or_code_comment_markers_then_hidden_links_are_ignored(self):
+        """Keep comment markers literal inside code and exclude actual comments."""
+        for text in [
+            '<!-- [comment](missing.md) ` -->',
+            '<!-- unclosed [comment](missing.md) `',
+            r'\\<!-- [comment](missing.md) -->',
+            '`<!--` and [real](source.txt) and `-->`',
+            '`<!-- [example](missing.md) -->`',
+            '``<!-- ` [example](missing.md) -->``',
+            '`<!--` and [real](source.txt) and `-->`\n<!-- [hidden](missing.md) -->',
+        ]:
+            with self.subTest(text=text):
+                (self.root / "guide.md").write_text(text, encoding="utf-8")
+                self.assertIn("1 Markdown files", self.run_checker("--markdown", "guide.md"))
+        (self.root / "guide.md").write_text('`<!--` and [real](missing.md) and `-->`', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Missing local Markdown target"):
+            self.run_checker("--markdown", "guide.md")
+
     def test_given_escaped_ticks_or_paragraph_breaks_then_real_links_are_checked(self):
         """Keep real links visible after escaped ticks and paragraph boundaries."""
         examples = [

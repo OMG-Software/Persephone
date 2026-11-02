@@ -1550,4 +1550,42 @@ mod tests {
             .await;
         assert!(matches!(result, Err(ErrorCode::Unavailable)), "{result:?}");
     }
+
+    /// Rejected relation previews must not resolve edit parents or block healthy pins.
+    #[tokio::test]
+    async fn given_invalid_relation_on_pinned_edit_then_parent_is_not_fetched_and_other_pins_load()
+    {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        pin_state(&server, json!(["$pin", "$healthy"])).await;
+        let mut original = replacement("$pin", "@alice:synthetic.test", 1, "pinned edit");
+        original["content"]["m.relates_to"]["event_id"] = json!("$parent");
+        pin_event(&server, "$pin", original).await;
+        let mut bad = replacement("$bad", "@alice:synthetic.test", 2, "untrusted replacement");
+        bad["room_id"] = json!("!other:synthetic.test");
+        pin_relations(&server, "$pin", json!({"chunk":[bad]})).await;
+        pin_event(
+            &server,
+            "$healthy",
+            text_event("$healthy", "@alice:synthetic.test", 3, "healthy preview"),
+        )
+        .await;
+        pin_relations(&server, "$healthy", json!({"chunk":[]})).await;
+        let result = pinned_messages(&client, &MatrixViews::default(), ROOM, || true)
+            .await
+            .unwrap();
+        assert_eq!(result.event_ids, vec!["$pin", "$healthy"]);
+        assert!(result.truncated);
+        assert!(
+            matches!(&result.items[..], [TimelineItem::Message {event_id, body, ..}] if event_id == "$healthy" && body == "healthy preview")
+        );
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().ends_with("/event/$parent"))
+        );
+    }
 }

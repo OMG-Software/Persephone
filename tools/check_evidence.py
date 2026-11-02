@@ -51,8 +51,8 @@ def historical_path(name):
 
 
 def strip_code_spans(text):
-    """Remove code spans closed by a backtick run of the same length."""
-    runs = list(re.finditer(r"`+", text))
+    """Remove HTML comments and code spans, respecting which opens first."""
+    runs = list(re.finditer(r"<!--|`+", text))
     result = []
     start = 0
     index = 0
@@ -63,11 +63,20 @@ def strip_code_spans(text):
         if backslashes % 2:
             index += 1
             continue
+        if opening.group() == "<!--":
+            close = text.find("-->", opening.end())
+            end = len(text) if close == -1 else close + 3
+            result.extend((text[start:opening.start()], " "))
+            start = end
+            index += 1
+            while index < len(runs) and runs[index].start() < end:
+                index += 1
+            continue
         closing = index + 1
         while closing < len(runs):
             if re.search(r"\n[ \t]*\n", text[opening.end():runs[closing].start()]):
                 break
-            if len(runs[closing].group()) == len(opening.group()):
+            if runs[closing].group() == opening.group():
                 break
             closing += 1
         if (closing == len(runs)

@@ -2075,6 +2075,35 @@
         ".local/runs/pr47-monitor/coderabbit-final-source-audit.log"
       ],
       "not_run": "Full workspace check, mounted RoomTools interaction, native UI, live homeservers, other-platform runtime, containment, release and audit acceptance. SDK buffering/drain limitations remain open. Remote CodeRabbit approval not yet verified."
+    },
+    {
+      "name": "pr47_coderabbit_inline_fixes",
+      "checked_on": "2026-11-02",
+      "base_commit": "5a2545772faacbb4c50aae5f1b397aa73e6237d1",
+      "exit_code": 0,
+      "rust_core_tests_passed_default": 234,
+      "rust_core_tests_passed_dev_disposable_servers": 238,
+      "rust_clippy_exit_code": 0,
+      "rust_format_exit_code": 0,
+      "python_checker_tests_passed": 13,
+      "python_checker_tests_skipped": 2,
+      "python_tools_tests_passed": 63,
+      "python_tools_tests_skipped": 2,
+      "before_fix_pin_regression_exit_code": 101,
+      "before_fix_python_control_exit_code": 1,
+      "source_manifest_sha256": "a99d5b2b53f73136b075c0719ad57e10a712ed087cc8c3899f4c672725532ec4",
+      "source": "Rejected-pin validation avoids edit-parent resolution while retaining ignore/room/ID guards. Markdown comments cannot open code spans that hide real links. Locks and Git revision guards unchanged.",
+      "report": "room-navigation-coderabbit-inline-fixes.md",
+      "not_run": "Full wrapper, frontend rerun, mounted RoomTools, native UI/accessibility, live homeservers, other-platform runtime, containment, release and audit. SDK buffering/drain gates remain open.",
+      "raw_logs": [
+        ".local/runs/pr47-monitor/pin-parent-before.log",
+        ".local/runs/pr47-monitor/pin-parent-core-tests.log",
+        ".local/runs/pr47-monitor/pin-parent-core-dev-tests.log",
+        ".local/runs/pr47-monitor/pin-parent-clippy.log",
+        ".local/runs/pr47-monitor/html-comment-escape-tests.log",
+        ".local/runs/pr47-monitor/html-comment-tools-suite.log",
+        ".local/runs/pr47-monitor/html-comment-negative-control.log"
+      ]
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",
