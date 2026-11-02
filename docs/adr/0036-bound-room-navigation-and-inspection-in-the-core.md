@@ -44,7 +44,13 @@ the feature requirements; this technical design remains proposed.
   changed. Return to latest to refresh.** Return to latest loads the live view.
 * **Pins:** use standard, unencrypted `m.room.pinned_events` state with no
   plaintext snippet. Read fresh state and check current power before writes.
-  Limit the list to 100 IDs. Matrix state replacement has no compare-and-swap
+  Show at most 100 IDs and reject additions at that limit. Permit removal from
+  existing lists within 512 IDs and a 112 KiB replacement-body limit, retaining
+  all other references. Pin reads have a 10-second deadline. Read replacement
+  responses in bounded chunks up to 256 KiB and reject more than 20 events
+  before SDK decryption. Preserve one SDK token refresh and bounded retry.
+  Equal edit timestamps use event ID ordering. This is not a global SDK
+  response cap or drain guarantee. State replacement has no compare-and-swap
   guarantee.
 * **Attachments:** scan one history chunk of at most 50 raw events per page.
   Use opaque room-scoped cursors. Filter kind, exact sender and date locally.

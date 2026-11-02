@@ -157,7 +157,9 @@ is unencrypted room metadata, including in encrypted rooms. It contains event
 IDs, not message snippets. Room participants and the homeserver can see these
 IDs. A pin change requires the user's current room-state power level and reads
 fresh state first, but concurrent state writes have no compare-and-swap
-protection. The list is limited to 100 IDs.
+protection. The panel shows at most 100 IDs and refuses new pins at that limit.
+Removing a pin from a larger list preserves the other references within the
+core's separate state and request-size limits. See [Room tools](docs/room-tools.md).
 
 Connection health is a manual view of existing sync observations. It starts
 no probes or background tasks. Displayed timestamps use the computer clock

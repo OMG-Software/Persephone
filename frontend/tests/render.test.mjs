@@ -190,3 +190,16 @@ test('GIVEN a timeline pin action WHEN rendered THEN its accessible name identif
   } });
   assert.match(html, /Pin message<span class="visually-hidden">(?:<!--.*?-->)* from (?:<!--.*?-->)*<bdi>&lt;sender><\/bdi><\/span>/);
 });
+
+
+test('GIVEN identical pinned messages WHEN controls render THEN both action names include distinct event IDs', async () => {
+  const { default: Row } = await vite.ssrLoadModule('/src/PinnedMessageRow.svelte');
+  const rendered = ['$one', '$two'].map((eventId) => render(Row, { props: {
+    item: { kind: 'message', event_id: eventId, sender: '@alice:example.org', body: 'Same text' },
+    eventId, canManage: true, busy: false, onview() {}, onunpin() {}
+  } }).body);
+  for (const [index, id] of ['$one', '$two'].entries()) {
+    assert.ok(rendered[index].includes(`aria-label="View in timeline: Message from @alice:example.org: Same text; event ${id}"`));
+    assert.ok(rendered[index].includes(`aria-label="Unpin: Message from @alice:example.org: Same text; event ${id}"`));
+  }
+});

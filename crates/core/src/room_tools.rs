@@ -3,14 +3,11 @@ use crate::matrix_views::{MatrixViews, joined_room, server_time};
 use crate::views::MAX_PAGE_BYTES;
 use matrix_sdk::{
     Client, Room,
-    room::{IncludeRelations, MessagesOptions, RelationsOptions},
+    room::MessagesOptions,
     ruma::{
         EventId, MilliSecondsSinceUnixEpoch, UInt,
         api::client::room::get_event_by_timestamp,
-        events::{
-            StateEventType, relation::RelationType,
-            room::pinned_events::RoomPinnedEventsEventContent,
-        },
+        events::{StateEventType, room::pinned_events::RoomPinnedEventsEventContent},
     },
 };
 use persephone_contracts::{
@@ -22,9 +19,10 @@ use std::time::Duration;
 use tokio::time::{Instant, timeout_at};
 
 const MAX_PINS: usize = 100;
+/// Removal can preserve a larger existing state without permitting new pins.
+const MAX_PIN_STATE_IDS: usize = 512;
 const MAX_SCAN: usize = 100;
 const MAX_ATTACHMENTS: usize = 50;
-const MAX_PIN_EDITS: usize = 20;
 const PIN_READ_BUDGET: Duration = Duration::from_secs(10);
 
 fn event_id(raw: &str) -> Result<&EventId, ErrorCode> {
@@ -306,31 +304,15 @@ async fn pinned_messages_until(
             }
             let edits = timeout_at(
                 deadline,
-                joined.relations(
-                    id.to_owned(),
-                    RelationsOptions {
-                        include_relations: IncludeRelations::RelationsOfType(
-                            RelationType::Replacement,
-                        ),
-                        limit: Some(UInt::try_from(MAX_PIN_EDITS as u64).unwrap()),
-                        ..Default::default()
-                    },
-                ),
+                crate::room_relations::replacements(client, &joined, id),
             )
             .await;
             let Ok(Ok(edits)) = edits else {
                 result.truncated = true;
                 continue;
             };
-            if edits.chunk.len() > MAX_PIN_EDITS || edits.next_batch_token.is_some() {
-                result.truncated = true;
-                continue;
-            }
-            let projected = timeout_at(
-                deadline,
-                views.project_pin(client, &joined, event, edits.chunk),
-            )
-            .await;
+            let projected =
+                timeout_at(deadline, views.project_pin(client, &joined, event, edits)).await;
             let projected = match projected {
                 Ok(items) => items?,
                 Err(_) => {
@@ -376,7 +358,8 @@ pub async fn set_pinned(
         .await
         .map_err(|_| ErrorCode::Unavailable)?
         .unwrap_or_default();
-    if ids.len() > MAX_PINS || ids.iter().any(|id| id.as_str().len() > MAX_EVENT_ID_BYTES) {
+    if ids.len() > MAX_PIN_STATE_IDS || ids.iter().any(|id| id.as_str().len() > MAX_EVENT_ID_BYTES)
+    {
         return Err(ErrorCode::LimitExceeded);
     }
     if pinned && ids.iter().any(|old| old == id) {
@@ -386,7 +369,7 @@ pub async fn set_pinned(
         return Ok(());
     }
     if pinned {
-        if ids.len() == MAX_PINS {
+        if ids.len() >= MAX_PINS {
             return Err(ErrorCode::LimitExceeded);
         }
         let event = joined
@@ -413,8 +396,12 @@ pub async fn set_pinned(
     } else if !pinned {
         ids.retain(|old| old != id);
     }
+    let content = RoomPinnedEventsEventContent::new(ids);
+    if !fits(&content) {
+        return Err(ErrorCode::LimitExceeded);
+    }
     joined
-        .send_state_event(RoomPinnedEventsEventContent::new(ids))
+        .send_state_event(content)
         .await
         .map_err(|_| ErrorCode::Unavailable)?;
     Ok(())
@@ -1279,6 +1266,126 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|request| request.url.path().contains("/event/"))
+        );
+    }
+    #[tokio::test]
+    async fn given_equal_time_pin_edits_then_event_id_breaks_ties_in_either_order() {
+        for reverse in [false, true] {
+            let server = MockServer::start().await;
+            let client = manager(&server).await;
+            pin_state(&server, json!(["$pin"])).await;
+            pin_event(
+                &server,
+                "$pin",
+                text_event("$pin", "@alice:synthetic.test", 1, "original"),
+            )
+            .await;
+            let mut edits = vec![
+                replacement("$a", "@alice:synthetic.test", 2, "tie loser"),
+                replacement("$z", "@alice:synthetic.test", 2, "tie winner"),
+            ];
+            if reverse {
+                edits.reverse();
+            }
+            pin_relations(&server, "$pin", json!({"chunk": edits})).await;
+            let result = pinned_messages(&client, &MatrixViews::default(), ROOM, || true)
+                .await
+                .unwrap();
+            assert!(
+                matches!(&result.items[..], [TimelineItem::Message { body, .. }] if body == "tie winner")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn given_101_pins_then_removal_preserves_every_other_id_in_order() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        let ids: Vec<String> = (0..101).map(|i| format!("$pin{i}")).collect();
+        pin_state(&server, json!(ids)).await;
+        let expected: Vec<&String> = ids.iter().filter(|id| id.as_str() != "$pin50").collect();
+        Mock::given(method("PUT"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{ROOM}/state/m.room.pinned_events/"
+            )))
+            .and(wiremock::matchers::body_json(json!({"pinned":expected})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id":"$state"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert_eq!(set_pinned(&client, ROOM, "$pin50", false).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn given_101_pins_then_add_is_refused_without_fetch_or_write() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        pin_state(
+            &server,
+            json!((0..101).map(|i| format!("$pin{i}")).collect::<Vec<_>>()),
+        )
+        .await;
+        assert_eq!(
+            set_pinned(&client, ROOM, "$new", true).await,
+            Err(ErrorCode::LimitExceeded)
+        );
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.method == "PUT" || request.url.path().contains("/event/"))
+        );
+    }
+
+    #[tokio::test]
+    async fn given_pin_state_above_removal_count_cap_then_no_write_occurs() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        pin_state(
+            &server,
+            json!(
+                (0..=MAX_PIN_STATE_IDS)
+                    .map(|i| format!("$pin{i}"))
+                    .collect::<Vec<_>>()
+            ),
+        )
+        .await;
+        assert_eq!(
+            set_pinned(&client, ROOM, "$pin0", false).await,
+            Err(ErrorCode::LimitExceeded)
+        );
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.method == "PUT")
+        );
+    }
+
+    #[tokio::test]
+    async fn given_removal_content_above_byte_budget_then_no_write_occurs() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        let ids: Vec<String> = (0..MAX_PIN_STATE_IDS)
+            .map(|i| format!("${i:03}{}", "a".repeat(MAX_EVENT_ID_BYTES - 4)))
+            .collect();
+        assert!(ids.iter().all(|id| id.len() == MAX_EVENT_ID_BYTES));
+        pin_state(&server, json!(ids)).await;
+        assert_eq!(
+            set_pinned(&client, ROOM, &ids[0], false).await,
+            Err(ErrorCode::LimitExceeded)
+        );
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.method == "PUT")
         );
     }
 }

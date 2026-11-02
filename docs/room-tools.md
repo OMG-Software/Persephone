@@ -161,14 +161,22 @@ context with a new timeline.
 Pins use standard `m.room.pinned_events` room state. The state contains event
 IDs only; it stores no plaintext snippets. Matrix room state is unencrypted
 metadata, including in encrypted rooms. The core reads current state and
-checks the user's current power level before a write. A list can contain at
-most 100 IDs. State replacement has no compare-and-swap guarantee, so
+checks the user's current power level before a write. The panel shows at most
+100 IDs and refuses additions at that limit. To clean up larger lists created
+by other clients, removal preserves all other IDs within a 512-ID state limit
+and a 112 KiB replacement-body limit. Larger changes fail without a write.
+State replacement has no compare-and-swap guarantee, so
 concurrent writers can overwrite one another. This is shared room metadata,
 not a private profile setting.
 
 Pin loading has a total time budget of 10 seconds. The core checks session
 admission before each content or edit request. It checks at most 20 replacement
 events per pin and applies the latest validated edit from the original sender.
+Equal timestamps are ordered by event ID. Each replacement response, including
+authentication errors and one SDK refresh retry, is limited to 256 KiB. The
+core checks streamed chunks before adding them to its buffer and checks the
+event count before SDK decryption. This cap
+applies to pin replacement reads; it does not cap every SDK response.
 If an edit read is unavailable, incomplete or undecryptable, the panel keeps
 the pin reference and hides its original preview. The panel reports unavailable
 previews or loading limits. This does not establish a complete SDK shutdown.
@@ -203,7 +211,8 @@ snapshot and generation fencing rejects stale sync updates.
 
 The implementation is in place. Automated checks are recorded in the
 [original record](evidence/room-navigation-media-health.md) and
-[review-fix record](evidence/room-navigation-review-fixes.md). Native UI and
+[review-fix record](evidence/room-navigation-review-fixes.md), with later
+[monitor fixes](evidence/room-navigation-monitor-fixes.md). Native UI and
 live-server acceptance remain open. Existing SDK drain and restart requirements
 remain unresolved. Passing feature checks do not establish a
 complete SDK shutdown or production readiness.

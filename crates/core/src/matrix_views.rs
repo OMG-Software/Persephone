@@ -654,11 +654,12 @@ impl MatrixViews {
                     replaces,
                     body,
                     origin_server_ts,
+                    event_id,
                     ..
-                } if replaces == id.as_str() => Some((origin_server_ts, body)),
+                } if replaces == id.as_str() => Some((origin_server_ts, event_id, body)),
                 _ => None,
             })
-            .max_by_key(|(time, _)| time.map(|time| time.get()));
+            .max_by_key(|(time, event_id, _)| (time.map(|time| time.get()), event_id.as_str()));
         let mut original = items
             .iter()
             .find(|item| match item {
@@ -669,7 +670,7 @@ impl MatrixViews {
                 _ => false,
             })
             .cloned();
-        if let (Some(TimelineItem::Message { body, .. }), Some((_, replacement))) =
+        if let (Some(TimelineItem::Message { body, .. }), Some((_, _, replacement))) =
             (&mut original, latest)
         {
             body.clone_from(replacement);

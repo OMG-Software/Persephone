@@ -57,6 +57,7 @@ pub mod prompt_text;
 pub mod proxy;
 pub mod recovery_file;
 pub mod registration;
+mod room_relations;
 pub mod room_settings;
 pub mod room_tools;
 pub mod security;

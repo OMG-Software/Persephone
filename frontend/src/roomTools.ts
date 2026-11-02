@@ -11,13 +11,34 @@ export function localTimestamp(value: string): number | null {
   return date.getTime();
 }
 
+/** Check the hostname and optional u16 port accepted by the locked Ruma validator. */
+function validMatrixServerName(server: string): boolean {
+  let hostEnd: number;
+  if (server.startsWith('[')) {
+    hostEnd = server.indexOf(']') + 1;
+    if (hostEnd === 0) return false;
+    try {
+      // URL parsing validates bracketed IPv6 locally. It does not make a request.
+      new URL('http://' + server.slice(0, hostEnd));
+    } catch { return false; }
+  } else {
+    const colon = server.indexOf(':');
+    hostEnd = colon === -1 ? server.length : colon;
+    if (!/^[A-Za-z0-9.-]+$/.test(server.slice(0, hostEnd))) return false;
+  }
+  if (hostEnd === server.length) return true;
+  const port = server.slice(hostEnd + 1);
+  return server[hostEnd] === ':' && /^\+?\d+$/.test(port) && Number(port) <= 65535;
+}
+
 /** Validate an exact Matrix sender and an inclusive/exclusive local date range. */
 export function searchFilters(sender: string, from: string, before: string): LocalSearchFilters | null {
   const fromMs = from ? localTimestamp(from) : null;
   const beforeMs = before ? localTimestamp(before) : null;
   const exact = sender.trim();
   if (/[\u0000-\u001f\u007f-\u009f]/u.test(sender) ||
-      (exact && (!/^@[^\s:]+:[^\s]+$/.test(exact) || new TextEncoder().encode(exact).length > 255)) ||
+      (exact && (!/^@[^\s:]+:[^\s]+$/.test(exact) || new TextEncoder().encode(exact).length > 255 ||
+        !validMatrixServerName(exact.slice(exact.indexOf(':') + 1)))) ||
       (from && fromMs === null) || (before && beforeMs === null) ||
       (fromMs !== null && beforeMs !== null && fromMs >= beforeMs)) return null;
   return { sender: exact || null, fromMs, beforeMs };
@@ -39,10 +60,13 @@ export const localZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 /** Bound accessible control names without exposing a whole message in each button. */
 export function pinSummary(item?: TimelineItem, eventId = ''): string {
-  if (!item || item.kind === 'gap') return 'Unavailable pinned message' + (eventId ? ': ' + [...eventId].slice(0, 80).join('') : '');
+  // Core event IDs contain at most 255 UTF-8 bytes. Keep the complete valid ID,
+  // including its suffix, so identical text and unavailable pins remain distinct.
+  const target = (eventId || (item && item.kind !== 'gap' ? item.event_id : '') || '').slice(0, 255);
+  if (!item || item.kind === 'gap') return 'Unavailable pinned message' + (target ? ': ' + target : '');
   const content = item.kind === 'message' ? item.body : item.kind === 'file' || item.kind === 'image' ? item.name : 'Message';
   const bounded = (value: string, limit: number) => [...value].slice(0, limit).join('');
-  return `Message from ${bounded(item.sender, 80)}: ${bounded(content, 120)}`;
+  return `Message from ${bounded(item.sender, 80)}: ${bounded(content, 120)}` + (target ? '; event ' + target : '');
 }
 
 /** Reject old attachment responses, including a change away and back to the same filters. */

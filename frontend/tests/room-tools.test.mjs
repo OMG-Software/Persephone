@@ -39,7 +39,8 @@ test('GIVEN control characters in sender filters WHEN validated THEN reject C0 a
   assert.equal(searchFilters('@alice:example.org', '', '').sender, '@alice:example.org');
 });
 
-test('GIVEN an attachment response WHEN filters change away and back THEN reject the old result', async () => {
+// Unit coverage for the request guard. This does not mount RoomTools or exercise its effects.
+test('GIVEN an attachment query guard WHEN selection changes away and back THEN its old ticket is invalid', async () => {
   const guard = createAttachmentQueryGuard();
   assert.equal(guard.select('images'), true);
   const current = guard.capture('images');
@@ -60,4 +61,30 @@ test('GIVEN long pinned text WHEN describing its controls THEN bound sender and 
   assert.equal(label, `Message from ${'s'.repeat(80)}: ${'x'.repeat(120)}`);
   assert.equal(pinSummary(), 'Unavailable pinned message');
   assert.equal(pinSummary(undefined, '$missing'), 'Unavailable pinned message: $missing');
+});
+
+
+test('GIVEN exact sender server names WHEN validated THEN enforce Ruma host and port syntax', () => {
+  for (const server of ['example.org', 'example.org:443', 'example.org:8448', 'example.org:65535', 'example.org:0', '127.0.0.1', '[::1]', '[::1]:443', '[2001:db8::1]:8448', '[::ffff:192.0.2.1]']) {
+    const sender = `@alice:${server}`;
+    assert.equal(searchFilters(sender, '', '')?.sender, sender, server);
+  }
+  for (const server of ['example.org:99999', 'example.org:65536', 'example.org:', 'example.org:-1', 'example.org:abc', 'example.org:443:1', ':8448', 'example.org/path', 'example_org', '[::1', '[invalid]', '[::1]:99999', '[::1]extra', '::1']) {
+    assert.equal(searchFilters(`@alice:${server}`, '', ''), null, server);
+  }
+});
+
+test('GIVEN identical pin previews WHEN labels are made THEN full valid event IDs distinguish each target', () => {
+  const prefix = '$' + 'a'.repeat(250);
+  const first = prefix + '1111';
+  const second = prefix + '2222';
+  const item = { kind: 'message', sender: '@alice:example.org', body: 'Same text', event_id: first };
+  const one = pinSummary(item, first);
+  const two = pinSummary({ ...item, event_id: second }, second);
+  assert.notEqual(one, two);
+  assert.ok(one.endsWith(first));
+  assert.ok(two.endsWith(second));
+  assert.equal(pinSummary(item), one);
+  assert.notEqual(pinSummary(undefined, first), pinSummary(undefined, second));
+  assert.ok(pinSummary(undefined, first).endsWith(first));
 });

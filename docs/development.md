@@ -163,6 +163,20 @@ the checked-out commit, or `unknown` ([`crates/core/build.rs`](../crates/core/bu
 It does not show uncommitted changes. Without a usable Git checkout of this
 source tree, the build uses `GITHUB_SHA`.
 
+## Evidence checks
+
+Run `python tools/check_evidence.py --help` for source-manifest, strict JSON
+and local inline Markdown-link checks. Paths are relative to the repository
+root. Source hashes normalize CRLF to LF. To check historical source, use
+`--revision <commit-or-ref>`; the tool resolves one commit before reading blobs.
+It rejects Git option arguments, non-commit objects and non-finite JSON tokens.
+Inline links can include quoted titles or angle-bracket targets.
+
+The tool's whitespace check covers only unstaged tracked changes. Before a
+commit, stage the intended files and run `git diff --cached --check` separately.
+See the [monitor-fix record](evidence/room-navigation-monitor-fixes.md) for exact
+commands, exit statuses, source hashes and remaining acceptance work.
+
 ## Disposable homeservers
 
 The harness in [`tools/servers`](../tools/servers) runs only disposable local Merovingian and Synapse instances. Use Linux/WSL and Python 3.12. The current path-bound prerequisites are `.local/servers/merovingian` and `.local/servers/synapse`; fresh synthetic profiles and logs belong under `.local/runs`. The harness rejects production configuration, databases, accounts, and URLs.
