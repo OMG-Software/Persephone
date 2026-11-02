@@ -1,0 +1,132 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { menuTarget } from '../src/menu.ts';
+import {
+  SIDEBAR_DEFAULT,
+  SIDEBAR_MAX,
+  SIDEBAR_MIN,
+  SIDEBAR_STEP,
+  MEMBER_PANEL_WIDTH,
+  ROOM_MIN,
+  clampSidebar,
+  draggedSidebar,
+  keyedSidebar,
+  membersFit,
+  sidebarLimit
+} from '../src/layout.ts';
+import { memberMark, memberRows } from '../src/members.ts';
+
+test('GIVEN an open menu WHEN arrow keys move focus THEN focus wraps and skips disabled commands', () => {
+  const enabled = [true, false, true, true];
+  assert.equal(menuTarget('ArrowDown', 0, enabled), 2, 'skips the disabled command');
+  assert.equal(menuTarget('ArrowDown', 3, enabled), 0, 'wraps to the first');
+  assert.equal(menuTarget('ArrowUp', 0, enabled), 3, 'wraps to the last');
+  assert.equal(menuTarget('ArrowUp', 2, enabled), 0, 'skips the disabled command upwards');
+  assert.equal(menuTarget('Home', 3, enabled), 0);
+  assert.equal(menuTarget('End', 0, [true, true, false]), 1, 'the last enabled command');
+  assert.equal(menuTarget('ArrowDown', -1, enabled), 0, 'from no focus, the first');
+  assert.equal(menuTarget('ArrowUp', -1, enabled), 3, 'from no focus, the last');
+});
+
+test('GIVEN an open menu WHEN a key does not move focus or nothing can take it THEN no target is given', () => {
+  assert.equal(menuTarget('a', 0, [true, true]), null);
+  assert.equal(menuTarget('Enter', 0, [true, true]), null);
+  assert.equal(menuTarget('ArrowDown', 0, [false, false]), null);
+  assert.equal(menuTarget('Home', 0, []), null);
+});
+
+test('GIVEN a room list width WHEN it is clamped THEN it stays in range and a value that is not a number gives the default', () => {
+  assert.equal(clampSidebar(10), SIDEBAR_MIN);
+  assert.equal(clampSidebar(10_000), SIDEBAR_MAX);
+  assert.equal(clampSidebar(300.4), 300);
+  assert.equal(clampSidebar(Number.NaN), SIDEBAR_DEFAULT);
+  assert.equal(clampSidebar(Number.POSITIVE_INFINITY), SIDEBAR_DEFAULT);
+});
+
+test('GIVEN the focused resize handle WHEN keys are pressed THEN arrows step the width and Home and End go to the limits', () => {
+  assert.equal(keyedSidebar(300, 'ArrowRight'), 300 + SIDEBAR_STEP);
+  assert.equal(keyedSidebar(300, 'ArrowLeft'), 300 - SIDEBAR_STEP);
+  assert.equal(keyedSidebar(SIDEBAR_MIN, 'ArrowLeft'), SIDEBAR_MIN, 'never below the minimum');
+  assert.equal(keyedSidebar(SIDEBAR_MAX, 'ArrowRight'), SIDEBAR_MAX, 'never above the maximum');
+  assert.equal(keyedSidebar(300, 'Home'), SIDEBAR_MIN);
+  assert.equal(keyedSidebar(300, 'End'), SIDEBAR_MAX);
+  assert.equal(keyedSidebar(300, 'ArrowUp'), null, 'a key that does not resize');
+});
+
+test('GIVEN a drag of the resize handle WHEN the interface is zoomed THEN the edge follows the pointer', () => {
+  assert.equal(draggedSidebar(292, 100, 150, 1), 342);
+  // At 125% zoom, 50 pointer pixels are 40 CSS pixels.
+  assert.equal(draggedSidebar(292, 100, 150, 1.25), 332);
+  assert.equal(draggedSidebar(292, 100, 150, 0), 342, 'an invalid ratio counts as 1');
+  assert.equal(draggedSidebar(292, 100, 150, Number.NaN), 342);
+  assert.equal(draggedSidebar(292, 500, 0, 1), SIDEBAR_MIN, 'clamped');
+});
+
+test('GIVEN a narrow window WHEN the room list limit is found THEN the room keeps its minimum width, down to the list minimum', () => {
+  assert.equal(sidebarLimit(1600), SIDEBAR_MAX);
+  // The native minimum window: 640 pixels leaves the room 320.
+  assert.equal(sidebarLimit(640), 640 - ROOM_MIN);
+  assert.equal(sidebarLimit(400), SIDEBAR_MIN, 'never below the list minimum');
+  assert.equal(sidebarLimit(Number.NaN), SIDEBAR_MAX);
+});
+
+test('GIVEN a lower limit WHEN the width is clamped, keyed or dragged THEN it never exceeds that limit', () => {
+  assert.equal(clampSidebar(450, 320), 320);
+  assert.equal(clampSidebar(Number.NaN, 250), 250, 'the default is capped too');
+  assert.equal(keyedSidebar(310, 'ArrowRight', 320), 320);
+  assert.equal(keyedSidebar(300, 'End', 320), 320);
+  assert.equal(draggedSidebar(292, 0, 400, 1, 320), 320);
+});
+
+test('GIVEN the window and room list widths WHEN the member panel is placed THEN it shows only when the room keeps its minimum', () => {
+  const needed = SIDEBAR_DEFAULT + MEMBER_PANEL_WIDTH + ROOM_MIN;
+  assert.equal(membersFit(needed, SIDEBAR_DEFAULT), true);
+  assert.equal(membersFit(needed - 1, SIDEBAR_DEFAULT), false);
+  assert.equal(membersFit(640, SIDEBAR_DEFAULT), false, 'not in the native minimum window');
+  assert.equal(membersFit(Number.NaN, SIDEBAR_DEFAULT), false);
+});
+
+const reader = (userId, trust, own = false) => ({ userId, trust, receiving: 1, refused: 0, own });
+const member = (userId, displayName, membership = 'join') => ({
+  userId, displayName, membership, level: 0, own: false, canKick: false, canBan: false, canUnban: false, canChangeLevel: false
+});
+
+test('GIVEN readers and members WHEN joined THEN names and invitations come from the member list, own first, then by name', () => {
+  const rows = memberRows(
+    [reader('@zed:s', 'verified'), reader('@me:s', 'verified', true), reader('@amy:s', 'unverified'), reader('@bob:s', 'no_identity')],
+    [member('@zed:s', 'Aaron'), member('@bob:s', null, 'invite')],
+    null
+  );
+  assert.deepEqual(rows.map((row) => row.userId), ['@me:s', '@zed:s', '@amy:s', '@bob:s']);
+  assert.equal(rows[1].name, 'Aaron');
+  assert.equal(rows[2].name, null, 'no member entry: the ID only');
+  assert.equal(rows[3].invited, true);
+  assert.equal(rows[1].invited, false);
+});
+
+test('GIVEN no member list WHEN joined THEN the readers still show by ID', () => {
+  const rows = memberRows([reader('@b:s', 'unverified'), reader('@a:s', 'verified')], null, null);
+  assert.deepEqual(rows.map((row) => [row.userId, row.name]), [['@a:s', null], ['@b:s', null]]);
+});
+
+test('GIVEN a direct-message contact status WHEN joined THEN it replaces only that reader\'s trust', () => {
+  const rows = memberRows(
+    [reader('@bob:s', 'no_identity'), reader('@eve:s', 'no_identity')],
+    null,
+    { roomId: '!dm:s', userId: '@bob:s', trust: 'unverified' }
+  );
+  assert.equal(rows.find((row) => row.userId === '@bob:s').trust, 'unverified');
+  assert.equal(rows.find((row) => row.userId === '@eve:s').trust, 'no_identity');
+});
+
+test('GIVEN a member\'s trust WHEN marked THEN only unverified offers Verify, and an unknown level never reads as verified', () => {
+  const mark = (trust, own = false) => memberMark({ userId: '@a:s', name: null, trust, own, invited: false });
+  assert.equal(mark('verified'), 'verified');
+  assert.equal(mark('unverified'), 'verify');
+  assert.equal(mark('changed'), 'changed');
+  assert.equal(mark('verified_changed'), 'changed');
+  assert.equal(mark('no_identity'), 'no_identity');
+  assert.equal(mark('unknown'), 'unknown');
+  assert.equal(mark('trusted_anyway'), 'unknown');
+  assert.equal(mark('unverified', true), 'own', 'this account is never offered for verification');
+});

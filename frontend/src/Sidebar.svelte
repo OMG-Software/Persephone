@@ -23,6 +23,10 @@
     onnewroom,
     onaccept = () => {},
     ondecline = () => {},
+    onfavourite,
+    favouriteBusy = false,
+    width,
+    menu,
     notice,
     lock
   }: {
@@ -48,6 +52,13 @@
     onnewroom?: () => void;
     onaccept?: (roomId: string) => void;
     ondecline?: (roomId: string) => void;
+    // Adds a room to Favourites or removes it; absent without an account.
+    onfavourite?: (roomId: string) => void;
+    favouriteBusy?: boolean;
+    // The width in CSS pixels, set by the resize handle.
+    width?: number;
+    // The main menu, shown next to the new-conversation buttons.
+    menu?: Snippet;
     // Shown above the account footer, such as a prompt to verify this device.
     notice?: Snippet;
     // The Lock button, when the session can be locked.
@@ -55,7 +66,7 @@
   } = $props();
 </script>
 
-<aside class="sidebar" aria-label="Navigation">
+<aside class="sidebar" aria-label="Navigation" style:width={width === undefined ? undefined : width + 'px'}>
   <div class="sidebar-top">
     <button
       type="button"
@@ -83,6 +94,7 @@
         <Icon name="users" />
       </button>
     {/if}
+    {@render menu?.()}
   </div>
   <div class="sidebar-scroll">
     {#if invites && invites.invites.length > 0}
@@ -95,7 +107,15 @@
       />
     {/if}
     {#if rooms}
-      <RoomList rooms={rooms.rooms} truncated={rooms.truncated} {selected} {onselect} {preferences} />
+      <RoomList
+        rooms={rooms.rooms}
+        truncated={rooms.truncated}
+        {selected}
+        {onselect}
+        {preferences}
+        {onfavourite}
+        {favouriteBusy}
+      />
     {:else}
       <p class="note" role="status">Loading rooms…</p>
     {/if}

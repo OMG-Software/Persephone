@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import type {
     ContactStatus,
     RoomEncryption,
@@ -6,9 +7,11 @@
   } from '../../crates/contracts/generated/contracts';
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
+  import IconAction from './IconAction.svelte';
   import FileMessage from './FileMessage.svelte';
   import ImageMessage from './ImageMessage.svelte';
   import Message from './Message.svelte';
+  import MessageActions from './MessageActions.svelte';
   import { stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
   import { applyRelations, newestEvent, quoteOf, type ShownItem } from './timeline';
@@ -23,11 +26,10 @@
     error,
     onolder,
     contact = null,
-    canVerify = false,
-    verifying = false,
-    onverify = () => {},
-    oninvite,
-    onsettings,
+    favourite = false,
+    favouriteBusy = false,
+    onfavourite,
+    menu,
     onreply,
     ownUserId = null,
     onedit,
@@ -53,14 +55,15 @@
     onolder: () => void;
     // The other person in a direct-message room, if this is one.
     contact?: ContactStatus | null;
-    // This device may vouch for the contact (it is verified itself).
-    canVerify?: boolean;
-    verifying?: boolean;
-    onverify?: () => void;
-    // Opens the invite dialog; absent where inviting is not offered.
-    oninvite?: () => void;
-    // Opens the room's settings; absent where they are not offered.
-    onsettings?: () => void;
+    // Whether the room is in Favourites, and the star that changes it;
+    // absent where room groups are not offered.
+    favourite?: boolean;
+    // A favourite change is being saved: the star waits.
+    favouriteBusy?: boolean;
+    onfavourite?: () => void;
+    // The room menu, at the end of the header. People are verified from the
+    // member panel, not here.
+    menu?: Snippet;
     // Starts a reply to a message; absent where replying is not offered.
     onreply?: (eventId: string) => void;
     // This account's user ID: its own messages can be edited.
@@ -180,28 +183,27 @@
           <bdi>{contact.userId}</bdi> · {trustText[contact.trust] ?? trustText.unknown}
         </p>
       </div>
-      {#if contact.trust === 'unverified' && canVerify}
-        <button type="button" class="secondary header-action" disabled={verifying} onclick={onverify}>
-          Verify <span class="visually-hidden"><bdi>{contact.userId}</bdi></span>
-        </button>
-      {/if}
     {:else}
       <Icon name="hash" class="hash" />
       <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
     {/if}
-    {#if oninvite}
-      <button type="button" class="secondary header-action" onclick={oninvite}>Invite</button>
-    {/if}
-    {#if onsettings}
-      <button
-        type="button"
-        class="icon-button header-settings"
-        aria-label="Room settings"
-        title="Room settings"
-        onclick={onsettings}
+    {#if onfavourite}
+      <IconAction
+        icon="star"
+        class="favourite-toggle"
+        label={favourite ? 'Remove from favourites' : 'Add to favourites'}
+        name="Favourite"
+        pressed={favourite}
+        filled={favourite}
+        disabled={favouriteBusy}
+        tip="below"
+        onclick={onfavourite}
       >
-        <Icon name="settings" />
-      </button>
+        <bdi>{title}</bdi>
+      </IconAction>
+    {/if}
+    {#if menu}
+      <span class="header-end">{@render menu()}</span>
     {/if}
   </header>
   <div class="scroller" bind:this={scroller} onscroll={scrolled}>
@@ -248,6 +250,10 @@
                 reactions={item.reactions ?? []}
                 onreact={onreact && ((key) => onreact(item.event_id, key))}
                 {onunreact}
+                onpin={onpin && (() => onpin(item.event_id))}
+                onreport={onreport && ownUserId !== null && item.sender !== ownUserId
+                  ? () => onreport(item.event_id, item.sender)
+                  : undefined}
                 {onlink}
               />
             {:else if item.kind === 'image'}
@@ -277,11 +283,16 @@
             {:else}
               <p class="gap">Some messages are not shown here.</p>
             {/if}
-            {#if onpin && (item.kind === 'message' || item.kind === 'image' || item.kind === 'file')}
-              <button type="button" class="link" title="Pin this message for the room" onclick={() => onpin(item.event_id)}>Pin message<span class="visually-hidden">{' from '}<bdi>{item.sender}</bdi></span></button>
-            {/if}
-            {#if onreport && item.kind !== 'gap' && item.kind !== 'state' && ownUserId !== null && item.sender !== ownUserId}
-              <button type="button" class="link report-message" onclick={() => onreport(item.event_id, item.sender)}>Report message<span class="visually-hidden"> from <bdi>{item.sender}</bdi></span></button>
+            {#if item.kind === 'image' || item.kind === 'file' || item.kind === 'notice'}
+              <div class="item-actions">
+                <MessageActions
+                  sender={item.sender}
+                  onpin={onpin && item.kind !== 'notice' ? () => onpin(item.event_id) : undefined}
+                  onreport={onreport && ownUserId !== null && item.sender !== ownUserId
+                    ? () => onreport(item.event_id, item.sender)
+                    : undefined}
+                />
+              </div>
             {/if}
           </li>
         {/each}

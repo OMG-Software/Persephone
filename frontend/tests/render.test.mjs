@@ -188,7 +188,8 @@ test('GIVEN a timeline pin action WHEN rendered THEN its accessible name identif
     title: 'Room', roomId: '!r:s', items: [{ kind: 'message', event_id: '$e', sender: '<sender>', body: 'body', origin_server_ts: 0 }],
     hasOlder: false, loading: false, error: null, onolder() {}, onpin() {}
   } });
-  assert.match(html, /Pin message<span class="visually-hidden">(?:<!--.*?-->)* from (?:<!--.*?-->)*<bdi>&lt;sender><\/bdi><\/span>/);
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.match(shown, /<span class="visually-hidden">Pin message from <bdi>&lt;sender><\/bdi><\/span><\/button> <span class="action-tip" aria-hidden="true">Pin message<\/span>/);
 });
 
 

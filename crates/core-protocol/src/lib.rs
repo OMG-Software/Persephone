@@ -386,6 +386,15 @@ pub enum Call {
     VerifyContact {
         room_id: String,
     },
+    /// Ask a member of this joined room to verify each other by comparing
+    /// emoji. The core checks that they are a member of the room, then sends
+    /// the request to an existing direct-message room with just them, as for
+    /// [`Call::VerifyContact`]; it never creates or joins a room. Progress
+    /// arrives as [`Event::SecurityChanged`].
+    VerifyMember {
+        room_id: String,
+        user_id: String,
+    },
     /// The members of this room whose identity changed (ADR-0007).
     IdentityChanges {
         room_id: String,
@@ -1120,6 +1129,13 @@ mod tests {
                 r#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s"}}"#,
             ),
             (
+                Call::VerifyMember {
+                    room_id: "!r:s".into(),
+                    user_id: "@b:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"verify_member","room_id":"!r:s","user_id":"@b:s"}}"#,
+            ),
+            (
                 Call::IdentityChanges {
                     room_id: "!r:s".into(),
                 },
@@ -1833,6 +1849,11 @@ mod tests {
             br#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s","user_id":"@b:s"}}"#,
             br#"{"id":1,"call":{"command":"verify_contact","room_id":"!r:s","create_room":true}}"#,
             br#"{"id":1,"call":{"command":"verify_user","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"verify_member"}}"#,
+            br#"{"id":1,"call":{"command":"verify_member","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"verify_member","user_id":"@b:s"}}"#,
+            br#"{"id":1,"call":{"command":"verify_member","room_id":"!r:s","user_id":null}}"#,
+            br#"{"id":1,"call":{"command":"verify_member","room_id":"!r:s","user_id":"@b:s","create_room":true}}"#,
             br#"{"id":1,"call":{"command":"identity_changes"}}"#,
             br#"{"id":1,"call":{"command":"identity_changes","room_id":"!r:s","all":true}}"#,
             br#"{"id":1,"call":{"command":"accept_identity","room_id":"!r:s"}}"#,

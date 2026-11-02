@@ -218,7 +218,10 @@ test('GIVEN replies WHEN rendered THEN a loaded message is quoted as isolated te
   assert.doesNotMatch(shown, /<img|<b>/);
   assert.match(shown, /In reply to <bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>: <span dir="auto">asked &lt;b><\/span>/);
   assert.match(shown, /In reply to an earlier message/);
-  assert.equal((shown.match(/>\s*Reply <span class="visually-hidden">/g) ?? []).length, 3);
+  // Reply is an icon: its label is the tooltip, and the accessible name adds the sender.
+  assert.equal((shown.match(/<span class="visually-hidden">Reply to <bdi>/g) ?? []).length, 3);
+  assert.equal((shown.match(/<span class="action-tip" aria-hidden="true">Reply<\/span>/g) ?? []).length, 3);
+  assert.doesNotMatch(shown, /class="link"[^>]*>\s*Reply/, 'no text button');
 });
 
 test('GIVEN the first unread message WHEN rendered THEN one New messages line comes just before it', () => {
@@ -463,7 +466,7 @@ test('GIVEN a contact verification WHEN each phase shows THEN the contact is iso
 });
 
 test('GIVEN a direct-message room WHEN the header shows THEN the contact and their trust are fixed, isolated text', () => {
-  const header = (trust, canVerify = true, verifying = false) =>
+  const header = (trust) =>
     render(Timeline, {
       props: {
         title: 'Bob',
@@ -473,27 +476,20 @@ test('GIVEN a direct-message room WHEN the header shows THEN the contact and the
         loading: false,
         error: null,
         onolder: () => {},
-        contact: { roomId: '!dm:example.invalid', userId: hostileName, trust },
-        canVerify,
-        verifying,
-        onverify: () => {}
+        contact: { roomId: '!dm:example.invalid', userId: hostileName, trust }
       }
     }).body;
   const unverified = header('unverified');
   assert.match(unverified, /class="contact-id"><bdi>&lt;img[^<]*<\/bdi> · Not verified/);
   assert.doesNotMatch(unverified, /<img/);
-  assert.match(unverified, /class="secondary header-action"[^>]*>\s*Verify/);
+  // People are verified from the member panel; the header has no Verify button.
+  assert.doesNotMatch(unverified, /<button[^>]*>\s*Verify/);
   assert.doesNotMatch(unverified, /verified-shield/);
-  assert.doesNotMatch(header('unverified', false), /header-action/, 'an unverified device offers no verification');
-  assert.match(header('unverified', true, true), /header-action" disabled/);
   const verified = header('verified');
   assert.match(verified, /verified-shield/);
   assert.match(verified, / · Verified/);
-  assert.doesNotMatch(verified, /header-action/);
   assert.match(header('no_identity'), / · Has not set up encryption/);
-  assert.doesNotMatch(header('no_identity'), /header-action/);
   assert.match(header('changed'), / · Identity changed/);
-  assert.doesNotMatch(header('changed'), /header-action/, 'a changed identity is handled in the room');
   assert.match(header('verified_changed'), / · Identity changed since you verified them/);
   assert.doesNotMatch(header('verified_changed'), /verified-shield/);
   // A trust level the page does not know never reads as verified.
@@ -999,22 +995,30 @@ test('GIVEN the new-room dialog WHEN it opens THEN nothing can be created or add
   assert.doesNotMatch(html, /People to invite/);
 });
 
-test('GIVEN a room with an invite action WHEN the header shows THEN it offers Invite, and only then', () => {
-  const header = (oninvite) =>
-    render(Timeline, {
-      props: { title: 'general', items: [], hasOlder: false, loading: false, error: null, onolder: () => {}, oninvite }
-    }).body;
-  assert.match(header(() => {}), /<button type="button" class="secondary header-action">Invite<\/button>/);
-  assert.doesNotMatch(header(undefined), />Invite</);
+test('GIVEN a room header WHEN it shows THEN Invite and Room settings are not buttons there: they are in the room menu', () => {
+  const html = render(Timeline, {
+    props: { title: 'general', items: [], hasOlder: false, loading: false, error: null, onolder: () => {} }
+  }).body;
+  assert.doesNotMatch(html, />Invite</);
+  assert.doesNotMatch(html, /Room settings/);
+  assert.doesNotMatch(html, /header-end/, 'no menu slot without a menu');
 });
 
-test('GIVEN a room with a settings action WHEN the header shows THEN it offers a labelled settings button, and only then', () => {
-  const header = (onsettings) =>
+test('GIVEN a room header with a favourite action WHEN it shows THEN a star toggle names the isolated room, and only then', () => {
+  const header = (props) =>
     render(Timeline, {
-      props: { title: 'general', items: [], hasOlder: false, loading: false, error: null, onolder: () => {}, onsettings }
-    }).body;
-  assert.match(header(() => {}), /<button type="button" class="icon-button header-settings" aria-label="Room settings"/);
-  assert.doesNotMatch(header(undefined), /Room settings/);
+      props: { title: hostileName, items: [], hasOlder: false, loading: false, error: null, onolder: () => {}, ...props }
+    }).body.replace(/<!--.*?-->/g, '');
+  const off = header({ onfavourite: () => {}, favourite: false });
+  assert.match(off, /class="icon-action favourite-toggle" aria-pressed="false"/);
+  assert.match(off, /<span class="visually-hidden">Favourite <bdi>&lt;img src=x onerror=alert\(1\)><\/bdi><\/span>/);
+  assert.match(off, /aria-hidden="true">Add to favourites</);
+  assert.doesNotMatch(off, /<img/);
+  const on = header({ onfavourite: () => {}, favourite: true });
+  assert.match(on, /aria-pressed="true"/);
+  assert.match(on, /class="icon filled"/);
+  assert.match(on, /aria-hidden="true">Remove from favourites</);
+  assert.doesNotMatch(header({}), /favourite-toggle/, 'no star without room groups');
 });
 
 test('GIVEN the room settings WHEN they open THEN the room name is isolated text, the tabs show and nothing is changeable before they load', () => {

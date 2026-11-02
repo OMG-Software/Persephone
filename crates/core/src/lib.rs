@@ -66,6 +66,7 @@ pub mod session;
 pub mod sessions;
 pub mod settings;
 pub mod store;
+mod turns;
 pub mod ui_host;
 pub mod vault;
 pub mod verification;
@@ -291,7 +292,9 @@ pub struct Core {
     /// Reading a room's settings, listing its members, and changing it, each
     /// one at a time.
     room_settings: conversations::Busy,
-    room_members: conversations::Busy,
+    // Listing a room's members, readers or servers: one at a time, and up to
+    // LISTING_PLACES more wait for it (`turns.rs`).
+    room_members: turns::Queue,
     room_change: conversations::Busy,
     /// Changing the password or an email address or phone number, one at a
     /// time; listing them; reading or setting the notification level.
@@ -330,6 +333,35 @@ impl Drop for Running<'_> {
 
 /// A call that runs on its own thread; it returns the reply's outcome.
 type LongCall<'a> = Box<dyn FnOnce() -> Outcome + Send + 'a>;
+
+/// How many listings may wait while one runs, and for how long each waits.
+/// The member panel lists readers, then names, one after the other; room
+/// settings may list members, readers and servers.
+const LISTING_PLACES: usize = 3;
+const LISTING_WAIT: Duration = Duration::from_secs(10);
+
+/// What a long call holds so that only one of its kind runs: a slot taken at
+/// once, or a place in a queue that becomes a turn on the call's thread.
+/// The guards are only held: dropping one ends the operation.
+enum Slot<'a> {
+    Held {
+        _guard: conversations::BusyGuard<'a>,
+    },
+    Queued(turns::Ticket<'a>),
+    Turn {
+        _turn: turns::Turn<'a>,
+    },
+}
+
+impl Slot<'_> {
+    /// Waits for a queued call's turn, for at most `limit`.
+    fn ready(self, limit: Duration) -> Result<Self, ErrorCode> {
+        match self {
+            Slot::Queued(ticket) => ticket.wait(limit).map(|turn| Slot::Turn { _turn: turn }),
+            held => Ok(held),
+        }
+    }
+}
 
 /// How a request is answered.
 enum Answer<'a> {
@@ -453,7 +485,7 @@ impl Core {
             display_name: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             room_settings: conversations::Busy::default(),
-            room_members: conversations::Busy::default(),
+            room_members: turns::Queue::new(LISTING_PLACES),
             room_change: conversations::Busy::default(),
             account_change: conversations::Busy::default(),
             three_pid_list: conversations::Busy::default(),
@@ -855,6 +887,12 @@ impl Core {
                     Outcome::Error(ErrorCode::InvalidArgument)
                 }
             }
+            Call::VerifyMember { room_id, user_id } => match conversations::parse_user(user_id) {
+                Some(member) if valid_room_id(room_id) => ok(&self
+                    .session
+                    .verify(verification::Action::StartMember(room_id.clone(), member))),
+                _ => Outcome::Error(ErrorCode::InvalidArgument),
+            },
             Call::SignOut {} => {
                 match self.session.sign_out(LOCK_TIMEOUT, || self.announce_lock()) {
                     Ok(state) => ok(&state),
@@ -1271,34 +1309,58 @@ impl Core {
             Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
         };
         let slot = match work {
-            Work::Search(_) => self.search.begin()?,
-            Work::MarkRead(..) | Work::Typing(..) => self.read_marker.begin()?,
-            Work::OpenLink(_) => self.link.begin()?,
-            Work::DisplayName | Work::SetDisplayName(_) => self.display_name.begin()?,
-            Work::Devices | Work::NewSessions | Work::AcknowledgeSessions(_) => {
-                self.devices.begin()?
-            }
-            Work::RemoveDevice(_) => self.account_change.begin()?,
-            Work::RoomSettings(_) => self.room_settings.begin()?,
+            Work::Search(_) => Slot::Held {
+                _guard: self.search.begin()?,
+            },
+            Work::MarkRead(..) | Work::Typing(..) => Slot::Held {
+                _guard: self.read_marker.begin()?,
+            },
+            Work::OpenLink(_) => Slot::Held {
+                _guard: self.link.begin()?,
+            },
+            Work::DisplayName | Work::SetDisplayName(_) => Slot::Held {
+                _guard: self.display_name.begin()?,
+            },
+            Work::Devices | Work::NewSessions | Work::AcknowledgeSessions(_) => Slot::Held {
+                _guard: self.devices.begin()?,
+            },
+            Work::RemoveDevice(_) => Slot::Held {
+                _guard: self.account_change.begin()?,
+            },
+            Work::RoomSettings(_) => Slot::Held {
+                _guard: self.room_settings.begin()?,
+            },
+            // Listings take turns: the member panel and the room settings
+            // both list, and a refusal would show as an error.
             Work::RoomMembers(..) | Work::RoomServers(_) | Work::RoomReaders(_) => {
-                self.room_members.begin()?
+                Slot::Queued(self.room_members.join()?)
             }
-            Work::ChangeRoom(..) | Work::Delete(..) | Work::React(..) => {
-                self.room_change.begin()?
-            }
+            Work::ChangeRoom(..) | Work::Delete(..) | Work::React(..) => Slot::Held {
+                _guard: self.room_change.begin()?,
+            },
             Work::ChangePassword(_)
             | Work::RequestEmail(_)
             | Work::RequestPhone(..)
             | Work::AddThreePid
-            | Work::RemoveThreePid(..) => self.account_change.begin()?,
-            Work::ThreePids => self.three_pid_list.begin()?,
-            Work::NotificationLevel | Work::SetNotificationLevel(_) => {
-                self.notification_level.begin()?
-            }
-            _ => self.conversation.begin()?,
+            | Work::RemoveThreePid(..) => Slot::Held {
+                _guard: self.account_change.begin()?,
+            },
+            Work::ThreePids => Slot::Held {
+                _guard: self.three_pid_list.begin()?,
+            },
+            Work::NotificationLevel | Work::SetNotificationLevel(_) => Slot::Held {
+                _guard: self.notification_level.begin()?,
+            },
+            _ => Slot::Held {
+                _guard: self.conversation.begin()?,
+            },
         };
         Ok(Box::new(move || {
-            let _slot = slot;
+            // A queued listing waits here, on its own thread, holding no lease.
+            let _slot = match slot.ready(LISTING_WAIT) {
+                Ok(slot) => slot,
+                Err(code) => return Outcome::Error(code),
+            };
             let outcome = match &work {
                 Work::Accept(room_id) => self
                     .with_matrix(generation, async |client| {

@@ -853,6 +853,21 @@ async fn verify_contact(
     relay(core.inner(), Call::VerifyContact { room_id }).await
 }
 
+/// Asks a member of this joined room to verify each other. The room and the
+/// member cross; the core checks the membership and uses an existing
+/// direct-message room with just them, never a new one.
+#[tauri::command]
+async fn verify_member(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    user_id: String,
+) -> Result<SecurityStatus, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES || user_id.len() > MAX_USER_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::VerifyMember { room_id, user_id }).await
+}
+
 /// The members of a room whose identity changed (ADR-0007).
 #[tauri::command]
 async fn identity_changes(
@@ -1490,6 +1505,7 @@ pub fn configure<R: Runtime>(
             cancel_verification,
             contact_status,
             verify_contact,
+            verify_member,
             identity_changes,
             accept_identity,
             load_image,

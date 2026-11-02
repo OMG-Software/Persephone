@@ -2921,6 +2921,55 @@ fn given_an_unverified_device_then_verifying_a_contact_sends_nothing() {
     assert_eq!(state, StoreState::RestartRequired);
 }
 
+/// GIVEN a device that is not verified WHEN the page asks to verify a member
+/// of a room THEN nothing is queued and nothing is sent; a bad room or user
+/// ID is refused before anything is queued.
+#[test]
+fn given_an_unverified_device_then_verifying_a_member_sends_nothing() {
+    let server = Homeserver::signed_in();
+    server.encryption_endpoints();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let status: SecurityStatus = value(call(
+        &core,
+        Call::VerifyMember {
+            room_id: GROUP.into(),
+            user_id: "@bob:synthetic.test".into(),
+        },
+    ));
+    assert_eq!(status.operation, SecurityOperation::Idle, "not queued");
+    assert_eq!(status.verification, None);
+    assert_eq!(status.error, None);
+    for (room_id, user_id) in [
+        ("#alias:synthetic.test", "@bob:synthetic.test"),
+        (GROUP, "bob"),
+        (GROUP, ""),
+        (GROUP, &*format!("@{}:s", "b".repeat(255))),
+    ] {
+        assert_eq!(
+            call(
+                &core,
+                Call::VerifyMember {
+                    room_id: room_id.into(),
+                    user_id: user_id.into(),
+                }
+            ),
+            Outcome::Error(ErrorCode::InvalidArgument),
+            "{room_id} {user_id}"
+        );
+    }
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(server.sends().is_empty(), "no request reached a room");
+    assert_eq!(security(&core).verification, None);
+    // Stops the sync loop: the mock server goes back to a shared pool.
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}
+
 /// GIVEN a direct-message room whose contact's identity did not change WHEN
 /// the page asks for the room's changed identities, or asks to accept one
 /// THEN none is listed, accepting is `not_found` and asks nothing, and bad

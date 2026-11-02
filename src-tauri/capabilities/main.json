@@ -61,6 +61,7 @@
     "allow-cancel-verification",
     "allow-contact-status",
     "allow-verify-contact",
+    "allow-verify-member",
     "allow-identity-changes",
     "allow-accept-identity",
     "allow-load-image",

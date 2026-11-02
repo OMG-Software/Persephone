@@ -79,6 +79,45 @@ pub async fn verifiable_contact(
     Ok(contact)
 }
 
+/// Checks that `member` may be verified from this joined room: they are a
+/// joined or invited member of it and not this account, and the room the SDK
+/// would send a verification request to (`get_dm_room`) has exactly two
+/// members, this account and them, both joined. `failed` when they are not a
+/// member here; `not_direct_room` when there is no such direct-message room,
+/// so the page can offer to start one. Nothing is created or joined.
+pub async fn verifiable_member(
+    client: &Client,
+    room_id: &str,
+    member: &UserId,
+) -> Result<(), SecurityError> {
+    let room = RoomId::parse(room_id)
+        .ok()
+        .and_then(|id| client.get_room(&id))
+        .filter(|room| room.state() == RoomState::Joined)
+        .ok_or(SecurityError::Failed)?;
+    if client.user_id().is_none_or(|own| own == member) {
+        return Err(SecurityError::Failed);
+    }
+    let listed = room
+        .get_member(member)
+        .await
+        .map_err(|_| SecurityError::Failed)?
+        .ok_or(SecurityError::Failed)?;
+    if !matches!(
+        listed.membership(),
+        MembershipState::Join | MembershipState::Invite
+    ) {
+        return Err(SecurityError::Failed);
+    }
+    let target = client
+        .get_dm_room(member)
+        .ok_or(SecurityError::NotDirectRoom)?;
+    if !just_us(client, &target, member).await {
+        return Err(SecurityError::NotDirectRoom);
+    }
+    Ok(())
+}
+
 /// How far this account trusts `contact`, as the local crypto store says.
 /// `None` when the store has no identity for them.
 pub async fn trust(client: &Client, contact: &UserId) -> Option<ContactTrust> {

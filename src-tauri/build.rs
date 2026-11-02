@@ -71,6 +71,7 @@ fn main() {
             "cancel_verification",
             "contact_status",
             "verify_contact",
+            "verify_member",
             "identity_changes",
             "accept_identity",
             "load_image",
