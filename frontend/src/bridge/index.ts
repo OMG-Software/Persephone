@@ -410,6 +410,16 @@ export function verifyContact(roomId: string): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('verify_contact', { roomId });
 }
 
+/**
+ * Asks a member of this joined room to verify each other by comparing emoji.
+ * The core checks the membership and sends the request to an existing
+ * direct-message room with just them; with none, the security status reports
+ * `not_direct_room`. Progress arrives as security changes.
+ */
+export function verifyMember(roomId: string, userId: string): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('verify_member', { roomId, userId });
+}
+
 /** The members of a room whose encryption identity changed (ADR-0007). */
 export function identityChanges(roomId: string): Promise<RoomIdentityChanges> {
   return invoke<RoomIdentityChanges>('identity_changes', { roomId });

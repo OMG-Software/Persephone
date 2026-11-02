@@ -14,10 +14,11 @@
   // Loads the selected room's members for the member list. The owner
   // remounts this panel when the room or session changes, so a reply always
   // belongs to this room; a newer request still wins over an older one.
-  // The core runs one member, reader or server listing at a time and refuses
-  // another with `limit_exceeded`: the panel asks one after the other, waits
-  // while the room settings (which list them too) are open, and tries again
-  // a little later when the core is busy.
+  // The core runs one member, reader or server listing at a time; a few more
+  // wait their turn, and beyond that or after a time limit it answers
+  // `limit_exceeded`. The panel asks one after the other, leaves the core to
+  // the room settings (which list them too) while they are open, and tries
+  // again a little later when the core is busy.
   let {
     roomId,
     version,
@@ -25,7 +26,9 @@
     paused = false,
     canVerify = false,
     verifying = false,
+    asking = null,
     onverify,
+    oncancelask,
     onmessage
   }: {
     roomId: string;
@@ -38,9 +41,12 @@
     paused?: boolean;
     canVerify?: boolean;
     verifying?: boolean;
-    // Starts verifying a member. False when there is no direct conversation
-    // with them to verify in.
-    onverify: (userId: string) => boolean;
+    // The member the core found no direct conversation with, to verify in:
+    // the panel offers to start one.
+    asking?: string | null;
+    // Starts verifying a member; the core reports the outcome.
+    onverify: (userId: string) => void;
+    oncancelask: () => void;
     // Starts or opens a direct conversation; resolves with why it failed.
     onmessage: (userId: string) => Promise<string | null>;
   } = $props();
@@ -49,7 +55,6 @@
   let members = $state<RoomMember[] | null>(null);
   let truncated = $state(false);
   let failed = $state(false);
-  let asking = $state<string | null>(null);
   let messageBusy = $state(false);
   let messageFailure = $state<string | null>(null);
   const rows = $derived(readers === null ? null : memberRows(readers, members, contact));
@@ -158,7 +163,7 @@
 
   function verify(userId: string) {
     messageFailure = null;
-    asking = onverify(userId) ? null : userId;
+    onverify(userId);
   }
 
   async function message(userId: string) {
@@ -169,7 +174,6 @@
     if (!active) return;
     messageBusy = false;
     messageFailure = failure;
-    if (failure === null) asking = null;
   }
 </script>
 
@@ -185,8 +189,8 @@
   onverify={verify}
   onmessage={message}
   oncancelask={() => {
-    asking = null;
     messageFailure = null;
+    oncancelask();
   }}
   onretry={retry}
 />

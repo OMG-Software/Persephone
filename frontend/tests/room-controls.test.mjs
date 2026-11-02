@@ -10,6 +10,7 @@ let Menu;
 let Message;
 let Timeline;
 let RoomOrganisation;
+let createRawSnippet;
 
 before(async () => {
   // A cache of its own: test files run in parallel (see views.test.mjs).
@@ -28,6 +29,7 @@ before(async () => {
   ({ default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte'));
   ({ default: RoomOrganisation } = await vite.ssrLoadModule('/src/RoomOrganisation.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
+  ({ createRawSnippet } = await vite.ssrLoadModule('svelte'));
 });
 
 after(async () => {
@@ -187,6 +189,8 @@ test('GIVEN images, files and notices WHEN pin and report are offered THEN they 
         title: 'Room',
         roomId: '!r:s',
         items: [
+          { kind: 'image', event_id: '$i', sender: '@img:s', origin_server_ts: 0, name: 'a.png', size: 1, width: 1, height: 1, encrypted: true },
+          { kind: 'file', event_id: '$f', sender: '@file:s', origin_server_ts: 0, name: 'a.txt', size: 1, encrypted: true },
           { kind: 'notice', event_id: '$n', sender: '@b:s', notice: 'undecryptable', origin_server_ts: 0 },
           { kind: 'notice', event_id: '$own', sender: '@me:s', notice: 'undecryptable', origin_server_ts: 0 }
         ],
@@ -200,8 +204,12 @@ test('GIVEN images, files and notices WHEN pin and report are offered THEN they 
       }
     }).body
   );
-  assert.equal((html.match(/class="item-actions"/g) ?? []).length, 2);
-  assert.doesNotMatch(html, /Pin message/, 'a notice cannot be pinned');
+  assert.equal((html.match(/class="item-actions"/g) ?? []).length, 4);
+  for (const sender of ['@img:s', '@file:s']) {
+    assert.match(html, new RegExp(`<span class="visually-hidden">Pin message from <bdi>${sender}</bdi></span>`), sender);
+    assert.match(html, new RegExp(`<span class="visually-hidden">Report message from <bdi>${sender}</bdi></span>`), sender);
+  }
+  assert.doesNotMatch(html, /Pin message from <bdi>@b:s/, 'a notice cannot be pinned');
   assert.equal((html.match(/<span class="visually-hidden">Report message from <bdi>@b:s<\/bdi>/g) ?? []).length, 1);
   assert.doesNotMatch(html, /Report message from <bdi>@me:s/, 'own events cannot be reported');
 });
@@ -217,4 +225,12 @@ test('GIVEN a favourite change is saving WHEN the header star and the section di
     }).body;
   assert.match(section(true), /<button type="submit" class="secondary" disabled/);
   assert.doesNotMatch(section(false), /<button type="submit" class="secondary" disabled/);
+});
+
+test('GIVEN a room menu WHEN the header shows THEN the menu renders at the end of the header', () => {
+  const menu = createRawSnippet(() => ({ render: () => '<button type="button" id="menu-probe">Room menu</button>' }));
+  const html = shown(render(Timeline, {
+    props: { title: 'Room', items: [], hasOlder: false, loading: false, error: null, onolder() {}, menu }
+  }).body);
+  assert.match(html, /<span class="header-end"><button type="button" id="menu-probe">Room menu<\/button><\/span>\s*<\/header>/);
 });

@@ -20,7 +20,6 @@
   import Icon from './Icon.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
   import MemberPanel from './MemberPanel.svelte';
-  import { directRoomOf } from './members';
   import {
     SIDEBAR_DEFAULT,
     SIDEBAR_MIN,
@@ -98,6 +97,7 @@
     cancelVerification,
     contactStatus,
     verifyContact,
+    verifyMember as verifyRoomMember,
     identityChanges,
     acceptIdentity,
     signOut,
@@ -154,6 +154,10 @@
   // verify: the core reports why that failed in the security status, shown
   // in that room or on the Sessions page, each in its own place.
   let contactAsked = $state<string | null>(null);
+  // The member of the selected room this page last asked to verify: when the
+  // core finds no direct-message room with them, the member panel offers to
+  // start one.
+  let memberAsked = $state<{ room: string; user: string } | null>(null);
   let identityAsked = $state<string | null>(null);
   let deviceAsked = $state<string | null>(null);
   // Messages sent from this device in the selected room.
@@ -414,9 +418,20 @@
       ? securityErrorText[security.error]
       : null
   );
+  // A member with no direct-message room is shown in the member panel, which
+  // offers to start one, rather than as an error.
+  const memberNeedsRoom = $derived(
+    memberAsked !== null &&
+      memberAsked.room === selected &&
+      security?.operation === 'idle' &&
+      security.error === 'not_direct_room'
+      ? memberAsked.user
+      : null
+  );
   const contactFailure = $derived(
     contactAsked !== null &&
       contactAsked === selected &&
+      memberNeedsRoom === null &&
       security?.operation === 'idle' &&
       security.error
       ? securityErrorText[security.error]
@@ -658,6 +673,7 @@
     changes = null;
     changesFailed = false;
     contactAsked = null;
+    memberAsked = null;
     identityAsked = null;
     deviceAsked = null;
     confirmingPlain = null;
@@ -846,13 +862,19 @@
   // failure is not shown in that room. `explain` turns a refusal into text.
   async function startSecurity(
     start: () => Promise<SecurityStatus>,
-    asked: { room: string; kind: 'contact' | 'identity' } | { device: string; kind: 'device' } | null = null,
+    asked:
+      | { room: string; kind: 'contact' | 'identity' }
+      | { room: string; user: string; kind: 'member' }
+      | { device: string; kind: 'device' }
+      | null = null,
     explain: (reason: unknown) => string = describe
   ) {
     if (securityBusy) return;
     securityBusy = true;
     securityFailure = null;
-    contactAsked = asked?.kind === 'contact' ? asked.room : null;
+    // A member's verification fails in the same place as a contact's.
+    contactAsked = asked?.kind === 'contact' || asked?.kind === 'member' ? asked.room : null;
+    memberAsked = asked?.kind === 'member' ? { room: asked.room, user: asked.user } : null;
     identityAsked = asked?.kind === 'identity' ? asked.room : null;
     deviceAsked = asked?.kind === 'device' ? asked.device : null;
     const generation = sessionGeneration;
@@ -1704,16 +1726,15 @@
   }
 
   /**
-   * Verify a member of the selected room in the direct-message room the room
-   * list has for them; the core checks that room again. A failure shows in the
-   * selected room. False when there is no such room.
+   * Verify a member of the selected room. The core checks the membership and
+   * finds the direct-message room with them itself; with none it reports
+   * `not_direct_room`, and the member panel offers to start one. Other
+   * failures show in the selected room.
    */
-  function verifyMember(userId: string): boolean {
+  function verifyMember(userId: string) {
     const roomId = selected;
-    const direct = rooms ? directRoomOf(rooms.rooms, userId) : null;
-    if (!roomId || direct === null) return false;
-    void startSecurity(() => verifyContact(direct), { room: roomId, kind: 'contact' });
-    return true;
+    if (!roomId) return;
+    void startSecurity(() => verifyRoomMember(roomId, userId), { room: roomId, user: userId, kind: 'member' });
   }
 
   /** Open or start a direct conversation with a member; the result is the failure text, if any. */
@@ -2300,7 +2321,9 @@
                 paused={roomSettingsOf !== null}
                 canVerify={security?.identity === 'verified'}
                 verifying={securityBusy || (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
+                asking={memberNeedsRoom}
                 onverify={verifyMember}
+                oncancelask={() => (memberAsked = null)}
                 onmessage={messageMember}
               />
             {/key}

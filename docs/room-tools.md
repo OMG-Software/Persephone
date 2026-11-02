@@ -13,8 +13,10 @@ gate is closed.
 ## Layout and controls
 
 Updated 2 November 2026 after an owner request. This section describes where
-the controls are. The frontend checks pass. Native UI and live-server checks
-were not run.
+the controls are and the core calls behind member verification and listings.
+The frontend checks, core and protocol tests, Clippy and the Tauri IPC tests
+pass on Linux. Native UI, live-server verification and other OS checks were
+not run.
 
 - **Main menu**: the menu button at the top of the room list opens **Search
   cached messages**, **Saved drafts**, **Ignored users** and **Connection
@@ -40,18 +42,23 @@ were not run.
   room (at most 100, from the core's reader list). A person this account has
   not verified has a Verify icon. A verified person has a verified icon. A
   changed identity or a person with no encryption identity has its own icon.
-  Verify uses the existing contact verification. The core verifies people only
-  in a joined direct-message room with exactly the two of you (see
-  [contact verification](evidence/contact-verification.md)). If the room list
-  has no such room for that person, the panel offers **Start conversation**.
-  The Verify icon itself never creates a room or sends an invitation. The room
-  list holds at most 200 rooms; if the direct room is not among them, **Start
-  conversation** opens the existing one. The panel hides when the window is
-  too narrow to keep the room at least 320 pixels wide. The
-  panel reads the list again after room and security changes, at most about
-  once a second. The core runs one member, reader or server listing at a time,
-  so the panel waits while room settings are open and tries again when the
-  core is busy.
+  Verify sends `verify_member` with the room and the person. The core checks
+  that the person is a joined or invited member of that joined room. It then
+  uses the existing contact verification, which works only in a joined
+  direct-message room with exactly the two of you (see
+  [contact verification](evidence/contact-verification.md)). The core finds
+  that room itself, so the page's 200-room list does not limit it. With no
+  such room, the core reports `not_direct_room` and the panel offers
+  **Start conversation**. Verify itself never creates a room or sends an
+  invitation. The panel hides when the window is too narrow to keep the room
+  at least 320 pixels wide. It reads the list again after room and security
+  changes, at most about once a second.
+- **Listing queue**: the core runs one member, reader or server listing at a
+  time. Up to three more wait their turn, each for at most 10 seconds, on
+  their own thread and without a session lease. A further listing, or one
+  that waits too long, is `limit_exceeded`. The member panel still waits
+  while room settings are open, and retries a few times when the core is
+  busy.
 
 ## Drafts
 

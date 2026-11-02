@@ -1020,6 +1020,7 @@ fn run_security(
                     Some(SecurityCommand::Verify(
                         VerifyAction::Start
                         | VerifyAction::StartContact(_)
+                        | VerifyAction::StartMember(..)
                         | VerifyAction::StartDevice(_),
                     )) if flow.as_ref().is_some_and(|flow| !flow.is_over()) => (None, None),
                     Some(SecurityCommand::Verify(VerifyAction::StartDevice(device_id))) => {
@@ -1039,6 +1040,15 @@ fn run_security(
                     }
                     Some(SecurityCommand::Verify(VerifyAction::StartContact(room_id))) => {
                         match verification::start_contact(&client, &room_id).await {
+                            Ok(new) => {
+                                flow = Some(new);
+                                (None, None)
+                            }
+                            Err(error) => (Some(error), None),
+                        }
+                    }
+                    Some(SecurityCommand::Verify(VerifyAction::StartMember(room_id, member))) => {
+                        match verification::start_member(&client, &room_id, &member).await {
                             Ok(new) => {
                                 flow = Some(new);
                                 (None, None)
@@ -1256,7 +1266,9 @@ fn queue_verification(security: &mut SecurityShared, action: VerifyAction) -> bo
         VerifyAction::Start => security.status.identity == IdentityState::Unverified && over,
         // Only a verified device vouches for someone else, or for another
         // of the account's devices.
-        VerifyAction::StartContact(_) | VerifyAction::StartDevice(_) => {
+        VerifyAction::StartContact(_)
+        | VerifyAction::StartMember(..)
+        | VerifyAction::StartDevice(_) => {
             security.status.identity == IdentityState::Verified && over
         }
         VerifyAction::Accept(id) => flow
@@ -2870,6 +2882,47 @@ mod tests {
         assert!(matches!(
             verified.command,
             Some(SecurityCommand::Verify(VerifyAction::StartContact(ref room))) if room == "!dm:s"
+        ));
+        assert_eq!(verified.status.operation, SecurityOperation::Working);
+    }
+
+    /// GIVEN this device's state WHEN it asks to verify a member of a room
+    /// THEN only a verified device with no open flow and nothing running
+    /// queues it, with the room and member unchanged.
+    #[test]
+    fn given_a_member_verification_then_only_a_verified_idle_device_queues_it() {
+        let member = || {
+            VerifyAction::StartMember(
+                "!group:s".into(),
+                matrix_sdk::ruma::OwnedUserId::try_from("@bob:s").unwrap(),
+            )
+        };
+        for identity in [
+            IdentityState::Unknown,
+            IdentityState::None,
+            IdentityState::Unverified,
+        ] {
+            let mut security = unverified();
+            security.status.identity = identity;
+            assert!(!queue_verification(&mut security, member()), "{identity:?}");
+            assert!(security.command.is_none());
+        }
+        let mut verified = unverified();
+        verified.status.identity = IdentityState::Verified;
+        verified.status.verification = flow(VerificationPhase::Compare);
+        assert!(
+            !queue_verification(&mut verified, member()),
+            "a flow is open"
+        );
+        verified.status.verification = flow(VerificationPhase::Done);
+        verified.status.operation = SecurityOperation::Working;
+        assert!(!queue_verification(&mut verified, member()), "busy");
+        verified.status.operation = SecurityOperation::Idle;
+        assert!(queue_verification(&mut verified, member()));
+        assert!(matches!(
+            verified.command,
+            Some(SecurityCommand::Verify(VerifyAction::StartMember(ref room, ref user)))
+                if room == "!group:s" && user.as_str() == "@bob:s"
         ));
         assert_eq!(verified.status.operation, SecurityOperation::Working);
     }

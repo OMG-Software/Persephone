@@ -144,6 +144,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
       { medium: 'email', address: 'a@example.org' }
     ],
     [() => bridge.verifyDevice('OTHER'), 'verify_device', { deviceId: 'OTHER' }],
+    [() => bridge.verifyMember('!r:s', '@b:s'), 'verify_member', { roomId: '!r:s', userId: '@b:s' }],
     [() => bridge.changeRecoveryKey(), 'change_recovery_key', {}],
     [() => bridge.notificationLevel(), 'notification_level', {}],
     [() => bridge.setNotificationLevel('mentions'), 'set_notification_level', { level: 'mentions' }],

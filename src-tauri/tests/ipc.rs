@@ -180,7 +180,7 @@ impl CoreTransport for FakeCore {
                 "identity": "verified", "recovery": "enabled", "operation": "waiting_for_confirmation",
                 "error": null, "canSetUpRecovery": false, "verification": null
             })),
-            Call::VerifyContact { .. } => Ok(serde_json::json!({
+            Call::VerifyContact { .. } | Call::VerifyMember { .. } => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "enabled", "operation": "working", "error": null, "canSetUpRecovery": false,
                 "verification": null
             })),
@@ -735,6 +735,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-cancel-verification",
             "allow-contact-status",
             "allow-verify-contact",
+            "allow-verify-member",
             "allow-identity-changes",
             "allow-accept-identity",
             "allow-load-image",
@@ -1447,6 +1448,29 @@ fn given_contact_commands_then_only_the_room_id_crosses() {
         core.calls.load(Ordering::SeqCst),
         calls,
         "oversized room IDs never crossed"
+    );
+    assert_eq!(
+        invoke(
+            "verify_member",
+            serde_json::json!({"roomId": "!group:example.invalid", "userId": "@bob:example.invalid"})
+        )
+        .unwrap()["operation"],
+        "working"
+    );
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"roomId": "!".repeat(256), "userId": "@b:s"}),
+        serde_json::json!({"roomId": "!r:s", "userId": "@".repeat(256)}),
+    ] {
+        assert_eq!(
+            invoke("verify_member", args).unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "oversized IDs never crossed"
     );
 }
 

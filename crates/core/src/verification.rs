@@ -26,7 +26,7 @@ use matrix_sdk::{
     encryption::verification::{
         SasState, SasVerification, VerificationRequest, VerificationRequestState,
     },
-    ruma::UserId,
+    ruma::{OwnedUserId, UserId},
 };
 use persephone_contracts::{SasEmoji, SecurityError, VerificationPhase, VerificationView};
 
@@ -39,6 +39,9 @@ pub enum Action {
     Start,
     /// Verify the contact of this direct-message room.
     StartContact(String),
+    /// Verify a member of this joined room, in an existing direct-message
+    /// room with just them.
+    StartMember(String, OwnedUserId),
     /// Verify another of the account's devices, by its ID, from this
     /// verified device.
     StartDevice(String),
@@ -323,17 +326,39 @@ pub async fn start_contact(client: &Client, room_id: &str) -> Result<Flow, Secur
         return Err(SecurityError::CannotSignContacts);
     }
     let contact = contacts::verifiable_contact(client, room_id).await?;
+    request_contact(client, &contact).await
+}
+
+/// Asks a member of this joined room to verify each other, with a message in
+/// an existing direct-message room with just them. Nothing is created: with
+/// no such room, this is `not_direct_room`, and the page offers to start a
+/// conversation first.
+pub async fn start_member(
+    client: &Client,
+    room_id: &str,
+    member: &UserId,
+) -> Result<Flow, SecurityError> {
+    if !can_sign_contacts(client).await {
+        return Err(SecurityError::CannotSignContacts);
+    }
+    contacts::verifiable_member(client, room_id, member).await?;
+    request_contact(client, member).await
+}
+
+/// Sends the verification request to another person, whose direct-message
+/// room the caller has checked.
+async fn request_contact(client: &Client, contact: &UserId) -> Result<Flow, SecurityError> {
     let encryption = client.encryption();
     // The store may not hold the contact's keys yet (`contacts.rs`): ask the
     // homeserver before saying they have no identity.
     let identity = match encryption
-        .get_user_identity(&contact)
+        .get_user_identity(contact)
         .await
         .map_err(|_| SecurityError::Failed)?
     {
         Some(identity) => identity,
         None => encryption
-            .request_user_identity(&contact)
+            .request_user_identity(contact)
             .await
             .map_err(|_| SecurityError::Failed)?
             .ok_or(SecurityError::ContactHasNoIdentity)?,

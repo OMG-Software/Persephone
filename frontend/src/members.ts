@@ -2,8 +2,7 @@ import type {
   ContactStatus,
   ContactTrust,
   RoomMember,
-  RoomReader,
-  RoomSummary
+  RoomReader
 } from '../../crates/contracts/generated/contracts';
 import { localpart } from './people.ts';
 
@@ -66,12 +65,4 @@ export function memberMark(row: MemberRow): MemberMark {
     default:
       return 'unknown';
   }
-}
-
-/**
- * The joined direct-message room for this person, if the room list has one.
- * The core verifies people only in such a room, and checks it again itself.
- */
-export function directRoomOf(rooms: readonly RoomSummary[], userId: string): string | null {
-  return rooms.find((room) => room.contact === userId)?.roomId ?? null;
 }

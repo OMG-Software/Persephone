@@ -14,7 +14,7 @@ import {
   membersFit,
   sidebarLimit
 } from '../src/layout.ts';
-import { directRoomOf, memberMark, memberRows } from '../src/members.ts';
+import { memberMark, memberRows } from '../src/members.ts';
 
 test('GIVEN an open menu WHEN arrow keys move focus THEN focus wraps and skips disabled commands', () => {
   const enabled = [true, false, true, true];
@@ -129,15 +129,4 @@ test('GIVEN a member\'s trust WHEN marked THEN only unverified offers Verify, an
   assert.equal(mark('unknown'), 'unknown');
   assert.equal(mark('trusted_anyway'), 'unknown');
   assert.equal(mark('unverified', true), 'own', 'this account is never offered for verification');
-});
-
-test('GIVEN the room list WHEN a member\'s direct room is looked up THEN only an exact contact match is used', () => {
-  const rooms = [
-    { roomId: '!group:s', displayName: 'Group', unreadCount: 0, encryption: 'encrypted', contact: null },
-    { roomId: '!dm:s', displayName: 'Bob', unreadCount: 0, encryption: 'encrypted', contact: '@bob:s' }
-  ];
-  assert.equal(directRoomOf(rooms, '@bob:s'), '!dm:s');
-  assert.equal(directRoomOf(rooms, '@BOB:s'), null);
-  assert.equal(directRoomOf(rooms, '@eve:s'), null);
-  assert.equal(directRoomOf([], '@bob:s'), null);
 });
