@@ -419,23 +419,30 @@
       : null
   );
   // A member with no direct-message room is shown in the member panel, which
-  // offers to start one, rather than as an error.
+  // offers to start one, rather than as an error. Only once the core has
+  // answered this request: until then the error is the previous request's.
   const memberNeedsRoom = $derived(
     memberAsked !== null &&
       memberAsked.room === selected &&
+      !securityBusy &&
       security?.operation === 'idle' &&
       security.error === 'not_direct_room'
       ? memberAsked.user
       : null
   );
+  // The member panel is shown, so it can show `memberNeedsRoom` itself.
+  const membersVisible = $derived(signedIn && membersShown && membersRoom);
+  // Why verifying this room's contact or member failed: refused by the
+  // host or core (`securityFailure`), or reported by the core afterwards.
   const contactFailure = $derived(
-    contactAsked !== null &&
-      contactAsked === selected &&
-      memberNeedsRoom === null &&
-      security?.operation === 'idle' &&
-      security.error
-      ? securityErrorText[security.error]
-      : null
+    contactAsked === null || contactAsked !== selected
+      ? null
+      : (securityFailure ??
+          (!(memberNeedsRoom !== null && membersVisible) &&
+          security?.operation === 'idle' &&
+          security.error
+            ? securityErrorText[security.error]
+            : null))
   );
   // Why the core could not start verifying the session the Sessions page
   // asked for (such as `cannot_sign_devices`); a flow that did start has its
@@ -2320,7 +2327,9 @@
                 {contact}
                 paused={roomSettingsOf !== null}
                 canVerify={security?.identity === 'verified'}
-                verifying={securityBusy || (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
+                verifying={securityBusy ||
+                  security?.operation !== 'idle' ||
+                  (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
                 asking={memberNeedsRoom}
                 onverify={verifyMember}
                 oncancelask={() => (memberAsked = null)}
