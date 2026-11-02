@@ -137,6 +137,35 @@ that cache. Missing history, undecrypted events and resource limits mean the
 results do not cover all messages. User-directory search described above is a
 different operation and does send its query to your homeserver.
 
+Search can also filter by exact sender and an inclusive start and exclusive
+end time. Dates use the original event timestamp, including when edits or
+redactions change the displayed text. Unknown dates do not match a date filter.
+The cache does not grow because of search, and the app creates no search index.
+
+### Room navigation and inspection
+
+Jump to date sends the room ID and requested time to the homeserver. It does
+not send a search term. The core asks for the first event at or after that
+time, and tries the last event before that time only if the server returns
+404. It then requests bounded event context. Attachment browsing requests
+room history in chunks of at most 50 raw events. Filters apply locally. The
+panel shows metadata; it does not load media automatically. You must choose
+an existing media action to fetch or open an attachment.
+
+Pinned messages use standard `m.room.pinned_events` room state. This state
+is unencrypted room metadata, including in encrypted rooms. It contains event
+IDs, not message snippets. Room participants and the homeserver can see these
+IDs. A pin change requires the user's current room-state power level and reads
+fresh state first, but concurrent state writes have no compare-and-swap
+protection. The panel shows at most 100 IDs and refuses new pins at that limit.
+Removing a pin from a larger list preserves the other references within the
+core's separate state and request-size limits. See [Room tools](docs/room-tools.md).
+
+Connection health is a manual view of existing sync observations. It starts
+no probes or background tasks. Displayed timestamps use the computer clock
+and do not prove that the client is currently connected. Locking resets the
+health snapshot.
+
 ### Images
 
 * **Received images.** The app shows a placeholder for each received image.

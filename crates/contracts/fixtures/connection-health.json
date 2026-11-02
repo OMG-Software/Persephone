@@ -1,0 +1,10 @@
+{
+  "accountState": "signed_out",
+  "storeState": "protected",
+  "syncMode": "unknown",
+  "lastAttemptAt": null,
+  "lastSuccessAt": null,
+  "consecutiveFailures": 0,
+  "retryDelayMs": 0,
+  "lastError": null
+}

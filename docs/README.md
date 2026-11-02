@@ -10,7 +10,8 @@
 - [Security design](architecture/security-design.md): proposed threat boundaries, controls, and release gates, and why the web view is the more secure design.
 - [Development guide](development.md): workspace commands, toolchain requirements, and local data layout.
 - [Release guide](release.md): signing secrets, cutting a draft release, and verifying downloads.
-- [Room tools](room-tools.md): drafts, partial local message search, ignore/report disclosures, favourites and room sections; automated checks pass, native UI and live-server acceptance remain open.
+- [Room tools](room-tools.md): drafts, partial local message search, ignore/report disclosures, room organisation, date navigation, pins, attachment browsing, search filters and connection health; implemented, with automated checks recorded and native UI/live-server acceptance open.
+- [Room navigation and inspection](adr/0036-bound-room-navigation-and-inspection-in-the-core.md) (proposed): authority, disclosure and resource bounds for five room tools.
 
 ## Decisions
 
@@ -40,6 +41,14 @@
 Run records and supporting artifacts are grouped under [evidence](evidence). The [verification ledger](evidence/verification.json) records the checks, statuses, and source hashes. Historical evidence preserves original command lines and paths as provenance; use the Development guide for current commands and locations.
 
 - [Room tools](evidence/room-tools.md): coordinated checks passed on 1 November 2026; source hashes, behavior coverage, and remaining live/native acceptance work.
+- [Room navigation and media health](evidence/room-navigation-media-health.md): automated checks and remaining native UI/live-server acceptance.
+- [Room navigation review fixes](evidence/room-navigation-review-fixes.md): pin edits and time limits, visible date targets, UI corrections and reproducible documentation checks for PR 47.
+- [Room navigation review refinements](evidence/room-navigation-review-refinements.md): historical source-path and Markdown-link checker refinements, plus pin-preview isolation. Full check passed on 2 November 2026; two Windows symlink cases were skipped.
+- [Checker CI root fix](evidence/room-navigation-ci-root-fix.md): canonical temporary roots and a portable alias regression; Python tools suite passed with two Windows symlink skips.
+- [CodeRabbit merge follow-up](evidence/room-navigation-coderabbit-merge-fixes.md): function documentation and a regression for unreadable ignore state in invalid pin-relation projection.
+- [CodeRabbit inline fixes](evidence/room-navigation-coderabbit-inline-fixes.md): rejected pin previews skip edit-parent reads; Markdown comment backticks cannot hide real links. Core and Python regression suites passed.
+- [Room navigation monitor fixes](evidence/room-navigation-monitor-fixes.md): later PR 47 findings, bounded replacement responses, Git option validation, deterministic edits and sender/label corrections.
+- [SonarQube follow-up](evidence/room-navigation-sonar-follow-up.md): HTTPS parser prefix, frontend recheck and evidence for the Git revision false positive that needs remote triage.
 - [Room tools review fixes](evidence/room-tools-review-fixes.md): strict nullable contracts, search-context retention, ignored-list recovery and the Windows HTTP test correction; local verification on 1 November 2026.
 
 - [Independent recipients with SAS-verified devices](evidence/verified-recipients.md): two-user verification and bidirectional encrypted messaging on both disposable homeservers.

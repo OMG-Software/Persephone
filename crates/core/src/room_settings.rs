@@ -272,7 +272,10 @@ async fn unsynced<C: DeserializeOwned>(
 /// synced them, as the homeserver has them; a room without any has the
 /// specification's defaults. The room's creators must be synced, and
 /// content that is not valid power levels is `unavailable`.
-async fn power_levels(client: &Client, room: &Room) -> Result<RoomPowerLevels, ErrorCode> {
+pub(crate) async fn power_levels(
+    client: &Client,
+    room: &Room,
+) -> Result<RoomPowerLevels, ErrorCode> {
     if let Ok(levels) = room.power_levels().await {
         return Ok(levels);
     }

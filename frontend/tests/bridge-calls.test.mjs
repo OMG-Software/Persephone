@@ -81,8 +81,17 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.saveRoomDraft('!r:s', { body: 'draft', replyTo: '$e' }), 'save_room_draft', { roomId: '!r:s', draft: { body: 'draft', replyTo: '$e' } }],
     [() => bridge.roomPreferences(), 'room_preferences', {}],
     [() => bridge.setRoomPreference({ roomId: '!r:s', favourite: true, section: 'Work' }), 'set_room_preference', { preference: { roomId: '!r:s', favourite: true, section: 'Work' } }],
-    [() => bridge.searchMessages('hello', null), 'search_messages', { term: 'hello', roomId: null }],
-    [() => bridge.searchMessages('hello', '!r:s'), 'search_messages', { term: 'hello', roomId: '!r:s' }],
+    [() => bridge.searchMessages('hello', null), 'search_messages', { term: 'hello', roomId: null, filters: { sender: null, fromMs: null, beforeMs: null } }],
+    [() => bridge.searchMessages('hello', '!r:s'), 'search_messages', { term: 'hello', roomId: '!r:s', filters: { sender: null, fromMs: null, beforeMs: null } }],
+    [() => bridge.searchMessages('hello', '!r:s', { sender: '@a:s', fromMs: 1, beforeMs: 2 }), 'search_messages', { term: 'hello', roomId: '!r:s', filters: { sender: '@a:s', fromMs: 1, beforeMs: 2 } }],
+    [() => bridge.jumpToDate('!r:s', 123), 'jump_to_date', { roomId: '!r:s', timestampMs: 123 }],
+    [() => bridge.eventContext('!r:s', '$e'), 'event_context', { roomId: '!r:s', eventId: '$e' }],
+    [() => bridge.pinnedMessages('!r:s'), 'pinned_messages', { roomId: '!r:s' }],
+    [() => bridge.setPinned('!r:s', '$e', true), 'set_pinned', { roomId: '!r:s', eventId: '$e', pinned: true }],
+    [() => bridge.setPinned('!r:s', '$e', false), 'set_pinned', { roomId: '!r:s', eventId: '$e', pinned: false }],
+    [() => bridge.attachments('!r:s', 'cursor', 'images', { sender: '@a:s', fromMs: 1, beforeMs: 2 }), 'attachments', { roomId: '!r:s', cursor: 'cursor', kind: 'images', filters: { sender: '@a:s', fromMs: 1, beforeMs: 2 } }],
+    [() => bridge.attachments('!r:s', null, 'all', { sender: null, fromMs: null, beforeMs: null }), 'attachments', { roomId: '!r:s', cursor: null, kind: 'all', filters: { sender: null, fromMs: null, beforeMs: null } }],
+    [() => bridge.connectionHealth(), 'connection_health', {}],
     [() => bridge.ignoredUsers(), 'ignored_users', {}],
     [() => bridge.setIgnoredUser('@a:s', true), 'set_ignored_user', { userId: '@a:s', ignored: true }],
     [() => bridge.reportAbuse('!r:s', '$e', 'spam'), 'report_abuse', { roomId: '!r:s', eventId: '$e', reason: 'spam' }],
@@ -211,4 +220,12 @@ test('GIVEN a host reply WHEN a call resolves THEN the page gets it unchanged', 
     throw 'locked';
   });
   await assert.rejects(bridge.setAccountSettings({ enterSends: true }), (reason) => reason === 'locked');
+});
+
+
+test('GIVEN a core rejection WHEN navigating or changing pins THEN preserve the error', async () => {
+  for (const call of [() => bridge.jumpToDate('!r:s', 123), () => bridge.eventContext('!r:s', '$e'), () => bridge.setPinned('!r:s', '$e', true)]) {
+    mockIPC(() => Promise.reject('rejected'));
+    await assert.rejects(call, (error) => error === 'rejected');
+  }
 });

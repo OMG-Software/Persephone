@@ -155,3 +155,51 @@ test('GIVEN a pending dialog operation WHEN dismissal is disabled THEN its Close
     assert.equal(/\bdisabled\b/.test(close), closeDisabled);
   }
 });
+
+
+test('GIVEN hostile pin metadata WHEN rendered THEN isolate inert text and disable unauthorized unpin', async () => {
+  const { default: Row } = await vite.ssrLoadModule('/src/PinnedMessageRow.svelte');
+  const hostile = '<img src=x onerror=alert(1)>';
+  const { body: html } = render(Row, { props: {
+    item: { kind: 'message', sender: hostile, body: hostile }, canManage: false, busy: false, onview() {}, onunpin() {}
+  } });
+  assert.match(html, /<bdi>&lt;img/);
+  assert.match(html, /dir="auto"/);
+  assert.doesNotMatch(html, /<img\b/);
+  assert.match(html, /disabled="" aria-label="Unpin: [^"]*">Unpin/);
+  assert.match(html, /aria-label="View in timeline: Message from &lt;img/);
+  assert.match(html, /aria-label="Unpin: Message from &lt;img/);
+});
+
+test('GIVEN unavailable pinned content WHEN rendered THEN retain a view control and explain absence', async () => {
+  const { default: Row } = await vite.ssrLoadModule('/src/PinnedMessageRow.svelte');
+  const { body: html } = render(Row, { props: { canManage: true, busy: false, onview() {}, onunpin() {} } });
+  assert.match(html, /Message content is unavailable/);
+  assert.match(html, /View in timeline/);
+  assert.match(html, /aria-label="View in timeline: Unavailable pinned message"/);
+  assert.match(html, /aria-label="Unpin: Unavailable pinned message"/);
+  assert.doesNotMatch(html, /disabled/);
+});
+
+
+test('GIVEN a timeline pin action WHEN rendered THEN its accessible name identifies the isolated sender', async () => {
+  const { default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte');
+  const { body: html } = render(Timeline, { props: {
+    title: 'Room', roomId: '!r:s', items: [{ kind: 'message', event_id: '$e', sender: '<sender>', body: 'body', origin_server_ts: 0 }],
+    hasOlder: false, loading: false, error: null, onolder() {}, onpin() {}
+  } });
+  assert.match(html, /Pin message<span class="visually-hidden">(?:<!--.*?-->)* from (?:<!--.*?-->)*<bdi>&lt;sender><\/bdi><\/span>/);
+});
+
+
+test('GIVEN identical pinned messages WHEN controls render THEN both action names include distinct event IDs', async () => {
+  const { default: Row } = await vite.ssrLoadModule('/src/PinnedMessageRow.svelte');
+  const rendered = ['$one', '$two'].map((eventId) => render(Row, { props: {
+    item: { kind: 'message', event_id: eventId, sender: '@alice:example.org', body: 'Same text' },
+    eventId, canManage: true, busy: false, onview() {}, onunpin() {}
+  } }).body);
+  for (const [index, id] of ['$one', '$two'].entries()) {
+    assert.ok(rendered[index].includes(`aria-label="View in timeline: Message from @alice:example.org: Same text; event ${id}"`));
+    assert.ok(rendered[index].includes(`aria-label="Unpin: Message from @alice:example.org: Same text; event ${id}"`));
+  }
+});

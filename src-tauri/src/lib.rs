@@ -175,8 +175,101 @@ async fn search_messages(
     core: State<'_, CoreLink>,
     term: String,
     room_id: Option<String>,
+    filters: persephone_contracts::LocalSearchFilters,
 ) -> Result<persephone_contracts::LocalSearchResults, String> {
-    personal_relay(core.inner(), Call::SearchMessages { term, room_id }).await
+    personal_relay(
+        core.inner(),
+        Call::SearchMessages {
+            term,
+            room_id,
+            filters,
+        },
+    )
+    .await
+}
+
+/// Locate bounded history near a date without exposing server tokens to the UI.
+#[tauri::command]
+async fn jump_to_date(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    timestamp_ms: u64,
+) -> Result<persephone_contracts::FocusedTimeline, String> {
+    personal_relay(
+        core.inner(),
+        Call::JumpToDate {
+            room_id,
+            timestamp_ms,
+        },
+    )
+    .await
+}
+
+/// Fetch a bounded context for an explicit room event reference.
+#[tauri::command]
+async fn event_context(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+) -> Result<persephone_contracts::FocusedTimeline, String> {
+    personal_relay(core.inner(), Call::EventContext { room_id, event_id }).await
+}
+
+/// List shared pin references and content visible to this account.
+#[tauri::command]
+async fn pinned_messages(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<persephone_contracts::PinnedMessages, String> {
+    personal_relay(core.inner(), Call::PinnedMessages { room_id }).await
+}
+
+/// Relay a pin mutation; the core checks joined membership and power levels.
+#[tauri::command]
+async fn set_pinned(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    personal_relay(
+        core.inner(),
+        Call::SetPinned {
+            room_id,
+            event_id,
+            pinned,
+        },
+    )
+    .await
+}
+
+/// Read attachment metadata only; media retrieval still needs an explicit action.
+#[tauri::command]
+async fn attachments(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    cursor: Option<String>,
+    kind: persephone_contracts::AttachmentKind,
+    filters: persephone_contracts::LocalSearchFilters,
+) -> Result<persephone_contracts::AttachmentPage, String> {
+    personal_relay(
+        core.inner(),
+        Call::Attachments {
+            room_id,
+            cursor,
+            kind,
+            filters,
+        },
+    )
+    .await
+}
+
+/// Snapshot observations of existing sync work without starting a network probe.
+#[tauri::command]
+async fn connection_health(
+    core: State<'_, CoreLink>,
+) -> Result<persephone_contracts::ConnectionHealth, String> {
+    personal_relay(core.inner(), Call::ConnectionHealth {}).await
 }
 
 /// Read the bounded ignore display list; filtering remains in the core.
@@ -1347,6 +1440,12 @@ pub fn configure<R: Runtime>(
             room_preferences,
             set_room_preference,
             search_messages,
+            jump_to_date,
+            event_context,
+            pinned_messages,
+            set_pinned,
+            attachments,
+            connection_health,
             ignored_users,
             set_ignored_user,
             report_abuse,

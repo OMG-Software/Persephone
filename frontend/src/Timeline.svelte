@@ -33,6 +33,7 @@
     onedit,
     ondelete,
     onreport,
+    onpin,
     focusEvent = null,
     onreact,
     onunreact,
@@ -70,6 +71,7 @@
     // Asks to delete one of this account's messages; absent where deleting
     // is not offered.
     ondelete?: (eventId: string) => void;
+    onpin?: (eventId: string) => void;
     onreport?: (eventId: string, sender: string) => void;
     focusEvent?: string | null;
     // Reacts to a message, or takes back this account's reaction by its
@@ -274,6 +276,9 @@
               </p>
             {:else}
               <p class="gap">Some messages are not shown here.</p>
+            {/if}
+            {#if onpin && (item.kind === 'message' || item.kind === 'image' || item.kind === 'file')}
+              <button type="button" class="link" title="Pin this message for the room" onclick={() => onpin(item.event_id)}>Pin message<span class="visually-hidden">{' from '}<bdi>{item.sender}</bdi></span></button>
             {/if}
             {#if onreport && item.kind !== 'gap' && item.kind !== 'state' && ownUserId !== null && item.sender !== ownUserId}
               <button type="button" class="link report-message" onclick={() => onreport(item.event_id, item.sender)}>Report message<span class="visually-hidden"> from <bdi>{item.sender}</bdi></span></button>

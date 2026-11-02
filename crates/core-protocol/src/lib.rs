@@ -25,6 +25,26 @@ use std::io::{self, Read, Write};
 pub const MAX_LOCAL_SEARCH_BYTES: usize = 128;
 pub const MAX_SECTION_BYTES: usize = 64;
 pub const MAX_REPORT_REASON_BYTES: usize = 1000;
+pub const MAX_SAFE_TIMESTAMP: u64 = 9_007_199_254_740_991;
+
+/// Bound shared local filters before relay. Matrix identifier syntax is checked
+/// again in the core. A missing date range never authorizes extra cache reads.
+pub fn search_filters_within_limits(filters: &persephone_contracts::LocalSearchFilters) -> bool {
+    filters.sender.as_ref().is_none_or(|sender| {
+        !sender.is_empty()
+            && sender.len() <= MAX_USER_ID_BYTES
+            && !sender.chars().any(char::is_control)
+    }) && filters
+        .from_ms
+        .is_none_or(|time| time.get() <= MAX_SAFE_TIMESTAMP)
+        && filters
+            .before_ms
+            .is_none_or(|time| time.get() <= MAX_SAFE_TIMESTAMP)
+        && match (filters.from_ms, filters.before_ms) {
+            (Some(from), Some(before)) => from < before,
+            _ => true,
+        }
+}
 
 /// Cheap checks for the relay and authoritative receiver. Identifier syntax
 /// and encrypted-record capacity are checked by the core as well.
@@ -54,12 +74,39 @@ pub fn personal_call_within_limits(call: &Call) -> bool {
                     .as_ref()
                     .is_none_or(|s| !s.trim().is_empty() && text(s, MAX_SECTION_BYTES))
         }
-        Call::SearchMessages { term, room_id } => {
+        Call::SearchMessages {
+            term,
+            room_id,
+            filters,
+        } => {
             !term.trim().is_empty()
                 && text(term, MAX_LOCAL_SEARCH_BYTES)
                 && room_id
                     .as_ref()
                     .is_none_or(|id| text(id, MAX_ROOM_ID_BYTES))
+                && search_filters_within_limits(filters)
+        }
+        Call::ConnectionHealth {} => true,
+        Call::JumpToDate {
+            room_id,
+            timestamp_ms,
+        } => text(room_id, MAX_ROOM_ID_BYTES) && *timestamp_ms <= MAX_SAFE_TIMESTAMP,
+        Call::EventContext { room_id, event_id }
+        | Call::SetPinned {
+            room_id, event_id, ..
+        } => text(room_id, MAX_ROOM_ID_BYTES) && text(event_id, MAX_EVENT_ID_BYTES),
+        Call::PinnedMessages { room_id } => text(room_id, MAX_ROOM_ID_BYTES),
+        Call::Attachments {
+            room_id,
+            cursor,
+            filters,
+            ..
+        } => {
+            text(room_id, MAX_ROOM_ID_BYTES)
+                && cursor
+                    .as_ref()
+                    .is_none_or(|cursor| text(cursor, MAX_CURSOR_BYTES))
+                && search_filters_within_limits(filters)
         }
         Call::SetIgnoredUser { user_id, .. } => text(user_id, MAX_USER_ID_BYTES),
         Call::ReportAbuse {
@@ -105,7 +152,32 @@ pub enum Call {
         term: String,
         #[serde(deserialize_with = "Option::deserialize")]
         room_id: Option<String>,
+        filters: persephone_contracts::LocalSearchFilters,
     },
+    JumpToDate {
+        room_id: String,
+        timestamp_ms: u64,
+    },
+    EventContext {
+        room_id: String,
+        event_id: String,
+    },
+    PinnedMessages {
+        room_id: String,
+    },
+    SetPinned {
+        room_id: String,
+        event_id: String,
+        pinned: bool,
+    },
+    Attachments {
+        room_id: String,
+        #[serde(deserialize_with = "Option::deserialize")]
+        cursor: Option<String>,
+        kind: persephone_contracts::AttachmentKind,
+        filters: persephone_contracts::LocalSearchFilters,
+    },
+    ConnectionHealth {},
     IgnoredUsers {},
     SetIgnoredUser {
         user_id: String,
@@ -2122,6 +2194,7 @@ mod tests {
 mod personal_tests {
     use super::*;
 
+    /// Check strict personal command schemas and required nullable fields.
     #[test]
     fn personal_wire_round_trips_and_requires_nullable_fields() {
         for json in [
@@ -2129,7 +2202,7 @@ mod personal_tests {
             r#"{"command":"save_room_draft","room_id":"!r:s","draft":{"body":"draft","replyTo":null}}"#,
             r#"{"command":"room_preferences"}"#,
             r#"{"command":"set_room_preference","preference":{"roomId":"!r:s","favourite":true,"section":null}}"#,
-            r#"{"command":"search_messages","term":"text","room_id":null}"#,
+            r#"{"command":"search_messages","term":"text","room_id":null,"filters":{"sender":null,"fromMs":null,"beforeMs":null}}"#,
             r#"{"command":"ignored_users"}"#,
             r#"{"command":"set_ignored_user","user_id":"@u:s","ignored":true}"#,
             r#"{"command":"report_abuse","room_id":"!r:s","event_id":"$e","reason":"Spam"}"#,
@@ -2152,9 +2225,11 @@ mod personal_tests {
         }
     }
 
+    /// Check UTF-8 byte limits and reject disallowed control characters.
     #[test]
     fn personal_limits_count_utf8_bytes_and_reject_control_characters() {
         let search = |term| Call::SearchMessages {
+            filters: Default::default(),
             term,
             room_id: None,
         };
@@ -2167,5 +2242,95 @@ mod personal_tests {
             event_id: "$e".into(),
             reason: "x".repeat(1001)
         }));
+    }
+}
+
+#[cfg(test)]
+mod navigation_wire_tests {
+    use super::*;
+    /// Build valid navigation command fixtures with explicit nullable filters.
+    fn calls() -> Vec<serde_json::Value> {
+        let filters = serde_json::json!({"sender":null,"fromMs":null,"beforeMs":null});
+        vec![
+            serde_json::json!({"command":"search_messages","term":"text","room_id":null,"filters":filters}),
+            serde_json::json!({"command":"jump_to_date","room_id":"!r:s","timestamp_ms":MAX_SAFE_TIMESTAMP}),
+            serde_json::json!({"command":"event_context","room_id":"!r:s","event_id":"$e"}),
+            serde_json::json!({"command":"pinned_messages","room_id":"!r:s"}),
+            serde_json::json!({"command":"set_pinned","room_id":"!r:s","event_id":"$e","pinned":true}),
+            serde_json::json!({"command":"attachments","room_id":"!r:s","cursor":null,"kind":"all","filters":filters}),
+            serde_json::json!({"command":"connection_health"}),
+        ]
+    }
+    /// Reject missing and extra navigation fields while accepting valid commands.
+    #[test]
+    fn navigation_commands_require_exact_wire_fields() {
+        for value in calls() {
+            let call: Call = serde_json::from_value(value.clone()).unwrap();
+            assert!(personal_call_within_limits(&call));
+            assert_eq!(serde_json::to_value(call).unwrap(), value);
+            let mut extra = value.clone();
+            extra["secret"] = true.into();
+            assert!(serde_json::from_value::<Call>(extra).is_err());
+            for key in value
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|key| *key != "command")
+            {
+                let mut missing = value.clone();
+                missing.as_object_mut().unwrap().remove(key);
+                assert!(
+                    serde_json::from_value::<Call>(missing).is_err(),
+                    "missing {key}: {value}"
+                );
+                let mut wrong = value.clone();
+                wrong[key] = serde_json::json!([]);
+                assert!(
+                    serde_json::from_value::<Call>(wrong).is_err(),
+                    "wrong {key}: {value}"
+                );
+                let wire = serde_json::to_string(&value).unwrap();
+                let duplicate = format!("{},\"{}\":{}}}", &wire[..wire.len() - 1], key, value[key]);
+                assert!(
+                    serde_json::from_str::<Call>(&duplicate).is_err(),
+                    "duplicate {key}"
+                );
+            }
+        }
+    }
+    /// Reject oversized identifiers and cursors, unsafe timestamps, and invalid ranges.
+    #[test]
+    fn navigation_limits_reject_oversized_ids_cursors_and_invalid_ranges() {
+        for value in calls() {
+            for (key, limit) in [
+                ("room_id", MAX_ROOM_ID_BYTES),
+                ("event_id", MAX_EVENT_ID_BYTES),
+                ("cursor", MAX_CURSOR_BYTES),
+            ] {
+                if value.get(key).is_none() {
+                    continue;
+                }
+                let mut oversized = value.clone();
+                oversized[key] = "é".repeat(limit / 2 + 1).into();
+                assert!(!personal_call_within_limits(
+                    &serde_json::from_value(oversized).unwrap()
+                ));
+            }
+        }
+        assert!(!personal_call_within_limits(&Call::JumpToDate {
+            room_id: "!r:s".into(),
+            timestamp_ms: MAX_SAFE_TIMESTAMP + 1
+        }));
+        for filters in [
+            serde_json::json!({"sender":"","fromMs":null,"beforeMs":null}),
+            serde_json::json!({"sender":"@u:\ns","fromMs":null,"beforeMs":null}),
+            serde_json::json!({"sender":"é".repeat(MAX_USER_ID_BYTES / 2 + 1),"fromMs":null,"beforeMs":null}),
+            serde_json::json!({"sender":null,"fromMs":2,"beforeMs":2}),
+            serde_json::json!({"sender":null,"fromMs":3,"beforeMs":2}),
+        ] {
+            assert!(!search_filters_within_limits(
+                &serde_json::from_value(filters).unwrap()
+            ));
+        }
     }
 }

@@ -22,7 +22,7 @@ use matrix_sdk::{
     },
 };
 use matrix_sdk_base::event_cache::store::EventCacheStore;
-use persephone_contracts::{LocalSearchHit, LocalSearchResults};
+use persephone_contracts::{LocalSearchFilters, LocalSearchHit, LocalSearchResults};
 use persephone_core_protocol::ErrorCode;
 
 pub const MAX_SEARCH_ROOMS: usize = 100;
@@ -40,6 +40,51 @@ fn checked_term(term: &str) -> Result<String, ErrorCode> {
         return Err(ErrorCode::InvalidArgument);
     }
     Ok(term.to_lowercase())
+}
+
+/// Reject malformed filters before any local cache work.
+pub(crate) fn checked_filters(filters: &LocalSearchFilters) -> Result<(), ErrorCode> {
+    const MAX_TIMESTAMP: u64 = (1u64 << 53) - 1;
+    if filters.sender.as_ref().is_some_and(|sender| {
+        sender.len() > 255
+            || sender.chars().any(char::is_control)
+            || matrix_sdk::ruma::UserId::parse(sender.as_str()).is_err()
+    }) || filters
+        .from_ms
+        .is_some_and(|value| value.get() > MAX_TIMESTAMP)
+        || filters
+            .before_ms
+            .is_some_and(|value| value.get() > MAX_TIMESTAMP)
+        || matches!((filters.from_ms, filters.before_ms), (Some(from), Some(before)) if from.get() >= before.get())
+    {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// Dates refer to the original message, with an inclusive start and exclusive end.
+/// An unknown timestamp cannot satisfy a date filter.
+pub(crate) fn matches_filters(
+    filters: &LocalSearchFilters,
+    sender: &str,
+    timestamp: Option<u64>,
+) -> bool {
+    if filters
+        .sender
+        .as_deref()
+        .is_some_and(|expected| expected != sender)
+    {
+        return false;
+    }
+    if filters.from_ms.is_none() && filters.before_ms.is_none() {
+        return true;
+    }
+    timestamp.is_some_and(|timestamp| {
+        filters.from_ms.is_none_or(|from| timestamp >= from.get())
+            && filters
+                .before_ms
+                .is_none_or(|before| timestamp < before.get())
+    })
 }
 
 /// Search plain text message kinds only; omit media and custom message types.
@@ -96,8 +141,9 @@ pub async fn search(
     stores: &Stores,
     term: &str,
     room_id: Option<&str>,
+    filters: &LocalSearchFilters,
 ) -> Result<LocalSearchResults, ErrorCode> {
-    search_cache(client, &stores.sdk().event_cache, term, room_id).await
+    search_cache(client, &stores.sdk().event_cache, term, room_id, filters).await
 }
 
 /// Apply room, event, chunk, and byte budgets to local cache reads.
@@ -107,8 +153,10 @@ async fn search_cache(
     cache: &impl EventCacheStore,
     term: &str,
     room_id: Option<&str>,
+    filters: &LocalSearchFilters,
 ) -> Result<LocalSearchResults, ErrorCode> {
     let term = checked_term(term)?;
+    checked_filters(filters)?;
     let ignored = abuse::ignored_set(client).await?;
     let mut rooms = if let Some(id) = room_id {
         vec![matrix_views::joined_room(client, id)?]
@@ -213,6 +261,7 @@ async fn search_cache(
                 &events,
                 &ignored,
                 &term,
+                filters,
                 &mut output,
             );
         }
@@ -233,6 +282,7 @@ fn search_events(
     events: &[TimelineEvent],
     ignored: &BTreeSet<OwnedUserId>,
     term: &str,
+    filters: &LocalSearchFilters,
     output: &mut LocalSearchResults,
 ) {
     let redacted: BTreeSet<OwnedEventId> = events
@@ -303,6 +353,13 @@ fn search_events(
         {
             continue;
         }
+        if !matches_filters(
+            filters,
+            message.sender.as_str(),
+            Some(u64::from(message.origin_server_ts.get())),
+        ) {
+            continue;
+        }
         let Some(original) = body(&message.content.msgtype) else {
             continue;
         };
@@ -341,6 +398,7 @@ fn search_events(
 mod tests {
     use super::*;
     use matrix_sdk::ruma::serde::Raw;
+    use persephone_contracts::UnixMillis;
     use serde_json::json;
 
     fn event(id: &str, sender: &str, content: serde_json::Value) -> TimelineEvent {
@@ -365,6 +423,7 @@ mod tests {
         )
     }
 
+    /// Search synthetic cached events with the default filters and supplied ignore policy.
     fn results(events: &[TimelineEvent], term: &str, ignored: &[&str]) -> LocalSearchResults {
         let mut output = LocalSearchResults {
             results: Vec::new(),
@@ -379,9 +438,147 @@ mod tests {
                 .map(|id| matrix_sdk::ruma::UserId::parse(*id).unwrap())
                 .collect(),
             &checked_term(term).unwrap(),
+            &LocalSearchFilters::default(),
             &mut output,
         );
         output
+    }
+
+    #[test]
+    /// Check exact sender matching and inclusive/exclusive dates, including missing times.
+    fn given_sender_and_date_filters_then_boundaries_and_unknown_dates_are_explicit() {
+        let filters = LocalSearchFilters {
+            sender: Some("@alice:s".into()),
+            from_ms: UnixMillis::new(10),
+            before_ms: UnixMillis::new(20),
+        };
+        assert!(checked_filters(&filters).is_ok());
+        assert!(UnixMillis::new(1 << 53).is_none());
+        assert!(matches_filters(&filters, "@alice:s", Some(10)));
+        assert!(matches_filters(&filters, "@alice:s", Some(19)));
+        for timestamp in [None, Some(9), Some(20)] {
+            assert!(!matches_filters(&filters, "@alice:s", timestamp));
+        }
+        assert!(!matches_filters(&filters, "@Alice:s", Some(10)));
+        assert!(matches_filters(
+            &LocalSearchFilters::default(),
+            "@alice:s",
+            None
+        ));
+        for invalid in [
+            LocalSearchFilters {
+                sender: Some("alice".into()),
+                ..Default::default()
+            },
+            LocalSearchFilters {
+                sender: Some("@alice:s\n".into()),
+                ..Default::default()
+            },
+            LocalSearchFilters {
+                sender: Some(format!("@{}:s", "a".repeat(256))),
+                ..Default::default()
+            },
+            LocalSearchFilters {
+                from_ms: UnixMillis::new(20),
+                before_ms: UnixMillis::new(20),
+                ..Default::default()
+            },
+            LocalSearchFilters {
+                from_ms: UnixMillis::new(21),
+                before_ms: UnixMillis::new(20),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(checked_filters(&invalid), Err(ErrorCode::InvalidArgument));
+        }
+    }
+
+    #[test]
+    /// Apply edits and deletions before filtering the original message by its date.
+    fn given_relations_outside_date_filter_then_current_original_text_is_searched() {
+        let filters = LocalSearchFilters {
+            sender: Some("@alice:s".into()),
+            from_ms: UnixMillis::new(10),
+            before_ms: UnixMillis::new(20),
+        };
+        let events = vec![
+            event_at(
+                "$edit",
+                "@alice:s",
+                json!({
+                    "msgtype": "m.text", "body": "* changed",
+                    "m.new_content": {"msgtype": "m.text", "body": "updated words"},
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+                }),
+                30,
+            ),
+            TimelineEvent::from_plaintext(
+                Raw::from_json_string(
+                    json!({
+                        "type":"m.room.redaction", "event_id":"$redaction", "sender":"@mod:s",
+                        "origin_server_ts":30, "content":{"redacts":"$deleted"},
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+            ),
+            event_at(
+                "$original",
+                "@alice:s",
+                json!({"msgtype":"m.text", "body":"old words"}),
+                10,
+            ),
+            event_at(
+                "$deleted",
+                "@alice:s",
+                json!({"msgtype":"m.text", "body":"deleted words"}),
+                11,
+            ),
+            event_at(
+                "$before",
+                "@alice:s",
+                json!({"msgtype":"m.text", "body":"outside words"}),
+                9,
+            ),
+            event_at(
+                "$end",
+                "@alice:s",
+                json!({"msgtype":"m.text", "body":"outside words"}),
+                20,
+            ),
+            event_at(
+                "$other",
+                "@bob:s",
+                json!({"msgtype":"m.text", "body":"other words"}),
+                10,
+            ),
+        ];
+        let mut output = LocalSearchResults {
+            results: Vec::new(),
+            truncated: false,
+            scanned: events.len() as u32,
+        };
+        search_events(
+            "!room:s",
+            &events,
+            &BTreeSet::new(),
+            "words",
+            &filters,
+            &mut output,
+        );
+        assert_eq!(output.results.len(), 1);
+        assert_eq!(output.results[0].event_id, "$original");
+        assert_eq!(output.results[0].body, "words");
+        output.results.clear();
+        search_events(
+            "!room:s",
+            &events,
+            &BTreeSet::new(),
+            "old",
+            &filters,
+            &mut output,
+        );
+        assert!(output.results.is_empty());
     }
 
     #[test]
@@ -478,6 +675,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Read bounded encrypted cache history without sending search requests to the server.
     async fn given_encrypted_sqlite_cache_then_search_traverses_bounded_history_without_http() {
         use matrix_sdk::linked_chunk::{ChunkIdentifier, Position, Update};
         use matrix_sdk_sqlite::SqliteEventCacheStore;
@@ -494,10 +692,18 @@ mod tests {
             let id = ChunkIdentifier::new(chunk);
             let items = (0..128)
                 .map(|n| {
-                    event(
-                        &format!("$e{}", chunk * 128 + n),
-                        "@alice:s",
+                    let index = chunk * 128 + n;
+                    // These newest events are inside the scan budget and match
+                    // the term, but each fails one active filter.
+                    event_at(
+                        &format!("$e{index}"),
+                        if index == 2175 { "@bob:s" } else { "@alice:s" },
                         json!({"msgtype":"m.text", "body":"locally retained message"}),
+                        match index {
+                            2174 => 2,
+                            2173 => 0,
+                            _ => 1,
+                        },
                     )
                 })
                 .collect();
@@ -549,11 +755,29 @@ mod tests {
                     .path()
                     .ends_with("/account_data/m.ignored_user_list"))
         );
-        let output = search_cache(&client, &cache, "RETAINED", Some(room.as_str()))
-            .await
-            .unwrap();
+        let output = search_cache(
+            &client,
+            &cache,
+            "RETAINED",
+            Some(room.as_str()),
+            &LocalSearchFilters {
+                sender: Some("@alice:s".into()),
+                from_ms: UnixMillis::new(1),
+                before_ms: UnixMillis::new(2),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(output.scanned, MAX_SCANNED_EVENTS);
         assert_eq!(output.results.len(), MAX_SEARCH_RESULTS);
+        assert_eq!(output.results[0].event_id, "$e2172");
+        assert!(
+            output.results.iter().all(|hit| {
+                hit.sender == "@alice:s"
+                    && !["$e2175", "$e2174", "$e2173"].contains(&hit.event_id.as_str())
+            }),
+            "sender, inclusive start, and exclusive end must filter cached hits"
+        );
         assert!(output.truncated);
         assert_eq!(
             server.received_requests().await.unwrap().len(),
@@ -561,9 +785,15 @@ mod tests {
             "search must make no HTTP request"
         );
         assert_eq!(
-            search_cache(&client, &cache, "retained", Some("!missing:s"))
-                .await
-                .err(),
+            search_cache(
+                &client,
+                &cache,
+                "retained",
+                Some("!missing:s"),
+                &LocalSearchFilters::default()
+            )
+            .await
+            .err(),
             Some(ErrorCode::NotFound)
         );
         // A valid edit larger than the source budget must not make the
@@ -574,12 +804,18 @@ mod tests {
             Update::PushItems { at: Position::new(id, 0), items: vec![event("$large-edit", "@alice:s", json!({
                 "msgtype":"m.text", "body":"* changed",
                 "m.new_content":{"msgtype":"m.text","body":"x".repeat(MAX_EVENT_BYTES)},
-                "m.relates_to":{"rel_type":"m.replace","event_id":"$e2175"},
+                "m.relates_to":{"rel_type":"m.replace","event_id":"$e2172"},
             }))] },
         ]).await.unwrap();
-        let output = search_cache(&client, &cache, "retained", Some(room.as_str()))
-            .await
-            .unwrap();
+        let output = search_cache(
+            &client,
+            &cache,
+            "retained",
+            Some(room.as_str()),
+            &LocalSearchFilters::default(),
+        )
+        .await
+        .unwrap();
         assert!(output.results.is_empty());
         assert!(output.truncated);
         cache.close().await.unwrap();

@@ -64,8 +64,9 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    AccountSettings, AccountState, AccountStatus, IdentityState, PendingMessage, RecoveryState,
-    SecurityError, SecurityOperation, SecurityStatus, SignInError, StoreState, VerificationPhase,
+    AccountSettings, AccountState, AccountStatus, ConnectionHealth, IdentityState, PendingMessage,
+    RecoveryState, SecurityError, SecurityOperation, SecurityStatus, SignInError, StoreState,
+    SyncMode, UnixMillis, VerificationPhase,
 };
 use std::{
     path::{Path, PathBuf},
@@ -74,7 +75,7 @@ use std::{
         atomic::{AtomicBool, AtomicU16, Ordering},
     },
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroizing;
 
@@ -224,11 +225,70 @@ impl Default for SecurityShared {
     }
 }
 
+/// Observations from this session's sync loop. This does not prove reachability.
+struct SyncHealth {
+    mode: SyncMode,
+    last_attempt_at: Option<u64>,
+    last_success_at: Option<u64>,
+    consecutive_failures: u32,
+    retry_delay_ms: u32,
+    last_error: Option<SignInError>,
+}
+
+impl Default for SyncHealth {
+    /// Start without sync observations or a selected sync mode.
+    fn default() -> Self {
+        Self {
+            mode: SyncMode::Unknown,
+            last_attempt_at: None,
+            last_success_at: None,
+            consecutive_failures: 0,
+            retry_delay_ms: 0,
+            last_error: None,
+        }
+    }
+}
+
+impl SyncHealth {
+    /// Record one sync outcome; saturate failure counts and bound the reported retry delay.
+    fn observe(
+        &mut self,
+        attempt: Option<u64>,
+        mode: SyncMode,
+        error: Option<SignInError>,
+        retry: Duration,
+    ) {
+        self.mode = mode;
+        if attempt.is_some() {
+            self.last_attempt_at = attempt;
+        }
+        self.last_error = error;
+        if error.is_some() {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            self.retry_delay_ms = retry.as_millis().min(u128::from(u32::MAX)) as u32;
+        } else {
+            self.last_success_at = observed_time();
+            self.consecutive_failures = 0;
+            self.retry_delay_ms = 0;
+        }
+    }
+}
+
+/// Return representable Unix milliseconds, or none if the system clock is unusable.
+fn observed_time() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .filter(|value| *value < (1u64 << 53))
+}
+
 struct Shared {
     inner: Mutex<Inner>,
     /// Notified when a lease ends or a lock begins.
     drained: Condvar,
     status: Mutex<AccountStatus>,
+    health: Mutex<SyncHealth>,
     account: Mutex<Option<ActiveAccount>>,
     listener: Mutex<Option<Arc<dyn SessionListener>>>,
     /// Set once any SDK client was built over these stores.
@@ -553,6 +613,7 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
         .idle_lock_minutes
         .store(loaded.idle_lock_minutes, Ordering::SeqCst);
     let installed = lease.commit(|| {
+        *guard(&shared.health) = SyncHealth::default();
         *guard(&shared.account) = Some(ActiveAccount {
             client: client.clone(),
             sync: None,
@@ -683,6 +744,8 @@ fn run_sync(
             }
         };
         let started = Instant::now();
+        let mut attempted_at = None;
+        let _ = lease.commit(|| guard(&shared.health).retry_delay_ms = 0);
         let outcome = lease.stores().block_on(async {
             if !notifying {
                 notifying = true;
@@ -730,6 +793,7 @@ fn run_sync(
                     .ok()
                     .map(Box::pin);
             }
+            attempted_at = observed_time();
             let rooms =
                 account::sync_round(&client, engine.as_ref().expect("selected above")).await;
             // Saved even when the round failed: the SDK may have refreshed the
@@ -761,6 +825,17 @@ fn run_sync(
         // lock, the next start finds the refused token again.
         let committed = lease
             .commit(|| {
+                let mode = match engine.as_ref() {
+                    Some(account::Engine::Sliding(_)) => SyncMode::Sliding,
+                    Some(account::Engine::Classic) => SyncMode::Classic,
+                    None => SyncMode::Unknown,
+                };
+                guard(&shared.health).observe(
+                    attempted_at,
+                    mode,
+                    outcome.as_ref().err().copied(),
+                    if ended { Duration::ZERO } else { backoff },
+                );
                 if ended {
                     shared.ended.store(true, Ordering::SeqCst);
                 }
@@ -1276,6 +1351,7 @@ impl Session {
                 }),
                 drained: Condvar::new(),
                 status: Mutex::new(AccountStatus::signed_out()),
+                health: Mutex::default(),
                 account: Mutex::new(None),
                 security: Mutex::default(),
                 outbox: Mutex::default(),
@@ -1295,6 +1371,31 @@ impl Session {
 
     pub fn state(&self) -> StoreState {
         lock(&self.shared).state
+    }
+
+    /// Return observed sync metadata. No probe or SDK request runs here.
+    pub fn connection_health(&self) -> ConnectionHealth {
+        // Match the commit lock order. A lock transition cannot mix generations.
+        let inner = lock(&self.shared);
+        let status = guard(&self.shared.status);
+        let health = guard(&self.shared.health);
+        let empty = SyncHealth::default();
+        let health =
+            if inner.state == StoreState::Protected && status.state == AccountState::SignedIn {
+                &*health
+            } else {
+                &empty
+            };
+        ConnectionHealth {
+            account_state: status.state,
+            store_state: inner.state,
+            sync_mode: health.mode,
+            last_attempt_at: health.last_attempt_at.and_then(UnixMillis::new),
+            last_success_at: health.last_success_at.and_then(UnixMillis::new),
+            consecutive_failures: health.consecutive_failures,
+            retry_delay_ms: health.retry_delay_ms,
+            last_error: health.last_error,
+        }
     }
 
     pub fn account_status(&self) -> AccountStatus {
@@ -1665,6 +1766,7 @@ impl Session {
                     }
                     None => StoreState::LockFailed,
                 };
+                *guard(&self.shared.health) = SyncHealth::default();
                 self.shared.drained.notify_all();
                 drop(inner);
                 announce();
@@ -2510,6 +2612,193 @@ mod tests {
             other_device: None,
             contact: None,
         })
+    }
+
+    /// Exercise the production sync loop and its generation-fenced publisher.
+    /// The SDK client uses a synthetic account and a loopback HTTP fixture.
+    #[test]
+    fn given_real_sync_rounds_then_connection_health_reports_failure_and_recovery() {
+        use std::sync::atomic::AtomicUsize;
+        use wiremock::{
+            Mock, MockServer, Request, Respond, ResponseTemplate,
+            matchers::{method, path_regex},
+        };
+
+        #[derive(Clone)]
+        struct SyncResponse {
+            fail: Arc<AtomicBool>,
+            requests: Arc<AtomicUsize>,
+        }
+        impl Respond for SyncResponse {
+            /// Serve controlled sync success or failure and count each production-loop request.
+            fn respond(&self, _: &Request) -> ResponseTemplate {
+                let round = self.requests.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) {
+                    ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                        "errcode":"M_UNKNOWN", "error":"synthetic failure"
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "next_batch": format!("round-{round}"), "rooms": {},
+                        "device_lists": {"changed":[], "left":[]},
+                        "device_one_time_keys_count": {}
+                    }))
+                }
+            }
+        }
+        let server_runtime = tokio::runtime::Runtime::new().unwrap();
+        let server = server_runtime.block_on(MockServer::start());
+        let responder = SyncResponse {
+            fail: Arc::new(AtomicBool::new(false)),
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        server_runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path_regex("^/_matrix/client/[^/]+/sync$"))
+                .respond_with(responder.clone())
+                .mount(&server),
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        // Retain a lease until the loop has joined. No store close can race
+        // the test thread's final SDK drops.
+        let lease = session.admit().unwrap();
+        let client = lease
+            .stores()
+            .block_on(crate::abuse::test_client(&server.uri(), &[]));
+        *guard(&session.shared.status) = signed_in("@me:example.org", None);
+        let shared = session.shared.clone();
+        let runtime = lease.stores().runtime().handle().clone();
+        let worker = std::thread::spawn(move || {
+            run_sync(&shared, client, "@me:example.org".into(), runtime);
+        });
+        let wait_for = |predicate: &dyn Fn(&ConnectionHealth) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let snapshot = session.connection_health();
+                if predicate(&snapshot) || Instant::now() >= deadline {
+                    break snapshot;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let success = wait_for(&|health| health.last_success_at.is_some());
+        responder.fail.store(true, Ordering::SeqCst);
+        let failure =
+            wait_for(&|health| health.consecutive_failures > 0 && health.retry_delay_ms > 0);
+        responder.fail.store(false, Ordering::SeqCst);
+        let recovery = wait_for(&|health| {
+            health.last_success_at != failure.last_success_at && health.last_error.is_none()
+        });
+        // Close admission, join the complete loop, then allow stores to close.
+        assert_eq!(session.lock(Duration::ZERO, || {}).0, StoreState::Locking);
+        let joined = worker.join();
+        drop(lease);
+        let stopped = session.lock(Duration::from_secs(5), || {}).0;
+        assert!(
+            joined.is_ok(),
+            "the production sync loop must exit normally"
+        );
+        assert_eq!(stopped, StoreState::Locked);
+        assert_eq!(success.sync_mode, SyncMode::Classic);
+        assert!(success.last_attempt_at.is_some());
+        assert!(success.last_success_at.is_some());
+        assert_eq!(success.consecutive_failures, 0);
+        assert_eq!(failure.sync_mode, SyncMode::Classic);
+        assert!(failure.last_attempt_at >= success.last_attempt_at);
+        // A request already in flight when failure mode is set can succeed
+        // before the first failed request. Its observation must not be lost.
+        assert!(failure.last_success_at >= success.last_success_at);
+        assert!(failure.consecutive_failures > 0);
+        assert_eq!(failure.retry_delay_ms, 1000);
+        assert_eq!(failure.last_error, Some(SignInError::SyncFailed));
+        assert!(recovery.last_success_at > failure.last_success_at);
+        assert_eq!(recovery.consecutive_failures, 0);
+        assert_eq!(recovery.retry_delay_ms, 0);
+        assert_eq!(recovery.last_error, None);
+        assert!(responder.requests.load(Ordering::SeqCst) >= 3);
+        assert_eq!(session.connection_health().last_success_at, None);
+    }
+
+    #[test]
+    /// Keep the last successful observation through failures and clear failure state on recovery.
+    fn given_sync_observations_then_success_failure_and_recovery_preserve_actual_history() {
+        let mut health = SyncHealth::default();
+        assert_eq!(health.mode, SyncMode::Unknown);
+        assert_eq!(health.last_success_at, None);
+        health.observe(Some(10), SyncMode::Classic, None, Duration::from_secs(1));
+        let success = health.last_success_at;
+        assert!(success.is_some());
+        assert_eq!(health.last_attempt_at, Some(10));
+        health.observe(
+            Some(20),
+            SyncMode::Classic,
+            Some(SignInError::SyncFailed),
+            Duration::from_secs(2),
+        );
+        assert_eq!(health.last_success_at, success);
+        assert_eq!(health.last_attempt_at, Some(20));
+        assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(health.retry_delay_ms, 2000);
+        assert_eq!(health.last_error, Some(SignInError::SyncFailed));
+        health.consecutive_failures = u32::MAX;
+        health.observe(
+            None,
+            SyncMode::Unknown,
+            Some(SignInError::SyncFailed),
+            Duration::from_secs(1),
+        );
+        assert_eq!(health.consecutive_failures, u32::MAX);
+        assert_eq!(health.last_attempt_at, Some(20));
+        health.observe(Some(30), SyncMode::Sliding, None, Duration::from_secs(1));
+        assert_eq!(health.mode, SyncMode::Sliding);
+        assert_eq!(health.consecutive_failures, 0);
+        assert_eq!(health.retry_delay_ms, 0);
+        assert_eq!(health.last_error, None);
+    }
+
+    #[test]
+    /// Prevent a sync round from publishing health after its session generation ends.
+    fn given_lock_during_sync_then_health_reset_rejects_stale_round_commit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        *guard(&session.shared.status) = signed_in("@alice:s", None);
+        let lease = session.admit().unwrap();
+        lease
+            .commit(|| {
+                guard(&session.shared.health).observe(
+                    Some(10),
+                    SyncMode::Classic,
+                    None,
+                    Duration::ZERO,
+                )
+            })
+            .unwrap();
+        assert!(session.connection_health().last_success_at.is_some());
+        assert_eq!(session.lock(Duration::ZERO, || {}).0, StoreState::Locking);
+        assert!(
+            lease
+                .commit(|| guard(&session.shared.health).observe(
+                    Some(20),
+                    SyncMode::Classic,
+                    None,
+                    Duration::ZERO
+                ))
+                .is_err()
+        );
+        let health = session.connection_health();
+        assert_eq!(health.store_state, StoreState::Locking);
+        assert_eq!(health.sync_mode, SyncMode::Unknown);
+        assert_eq!(health.last_success_at, None);
+        assert_eq!(health.last_attempt_at, None);
+        drop(lease);
+        assert_eq!(
+            session.lock(Duration::from_secs(5), || {}).0,
+            StoreState::Locked
+        );
+        assert_eq!(session.unlock(), StoreState::Unlocking);
+        assert_eq!(settled(&session), StoreState::Protected);
+        assert_eq!(session.connection_health().last_success_at, None);
     }
 
     /// GIVEN a comparison without its seven emoji WHEN the page confirms THEN

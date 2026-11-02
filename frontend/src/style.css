@@ -2691,3 +2691,9 @@ mark {
 .report-message { margin: 0 0 8px 64px; }
 .discard-draft { align-self: flex-start; margin: 4px 16px 8px; }
 .draft-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; user-select: text; }
+
+.feature-dialog fieldset { margin: 1rem 0; border: 1px solid var(--line, #777); border-radius: .4rem; padding: .75rem; }
+.feature-dialog fieldset label { display: grid; gap: .3rem; margin: .6rem 0; }
+.feature-dialog dl { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 2fr); gap: .6rem; }
+.feature-dialog dd { margin: 0; overflow-wrap: anywhere; }
+.feature-dialog .local-results > li { margin: .75rem 0; overflow-wrap: anywhere; }

@@ -163,6 +163,30 @@ the checked-out commit, or `unknown` ([`crates/core/build.rs`](../crates/core/bu
 It does not show uncommitted changes. Without a usable Git checkout of this
 source tree, the build uses `GITHUB_SHA`.
 
+## Evidence checks
+
+Run `python tools/check_evidence.py --help` for source-manifest, strict JSON
+and local inline Markdown-link checks. In current-checkout mode, manifest paths
+are repository-relative and a real-path guard rejects paths that resolve
+outside the checkout, including through symlinks. In `--revision` mode, paths
+are portable lexical repository-relative POSIX paths. The checker rejects
+empty, `.` or `..` segments, absolute paths, drive or colon syntax, backslashes
+and NUL. It reads blobs from the selected commit; it does not use current
+checkout symlinks to resolve historical paths.
+
+Historical revisions resolve to one commit before blob lookup. The checker
+rejects Git option arguments and non-commit objects. Strict JSON rejects
+non-finite tokens. Markdown checks ignore triple-backtick fences and matching-backtick
+code spans. An escaped backtick opener stays literal; spans may contain a
+single newline but do not cross a blank paragraph. The checker still checks
+real inline links, including links with titles and angle-bracket targets.
+Source hashes normalize CRLF to LF.
+
+The tool's whitespace check covers only unstaged tracked changes. Before a
+commit, stage the intended files and run `git diff --cached --check` separately.
+See the [monitor-fix record](evidence/room-navigation-monitor-fixes.md) for exact
+commands, exit statuses, source hashes and remaining acceptance work.
+
 ## Disposable homeservers
 
 The harness in [`tools/servers`](../tools/servers) runs only disposable local Merovingian and Synapse instances. Use Linux/WSL and Python 3.12. The current path-bound prerequisites are `.local/servers/merovingian` and `.local/servers/synapse`; fresh synthetic profiles and logs belong under `.local/runs`. The harness rejects production configuration, databases, accounts, and URLs.

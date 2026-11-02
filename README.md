@@ -67,13 +67,15 @@ On Windows, the app can do these things today:
 - Send and receive images. Received images load only when you ask. Sent images
   have their metadata removed.
 
-The current source also adds per-room text and reply drafts, local favourites
-and room sections, bounded search of the encrypted local message cache, and
-ignore and report controls. Drafts and room organisation stay in the encrypted
-profile. Search sends no query to a server and has partial coverage. Ignore
-lists and explicit reports go to your homeserver. Coordinated automated checks
-pass; native UI and live-server acceptance remain open. See
-[Room tools](docs/room-tools.md) and its [verification record](docs/evidence/room-tools.md).
+The current source also adds per-room drafts, local room organisation, bounded
+cache search with filters, ignore and report controls, date navigation, shared
+pins, attachment browsing, and a connection health panel. These tools keep
+Matrix authority in the core. Search terms stay local; date navigation and
+attachment browsing request room history. Shared pins expose event references
+as room state. See [Room tools](docs/room-tools.md). Automated checks are
+recorded in [the verification record](docs/evidence/room-navigation-media-health.md).
+Native UI and live-server acceptance remain open. This does not establish
+security readiness.
 
 Not done yet: Linux and macOS runs, keyboard and screen-reader checks, signed
 releases, and an independent security review.

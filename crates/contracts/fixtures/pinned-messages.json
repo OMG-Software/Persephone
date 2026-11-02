@@ -1,0 +1,9 @@
+{
+  "roomId": "!room:example.invalid",
+  "eventIds": [
+    "$event"
+  ],
+  "items": [],
+  "canManage": false,
+  "truncated": false
+}

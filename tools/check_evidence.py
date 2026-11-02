@@ -1,0 +1,136 @@
+"""Check selected evidence hashes, JSON files and local Markdown links."""
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import subprocess
+from urllib.parse import unquote
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def repository_file(name):
+    """Refuse paths outside the checkout, including symlink escapes."""
+    path = (ROOT / name).resolve()
+    path.relative_to(ROOT)
+    return path
+
+
+def reject_constant(value):
+    """Evidence uses JSON numbers, never Python's non-finite extensions."""
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
+def read_json(path):
+    """Apply strict JSON parsing to manifests and explicitly checked files."""
+    return json.loads(path.read_text(encoding="utf-8"), parse_constant=reject_constant)
+
+
+def resolve_revision(revision):
+    """Resolve one commit before using it in a Git object/path argument."""
+    if not revision or revision.startswith("-") or "\0" in revision:
+        raise ValueError("Expected a commit revision, not a Git option")
+    oid = subprocess.check_output(
+        ["git", "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"],
+        cwd=ROOT,
+        text=True,
+    ).strip()
+    if not re.fullmatch(r"(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})", oid):
+        raise ValueError("Git did not return one commit object ID")
+    return oid
+
+
+def historical_path(name):
+    """Use a portable tree path without consulting the current filesystem."""
+    if (not name or "\0" in name or "\\" in name or ":" in name
+            or name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/"))):
+        raise ValueError(f"Invalid historical source path: {name}")
+    return name
+
+
+def strip_code_spans(text):
+    """Remove HTML comments and code spans, respecting which opens first."""
+    runs = list(re.finditer(r"<!--|`+", text))
+    result = []
+    start = 0
+    index = 0
+    while index < len(runs):
+        opening = runs[index]
+        preceding = text[:opening.start()]
+        backslashes = len(preceding) - len(preceding.rstrip("\\"))
+        if backslashes % 2:
+            index += 1
+            continue
+        if opening.group() == "<!--":
+            close = text.find("-->", opening.end())
+            end = len(text) if close == -1 else close + 3
+            result.extend((text[start:opening.start()], " "))
+            start = end
+            index += 1
+            while index < len(runs) and runs[index].start() < end:
+                index += 1
+            continue
+        closing = index + 1
+        while closing < len(runs):
+            if re.search(r"\n[ \t]*\n", text[opening.end():runs[closing].start()]):
+                break
+            if runs[closing].group() == opening.group():
+                break
+            closing += 1
+        if (closing == len(runs)
+                or re.search(r"\n[ \t]*\n", text[opening.end():runs[closing].start()])):
+            index += 1
+            continue
+        result.append(text[start:opening.start()])
+        result.append(" ")
+        start = runs[closing].end()
+        index = closing + 1
+    result.append(text[start:])
+    return "".join(result)
+
+
+def main():
+    """Check source hashes and selected documents; raise on invalid evidence."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--revision", help="Check historical source blobs at this Git revision")
+    parser.add_argument("--markdown", nargs="*", default=[])
+    parser.add_argument("--json", nargs="*", default=[])
+    args = parser.parse_args()
+    manifest = read_json(repository_file(args.manifest))
+    revision = resolve_revision(args.revision) if args.revision is not None else None
+    for name, expected in manifest["files"].items():
+        if revision:
+            tree_path = historical_path(name)
+            content = subprocess.check_output(
+                ["git", "show", "--no-ext-diff", "--no-textconv", "--end-of-options",
+                 f"{revision}:{tree_path}"], cwd=ROOT
+            )
+        else:
+            content = repository_file(name).read_bytes()
+        actual = hashlib.sha256(content.replace(b"\r\n", b"\n")).hexdigest()
+        if actual != expected:
+            raise ValueError(f"Source hash mismatch: {name}")
+    for name in args.json:
+        read_json(repository_file(name))
+    for name in args.markdown:
+        path = repository_file(name)
+        text = re.sub(r"```[\s\S]*?```", "", path.read_text(encoding="utf-8"))
+        text = strip_code_spans(text)
+        links = r'''\[[^\]]*\]\(\s*(<[^>]*>|[^\s)]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)'''
+        for target in re.findall(links, text):
+            target = target.strip("<>")
+            if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", target) or target.startswith("#"):
+                continue
+            local = unquote(target.split("#", 1)[0])
+            if local and not (path.parent / local).exists():
+                raise ValueError(f"Missing local Markdown target: {name}: {target}")
+    subprocess.run(["git", "diff", "--check"], cwd=ROOT, check=True)
+    print(f"PASS: {len(manifest['files'])} source hashes, {len(args.json)} JSON files, "
+          f"{len(args.markdown)} Markdown files; unstaged tracked diff whitespace.")
+
+
+if __name__ == "__main__":
+    main()

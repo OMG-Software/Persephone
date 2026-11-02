@@ -1,0 +1,7 @@
+{
+  "roomId": "!room:example.invalid",
+  "items": [],
+  "nextCursor": null,
+  "scanned": 0,
+  "partial": true
+}

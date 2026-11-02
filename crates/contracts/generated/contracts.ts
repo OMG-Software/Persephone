@@ -121,6 +121,20 @@ export type LocalSearchHit = { roomId: string, eventId: string, sender: string, 
 
 export type LocalSearchResults = { results: Array<LocalSearchHit>, truncated: boolean, scanned: number, };
 
+export type LocalSearchFilters = { sender: string | null, fromMs: number | null, beforeMs: number | null, };
+
+export type FocusedTimeline = { page: TimelinePage, eventId: string, };
+
+export type PinnedMessages = { roomId: string, eventIds: Array<string>, items: Array<TimelineItem>, canManage: boolean, truncated: boolean, };
+
+export type AttachmentKind = "all" | "images" | "files";
+
+export type AttachmentPage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, scanned: number, partial: boolean, };
+
+export type SyncMode = "unknown" | "sliding" | "classic";
+
+export type ConnectionHealth = { accountState: AccountState, storeState: StoreState, syncMode: SyncMode, lastAttemptAt: number | null, lastSuccessAt: number | null, consecutiveFailures: number, retryDelayMs: number, lastError: SignInError | null, };
+
 export type IgnoredUsers = { users: Array<string>, truncated: boolean, };
 
 export type InviteSummary = { roomId: string, 

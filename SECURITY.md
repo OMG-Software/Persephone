@@ -22,9 +22,10 @@ Do not report a vulnerability in a public issue, pull request or discussion.
 The app's **Report abuse** action sends a message report to your own Matrix
 homeserver. It does not report a Persephone vulnerability to this project.
 For app vulnerabilities, use the private GitHub route above. Draft isolation,
-local-search disclosure, ignored-user filtering, and encrypted room preferences
-are part of the app's existing security scope. See [Room tools](docs/room-tools.md)
-for their data boundaries and current verification limits.
+local-search disclosure, ignored-user filtering, room preferences, and the
+navigation and inspection tools are part of the app's security scope. See
+[Room tools](docs/room-tools.md) for their data boundaries and current
+verification status. These features do not close the production security gates.
 
 ## What to include
 

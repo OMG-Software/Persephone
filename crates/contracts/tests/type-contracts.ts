@@ -1,5 +1,9 @@
 import type {
   AppStatus,
+  LocalSearchFilters,
+  ConnectionHealth,
+  AttachmentKind,
+  SyncMode,
   ImagePick,
   ImageView,
   PendingMessage,
@@ -141,3 +145,21 @@ void unknownChange;
 void wrongChangeField;
 void missingMainAddress;
 void unknownJoinRule;
+
+// @ts-expect-error nullable filter fields must be present
+const missingFilter: LocalSearchFilters = { sender: null, fromMs: null };
+const validFilters: LocalSearchFilters = { sender: null, fromMs: 0, beforeMs: null };
+// @ts-expect-error filter timestamps use JavaScript numbers
+const bigintFilter: LocalSearchFilters = { sender: null, fromMs: 1n, beforeMs: null };
+// @ts-expect-error only the defined attachment kinds are accepted
+const unknownAttachment: AttachmentKind = "videos";
+// @ts-expect-error only the defined sync modes are accepted
+const unknownSync: SyncMode = "polling";
+// @ts-expect-error missing health observations must be explicit null
+const missingHealth: ConnectionHealth = { accountState: "signed_out", storeState: "protected", syncMode: "unknown", consecutiveFailures: 0, retryDelayMs: 0, lastError: null };
+void missingFilter;
+void validFilters;
+void bigintFilter;
+void unknownAttachment;
+void unknownSync;
+void missingHealth;
