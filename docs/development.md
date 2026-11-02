@@ -166,11 +166,21 @@ source tree, the build uses `GITHUB_SHA`.
 ## Evidence checks
 
 Run `python tools/check_evidence.py --help` for source-manifest, strict JSON
-and local inline Markdown-link checks. Paths are relative to the repository
-root. Source hashes normalize CRLF to LF. To check historical source, use
-`--revision <commit-or-ref>`; the tool resolves one commit before reading blobs.
-It rejects Git option arguments, non-commit objects and non-finite JSON tokens.
-Inline links can include quoted titles or angle-bracket targets.
+and local inline Markdown-link checks. In current-checkout mode, manifest paths
+are repository-relative and a real-path guard rejects paths that resolve
+outside the checkout, including through symlinks. In `--revision` mode, paths
+are portable lexical repository-relative POSIX paths. The checker rejects
+empty, `.` or `..` segments, absolute paths, drive or colon syntax, backslashes
+and NUL. It reads blobs from the selected commit; it does not use current
+checkout symlinks to resolve historical paths.
+
+Historical revisions resolve to one commit before blob lookup. The checker
+rejects Git option arguments and non-commit objects. Strict JSON rejects
+non-finite tokens. Markdown checks ignore triple-backtick fences and matching-backtick
+code spans. An escaped backtick opener stays literal; spans may contain a
+single newline but do not cross a blank paragraph. The checker still checks
+real inline links, including links with titles and angle-bracket targets.
+Source hashes normalize CRLF to LF.
 
 The tool's whitespace check covers only unstaged tracked changes. Before a
 commit, stage the intended files and run `git diff --cached --check` separately.

@@ -42,6 +42,46 @@ def resolve_revision(revision):
     return oid
 
 
+def historical_path(name):
+    """Use a portable tree path without consulting the current filesystem."""
+    if (not name or "\0" in name or "\\" in name or ":" in name
+            or name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/"))):
+        raise ValueError(f"Invalid historical source path: {name}")
+    return name
+
+
+def strip_code_spans(text):
+    """Remove code spans closed by a backtick run of the same length."""
+    runs = list(re.finditer(r"`+", text))
+    result = []
+    start = 0
+    index = 0
+    while index < len(runs):
+        opening = runs[index]
+        preceding = text[:opening.start()]
+        backslashes = len(preceding) - len(preceding.rstrip("\\"))
+        if backslashes % 2:
+            index += 1
+            continue
+        closing = index + 1
+        while closing < len(runs):
+            if re.search(r"\n[ \t]*\n", text[opening.end():runs[closing].start()]):
+                break
+            if len(runs[closing].group()) == len(opening.group()):
+                break
+            closing += 1
+        if (closing == len(runs)
+                or re.search(r"\n[ \t]*\n", text[opening.end():runs[closing].start()])):
+            index += 1
+            continue
+        result.append(text[start:opening.start()])
+        result.append(" ")
+        start = runs[closing].end()
+        index = closing + 1
+    result.append(text[start:])
+    return "".join(result)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
@@ -52,14 +92,14 @@ def main():
     manifest = read_json(repository_file(args.manifest))
     revision = resolve_revision(args.revision) if args.revision is not None else None
     for name, expected in manifest["files"].items():
-        path = repository_file(name)
         if revision:
+            tree_path = historical_path(name)
             content = subprocess.check_output(
                 ["git", "show", "--no-ext-diff", "--no-textconv", "--end-of-options",
-                 f"{revision}:{path.relative_to(ROOT).as_posix()}"], cwd=ROOT
+                 f"{revision}:{tree_path}"], cwd=ROOT
             )
         else:
-            content = path.read_bytes()
+            content = repository_file(name).read_bytes()
         actual = hashlib.sha256(content.replace(b"\r\n", b"\n")).hexdigest()
         if actual != expected:
             raise ValueError(f"Source hash mismatch: {name}")
@@ -68,6 +108,7 @@ def main():
     for name in args.markdown:
         path = repository_file(name)
         text = re.sub(r"```[\s\S]*?```", "", path.read_text(encoding="utf-8"))
+        text = strip_code_spans(text)
         links = r'''\[[^\]]*\]\(\s*(<[^>]*>|[^\s)]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)'''
         for target in re.findall(links, text):
             target = target.strip("<>")

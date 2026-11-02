@@ -638,10 +638,18 @@ impl MatrixViews {
         let id = original.event_id().ok_or(ErrorCode::Rejected)?.to_owned();
         // An undecryptable or unsupported replacement cannot establish current
         // text. Do not fall back to a potentially sensitive original preview.
-        if edits
-            .iter()
-            .any(|edit| edit_claim(edit).is_none_or(|claim| claim.replaces != id))
-        {
+        if edits.iter().any(|edit| {
+            edit_claim(edit).is_none_or(|claim| claim.replaces != id)
+                || !edit
+                    .raw()
+                    .get_field::<String>("room_id")
+                    .is_ok_and(|room| room.is_none_or(|room| room == joined.room_id().as_str()))
+        }) {
+            // Invalid relation scope suppresses only this preview. Validate
+            // the original and local ignore state before returning, so a bad
+            // relation cannot mask a separate authority or store failure.
+            self.project_chunk(client, joined, std::slice::from_ref(&original))
+                .await?;
             return Ok(Vec::new());
         }
         let mut chunk = vec![original];

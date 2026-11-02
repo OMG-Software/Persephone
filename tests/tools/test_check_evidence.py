@@ -98,6 +98,97 @@ class CheckEvidenceTests(unittest.TestCase):
         (self.root / "guide.md").write_text('[local](<local file.md> "Run")\n[web](<https://example.org> "Web")', encoding="utf-8")
         self.assertIn("1 Markdown files", self.run_checker("--markdown", "guide.md"))
 
+    def test_given_inline_code_links_then_only_real_links_are_checked(self):
+        examples = [
+            '`[example](missing.md)`',
+            '``[example](missing.md "Title") with ` inside``',
+            '`multiline\n[example](missing.md)\ncode`',
+            '``[example](missing.md)``` unmatched inner run``',
+        ]
+        for code in examples:
+            with self.subTest(code=code):
+                (self.root / "guide.md").write_text(code, encoding="utf-8")
+                self.assertIn("1 Markdown files", self.run_checker("--markdown", "guide.md"))
+                (self.root / "guide.md").write_text(code + '\n[real](missing.md "Title")', encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Missing local Markdown target"):
+                    self.run_checker("--markdown", "guide.md")
+        (self.root / "guide.md").write_text('`unclosed [real](missing.md)', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Missing local Markdown target"):
+            self.run_checker("--markdown", "guide.md")
+
+    def replace_source_with_symlink(self, target):
+        source = self.root / "source.txt"
+        source.unlink()
+        try:
+            source.symlink_to(target)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"File symlinks unavailable: {error}")
+
+    def test_given_escaped_ticks_or_paragraph_breaks_then_real_links_are_checked(self):
+        examples = [
+            r'\`[real](missing.md)`',
+            r'\\\`[real](missing.md)`',
+            '`unclosed\n\n[real](missing.md)`',
+            '`unclosed\n \t\n[real](missing.md)`',
+        ]
+        for text in examples:
+            with self.subTest(text=text):
+                (self.root / "guide.md").write_text(text, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Missing local Markdown target"):
+                    self.run_checker("--markdown", "guide.md")
+
+    def test_given_valid_code_ticks_then_escape_rules_do_not_hide_adjacent_links(self):
+        for code in [r'\\`[example](missing.md)`', r'`[example](missing.md)\`',
+                     '`first line\n[example](missing.md)`']:
+            with self.subTest(code=code):
+                (self.root / "guide.md").write_text(code, encoding="utf-8")
+                self.assertIn("1 Markdown files", self.run_checker("--markdown", "guide.md"))
+                (self.root / "guide.md").write_text(code + '\n[real](missing.md)', encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Missing local Markdown target"):
+                    self.run_checker("--markdown", "guide.md")
+
+    def test_given_historical_blob_then_source_filesystem_resolution_is_not_used(self):
+        self.write_manifest({"source.txt": hashlib.sha256(b"original\n").hexdigest()})
+        original = check_evidence.repository_file
+
+        def current_file(name):
+            if name == "source.txt":
+                self.fail("Historical source lookup consulted the current filesystem")
+            return original(name)
+
+        with mock.patch.object(check_evidence, "repository_file", side_effect=current_file):
+            self.assertIn("PASS: 1 source hashes", self.run_checker("--revision", "original"))
+
+    def test_given_current_inside_symlink_then_historical_lookup_uses_original_tree_path(self):
+        target = self.root / "different.txt"
+        target.write_bytes(b"different\n")
+        self.replace_source_with_symlink(target)
+        self.write_manifest({"source.txt": hashlib.sha256(b"original\n").hexdigest()})
+        self.assertIn("PASS: 1 source hashes", self.run_checker("--revision", "original"))
+
+    def test_given_current_outside_symlink_then_history_works_but_current_mode_rejects(self):
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside) / "outside.txt"
+            target.write_bytes(b"original\n")
+            self.replace_source_with_symlink(target)
+            self.write_manifest({"source.txt": hashlib.sha256(b"original\n").hexdigest()})
+            self.assertIn("PASS: 1 source hashes", self.run_checker("--revision", "original"))
+            with self.assertRaises(ValueError):
+                self.run_checker()
+
+    def test_given_nonportable_historical_paths_then_reject_before_blob_lookup(self):
+        for name in ["/source.txt", "C:/source.txt", "C:source.txt", "\\\\server\\source.txt",
+                     "dir\\source.txt", "../source.txt", "dir/../source.txt", "./source.txt",
+                     "dir//source.txt", "source.txt/", "source\0.txt", ""]:
+            with self.subTest(name=name):
+                self.write_manifest({name: hashlib.sha256(b"original\n").hexdigest()})
+                original = subprocess.check_output
+                with mock.patch.object(subprocess, "check_output", wraps=original) as command:
+                    with self.assertRaisesRegex(ValueError, "Invalid historical source path"):
+                        self.run_checker("--revision", "original")
+                    self.assertEqual(len(command.call_args_list), 1)
+                    self.assertEqual(command.call_args.args[0][1], "rev-parse")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1010,6 +1010,7 @@ mod tests {
 
     fn replacement(id: &str, sender: &str, time: u64, body: &str) -> Value {
         let mut event = text_event(id, sender, time, "* fallback");
+        event["room_id"] = json!(ROOM);
         event["content"]["m.new_content"] = json!({"msgtype":"m.text","body":body});
         event["content"]["m.relates_to"] = json!({"rel_type":"m.replace","event_id":"$pin"});
         event
@@ -1387,5 +1388,67 @@ mod tests {
                 .iter()
                 .any(|request| request.method == "PUT")
         );
+    }
+    #[tokio::test]
+    async fn given_untrustworthy_pin_relation_room_then_only_that_preview_is_suppressed() {
+        for room_id in [json!("!other:synthetic.test"), json!(17)] {
+            let server = MockServer::start().await;
+            let client = manager(&server).await;
+            pin_state(&server, json!(["$pin", "$healthy"])).await;
+            pin_event(
+                &server,
+                "$pin",
+                text_event(
+                    "$pin",
+                    "@alice:synthetic.test",
+                    1,
+                    "obsolete sensitive text",
+                ),
+            )
+            .await;
+            let mut bad = replacement(
+                "$bad-room",
+                "@alice:synthetic.test",
+                2,
+                "untrusted replacement",
+            );
+            bad["room_id"] = room_id;
+            pin_relations(&server, "$pin", json!({"chunk":[bad]})).await;
+            pin_event(
+                &server,
+                "$healthy",
+                text_event("$healthy", "@alice:synthetic.test", 3, "healthy preview"),
+            )
+            .await;
+            pin_relations(&server, "$healthy", json!({"chunk":[]})).await;
+            let result = pinned_messages(&client, &MatrixViews::default(), ROOM, || true)
+                .await
+                .unwrap();
+            assert_eq!(result.event_ids, vec!["$pin", "$healthy"]);
+            assert!(result.truncated);
+            assert!(
+                matches!(&result.items[..], [TimelineItem::Message { event_id, body, .. }] if event_id == "$healthy" && body == "healthy preview")
+            );
+            let serialized = serde_json::to_string(&result).unwrap();
+            assert!(!serialized.contains("obsolete sensitive text"));
+            assert!(!serialized.contains("untrusted replacement"));
+        }
+    }
+
+    #[tokio::test]
+    async fn given_original_room_mismatch_then_bad_relation_does_not_mask_rejection() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        pin_state(&server, json!(["$pin"])).await;
+        let mut original = text_event("$pin", "@alice:synthetic.test", 1, "wrong room");
+        original["room_id"] = json!("!other:synthetic.test");
+        pin_event(&server, "$pin", original).await;
+        let mut bad = replacement("$bad-room", "@alice:synthetic.test", 2, "replacement");
+        bad["room_id"] = json!(17);
+        pin_relations(&server, "$pin", json!({"chunk":[bad]})).await;
+        assert!(matches!(
+            pinned_messages(&client, &MatrixViews::default(), ROOM, || true).await,
+            Err(ErrorCode::Rejected)
+        ));
     }
 }

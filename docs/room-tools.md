@@ -181,6 +181,12 @@ If an edit read is unavailable, incomplete or undecryptable, the panel keeps
 the pin reference and hides its original preview. The panel reports unavailable
 previews or loading limits. This does not establish a complete SDK shutdown.
 
+If a replacement event names a malformed or different room ID, the core hides
+that pin's preview and keeps other valid pin previews. It does not fall back to
+the original text, which may be obsolete. A failure to verify the original
+event identity or to read the account's ignore state still rejects the whole
+pin read.
+
 ## Attachment browser
 
 The browser scans one history chunk of at most 50 raw events per page, then

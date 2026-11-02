@@ -1996,6 +1996,29 @@
         ".local/runs/pr47-monitor/sonar-revision-recheck.log",
         ".local/runs/pr47-monitor/sonar-revision-probes.log"
       ]
+    },
+    {
+      "name": "pr47_review_refinements",
+      "checked_on": "2026-11-02",
+      "base_commit": "36ed9bf31697cb527675d174341ecf82a4e1f732",
+      "command": "python tools/dev.py check",
+      "exit_code": 0,
+      "rust_test_executions_passed": 846,
+      "rust_benchmarks_ignored": 2,
+      "frontend_tests_passed": 196,
+      "python_tests_passed": 62,
+      "python_tests_skipped": 2,
+      "skip_reason": "Windows file symlink privilege unavailable (error 1314). Real Git historical blob resolution test passed.",
+      "focused_checker_tests_passed": 10,
+      "focused_checker_tests_skipped": 2,
+      "source_manifest_sha256": "ed4220e596e1b3e29df7bb9cab202cf19365642f89fa4130dd8a75ce12eaf6b6",
+      "source": "54 normalized hashes in room-navigation-review-refinements-sources.json. No dependency or lockfile changes.",
+      "report": "room-navigation-review-refinements.md",
+      "raw_logs": [
+        ".local/runs/pr47-monitor/round2-check.log",
+        ".local/runs/pr47-monitor/tools-round2-tests.log"
+      ],
+      "not_run": "Native UI/mounted interaction/live-server/other-platform/containment/release/audit acceptance remains open."
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",
