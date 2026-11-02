@@ -2019,6 +2019,29 @@
         ".local/runs/pr47-monitor/tools-round2-tests.log"
       ],
       "not_run": "Native UI/mounted interaction/live-server/other-platform/containment/release/audit acceptance remains open."
+    },
+    {
+      "name": "pr47_checker_ci_root_fix",
+      "checked_on": "2026-11-02",
+      "base_commit": "3af935bca89aa48715fe87adf83d97986a54a741",
+      "command": "python -m unittest discover -s tests/tools -v",
+      "exit_code": 0,
+      "python_tool_tests_scheduled": 63,
+      "python_tool_tests_passed": 61,
+      "python_tool_tests_skipped": 2,
+      "focused_checker_tests_passed": 11,
+      "focused_checker_tests_skipped": 2,
+      "negative_control_exit_code": 1,
+      "negative_control_outcome": "Expected failure with old unresolved temporary root; new canonical-root regression detects alias mismatch.",
+      "source_manifest_sha256": "f0fd24375dbcd9fa3f7ffb56b9c43668db22fc2b022f8719555318dd404a71b5",
+      "report": "room-navigation-ci-root-fix.md",
+      "raw_logs": [
+        ".local/runs/pr47-monitor/ci-root-tests.log",
+        ".local/runs/pr47-monitor/ci-root-tools-suite.log",
+        ".local/runs/pr47-monitor/ci-root-negative-control.log",
+        ".local/runs/pr47-monitor/ci-temp-root-failure-excerpts.log"
+      ],
+      "not_run": "Runtime sources unchanged; no repeated Rust/frontend/server tests. Remote runner acceptance remains pending; previous native/live/SDK gates stay open."
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

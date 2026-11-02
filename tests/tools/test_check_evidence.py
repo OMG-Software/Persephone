@@ -19,7 +19,7 @@ class CheckEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.git("init", "-q")
         self.git("config", "user.name", "Synthetic checker test")
         self.git("config", "user.email", "checker@synthetic.test")
@@ -48,6 +48,30 @@ class CheckEvidenceTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["check_evidence", "--manifest", "manifest.json", *args]), redirect_stdout(io.StringIO()) as output:
             check_evidence.main()
         return output.getvalue()
+
+    def test_given_temporary_root_alias_then_fixture_accepts_only_canonical_in_root_paths(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            canonical = Path(directory).resolve()
+            (canonical / "alias-parent").mkdir()
+            alias = canonical / "alias-parent" / ".."
+            self.assertNotEqual(alias, canonical)
+            temporary = mock.Mock()
+            temporary.name = str(alias)
+            temporary.cleanup = mock.Mock()
+            fixture = CheckEvidenceTests()
+            try:
+                with mock.patch.object(tempfile, "TemporaryDirectory", return_value=temporary):
+                    fixture.setUp()
+                self.assertEqual(fixture.root, canonical)
+                self.assertEqual(check_evidence.repository_file("source.txt"), canonical / "source.txt")
+                fixture.write_manifest({"source.txt": hashlib.sha256(b"changed\n").hexdigest()})
+                self.assertIn("PASS: 1 source hashes", fixture.run_checker())
+                target = Path(outside) / "outside.txt"
+                target.write_text("outside", encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    check_evidence.repository_file(str(target))
+            finally:
+                fixture.doCleanups()
 
     def test_given_historical_refs_then_resolve_one_commit_and_check_its_blob(self):
         for ref, expected in [("HEAD", self.second), ("HEAD~1", self.first),
