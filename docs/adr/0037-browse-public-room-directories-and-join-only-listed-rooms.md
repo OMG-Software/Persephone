@@ -52,8 +52,8 @@ page of this session listed as open to anyone".
   public join rule, at most 330 (a full 300-room listing and one more page),
   oldest forgotten first, with the server whose directory listed them. A new
   session forgets them all, and a page from an older session is ignored.
-* A rate limit (429) is `unavailable`, like a failure to connect. Any other
-  refusal is `rejected`.
+* A refusal (a 4xx answer) is `rejected`. A rate limit (429), a server
+  error (5xx) or no answer at all is `unavailable`.
 * `join_public_room` takes only a room ID. The core joins it through the
   server that listed it, and only when it is remembered; any other room is
   `not_found`. Knock and restricted rooms are shown but not joined.

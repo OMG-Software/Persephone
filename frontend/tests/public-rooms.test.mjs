@@ -92,7 +92,11 @@ test('GIVEN a directory WHEN it answers with the token it was asked with THEN no
   assert.equal(first.next, 'p2');
   const repeated = addPage(first, { rooms: [room('!a:s')], next: 'p2', total: null }, 'p2');
   assert.equal(repeated.next, null, 'asking again would bring nothing new');
-  assert.equal(addPage(first, { rooms: [room('!b:s')], next: 'p3', total: null }, 'p2').next, 'p3');
+  const advanced = addPage(first, { rooms: [room('!b:s')], next: 'p3', total: null }, 'p2');
+  assert.equal(advanced.next, 'p3');
+  // A loop of pages: p3 answers with p2 again.
+  assert.equal(addPage(advanced, { rooms: [room('!c:s')], next: 'p2', total: null }, 'p3').next, null);
+  assert.deepEqual(addPage(advanced, { rooms: [], next: 'p4', total: null }, 'p3').asked, ['p2', 'p3']);
 });
 
 test('GIVEN listed rooms WHEN labelled THEN the name, address, then ID is shown, and member counts read naturally', () => {

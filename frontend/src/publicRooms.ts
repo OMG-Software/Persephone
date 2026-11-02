@@ -42,14 +42,15 @@ export function ownServer(userId: string | null): string | null {
   return at > 0 && at < userId.length - 1 ? userId.slice(at + 1) : null;
 }
 
-/** A listing: its pages so far, one room once, up to the limit. */
-export type Listing = { rooms: PublicRoom[]; next: string | null; total: number | null };
+/** A listing: its pages so far, one room once, up to the limit, and the page tokens already asked with. */
+export type Listing = { rooms: PublicRoom[]; next: string | null; total: number | null; asked: string[] };
 
 /**
  * Adds a page to a listing. A room listed twice keeps its first place. Past
- * the limit, or when the directory answers with the token it was asked
- * with, no next page is offered: asking again would bring nothing new.
- * `requested`: the token the page was asked with, null for the first page.
+ * the limit, or when the directory answers with a token this listing was
+ * already asked with (the same one, or one from a loop of pages), no next
+ * page is offered: asking again would bring nothing new. `requested`: the
+ * token the page was asked with, null for the first page.
  */
 export function addPage(listing: Listing | null, page: PublicRoomPage, requested: string | null = null): Listing {
   const rooms = [...(listing?.rooms ?? [])];
@@ -60,8 +61,10 @@ export function addPage(listing: Listing | null, page: PublicRoomPage, requested
     seen.add(room.roomId);
     rooms.push(room);
   }
-  const next = rooms.length >= MAX_LISTED_ROOMS || page.next === requested ? null : page.next;
-  return { rooms, next, total: page.total };
+  const asked = [...(listing?.asked ?? []), ...(requested === null ? [] : [requested])];
+  const repeated = page.next !== null && asked.includes(page.next);
+  const next = rooms.length >= MAX_LISTED_ROOMS || repeated ? null : page.next;
+  return { rooms, next, total: page.total, asked };
 }
 
 /** What a room shows as its name: its name, else its address, else its ID. */

@@ -220,13 +220,14 @@ fn page(
     (PublicRoomPage { rooms, next, total }, offers)
 }
 
-/// A refusal from the homeserver is `rejected`; anything else, such as no
-/// answer at all, is `unavailable`.
-/// A rate limit (429) is transient, so it is `unavailable` too, as for
-/// media (`media.rs`).
+/// A refusal from the homeserver (a 4xx answer) is `rejected`. Anything
+/// transient is `unavailable`: no answer at all, a server error (5xx), or a
+/// rate limit (429), as for media (`media.rs`).
 fn request_error(error: Option<&matrix_sdk::ruma::api::error::Error>) -> ErrorCode {
     match error {
-        Some(error) if error.status_code.as_u16() != 429 => ErrorCode::Rejected,
+        Some(error) if error.status_code.is_client_error() && error.status_code.as_u16() != 429 => {
+            ErrorCode::Rejected
+        }
         _ => ErrorCode::Unavailable,
     }
 }

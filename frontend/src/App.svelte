@@ -644,7 +644,9 @@
   async function openConversation(roomId: string) {
     const generation = sessionGeneration;
     await refreshRooms();
-    if (generation === sessionGeneration) open(roomId);
+    // Awaited, so a caller sees the room change finished, with any error
+    // it set, before it adds its own message.
+    if (generation === sessionGeneration) await open(roomId);
   }
 
   /**

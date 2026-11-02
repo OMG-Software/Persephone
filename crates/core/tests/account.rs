@@ -3563,7 +3563,8 @@ fn given_an_encrypted_room_then_an_image_is_never_uploaded_in_plain() {
 /// listed THEN the homeserver is asked for it with the filter, and only a
 /// room listed as open to anyone can be joined, through the server that
 /// listed it. A room asking to knock or never listed is `not_found` and no
-/// join is sent. A rate limit is `unavailable`, and a refusal `rejected`.
+/// join is sent. A rate limit or a server error is `unavailable`, and a
+/// refusal `rejected`.
 #[test]
 fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
     const DIRECTORY: &str = "/_matrix/client/v3/publicRooms";
@@ -3661,4 +3662,11 @@ fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
         json!({"errcode": "M_FORBIDDEN", "error": "Federation directory is disabled"}),
     );
     assert_eq!(list(None), Outcome::Error(ErrorCode::Rejected));
+    server.answer_once(
+        "POST",
+        "^/_matrix/client/v3/publicRooms$",
+        502,
+        json!({"errcode": "M_UNKNOWN", "error": "Bad gateway"}),
+    );
+    assert_eq!(list(None), Outcome::Error(ErrorCode::Unavailable));
 }
