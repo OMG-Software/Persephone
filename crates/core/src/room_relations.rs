@@ -137,6 +137,7 @@ async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, ErrorCode
     Ok(body)
 }
 
+/// Reject incomplete pages and excessive raw events before SDK decryption.
 fn parse_page(body: &[u8]) -> Result<Page, ErrorCode> {
     let page: Page = serde_json::from_slice(body).map_err(|_| ErrorCode::Rejected)?;
     if page.chunk.len() > MAX_RELATIONS || page.next_batch.is_some() {
@@ -145,6 +146,7 @@ fn parse_page(body: &[u8]) -> Result<Page, ErrorCode> {
     Ok(page)
 }
 #[cfg(test)]
+/// Exercise the shared body cap and complete-page parser without a Matrix session.
 async fn read_page(response: reqwest::Response) -> Result<Page, ErrorCode> {
     let success = response.status().is_success();
     let body = read_body(response).await?;
@@ -160,6 +162,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     #[tokio::test]
+    /// Accept a complete bounded page without decrypting its raw entries.
     async fn given_bounded_complete_relations_then_raw_events_are_returned() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -177,6 +180,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Check rejection before decryption for invalid, oversized and incomplete responses.
     async fn given_bad_status_malformed_oversize_or_incomplete_then_refuse_page() {
         for (template, expected) in [
             (ResponseTemplate::new(503).set_body_string("failure"), ErrorCode::Unavailable),
@@ -195,6 +199,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Stop an unknown-length stream at the byte limit before the server sends it all.
     async fn given_unknown_length_chunked_oversize_then_abort_before_full_body_is_sent() {
         use std::sync::{
             Arc,
@@ -250,6 +255,7 @@ mod tests {
         server.abort();
         let _ = server.await;
     }
+    /// Restore synthetic Matrix tokens for real SDK refresh requests to the loopback fixture.
     async fn refresh_client(server: &MockServer) -> Client {
         // SDK token refresh uses send_inner, which selects the refresh
         // endpoint from the server's advertised Matrix versions.
@@ -286,6 +292,7 @@ mod tests {
         client
     }
 
+    /// Require the specified number of SDK refresh requests with the synthetic refresh token.
     async fn refresh_endpoint(server: &MockServer, times: u64) {
         Mock::given(method("POST"))
             .and(wiremock::matchers::path("/_matrix/client/v3/refresh"))
@@ -294,6 +301,7 @@ mod tests {
             .expect(times).mount(server).await;
     }
 
+    /// Count relation requests that use the expected access token.
     async fn authorized_response(
         server: &MockServer,
         token: &str,
@@ -312,12 +320,14 @@ mod tests {
             .await;
     }
 
+    /// Build the Matrix error that permits one SDK token refresh.
     fn unknown_token() -> ResponseTemplate {
         ResponseTemplate::new(401)
             .set_body_json(serde_json::json!({"errcode":"M_UNKNOWN_TOKEN","error":"expired"}))
     }
 
     #[tokio::test]
+    /// Require SDK refresh and the new bearer token on the single relation retry.
     async fn given_expired_token_then_sdk_refreshes_once_and_new_token_retries_relations() {
         let server = MockServer::start().await;
         let client = refresh_client(&server).await;
@@ -341,6 +351,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Refuse a second token error without another refresh or relation retry.
     async fn given_repeated_unknown_token_then_only_one_refresh_and_two_requests_occur() {
         let server = MockServer::start().await;
         let client = refresh_client(&server).await;
@@ -354,6 +365,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Enforce the initial error-body cap before requesting an SDK token refresh.
     async fn given_oversized_401_then_no_refresh_or_retry_occurs() {
         let server = MockServer::start().await;
         let client = refresh_client(&server).await;
@@ -372,6 +384,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Apply the same response byte limit after token refresh.
     async fn given_oversized_retry_401_then_retry_body_is_also_bounded() {
         let server = MockServer::start().await;
         let client = refresh_client(&server).await;
@@ -391,6 +404,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Keep refresh limited to the Matrix unknown-token error.
     async fn given_other_auth_error_or_server_error_then_sdk_does_not_refresh() {
         for status in [401, 503] {
             let server = MockServer::start().await;

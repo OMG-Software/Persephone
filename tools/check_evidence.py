@@ -83,6 +83,7 @@ def strip_code_spans(text):
 
 
 def main():
+    """Check source hashes and selected documents; raise on invalid evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--revision", help="Check historical source blobs at this Git revision")

@@ -1918,6 +1918,7 @@ mod personal_contract_tests {
         assert!(serde_json::from_value::<T>(json).is_err());
     }
 
+    /// Check explicit nullable cursors and reject missing or invalid cursor fields.
     #[test]
     fn attachment_page_requires_an_explicit_nullable_cursor() {
         let page = serde_json::json!({"roomId":"!room:example.invalid","items":[],"nextCursor":null,"scanned":0,"partial":true});
@@ -1948,8 +1949,10 @@ mod personal_contract_tests {
         }
     }
 
+    /// Check navigation fixtures round-trip and reject unknown fields.
     #[test]
     fn navigation_fixtures_round_trip_and_reject_unexpected_data() {
+        /// Round-trip one typed fixture and reject an added unknown field.
         fn fixture<T: DeserializeOwned + Serialize>(wire: &str) {
             let value: serde_json::Value = serde_json::from_str(wire).unwrap();
             let decoded: T = serde_json::from_value(value.clone()).unwrap();
@@ -1971,6 +1974,7 @@ mod personal_contract_tests {
         assert!(serde_json::from_str::<SyncMode>("\"polling\"").is_err());
     }
 
+    /// Reject missing, duplicate, or invalid nullable fields and unsafe timestamps.
     #[test]
     fn navigation_nullable_fields_are_required_strict_and_javascript_safe() {
         let filters = serde_json::json!({"sender":null,"fromMs":null,"beforeMs":null});

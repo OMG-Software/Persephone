@@ -588,8 +588,7 @@
     if (generation === sessionGeneration) open(roomId);
   }
 
-  // The session changed: drop everything shown from it. Pending fetches see
-  // the cleared selection and discard their results.
+  /** Clear session-bound UI state and invalidate pending room-context work. */
   function reset() {
     cancelContext?.(); cancelContext = null;
     sessionGeneration += 1;
@@ -1107,7 +1106,7 @@
     }
   }
 
-  /** Refresh the newest page, coalescing overlapping invalidations and rejecting stale content. */
+  /** Refresh live history; clear a focused view on invalidation and reject stale page results. */
   async function refresh(roomId: string, generation: number) {
     if (!current(roomId, generation)) return;
     if (focusedContext) {
@@ -1270,8 +1269,7 @@
     typingNotifier.input();
   }
 
-  // Marks the selected room read once its newest event has been seen. Best
-  // effort: a failure is tried again with the next newest event.
+  /** Mark the newest visible event read, except while the user views focused context. */
   async function readTo(eventId: string) {
     if (focusedContext) return;
     const roomId = selected;

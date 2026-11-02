@@ -25,6 +25,7 @@ const MAX_SCAN: usize = 100;
 const MAX_ATTACHMENTS: usize = 50;
 const PIN_READ_BUDGET: Duration = Duration::from_secs(10);
 
+/// Reject oversized or invalid Matrix event IDs before room network operations.
 fn event_id(raw: &str) -> Result<&EventId, ErrorCode> {
     if raw.len() > MAX_EVENT_ID_BYTES {
         return Err(ErrorCode::InvalidArgument);
@@ -32,6 +33,7 @@ fn event_id(raw: &str) -> Result<&EventId, ErrorCode> {
     <&EventId>::try_from(raw).map_err(|_| ErrorCode::InvalidArgument)
 }
 
+/// Count the serialized value against the core reply or pin-state body budget.
 fn fits(value: &impl serde::Serialize) -> bool {
     serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= MAX_PAGE_BYTES)
 }
@@ -209,6 +211,7 @@ fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option
     .map(|(id, _)| id)
 }
 
+/// Extract the event reference from projected content; gaps have no event ID.
 fn item_id(item: &TimelineItem) -> Option<&str> {
     match item {
         TimelineItem::Message { event_id, .. }
@@ -223,6 +226,7 @@ fn item_id(item: &TimelineItem) -> Option<&str> {
     }
 }
 
+/// Require readable room power levels to determine pin-state permission.
 async fn can_manage(client: &Client, room: &Room) -> Result<bool, ErrorCode> {
     let own = client.user_id().ok_or(ErrorCode::Locked)?;
     Ok(crate::room_settings::power_levels(client, room)
@@ -493,6 +497,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Check event ID rejection before any request can reach the homeserver.
     fn given_invalid_or_oversized_event_id_then_reject_before_network() {
         assert_eq!(
             event_id("not an event").unwrap_err(),
@@ -506,6 +511,7 @@ mod tests {
     }
 
     #[test]
+    /// Keep opaque cursors room-scoped and reject them after bounded-cache eviction.
     fn given_cross_room_or_expired_cursor_then_no_server_token_is_disclosed() {
         let views = MatrixViews::default();
         let cursor = views.remember("!a:example.org", "secret-server-token".to_owned());
@@ -524,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    /// Include JSON overhead when testing the serialized reply budget.
     fn given_projection_budget_then_serialized_envelope_counts_toward_limit() {
         assert!(fits(&"x".repeat(MAX_PAGE_BYTES - 2)));
         assert!(!fits(&"x".repeat(MAX_PAGE_BYTES - 1)));
@@ -541,6 +548,7 @@ mod tests {
     };
     const ROOM: &str = "!dm:synthetic.test";
 
+    /// Construct a synthetic sync state event with a stable event reference.
     fn state_event(kind: &str, key: &str, sender: &str, content: Value) -> Value {
         json!({
             "type": kind, "state_key": key, "sender": sender, "content": content,
@@ -648,6 +656,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Return an unavailable result instead of scanning history after an unsupported endpoint.
     async fn given_unsupported_timestamp_endpoint_then_no_history_scan() {
         let server = MockServer::start().await;
         let client = synced(&server, false, &["@alice:synthetic.test"]).await;
@@ -678,6 +687,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Reject pin mutation without sending a state write when permission is absent.
     async fn given_no_state_permission_then_pin_write_is_rejected() {
         let server = MockServer::start().await;
         let client = synced(&server, false, &["@alice:synthetic.test"]).await;
@@ -696,6 +706,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Retain scan continuation when the fetched window contains no attachments.
     async fn given_non_attachment_history_then_empty_page_keeps_backward_cursor() {
         let server = MockServer::start().await;
         let client = synced(&server, false, &["@alice:synthetic.test"]).await;
@@ -739,6 +750,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Reject a context response whose target differs from the requested event.
     async fn given_context_target_identity_mismatch_then_reject() {
         let server = MockServer::start().await;
         let client = synced(&server, false, &["@alice:synthetic.test"]).await;
@@ -755,6 +767,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Apply moderator deletions even when their sender and date fail the media filters.
     async fn given_moderator_redaction_outside_filters_then_attachment_is_hidden() {
         let server = MockServer::start().await;
         let client = synced(&server, false, &["@alice:synthetic.test"]).await;
@@ -789,6 +802,7 @@ mod tests {
         );
     }
 
+    /// Serve one bounded target context with private backward and forward tokens.
     async fn context_mock(server: &MockServer) {
         Mock::given(method("GET")).and(path(format!("/_matrix/client/v3/rooms/{ROOM}/context/$wanted")))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event":{"type":"m.room.message","event_id":"$wanted","sender":"@alice:synthetic.test","origin_server_ts":10,"content":{"msgtype":"m.text","body":"target"}},"events_before":[],"events_after":[],"state":[],"start":"context-older","end":"context-newer"})))
@@ -796,6 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Return the selected target and an opaque cursor for its older context boundary.
     async fn given_timestamp_forward_match_then_focused_page_retains_cursor() {
         let server = MockServer::start().await;
         let client = synced(&server, false, &["@alice:synthetic.test"]).await;
@@ -828,6 +843,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Use the backward timestamp endpoint only after a missing forward result.
     async fn given_missing_forward_timestamp_then_backward_match_is_used() {
         let server = MockServer::start().await;
         let client = synced(&server, false, &["@alice:synthetic.test"]).await;
@@ -865,6 +881,7 @@ mod tests {
         );
     }
 
+    /// Restore a joined synthetic account with permission to change pin state.
     async fn manager(server: &MockServer) -> Client {
         let mut sync = sync_reply(false, &["@alice:synthetic.test"]);
         let state = sync["rooms"]["join"][ROOM]["state"]["events"]
@@ -885,6 +902,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Preserve fresh existing pin IDs when adding a validated target.
     async fn given_manager_and_valid_target_then_pin_writes_fresh_state() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -913,6 +931,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Refuse additions at the pin limit before fetching target content or writing state.
     async fn given_full_pin_state_then_new_pin_is_refused_without_target_fetch() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -940,6 +959,7 @@ mod tests {
         );
     }
     #[tokio::test]
+    /// Deduplicate displayed references and avoid repeated content requests.
     async fn given_duplicate_pin_ids_then_one_reference_and_one_event_fetch() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -973,10 +993,12 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert!(!result.truncated);
     }
+    /// Construct a plain synthetic message with an explicit sender and server time.
     fn text_event(id: &str, sender: &str, time: u64, body: &str) -> Value {
         json!({"type":"m.room.message","event_id":id,"sender":sender,"origin_server_ts":time,"content":{"msgtype":"m.text","body":body}})
     }
 
+    /// Serve one fresh pin-state read with the supplied event references.
     async fn pin_state(server: &MockServer, ids: Value) {
         Mock::given(method("GET"))
             .and(path(format!(
@@ -988,6 +1010,7 @@ mod tests {
             .await;
     }
 
+    /// Serve exactly one content read for a referenced pin.
     async fn pin_event(server: &MockServer, id: &str, event: Value) {
         Mock::given(method("GET"))
             .and(path(format!("/_matrix/client/v3/rooms/{ROOM}/event/{id}")))
@@ -997,6 +1020,7 @@ mod tests {
             .await;
     }
 
+    /// Serve one replacement page for the specified pin reference.
     async fn pin_relations(server: &MockServer, id: &str, response: Value) {
         Mock::given(method("GET"))
             .and(path(format!(
@@ -1008,6 +1032,7 @@ mod tests {
             .await;
     }
 
+    /// Construct a same-room replacement relation with independently supplied sender and time.
     fn replacement(id: &str, sender: &str, time: u64, body: &str) -> Value {
         let mut event = text_event(id, sender, time, "* fallback");
         event["room_id"] = json!(ROOM);
@@ -1017,6 +1042,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Show the latest validated text and reject a newer edit from another sender.
     async fn given_pin_edits_then_latest_same_sender_text_wins_and_forgery_is_ignored() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1047,6 +1073,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Retain pin references without exposing stale text when current edits cannot be checked.
     async fn given_incomplete_or_undecryptable_pin_edits_then_original_preview_is_suppressed() {
         for mode in ["unavailable", "partial", "undecryptable"] {
             let server = MockServer::start().await;
@@ -1098,6 +1125,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Stop content reads at the shared deadline while retaining bounded pin references.
     async fn given_slow_pin_fetch_then_total_deadline_preserves_refs_and_stops_later_fetches() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1135,6 +1163,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Prevent content requests after the session-open callback observes closure.
     async fn given_session_closes_after_state_read_then_no_pin_content_fetch_starts() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1168,6 +1197,7 @@ mod tests {
         );
     }
 
+    /// Serve an ignored timestamp target and optionally a visible later context message.
     async fn ignored_date_fixture(server: &MockServer, later: bool) -> Client {
         let mut sync = sync_reply(false, &["@alice:synthetic.test"]);
         sync["account_data"]["events"].as_array_mut().unwrap().push(json!({"type":"m.ignored_user_list","content":{"ignored_users":{"@ignored:synthetic.test":{}}}}));
@@ -1206,6 +1236,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Select eligible visible content from the same bounded context after hiding the target.
     async fn given_ignored_date_target_then_visible_later_context_event_is_selected() {
         let server = MockServer::start().await;
         let client = ignored_date_fixture(&server, true).await;
@@ -1223,6 +1254,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Return not found when the bounded context has no eligible visible event.
     async fn given_no_visible_date_target_then_not_found_without_extra_history_scan() {
         let server = MockServer::start().await;
         let client = ignored_date_fixture(&server, false).await;
@@ -1241,6 +1273,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Exclude edit-only events without fetching their target while scanning attachments.
     async fn given_attachment_page_with_edit_then_no_original_event_lookup_occurs() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1270,6 +1303,7 @@ mod tests {
         );
     }
     #[tokio::test]
+    /// Require the same edit winner for both response orders when server times match.
     async fn given_equal_time_pin_edits_then_event_id_breaks_ties_in_either_order() {
         for reverse in [false, true] {
             let server = MockServer::start().await;
@@ -1299,6 +1333,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Remove one reference from larger existing state without truncating or reordering the rest.
     async fn given_101_pins_then_removal_preserves_every_other_id_in_order() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1318,6 +1353,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Permit no further additions to state already above the display/add limit.
     async fn given_101_pins_then_add_is_refused_without_fetch_or_write() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1341,6 +1377,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Refuse state above the separate removal count cap without a state write.
     async fn given_pin_state_above_removal_count_cap_then_no_write_occurs() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1368,6 +1405,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Check the complete replacement body budget even for a permitted removal count.
     async fn given_removal_content_above_byte_budget_then_no_write_occurs() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1390,6 +1428,7 @@ mod tests {
         );
     }
     #[tokio::test]
+    /// Hide one untrustworthy preview while retaining its reference and other healthy pins.
     async fn given_untrustworthy_pin_relation_room_then_only_that_preview_is_suppressed() {
         for room_id in [json!("!other:synthetic.test"), json!(17)] {
             let server = MockServer::start().await;
@@ -1436,6 +1475,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Preserve rejection of an invalid original even when a replacement is also invalid.
     async fn given_original_room_mismatch_then_bad_relation_does_not_mask_rejection() {
         let server = MockServer::start().await;
         let client = manager(&server).await;
@@ -1450,5 +1490,64 @@ mod tests {
             pinned_messages(&client, &MatrixViews::default(), ROOM, || true).await,
             Err(ErrorCode::Rejected)
         ));
+    }
+    /// Preserve ignore-store failure when an invalid relation suppresses a pin preview.
+    #[tokio::test]
+    async fn given_invalid_pin_relation_and_malformed_ignore_state_then_projection_is_unavailable()
+    {
+        use matrix_sdk::ruma::{events::GlobalAccountDataEventType, serde::Raw};
+        use matrix_sdk_base::store::StateChanges;
+
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        pin_event(
+            &server,
+            "$pin",
+            text_event(
+                "$pin",
+                "@alice:synthetic.test",
+                1,
+                "obsolete sensitive text",
+            ),
+        )
+        .await;
+        let mut bad = replacement("$bad-room", "@alice:synthetic.test", 2, "replacement");
+        bad["room_id"] = json!("!other:synthetic.test");
+        pin_relations(&server, "$pin", json!({"chunk":[bad]})).await;
+        let joined = joined_room(&client, ROOM).unwrap();
+        let id = event_id("$pin").unwrap();
+        // Fetch before corruption: SDK push-context construction itself reads
+        // ignore state. This test must reach the invalid-relation projection.
+        let original = joined.event(id, None).await.unwrap();
+        let edits = crate::room_relations::replacements(&client, &joined, id)
+            .await
+            .unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0]
+                .raw()
+                .get_field::<String>("room_id")
+                .unwrap()
+                .as_deref(),
+            Some("!other:synthetic.test")
+        );
+        let mut changes = StateChanges::default();
+        changes.account_data.insert(
+            GlobalAccountDataEventType::IgnoredUserList,
+            Raw::new(&json!({
+                "type":"m.ignored_user_list", "content":{"ignored_users":[]}
+            }))
+            .unwrap()
+            .cast_unchecked(),
+        );
+        client.state_store().save_changes(&changes).await.unwrap();
+        assert_eq!(
+            crate::abuse::ignored_set(&client).await,
+            Err(ErrorCode::Unavailable)
+        );
+        let result = MatrixViews::default()
+            .project_pin(&client, &joined, original, edits)
+            .await;
+        assert!(matches!(result, Err(ErrorCode::Unavailable)), "{result:?}");
     }
 }

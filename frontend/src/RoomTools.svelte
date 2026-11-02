@@ -38,7 +38,7 @@
     });
   }
   $effect(changedQuery);
-  /** Fetch one bounded page; only explicit Load more appends matching metadata. */
+  /** Fetch one bounded page and reject replies after the room query changes. */
   async function load(more = false) {
     if (busy || (mode === 'attachments' && !filters)) return;
     const asked = ++request;
@@ -69,7 +69,7 @@
     catch { if (asked === request) failure = 'The pin could not be removed. Room permission may have changed.'; }
     finally { if (asked === request) busy = false; }
   }
-  /** Keep navigation errors in this dialog while the owner guards timeline state. */
+  /** Run one context action; App owns room and session guards for its results. */
   async function navigate(action: () => Promise<void>) {
     if (busy) return;
     const asked = ++request; busy = true; failure = null;

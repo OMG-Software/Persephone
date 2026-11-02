@@ -468,6 +468,7 @@ impl MatrixViews {
         format!("{CURSOR_PREFIX}{number}")
     }
 
+    /// Resolve only canonical, retained cursors for the requested room; never accept server tokens.
     pub(crate) fn token(&self, room: &str, cursor: &str) -> Result<String, ErrorCode> {
         if cursor.len() > MAX_CURSOR_BYTES {
             return Err(ErrorCode::InvalidArgument);

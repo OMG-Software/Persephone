@@ -2042,6 +2042,39 @@
         ".local/runs/pr47-monitor/ci-temp-root-failure-excerpts.log"
       ],
       "not_run": "Runtime sources unchanged; no repeated Rust/frontend/server tests. Remote runner acceptance remains pending; previous native/live/SDK gates stay open."
+    },
+    {
+      "name": "pr47_coderabbit_merge_follow_up",
+      "checked_on": "2026-11-02",
+      "base_commit": "9f2e01176624e0283e2a257a7c4b5f249bc45a69",
+      "exit_code": 0,
+      "source": "Function documentation across 18 files and one new pin projection regression; executable-source audit confirms no production statement changes.",
+      "frontend_tests_passed": 196,
+      "python_checker_tests_passed": 11,
+      "python_checker_tests_skipped": 2,
+      "room_tools_tests_passed_default": 28,
+      "room_tools_tests_passed_dev_disposable_servers": 28,
+      "negative_control_exit_code": 101,
+      "negative_control_outcome": "Removing the existing ignore-state validation makes the new projection regression fail with Ok([]). Source restored; regression passes.",
+      "initial_test_fixture_failures": "Two exit101 attempts corrupted ignore state before SDK Room::event; SDK push-context error prevented reaching the projection. Final fixture fetches events first.",
+      "rust_doc_targets_compiled": 4,
+      "rust_executable_doctests": 0,
+      "rustdoc_build_exit_code": 0,
+      "rustdoc_existing_private_link_warnings": 3,
+      "rust_format_exit_code": 0,
+      "source_manifest_sha256": "0b4f19cd50bc351a3ca01b5c14b9e43f72072fb3c80d60736d7b050f81968f89",
+      "report": "room-navigation-coderabbit-merge-fixes.md",
+      "raw_logs": [
+        ".local/runs/pr47-monitor/docstring-frontend.log",
+        ".local/runs/pr47-monitor/docstring-checker.log",
+        ".local/runs/pr47-monitor/ignore-guard-fixed-tests.log",
+        ".local/runs/pr47-monitor/ignore-guard-fixed-dev-tests.log",
+        ".local/runs/pr47-monitor/ignore-guard-negative-control.log",
+        ".local/runs/pr47-monitor/ignore-guard-restored.log",
+        ".local/runs/pr47-monitor/docstring-rustdoc-build.log",
+        ".local/runs/pr47-monitor/coderabbit-final-source-audit.log"
+      ],
+      "not_run": "Full workspace check, mounted RoomTools interaction, native UI, live homeservers, other-platform runtime, containment, release and audit acceptance. SDK buffering/drain limitations remain open. Remote CodeRabbit approval not yet verified."
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

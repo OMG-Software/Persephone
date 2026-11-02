@@ -32,7 +32,7 @@
   $effect(clearRoomResults);
   $effect(() => { sender; from; before; results = null; });
   onDestroy(() => { request += 1; results = null; term = ''; });
-  /** Search cached text only; request IDs prevent older results replacing a newer view. */
+  /** Search cached text with validated filters; ignore replies after request invalidation. */
   async function search(event: SubmitEvent) {
     event.preventDefault();
     if (busy || !filters || !term.trim() || byteLength(term) > 128) return;

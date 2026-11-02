@@ -17,6 +17,7 @@ test('GIVEN search filters WHEN sender and dates are valid THEN retain exact bou
   assert.equal(searchFilters('', '2026-01-01T10:00', '2026-01-01T10:00'), null);
 });
 
+/** Make the minimal file item used by attachment-page unit cases. */
 const file = (id) => ({ kind: 'file', event_id: id });
 test('GIVEN overlapping metadata pages WHEN appended THEN deduplicate, filter and bound state', () => {
   assert.deepEqual(appendAttachments([file('$a')], [file('$a'), { kind: 'gap' }, { kind: 'message', event_id: '$x' }, file('$b')]), [file('$a'), file('$b')]);

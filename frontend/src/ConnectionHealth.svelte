@@ -21,6 +21,7 @@
   onMount(refresh);
   onDestroy(() => { request += 1; health = null; });
   const labels = $derived(health ? healthLabels(health) : null);
+  /** Format an observed timestamp in the computer's local time zone. */
   const timestamp = (value: number | null) => value === null ? 'Not recorded' : new Date(value).toLocaleString();
 </script>
 <FeatureDialog title="Connection health" {onclose}>

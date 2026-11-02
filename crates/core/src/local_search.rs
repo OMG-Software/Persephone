@@ -423,6 +423,7 @@ mod tests {
         )
     }
 
+    /// Search synthetic cached events with the default filters and supplied ignore policy.
     fn results(events: &[TimelineEvent], term: &str, ignored: &[&str]) -> LocalSearchResults {
         let mut output = LocalSearchResults {
             results: Vec::new(),
@@ -444,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    /// Check exact sender matching and inclusive/exclusive dates, including missing times.
     fn given_sender_and_date_filters_then_boundaries_and_unknown_dates_are_explicit() {
         let filters = LocalSearchFilters {
             sender: Some("@alice:s".into()),
@@ -492,6 +494,7 @@ mod tests {
     }
 
     #[test]
+    /// Apply edits and deletions before filtering the original message by its date.
     fn given_relations_outside_date_filter_then_current_original_text_is_searched() {
         let filters = LocalSearchFilters {
             sender: Some("@alice:s".into()),
@@ -672,6 +675,7 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Read bounded encrypted cache history without sending search requests to the server.
     async fn given_encrypted_sqlite_cache_then_search_traverses_bounded_history_without_http() {
         use matrix_sdk::linked_chunk::{ChunkIdentifier, Position, Update};
         use matrix_sdk_sqlite::SqliteEventCacheStore;

@@ -2479,6 +2479,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Reserve room and cache-search slots independently, and refuse excess work.
     fn given_pending_room_reads_then_local_search_has_independent_bounded_admission() {
         let core = Core::default();
         let room_read = Call::PinnedMessages {
@@ -2524,6 +2525,7 @@ mod tests {
     }
 
     #[test]
+    /// Keep personal storage unavailable in demo and signed-out states; reject bad input.
     fn personal_commands_reject_bad_input_and_have_no_demo_or_signed_out_store() {
         let core = Core::default();
         let valid = [

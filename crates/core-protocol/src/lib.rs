@@ -2194,6 +2194,7 @@ mod tests {
 mod personal_tests {
     use super::*;
 
+    /// Check strict personal command schemas and required nullable fields.
     #[test]
     fn personal_wire_round_trips_and_requires_nullable_fields() {
         for json in [
@@ -2224,6 +2225,7 @@ mod personal_tests {
         }
     }
 
+    /// Check UTF-8 byte limits and reject disallowed control characters.
     #[test]
     fn personal_limits_count_utf8_bytes_and_reject_control_characters() {
         let search = |term| Call::SearchMessages {
@@ -2246,6 +2248,7 @@ mod personal_tests {
 #[cfg(test)]
 mod navigation_wire_tests {
     use super::*;
+    /// Build valid navigation command fixtures with explicit nullable filters.
     fn calls() -> Vec<serde_json::Value> {
         let filters = serde_json::json!({"sender":null,"fromMs":null,"beforeMs":null});
         vec![
@@ -2258,6 +2261,7 @@ mod navigation_wire_tests {
             serde_json::json!({"command":"connection_health"}),
         ]
     }
+    /// Reject missing and extra navigation fields while accepting valid commands.
     #[test]
     fn navigation_commands_require_exact_wire_fields() {
         for value in calls() {
@@ -2294,6 +2298,7 @@ mod navigation_wire_tests {
             }
         }
     }
+    /// Reject oversized identifiers and cursors, unsafe timestamps, and invalid ranges.
     #[test]
     fn navigation_limits_reject_oversized_ids_cursors_and_invalid_ranges() {
         for value in calls() {

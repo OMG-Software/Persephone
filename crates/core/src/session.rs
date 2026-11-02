@@ -236,6 +236,7 @@ struct SyncHealth {
 }
 
 impl Default for SyncHealth {
+    /// Start without sync observations or a selected sync mode.
     fn default() -> Self {
         Self {
             mode: SyncMode::Unknown,
@@ -249,6 +250,7 @@ impl Default for SyncHealth {
 }
 
 impl SyncHealth {
+    /// Record one sync outcome; saturate failure counts and bound the reported retry delay.
     fn observe(
         &mut self,
         attempt: Option<u64>,
@@ -272,6 +274,7 @@ impl SyncHealth {
     }
 }
 
+/// Return representable Unix milliseconds, or none if the system clock is unusable.
 fn observed_time() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2627,6 +2630,7 @@ mod tests {
             requests: Arc<AtomicUsize>,
         }
         impl Respond for SyncResponse {
+            /// Serve controlled sync success or failure and count each production-loop request.
             fn respond(&self, _: &Request) -> ResponseTemplate {
                 let round = self.requests.fetch_add(1, Ordering::SeqCst);
                 if self.fail.load(Ordering::SeqCst) {
@@ -2717,6 +2721,7 @@ mod tests {
     }
 
     #[test]
+    /// Keep the last successful observation through failures and clear failure state on recovery.
     fn given_sync_observations_then_success_failure_and_recovery_preserve_actual_history() {
         let mut health = SyncHealth::default();
         assert_eq!(health.mode, SyncMode::Unknown);
@@ -2753,6 +2758,7 @@ mod tests {
     }
 
     #[test]
+    /// Prevent a sync round from publishing health after its session generation ends.
     fn given_lock_during_sync_then_health_reset_rejects_stale_round_commit() {
         let dir = tempfile::TempDir::new().unwrap();
         let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());

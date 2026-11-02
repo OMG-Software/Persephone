@@ -34,6 +34,7 @@ impl FakeCore {
 }
 
 impl CoreTransport for FakeCore {
+    /// Return synthetic typed replies and count each request that reaches the fake core.
     fn call(&self, call: Call) -> Result<serde_json::Value, CoreError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if !self.available {
@@ -627,6 +628,7 @@ fn given_wrong_invoke_key_then_the_request_is_dropped_unanswered() {
     );
 }
 
+/// Check the shell configuration keeps restrictive capabilities and window policies.
 #[test]
 fn given_shell_config_then_security_settings_are_restrictive() {
     let config: serde_json::Value =
@@ -2428,6 +2430,7 @@ fn given_notifications_with_and_without_names_then_only_named_ones_show_names() 
     );
 }
 
+/// Check local personal commands succeed and remote origins or invalid replies fail.
 #[test]
 fn personal_commands_cross_only_with_bounded_input_and_typed_replies() {
     let cases = [
@@ -2473,6 +2476,7 @@ fn personal_commands_cross_only_with_bounded_input_and_typed_replies() {
     );
 }
 
+/// Reject invalid personal arguments before they reach the core transport.
 #[test]
 fn personal_limits_reject_before_relay_and_nested_extra_fields_are_refused() {
     let fake = FakeCore::new(true);
@@ -2521,6 +2525,7 @@ fn personal_limits_reject_before_relay_and_nested_extra_fields_are_refused() {
     assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
 }
 
+/// Check navigation replies and reject remote origins or invalid input before relay.
 #[test]
 fn navigation_commands_allow_local_views_and_deny_remote_origins_before_relay() {
     let fake = FakeCore::new(true);

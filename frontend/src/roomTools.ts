@@ -44,7 +44,7 @@ export function searchFilters(sender: string, from: string, before: string): Loc
   return { sender: exact || null, fromMs, beforeMs };
 }
 
-/** Keep metadata bounded and deduplicate overlapping pages. */
+/** Deduplicate overlapping image/file pages and retain at most 500 items. */
 export function appendAttachments(previous: TimelineItem[], page: TimelineItem[]): TimelineItem[] {
   const ids = new Set<string>();
   return [...previous, ...page].filter((item) => {

@@ -181,7 +181,7 @@ export function jumpToDate(roomId: string, timestampMs: number): Promise<Focused
   return invoke<FocusedTimeline>('jump_to_date', { roomId, timestampMs });
 }
 
-/** Load bounded context for an explicit event without exposing pagination tokens. */
+/** Load bounded event context through the core's Matrix client. */
 export function eventContext(roomId: string, eventId: string): Promise<FocusedTimeline> {
   return invoke<FocusedTimeline>('event_context', { roomId, eventId });
 }
