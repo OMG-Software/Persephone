@@ -1375,6 +1375,50 @@ pub struct UserSearch {
     pub truncated: bool,
 }
 
+/// One room from a public room directory. Everything here is the
+/// directory's word: names and the topic are projected like any name or
+/// message body, and IDs are sent unchanged only when they are valid.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PublicRoom {
+    pub room_id: String,
+    pub name: Option<String>,
+    /// The room's main address, such as `#rust:example.org`.
+    pub alias: Option<String>,
+    /// Cut short by the core to at most 500 characters.
+    pub topic: Option<String>,
+    /// The directory's count of joined members.
+    pub members: u32,
+    /// Anyone, joined or not, may read the room's history.
+    pub world_readable: bool,
+    /// Guest accounts may join.
+    pub guests_can_join: bool,
+    /// The room lets anyone join, so `join_public_room` may join it. A room
+    /// that asks to knock, or only lets in members of another room, is not.
+    pub joinable: bool,
+    /// This account has already joined the room.
+    pub joined: bool,
+}
+
+/// Reply of `public_rooms`: one page of a public room directory, in the
+/// directory's order.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PublicRoomPage {
+    pub rooms: Vec<PublicRoom>,
+    /// The token for the next page, or none on the last page.
+    pub next: Option<String>,
+    /// The directory's estimate of how many rooms it lists, if it gave one.
+    pub total: Option<u32>,
+}
+
+/// Reply of `join_public_room`: the room joined.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct JoinedRoom {
+    pub room_id: String,
+}
+
 /// State of the local encrypted store. Codes only: no paths, key material or
 /// error text reach the UI.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -1882,6 +1926,9 @@ pub fn generated_typescript() -> String {
         format!("export {}", ProfileList::decl(&config)),
         format!("export {}", UserMatch::decl(&config)),
         format!("export {}", UserSearch::decl(&config)),
+        format!("export {}", PublicRoom::decl(&config)),
+        format!("export {}", PublicRoomPage::decl(&config)),
+        format!("export {}", JoinedRoom::decl(&config)),
         format!("export {}", NoticeKind::decl(&config)),
         format!("export {}", MembershipChange::decl(&config)),
         format!("export {}", StateChange::decl(&config)),

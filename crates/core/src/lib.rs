@@ -37,6 +37,7 @@ pub mod activity;
 pub mod contacts;
 pub mod conversations;
 pub mod credentials;
+pub mod directory;
 pub mod discovery;
 pub mod files;
 pub mod homeserver;
@@ -275,6 +276,11 @@ pub struct Core {
     conversation: conversations::Busy,
     /// One user-directory search at a time.
     search: conversations::Busy,
+    /// One public room directory page at a time.
+    public_rooms: conversations::Busy,
+    /// The rooms public room directory pages offered to join, with the
+    /// session generation they were listed in.
+    offers: Mutex<directory::Offers>,
     /// Serializes encrypted record read/modify/write operations.
     personal: conversations::Busy,
     local_search: conversations::Busy,
@@ -475,6 +481,8 @@ impl Core {
             budgets,
             conversation: conversations::Busy::default(),
             search: conversations::Busy::default(),
+            public_rooms: conversations::Busy::default(),
+            offers: Mutex::new(directory::Offers::default()),
             personal: conversations::Busy::default(),
             local_search: conversations::Busy::default(),
             room_reads: conversations::Busy::default(),
@@ -623,6 +631,8 @@ impl Core {
             | Call::OpenLink { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
+            | Call::PublicRooms { .. }
+            | Call::JoinPublicRoom { .. }
             | Call::CreateRoom { .. }
             | Call::InviteUser { .. }
             | Call::DisplayName {}
@@ -938,6 +948,8 @@ impl Core {
             | Call::OpenLink { .. }
             | Call::StartConversation { .. }
             | Call::SearchUsers { .. }
+            | Call::PublicRooms { .. }
+            | Call::JoinPublicRoom { .. }
             | Call::CreateRoom { .. }
             | Call::InviteUser { .. }
             | Call::DisplayName {}
@@ -1161,6 +1173,8 @@ impl Core {
             OpenLink(url::Url),
             Start(OwnedUserId),
             Search(String),
+            PublicRooms(directory::PageRequest),
+            JoinPublicRoom(matrix_sdk::ruma::OwnedRoomId),
             CreateRoom(String, Vec<OwnedUserId>),
             Invite(String, OwnedUserId),
             DisplayName,
@@ -1219,6 +1233,21 @@ impl Core {
             Call::SearchUsers { term } if conversations::valid_term(term) => {
                 Work::Search(term.clone())
             }
+            Call::PublicRooms {
+                server,
+                filter,
+                since,
+            } => Work::PublicRooms(
+                directory::PageRequest::parse(
+                    server.as_deref(),
+                    filter.as_deref(),
+                    since.as_deref(),
+                )
+                .ok_or(ErrorCode::InvalidArgument)?,
+            ),
+            Call::JoinPublicRoom { room_id } if valid_room_id(room_id) => Work::JoinPublicRoom(
+                matrix_sdk::ruma::RoomId::parse(room_id).map_err(|_| ErrorCode::InvalidArgument)?,
+            ),
             Call::CreateRoom { name, invite } if conversations::valid_room_name(name) => {
                 Work::CreateRoom(
                     name.trim().to_owned(),
@@ -1311,6 +1340,9 @@ impl Core {
         let slot = match work {
             Work::Search(_) => Slot::Held {
                 _guard: self.search.begin()?,
+            },
+            Work::PublicRooms(_) => Slot::Held {
+                _guard: self.public_rooms.begin()?,
             },
             Work::MarkRead(..) | Work::Typing(..) => Slot::Held {
                 _guard: self.read_marker.begin()?,
@@ -1405,6 +1437,28 @@ impl Core {
                 Work::Search(term) => json(self.with_matrix(generation, async |client| {
                     conversations::search(&client, term).await
                 })),
+                Work::PublicRooms(request) => self
+                    .with_matrix(generation, async |client| {
+                        directory::list(&client, request).await
+                    })
+                    .and_then(|(page, offers)| match bounded(&page) {
+                        Outcome::Ok(value) => {
+                            lock(&self.offers).remember(generation, offers);
+                            Ok(value)
+                        }
+                        Outcome::Error(code) => Err(code),
+                    }),
+                Work::JoinPublicRoom(room_id) => {
+                    // The guard is dropped before the join: no lock is held
+                    // while the homeserver answers.
+                    let via = lock(&self.offers).via(generation, room_id);
+                    match via {
+                        None => Err(ErrorCode::NotFound),
+                        Some(via) => json(self.with_matrix(generation, async |client| {
+                            directory::join(&client, room_id, &via).await
+                        })),
+                    }
+                }
                 Work::CreateRoom(name, invite) => {
                     json(self.with_matrix(generation, async |client| {
                         conversations::create_room(&client, name, invite.clone()).await
@@ -1515,7 +1569,11 @@ impl Core {
             };
             let rooms_changed = matches!(
                 work,
-                Work::Accept(_) | Work::Decline(_) | Work::Start(_) | Work::CreateRoom(..)
+                Work::Accept(_)
+                    | Work::Decline(_)
+                    | Work::Start(_)
+                    | Work::CreateRoom(..)
+                    | Work::JoinPublicRoom(_)
             );
             if outcome.is_ok() && rooms_changed {
                 self.hub.mark_list_changed(&[], true);
@@ -2947,6 +3005,58 @@ mod tests {
             (
                 Call::SearchUsers {
                     term: "b".repeat(persephone_core_protocol::MAX_SEARCH_TERM_BYTES + 1),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::PublicRooms {
+                    server: None,
+                    filter: None,
+                    since: None,
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::PublicRooms {
+                    server: Some("example.org".into()),
+                    filter: Some("rust".into()),
+                    since: Some("p30".into()),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::PublicRooms {
+                    server: Some("https://example.org".into()),
+                    filter: None,
+                    since: None,
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::PublicRooms {
+                    server: None,
+                    filter: Some(" ".into()),
+                    since: None,
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::PublicRooms {
+                    server: None,
+                    filter: None,
+                    since: Some("p 30".into()),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::JoinPublicRoom {
+                    room_id: "!r:s".into(),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::JoinPublicRoom {
+                    room_id: "#alias:s".into(),
                 },
                 ErrorCode::InvalidArgument,
             ),

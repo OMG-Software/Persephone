@@ -13,6 +13,8 @@
   import ReportAbuse from './ReportAbuse.svelte';
   import RoomOrganisation from './RoomOrganisation.svelte';
   import RoomGroups from './RoomGroups.svelte';
+  import PublicRooms from './PublicRooms.svelte';
+  import { ownServer } from './publicRooms.ts';
   import SavedDrafts from './SavedDrafts.svelte';
   import StoredRoomGroups from './StoredRoomGroups.svelte';
   import { DraftKeeper } from './drafts';
@@ -266,6 +268,8 @@
   // for it, because each of its writes carries the room's favourite value.
   let groupsOpen = $state(false);
   let groupsBusy = $state(false);
+  // The public room directory dialog.
+  let directoryOpen = $state(false);
   // Changes when trust may have changed, so the member panel reads it again.
   let trustVersion = $state(0);
   // The room list width, changed with the resize handle; kept in memory only.
@@ -486,7 +490,7 @@
     }
     // Native modal dialogs keep pointer focus inside. Keep the global room
     // shortcut inside the same boundary, especially during saved-draft removal.
-    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || sectionOpen || groupsOpen || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
+    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || sectionOpen || groupsOpen || directoryOpen || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
     if (chatShown && rooms && !paletteOpen) {
       event.preventDefault();
       paletteOpen = true;
@@ -662,6 +666,7 @@
     favouriteFailure = null;
     groupsOpen = false;
     groupsBusy = false;
+    directoryOpen = false;
     focusEvent = null;
     searchLocation = null;
     textSending = false;
@@ -1816,6 +1821,7 @@
 
   // The main menu: account-wide tools that used to be buttons above the room.
   const mainMenu: MenuItem[] = [
+    { label: 'Explore public rooms', onselect: () => (directoryOpen = true) },
     { label: 'Room groups', onselect: () => (groupsOpen = rooms !== null) },
     { label: 'Search cached messages', onselect: () => (searchOpen = true) },
     { label: 'Saved drafts', onselect: () => void openSavedDrafts() },
@@ -2113,6 +2119,7 @@
         {inviteBusy}
         onnewconversation={signedIn ? () => (newConversationOpen = true) : undefined}
         onnewroom={signedIn ? () => (newRoomOpen = true) : undefined}
+        onexplore={signedIn ? () => (directoryOpen = true) : undefined}
         onaccept={(roomId) => answerInvite(roomId, true)}
         ondecline={(roomId) => answerInvite(roomId, false)}
         onfavourite={signedIn ? toggleFavourite : undefined}
@@ -2394,6 +2401,10 @@
       {#if groupsOpen && signedIn && rooms}
         <RoomGroups rooms={rooms.rooms} {preferences} favouriteSaving={favouriteBusy} onchanged={preferenceChanged}
           onbusy={(busy) => (groupsBusy = busy)} onclose={() => (groupsOpen = false)} />
+      {/if}
+      {#if directoryOpen && signedIn}
+        <PublicRooms homeserver={ownServer(status.account.userId)} onopen={open} onjoined={openConversation}
+          onclose={() => (directoryOpen = false)} />
       {/if}
       {#if reportTarget && signedIn}
         <ReportAbuse roomId={reportTarget.roomId} eventId={reportTarget.eventId} sender={reportTarget.sender}

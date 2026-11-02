@@ -316,6 +316,51 @@ impl CoreTransport for FakeCore {
                     "truncated": false
                 })),
             },
+            Call::PublicRooms {
+                server,
+                filter,
+                since,
+            } => match (server.as_deref(), filter.as_deref(), since.as_deref()) {
+                (None, None, None) => Ok(serde_json::json!({
+                    "rooms": [{
+                        "roomId": "!pub:example.invalid",
+                        "name": "<b>Lobby</b>",
+                        "alias": "#lobby:example.invalid",
+                        "topic": null,
+                        "members": 3,
+                        "worldReadable": true,
+                        "guestsCanJoin": false,
+                        "joinable": true,
+                        "joined": false
+                    }],
+                    "next": "p1",
+                    "total": 1
+                })),
+                (Some("other.invalid"), Some("rust"), Some("p1")) => {
+                    Ok(serde_json::json!({"rooms": [], "next": null, "total": null}))
+                }
+                // A room carrying an avatar the contract does not have.
+                _ => Ok(serde_json::json!({
+                    "rooms": [{
+                        "roomId": "!a:example.invalid",
+                        "name": null,
+                        "alias": null,
+                        "topic": null,
+                        "members": 1,
+                        "worldReadable": false,
+                        "guestsCanJoin": false,
+                        "joinable": true,
+                        "joined": false,
+                        "avatarUrl": "mxc://x/y"
+                    }],
+                    "next": null,
+                    "total": null
+                })),
+            },
+            Call::JoinPublicRoom { room_id } => match room_id.as_str() {
+                "!pub:example.invalid" => Ok(serde_json::json!({"roomId": room_id})),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
             Call::CreateRoom { name, invite } => match (name.as_str(), invite.as_slice()) {
                 ("Plans", [user]) if user == "@bob:example.invalid" => {
                     Ok(serde_json::json!({"kind": "created", "roomId": "!new:example.invalid"}))
@@ -1488,10 +1533,10 @@ fn given_contact_commands_then_only_the_room_id_crosses() {
     );
 }
 
-/// Conversation commands relay only their one argument, refuse an oversized
-/// one before the core, and refuse a reply outside the contract: an
-/// unencrypted outcome or a directory match with an avatar URL never reaches
-/// the page.
+/// Conversation and room-directory commands relay only their named
+/// arguments, refuse an oversized one before the core, and refuse a reply
+/// outside the contract: an unencrypted outcome, or a directory match or
+/// public room with an avatar URL, never reaches the page.
 #[test]
 fn given_conversation_commands_then_one_argument_crosses_and_replies_are_checked() {
     let core = FakeCore::new(true);
@@ -1542,6 +1587,37 @@ fn given_conversation_commands_then_one_argument_crosses_and_replies_are_checked
         "@bob:example.invalid"
     );
     assert!(invoke("search_users", serde_json::json!({"term": "a"})).is_err());
+    let page = invoke("public_rooms", serde_json::json!({})).unwrap();
+    assert_eq!(page["rooms"][0]["name"], "<b>Lobby</b>");
+    assert_eq!(page["next"], "p1");
+    assert_eq!(
+        invoke(
+            "public_rooms",
+            serde_json::json!({"server": "other.invalid", "filter": "rust", "since": "p1"})
+        )
+        .unwrap(),
+        serde_json::json!({"rooms": [], "next": null, "total": null})
+    );
+    assert!(
+        invoke("public_rooms", serde_json::json!({"filter": "avatar"})).is_err(),
+        "a reply outside the contract never reaches the page"
+    );
+    assert_eq!(
+        invoke(
+            "join_public_room",
+            serde_json::json!({"roomId": "!pub:example.invalid"})
+        )
+        .unwrap(),
+        serde_json::json!({"roomId": "!pub:example.invalid"})
+    );
+    assert_eq!(
+        invoke(
+            "join_public_room",
+            serde_json::json!({"roomId": "!other:example.invalid"})
+        )
+        .unwrap_err(),
+        "not_found"
+    );
     let calls = core.calls.load(Ordering::SeqCst);
     for (cmd, args) in [
         (
@@ -1557,6 +1633,22 @@ fn given_conversation_commands_then_one_argument_crosses_and_replies_are_checked
             serde_json::json!({"userId": "@".repeat(256)}),
         ),
         ("search_users", serde_json::json!({"term": "b".repeat(257)})),
+        (
+            "public_rooms",
+            serde_json::json!({"server": "a".repeat(262)}),
+        ),
+        (
+            "public_rooms",
+            serde_json::json!({"filter": "a".repeat(257)}),
+        ),
+        (
+            "public_rooms",
+            serde_json::json!({"since": "a".repeat(513)}),
+        ),
+        (
+            "join_public_room",
+            serde_json::json!({"roomId": "!".repeat(256)}),
+        ),
     ] {
         assert_eq!(invoke(cmd, args).unwrap_err(), "invalid_argument", "{cmd}");
     }

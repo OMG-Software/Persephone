@@ -66,7 +66,10 @@ import type {
   TimelineItem,
   TimelinePage,
   UserMatch,
-  UserSearch
+  UserSearch,
+  PublicRoom,
+  PublicRoomPage,
+  JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
 import { parseBand, type Band } from '../image.ts';
 
@@ -133,7 +136,10 @@ export type {
   TimelineItem,
   TimelinePage,
   UserMatch,
-  UserSearch
+  UserSearch,
+  PublicRoom,
+  PublicRoomPage,
+  JoinedRoom
 };
 
 export function appStatus(): Promise<AppStatus> {
@@ -598,6 +604,27 @@ export function startConversation(userId: string): Promise<ConversationStart> {
  */
 export function searchUsers(term: string): Promise<UserSearch> {
   return invoke<UserSearch>('search_users', { term });
+}
+
+/**
+ * One page of a public room directory: this account's homeserver's when
+ * `server` is null, otherwise that server's, asked through the homeserver.
+ * Both servers see `filter`. `since` is the `next` token of the page before.
+ */
+export function publicRooms(
+  server: string | null,
+  filter: string | null,
+  since: string | null
+): Promise<PublicRoomPage> {
+  return invoke<PublicRoomPage>('public_rooms', { server, filter, since });
+}
+
+/**
+ * Joins a room that a directory page of this session listed as open to
+ * anyone. Rejects with `not_found` for any other room.
+ */
+export function joinPublicRoom(roomId: string): Promise<JoinedRoom> {
+  return invoke<JoinedRoom>('join_public_room', { roomId });
 }
 
 /**

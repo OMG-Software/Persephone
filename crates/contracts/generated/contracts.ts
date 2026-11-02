@@ -383,6 +383,49 @@ displayName: string | null, };
 
 export type UserSearch = { users: Array<UserMatch>, truncated: boolean, };
 
+export type PublicRoom = { roomId: string, name: string | null, 
+/**
+ * The room's main address, such as `#rust:example.org`.
+ */
+alias: string | null, 
+/**
+ * Cut short by the core to at most 500 characters.
+ */
+topic: string | null, 
+/**
+ * The directory's count of joined members.
+ */
+members: number, 
+/**
+ * Anyone, joined or not, may read the room's history.
+ */
+worldReadable: boolean, 
+/**
+ * Guest accounts may join.
+ */
+guestsCanJoin: boolean, 
+/**
+ * The room lets anyone join, so `join_public_room` may join it. A room
+ * that asks to knock, or only lets in members of another room, is not.
+ */
+joinable: boolean, 
+/**
+ * This account has already joined the room.
+ */
+joined: boolean, };
+
+export type PublicRoomPage = { rooms: Array<PublicRoom>, 
+/**
+ * The token for the next page, or none on the last page.
+ */
+next: string | null, 
+/**
+ * The directory's estimate of how many rooms it lists, if it gave one.
+ */
+total: number | null, };
+
+export type JoinedRoom = { roomId: string, };
+
 export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "unsupported" | "deleted";
 
 export type MembershipChange = "joined" | "left" | "invited" | "invite_rejected" | "invite_withdrawn" | "kicked" | "banned" | "unbanned" | "knocked" | "knock_withdrawn" | "knock_denied";

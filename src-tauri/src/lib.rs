@@ -32,20 +32,21 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart,
-    DeviceList, DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, NewSessions,
-    NotificationLevel, NotificationSettings, PendingMessage, ProfileList, ProxySetting,
-    RoomActivity, RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers,
-    RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
-    ThreePidMedium, TimelinePage, UserSearch,
+    DeviceList, DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom,
+    NewSessions, NotificationLevel, NotificationSettings, PendingMessage, ProfileList,
+    ProxySetting, PublicRoomPage, RoomActivity, RoomChange, RoomCreation, RoomIdentityChanges,
+    RoomInvite, RoomList, RoomMembers, RoomReaders, RoomServers, RoomSettings, SecurityStatus,
+    StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
     COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
-    MAX_DEVICE_ID_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES,
-    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
-    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES,
-    MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES,
-    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES,
-    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
+    MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
+    MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES,
+    MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES, MAX_MEMBER_FILTER_BYTES,
+    MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PHONE_NUMBER_BYTES,
+    MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES,
+    MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES,
+    MAX_USERNAME_BYTES, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -1110,6 +1111,52 @@ async fn search_users(core: State<'_, CoreLink>, term: String) -> Result<UserSea
     relay(core.inner(), Call::SearchUsers { term }).await
 }
 
+/// One page of a public room directory: this account's homeserver's when
+/// `server` is none, otherwise the named server's. The core checks each
+/// part again.
+#[tauri::command]
+async fn public_rooms(
+    core: State<'_, CoreLink>,
+    server: Option<String>,
+    filter: Option<String>,
+    since: Option<String>,
+) -> Result<PublicRoomPage, String> {
+    if server
+        .as_ref()
+        .is_some_and(|server| server.len() > MAX_SERVER_NAME_BYTES)
+        || filter
+            .as_ref()
+            .is_some_and(|filter| filter.len() > MAX_DIRECTORY_FILTER_BYTES)
+        || since
+            .as_ref()
+            .is_some_and(|since| since.len() > MAX_DIRECTORY_TOKEN_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(
+        core.inner(),
+        Call::PublicRooms {
+            server,
+            filter,
+            since,
+        },
+    )
+    .await
+}
+
+/// Joins a room a directory page listed as open to anyone. The core refuses
+/// any other room.
+#[tauri::command]
+async fn join_public_room(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<JoinedRoom, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::JoinPublicRoom { room_id }).await
+}
+
 /// Creates an encrypted room with a name and invites people to it.
 #[tauri::command]
 async fn create_room(
@@ -1521,6 +1568,8 @@ pub fn configure<R: Runtime>(
             decline_invite,
             start_conversation,
             search_users,
+            public_rooms,
+            join_public_room,
             create_room,
             invite_user,
             room_settings,

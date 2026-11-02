@@ -1,6 +1,6 @@
 # Privacy policy
 
-Last updated: 1 November 2026
+Last updated: 2 November 2026
 
 This policy tells you what data the Persephone project collects, what the
 Persephone app sends and stores, and where other parties process data. It
@@ -95,6 +95,15 @@ homeserver's user directory. It sends it 0.4 seconds after you stop typing,
 once it is at least two characters long. Your homeserver can keep a record of
 these searches. Results show names and Matrix IDs as text. The app fetches no
 avatars.
+
+The public room browser sends nothing until you press Browse. Then the app
+asks your homeserver for one page of a public room directory, with the search
+text if you entered one. If you enter another server, your homeserver asks
+that server for its directory on your behalf; the app does not connect to it.
+Both servers can keep a record of these requests. Results show names, room
+addresses and topics as text. The app fetches no avatars. When you join a
+listed room, the room's members and servers see your Matrix ID. Public rooms
+are usually not encrypted.
 
 When you accept a direct-message invitation, the app joins the room. When you
 decline it, the app leaves the room. Your homeserver and the person who

@@ -35,6 +35,7 @@
 - [ADR-0033](adr/0033-search-only-the-existing-encrypted-event-cache.md) (proposed): bounded local cache search with no HTTP or new index and explicit partial coverage.
 - [ADR-0034](adr/0034-ignore-users-and-report-events-through-the-homeserver.md) (proposed): standard Matrix ignore account data and explicit reports to the account's homeserver.
 - [ADR-0035](adr/0035-keep-favourites-and-room-sections-local-to-the-profile.md) (proposed): local encrypted favourites and named sections, without Matrix room tags.
+- [ADR-0037](adr/0037-browse-public-room-directories-and-join-only-listed-rooms.md) (proposed): browse a public room directory through the homeserver, and join only rooms a listed page offered as open to anyone.
 
 ## Evidence
 

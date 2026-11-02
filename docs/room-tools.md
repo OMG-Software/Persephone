@@ -18,9 +18,17 @@ The frontend checks, core and protocol tests, Clippy and the Tauri IPC tests
 pass on Linux. Native UI, live-server verification and other OS checks were
 not run.
 
-- **Main menu**: the menu button at the top of the room list opens **Room
-  groups**, **Search cached messages**, **Saved drafts**, **Ignored users**
-  and **Connection health**.
+- **Main menu**: the menu button at the top of the room list opens **Explore
+  public rooms**, **Room groups**, **Search cached messages**, **Saved
+  drafts**, **Ignored users** and **Connection health**.
+- **Public rooms** (ADR-0037): **Explore public rooms** in the main menu, or
+  the link of the same name below the room list, opens the directory. Leave
+  **Server** empty to browse your homeserver, or enter another server name.
+  **Search** is optional. Nothing is sent until **Browse** is pressed. Select
+  a room to view its address, ID, member count, history and guest access and
+  its topic, then **Join room**, or **Open room** when it is already joined.
+  **Show more rooms** loads the next page, up to 300 rooms. Rooms that ask to
+  knock, or let in only invited people, are shown without Join.
 - **Room menu**: the menu button at the end of the room header opens **Invite
   people** (not in a direct-message room), **Jump to date**, **Pinned
   messages**, **Attachments**, **Show members** or **Hide members**, **Room
