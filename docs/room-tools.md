@@ -29,11 +29,13 @@ were not run.
   section. **Room section** in the room menu sets the section.
 - **Message actions**: React, Reply, Edit, Delete, Pin message and Report
   message are icons. Each label shows as a tooltip on hover and keyboard
-  focus. The accessible name also names the sender.
+  focus. The accessible name also names the sender, except for Edit and
+  Delete, which show only on your own messages and say "your message".
 - **Room list width**: drag the edge of the room list, or focus it and use the
-  arrow keys, Home and End. The width is from 200 to 480 CSS pixels. It is kept
-  in memory only and resets when Persephone starts, because the web view uses
-  no browser storage.
+  arrow keys, Home and End. The width is from 200 to 480 CSS pixels, and less
+  in a narrow window, so the room keeps at least 320 pixels. It is kept in
+  memory only and resets when Persephone starts, because the web view uses no
+  browser storage.
 - **Member panel**: the joined and invited members show down the right of the
   room (at most 100, from the core's reader list). A person this account has
   not verified has a Verify icon. A verified person has a verified icon. A
@@ -42,7 +44,10 @@ were not run.
   in a joined direct-message room with exactly the two of you (see
   [contact verification](evidence/contact-verification.md)). If the room list
   has no such room for that person, the panel offers **Start conversation**.
-  The Verify icon itself never creates a room or sends an invitation. The
+  The Verify icon itself never creates a room or sends an invitation. The room
+  list holds at most 200 rooms; if the direct room is not among them, **Start
+  conversation** opens the existing one. The panel hides when the window is
+  too narrow to keep the room at least 320 pixels wide. The
   panel reads the list again after room and security changes, at most about
   once a second. The core runs one member, reader or server listing at a time,
   so the panel waits while room settings are open and tries again when the

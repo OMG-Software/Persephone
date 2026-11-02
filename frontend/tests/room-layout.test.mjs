@@ -6,9 +6,13 @@ import {
   SIDEBAR_MAX,
   SIDEBAR_MIN,
   SIDEBAR_STEP,
+  MEMBER_PANEL_WIDTH,
+  ROOM_MIN,
   clampSidebar,
   draggedSidebar,
-  keyedSidebar
+  keyedSidebar,
+  membersFit,
+  sidebarLimit
 } from '../src/layout.ts';
 import { directRoomOf, memberMark, memberRows } from '../src/members.ts';
 
@@ -56,6 +60,30 @@ test('GIVEN a drag of the resize handle WHEN the interface is zoomed THEN the ed
   assert.equal(draggedSidebar(292, 100, 150, 0), 342, 'an invalid ratio counts as 1');
   assert.equal(draggedSidebar(292, 100, 150, Number.NaN), 342);
   assert.equal(draggedSidebar(292, 500, 0, 1), SIDEBAR_MIN, 'clamped');
+});
+
+test('GIVEN a narrow window WHEN the room list limit is found THEN the room keeps its minimum width, down to the list minimum', () => {
+  assert.equal(sidebarLimit(1600), SIDEBAR_MAX);
+  // The native minimum window: 640 pixels leaves the room 320.
+  assert.equal(sidebarLimit(640), 640 - ROOM_MIN);
+  assert.equal(sidebarLimit(400), SIDEBAR_MIN, 'never below the list minimum');
+  assert.equal(sidebarLimit(Number.NaN), SIDEBAR_MAX);
+});
+
+test('GIVEN a lower limit WHEN the width is clamped, keyed or dragged THEN it never exceeds that limit', () => {
+  assert.equal(clampSidebar(450, 320), 320);
+  assert.equal(clampSidebar(Number.NaN, 250), 250, 'the default is capped too');
+  assert.equal(keyedSidebar(310, 'ArrowRight', 320), 320);
+  assert.equal(keyedSidebar(300, 'End', 320), 320);
+  assert.equal(draggedSidebar(292, 0, 400, 1, 320), 320);
+});
+
+test('GIVEN the window and room list widths WHEN the member panel is placed THEN it shows only when the room keeps its minimum', () => {
+  const needed = SIDEBAR_DEFAULT + MEMBER_PANEL_WIDTH + ROOM_MIN;
+  assert.equal(membersFit(needed, SIDEBAR_DEFAULT), true);
+  assert.equal(membersFit(needed - 1, SIDEBAR_DEFAULT), false);
+  assert.equal(membersFit(640, SIDEBAR_DEFAULT), false, 'not in the native minimum window');
+  assert.equal(membersFit(Number.NaN, SIDEBAR_DEFAULT), false);
 });
 
 const reader = (userId, trust, own = false) => ({ userId, trust, receiving: 1, refused: 0, own });

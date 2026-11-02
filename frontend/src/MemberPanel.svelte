@@ -103,6 +103,16 @@
       else if (active && asked === request) failed = true;
       return;
     }
+    if (!active || asked !== request) return;
+    readers = found.readers;
+    truncated = found.truncated;
+    failed = false;
+    // Room settings opened meanwhile: leave the core to them, and read the
+    // names when they close. Names the core does not list now stay as they were.
+    if (paused) {
+      pending = true;
+      return;
+    }
     let named: RoomMembers | null = null;
     let namesBusy = false;
     try {
@@ -111,11 +121,7 @@
       namesBusy = isBusy(reason);
     }
     if (!active || asked !== request) return;
-    readers = found.readers;
-    truncated = found.truncated;
-    // Names the core could not list now stay as they were.
     if (named) members = named.members;
-    failed = false;
     if (namesBusy) busy(asked);
     else busyTries = 0;
   }

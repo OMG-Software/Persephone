@@ -27,6 +27,7 @@
     onolder,
     contact = null,
     favourite = false,
+    favouriteBusy = false,
     onfavourite,
     menu,
     onreply,
@@ -57,6 +58,8 @@
     // Whether the room is in Favourites, and the star that changes it;
     // absent where room groups are not offered.
     favourite?: boolean;
+    // A favourite change is being saved: the star waits.
+    favouriteBusy?: boolean;
     onfavourite?: () => void;
     // The room menu, at the end of the header. People are verified from the
     // member panel, not here.
@@ -192,6 +195,7 @@
         name="Favourite"
         pressed={favourite}
         filled={favourite}
+        disabled={favouriteBusy}
         tip="below"
         onclick={onfavourite}
       >

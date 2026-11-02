@@ -9,6 +9,7 @@ let RoomList;
 let Menu;
 let Message;
 let Timeline;
+let RoomOrganisation;
 
 before(async () => {
   // A cache of its own: test files run in parallel (see views.test.mjs).
@@ -25,6 +26,7 @@ before(async () => {
   ({ default: Menu } = await vite.ssrLoadModule('/src/Menu.svelte'));
   ({ default: Message } = await vite.ssrLoadModule('/src/Message.svelte'));
   ({ default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte'));
+  ({ default: RoomOrganisation } = await vite.ssrLoadModule('/src/RoomOrganisation.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
 });
 
@@ -202,4 +204,17 @@ test('GIVEN images, files and notices WHEN pin and report are offered THEN they 
   assert.doesNotMatch(html, /Pin message/, 'a notice cannot be pinned');
   assert.equal((html.match(/<span class="visually-hidden">Report message from <bdi>@b:s<\/bdi>/g) ?? []).length, 1);
   assert.doesNotMatch(html, /Report message from <bdi>@me:s/, 'own events cannot be reported');
+});
+
+test('GIVEN a favourite change is saving WHEN the header star and the section dialog show THEN both wait for it', () => {
+  const header = render(Timeline, {
+    props: { title: 'Room', items: [], hasOlder: false, loading: false, error: null, onolder() {}, onfavourite() {}, favouriteBusy: true }
+  }).body;
+  assert.match(header, /class="icon-action favourite-toggle" disabled/);
+  const section = (favouriteSaving) =>
+    render(RoomOrganisation, {
+      props: { roomId: '!r:s', preferences: [], favouriteSaving, onchanged() {}, onclose() {} }
+    }).body;
+  assert.match(section(true), /<button type="submit" class="secondary" disabled/);
+  assert.doesNotMatch(section(false), /<button type="submit" class="secondary" disabled/);
 });

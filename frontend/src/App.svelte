@@ -21,7 +21,15 @@
   import Menu, { type MenuItem } from './Menu.svelte';
   import MemberPanel from './MemberPanel.svelte';
   import { directRoomOf } from './members';
-  import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, clampSidebar, draggedSidebar, keyedSidebar } from './layout';
+  import {
+    SIDEBAR_DEFAULT,
+    SIDEBAR_MIN,
+    clampSidebar,
+    draggedSidebar,
+    keyedSidebar,
+    membersFit,
+    sidebarLimit
+  } from './layout';
   import IdentityChanges from './IdentityChanges.svelte';
   import InvitePerson from './InvitePerson.svelte';
   import JumpPalette from './JumpPalette.svelte';
@@ -293,6 +301,13 @@
   let settings = $state<AccountSettings>(DEFAULT_SETTINGS);
   let settingsFailure = $state<string | null>(null);
   const scale = $derived(textScale(settings));
+  // The window width in CSS pixels inside the zoomed interface. The room list
+  // and member panel shrink or hide so the room keeps a usable width.
+  let windowWidth = $state(typeof window === 'undefined' ? 1024 : window.innerWidth);
+  const available = $derived(windowWidth / scale.interface);
+  const sidebarMax = $derived(sidebarLimit(available));
+  const shownSidebar = $derived(Math.min(sidebarWidth, sidebarMax));
+  const membersRoom = $derived(membersFit(available, shownSidebar));
   const settingsKeeper = new SettingsKeeper(
     { load: accountSettings, save: setAccountSettings },
     (next, failure) => {
@@ -1721,29 +1736,39 @@
     }
   }
 
-  // Resizing the room list with the pointer: the width and pointer position
-  // when the drag started, and pointer pixels per CSS pixel (the interface
-  // zoom).
-  let drag: { width: number; x: number; ratio: number } | null = null;
+  // Resizing the room list with the pointer: the pointer that owns the drag,
+  // the width and pointer position when it started, and pointer pixels per
+  // CSS pixel (the interface zoom). Other pointers cannot move or end it.
+  let drag: { pointerId: number; width: number; x: number; ratio: number } | null = null;
   function startResize(event: PointerEvent) {
     if (event.button !== 0) return;
     const handle = event.currentTarget as HTMLElement;
+    // A drag in progress keeps its pointer. A drag whose handle went away
+    // (the shell was replaced mid-drag) holds no capture and is replaced.
+    if (drag && drag.pointerId !== event.pointerId && handle.hasPointerCapture(drag.pointerId)) return;
     const sidebar = handle.previousElementSibling;
-    const shown = sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : sidebarWidth;
-    drag = { width: sidebarWidth, x: event.clientX, ratio: shown / sidebarWidth };
+    const shown = sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : shownSidebar;
+    drag = { pointerId: event.pointerId, width: shownSidebar, x: event.clientX, ratio: shown / shownSidebar };
     handle.setPointerCapture(event.pointerId);
     event.preventDefault();
   }
   function moveResize(event: PointerEvent) {
-    if (drag) sidebarWidth = draggedSidebar(drag.width, drag.x, event.clientX, drag.ratio);
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    // No button held: the release was missed, so the drag is over.
+    if (event.buttons === 0) {
+      drag = null;
+      return;
+    }
+    sidebarWidth = draggedSidebar(drag.width, drag.x, event.clientX, drag.ratio, sidebarMax);
   }
   function endResize(event: PointerEvent) {
+    if (!drag || event.pointerId !== drag.pointerId) return;
     drag = null;
     const handle = event.currentTarget as HTMLElement;
     if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
   }
   function keyResize(event: KeyboardEvent) {
-    const next = keyedSidebar(sidebarWidth, event.key);
+    const next = keyedSidebar(shownSidebar, event.key, sidebarMax);
     if (next === null) return;
     event.preventDefault();
     sidebarWidth = next;
@@ -1764,7 +1789,9 @@
       { label: 'Jump to date', onselect: () => (roomTool = 'jump') },
       { label: 'Pinned messages', onselect: () => (roomTool = 'pins') },
       { label: 'Attachments', onselect: () => (roomTool = 'attachments') },
-      { label: membersShown ? 'Hide members' : 'Show members', onselect: () => (membersShown = !membersShown), separated: true },
+      membersRoom
+        ? { label: membersShown ? 'Hide members' : 'Show members', onselect: () => (membersShown = !membersShown), separated: true }
+        : { label: 'Members need a wider window', onselect: () => {}, disabled: true, separated: true },
       { label: 'Room section', onselect: () => (sectionOpen = true) },
       { label: 'Room settings', onselect: () => (roomSettingsOf = roomId), separated: true }
     ];
@@ -1784,7 +1811,7 @@
 </script>
 
 
-<svelte:window onkeydown={shortcutKey} />
+<svelte:window onkeydown={shortcutKey} bind:innerWidth={windowWidth} />
 
 {#snippet brand()}
   <div class="auth-brand">
@@ -2049,7 +2076,7 @@
         ondecline={(roomId) => answerInvite(roomId, false)}
         onfavourite={signedIn ? toggleFavourite : undefined}
         {favouriteBusy}
-        width={sidebarWidth}
+        width={shownSidebar}
       >
         {#snippet menu()}
           {#if signedIn}
@@ -2086,15 +2113,15 @@
         aria-orientation="vertical"
         aria-label="Resize room list"
         aria-valuemin={SIDEBAR_MIN}
-        aria-valuemax={SIDEBAR_MAX}
-        aria-valuenow={sidebarWidth}
+        aria-valuemax={sidebarMax}
+        aria-valuenow={shownSidebar}
         tabindex="0"
         onpointerdown={startResize}
         onpointermove={moveResize}
         onpointerup={endResize}
         onpointercancel={endResize}
         onkeydown={keyResize}
-        ondblclick={() => (sidebarWidth = clampSidebar(SIDEBAR_DEFAULT))}
+        ondblclick={() => (sidebarWidth = clampSidebar(SIDEBAR_DEFAULT, sidebarMax))}
       ></div>
       <div class="pane">
         {#if signedIn}
@@ -2134,6 +2161,7 @@
             {contact}
             favourite={preferences.some((entry) => entry.roomId === selectedRoom.roomId && entry.favourite)}
             onfavourite={signedIn ? () => toggleFavourite(selectedRoom.roomId) : undefined}
+            {favouriteBusy}
             menu={signedIn ? roomMenuButton : undefined}
             onreply={sendBlocked === null && draftReady && !textSending
               ? replyToMessage
@@ -2263,7 +2291,7 @@
             {/if}
           {/if}
           </div>
-          {#if signedIn && membersShown}
+          {#if signedIn && membersShown && membersRoom}
             {#key selectedRoom.roomId + ':' + sessionGeneration}
               <MemberPanel
                 roomId={selectedRoom.roomId}
@@ -2315,7 +2343,7 @@
       {/if}
       {#if sectionOpen && signedIn && selected}
         {#key selected}
-          <RoomOrganisation roomId={selected} {preferences} onchanged={preferenceChanged} onclose={() => (sectionOpen = false)} />
+          <RoomOrganisation roomId={selected} {preferences} favouriteSaving={favouriteBusy} onchanged={preferenceChanged} onclose={() => (sectionOpen = false)} />
         {/key}
       {/if}
       {#if reportTarget && signedIn}

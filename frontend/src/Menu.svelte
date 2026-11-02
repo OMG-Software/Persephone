@@ -70,6 +70,11 @@
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       void show(event.key === 'ArrowDown' ? 'Home' : 'End');
+    } else if (event.key === 'Escape' && open) {
+      // Focus stays on the trigger when no command can take it.
+      event.preventDefault();
+      event.stopPropagation();
+      hide(true);
     } else if (event.key === 'Escape' && !open && !dismissed) {
       dismissed = true;
       event.stopPropagation();
