@@ -54,7 +54,7 @@
       try {
         const page = await publicRooms(target.server, target.filter, since);
         if (!active || mine !== request) return;
-        listing = addPage(since === null ? null : listing, page);
+        listing = addPage(since === null ? null : listing, page, since);
         asked = target;
         loading = false;
       } catch (reason) {

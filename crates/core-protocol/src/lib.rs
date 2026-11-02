@@ -589,8 +589,11 @@ pub enum Call {
     /// whose name, address or topic contains it; `since` is the `next` token
     /// of the page before. Both servers see the filter.
     PublicRooms {
+        #[serde(deserialize_with = "Option::deserialize")]
         server: Option<String>,
+        #[serde(deserialize_with = "Option::deserialize")]
         filter: Option<String>,
+        #[serde(deserialize_with = "Option::deserialize")]
         since: Option<String>,
     },
     /// Join a room that a `public_rooms` page of this session listed as
@@ -718,9 +721,15 @@ pub const MAX_DIRECTORY_FILTER_BYTES: usize = 256;
 /// longer token from the homeserver ends the listing.
 pub const MAX_DIRECTORY_TOKEN_BYTES: usize = 512;
 
+/// Most rooms one listing shows across its pages. The page stops asking for
+/// more pages at this count.
+pub const MAX_LISTED_ROOMS: usize = 300;
+
 /// Most listed rooms the core remembers as joinable for `join_public_room`;
-/// the oldest are forgotten first.
-pub const MAX_OFFERED_ROOMS: usize = 300;
+/// the oldest are forgotten first. A listing's last page can offer up to a
+/// whole page past [`MAX_LISTED_ROOMS`], so every room a listing shows stays
+/// joinable.
+pub const MAX_OFFERED_ROOMS: usize = MAX_LISTED_ROOMS + MAX_PUBLIC_ROOMS;
 
 /// Longest room name either side accepts, in bytes.
 pub const MAX_ROOM_NAME_BYTES: usize = 255;
@@ -1922,6 +1931,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"search_users","term":"b","limit":500}}"#,
             br#"{"id":1,"call":{"command":"public_rooms","server":null,"filter":null,"since":null,"limit":500}}"#,
             br#"{"id":1,"call":{"command":"public_rooms","server":7,"filter":null,"since":null}}"#,
+            br#"{"id":1,"call":{"command":"public_rooms"}}"#,
+            br#"{"id":1,"call":{"command":"public_rooms","server":null,"filter":null}}"#,
             br#"{"id":1,"call":{"command":"join_public_room"}}"#,
             br#"{"id":1,"call":{"command":"join_public_room","room_id":"!r:s","via":["evil.example"]}}"#,
             br#"{"id":1,"call":{"command":"create_room","name":"x"}}"#,

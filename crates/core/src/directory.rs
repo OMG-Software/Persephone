@@ -222,11 +222,12 @@ fn page(
 
 /// A refusal from the homeserver is `rejected`; anything else, such as no
 /// answer at all, is `unavailable`.
-fn request_error(error: &matrix_sdk::HttpError) -> ErrorCode {
-    if error.as_client_api_error().is_some() {
-        ErrorCode::Rejected
-    } else {
-        ErrorCode::Unavailable
+/// A rate limit (429) is transient, so it is `unavailable` too, as for
+/// media (`media.rs`).
+fn request_error(error: Option<&matrix_sdk::ruma::api::error::Error>) -> ErrorCode {
+    match error {
+        Some(error) if error.status_code.as_u16() != 429 => ErrorCode::Rejected,
+        _ => ErrorCode::Unavailable,
     }
 }
 
@@ -249,7 +250,7 @@ pub async fn list(
     let response = client
         .public_rooms_filtered(call)
         .await
-        .map_err(|error| request_error(&error))?;
+        .map_err(|error| request_error(error.as_client_api_error()))?;
     Ok(page(response, request.server.as_ref(), |room_id| {
         client
             .get_room(room_id)
@@ -266,13 +267,7 @@ pub async fn join(
     let room = client
         .join_room_by_id_or_alias(room_id.into(), via)
         .await
-        .map_err(|error| {
-            if error.client_api_error_kind().is_some() {
-                ErrorCode::Rejected
-            } else {
-                ErrorCode::Unavailable
-            }
-        })?;
+        .map_err(|error| request_error(error.as_client_api_error()))?;
     Ok(JoinedRoom {
         room_id: room.room_id().to_string(),
     })
@@ -477,6 +472,30 @@ mod tests {
             "{bytes} > {}",
             crate::views::MAX_PAGE_BYTES
         );
+    }
+
+    /// GIVEN a listing the page shows in full, whose last page offers a whole
+    /// page past the rooms it shows WHEN the page asks to join THEN every
+    /// room it shows is still joinable.
+    #[test]
+    fn given_a_full_listing_then_every_shown_room_stays_joinable() {
+        use persephone_core_protocol::MAX_LISTED_ROOMS;
+        let mut offers = Offers::default();
+        let pages = MAX_LISTED_ROOMS / MAX_PUBLIC_ROOMS + 1;
+        for page in 0..pages {
+            offers.remember(
+                1,
+                (0..MAX_PUBLIC_ROOMS).map(|n| {
+                    let id = format!("!p{page}r{n}:example.org");
+                    (RoomId::parse(id).unwrap(), None)
+                }),
+            );
+        }
+        for shown in 0..MAX_LISTED_ROOMS {
+            let (page, n) = (shown / MAX_PUBLIC_ROOMS, shown % MAX_PUBLIC_ROOMS);
+            let id = RoomId::parse(format!("!p{page}r{n}:example.org")).unwrap();
+            assert!(offers.via(1, &id).is_some(), "{id}");
+        }
     }
 
     /// GIVEN listed rooms WHEN the page asks to join THEN only a room listed

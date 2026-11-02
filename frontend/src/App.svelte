@@ -647,6 +647,22 @@
     if (generation === sessionGeneration) open(roomId);
   }
 
+  /**
+   * Open a room the directory just joined. Say why when it cannot be shown:
+   * the room list holds at most 200 rooms and a new room may not have synced
+   * yet, and a room change stops when the current draft cannot be saved.
+   */
+  async function openJoined(roomId: string) {
+    const generation = sessionGeneration;
+    await openConversation(roomId);
+    if (generation !== sessionGeneration) return;
+    if (!rooms?.rooms.some((room) => room.roomId === roomId)) {
+      error = 'You joined the room, but it is not in the room list yet. The list shows at most 200 rooms, and a new room can take a moment to appear.';
+    } else if (selected !== roomId) {
+      error ??= 'You joined the room, but the current room could not be left because its draft could not be saved. Select the joined room in the room list.';
+    }
+  }
+
   /** Clear session-bound UI state and invalidate pending room-context work. */
   function reset() {
     cancelContext?.(); cancelContext = null;
@@ -2403,7 +2419,7 @@
           onbusy={(busy) => (groupsBusy = busy)} onclose={() => (groupsOpen = false)} />
       {/if}
       {#if directoryOpen && signedIn}
-        <PublicRooms homeserver={ownServer(status.account.userId)} onopen={open} onjoined={openConversation}
+        <PublicRooms homeserver={ownServer(status.account.userId)} onopen={open} onjoined={openJoined}
           onclose={() => (directoryOpen = false)} />
       {/if}
       {#if reportTarget && signedIn}

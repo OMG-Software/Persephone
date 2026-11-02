@@ -45,8 +45,13 @@ export function ownServer(userId: string | null): string | null {
 /** A listing: its pages so far, one room once, up to the limit. */
 export type Listing = { rooms: PublicRoom[]; next: string | null; total: number | null };
 
-/** Adds a page to a listing. A room listed twice keeps its first place; past the limit, no next page is offered. */
-export function addPage(listing: Listing | null, page: PublicRoomPage): Listing {
+/**
+ * Adds a page to a listing. A room listed twice keeps its first place. Past
+ * the limit, or when the directory answers with the token it was asked
+ * with, no next page is offered: asking again would bring nothing new.
+ * `requested`: the token the page was asked with, null for the first page.
+ */
+export function addPage(listing: Listing | null, page: PublicRoomPage, requested: string | null = null): Listing {
   const rooms = [...(listing?.rooms ?? [])];
   const seen = new Set(rooms.map((room) => room.roomId));
   for (const room of page.rooms) {
@@ -55,7 +60,8 @@ export function addPage(listing: Listing | null, page: PublicRoomPage): Listing 
     seen.add(room.roomId);
     rooms.push(room);
   }
-  return { rooms, next: rooms.length >= MAX_LISTED_ROOMS ? null : page.next, total: page.total };
+  const next = rooms.length >= MAX_LISTED_ROOMS || page.next === requested ? null : page.next;
+  return { rooms, next, total: page.total };
 }
 
 /** What a room shows as its name: its name, else its address, else its ID. */

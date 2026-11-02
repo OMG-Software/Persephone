@@ -47,15 +47,17 @@ export function groupWrites(
 ): RoomPreference[] {
   const byRoom = new Map(preferences.map((entry) => [entry.roomId, entry]));
   const chosen = new Set(roomIds);
-  const writes: RoomPreference[] = [];
+  const leaving: RoomPreference[] = [];
+  const joining: RoomPreference[] = [];
   for (const roomId of joined) {
     const saved = byRoom.get(roomId);
     const favourite = saved?.favourite ?? false;
     const inGroup = saved?.section === name;
-    if (chosen.has(roomId) && !inGroup) writes.push({ roomId, favourite, section: name });
-    else if (!chosen.has(roomId) && inGroup) writes.push({ roomId, favourite, section: null });
+    if (chosen.has(roomId) && !inGroup) joining.push({ roomId, favourite, section: name });
+    else if (!chosen.has(roomId) && inGroup) leaving.push({ roomId, favourite, section: null });
   }
-  return writes;
+  // Rooms leave first: each leave can free a room entry before a join needs one.
+  return [...leaving, ...joining];
 }
 
 /** The writes that remove group `name` from every entry, including rooms not in the room list. */
@@ -75,16 +77,48 @@ export function afterWrites(preferences: RoomPreference[], writes: RoomPreferenc
   return [...byRoom.values()];
 }
 
-/** Why the writes would go over the core's limits, or null when they fit. */
+/**
+ * Why the writes would go over the core's limits, or null when they fit.
+ * The core checks each write on its own, so every step in order must fit,
+ * not only the result: moving rooms into a new group while their old group
+ * still has rooms holds both groups for a while.
+ */
 export function capacityProblem(preferences: RoomPreference[], writes: RoomPreference[]): string | null {
-  const after = afterWrites(preferences, writes);
-  if (groupNames(after).length > MAX_GROUPS) {
-    return `This profile can keep at most ${MAX_GROUPS} groups. Remove a group first.`;
-  }
-  if (after.length > MAX_GROUP_ENTRIES) {
-    return `This profile can keep groups and favourites for at most ${MAX_GROUP_ENTRIES} rooms.`;
+  let state = preferences;
+  for (const write of writes) {
+    state = afterWrites(state, [write]);
+    if (groupNames(state).length > MAX_GROUPS) {
+      return `This profile can keep at most ${MAX_GROUPS} groups. Remove a group first.`;
+    }
+    if (state.length > MAX_GROUP_ENTRIES) {
+      return `This profile can keep groups and favourites for at most ${MAX_GROUP_ENTRIES} rooms.`;
+    }
   }
   return null;
+}
+
+/**
+ * The writes that save group `name`, or why they cannot be saved. `isNew`:
+ * the name was typed for a new group. `chosen`: the rooms checked; a room
+ * that has left the room list (`joined`) since it was checked is dropped.
+ */
+export function planGroupSave(
+  preferences: RoomPreference[],
+  name: string,
+  isNew: boolean,
+  chosen: string[],
+  joined: string[]
+): { writes: RoomPreference[] } | { failure: string } {
+  const picked = chosen.filter((roomId) => joined.includes(roomId));
+  if (isNew) {
+    const problem = groupNameProblem(name);
+    if (problem) return { failure: problem };
+    if (groupNames(preferences).includes(name)) return { failure: 'A group with this name exists. Use Edit rooms.' };
+    if (picked.length === 0) return { failure: 'Choose at least one room in the room list for the new group.' };
+  }
+  const writes = groupWrites(preferences, name, picked, joined);
+  const capacity = capacityProblem(preferences, writes);
+  return capacity ? { failure: capacity } : { writes };
 }
 
 /**

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   MAX_GROUP_ENTRIES, MAX_GROUP_NAME_BYTES, MAX_GROUPS, afterWrites, applyWrites, capacityProblem,
-  groupNameProblem, groupNames, groupWrites, removeGroupWrites
+  groupNameProblem, groupNames, groupWrites, planGroupSave, removeGroupWrites
 } from '../src/roomGroupEdits.ts';
 
 const pref = (roomId, section = null, favourite = false) => ({ roomId, favourite, section });
@@ -80,4 +80,31 @@ test('GIVEN writes WHEN all are saved THEN they are sent one at a time in order'
   }, () => {});
   assert.deepEqual(result, { saved: 2, failed: false });
   assert.deepEqual(order, ['!a:s', '!b:s']);
+});
+
+test('GIVEN an edit that adds and removes rooms WHEN writes are planned THEN every leave comes before any join', () => {
+  const preferences = [pref('!z:s', 'Work')];
+  const writes = groupWrites(preferences, 'Work', ['!a:s'], ['!a:s', '!z:s']);
+  assert.deepEqual(writes, [pref('!z:s', null), pref('!a:s', 'Work')]);
+});
+
+test('GIVEN full limits WHEN only the final state fits THEN the step that goes over is still reported', () => {
+  // Sixteen groups; G0 has two rooms. Moving both into a new group holds
+  // seventeen groups after the first move, which the core refuses.
+  const full = [pref('!r0b:s', 'G0'), ...Array.from({ length: MAX_GROUPS }, (_, n) => pref(`!r${n}:s`, `G${n}`))];
+  const writes = [pref('!r0:s', 'New'), pref('!r0b:s', 'New')];
+  assert.equal(groupNames(afterWrites(full, writes)).length, MAX_GROUPS, 'the result alone would fit');
+  assert.match(capacityProblem(full, writes), /at most 16 groups/);
+});
+
+test('GIVEN a group save WHEN planned THEN rooms that left the list are dropped and each refusal is explained', () => {
+  const joined = ['!a:s', '!b:s'];
+  assert.deepEqual(planGroupSave([], 'Work', true, ['!a:s', '!gone:s'], joined), { writes: [pref('!a:s', 'Work')] });
+  assert.match(planGroupSave([], 'Work', true, ['!gone:s'], joined).failure, /at least one room in the room list/);
+  assert.match(planGroupSave([pref('!b:s', 'Work')], 'Work', true, ['!a:s'], joined).failure, /exists/);
+  assert.match(planGroupSave([], 'Rooms', true, ['!a:s'], joined).failure, /already headings/);
+  // An existing group may be emptied: its joined rooms leave it.
+  assert.deepEqual(planGroupSave([pref('!b:s', 'Work')], 'Work', false, [], joined), { writes: [pref('!b:s', null)] });
+  const full = Array.from({ length: MAX_GROUPS }, (_, n) => pref(`!r${n}:s`, `G${n}`));
+  assert.match(planGroupSave(full, 'New', true, ['!a:s'], joined).failure, /at most 16 groups/);
 });

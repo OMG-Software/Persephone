@@ -4,8 +4,7 @@
   import { setRoomPreference, type RoomPreference } from './bridge';
   import FeatureDialog from './FeatureDialog.svelte';
   import {
-    MAX_GROUP_NAME_BYTES, applyWrites, capacityProblem, groupNameProblem, groupNames, groupWrites,
-    removeGroupWrites
+    MAX_GROUP_NAME_BYTES, applyWrites, groupNames, planGroupSave, removeGroupWrites
   } from './roomGroupEdits.ts';
 
   // Creates, edits and removes room groups. A group is the section name of
@@ -79,17 +78,9 @@
   async function save(event: SubmitEvent) {
     event.preventDefault();
     if (blocked || view.kind !== 'edit') return;
-    const group = view.group ?? name.trim();
-    if (view.group === null) {
-      const problem = groupNameProblem(group);
-      if (problem) { failure = problem; return; }
-      if (groups.includes(group)) { failure = 'A group with this name exists. Use Edit rooms.'; return; }
-      if (chosen.length === 0) { failure = 'Choose at least one room for the new group.'; return; }
-    }
-    const writes = groupWrites(preferences, group, chosen, joined);
-    const capacity = capacityProblem(preferences, writes);
-    if (capacity) { failure = capacity; return; }
-    if (await run(writes)) back();
+    const plan = planGroupSave(preferences, view.group ?? name.trim(), view.group === null, chosen, joined);
+    if ('failure' in plan) { failure = plan.failure; return; }
+    if (await run(plan.writes)) back();
   }
 
   async function remove(group: string) {

@@ -640,6 +640,40 @@ impl Homeserver {
         );
     }
 
+    /// Answers the next request of `method` to a path matching `pattern`
+    /// with `status` and `body`.
+    fn answer_once(&self, method_name: &str, pattern: &str, status: u16, body: Value) {
+        self.runtime.block_on(
+            Mock::given(method(method_name))
+                .and(path_regex(pattern))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&self.server),
+        );
+    }
+
+    /// The requests to a path starting with `prefix`: path with query, and
+    /// body.
+    fn requests_matching(&self, prefix: &str) -> Vec<(String, Value)> {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path().starts_with(prefix))
+            .map(|request| {
+                (
+                    format!(
+                        "{}?{}",
+                        request.url.path(),
+                        request.url.query().unwrap_or("")
+                    ),
+                    serde_json::from_slice(&request.body).unwrap_or(Value::Null),
+                )
+            })
+            .collect()
+    }
+
     /// Requests of `method` to this account's display name, in order.
     fn display_name_requests(&self, method_name: &str) -> Vec<Value> {
         self.runtime
@@ -3523,4 +3557,108 @@ fn given_an_encrypted_room_then_an_image_is_never_uploaded_in_plain() {
         pending(&core, ROOM).is_empty(),
         "the queued image is dropped"
     );
+}
+
+/// GIVEN a signed-in account WHEN another server's public room directory is
+/// listed THEN the homeserver is asked for it with the filter, and only a
+/// room listed as open to anyone can be joined, through the server that
+/// listed it. A room asking to knock or never listed is `not_found` and no
+/// join is sent. A rate limit is `unavailable`, and a refusal `rejected`.
+#[test]
+fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
+    const DIRECTORY: &str = "/_matrix/client/v3/publicRooms";
+    const JOIN: &str = "/_matrix/client/v3/join/";
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = core_with_room(&server, dir.path());
+    let _locked = LockOnDrop(&core);
+    let list = |since: Option<&str>| {
+        call(
+            &core,
+            Call::PublicRooms {
+                server: Some("remote.test".into()),
+                filter: Some("rust".into()),
+                since: since.map(Into::into),
+            },
+        )
+    };
+
+    server.answer_once(
+        "POST",
+        "^/_matrix/client/v3/publicRooms$",
+        200,
+        json!({
+            "chunk": [
+                {"room_id": "!open:remote.test", "name": "Rust", "num_joined_members": 5,
+                 "world_readable": true, "guest_can_join": false, "join_rule": "public"},
+                {"room_id": "!knock:remote.test", "num_joined_members": 2,
+                 "world_readable": false, "guest_can_join": false, "join_rule": "knock"}
+            ],
+            "next_batch": "p1",
+            "total_room_count_estimate": 2
+        }),
+    );
+    let page: Value = value(list(None));
+    assert_eq!(page["rooms"][0]["roomId"], "!open:remote.test");
+    assert_eq!(page["rooms"][0]["joinable"], true);
+    assert_eq!(page["rooms"][1]["joinable"], false);
+    assert_eq!(page["next"], "p1");
+    let asked = server.requests_matching(DIRECTORY);
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].0.contains("server=remote.test"), "{}", asked[0].0);
+    assert_eq!(asked[0].1["filter"]["generic_search_term"], "rust");
+    assert_eq!(asked[0].1["limit"], 30);
+
+    for room_id in ["!knock:remote.test", "!never:remote.test"] {
+        assert_eq!(
+            call(
+                &core,
+                Call::JoinPublicRoom {
+                    room_id: room_id.into()
+                }
+            ),
+            Outcome::Error(ErrorCode::NotFound),
+            "{room_id}"
+        );
+    }
+    assert!(
+        server.requests_matching(JOIN).is_empty(),
+        "no join was sent"
+    );
+
+    server.answer_once(
+        "POST",
+        "^/_matrix/client/v3/join/.+$",
+        200,
+        json!({"room_id": "!open:remote.test"}),
+    );
+    let joined: Value = value(call(
+        &core,
+        Call::JoinPublicRoom {
+            room_id: "!open:remote.test".into(),
+        },
+    ));
+    assert_eq!(joined, json!({"roomId": "!open:remote.test"}));
+    let joins = server.requests_matching(JOIN);
+    assert_eq!(joins.len(), 1);
+    assert!(
+        joins[0].0.contains("via=remote.test") || joins[0].0.contains("server_name=remote.test"),
+        "joined through the listing server: {}",
+        joins[0].0
+    );
+
+    server.answer_once(
+        "POST",
+        "^/_matrix/client/v3/publicRooms$",
+        429,
+        json!({"errcode": "M_LIMIT_EXCEEDED", "error": "Too many requests"}),
+    );
+    assert_eq!(list(Some("p1")), Outcome::Error(ErrorCode::Unavailable));
+    server.answer_once(
+        "POST",
+        "^/_matrix/client/v3/publicRooms$",
+        403,
+        json!({"errcode": "M_FORBIDDEN", "error": "Federation directory is disabled"}),
+    );
+    assert_eq!(list(None), Outcome::Error(ErrorCode::Rejected));
 }

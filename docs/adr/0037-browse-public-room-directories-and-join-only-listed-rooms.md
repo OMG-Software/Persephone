@@ -49,8 +49,11 @@ page of this session listed as open to anyone".
   token only when it is visible ASCII of at most 512 bytes. The reply must
   fit the bounded view size.
 * The core remembers the rooms that pages of this session listed with the
-  public join rule, at most 300, oldest forgotten first, with the server
-  whose directory listed them. A new session forgets them all.
+  public join rule, at most 330 (a full 300-room listing and one more page),
+  oldest forgotten first, with the server whose directory listed them. A new
+  session forgets them all, and a page from an older session is ignored.
+* A rate limit (429) is `unavailable`, like a failure to connect. Any other
+  refusal is `rejected`.
 * `join_public_room` takes only a room ID. The core joins it through the
   server that listed it, and only when it is remembered; any other room is
   `not_found`. Knock and restricted rooms are shown but not joined.

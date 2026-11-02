@@ -87,6 +87,14 @@ test('GIVEN directory pages WHEN added to a listing THEN a room shows once, the 
   assert.equal(full.next, null);
 });
 
+test('GIVEN a directory WHEN it answers with the token it was asked with THEN no next page is offered', () => {
+  const first = addPage(null, { rooms: [room('!a:s')], next: 'p2', total: null }, null);
+  assert.equal(first.next, 'p2');
+  const repeated = addPage(first, { rooms: [room('!a:s')], next: 'p2', total: null }, 'p2');
+  assert.equal(repeated.next, null, 'asking again would bring nothing new');
+  assert.equal(addPage(first, { rooms: [room('!b:s')], next: 'p3', total: null }, 'p2').next, 'p3');
+});
+
 test('GIVEN listed rooms WHEN labelled THEN the name, address, then ID is shown, and member counts read naturally', () => {
   assert.equal(roomLabel(room('!r:s', { name: 'Lobby', alias: '#lobby:s' })), 'Lobby');
   assert.equal(roomLabel(room('!r:s', { alias: '#lobby:s' })), '#lobby:s');
