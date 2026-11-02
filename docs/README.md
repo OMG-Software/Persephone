@@ -73,7 +73,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Unlock secret](evidence/unlock-secret.md): profile passphrase with Argon2id inside DPAPI, upgrade of DPAPI-only profiles, wrong-entry limit, native-confirmed reset, Lock help text.
 - [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.
 - [Live room updates](evidence/live-updates.md): content-free, coalescing core events for subscribed rooms; reply routing; real-app walkthrough including page reloads.
-- [Web view to host IPC size](evidence/ipc-transport.md): measured 9Ãƒâ€” host allocation for page payloads up to 256 MiB, which led to the core/UI split ([ADR-0004](adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)); after the split, floods leave the core's memory unchanged.
+- [Web view to host IPC size](evidence/ipc-transport.md): measured 9× host allocation for page payloads up to 256 MiB, which led to the core/UI split ([ADR-0004](adr/0004-separate-the-key-holding-core-from-the-web-view-process.md)); after the split, floods leave the core's memory unchanged.
 - [Tauri shell and IPC permissions](evidence/tauri-shell.md) (20 October 2026, before Matrix, storage and media were wired in): one allowlisted command, strict CSP, navigation and window policy; mock-runtime and real web view checks.
 - [Contained media worker](evidence/media-worker.md): self-checking worker under AppContainer, Job and mitigations; memory and deadline results.
 - [WebAssembly decoder sandbox](evidence/wasm-decoder.md): import allowlist, memory/fuel limits, hostile-module tests and 16-megapixel benchmark.
