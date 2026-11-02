@@ -10,6 +10,44 @@ recorded in [room-navigation and media health evidence](evidence/room-navigation
 Native UI and live-server acceptance remain open. No acceptance or security
 gate is closed.
 
+## Layout and controls
+
+Updated 2 November 2026 after an owner request. This section describes where
+the controls are. The frontend checks pass. Native UI and live-server checks
+were not run.
+
+- **Main menu**: the menu button at the top of the room list opens **Search
+  cached messages**, **Saved drafts**, **Ignored users** and **Connection
+  health**.
+- **Room menu**: the menu button at the end of the room header opens **Invite
+  people** (not in a direct-message room), **Jump to date**, **Pinned
+  messages**, **Attachments**, **Show members** or **Hide members**, **Room
+  section** and **Room settings**. **Return to latest** stays visible while
+  message context is shown.
+- **Favourites**: a star next to each room name in the room list and in the
+  room header adds the room to Favourites or removes it. The room keeps its
+  section. **Room section** in the room menu sets the section.
+- **Message actions**: React, Reply, Edit, Delete, Pin message and Report
+  message are icons. Each label shows as a tooltip on hover and keyboard
+  focus. The accessible name also names the sender.
+- **Room list width**: drag the edge of the room list, or focus it and use the
+  arrow keys, Home and End. The width is from 200 to 480 CSS pixels. It is kept
+  in memory only and resets when Persephone starts, because the web view uses
+  no browser storage.
+- **Member panel**: the joined and invited members show down the right of the
+  room (at most 100, from the core's reader list). A person this account has
+  not verified has a Verify icon. A verified person has a verified icon. A
+  changed identity or a person with no encryption identity has its own icon.
+  Verify uses the existing contact verification. The core verifies people only
+  in a joined direct-message room with exactly the two of you (see
+  [contact verification](evidence/contact-verification.md)). If the room list
+  has no such room for that person, the panel offers **Start conversation**.
+  The Verify icon itself never creates a room or sends an invitation. The
+  panel reads the list again after room and security changes, at most about
+  once a second. The core runs one member, reader or server listing at a time,
+  so the panel waits while room settings are open and tries again when the
+  core is busy.
+
 ## Drafts
 
 Each room can keep its text and reply reference in the encrypted local profile.

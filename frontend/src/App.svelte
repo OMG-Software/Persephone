@@ -6,7 +6,7 @@
   import Composer from './Composer.svelte';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { jumpToDate, eventContext, setPinned } from './bridge';
+  import { jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import type { FocusedTimeline } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -18,6 +18,10 @@
   import { findSearchContext } from './searchNavigation';
   import Devices from './Devices.svelte';
   import Icon from './Icon.svelte';
+  import Menu, { type MenuItem } from './Menu.svelte';
+  import MemberPanel from './MemberPanel.svelte';
+  import { directRoomOf } from './members';
+  import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, clampSidebar, draggedSidebar, keyedSidebar } from './layout';
   import IdentityChanges from './IdentityChanges.svelte';
   import InvitePerson from './InvitePerson.svelte';
   import JumpPalette from './JumpPalette.svelte';
@@ -240,6 +244,15 @@
   let savedDraftsOpen = $state(false);
   let ignoreOpen = $state(false);
   let reportTarget = $state<{ roomId: string; eventId: string; sender: string } | null>(null);
+  // The room-section dialog, the member panel, and a favourite being saved.
+  let sectionOpen = $state(false);
+  let membersShown = $state(true);
+  let favouriteBusy = $state(false);
+  let favouriteFailure = $state<string | null>(null);
+  // Changes when trust may have changed, so the member panel reads it again.
+  let trustVersion = $state(0);
+  // The room list width, changed with the resize handle; kept in memory only.
+  let sidebarWidth = $state(SIDEBAR_DEFAULT);
   let focusEvent = $state<string | null>(null);
   let searchLocation = $state<string | null>(null);
   /** Open the manager even when a full draft cannot be saved, so another draft can be removed. */
@@ -431,7 +444,7 @@
     }
     // Native modal dialogs keep pointer focus inside. Keep the global room
     // shortcut inside the same boundary, especially during saved-draft removal.
-    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
+    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || sectionOpen || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
     if (chatShown && rooms && !paletteOpen) {
       event.preventDefault();
       paletteOpen = true;
@@ -602,6 +615,9 @@
     savedDraftsOpen = false;
     ignoreOpen = false;
     reportTarget = null;
+    sectionOpen = false;
+    favouriteBusy = false;
+    favouriteFailure = null;
     focusEvent = null;
     searchLocation = null;
     textSending = false;
@@ -718,6 +734,7 @@
   // The account's encryption state changed: fetch it again. Nothing else
   // changes.
   async function refreshSecurity() {
+    trustVersion += 1;
     checkSessions();
     const generation = sessionGeneration;
     const request = ++securityRequest;
@@ -1019,6 +1036,7 @@
     if (imageDraft && imageDraft.roomId !== roomId) cancelImage();
     imageError = null;
     if (roomSettingsOf !== roomId) roomSettingsOf = null;
+    if (selected !== roomId) sectionOpen = false;
     selected = roomId;
     const contentEpoch = ++timelineEpoch;
     focusEvent = null;
@@ -1515,6 +1533,7 @@
     draftKeeper.clear();
     draftReady = false;
     roomSettingsOf = null;
+    sectionOpen = false;
     if (imageDraft) cancelImage();
     selected = null;
     items = [];
@@ -1649,6 +1668,108 @@
     finally { if (valid()) { loading = false; cancelContext = null; } }
   }
 
+  /** Toggle a room in Favourites, keeping its section; ignore a reply from an older session. */
+  async function toggleFavourite(roomId: string) {
+    if (favouriteBusy) return;
+    const generation = sessionGeneration;
+    const saved = preferences.find((entry) => entry.roomId === roomId);
+    const preference = { roomId, favourite: !(saved?.favourite ?? false), section: saved?.section ?? null };
+    favouriteBusy = true;
+    favouriteFailure = null;
+    try {
+      await setRoomPreference(preference);
+      if (generation === sessionGeneration) preferenceChanged(preference);
+    } catch {
+      if (generation === sessionGeneration) {
+        favouriteFailure = 'The favourite could not be saved. This profile may already have the most room groups it can keep.';
+      }
+    } finally {
+      if (generation === sessionGeneration) favouriteBusy = false;
+    }
+  }
+
+  /**
+   * Verify a member of the selected room in the direct-message room the room
+   * list has for them; the core checks that room again. A failure shows in the
+   * selected room. False when there is no such room.
+   */
+  function verifyMember(userId: string): boolean {
+    const roomId = selected;
+    const direct = rooms ? directRoomOf(rooms.rooms, userId) : null;
+    if (!roomId || direct === null) return false;
+    void startSecurity(() => verifyContact(direct), { room: roomId, kind: 'contact' });
+    return true;
+  }
+
+  /** Open or start a direct conversation with a member; the result is the failure text, if any. */
+  async function messageMember(userId: string): Promise<string | null> {
+    const generation = sessionGeneration;
+    try {
+      const reply = await startConversation(userId);
+      if (generation !== sessionGeneration) return null;
+      if (reply.kind === 'existing' || reply.kind === 'created') {
+        await openConversation(reply.roomId);
+        return null;
+      }
+      return reply.kind === 'no_identity'
+        ? 'This person has not set up encryption, so there is nothing to verify.'
+        : 'The conversation could not be started.';
+    } catch (reason) {
+      return String(reason) === 'limit_exceeded'
+        ? 'Another conversation is being started. Try again in a moment.'
+        : describe(reason);
+    }
+  }
+
+  // Resizing the room list with the pointer: the width and pointer position
+  // when the drag started, and pointer pixels per CSS pixel (the interface
+  // zoom).
+  let drag: { width: number; x: number; ratio: number } | null = null;
+  function startResize(event: PointerEvent) {
+    if (event.button !== 0) return;
+    const handle = event.currentTarget as HTMLElement;
+    const sidebar = handle.previousElementSibling;
+    const shown = sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : sidebarWidth;
+    drag = { width: sidebarWidth, x: event.clientX, ratio: shown / sidebarWidth };
+    handle.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+  function moveResize(event: PointerEvent) {
+    if (drag) sidebarWidth = draggedSidebar(drag.width, drag.x, event.clientX, drag.ratio);
+  }
+  function endResize(event: PointerEvent) {
+    drag = null;
+    const handle = event.currentTarget as HTMLElement;
+    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+  }
+  function keyResize(event: KeyboardEvent) {
+    const next = keyedSidebar(sidebarWidth, event.key);
+    if (next === null) return;
+    event.preventDefault();
+    sidebarWidth = next;
+  }
+
+  // The main menu: account-wide tools that used to be buttons above the room.
+  const mainMenu: MenuItem[] = [
+    { label: 'Search cached messages', onselect: () => (searchOpen = true) },
+    { label: 'Saved drafts', onselect: () => void openSavedDrafts() },
+    { label: 'Ignored users', onselect: () => (ignoreOpen = true) },
+    { label: 'Connection health', onselect: () => (healthOpen = true) }
+  ];
+
+  /** The selected room's menu: what used to be buttons at the top of the room. */
+  function roomMenu(roomId: string, direct: boolean): MenuItem[] {
+    return [
+      ...(direct ? [] : [{ label: 'Invite people', onselect: () => (invitingTo = roomId) }]),
+      { label: 'Jump to date', onselect: () => (roomTool = 'jump') },
+      { label: 'Pinned messages', onselect: () => (roomTool = 'pins') },
+      { label: 'Attachments', onselect: () => (roomTool = 'attachments') },
+      { label: membersShown ? 'Hide members' : 'Show members', onselect: () => (membersShown = !membersShown), separated: true },
+      { label: 'Room section', onselect: () => (sectionOpen = true) },
+      { label: 'Room settings', onselect: () => (roomSettingsOf = roomId), separated: true }
+    ];
+  }
+
   /** Pin through the core; reopen the panel only for the original room request. */
   async function pinMessage(eventId: string) {
     if (!selected || pinBusy) return;
@@ -1670,6 +1791,12 @@
     <img src={markUrl} alt="" width="32" height="32" />
     Persephone
   </div>
+{/snippet}
+
+{#snippet roomMenuButton()}
+  {#if selectedRoom}
+    <Menu id="room-menu" label="Room menu" items={roomMenu(selectedRoom.roomId, !!selectedRoom.contact)} />
+  {/if}
 {/snippet}
 
 {#snippet lockButton(above: boolean, iconOnly: boolean)}
@@ -1920,7 +2047,15 @@
         onnewroom={signedIn ? () => (newRoomOpen = true) : undefined}
         onaccept={(roomId) => answerInvite(roomId, true)}
         ondecline={(roomId) => answerInvite(roomId, false)}
+        onfavourite={signedIn ? toggleFavourite : undefined}
+        {favouriteBusy}
+        width={sidebarWidth}
       >
+        {#snippet menu()}
+          {#if signedIn}
+            <Menu id="main-menu" label="Main menu" icon="menu" items={mainMenu} />
+          {/if}
+        {/snippet}
         {#snippet notice()}
           {#if signedIn && (security?.identity === 'none' || security?.identity === 'unverified')}
             <div class="device-notice">
@@ -1941,14 +2076,29 @@
           {/if}
         {/snippet}
       </Sidebar>
+      <!-- Drag, or focus and use the arrow keys, to resize the room list. A
+           focusable separator is the ARIA window-splitter pattern, an
+           interactive widget the linter does not recognise. -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <div
+        class="resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize room list"
+        aria-valuemin={SIDEBAR_MIN}
+        aria-valuemax={SIDEBAR_MAX}
+        aria-valuenow={sidebarWidth}
+        tabindex="0"
+        onpointerdown={startResize}
+        onpointermove={moveResize}
+        onpointerup={endResize}
+        onpointercancel={endResize}
+        onkeydown={keyResize}
+        ondblclick={() => (sidebarWidth = clampSidebar(SIDEBAR_DEFAULT))}
+      ></div>
       <div class="pane">
         {#if signedIn}
-          <div class="feature-actions" aria-label="Message tools">
-            <button type="button" class="secondary" onclick={() => (searchOpen = true)}>Search cached messages</button>
-            <button type="button" class="secondary" onclick={() => (healthOpen = true)}>Connection health</button>
-            <button type="button" class="secondary" onclick={() => (ignoreOpen = true)}>Ignored users</button>
-            <button type="button" class="secondary" onclick={openSavedDrafts}>Saved drafts</button>
-          </div>
+          {#if favouriteFailure}<p class="error pane-error" role="alert">{favouriteFailure}</p>{/if}
           {#if preferenceFailure}<p class="error" role="alert">{preferenceFailure} <button type="button" class="link" onclick={loadPreferences}>Try again</button></p>{/if}
           {#if rooms}<StoredRoomGroups {preferences} joinedRooms={rooms.rooms.map((room) => room.roomId)} onchanged={preferenceChanged} />{/if}
         {/if}
@@ -1964,20 +2114,14 @@
           />
         {/if}
         {#if selectedRoom}
-          {#if signedIn}
-            {#key selectedRoom.roomId}
-              <RoomOrganisation roomId={selectedRoom.roomId} {preferences} onchanged={preferenceChanged} />
-            {/key}
-          {/if}
-          {#if signedIn}
-            <div class="feature-actions" aria-label="Room tools">
-              <button type="button" class="secondary" onclick={() => (roomTool = 'jump')}>Jump to date</button>
-              <button type="button" class="secondary" onclick={() => (roomTool = 'pins')}>Pinned messages</button>
-              <button type="button" class="secondary" onclick={() => (roomTool = 'attachments')}>Attachments</button>
-              {#if focusedContext}<button type="button" class="secondary" onclick={() => selected && open(selected)}>Return to latest</button>{/if}
+          <div class="room-view">
+          <div class="room-main">
+          {#if searchLocation || (signedIn && focusedContext)}
+            <div class="search-location">
+              {#if searchLocation}<p class="note" role="status">{searchLocation}</p>{/if}
+              {#if signedIn && focusedContext}<button type="button" class="secondary" onclick={() => selected && open(selected)}>Return to latest</button>{/if}
             </div>
           {/if}
-          {#if searchLocation}<p class="note search-location" role="status">{searchLocation}</p>{/if}
           <Timeline
             title={selectedRoom.displayName ?? selectedRoom.roomId}
             roomId={selectedRoom.roomId}
@@ -1988,13 +2132,9 @@
             {error}
             onolder={older}
             {contact}
-            canVerify={security?.identity === 'verified'}
-            verifying={securityBusy || (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
-            onverify={() => verifyRoomContact(selectedRoom.roomId)}
-            oninvite={signedIn && !selectedRoom.contact
-              ? () => (invitingTo = selectedRoom.roomId)
-              : undefined}
-            onsettings={signedIn ? () => (roomSettingsOf = selectedRoom.roomId) : undefined}
+            favourite={preferences.some((entry) => entry.roomId === selectedRoom.roomId && entry.favourite)}
+            onfavourite={signedIn ? () => toggleFavourite(selectedRoom.roomId) : undefined}
+            menu={signedIn ? roomMenuButton : undefined}
             onreply={sendBlocked === null && draftReady && !textSending
               ? replyToMessage
               : undefined}
@@ -2122,6 +2262,22 @@
               <button type="button" class="link discard-draft" disabled={textSending} onclick={discardDraft}>Discard draft</button>
             {/if}
           {/if}
+          </div>
+          {#if signedIn && membersShown}
+            {#key selectedRoom.roomId + ':' + sessionGeneration}
+              <MemberPanel
+                roomId={selectedRoom.roomId}
+                version={roomChanges + trustVersion}
+                {contact}
+                paused={roomSettingsOf !== null}
+                canVerify={security?.identity === 'verified'}
+                verifying={securityBusy || (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
+                onverify={verifyMember}
+                onmessage={messageMember}
+              />
+            {/key}
+          {/if}
+          </div>
         {:else}
           <section class="empty-pane" aria-label="No room selected">
             <p>
@@ -2156,6 +2312,11 @@
       {/if}
       {#if ignoreOpen && signedIn}
         <IgnoreUsers onchanged={ignoredChanged} onclose={() => (ignoreOpen = false)} />
+      {/if}
+      {#if sectionOpen && signedIn && selected}
+        {#key selected}
+          <RoomOrganisation roomId={selected} {preferences} onchanged={preferenceChanged} onclose={() => (sectionOpen = false)} />
+        {/key}
       {/if}
       {#if reportTarget && signedIn}
         <ReportAbuse roomId={reportTarget.roomId} eventId={reportTarget.eventId} sender={reportTarget.sender}

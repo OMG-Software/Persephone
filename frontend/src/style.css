@@ -682,7 +682,13 @@ kbd {
 
 .chat-header .room-title {
   min-width: 0;
-  flex: 1;
+  flex: 0 1 auto;
+}
+
+.chat-header .header-end {
+  display: flex;
+  flex: none;
+  margin-left: auto;
 }
 
 .chat-header .room-title h2 {
@@ -769,11 +775,6 @@ kbd {
 
 .contact-error {
   margin: 8px 20px 0;
-}
-
-.chat-header .header-action {
-  flex: none;
-  margin-left: auto;
 }
 
 .scroller {
@@ -965,7 +966,7 @@ kbd {
 
 .message-actions {
   display: flex;
-  gap: 10px;
+  gap: 2px;
   margin-left: auto;
   opacity: 0;
 }
@@ -1010,12 +1011,29 @@ kbd {
 }
 
 .message:hover .message-actions,
-.message:focus-within .message-actions {
+.message:focus-within .message-actions,
+.stream li:hover > .item-actions .message-actions,
+.stream li:focus-within > .item-actions .message-actions {
   opacity: 1;
 }
 
-.message-actions .link {
-  font-size: 12px;
+/* Actions on an image, file or notice: a small floating bar at the top
+   right of the item, shown on hover and keyboard focus. */
+.stream li {
+  position: relative;
+}
+
+.item-actions {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+}
+
+.item-actions .message-actions {
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
 }
 
 .replying {
@@ -2588,10 +2606,6 @@ mark {
   user-select: text;
 }
 
-.chat-header .header-settings {
-  flex: none;
-}
-
 @media (max-width: 760px) {
   .room-settings-frame {
     flex-direction: column;
@@ -2652,13 +2666,6 @@ mark {
 }
 
 /* Cached search, room grouping, and explicit moderation controls. */
-.feature-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--line);
-}
 
 .feature-dialog {
   width: min(640px, calc(100vw - 32px));
@@ -2674,21 +2681,21 @@ mark {
 
 .feature-dialog::backdrop { background: #0008; }
 .feature-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.feature-dialog form, .room-organisation form { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+.feature-dialog form { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
 .feature-dialog p { margin: 12px 0; }
-.feature-dialog input, .feature-dialog textarea, .feature-dialog select, .room-organisation input { min-width: 0; max-width: 100%; }
+.feature-dialog input, .feature-dialog textarea, .feature-dialog select { min-width: 0; max-width: 100%; }
 .feature-dialog textarea { min-height: 80px; }
 .room-organisation { padding: 8px 16px; border-bottom: 1px solid var(--line); }
 .room-organisation summary { cursor: pointer; }
-.room-organisation input[type='checkbox'] { width: auto; }
-.room-organisation form { max-width: 480px; }
+.feature-dialog .room-organisation { padding: 0; border-bottom: 0; }
 .local-results { padding: 0; list-style: none; }
 .local-results li { margin: 8px 0; }
 .search-result { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 12px; text-align: start; overflow-wrap: anywhere; }
 .search-result span { max-width: 100%; }
 .search-selected { outline: 2px solid var(--accent, #1d7a5a); outline-offset: -2px; }
 .search-location, .draft-status { padding: 8px 16px; }
-.report-message { margin: 0 0 8px 64px; }
+.search-location { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+.pane-error { padding: 8px 16px; }
 .discard-draft { align-self: flex-start; margin: 4px 16px 8px; }
 .draft-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; user-select: text; }
 
@@ -2697,3 +2704,308 @@ mark {
 .feature-dialog dl { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 2fr); gap: .6rem; }
 .feature-dialog dd { margin: 0; overflow-wrap: anywhere; }
 .feature-dialog .local-results > li { margin: .75rem 0; overflow-wrap: anywhere; }
+
+/* Icon buttons with a tooltip label (IconAction, Menu). The tooltip shows
+   on hover and keyboard focus; Escape hides it until the pointer or focus
+   leaves. It is aria-hidden: the button carries the same text as its
+   accessible name. */
+.icon.filled {
+  fill: currentColor;
+}
+
+.action-anchor {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.action-tip {
+  position: absolute;
+  left: 50%;
+  z-index: 25;
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateX(-50%);
+  visibility: hidden;
+}
+
+.tip-above > .action-tip {
+  bottom: calc(100% + 4px);
+}
+
+.tip-below > .action-tip {
+  top: calc(100% + 4px);
+}
+
+.tip-start > .action-tip {
+  top: 50%;
+  right: calc(100% + 6px);
+  left: auto;
+  transform: translateY(-50%);
+}
+
+.action-anchor:hover > .action-tip,
+.action-anchor > button:focus-visible + .action-tip {
+  visibility: visible;
+}
+
+.action-anchor > .action-tip.dismissed {
+  visibility: hidden;
+}
+
+.icon-action {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink2);
+}
+
+.icon-action .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.icon-action:hover:not(:disabled) {
+  background: var(--sel);
+  color: var(--ink);
+}
+
+.icon-action:disabled {
+  color: var(--ink3);
+  opacity: 0.6;
+}
+
+/* Favourite stars: shown on hover and focus, and always when on. */
+.room-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.room-item .room-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.favourite-toggle[aria-pressed='true'] {
+  color: var(--accent);
+}
+
+.room-item .favourite-toggle {
+  opacity: 0;
+}
+
+.room-item:hover .favourite-toggle,
+.room-item .favourite-toggle:focus-visible,
+.room-item .favourite-toggle[aria-pressed='true'] {
+  opacity: 1;
+}
+
+/* The room list resize handle: a thin strip over the sidebar's border. */
+.resize-handle {
+  position: relative;
+  z-index: 5;
+  flex: none;
+  width: 6px;
+  margin: 0 -3px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resize-handle:hover,
+.resize-handle:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+/* Menus: the main menu in the sidebar and the room menu in the header. */
+.menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  box-shadow: var(--shadow-modal);
+}
+
+.menu-list.align-end {
+  right: 0;
+}
+
+.menu-list.align-start {
+  left: 0;
+}
+
+.menu-list li.separated {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.menu-list [role='menuitem'] {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13.5px;
+  text-align: start;
+  white-space: nowrap;
+}
+
+.menu-list [role='menuitem']:hover:not(:disabled),
+.menu-list [role='menuitem']:focus {
+  background: var(--hover);
+}
+
+.menu-list [role='menuitem']:disabled {
+  color: var(--ink3);
+}
+
+.menu-trigger[aria-expanded='true'] {
+  background: var(--sel);
+}
+
+/* The room: the timeline and composer, and the member panel on the right. */
+.room-view {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.room-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.member-panel {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+  width: 248px;
+  min-height: 0;
+  padding: 16px 8px 12px 12px;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.member-panel h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.member-count {
+  color: var(--ink3);
+  font-weight: 400;
+}
+
+.member-panel .note,
+.member-panel .error {
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 2px 0;
+}
+
+.member-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.member-name,
+.member-id {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-name {
+  font-size: 13.5px;
+}
+
+.member-id {
+  color: var(--ink3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.member-own {
+  color: var(--ink3);
+  font-size: 12px;
+}
+
+.member-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+}
+
+.member-mark .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.member-mark.verified {
+  color: var(--enc-fg);
+}
+
+.member-mark.changed {
+  color: var(--danger);
+}
+
+.member-mark.no_identity {
+  color: var(--ink3);
+}
+
+.member-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 2px 0 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.member-ask .secondary {
+  height: 30px;
+  font-size: 13px;
+}

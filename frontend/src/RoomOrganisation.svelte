@@ -2,12 +2,15 @@
   import { onDestroy } from 'svelte';
   import { setRoomPreference, type RoomPreference } from './bridge';
   import { byteLength } from './drafts';
+  import FeatureDialog from './FeatureDialog.svelte';
   import { RoomGroupRestoration } from './roomGroupRestoration.ts';
-  let { roomId, preferences, onchanged }: {
+  // The room's section in the room list. Favourites change with the star
+  // next to the room name; saving a section keeps the saved favourite.
+  let { roomId, preferences, onchanged, onclose }: {
     roomId: string; preferences: RoomPreference[]; onchanged: (preference: RoomPreference) => void;
+    onclose: () => void;
   } = $props();
   let section = $state('');
-  let favourite = $state(false);
   let busy = $state(false);
   let failure = $state<string | null>(null);
   let active = true;
@@ -20,7 +23,6 @@
     const saved = restoration.changed(roomId, savedSection, savedFavourite);
     if (!saved) return;
     section = saved.section;
-    favourite = saved.favourite;
     failure = null;
   }
   $effect(restoreGrouping);
@@ -28,22 +30,20 @@
   async function save(event: SubmitEvent) {
     event.preventDefault();
     if (busy || byteLength(section.trim()) > 64) return;
-    const preference = { roomId, favourite, section: section.trim() || null };
+    const preference = { roomId, favourite: savedFavourite, section: section.trim() || null };
     busy = true;
     failure = null;
     try {
       await setRoomPreference(preference);
-      if (active) onchanged(preference);
+      if (active) { onchanged(preference); onclose(); }
     } catch {
       if (active) failure = 'The room group could not be saved. Use a section name up to 64 UTF-8 bytes and at most 16 sections.';
     } finally { if (active) busy = false; }
   }
 </script>
 
-<details class="room-organisation">
-  <summary>Organise this room</summary>
-  <form onsubmit={save}>
-    <label><input type="checkbox" bind:checked={favourite} disabled={busy} /> Favourite</label>
+<FeatureDialog title="Room section" {onclose} closeDisabled={busy}>
+  <form class="room-organisation" onsubmit={save}>
     <label for="room-section">Section (empty means Rooms; up to 64 UTF-8 bytes)</label>
     <input id="room-section" bind:value={section} maxlength="64" disabled={busy} autocomplete="off" />
     <p class="note">Favourites appear first. A favourite appears once, even when it has a section. These groups apply to this account profile.</p>
@@ -51,4 +51,4 @@
     {#if byteLength(section.trim()) > 64}<p role="alert" class="error">The section name exceeds 64 UTF-8 bytes.</p>{/if}
     {#if failure}<p role="alert" class="error">{failure}</p>{/if}
   </form>
-</details>
+</FeatureDialog>

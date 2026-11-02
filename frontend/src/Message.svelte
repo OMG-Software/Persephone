@@ -1,4 +1,5 @@
 <script lang="ts">
+  import MessageActions from './MessageActions.svelte';
   import { avatarColour, initials } from './people';
   import { clockTime, fullTime, toDate } from './time';
   import { bodyParts } from './links';
@@ -16,6 +17,8 @@
     reactions = [],
     onreact,
     onunreact,
+    onpin,
+    onreport,
     onlink
   }: {
     name: string;
@@ -38,6 +41,10 @@
     // event); absent where reacting is not offered.
     onreact?: (key: string) => void;
     onunreact?: (reactionEventId: string) => void;
+    // Pins this message for the room; absent where pinning is not offered.
+    onpin?: () => void;
+    // Reports this message; only for other people's messages.
+    onreport?: () => void;
     // Asks the core to open a link; without it, links stay plain text.
     onlink?: (url: string) => void;
   } = $props();
@@ -63,30 +70,16 @@
       {#if edited}
         <span class="edited">(edited)</span>
       {/if}
-      {#if onreply || onedit || ondelete || onreact}
-        <span class="message-actions">
-          {#if onreact}
-            <button type="button" class="link" aria-expanded={picking} onclick={() => (picking = !picking)}>
-              React <span class="visually-hidden">to <bdi>{name}</bdi></span>
-            </button>
-          {/if}
-          {#if onreply}
-            <button type="button" class="link" onclick={onreply}>
-              Reply <span class="visually-hidden">to <bdi>{name}</bdi></span>
-            </button>
-          {/if}
-          {#if onedit}
-            <button type="button" class="link" onclick={onedit}>
-              Edit <span class="visually-hidden">your message</span>
-            </button>
-          {/if}
-          {#if ondelete}
-            <button type="button" class="link" onclick={ondelete}>
-              Delete <span class="visually-hidden">your message</span>
-            </button>
-          {/if}
-        </span>
-      {/if}
+      <MessageActions
+        sender={name}
+        reacting={picking}
+        onreact={onreact && (() => (picking = !picking))}
+        {onreply}
+        {onedit}
+        {ondelete}
+        {onpin}
+        {onreport}
+      />
     </div>
     {#if quote === 'missing'}
       <p class="reply-quote">In reply to an earlier message</p>
