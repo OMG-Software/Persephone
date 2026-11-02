@@ -1977,6 +1977,25 @@
       "not_run": "Mounted RoomTools interaction, native UI/accessibility, live homeservers, Linux/macOS runtime, separate containment, release package or dependency audit. Global SDK response buffering and drain remain open.",
       "report": "room-navigation-monitor-fixes.md",
       "raw_log": ".local/runs/pr47-monitor/check.log"
+    },
+    {
+      "name": "pr47_sonar_parser_follow_up",
+      "checked_on": "2026-11-02",
+      "base_commit": "624968920683afeeb91d780164055b9d40f1812a",
+      "command": "python tools/dev.py frontend; python -m unittest discover -s tests/tools -p test_check_evidence.py -v",
+      "exit_code": 0,
+      "frontend_tests_passed": 196,
+      "evidence_checker_tests_passed": 5,
+      "source_manifest_sha256": "f64295985986bcff7195ad330f9b048ba6dc9efcd67967bee1c9c46642bd383b",
+      "source": "Parser HTTPS literal only; other runtime/test files unchanged. 54 hashes in room-navigation-sonar-parser-sources.json.",
+      "sonar_git_revision_disposition": "No source change; independent trace and adversarial execution support false positive. Remote classification remains open and needs owner triage.",
+      "not_run": "Rust unchanged and not repeated; native UI/mounted interaction/live-server/other-platform/containment/release/audit acceptance remains open.",
+      "report": "room-navigation-sonar-follow-up.md",
+      "raw_logs": [
+        ".local/runs/pr47-monitor/sonar-parser-frontend.log",
+        ".local/runs/pr47-monitor/sonar-revision-recheck.log",
+        ".local/runs/pr47-monitor/sonar-revision-probes.log"
+      ]
     }
   ],
   "previous_recorded_root_lock_sha256": "21bac5958502928a449613c3bc62e0433195347b7f24461934e80fb48b2216e2",

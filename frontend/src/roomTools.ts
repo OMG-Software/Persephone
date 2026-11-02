@@ -19,7 +19,7 @@ function validMatrixServerName(server: string): boolean {
     if (hostEnd === 0) return false;
     try {
       // URL parsing validates bracketed IPv6 locally. It does not make a request.
-      new URL('http://' + server.slice(0, hostEnd));
+      new URL('https://' + server.slice(0, hostEnd));
     } catch { return false; }
   } else {
     const colon = server.indexOf(':');
