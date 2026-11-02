@@ -144,6 +144,10 @@ marks the newer end with a gap. Its page cursor resumes before the oldest
 retained item. It does not scan history to simulate a date lookup. The server
 still learns the room and time.
 
+The client selects a visible event from that bounded context window. Ignored
+messages and relation-only events cannot be the focus. A window with no
+eligible visible event returns no result; it does not trigger a history scan.
+
 Focused date and pinned-message context does not send read markers. If a live
 room update invalidates focused context, the client cancels an in-flight
 context request and clears the displayed focused timeline. It removes received
@@ -161,6 +165,13 @@ checks the user's current power level before a write. A list can contain at
 most 100 IDs. State replacement has no compare-and-swap guarantee, so
 concurrent writers can overwrite one another. This is shared room metadata,
 not a private profile setting.
+
+Pin loading has a total time budget of 10 seconds. The core checks session
+admission before each content or edit request. It checks at most 20 replacement
+events per pin and applies the latest validated edit from the original sender.
+If an edit read is unavailable, incomplete or undecryptable, the panel keeps
+the pin reference and hides its original preview. The panel reports unavailable
+previews or loading limits. This does not establish a complete SDK shutdown.
 
 ## Attachment browser
 
@@ -190,8 +201,9 @@ snapshot and generation fencing rejects stale sync updates.
 
 ## Verification state
 
-The implementation is in place, and automated checks are recorded in the
-[verification record](evidence/room-navigation-media-health.md). Native UI
-and live-server acceptance remain open. Existing SDK drain and restart
-requirements remain unresolved. Passing feature checks do not establish a
+The implementation is in place. Automated checks are recorded in the
+[original record](evidence/room-navigation-media-health.md) and
+[review-fix record](evidence/room-navigation-review-fixes.md). Native UI and
+live-server acceptance remain open. Existing SDK drain and restart requirements
+remain unresolved. Passing feature checks do not establish a
 complete SDK shutdown or production readiness.

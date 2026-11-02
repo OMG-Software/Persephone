@@ -1,4 +1,4 @@
-import type { ConnectionHealth } from './bridge/index.ts';
+import type { ConnectionHealth } from '../../crates/contracts/generated/contracts';
 
 const accounts = {
   signed_out: 'Signed out', signing_in: 'Signing in', signed_in: 'Signed in', sign_in_failed: 'Sign-in failed'

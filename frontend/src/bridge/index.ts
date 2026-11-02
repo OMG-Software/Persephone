@@ -169,8 +169,10 @@ export function setRoomPreference(preference: RoomPreference): Promise<void> {
   return invoke<void>('set_room_preference', { preference });
 }
 
+const EMPTY_LOCAL_SEARCH_FILTERS: Readonly<LocalSearchFilters> = Object.freeze({ sender: null, fromMs: null, beforeMs: null });
+
 /** Search existing local cache entries; this call does not fetch server history. */
-export function searchMessages(term: string, roomId: string | null, filters: LocalSearchFilters = { sender: null, fromMs: null, beforeMs: null }): Promise<LocalSearchResults> {
+export function searchMessages(term: string, roomId: string | null, filters: LocalSearchFilters = EMPTY_LOCAL_SEARCH_FILTERS): Promise<LocalSearchResults> {
   return invoke<LocalSearchResults>('search_messages', { term, roomId, filters });
 }
 

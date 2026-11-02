@@ -3,11 +3,14 @@ use crate::matrix_views::{MatrixViews, joined_room, server_time};
 use crate::views::MAX_PAGE_BYTES;
 use matrix_sdk::{
     Client, Room,
-    room::MessagesOptions,
+    room::{IncludeRelations, MessagesOptions, RelationsOptions},
     ruma::{
         EventId, MilliSecondsSinceUnixEpoch, UInt,
         api::client::room::get_event_by_timestamp,
-        events::{StateEventType, room::pinned_events::RoomPinnedEventsEventContent},
+        events::{
+            StateEventType, relation::RelationType,
+            room::pinned_events::RoomPinnedEventsEventContent,
+        },
     },
 };
 use persephone_contracts::{
@@ -15,10 +18,14 @@ use persephone_contracts::{
     TimelineItem, TimelinePage,
 };
 use persephone_core_protocol::{ErrorCode, MAX_EVENT_ID_BYTES};
+use std::time::Duration;
+use tokio::time::{Instant, timeout_at};
 
 const MAX_PINS: usize = 100;
 const MAX_SCAN: usize = 100;
 const MAX_ATTACHMENTS: usize = 50;
+const MAX_PIN_EDITS: usize = 20;
+const PIN_READ_BUDGET: Duration = Duration::from_secs(10);
 
 fn event_id(raw: &str) -> Result<&EventId, ErrorCode> {
     if raw.len() > MAX_EVENT_ID_BYTES {
@@ -44,24 +51,34 @@ pub async fn jump_to_date(
         UInt::try_from(timestamp).map_err(|_| ErrorCode::InvalidArgument)?,
     );
     let request = get_event_by_timestamp::v1::Request::since(joined.room_id().to_owned(), ts);
-    let found = match client.send(request).await {
-        Ok(found) => found,
+    let (found, backward) = match client.send(request).await {
+        Ok(found) => (found, false),
         Err(error)
             if error
                 .as_client_api_error()
                 .is_some_and(|e| e.status_code.as_u16() == 404) =>
         {
-            client
-                .send(get_event_by_timestamp::v1::Request::until(
-                    joined.room_id().to_owned(),
-                    ts,
-                ))
-                .await
-                .map_err(|_| ErrorCode::Unavailable)?
+            (
+                client
+                    .send(get_event_by_timestamp::v1::Request::until(
+                        joined.room_id().to_owned(),
+                        ts,
+                    ))
+                    .await
+                    .map_err(|_| ErrorCode::Unavailable)?,
+                true,
+            )
         }
         Err(_) => return Err(ErrorCode::Unavailable),
     };
-    event_context(client, views, room, found.event_id.as_str()).await
+    focused_context(
+        client,
+        views,
+        room,
+        found.event_id.as_str(),
+        Some((timestamp, backward)),
+    )
+    .await
 }
 
 /// Return a focused page. Retry smaller complete contexts instead of cutting
@@ -71,6 +88,17 @@ pub async fn event_context(
     views: &MatrixViews,
     room: &str,
     raw: &str,
+) -> Result<FocusedTimeline, ErrorCode> {
+    focused_context(client, views, room, raw, None).await
+}
+
+/// Select a visible date target from the same bounded, validated context.
+async fn focused_context(
+    client: &Client,
+    views: &MatrixViews,
+    room: &str,
+    raw: &str,
+    date: Option<(u64, bool)>,
 ) -> Result<FocusedTimeline, ErrorCode> {
     let joined = joined_room(client, room)?;
     let id = event_id(raw)?;
@@ -92,9 +120,13 @@ pub async fn event_context(
         chunk.push(target);
         chunk.extend(context.events_after);
         let mut items = views.project_chunk(client, &joined, &chunk).await?;
-        if !items.iter().any(|item| item_id(item) == Some(raw)) {
-            return Err(ErrorCode::NotFound);
-        }
+        let selected = match date {
+            Some((timestamp, backward)) => date_target(&items, timestamp, backward)
+                .ok_or(ErrorCode::NotFound)?
+                .to_owned(),
+            None if items.iter().any(|item| item_id(item) == Some(raw)) => raw.to_owned(),
+            None => return Err(ErrorCode::NotFound),
+        };
         items.push(TimelineItem::Gap { next_cursor: None });
         // Register only after the budget check to avoid evicting useful cursors
         // for responses that will be retried.
@@ -104,7 +136,7 @@ pub async fn event_context(
                 items,
                 next_cursor: None,
             },
-            event_id: raw.to_owned(),
+            event_id: selected,
         };
         if fits(&result) {
             result.page.next_cursor = context
@@ -120,6 +152,63 @@ pub async fn event_context(
         }
         limit /= 2;
     }
+}
+
+/// Skip hidden messages and relation-only events that have no timeline row.
+fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option<&str> {
+    let redacted: std::collections::BTreeSet<&str> = items
+        .iter()
+        .filter_map(|item| {
+            if let TimelineItem::Redaction { redacts, .. } = item {
+                Some(redacts.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let candidates = items.iter().filter_map(|item| {
+        let (id, time) = match item {
+            TimelineItem::Message {
+                event_id,
+                origin_server_ts,
+                ..
+            }
+            | TimelineItem::Image {
+                event_id,
+                origin_server_ts,
+                ..
+            }
+            | TimelineItem::File {
+                event_id,
+                origin_server_ts,
+                ..
+            }
+            | TimelineItem::Notice {
+                event_id,
+                origin_server_ts,
+                ..
+            }
+            | TimelineItem::State {
+                event_id,
+                origin_server_ts,
+                ..
+            } => (event_id, origin_server_ts.as_ref()?.get()),
+            _ => return None,
+        };
+        (!redacted.contains(id.as_str())
+            && if backward {
+                time <= timestamp
+            } else {
+                time >= timestamp
+            })
+        .then_some((id.as_str(), time))
+    });
+    if backward {
+        candidates.max_by_key(|(_, time)| *time)
+    } else {
+        candidates.min_by_key(|(_, time)| *time)
+    }
+    .map(|(id, _)| id)
 }
 
 fn item_id(item: &TimelineItem) -> Option<&str> {
@@ -149,18 +238,42 @@ pub async fn pinned_messages(
     client: &Client,
     views: &MatrixViews,
     room: &str,
+    is_open: impl Fn() -> bool,
+) -> Result<PinnedMessages, ErrorCode> {
+    pinned_messages_until(
+        client,
+        views,
+        room,
+        is_open,
+        Instant::now() + PIN_READ_BUDGET,
+    )
+    .await
+}
+
+/// Keep the whole pin read, including a slow current request, within one deadline.
+async fn pinned_messages_until(
+    client: &Client,
+    views: &MatrixViews,
+    room: &str,
+    is_open: impl Fn() -> bool,
+    deadline: Instant,
 ) -> Result<PinnedMessages, ErrorCode> {
     let joined = joined_room(client, room)?;
-    let ids = joined
-        .load_pinned_events()
+    if !is_open() {
+        return Err(ErrorCode::Locked);
+    }
+    let ids = timeout_at(deadline, joined.load_pinned_events())
         .await
+        .map_err(|_| ErrorCode::Unavailable)?
         .map_err(|_| ErrorCode::Unavailable)?
         .unwrap_or_default();
     let mut result = PinnedMessages {
         room_id: room.to_owned(),
         event_ids: Vec::new(),
         items: Vec::new(),
-        can_manage: can_manage(client, &joined).await?,
+        can_manage: timeout_at(deadline, can_manage(client, &joined))
+            .await
+            .map_err(|_| ErrorCode::Unavailable)??,
         truncated: ids.len() > MAX_PINS,
     };
     for id in ids.into_iter().take(MAX_PINS) {
@@ -174,11 +287,60 @@ pub async fn pinned_messages(
             continue;
         }
         result.event_ids.push(id.to_string());
-        if let Ok(event) = joined.event(&id, None).await {
-            if event.event_id() != Some(id.as_ref()) {
+    }
+    for id in result.event_ids.clone() {
+        if !is_open() || Instant::now() >= deadline {
+            result.truncated = true;
+            break;
+        }
+        let id = event_id(&id)?;
+        if let Ok(Ok(event)) = timeout_at(deadline, joined.event(id, None)).await {
+            if event.event_id() != Some(id) {
                 return Err(ErrorCode::Rejected);
             }
-            let projected = views.project_chunk(client, &joined, &[event]).await?;
+            // A preview must not show obsolete original text when later edits
+            // cannot be checked. Hide it on incomplete/failed relation reads.
+            if !is_open() || Instant::now() >= deadline {
+                result.truncated = true;
+                break;
+            }
+            let edits = timeout_at(
+                deadline,
+                joined.relations(
+                    id.to_owned(),
+                    RelationsOptions {
+                        include_relations: IncludeRelations::RelationsOfType(
+                            RelationType::Replacement,
+                        ),
+                        limit: Some(UInt::try_from(MAX_PIN_EDITS as u64).unwrap()),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .await;
+            let Ok(Ok(edits)) = edits else {
+                result.truncated = true;
+                continue;
+            };
+            if edits.chunk.len() > MAX_PIN_EDITS || edits.next_batch_token.is_some() {
+                result.truncated = true;
+                continue;
+            }
+            let projected = timeout_at(
+                deadline,
+                views.project_pin(client, &joined, event, edits.chunk),
+            )
+            .await;
+            let projected = match projected {
+                Ok(items) => items?,
+                Err(_) => {
+                    result.truncated = true;
+                    break;
+                }
+            };
+            if projected.is_empty() {
+                result.truncated = true;
+            }
             for item in projected {
                 result.items.push(item);
                 if !fits(&result) {
@@ -186,6 +348,8 @@ pub async fn pinned_messages(
                     result.truncated = true;
                 }
             }
+        } else {
+            result.truncated = true;
         }
     }
     if !fits(&result) {
@@ -295,7 +459,7 @@ pub async fn attachments(
         .filter_map(|event| event.event_id().map(|id| id.to_string()))
         .collect();
     let projected = views
-        .project_chunk(client, &joined, &messages.chunk)
+        .project_attachment_chunk(client, &joined, &messages.chunk)
         .await?;
     let redacted: std::collections::BTreeSet<&str> = projected
         .iter()
@@ -814,11 +978,307 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let result = pinned_messages(&client, &MatrixViews::default(), ROOM)
+        pin_relations(&server, "$duplicate", json!({"chunk":[]})).await;
+        let result = pinned_messages(&client, &MatrixViews::default(), ROOM, || true)
             .await
             .unwrap();
         assert_eq!(result.event_ids, vec!["$duplicate"]);
         assert_eq!(result.items.len(), 1);
         assert!(!result.truncated);
+    }
+    fn text_event(id: &str, sender: &str, time: u64, body: &str) -> Value {
+        json!({"type":"m.room.message","event_id":id,"sender":sender,"origin_server_ts":time,"content":{"msgtype":"m.text","body":body}})
+    }
+
+    async fn pin_state(server: &MockServer, ids: Value) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{ROOM}/state/m.room.pinned_events/"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"pinned":ids})))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    async fn pin_event(server: &MockServer, id: &str, event: Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/_matrix/client/v3/rooms/{ROOM}/event/{id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(event))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    async fn pin_relations(server: &MockServer, id: &str, response: Value) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v1/rooms/{ROOM}/relations/{id}/m.replace"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    fn replacement(id: &str, sender: &str, time: u64, body: &str) -> Value {
+        let mut event = text_event(id, sender, time, "* fallback");
+        event["content"]["m.new_content"] = json!({"msgtype":"m.text","body":body});
+        event["content"]["m.relates_to"] = json!({"rel_type":"m.replace","event_id":"$pin"});
+        event
+    }
+
+    #[tokio::test]
+    async fn given_pin_edits_then_latest_same_sender_text_wins_and_forgery_is_ignored() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        pin_state(&server, json!(["$pin"])).await;
+        pin_event(
+            &server,
+            "$pin",
+            text_event("$pin", "@alice:synthetic.test", 1, "original"),
+        )
+        .await;
+        pin_relations(
+            &server,
+            "$pin",
+            json!({"chunk":[
+                replacement("$older","@alice:synthetic.test",2,"older edit"),
+                replacement("$newest","@alice:synthetic.test",3,"current text"),
+                replacement("$forged","@mallory:synthetic.test",4,"forged text")
+            ]}),
+        )
+        .await;
+        let result = pinned_messages(&client, &MatrixViews::default(), ROOM, || true)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&result.items[..], [TimelineItem::Message {body,..}] if body == "current text")
+        );
+        assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn given_incomplete_or_undecryptable_pin_edits_then_original_preview_is_suppressed() {
+        for mode in ["unavailable", "partial", "undecryptable"] {
+            let server = MockServer::start().await;
+            let client = manager(&server).await;
+            pin_state(&server, json!(["$pin"])).await;
+            pin_event(
+                &server,
+                "$pin",
+                text_event(
+                    "$pin",
+                    "@alice:synthetic.test",
+                    1,
+                    "obsolete sensitive text",
+                ),
+            )
+            .await;
+            if mode == "unavailable" {
+                Mock::given(method("GET"))
+                    .and(path(format!(
+                        "/_matrix/client/v1/rooms/{ROOM}/relations/$pin/m.replace"
+                    )))
+                    .respond_with(
+                        ResponseTemplate::new(503)
+                            .set_body_json(json!({"errcode":"M_UNKNOWN","error":"failed"})),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            } else {
+                let response = if mode == "partial" {
+                    json!({"chunk":[],"next_batch":"more"})
+                } else {
+                    json!({"chunk":[{"type":"m.room.encrypted","event_id":"$encrypted-edit","sender":"@alice:synthetic.test","origin_server_ts":2,"content":{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"unavailable","session_id":"missing","sender_key":"missing","device_id":"unknown"}}]})
+                };
+                pin_relations(&server, "$pin", response).await;
+            }
+            let result = pinned_messages(&client, &MatrixViews::default(), ROOM, || true)
+                .await
+                .unwrap();
+            assert_eq!(result.event_ids, vec!["$pin"]);
+            assert!(result.items.is_empty(), "mode={mode}");
+            assert!(result.truncated);
+            assert!(
+                !serde_json::to_string(&result)
+                    .unwrap()
+                    .contains("obsolete sensitive text")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn given_slow_pin_fetch_then_total_deadline_preserves_refs_and_stops_later_fetches() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        pin_state(&server, json!(["$slow", "$later"])).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/_matrix/client/v3/rooms/{ROOM}/event/$slow")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(1))
+                    .set_body_json(text_event("$slow", "@alice:synthetic.test", 1, "slow")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let result = pinned_messages_until(
+            &client,
+            &MatrixViews::default(),
+            ROOM,
+            || true,
+            Instant::now() + Duration::from_millis(150),
+        )
+        .await
+        .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.event_ids, vec!["$slow", "$later"]);
+        assert!(result.items.is_empty());
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().ends_with("/event/$later"))
+        );
+    }
+
+    #[tokio::test]
+    async fn given_session_closes_after_state_read_then_no_pin_content_fetch_starts() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let close = open.clone();
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v3/rooms/{ROOM}/state/m.room.pinned_events/"
+            )))
+            .respond_with(move |_: &wiremock::Request| {
+                close.store(false, std::sync::atomic::Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(json!({"pinned":["$pin"]}))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let result = pinned_messages(&client, &MatrixViews::default(), ROOM, || {
+            open.load(std::sync::atomic::Ordering::SeqCst)
+        })
+        .await
+        .unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.event_ids, vec!["$pin"]);
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().contains("/event/"))
+        );
+    }
+
+    async fn ignored_date_fixture(server: &MockServer, later: bool) -> Client {
+        let mut sync = sync_reply(false, &["@alice:synthetic.test"]);
+        sync["account_data"]["events"].as_array_mut().unwrap().push(json!({"type":"m.ignored_user_list","content":{"ignored_users":{"@ignored:synthetic.test":{}}}}));
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v3/sync"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sync))
+            .with_priority(1)
+            .mount(server)
+            .await;
+        let client = synced(server, false, &["@alice:synthetic.test"]).await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/_matrix/client/v1/rooms/{ROOM}/timestamp_to_event"
+            )))
+            .and(query_param("dir", "f"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"event_id":"$hidden","origin_server_ts":10})),
+            )
+            .expect(1)
+            .mount(server)
+            .await;
+        let after = if later {
+            vec![text_event(
+                "$visible",
+                "@alice:synthetic.test",
+                11,
+                "visible",
+            )]
+        } else {
+            vec![]
+        };
+        Mock::given(method("GET")).and(path(format!("/_matrix/client/v3/rooms/{ROOM}/context/$hidden")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event":text_event("$hidden","@ignored:synthetic.test",10,"hidden"),"events_before":[],"events_after":after,"state":[],"start":"older","end":"newer"}))).expect(1).mount(server).await;
+        client
+    }
+
+    #[tokio::test]
+    async fn given_ignored_date_target_then_visible_later_context_event_is_selected() {
+        let server = MockServer::start().await;
+        let client = ignored_date_fixture(&server, true).await;
+        let result = jump_to_date(&client, &MatrixViews::default(), ROOM, 10)
+            .await
+            .unwrap();
+        assert_eq!(result.event_id, "$visible");
+        assert!(
+            !result
+                .page
+                .items
+                .iter()
+                .any(|item| item_id(item) == Some("$hidden"))
+        );
+    }
+
+    #[tokio::test]
+    async fn given_no_visible_date_target_then_not_found_without_extra_history_scan() {
+        let server = MockServer::start().await;
+        let client = ignored_date_fixture(&server, false).await;
+        assert!(matches!(
+            jump_to_date(&client, &MatrixViews::default(), ROOM, 10).await,
+            Err(ErrorCode::NotFound)
+        ));
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().ends_with("/messages"))
+        );
+    }
+
+    #[tokio::test]
+    async fn given_attachment_page_with_edit_then_no_original_event_lookup_occurs() {
+        let server = MockServer::start().await;
+        let client = manager(&server).await;
+        Mock::given(method("GET")).and(path(format!("/_matrix/client/v3/rooms/{ROOM}/messages")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"start":"latest","end":"older","state":[],"chunk":[replacement("$edit","@alice:synthetic.test",2,"replacement")]})))
+            .expect(1).mount(&server).await;
+        let result = attachments(
+            &client,
+            &MatrixViews::default(),
+            ROOM,
+            None,
+            AttachmentKind::All,
+            &LocalSearchFilters::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.scanned, 1);
+        assert!(result.items.is_empty());
+        assert!(result.next_cursor.is_some());
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().contains("/event/"))
+        );
     }
 }

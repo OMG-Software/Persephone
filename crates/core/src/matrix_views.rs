@@ -614,6 +614,77 @@ impl MatrixViews {
         joined: &matrix_sdk::Room,
         chunk: &[TimelineEvent],
     ) -> Result<Vec<TimelineItem>, ErrorCode> {
+        self.project_chunk_inner(client, joined, chunk, true).await
+    }
+
+    /// Attachments keep deletions but never resolve irrelevant text edits.
+    pub(crate) async fn project_attachment_chunk(
+        &self,
+        client: &Client,
+        joined: &matrix_sdk::Room,
+        chunk: &[TimelineEvent],
+    ) -> Result<Vec<TimelineItem>, ErrorCode> {
+        self.project_chunk_inner(client, joined, chunk, false).await
+    }
+
+    /// Apply validated same-sender edits before a pinned original can leave core.
+    pub(crate) async fn project_pin(
+        &self,
+        client: &Client,
+        joined: &matrix_sdk::Room,
+        original: TimelineEvent,
+        edits: Vec<TimelineEvent>,
+    ) -> Result<Vec<TimelineItem>, ErrorCode> {
+        let id = original.event_id().ok_or(ErrorCode::Rejected)?.to_owned();
+        // An undecryptable or unsupported replacement cannot establish current
+        // text. Do not fall back to a potentially sensitive original preview.
+        if edits
+            .iter()
+            .any(|edit| edit_claim(edit).is_none_or(|claim| claim.replaces != id))
+        {
+            return Ok(Vec::new());
+        }
+        let mut chunk = vec![original];
+        chunk.extend(edits);
+        let items = self.project_chunk(client, joined, &chunk).await?;
+        let latest = items
+            .iter()
+            .filter_map(|item| match item {
+                TimelineItem::Edit {
+                    replaces,
+                    body,
+                    origin_server_ts,
+                    ..
+                } if replaces == id.as_str() => Some((origin_server_ts, body)),
+                _ => None,
+            })
+            .max_by_key(|(time, _)| time.map(|time| time.get()));
+        let mut original = items
+            .iter()
+            .find(|item| match item {
+                TimelineItem::Message { event_id, .. }
+                | TimelineItem::Image { event_id, .. }
+                | TimelineItem::File { event_id, .. }
+                | TimelineItem::Notice { event_id, .. } => event_id == id.as_str(),
+                _ => false,
+            })
+            .cloned();
+        if let (Some(TimelineItem::Message { body, .. }), Some((_, replacement))) =
+            (&mut original, latest)
+        {
+            body.clone_from(replacement);
+        }
+        Ok(original.into_iter().collect())
+    }
+
+    /// Reuse room/ignore validation, optionally resolving edit identities.
+    async fn project_chunk_inner(
+        &self,
+        client: &Client,
+        joined: &matrix_sdk::Room,
+        chunk: &[TimelineEvent],
+        resolve_edits: bool,
+    ) -> Result<Vec<TimelineItem>, ErrorCode> {
         let ignored = crate::abuse::ignored_set(client).await?;
         let room = joined.room_id().as_str();
         let mut items = Vec::new();
@@ -636,8 +707,12 @@ impl MatrixViews {
             self.remember_sender(room, event);
             let item = match edit_claim(event) {
                 Some(claim) => {
-                    self.checked_edit(joined, room, chunk, event, claim, &mut lookups)
-                        .await
+                    if resolve_edits {
+                        self.checked_edit(joined, room, chunk, event, claim, &mut lookups)
+                            .await
+                    } else {
+                        None
+                    }
                 }
                 None => project(event),
             };

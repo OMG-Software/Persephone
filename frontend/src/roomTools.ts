@@ -1,4 +1,4 @@
-import type { LocalSearchFilters, TimelineItem } from './bridge/index.ts';
+import type { LocalSearchFilters, TimelineItem } from '../../crates/contracts/generated/contracts';
 
 /** Parse an explicit local date and time. Reject normalized, invalid dates. */
 export function localTimestamp(value: string): number | null {
@@ -16,7 +16,8 @@ export function searchFilters(sender: string, from: string, before: string): Loc
   const fromMs = from ? localTimestamp(from) : null;
   const beforeMs = before ? localTimestamp(before) : null;
   const exact = sender.trim();
-  if ((exact && (!/^@[^\s:]+:[^\s]+$/.test(exact) || new TextEncoder().encode(exact).length > 255)) ||
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(sender) ||
+      (exact && (!/^@[^\s:]+:[^\s]+$/.test(exact) || new TextEncoder().encode(exact).length > 255)) ||
       (from && fromMs === null) || (before && beforeMs === null) ||
       (fromMs !== null && beforeMs !== null && fromMs >= beforeMs)) return null;
   return { sender: exact || null, fromMs, beforeMs };
@@ -35,3 +36,28 @@ export function appendAttachments(previous: TimelineItem[], page: TimelineItem[]
 
 /** Show the local zone used by date inputs without storing a preference. */
 export const localZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+/** Bound accessible control names without exposing a whole message in each button. */
+export function pinSummary(item?: TimelineItem, eventId = ''): string {
+  if (!item || item.kind === 'gap') return 'Unavailable pinned message' + (eventId ? ': ' + [...eventId].slice(0, 80).join('') : '');
+  const content = item.kind === 'message' ? item.body : item.kind === 'file' || item.kind === 'image' ? item.name : 'Message';
+  const bounded = (value: string, limit: number) => [...value].slice(0, limit).join('');
+  return `Message from ${bounded(item.sender, 80)}: ${bounded(content, 120)}`;
+}
+
+/** Reject old attachment responses, including a change away and back to the same filters. */
+export function createAttachmentQueryGuard() {
+  let selected: string | null = null;
+  let revision = 0;
+  return {
+    select(query: string): boolean {
+      if (selected === query) return false;
+      selected = query; revision += 1;
+      return true;
+    },
+    capture(query: string): () => boolean {
+      const asked = revision;
+      return () => selected === query && revision === asked;
+    }
+  };
+}

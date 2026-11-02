@@ -2611,6 +2611,111 @@ mod tests {
         })
     }
 
+    /// Exercise the production sync loop and its generation-fenced publisher.
+    /// The SDK client uses a synthetic account and a loopback HTTP fixture.
+    #[test]
+    fn given_real_sync_rounds_then_connection_health_reports_failure_and_recovery() {
+        use std::sync::atomic::AtomicUsize;
+        use wiremock::{
+            Mock, MockServer, Request, Respond, ResponseTemplate,
+            matchers::{method, path_regex},
+        };
+
+        #[derive(Clone)]
+        struct SyncResponse {
+            fail: Arc<AtomicBool>,
+            requests: Arc<AtomicUsize>,
+        }
+        impl Respond for SyncResponse {
+            fn respond(&self, _: &Request) -> ResponseTemplate {
+                let round = self.requests.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) {
+                    ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                        "errcode":"M_UNKNOWN", "error":"synthetic failure"
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "next_batch": format!("round-{round}"), "rooms": {},
+                        "device_lists": {"changed":[], "left":[]},
+                        "device_one_time_keys_count": {}
+                    }))
+                }
+            }
+        }
+        let server_runtime = tokio::runtime::Runtime::new().unwrap();
+        let server = server_runtime.block_on(MockServer::start());
+        let responder = SyncResponse {
+            fail: Arc::new(AtomicBool::new(false)),
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        server_runtime.block_on(
+            Mock::given(method("GET"))
+                .and(path_regex("^/_matrix/client/[^/]+/sync$"))
+                .respond_with(responder.clone())
+                .mount(&server),
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        // Retain a lease until the loop has joined. No store close can race
+        // the test thread's final SDK drops.
+        let lease = session.admit().unwrap();
+        let client = lease
+            .stores()
+            .block_on(crate::abuse::test_client(&server.uri(), &[]));
+        *guard(&session.shared.status) = signed_in("@me:example.org", None);
+        let shared = session.shared.clone();
+        let runtime = lease.stores().runtime().handle().clone();
+        let worker = std::thread::spawn(move || {
+            run_sync(&shared, client, "@me:example.org".into(), runtime);
+        });
+        let wait_for = |predicate: &dyn Fn(&ConnectionHealth) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let snapshot = session.connection_health();
+                if predicate(&snapshot) || Instant::now() >= deadline {
+                    break snapshot;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let success = wait_for(&|health| health.last_success_at.is_some());
+        responder.fail.store(true, Ordering::SeqCst);
+        let failure =
+            wait_for(&|health| health.consecutive_failures > 0 && health.retry_delay_ms > 0);
+        responder.fail.store(false, Ordering::SeqCst);
+        let recovery = wait_for(&|health| {
+            health.last_success_at != failure.last_success_at && health.last_error.is_none()
+        });
+        // Close admission, join the complete loop, then allow stores to close.
+        assert_eq!(session.lock(Duration::ZERO, || {}).0, StoreState::Locking);
+        let joined = worker.join();
+        drop(lease);
+        let stopped = session.lock(Duration::from_secs(5), || {}).0;
+        assert!(
+            joined.is_ok(),
+            "the production sync loop must exit normally"
+        );
+        assert_eq!(stopped, StoreState::Locked);
+        assert_eq!(success.sync_mode, SyncMode::Classic);
+        assert!(success.last_attempt_at.is_some());
+        assert!(success.last_success_at.is_some());
+        assert_eq!(success.consecutive_failures, 0);
+        assert_eq!(failure.sync_mode, SyncMode::Classic);
+        assert!(failure.last_attempt_at >= success.last_attempt_at);
+        // A request already in flight when failure mode is set can succeed
+        // before the first failed request. Its observation must not be lost.
+        assert!(failure.last_success_at >= success.last_success_at);
+        assert!(failure.consecutive_failures > 0);
+        assert_eq!(failure.retry_delay_ms, 1000);
+        assert_eq!(failure.last_error, Some(SignInError::SyncFailed));
+        assert!(recovery.last_success_at > failure.last_success_at);
+        assert_eq!(recovery.consecutive_failures, 0);
+        assert_eq!(recovery.retry_delay_ms, 0);
+        assert_eq!(recovery.last_error, None);
+        assert!(responder.requests.load(Ordering::SeqCst) >= 3);
+        assert_eq!(session.connection_health().last_success_at, None);
+    }
+
     #[test]
     fn given_sync_observations_then_success_failure_and_recovery_preserve_actual_history() {
         let mut health = SyncHealth::default();

@@ -166,7 +166,9 @@ test('GIVEN hostile pin metadata WHEN rendered THEN isolate inert text and disab
   assert.match(html, /<bdi>&lt;img/);
   assert.match(html, /dir="auto"/);
   assert.doesNotMatch(html, /<img\b/);
-  assert.match(html, /disabled[^>]*>Unpin/);
+  assert.match(html, /disabled="" aria-label="Unpin: [^"]*">Unpin/);
+  assert.match(html, /aria-label="View in timeline: Message from &lt;img/);
+  assert.match(html, /aria-label="Unpin: Message from &lt;img/);
 });
 
 test('GIVEN unavailable pinned content WHEN rendered THEN retain a view control and explain absence', async () => {
@@ -174,5 +176,17 @@ test('GIVEN unavailable pinned content WHEN rendered THEN retain a view control 
   const { body: html } = render(Row, { props: { canManage: true, busy: false, onview() {}, onunpin() {} } });
   assert.match(html, /Message content is unavailable/);
   assert.match(html, /View in timeline/);
+  assert.match(html, /aria-label="View in timeline: Unavailable pinned message"/);
+  assert.match(html, /aria-label="Unpin: Unavailable pinned message"/);
   assert.doesNotMatch(html, /disabled/);
+});
+
+
+test('GIVEN a timeline pin action WHEN rendered THEN its accessible name identifies the isolated sender', async () => {
+  const { default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte');
+  const { body: html } = render(Timeline, { props: {
+    title: 'Room', roomId: '!r:s', items: [{ kind: 'message', event_id: '$e', sender: '<sender>', body: 'body', origin_server_ts: 0 }],
+    hasOlder: false, loading: false, error: null, onolder() {}, onpin() {}
+  } });
+  assert.match(html, /Pin message<span class="visually-hidden">(?:<!--.*?-->)* from (?:<!--.*?-->)*<bdi>&lt;sender><\/bdi><\/span>/);
 });

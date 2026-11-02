@@ -1,12 +1,13 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import { attachments, pinnedMessages, setPinned, type AttachmentKind, type PinnedMessages, type TimelineItem } from './bridge';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import { attachments, pinnedMessages, setPinned } from './bridge';
+  import type { AttachmentKind, PinnedMessages, TimelineItem } from '../../crates/contracts/generated/contracts';
   import PinnedMessageRow from './PinnedMessageRow.svelte';
   import FeatureDialog from './FeatureDialog.svelte';
   import SearchFilters from './SearchFilters.svelte';
   import FileMessage from './FileMessage.svelte';
   import ImageMessage from './ImageMessage.svelte';
-  import { appendAttachments, localTimestamp, localZone, searchFilters } from './roomTools';
+  import { appendAttachments, createAttachmentQueryGuard, localTimestamp, localZone, searchFilters } from './roomTools';
   let { roomId, mode, onclose, ondate, onevent }: {
     roomId: string; mode: 'jump' | 'pins' | 'attachments'; onclose: () => void;
     ondate: (timestamp: number) => Promise<void>; onevent: (eventId: string) => Promise<void>;
@@ -24,25 +25,41 @@
   const query = $derived(JSON.stringify([kind, sender, from, before]));
   const filters = $derived(searchFilters(sender, from, before));
   const title = $derived(mode === 'jump' ? 'Jump to date' : mode === 'pins' ? 'Pinned messages' : 'Attachments');
+  const queryGuard = createAttachmentQueryGuard();
+  /** Clear content and invalidate requests once per attachment filter change. */
+  function changedQuery() {
+    const next = query;
+    if (mode !== 'attachments') return;
+    untrack(() => {
+      if (!queryGuard.select(next)) return;
+      request += 1;
+      items = []; cursor = null; scanned = 0; partial = false; appliedQuery = null;
+      busy = false; failure = null;
+    });
+  }
+  $effect(changedQuery);
   /** Fetch one bounded page; only explicit Load more appends matching metadata. */
   async function load(more = false) {
     if (busy || (mode === 'attachments' && !filters)) return;
     const asked = ++request;
+    const askedQuery = query;
+    const queryCurrent = queryGuard.capture(askedQuery);
+    const valid = () => asked === request && (mode !== 'attachments' || (queryCurrent() && askedQuery === query));
     busy = true; failure = null;
     if (mode === 'attachments' && !more) { items = []; cursor = null; scanned = 0; partial = false; appliedQuery = null; }
     try {
       if (mode === 'pins') {
         const reply = await pinnedMessages(roomId);
-        if (asked === request && reply.roomId === roomId) pins = reply;
+        if (valid() && reply.roomId === roomId) pins = reply;
       } else if (mode === 'attachments') {
         const reply = await attachments(roomId, more ? cursor : null, kind, filters!);
-        if (asked === request && reply.roomId === roomId) {
+        if (valid() && reply.roomId === roomId) {
           items = appendAttachments(more ? items : [], reply.items);
-          appliedQuery = query; cursor = reply.nextCursor; scanned = more ? scanned + reply.scanned : reply.scanned; partial = reply.partial;
+          appliedQuery = askedQuery; cursor = reply.nextCursor; scanned = more ? scanned + reply.scanned : reply.scanned; partial = reply.partial;
         }
       }
-    } catch { if (asked === request) failure = 'The room data could not be loaded. Try again.'; }
-    finally { if (asked === request) busy = false; }
+    } catch { if (valid()) failure = 'The room data could not be loaded. Try again.'; }
+    finally { if (valid()) busy = false; }
   }
   /** Request a core-authorized pin removal and ignore replies after destruction. */
   async function unpin(eventId: string) {
@@ -74,13 +91,13 @@
     <p class="note">Pins are shared room state. Other room members can see the pinned message references.</p>
     <button type="button" class="secondary" disabled={busy} onclick={() => load()}>Refresh pins</button>
     {#if pins}
-      <p class="note">{pins.canManage ? 'You can manage pins.' : 'You do not have permission to manage pins.'} {pins.truncated ? 'The pin limit was reached.' : ''}</p>
+      <p class="note">{pins.canManage ? 'You can manage pins.' : 'You do not have permission to manage pins.'} {pins.truncated ? 'Some previews are unavailable or a loading limit was reached.' : ''}</p>
       {#if pins.eventIds.length === 0}<p>No pinned messages.</p>{/if}
       <ol class="local-results">
         {#each pins.eventIds.slice(0, 100) as eventId (eventId)}
           {@const item = pins.items.find((entry) => entry.kind !== 'gap' && entry.event_id === eventId)}
           <li>
-            <PinnedMessageRow {item} canManage={pins.canManage} {busy}
+            <PinnedMessageRow {item} {eventId} canManage={pins.canManage} {busy}
               onview={() => navigate(() => onevent(eventId))} onunpin={() => unpin(eventId)} />
           </li>
         {/each}

@@ -278,7 +278,7 @@
               <p class="gap">Some messages are not shown here.</p>
             {/if}
             {#if onpin && (item.kind === 'message' || item.kind === 'image' || item.kind === 'file')}
-              <button type="button" class="link" title="Pin this message for the room" onclick={() => onpin(item.event_id)}>Pin message</button>
+              <button type="button" class="link" title="Pin this message for the room" onclick={() => onpin(item.event_id)}>Pin message<span class="visually-hidden">{' from '}<bdi>{item.sender}</bdi></span></button>
             {/if}
             {#if onreport && item.kind !== 'gap' && item.kind !== 'state' && ownUserId !== null && item.sender !== ownUserId}
               <button type="button" class="link report-message" onclick={() => onreport(item.event_id, item.sender)}>Report message<span class="visually-hidden"> from <bdi>{item.sender}</bdi></span></button>

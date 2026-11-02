@@ -688,10 +688,18 @@ mod tests {
             let id = ChunkIdentifier::new(chunk);
             let items = (0..128)
                 .map(|n| {
-                    event(
-                        &format!("$e{}", chunk * 128 + n),
-                        "@alice:s",
+                    let index = chunk * 128 + n;
+                    // These newest events are inside the scan budget and match
+                    // the term, but each fails one active filter.
+                    event_at(
+                        &format!("$e{index}"),
+                        if index == 2175 { "@bob:s" } else { "@alice:s" },
                         json!({"msgtype":"m.text", "body":"locally retained message"}),
+                        match index {
+                            2174 => 2,
+                            2173 => 0,
+                            _ => 1,
+                        },
                     )
                 })
                 .collect();
@@ -758,6 +766,14 @@ mod tests {
         .unwrap();
         assert_eq!(output.scanned, MAX_SCANNED_EVENTS);
         assert_eq!(output.results.len(), MAX_SEARCH_RESULTS);
+        assert_eq!(output.results[0].event_id, "$e2172");
+        assert!(
+            output.results.iter().all(|hit| {
+                hit.sender == "@alice:s"
+                    && !["$e2175", "$e2174", "$e2173"].contains(&hit.event_id.as_str())
+            }),
+            "sender, inclusive start, and exclusive end must filter cached hits"
+        );
         assert!(output.truncated);
         assert_eq!(
             server.received_requests().await.unwrap().len(),
@@ -784,7 +800,7 @@ mod tests {
             Update::PushItems { at: Position::new(id, 0), items: vec![event("$large-edit", "@alice:s", json!({
                 "msgtype":"m.text", "body":"* changed",
                 "m.new_content":{"msgtype":"m.text","body":"x".repeat(MAX_EVENT_BYTES)},
-                "m.relates_to":{"rel_type":"m.replace","event_id":"$e2175"},
+                "m.relates_to":{"rel_type":"m.replace","event_id":"$e2172"},
             }))] },
         ]).await.unwrap();
         let output = search_cache(

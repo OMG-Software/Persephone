@@ -276,6 +276,7 @@ pub struct Core {
     /// Serializes encrypted record read/modify/write operations.
     personal: conversations::Busy,
     local_search: conversations::Busy,
+    room_reads: conversations::Busy,
     abuse: conversations::Busy,
     read_marker: conversations::Busy,
     /// One homeserver discovery at a time.
@@ -443,6 +444,7 @@ impl Core {
             search: conversations::Busy::default(),
             personal: conversations::Busy::default(),
             local_search: conversations::Busy::default(),
+            room_reads: conversations::Busy::default(),
             abuse: conversations::Busy::default(),
             read_marker: conversations::Busy::default(),
             discovery: conversations::Busy::default(),
@@ -933,6 +935,28 @@ impl Core {
         }
     }
 
+    /// Keep local searches independent from pending server history reads.
+    fn personal_slot(
+        &self,
+        call: &Call,
+    ) -> Result<Option<conversations::BusyGuard<'_>>, ErrorCode> {
+        Ok(match call {
+            Call::SearchMessages { .. } => Some(self.local_search.begin()?),
+            Call::JumpToDate { .. }
+            | Call::EventContext { .. }
+            | Call::PinnedMessages { .. }
+            | Call::Attachments { .. } => Some(self.room_reads.begin()?),
+            Call::SetPinned { .. } | Call::SetIgnoredUser { .. } | Call::ReportAbuse { .. } => {
+                Some(self.abuse.begin()?)
+            }
+            Call::SaveRoomDraft { .. } | Call::SetRoomPreference { .. } => {
+                Some(self.personal.begin()?)
+            }
+            // Profile reads can overlap without mutating their records.
+            _ => None,
+        })
+    }
+
     /// Local profile operations and explicit abuse operations. Retain a lease
     /// from admission to completion and fence the reply against lock/sign-out.
     fn personal_call<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
@@ -967,21 +991,7 @@ impl Core {
         if !self.session.is_configured() {
             return Err(ErrorCode::NotFound);
         }
-        let slot = match call {
-            Call::SearchMessages { .. }
-            | Call::JumpToDate { .. }
-            | Call::EventContext { .. }
-            | Call::PinnedMessages { .. }
-            | Call::Attachments { .. } => Some(self.local_search.begin()?),
-            Call::SetPinned { .. } => Some(self.abuse.begin()?),
-            Call::SetIgnoredUser { .. } | Call::ReportAbuse { .. } => Some(self.abuse.begin()?),
-            Call::SaveRoomDraft { .. } | Call::SetRoomPreference { .. } => {
-                Some(self.personal.begin()?)
-            }
-            // Reads do not mutate a record. Opening a room and loading its
-            // organisation at the same time must not reject either read.
-            _ => None,
-        };
+        let slot = self.personal_slot(call)?;
         let (lease, client) = match self.session.with_client() {
             Ok(Some(granted)) => granted,
             Ok(None) => return Err(ErrorCode::NotFound),
@@ -1023,9 +1033,12 @@ impl Core {
                     Call::EventContext { room_id, event_id } => json(
                         room_tools::event_context(&client, &self.matrix, room_id, event_id).await,
                     ),
-                    Call::PinnedMessages { room_id } => {
-                        json(room_tools::pinned_messages(&client, &self.matrix, room_id).await)
-                    }
+                    Call::PinnedMessages { room_id } => json(
+                        room_tools::pinned_messages(&client, &self.matrix, room_id, || {
+                            lease.commit(|| ()).is_ok()
+                        })
+                        .await,
+                    ),
                     Call::SetPinned {
                         room_id,
                         event_id,
@@ -2463,6 +2476,51 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn given_pending_room_reads_then_local_search_has_independent_bounded_admission() {
+        let core = Core::default();
+        let room_read = Call::PinnedMessages {
+            room_id: "!r:s".into(),
+        };
+        let cache_search = Call::SearchMessages {
+            term: "local".into(),
+            room_id: None,
+            filters: persephone_contracts::LocalSearchFilters::default(),
+        };
+        let room_slot = core.personal_slot(&room_read).unwrap();
+        let search_slot = core.personal_slot(&cache_search).unwrap();
+        assert!(matches!(
+            core.personal_slot(&cache_search),
+            Err(ErrorCode::LimitExceeded)
+        ));
+        for call in [
+            room_read.clone(),
+            Call::JumpToDate {
+                room_id: "!r:s".into(),
+                timestamp_ms: 1,
+            },
+            Call::EventContext {
+                room_id: "!r:s".into(),
+                event_id: "$e".into(),
+            },
+            Call::Attachments {
+                room_id: "!r:s".into(),
+                cursor: None,
+                kind: persephone_contracts::AttachmentKind::All,
+                filters: persephone_contracts::LocalSearchFilters::default(),
+            },
+        ] {
+            assert!(matches!(
+                core.personal_slot(&call),
+                Err(ErrorCode::LimitExceeded)
+            ));
+        }
+        drop(search_slot);
+        assert!(core.personal_slot(&cache_search).is_ok());
+        drop(room_slot);
+        assert!(core.personal_slot(&room_read).is_ok());
+    }
 
     #[test]
     fn personal_commands_reject_bad_input_and_have_no_demo_or_signed_out_store() {

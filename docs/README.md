@@ -42,6 +42,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 
 - [Room tools](evidence/room-tools.md): coordinated checks passed on 1 November 2026; source hashes, behavior coverage, and remaining live/native acceptance work.
 - [Room navigation and media health](evidence/room-navigation-media-health.md): automated checks and remaining native UI/live-server acceptance.
+- [Room navigation review fixes](evidence/room-navigation-review-fixes.md): pin edits and time limits, visible date targets, UI corrections and reproducible documentation checks for PR 47.
 - [Room tools review fixes](evidence/room-tools-review-fixes.md): strict nullable contracts, search-context retention, ignored-list recovery and the Windows HTTP test correction; local verification on 1 November 2026.
 
 - [Independent recipients with SAS-verified devices](evidence/verified-recipients.md): two-user verification and bidirectional encrypted messaging on both disposable homeservers.

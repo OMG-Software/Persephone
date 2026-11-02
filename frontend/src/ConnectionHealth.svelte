@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { connectionHealth, type ConnectionHealth } from './bridge';
+  import { connectionHealth } from './bridge';
+  import type { ConnectionHealth } from '../../crates/contracts/generated/contracts';
   import { healthLabels } from './healthLabels';
   import FeatureDialog from './FeatureDialog.svelte';
   let { onclose }: { onclose: () => void } = $props();

@@ -6,7 +6,8 @@
   import Composer from './Composer.svelte';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { jumpToDate, eventContext, setPinned, type FocusedTimeline } from './bridge';
+  import { jumpToDate, eventContext, setPinned } from './bridge';
+  import type { FocusedTimeline } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
   import ReportAbuse from './ReportAbuse.svelte';
@@ -2011,7 +2012,7 @@
             onunreact={signedIn ? unreact : undefined}
             {unreadFrom}
             onread={signedIn && !focusedContext ? readTo : undefined}
-            readBy={activity?.readBy ?? []}
+            readBy={focusedContext ? [] : (activity?.readBy ?? [])}
             onlink={signedIn ? followLink : undefined}
           />
           {#if contactFailure}

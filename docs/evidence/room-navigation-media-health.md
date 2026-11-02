@@ -53,7 +53,7 @@ runtime/test files. Guide and evidence edits followed the checks.
 | `python tools/dev.py check` | Exit 0; 798 successful Rust test executions, 189 frontend tests, 2 server-registration tests and 50 tool/controller tests |
 | Rust checks included | Format, guest/worker builds, workspace and development-feature Clippy with `-D warnings` passed |
 | Frontend and contracts included | Svelte 0 errors/warnings; production build, Node coverage, generated-binding drift and TypeScript contract checks passed |
-| Documentation checks | JSON, source hashes, local Markdown links and diff hygiene checked separately |
+| Documentation checks | Reported separately during the original work; this record did not retain the command, exit status or output artifact. See the later reproducibility check below. |
 
 The 1039 passing executions are not unique cases. The wrapper repeats core
 tests with `dev-disposable-servers`. The 2 ignored existing image benchmarks
@@ -89,3 +89,22 @@ Python harness output is not a live homeserver result. History and cache
 coverage remain partial. The existing SDK drain and `restart_required` limits
 remain unresolved. These checks do not establish production security readiness
 or remote CI/reviewer approval.
+
+## Later reproducibility check, 2 November 2026
+
+The original row did not record its checker command and raw output. A later
+check used the committed development tool below. It verified the original
+manifest against source blobs at commit `911bcd1`, plus the listed current
+Markdown links and verification JSON. It did not rerun the original runtime
+tests or replace the original manifest.
+
+Run from the repository root:
+
+```text
+python tools/check_evidence.py --manifest docs/evidence/room-navigation-media-health-sources.json --revision 911bcd18d3c0e928312178c8053e2d8ac8c2a481 --markdown docs/evidence/room-navigation-media-health.md docs/architecture/development-plan.md docs/room-tools.md --json docs/evidence/verification.json
+```
+
+Exit 0: 51 source hashes, 1 JSON file, 3 Markdown files and diff hygiene passed.
+Raw output: ignored `.local/runs/pr47-remediation/docscheck-original.log`.
+The [review-fix record](room-navigation-review-fixes.md) records the later
+runtime changes and their separate checks.

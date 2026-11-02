@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { searchMessages, type LocalSearchHit, type LocalSearchResults } from './bridge';
+  import { searchMessages } from './bridge';
+  import type { LocalSearchHit, LocalSearchResults } from '../../crates/contracts/generated/contracts';
   import { byteLength } from './drafts';
   import FeatureDialog from './FeatureDialog.svelte';
   import SearchFilters from './SearchFilters.svelte';
