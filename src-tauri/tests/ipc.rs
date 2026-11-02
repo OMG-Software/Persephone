@@ -802,6 +802,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-decline-invite",
             "allow-start-conversation",
             "allow-search-users",
+            "allow-public-rooms",
+            "allow-join-public-room",
             "allow-create-room",
             "allow-invite-user",
             "allow-room-settings",
