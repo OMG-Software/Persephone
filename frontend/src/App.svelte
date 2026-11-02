@@ -12,6 +12,7 @@
   import IgnoreUsers from './IgnoreUsers.svelte';
   import ReportAbuse from './ReportAbuse.svelte';
   import RoomOrganisation from './RoomOrganisation.svelte';
+  import RoomGroups from './RoomGroups.svelte';
   import SavedDrafts from './SavedDrafts.svelte';
   import StoredRoomGroups from './StoredRoomGroups.svelte';
   import { DraftKeeper } from './drafts';
@@ -261,6 +262,10 @@
   let membersShown = $state(true);
   let favouriteBusy = $state(false);
   let favouriteFailure = $state<string | null>(null);
+  // The room-groups dialog, and whether it is saving: favourite changes wait
+  // for it, because each of its writes carries the room's favourite value.
+  let groupsOpen = $state(false);
+  let groupsBusy = $state(false);
   // Changes when trust may have changed, so the member panel reads it again.
   let trustVersion = $state(0);
   // The room list width, changed with the resize handle; kept in memory only.
@@ -481,7 +486,7 @@
     }
     // Native modal dialogs keep pointer focus inside. Keep the global room
     // shortcut inside the same boundary, especially during saved-draft removal.
-    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || sectionOpen || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
+    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || sectionOpen || groupsOpen || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
     if (chatShown && rooms && !paletteOpen) {
       event.preventDefault();
       paletteOpen = true;
@@ -655,6 +660,8 @@
     sectionOpen = false;
     favouriteBusy = false;
     favouriteFailure = null;
+    groupsOpen = false;
+    groupsBusy = false;
     focusEvent = null;
     searchLocation = null;
     textSending = false;
@@ -1719,7 +1726,7 @@
 
   /** Toggle a room in Favourites, keeping its section; ignore a reply from an older session. */
   async function toggleFavourite(roomId: string) {
-    if (favouriteBusy) return;
+    if (favouriteBusy || groupsBusy) return;
     const generation = sessionGeneration;
     const saved = preferences.find((entry) => entry.roomId === roomId);
     const preference = { roomId, favourite: !(saved?.favourite ?? false), section: saved?.section ?? null };
@@ -1809,6 +1816,7 @@
 
   // The main menu: account-wide tools that used to be buttons above the room.
   const mainMenu: MenuItem[] = [
+    { label: 'Room groups', onselect: () => (groupsOpen = rooms !== null) },
     { label: 'Search cached messages', onselect: () => (searchOpen = true) },
     { label: 'Saved drafts', onselect: () => void openSavedDrafts() },
     { label: 'Ignored users', onselect: () => (ignoreOpen = true) },
@@ -1825,7 +1833,7 @@
       membersRoom
         ? { label: membersShown ? 'Hide members' : 'Show members', onselect: () => (membersShown = !membersShown), separated: true }
         : { label: 'Members need a wider window', onselect: () => {}, disabled: true, separated: true },
-      { label: 'Room section', onselect: () => (sectionOpen = true) },
+      { label: 'Room group', onselect: () => (sectionOpen = true) },
       { label: 'Room settings', onselect: () => (roomSettingsOf = roomId), separated: true }
     ];
   }
@@ -2108,7 +2116,7 @@
         onaccept={(roomId) => answerInvite(roomId, true)}
         ondecline={(roomId) => answerInvite(roomId, false)}
         onfavourite={signedIn ? toggleFavourite : undefined}
-        {favouriteBusy}
+        favouriteBusy={favouriteBusy || groupsBusy}
         width={shownSidebar}
       >
         {#snippet menu()}
@@ -2194,7 +2202,7 @@
             {contact}
             favourite={preferences.some((entry) => entry.roomId === selectedRoom.roomId && entry.favourite)}
             onfavourite={signedIn ? () => toggleFavourite(selectedRoom.roomId) : undefined}
-            {favouriteBusy}
+            favouriteBusy={favouriteBusy || groupsBusy}
             menu={signedIn ? roomMenuButton : undefined}
             onreply={sendBlocked === null && draftReady && !textSending
               ? replyToMessage
@@ -2380,8 +2388,12 @@
       {/if}
       {#if sectionOpen && signedIn && selected}
         {#key selected}
-          <RoomOrganisation roomId={selected} {preferences} favouriteSaving={favouriteBusy} onchanged={preferenceChanged} onclose={() => (sectionOpen = false)} />
+          <RoomOrganisation roomId={selected} {preferences} favouriteSaving={favouriteBusy || groupsBusy} onchanged={preferenceChanged} onclose={() => (sectionOpen = false)} />
         {/key}
+      {/if}
+      {#if groupsOpen && signedIn && rooms}
+        <RoomGroups rooms={rooms.rooms} {preferences} favouriteSaving={favouriteBusy} onchanged={preferenceChanged}
+          onbusy={(busy) => (groupsBusy = busy)} onclose={() => (groupsOpen = false)} />
       {/if}
       {#if reportTarget && signedIn}
         <ReportAbuse roomId={reportTarget.roomId} eventId={reportTarget.eventId} sender={reportTarget.sender}

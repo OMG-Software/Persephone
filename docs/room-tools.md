@@ -18,17 +18,31 @@ The frontend checks, core and protocol tests, Clippy and the Tauri IPC tests
 pass on Linux. Native UI, live-server verification and other OS checks were
 not run.
 
-- **Main menu**: the menu button at the top of the room list opens **Search
-  cached messages**, **Saved drafts**, **Ignored users** and **Connection
-  health**.
+- **Main menu**: the menu button at the top of the room list opens **Room
+  groups**, **Search cached messages**, **Saved drafts**, **Ignored users**
+  and **Connection health**.
 - **Room menu**: the menu button at the end of the room header opens **Invite
   people** (not in a direct-message room), **Jump to date**, **Pinned
   messages**, **Attachments**, **Show members** or **Hide members**, **Room
-  section** and **Room settings**. **Return to latest** stays visible while
+  group** and **Room settings**. **Return to latest** stays visible while
   message context is shown.
 - **Favourites**: a star next to each room name in the room list and in the
   room header adds the room to Favourites or removes it. The room keeps its
-  section. **Room section** in the room menu sets the section.
+  group. **Room group** in the room menu sets or clears the group of the
+  open room.
+- **Room groups**: a group is the section name kept with each room's
+  preference (ADR-0035). **Room groups** in the main menu lists the groups.
+  **New group** asks for a name and at least one room, because a group
+  exists only while one of its rooms has its name. **Edit rooms** adds rooms
+  to the group or takes them out. **Remove group** asks for confirmation,
+  then clears the group from every room that has it, including rooms that
+  are not in the room list; favourites stay. The names Favourites and Rooms
+  are refused, because the room list uses them as headings. The dialog
+  checks the core's limits (16 groups, 100 rooms with a group or favourite)
+  before it saves. It saves one room at a time and stops at the first
+  failure; each saved change shows at once, and the dialog reports how many
+  changes were saved. Favourite changes wait while it saves, because each
+  save carries the room's favourite value.
 - **Message actions**: React, Reply, Edit, Delete, Pin message and Report
   message are icons. Each label shows as a tooltip on hover and keyboard
   focus. The accessible name also names the sender, except for Edit and
