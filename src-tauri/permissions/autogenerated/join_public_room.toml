@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-join-public-room"
+description = "Enables the join_public_room command without any pre-configured scope."
+commands.allow = ["join_public_room"]
+
+[[permission]]
+identifier = "deny-join-public-room"
+description = "Denies the join_public_room command without any pre-configured scope."
+commands.deny = ["join_public_room"]
