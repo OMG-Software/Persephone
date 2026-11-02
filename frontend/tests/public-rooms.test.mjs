@@ -101,10 +101,11 @@ test('GIVEN failure codes WHEN shown THEN each failure says what happened and wh
   assert.match(listFailure('rejected', false), /Your homeserver refused/);
   assert.match(listFailure('core_unavailable', false), /could not be reached/);
   assert.match(listFailure('locked', false), /locked/);
+  assert.match(listFailure('limit_exceeded', false), /still running/);
   assert.match(joinFailure('not_found'), /Browse again/);
   assert.match(joinFailure('rejected'), /refused/);
   assert.match(joinFailure('limit_exceeded'), /Try again in a moment/);
-  assert.match(joinFailure('core_unavailable'), /could not be reached/);
+  assert.match(joinFailure('core_unavailable'), /could not be reached.*room list/);
 });
 
 test('GIVEN the directory dialog opens WHEN nothing was browsed THEN it names the own homeserver as inert text and lists nothing', () => {

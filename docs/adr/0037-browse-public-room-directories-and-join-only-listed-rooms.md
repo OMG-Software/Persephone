@@ -61,8 +61,8 @@ page of this session listed as open to anyone".
 
 * The user can find and join public rooms on any server that shares its
   directory.
-* A compromised web view can join only rooms that a directory lists as open
-  to anyone, not arbitrary rooms by ID or address.
+* The page cannot choose the servers a join goes through, join by address,
+  or join a room that no directory listed in this session.
 
 ### Negative Consequences
 
@@ -73,6 +73,15 @@ page of this session listed as open to anyone".
 * Joining reveals the user's Matrix ID to the room and its servers.
 * A room cannot be joined by address alone, and history of a room that is
   readable without joining is not previewed.
+* The join limit is weak. The page chooses the directory server, and a
+  hostile server can list any room as open to anyone. A compromised web view
+  can therefore still join any room the homeserver lets this account join,
+  through such a server. A join confirmed in the core's own window, as for
+  links (ADR-0024), would close this gap; it is an open follow-up.
+* The directory reply is read whole before the core keeps 30 rooms. A server
+  the page names can now send that reply, as the homeserver relays it.
+* Names, addresses and topics are the directory's claim. A room can show an
+  address it does not own; the page says so.
 * Not yet checked against a live federated homeserver.
 
 ## Links

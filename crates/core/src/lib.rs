@@ -1569,13 +1569,12 @@ impl Core {
             };
             let rooms_changed = matches!(
                 work,
-                Work::Accept(_)
-                    | Work::Decline(_)
-                    | Work::Start(_)
-                    | Work::CreateRoom(..)
-                    | Work::JoinPublicRoom(_)
+                Work::Accept(_) | Work::Decline(_) | Work::Start(_) | Work::CreateRoom(..)
             );
-            if outcome.is_ok() && rooms_changed {
+            // A join can fail in local bookkeeping after the homeserver
+            // joined the room, so the room list is read again either way.
+            let joined = matches!(work, Work::JoinPublicRoom(_));
+            if joined || (outcome.is_ok() && rooms_changed) {
                 self.hub.mark_list_changed(&[], true);
             }
             match outcome {

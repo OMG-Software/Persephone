@@ -16,7 +16,10 @@
 //!   open to anyone, and only through the server that listed it. The core
 //!   remembers at most [`MAX_OFFERED_ROOMS`] such rooms, oldest forgotten
 //!   first, and forgets them all when the session changes. Any other room is
-//!   `not_found`. This keeps the page from joining an arbitrary room by ID.
+//!   `not_found`. This is a weak limit, not a consent check: the page picks
+//!   the server, and a server can list any room as open (ADR-0037). It keeps
+//!   the page from choosing the join servers, joining by address, or joining
+//!   without a directory listing the room.
 //! * Public rooms are usually not encrypted. Joining one does not change
 //!   ADR-0005: sending there still needs the user's consent.
 
@@ -107,13 +110,18 @@ pub struct Offers {
 
 impl Offers {
     /// Remembers the joinable rooms of a page listed in `generation`. A new
-    /// generation forgets every room of the one before. A room listed again
-    /// moves to the newest place, with the server that listed it last.
+    /// generation forgets every room of the one before; a page from an older
+    /// generation, which finished after the session changed, is ignored. A
+    /// room listed again moves to the newest place, with the server that
+    /// listed it last.
     pub fn remember(
         &mut self,
         generation: u64,
         rooms: impl IntoIterator<Item = (OwnedRoomId, Option<OwnedServerName>)>,
     ) {
+        if generation < self.generation {
+            return;
+        }
         if self.generation != generation {
             self.generation = generation;
             self.rooms.clear();
@@ -473,8 +481,8 @@ mod tests {
 
     /// GIVEN listed rooms WHEN the page asks to join THEN only a room listed
     /// as joinable in this session is found, with the server that listed it
-    /// last; the oldest are forgotten past the limit, and a new session
-    /// forgets them all.
+    /// last; the oldest are forgotten past the limit, a new session forgets
+    /// them all, and a late page of an old session changes nothing.
     #[test]
     fn given_offers_then_only_rooms_listed_in_this_session_are_joinable() {
         let server = ServerName::parse("example.org").unwrap();
@@ -503,5 +511,12 @@ mod tests {
         // A new session forgets the old one's rooms.
         offers.remember(2, []);
         assert_eq!(offers.via(2, own), None);
+        let newer = room_id!("!newer:example.org");
+        offers.remember(2, [(newer.to_owned(), None)]);
+        // A page of the old session that finishes late changes nothing.
+        offers.remember(1, [(own.to_owned(), None)]);
+        assert_eq!(offers.via(1, own), None);
+        assert_eq!(offers.via(2, own), None);
+        assert_eq!(offers.via(2, newer), Some(Vec::new()));
     }
 }

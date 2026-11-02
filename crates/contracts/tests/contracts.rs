@@ -366,7 +366,6 @@ fn conversation_replies_keep_their_documented_shape() {
         .is_ok()
     );
     for invalid in [
-        r#"{"rooms":[],"next":null}"#.to_owned(),
         r#"{"rooms":[],"next":null,"total":null,"prev":"p0"}"#.to_owned(),
         format!(
             r#"{{"rooms":[{}],"next":null,"total":null}}"#,

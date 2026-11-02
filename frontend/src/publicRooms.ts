@@ -77,6 +77,8 @@ export function listFailure(code: string, otherServer: boolean): string {
         : 'Your homeserver refused to list its directory.';
     case 'invalid_argument':
       return 'Check the server name and the search text.';
+    case 'limit_exceeded':
+      return 'An earlier directory request is still running. Try again in a moment.';
     case 'locked':
       return 'The session is locked.';
     case 'not_found':
@@ -98,6 +100,6 @@ export function joinFailure(code: string): string {
     case 'locked':
       return 'The session is locked.';
     default:
-      return 'The homeserver could not be reached. Try again.';
+      return 'The homeserver could not be reached. If you joined the room anyway, it appears in the room list.';
   }
 }

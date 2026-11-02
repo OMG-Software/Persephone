@@ -170,13 +170,17 @@
       <section class="public-room-details" aria-labelledby="public-room-heading">
         <h3 id="public-room-heading"><bdi>{roomLabel(viewed)}</bdi></h3>
         <dl>
-          {#if viewed.alias}<dt>Address</dt><dd><bdi>{viewed.alias}</bdi></dd>{/if}
+          {#if viewed.alias}<dt>Address (as listed)</dt><dd><bdi>{viewed.alias}</bdi></dd>{/if}
           <dt>Room ID</dt><dd><bdi>{viewed.roomId}</bdi></dd>
           <dt>Members</dt><dd>{memberText(viewed.members)}</dd>
           <dt>History</dt><dd>{viewed.worldReadable ? 'Anyone can read it without joining' : 'Only members can read it'}</dd>
           <dt>Guests</dt><dd>{viewed.guestsCanJoin ? 'Guests can join' : 'Guests cannot join'}</dd>
         </dl>
         {#if viewed.topic}<p class="public-room-topic"><bdi>{viewed.topic}</bdi></p>{/if}
+        <p class="note">
+          The directory supplies this name, address and topic, and nothing checks them. A room can claim an address
+          it does not own.
+        </p>
         {#if viewed.joined}
           <button type="button" class="primary" onclick={() => openJoined(viewed!)}>Open room</button>
         {:else if viewed.joinable}
