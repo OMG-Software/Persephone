@@ -8,7 +8,7 @@ use persephone_desktop::{
     create_main_window,
 };
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use tauri::{
@@ -22,6 +22,8 @@ use tauri::{
 struct FakeCore {
     available: bool,
     calls: AtomicUsize,
+    // The room and user of the last `verify_member` that reached the core.
+    verified_member: Mutex<Option<(String, String)>>,
 }
 
 impl FakeCore {
@@ -29,6 +31,7 @@ impl FakeCore {
         Arc::new(Self {
             available,
             calls: AtomicUsize::new(0),
+            verified_member: Mutex::new(None),
         })
     }
 }
@@ -37,6 +40,9 @@ impl CoreTransport for FakeCore {
     /// Return synthetic typed replies and count each request that reaches the fake core.
     fn call(&self, call: Call) -> Result<serde_json::Value, CoreError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Call::VerifyMember { room_id, user_id } = &call {
+            *self.verified_member.lock().unwrap() = Some((room_id.clone(), user_id.clone()));
+        }
         if !self.available {
             return Err(CoreError::Unavailable);
         }
@@ -1456,6 +1462,14 @@ fn given_contact_commands_then_only_the_room_id_crosses() {
         )
         .unwrap()["operation"],
         "working"
+    );
+    assert_eq!(
+        *core.verified_member.lock().unwrap(),
+        Some((
+            "!group:example.invalid".to_string(),
+            "@bob:example.invalid".to_string()
+        )),
+        "the room and user cross unchanged"
     );
     let calls = core.calls.load(Ordering::SeqCst);
     for args in [

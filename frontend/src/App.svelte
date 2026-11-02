@@ -893,7 +893,12 @@
         securityShown = request;
       }
     } catch (reason) {
-      if (generation === sessionGeneration) securityFailure = explain(reason);
+      if (generation === sessionGeneration) {
+        // A refused request leaves the previous status: its error is not
+        // this member's, so no "Start conversation" offer follows from it.
+        memberAsked = null;
+        securityFailure = explain(reason);
+      }
     } finally {
       if (generation === sessionGeneration) securityBusy = false;
     }
