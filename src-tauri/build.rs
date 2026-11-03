@@ -87,6 +87,8 @@ fn main() {
             "decline_invite",
             "start_conversation",
             "search_users",
+            "public_rooms",
+            "join_public_room",
             "create_room",
             "invite_user",
             "room_settings",

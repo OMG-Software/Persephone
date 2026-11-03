@@ -1,9 +1,9 @@
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountState, AccountStatus, AppStatus, CHAT_TEXT_PERCENT_MAX,
-    ConversationStart, DeviceList, DisplayName, INTERFACE_TEXT_PERCENT_MAX, InviteList,
-    NotificationLevel, NotificationSettings, ProfileList, RoomCreation, RoomInvite, RoomList,
-    SignInError, StoreState, TEXT_PERCENT_MIN, ThreePidList, UserSearch, generated_typescript,
-    sample_room_summary, sample_timeline_page,
+    ConversationStart, DeviceList, DisplayName, INTERFACE_TEXT_PERCENT_MAX, InviteList, JoinedRoom,
+    NotificationLevel, NotificationSettings, ProfileList, PublicRoomPage, RoomCreation, RoomInvite,
+    RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, ThreePidList, UserSearch,
+    generated_typescript, sample_room_summary, sample_timeline_page,
 };
 
 #[test]
@@ -356,6 +356,32 @@ fn conversation_replies_keep_their_documented_shape() {
         r#"{"users":[{"userId":"@b:s","displayName":null,"avatarUrl":"mxc://s/m"}],"truncated":false}"#
     )
     .is_err());
+
+    // A directory page carries no avatar: the page fetches no remote images.
+    let room = r##"{"roomId":"!r:s","name":"Rust","alias":"#rust:s","topic":null,"members":3,"worldReadable":true,"guestsCanJoin":false,"joinable":true,"joined":false}"##;
+    assert!(
+        serde_json::from_str::<PublicRoomPage>(&format!(
+            r#"{{"rooms":[{room}],"next":"p30","total":120}}"#
+        ))
+        .is_ok()
+    );
+    for invalid in [
+        r#"{"rooms":[],"next":null,"total":null,"prev":"p0"}"#.to_owned(),
+        format!(
+            r#"{{"rooms":[{}],"next":null,"total":null}}"#,
+            room.replace(
+                r#""joined":false"#,
+                r#""joined":false,"avatarUrl":"mxc://s/m""#
+            )
+        ),
+    ] {
+        assert!(
+            serde_json::from_str::<PublicRoomPage>(&invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(serde_json::from_str::<JoinedRoom>(r#"{"roomId":"!r:s"}"#).is_ok());
+    assert!(serde_json::from_str::<JoinedRoom>(r#"{"roomId":"!r:s","via":"s"}"#).is_err());
 
     // A direct invitation, and one to a named room over federation whose
     // inviter the invitation did not say.

@@ -43,6 +43,7 @@
 * [0034 - Ignore users and report events through the homeserver](0034-ignore-users-and-report-events-through-the-homeserver.md)
 * [0035 - Keep favourites and room sections local to the profile](0035-keep-favourites-and-room-sections-local-to-the-profile.md)
 * [0036 - Bound room navigation and inspection in the core](0036-bound-room-navigation-and-inspection-in-the-core.md)
+* [0037 - Browse public room directories and join only listed rooms](0037-browse-public-room-directories-and-join-only-listed-rooms.md)
 
 ## Superseded Records
 

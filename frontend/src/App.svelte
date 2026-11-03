@@ -12,6 +12,9 @@
   import IgnoreUsers from './IgnoreUsers.svelte';
   import ReportAbuse from './ReportAbuse.svelte';
   import RoomOrganisation from './RoomOrganisation.svelte';
+  import RoomGroups from './RoomGroups.svelte';
+  import PublicRooms from './PublicRooms.svelte';
+  import { ownServer } from './publicRooms.ts';
   import SavedDrafts from './SavedDrafts.svelte';
   import StoredRoomGroups from './StoredRoomGroups.svelte';
   import { DraftKeeper } from './drafts';
@@ -261,6 +264,12 @@
   let membersShown = $state(true);
   let favouriteBusy = $state(false);
   let favouriteFailure = $state<string | null>(null);
+  // The room-groups dialog, and whether it is saving: favourite changes wait
+  // for it, because each of its writes carries the room's favourite value.
+  let groupsOpen = $state(false);
+  let groupsBusy = $state(false);
+  // The public room directory dialog.
+  let directoryOpen = $state(false);
   // Changes when trust may have changed, so the member panel reads it again.
   let trustVersion = $state(0);
   // The room list width, changed with the resize handle; kept in memory only.
@@ -481,7 +490,7 @@
     }
     // Native modal dialogs keep pointer focus inside. Keep the global room
     // shortcut inside the same boundary, especially during saved-draft removal.
-    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || sectionOpen || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
+    if (savedDraftsOpen || searchOpen || roomTool || healthOpen || ignoreOpen || reportTarget || sectionOpen || groupsOpen || directoryOpen || roomSettingsOf || invitingTo || newConversationOpen || newRoomOpen) return;
     if (chatShown && rooms && !paletteOpen) {
       event.preventDefault();
       paletteOpen = true;
@@ -635,7 +644,25 @@
   async function openConversation(roomId: string) {
     const generation = sessionGeneration;
     await refreshRooms();
-    if (generation === sessionGeneration) open(roomId);
+    // Awaited, so a caller sees the room change finished, with any error
+    // it set, before it adds its own message.
+    if (generation === sessionGeneration) await open(roomId);
+  }
+
+  /**
+   * Open a room the directory just joined. Say why when it cannot be shown:
+   * the room list holds at most 200 rooms and a new room may not have synced
+   * yet, and a room change stops when the current draft cannot be saved.
+   */
+  async function openJoined(roomId: string) {
+    const generation = sessionGeneration;
+    await openConversation(roomId);
+    if (generation !== sessionGeneration) return;
+    if (!rooms?.rooms.some((room) => room.roomId === roomId)) {
+      error = 'You joined the room, but it is not in the room list yet. The list shows at most 200 rooms, and a new room can take a moment to appear.';
+    } else if (selected !== roomId) {
+      error ??= 'You joined the room, but the current room could not be left because its draft could not be saved. Select the joined room in the room list.';
+    }
   }
 
   /** Clear session-bound UI state and invalidate pending room-context work. */
@@ -655,6 +682,9 @@
     sectionOpen = false;
     favouriteBusy = false;
     favouriteFailure = null;
+    groupsOpen = false;
+    groupsBusy = false;
+    directoryOpen = false;
     focusEvent = null;
     searchLocation = null;
     textSending = false;
@@ -1719,7 +1749,7 @@
 
   /** Toggle a room in Favourites, keeping its section; ignore a reply from an older session. */
   async function toggleFavourite(roomId: string) {
-    if (favouriteBusy) return;
+    if (favouriteBusy || groupsBusy) return;
     const generation = sessionGeneration;
     const saved = preferences.find((entry) => entry.roomId === roomId);
     const preference = { roomId, favourite: !(saved?.favourite ?? false), section: saved?.section ?? null };
@@ -1809,6 +1839,8 @@
 
   // The main menu: account-wide tools that used to be buttons above the room.
   const mainMenu: MenuItem[] = [
+    { label: 'Explore public rooms', onselect: () => (directoryOpen = true) },
+    { label: 'Room groups', onselect: () => (groupsOpen = rooms !== null) },
     { label: 'Search cached messages', onselect: () => (searchOpen = true) },
     { label: 'Saved drafts', onselect: () => void openSavedDrafts() },
     { label: 'Ignored users', onselect: () => (ignoreOpen = true) },
@@ -1825,7 +1857,7 @@
       membersRoom
         ? { label: membersShown ? 'Hide members' : 'Show members', onselect: () => (membersShown = !membersShown), separated: true }
         : { label: 'Members need a wider window', onselect: () => {}, disabled: true, separated: true },
-      { label: 'Room section', onselect: () => (sectionOpen = true) },
+      { label: 'Room group', onselect: () => (sectionOpen = true) },
       { label: 'Room settings', onselect: () => (roomSettingsOf = roomId), separated: true }
     ];
   }
@@ -2105,10 +2137,11 @@
         {inviteBusy}
         onnewconversation={signedIn ? () => (newConversationOpen = true) : undefined}
         onnewroom={signedIn ? () => (newRoomOpen = true) : undefined}
+        onexplore={signedIn ? () => (directoryOpen = true) : undefined}
         onaccept={(roomId) => answerInvite(roomId, true)}
         ondecline={(roomId) => answerInvite(roomId, false)}
         onfavourite={signedIn ? toggleFavourite : undefined}
-        {favouriteBusy}
+        favouriteBusy={favouriteBusy || groupsBusy}
         width={shownSidebar}
       >
         {#snippet menu()}
@@ -2194,7 +2227,7 @@
             {contact}
             favourite={preferences.some((entry) => entry.roomId === selectedRoom.roomId && entry.favourite)}
             onfavourite={signedIn ? () => toggleFavourite(selectedRoom.roomId) : undefined}
-            {favouriteBusy}
+            favouriteBusy={favouriteBusy || groupsBusy}
             menu={signedIn ? roomMenuButton : undefined}
             onreply={sendBlocked === null && draftReady && !textSending
               ? replyToMessage
@@ -2380,8 +2413,16 @@
       {/if}
       {#if sectionOpen && signedIn && selected}
         {#key selected}
-          <RoomOrganisation roomId={selected} {preferences} favouriteSaving={favouriteBusy} onchanged={preferenceChanged} onclose={() => (sectionOpen = false)} />
+          <RoomOrganisation roomId={selected} {preferences} favouriteSaving={favouriteBusy || groupsBusy} onchanged={preferenceChanged} onclose={() => (sectionOpen = false)} />
         {/key}
+      {/if}
+      {#if groupsOpen && signedIn && rooms}
+        <RoomGroups rooms={rooms.rooms} {preferences} favouriteSaving={favouriteBusy} onchanged={preferenceChanged}
+          onbusy={(busy) => (groupsBusy = busy)} onclose={() => (groupsOpen = false)} />
+      {/if}
+      {#if directoryOpen && signedIn}
+        <PublicRooms homeserver={ownServer(status.account.userId)} onopen={open} onjoined={openJoined}
+          onclose={() => (directoryOpen = false)} />
       {/if}
       {#if reportTarget && signedIn}
         <ReportAbuse roomId={reportTarget.roomId} eventId={reportTarget.eventId} sender={reportTarget.sender}

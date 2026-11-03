@@ -10,6 +10,7 @@ let Menu;
 let Message;
 let Timeline;
 let RoomOrganisation;
+let RoomGroups;
 let createRawSnippet;
 
 before(async () => {
@@ -28,6 +29,7 @@ before(async () => {
   ({ default: Message } = await vite.ssrLoadModule('/src/Message.svelte'));
   ({ default: Timeline } = await vite.ssrLoadModule('/src/Timeline.svelte'));
   ({ default: RoomOrganisation } = await vite.ssrLoadModule('/src/RoomOrganisation.svelte'));
+  ({ default: RoomGroups } = await vite.ssrLoadModule('/src/RoomGroups.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
   ({ createRawSnippet } = await vite.ssrLoadModule('svelte'));
 });
@@ -214,7 +216,7 @@ test('GIVEN images, files and notices WHEN pin and report are offered THEN they 
   assert.doesNotMatch(html, /Report message from <bdi>@me:s/, 'own events cannot be reported');
 });
 
-test('GIVEN a favourite change is saving WHEN the header star and the section dialog show THEN both wait for it', () => {
+test('GIVEN a favourite change is saving WHEN the header star and the room-group dialog show THEN both wait for it', () => {
   const header = render(Timeline, {
     props: { title: 'Room', items: [], hasOlder: false, loading: false, error: null, onolder() {}, onfavourite() {}, favouriteBusy: true }
   }).body;
@@ -233,4 +235,51 @@ test('GIVEN a room menu WHEN the header shows THEN the menu renders at the end o
     props: { title: 'Room', items: [], hasOlder: false, loading: false, error: null, onolder() {}, menu }
   }).body);
   assert.match(html, /<span class="header-end"><button type="button" id="menu-probe">Room menu<\/button><\/span>\s*<\/header>/);
+});
+
+const groupRoom = (roomId, displayName = null) => ({ roomId, displayName, unreadCount: 0, encryption: 'encrypted', contact: null });
+const groupsDialog = (props) =>
+  shown(render(RoomGroups, { props: { onchanged() {}, onbusy() {}, onclose() {}, ...props } }).body);
+
+test('GIVEN saved groups WHEN the room-groups dialog shows THEN each group is listed once as inert text with its joined-room count', () => {
+  const html = groupsDialog({
+    rooms: [groupRoom('!a:s', 'A'), groupRoom('!b:s', 'B'), groupRoom('!c:s', 'C')],
+    preferences: [
+      { roomId: '!a:s', favourite: false, section: hostile },
+      { roomId: '!b:s', favourite: true, section: hostile },
+      { roomId: '!c:s', favourite: false, section: 'Work' },
+      { roomId: '!stale:s', favourite: false, section: 'Work' }
+    ]
+  });
+  assert.match(html, /aria-label="Room groups"/);
+  assert.doesNotMatch(html, /<img/, 'group names are escaped');
+  assert.match(html, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi> <span class="note">\(2 rooms\)<\/span>/);
+  assert.match(html, /<bdi>Work<\/bdi> <span class="note">\(1 room\)<\/span>/, 'rooms outside the room list are not counted');
+  assert.equal((html.match(/>Edit rooms</g) ?? []).length, 2);
+  assert.equal((html.match(/>Remove group</g) ?? []).length, 2);
+  assert.match(html, /<button type="button" class="primary">New group<\/button>/);
+});
+
+test('GIVEN no groups, or a favourite change saving WHEN the room-groups dialog shows THEN it says so, or its controls wait', () => {
+  const empty = groupsDialog({ rooms: [groupRoom('!a:s')], preferences: [] });
+  assert.match(empty, /No groups yet\./);
+  const waiting = groupsDialog({
+    rooms: [groupRoom('!a:s')], preferences: [{ roomId: '!a:s', favourite: false, section: 'Work' }], favouriteSaving: true
+  });
+  assert.match(waiting, /<button type="button" class="secondary" disabled="">Edit rooms<\/button>/);
+  assert.match(waiting, /<button type="button" class="secondary" disabled="">Remove group<\/button>/);
+  assert.match(waiting, /<button type="button" class="primary" disabled="">New group<\/button>/);
+});
+
+test('GIVEN existing groups WHEN the room-group dialog shows THEN it offers their names as suggestions', () => {
+  const html = shown(render(RoomOrganisation, {
+    props: {
+      roomId: '!r:s', onchanged() {}, onclose() {},
+      preferences: [{ roomId: '!x:s', favourite: false, section: 'Work' }, { roomId: '!y:s', favourite: false, section: hostile }]
+    }
+  }).body);
+  assert.match(html, /aria-label="Room group"/);
+  assert.match(html, /list="room-section-groups"/);
+  assert.match(html, /<datalist id="room-section-groups"><option value="&lt;img src=x onerror=alert\(1\)>"><\/option><option value="Work"><\/option><\/datalist>/);
+  assert.doesNotMatch(html, /<img/);
 });

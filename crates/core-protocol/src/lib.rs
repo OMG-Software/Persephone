@@ -583,6 +583,24 @@ pub enum Call {
     SearchUsers {
         term: String,
     },
+    /// One page of a public room directory: this account's homeserver's
+    /// when `server` is none, otherwise the named server's, which the
+    /// homeserver asks over federation. `filter` narrows the page to rooms
+    /// whose name, address or topic contains it; `since` is the `next` token
+    /// of the page before. Both servers see the filter.
+    PublicRooms {
+        #[serde(deserialize_with = "Option::deserialize")]
+        server: Option<String>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        filter: Option<String>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        since: Option<String>,
+    },
+    /// Join a room that a `public_rooms` page of this session listed as
+    /// open to anyone. Any other room is `not_found`.
+    JoinPublicRoom {
+        room_id: String,
+    },
     /// A joined room's settings: names, addresses, access, encryption,
     /// notifications and power levels, with what this account may change.
     RoomSettings {
@@ -692,6 +710,26 @@ pub const MAX_SEARCH_TERM_BYTES: usize = 256;
 
 /// Most matches a user-directory search returns.
 pub const MAX_SEARCH_RESULTS: usize = 10;
+
+/// Most rooms one `public_rooms` page lists.
+pub const MAX_PUBLIC_ROOMS: usize = 30;
+
+/// Longest public-room filter either side accepts, in bytes.
+pub const MAX_DIRECTORY_FILTER_BYTES: usize = 256;
+
+/// Longest `public_rooms` page token either side accepts, in bytes. A
+/// longer token from the homeserver ends the listing.
+pub const MAX_DIRECTORY_TOKEN_BYTES: usize = 512;
+
+/// Most rooms one listing shows across its pages. The page stops asking for
+/// more pages at this count.
+pub const MAX_LISTED_ROOMS: usize = 300;
+
+/// Most listed rooms the core remembers as joinable for `join_public_room`;
+/// the oldest are forgotten first. A listing's last page can offer up to a
+/// whole page past [`MAX_LISTED_ROOMS`], so every room a listing shows stays
+/// joinable.
+pub const MAX_OFFERED_ROOMS: usize = MAX_LISTED_ROOMS + MAX_PUBLIC_ROOMS;
 
 /// Longest room name either side accepts, in bytes.
 pub const MAX_ROOM_NAME_BYTES: usize = 255;
@@ -1161,10 +1199,11 @@ mod tests {
         }
     }
 
-    /// GIVEN the conversation calls WHEN sent THEN only the room ID, user ID
-    /// or search term crosses, in the documented wire form.
+    /// GIVEN the conversation and directory calls WHEN sent THEN only the
+    /// room ID, user ID, search term or directory page arguments cross, in
+    /// the documented wire form.
     #[test]
-    fn given_conversation_calls_then_only_their_one_argument_crosses() {
+    fn given_conversation_calls_then_only_their_documented_arguments_cross() {
         let budgets = ResourceBudgets::default();
         for (call, wire) in [
             (
@@ -1192,6 +1231,28 @@ mod tests {
             (
                 Call::SearchUsers { term: "bob".into() },
                 r#"{"id":1,"call":{"command":"search_users","term":"bob"}}"#,
+            ),
+            (
+                Call::PublicRooms {
+                    server: None,
+                    filter: None,
+                    since: None,
+                },
+                r#"{"id":1,"call":{"command":"public_rooms","server":null,"filter":null,"since":null}}"#,
+            ),
+            (
+                Call::PublicRooms {
+                    server: Some("example.org".into()),
+                    filter: Some("rust".into()),
+                    since: Some("p30".into()),
+                },
+                r#"{"id":1,"call":{"command":"public_rooms","server":"example.org","filter":"rust","since":"p30"}}"#,
+            ),
+            (
+                Call::JoinPublicRoom {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"join_public_room","room_id":"!r:s"}}"#,
             ),
             (
                 Call::Register {
@@ -1868,6 +1929,12 @@ mod tests {
             br#"{"id":1,"call":{"command":"start_conversation","user_id":"@b:s","invite":["@c:s"]}}"#,
             br#"{"id":1,"call":{"command":"search_users"}}"#,
             br#"{"id":1,"call":{"command":"search_users","term":"b","limit":500}}"#,
+            br#"{"id":1,"call":{"command":"public_rooms","server":null,"filter":null,"since":null,"limit":500}}"#,
+            br#"{"id":1,"call":{"command":"public_rooms","server":7,"filter":null,"since":null}}"#,
+            br#"{"id":1,"call":{"command":"public_rooms"}}"#,
+            br#"{"id":1,"call":{"command":"public_rooms","server":null,"filter":null}}"#,
+            br#"{"id":1,"call":{"command":"join_public_room"}}"#,
+            br#"{"id":1,"call":{"command":"join_public_room","room_id":"!r:s","via":["evil.example"]}}"#,
             br#"{"id":1,"call":{"command":"create_room","name":"x"}}"#,
             b"not json",
         ] {

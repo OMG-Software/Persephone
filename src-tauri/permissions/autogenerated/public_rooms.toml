@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-public-rooms"
+description = "Enables the public_rooms command without any pre-configured scope."
+commands.allow = ["public_rooms"]
+
+[[permission]]
+identifier = "deny-public-rooms"
+description = "Denies the public_rooms command without any pre-configured scope."
+commands.deny = ["public_rooms"]

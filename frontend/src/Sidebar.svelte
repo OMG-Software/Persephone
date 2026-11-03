@@ -21,6 +21,7 @@
     onsettings,
     onnewconversation,
     onnewroom,
+    onexplore,
     onaccept = () => {},
     ondecline = () => {},
     onfavourite,
@@ -50,6 +51,8 @@
     onnewconversation?: () => void;
     // Opens the new-room dialog; absent when there is no account.
     onnewroom?: () => void;
+    // Opens the public room directory; absent when there is no account.
+    onexplore?: () => void;
     onaccept?: (roomId: string) => void;
     ondecline?: (roomId: string) => void;
     // Adds a room to Favourites or removes it; absent without an account.
@@ -118,6 +121,9 @@
       />
     {:else}
       <p class="note" role="status">Loading rooms…</p>
+    {/if}
+    {#if onexplore}
+      <button type="button" class="link explore-rooms" onclick={onexplore}>Explore public rooms</button>
     {/if}
   </div>
   {@render notice?.()}
