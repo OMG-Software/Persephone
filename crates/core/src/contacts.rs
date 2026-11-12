@@ -123,8 +123,11 @@ async fn repair_target(client: &Client, contact: &UserId) -> Result<(), Security
     Ok(())
 }
 
-/// Removes `rooms` from the account's direct marks for `contact` only, from
-/// the account data the client last synced.
+/// Removes `rooms` from the account's direct marks for `contact` only. The
+/// marks are read from the homeserver just before the write, not from the
+/// last sync, so a change another device made since is kept. Account data
+/// has no conditional write, so a change in between those two requests can
+/// still be lost.
 async fn unmark(
     client: &Client,
     contact: &UserId,
@@ -132,7 +135,7 @@ async fn unmark(
 ) -> Result<(), SecurityError> {
     let account = client.account();
     let mut content = account
-        .account_data::<DirectEventContent>()
+        .fetch_account_data_static::<DirectEventContent>()
         .await
         .map_err(|_| SecurityError::Failed)?
         .ok_or(SecurityError::Failed)?

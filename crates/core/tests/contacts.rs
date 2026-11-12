@@ -31,6 +31,8 @@ const CAROLS: &str = "!carol:synthetic.test";
 const ALICE: &str = "@alice:synthetic.test";
 const BOB: &str = "@bob:synthetic.test";
 const CAROL: &str = "@carol:synthetic.test";
+const DAVES: &str = "!dave:synthetic.test";
+const DAVE: &str = "@dave:synthetic.test";
 
 fn member(user: &str, membership: &str) -> Value {
     json!({
@@ -87,13 +89,30 @@ impl Respond for SyncReply {
     }
 }
 
-/// Keeps a saved `m.direct`, so the next sync returns it.
+/// Keeps a saved `m.direct`, so the next sync and read return it.
 struct SaveDirect(Arc<Mutex<Value>>);
 
 impl Respond for SaveDirect {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         *self.0.lock().unwrap() = serde_json::from_slice(&request.body).unwrap();
         ResponseTemplate::new(200).set_body_json(json!({}))
+    }
+}
+
+/// Answers a read of `m.direct` with the homeserver's copy: the saved one
+/// plus `newer`, marks another device added that this client has not synced.
+struct ServeDirect {
+    direct: Arc<Mutex<Value>>,
+    newer: Arc<Mutex<Value>>,
+}
+
+impl Respond for ServeDirect {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        let mut copy = self.direct.lock().unwrap().clone();
+        for (user, rooms) in self.newer.lock().unwrap().as_object().unwrap() {
+            copy[user] = rooms.clone();
+        }
+        ResponseTemplate::new(200).set_body_json(copy)
     }
 }
 
@@ -126,6 +145,7 @@ struct Setup {
     server: MockServer,
     client: Client,
     direct: Arc<Mutex<Value>>,
+    newer: Arc<Mutex<Value>>,
 }
 
 /// A signed-in client after one sync, with `!a-old`'s members as `old` (its
@@ -137,6 +157,7 @@ async fn synced(old: &[Value], old_list: bool, saves: u64) -> Setup {
     member_list(&server, "old", OLD, old_list.then_some(old)).await;
     member_list(&server, "dm", DM, Some(&dm)).await;
     let direct = Arc::new(Mutex::new(json!({ BOB: [OLD, DM], CAROL: [CAROLS] })));
+    let newer = Arc::new(Mutex::new(json!({})));
     Mock::given(method("GET"))
         .and(path("/_matrix/client/versions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "versions": ["v1.19"] })))
@@ -158,6 +179,16 @@ async fn synced(old: &[Value], old_list: bool, saves: u64) -> Setup {
         ))
         .respond_with(SaveDirect(direct.clone()))
         .expect(saves)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/_matrix/client/v3/user/[^/]+/account_data/m\.direct$",
+        ))
+        .respond_with(ServeDirect {
+            direct: direct.clone(),
+            newer: newer.clone(),
+        })
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -205,6 +236,7 @@ async fn synced(old: &[Value], old_list: bool, saves: u64) -> Setup {
         server,
         client,
         direct,
+        newer,
     }
 }
 
@@ -213,12 +245,15 @@ fn bob() -> OwnedUserId {
 }
 
 /// GIVEN an older room still marked direct for Bob, which Bob left and the
-/// SDK picks first, and a room where Alice and Bob are both joined WHEN Alice
+/// SDK picks first, a room where Alice and Bob are both joined, and a mark
+/// for Dave another device added that this client has not synced WHEN Alice
 /// verifies Bob from the joined room THEN the older room loses Bob's mark
-/// only, Carol's mark stays, and the SDK now picks the joined room.
+/// only, Carol's and Dave's marks stay, and the SDK now picks the joined
+/// room.
 #[tokio::test]
 async fn given_a_room_bob_left_then_it_loses_his_mark_and_he_is_verifiable() {
     let setup = synced(&[member(ALICE, "join"), member(BOB, "leave")], true, 1).await;
+    *setup.newer.lock().unwrap() = json!({ DAVE: [DAVES] });
     let picked = |client: &Client| {
         client
             .get_dm_room(&bob())
@@ -233,7 +268,7 @@ async fn given_a_room_bob_left_then_it_loses_his_mark_and_he_is_verifiable() {
 
     assert_eq!(
         *setup.direct.lock().unwrap(),
-        json!({ BOB: [DM], CAROL: [CAROLS] })
+        json!({ BOB: [DM], CAROL: [CAROLS], DAVE: [DAVES] })
     );
     assert_eq!(picked(&setup.client).as_deref(), Some(DM));
     setup.server.verify().await;
