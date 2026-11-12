@@ -26,6 +26,17 @@ flow was cancelled on both sides and the contact stayed unverified.**
   this account and the contact, both joined. A membership change between
   that check and the SDK's own is still possible: the SDK 0.19.1 offers no
   public way to send the request without its invitation fallback.
+
+  *Later change, 12 November 2026 (this report was not rerun):* the SDK's
+  first room is the first in its store's room order, so an older room still
+  marked direct for the contact (they left, their invitation is pending, or
+  someone else joined) made the core refuse even from a good room. The core
+  now removes that contact's direct mark from such stale rooms, at most 8,
+  when a room with just the two of them, both joined, exists, and waits up
+  to 10 seconds for sync to return the change. A member list that cannot be
+  read changes nothing and fails. See
+  [`contacts.rs`](../../crates/core/src/contacts.rs) and the mocked-server
+  tests in [`tests/contacts.rs`](../../crates/core/tests/contacts.rs).
 * **Only a verified device vouches for someone**: the page offers "Verify"
   only on a verified device, and the core queues the start only then. A match
   signs the contact's identity with the account's user-signing key, so both

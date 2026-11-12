@@ -72,7 +72,9 @@ not run.
   that room itself, so the page's 200-room list does not limit it. With no
   such room, the core reports `not_direct_room` and the panel offers
   **Start conversation**. Verify itself never creates a room or sends an
-  invitation. The panel hides when the window is too narrow to keep the room
+  invitation. When an older room keeps the person's direct mark but no
+  longer has just the two of you, joined, the core removes that mark so the
+  request goes to the good room (see `crates/core/src/contacts.rs`). The panel hides when the window is too narrow to keep the room
   at least 320 pixels wide. It reads the list again after room and security
   changes, at most about once a second.
 - **Listing queue**: the core runs one member, reader or server listing at a
