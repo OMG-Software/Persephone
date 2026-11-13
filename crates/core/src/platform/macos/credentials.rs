@@ -363,6 +363,13 @@ impl CredentialSource for NativePrompt {
         yes(prompt(&question_alert(caption, message))?.response)
     }
 
+    /// The warning before a key backup is deleted (ADR-0040), "No" by
+    /// default, as for the key change.
+    fn confirm_new_backup(&self) -> Result<bool, PromptError> {
+        let (caption, message) = prompt_text::NEW_BACKUP;
+        yes(prompt(&question_alert(caption, message))?.response)
+    }
+
     /// The question from `links::question` or `oauth_login::question`, as
     /// a warning whose default answer is "No". The text is plain alert
     /// text, never interpreted.
@@ -602,6 +609,8 @@ mod tests {
             Err(PromptError::Invalid)
         );
         assert!(!ask_to_retry());
+        // No backup is deleted without the question (ADR-0040).
+        assert_eq!(prompt.confirm_new_backup(), Err(PromptError::Unsupported));
         // Links: no question can be asked, and a checked link is not opened.
         assert_eq!(
             prompt.confirm_open_link("Open this link?", "https://example.org/"),

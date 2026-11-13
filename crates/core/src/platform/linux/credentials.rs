@@ -421,6 +421,13 @@ impl CredentialSource for NativePrompt {
         yes(prompt(question_alert(caption, message))?.response)
     }
 
+    /// The warning before a key backup is deleted (ADR-0040), "No" by
+    /// default, as for the key change.
+    fn confirm_new_backup(&self) -> Result<bool, PromptError> {
+        let (caption, message) = prompt_text::NEW_BACKUP;
+        yes(prompt(question_alert(caption, message))?.response)
+    }
+
     /// Any chooser error is `Failed`, so the key is reported as not saved;
     /// a cancel stays `Ok(None)`.
     fn choose_recovery_key_file(&self) -> Result<Option<PathBuf>, PromptError> {
@@ -432,11 +439,12 @@ impl CredentialSource for NativePrompt {
         yes(prompt(question_alert(caption, message))?.response)
     }
 
-    /// Hands the checked link to the OpenURI portal. A link that does not
-    /// pass the core's link check again is refused here too.
+    /// Hands the checked link to the OpenURI portal. Only a link that
+    /// passes [`crate::links::openable`] again, exactly as the question
+    /// showed it, is handed over; anything else is `Invalid`, as on macOS.
     fn open_link(&self, url: &str) -> Result<(), PromptError> {
-        let checked = crate::links::checked(url).ok_or(PromptError::Failed)?;
-        super::portal::open_uri(checked.as_str()).map_err(|_| PromptError::Failed)
+        let url = crate::links::openable(url).ok_or(PromptError::Invalid)?;
+        super::portal::open_uri(url.as_str()).map_err(|_| PromptError::Failed)
     }
 }
 
@@ -661,15 +669,22 @@ mod tests {
         );
     }
 
-    /// GIVEN an address that fails the core's link check WHEN it is opened
-    /// THEN it is refused before the portal is asked; GIVEN an unprintable
-    /// user ID THEN the identity question is refused before any window.
+    /// GIVEN an address that fails the core's link check, or differs from
+    /// the serialized form the question showed, WHEN it is opened THEN it is
+    /// refused before the portal is asked; GIVEN an unprintable user ID THEN
+    /// the identity question is refused before any window.
     #[test]
     fn given_unchecked_input_then_it_is_refused_before_any_window() {
-        for url in ["file:///etc/passwd", "javascript:alert(1)", "https://a b"] {
+        for url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://a b",
+            "https://example.org",
+            "https://\u{0430}pple.com/",
+        ] {
             assert_eq!(
                 NativePrompt.open_link(url),
-                Err(PromptError::Failed),
+                Err(PromptError::Invalid),
                 "{url}"
             );
         }
