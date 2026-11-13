@@ -1754,6 +1754,29 @@ impl Session {
         Ok(self.account_status())
     }
 
+    /// The start of a lock: a protected session stops admitting work, moves
+    /// to the next generation and runs `announce`, once, so the page clears
+    /// before anything waits. Leases already held keep running; the lock
+    /// waits for them. Any other state is left as it is. The caller holds
+    /// `transition`.
+    fn close_admission(&self, announce: impl FnOnce()) {
+        let mut inner = lock(&self.shared);
+        if inner.state != StoreState::Protected {
+            return;
+        }
+        inner.state = match inner.generation.checked_add(1) {
+            Some(next) => {
+                inner.generation = next;
+                StoreState::Locking
+            }
+            None => StoreState::LockFailed,
+        };
+        *guard(&self.shared.health) = SyncHealth::default();
+        self.shared.drained.notify_all();
+        drop(inner);
+        announce();
+    }
+
     /// Locks the session (see the module documentation). `announce` runs once,
     /// right after admission closes and before waiting, when this call is the
     /// one that began the lock. Returns the resulting state and, when the
@@ -1768,27 +1791,10 @@ impl Session {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let deadline = Instant::now() + timeout;
+        self.close_admission(announce);
         let mut inner = lock(&self.shared);
-        match inner.state {
-            StoreState::Protected => {
-                inner.state = match inner.generation.checked_add(1) {
-                    Some(next) => {
-                        inner.generation = next;
-                        StoreState::Locking
-                    }
-                    None => StoreState::LockFailed,
-                };
-                *guard(&self.shared.health) = SyncHealth::default();
-                self.shared.drained.notify_all();
-                drop(inner);
-                announce();
-                inner = lock(&self.shared);
-                if inner.state == StoreState::LockFailed {
-                    return (StoreState::LockFailed, None);
-                }
-            }
-            StoreState::Locking => {}
-            other => return (other, None),
+        if inner.state != StoreState::Locking {
+            return (inner.state, None);
         }
         while inner.active > 0 {
             let now = Instant::now();
@@ -1855,9 +1861,12 @@ impl Session {
 
     /// Signs out (owner decisions, 21 October 2026): revokes the session on
     /// the homeserver if it can be reached, then deletes this device's local
-    /// profile. The key goes first, so the encrypted stores are unreadable at
-    /// once; then the session locks as usual (ending `restart_required`, since
-    /// a client ran). The store files are deleted by the next start, before
+    /// profile. The lock starts before the revocation request
+    /// (docs/architecture/sdk-lifecycle.md): admission closes, the generation
+    /// moves on and `announce` clears the page, while the request runs under
+    /// the lease it was admitted with. The key goes next, so the encrypted
+    /// stores are unreadable at once; then the lock finishes as usual (ending
+    /// `restart_required`, since a client ran). The store files are deleted by the next start, before
     /// any client exists: the SDK's background work is not proven stopped in
     /// this process (docs/architecture/sdk-lifecycle.md), so its files are not
     /// deleted under it. A failed revocation still signs out locally and is
@@ -1876,12 +1885,26 @@ impl Session {
             return Ok(self.state());
         };
         let deadline = Instant::now() + timeout;
+        let mut announce = Some(announce);
         let (began, revoked) = loop {
             match self.with_client() {
                 Ok(Some((lease, client))) => {
                     // Before the request: an interrupted sign-out must never
                     // restore this account on the next start.
                     let began = store::begin_sign_out(&dir).is_ok();
+                    // The lock starts now, not after the request: nothing new
+                    // is admitted and the page clears while it runs. This
+                    // lease was admitted first, so the request still runs and
+                    // the lock below waits for it.
+                    {
+                        let _transition = self
+                            .transition
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if let Some(announce) = announce.take() {
+                            self.close_admission(announce);
+                        }
+                    }
                     let revoked = lease.stores().block_on(client.logout()).is_ok();
                     break (began, revoked);
                 }
@@ -1893,7 +1916,8 @@ impl Session {
             }
         };
         let marked = store::mark_signed_out(&dir, revoked).is_ok() && began;
-        let (state, _) = self.lock(timeout, announce);
+        // Admission closed above, so this only waits and finishes the lock.
+        let (state, _) = self.lock(timeout, || {});
         // The sync loop has been joined, so this status is not overwritten.
         self.shared.set_status(AccountStatus {
             state: AccountState::SignedOut,

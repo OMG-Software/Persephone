@@ -28,14 +28,16 @@ after a lock timeout, and store close only after the wait completes. Its drain
 proof refuses to stand for a full SDK drain. See the
 [session owner evidence](../evidence/session-owner.md).
 
-Sign-out first attempts to write a local marker for crash recovery, then
-attempts the homeserver logout before it calls `lock`. During that network
-request, it holds a session lease but has not yet closed admission or announced
-the UI clear. After the request, it attempts to record the revocation result
-and remove the stored key before locking. The immediate logout-start requirement
-above remains unmet during that request. The [room tools guide](../room-tools.md)
-describes this ordering; a frontend request does not prove that session
-protection is complete.
+Sign-out first attempts to write a local marker for crash recovery. Since
+13 November 2026 it then starts the lock: it closes admission, advances the
+generation and announces the UI clear, before the homeserver logout request.
+The request runs under the lease it was admitted with, and the lock waits for
+that lease. After the request, sign-out attempts to record the revocation
+result and remove the stored key, then finishes the lock. Before that date the
+request ran with admission still open, which did not meet the immediate
+logout-start requirement above. [ADR-0039](../adr/0039-obtain-sdk-stop-and-join-upstream-instead-of-forking.md)
+records the decision to obtain the SDK completion surface below upstream
+rather than fork the SDK or gate on runtime task counts.
 
 The core now runs an SDK client over those stores
 ([sign-in evidence](../evidence/matrix-sign-in.md)). Its sync loop and sign-in

@@ -2103,17 +2103,24 @@ fn given_a_sign_out_interrupted_during_logout_then_the_next_start_wipes_and_warn
     );
 }
 
-/// GIVEN a homeserver that is slow to answer logout WHEN signing out THEN the
-/// sign-out intent is on disk while the request is still in flight (with the
-/// key not yet deleted), so ending the process then cannot restore the account.
+/// GIVEN a homeserver that is slow to answer logout WHEN signing out THEN,
+/// while the request is still in flight, the sign-out intent is on disk (with
+/// the key not yet deleted), so ending the process then cannot restore the
+/// account; and the lock has already started: the page was told to clear
+/// once, and new work is refused (docs/architecture/sdk-lifecycle.md).
 #[test]
 fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_ends() {
     let server = Homeserver::signed_in();
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
     server.slow_logout(Duration::from_secs(2));
+    let announced = AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        let signing_out = scope.spawn(|| core.session().sign_out(Duration::from_secs(10), || {}));
+        let signing_out = scope.spawn(|| {
+            core.session().sign_out(Duration::from_secs(10), || {
+                announced.fetch_add(1, Ordering::SeqCst);
+            })
+        });
         wait_for("the logout request", || {
             server.requests_to("/_matrix/client/v3/logout") == 1
         });
@@ -2125,8 +2132,16 @@ fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_e
             dir.path().join("store-key.v2").exists(),
             "key deleted only after the answer"
         );
+        assert_eq!(announced.load(Ordering::SeqCst), 1, "page cleared first");
+        assert_eq!(core.session().state(), StoreState::Locking);
+        assert_eq!(
+            call(&core, Call::RoomList {}),
+            Outcome::Error(ErrorCode::Locked),
+            "nothing new admitted during the request"
+        );
         assert_eq!(signing_out.join().unwrap(), Ok(StoreState::RestartRequired));
     });
+    assert_eq!(announced.load(Ordering::SeqCst), 1, "announced once");
     assert!(!dir.path().join("store-key.v2").exists());
 }
 
