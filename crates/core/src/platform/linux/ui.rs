@@ -993,18 +993,35 @@ mod tests {
         let (mut child, placement) =
             spawn_gated(command, move |pid| place(pid, &unit)).expect("placed");
         assert!(placement.capped);
-        let run = UiRun {
-            group: ProcessGroup::of(&child),
-            cgroup: placement.cgroup,
+        let ui = child.id() as libc::pid_t;
+        let cgroup = placement.cgroup.expect("the scope's cgroup");
+        // The helper: a process in the scope that is in a session of its own
+        // (`setsid`) and no longer the UI's child (its parent exited). Wait
+        // for exactly that, so the test cannot pass before it happens.
+        let escaped = |pid: libc::pid_t| {
+            let stat = read_bounded(&PathBuf::from(format!("/proc/{pid}/stat"))).ok()?;
+            let rest = &stat[stat.rfind(')')? + 1..];
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            let parent: libc::pid_t = fields.get(1)?.parse().ok()?;
+            let session: libc::pid_t = fields.get(3)?.parse().ok()?;
+            (pid != ui && session != ui && parent != ui).then_some(pid)
         };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while run.active_processes().unwrap() < 2 {
+        let helper = loop {
+            if let Some(pid) = cgroup.processes().unwrap().into_iter().find_map(escaped) {
+                break pid;
+            }
             assert!(
                 Instant::now() < deadline,
-                "the new session is not in the scope"
+                "no reparented process in a new session is in the scope"
             );
             thread::sleep(POLL);
-        }
+        };
+        assert!(cgroup.processes().unwrap().contains(&helper));
+        let run = UiRun {
+            group: ProcessGroup::of(&child),
+            cgroup: Some(cgroup),
+        };
         assert!(run.terminate(Duration::from_secs(10)));
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
     }

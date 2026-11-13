@@ -165,6 +165,54 @@ mod tests {
         );
     }
 
+    /// The variable that tells [`session_in_a_child`] what to expect.
+    const EXPECT: &str = "PERSEPHONE_TEST_SESSION_BUS";
+
+    /// GIVEN `DBUS_SESSION_BUS_ADDRESS` set but empty, or not UTF-8 WHEN
+    /// `session()` connects THEN it fails; GIVEN it unset with no bus in the
+    /// runtime directory THEN there is no bus. Each case runs in a child copy
+    /// of this test program, so no test changes this process's environment.
+    #[test]
+    fn given_session_bus_settings_then_session_sorts_them() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt, process::Command};
+        let runtime = tempfile::tempdir().unwrap();
+        let run = |setting: Option<&OsStr>, expect: &str| {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "platform::linux::bus::tests::session_in_a_child",
+                    "--ignored",
+                ])
+                .env(EXPECT, expect)
+                .env("XDG_RUNTIME_DIR", runtime.path());
+            match setting {
+                Some(value) => command.env("DBUS_SESSION_BUS_ADDRESS", value),
+                None => command.env_remove("DBUS_SESSION_BUS_ADDRESS"),
+            };
+            let output = command.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{expect}: {stdout}");
+            assert!(stdout.contains("1 passed"), "{expect}: {stdout}");
+        };
+        run(Some(OsStr::new("")), "failed");
+        run(Some(OsStr::from_bytes(b"unix:path=/x\xff")), "failed");
+        run(None, "absent");
+    }
+
+    /// Run only by [`given_session_bus_settings_then_session_sorts_them`],
+    /// in a child process whose environment it set.
+    #[test]
+    #[ignore = "run in a child process by given_session_bus_settings_then_session_sorts_them"]
+    fn session_in_a_child() {
+        let expected = match std::env::var(EXPECT).as_deref() {
+            Ok("failed") => BusError::Failed,
+            Ok("absent") => BusError::Absent,
+            _ => return,
+        };
+        assert_eq!(session().err(), Some(expected));
+    }
+
     /// GIVEN a bus address with no socket behind it THEN there is no bus;
     /// GIVEN a socket that exists but refuses the connection THEN the
     /// connection failed, and is never taken for a missing bus.
