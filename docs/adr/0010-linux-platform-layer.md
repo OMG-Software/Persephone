@@ -57,6 +57,56 @@ the same plan):
   `/proc/<pid>/status` and sends input only when `NoNewPrivs` is 1 and
   `Seccomp` is 2.
 
+### Implementation decisions (13 November 2026)
+
+Owner decisions recorded with the implementation in
+`crates/core/src/platform/linux/`:
+
+* **Secret Service over a `plain` session.** The core talks to the Secret
+  Service with `zbus` 5.19.0 (already in the lockfile through Tauri, now a
+  direct, Linux-only dependency of the core) and opens a `plain` session, not
+  the Diffie-Hellman one. The secret then crosses the session bus
+  unencrypted. The session bus is a Unix socket that only the same user can
+  reach, and that user can already ask the provider for the item from an
+  unlocked collection, so the encrypted session would protect against no one
+  who can read the bus; it would add key-agreement code to the core. The item
+  is in the default collection, with the attributes `service`
+  (`io.github.omg-software.persephone`), `account` (`store-key-wrap-v1`) and
+  `xdg:schema`; its value is the 32-byte secret as 64 lowercase hexadecimal
+  characters (`text/plain`), so providers that keep text keep it unchanged. It
+  is never replaced: if two cores store at once, both use the item with the
+  smallest object path. A locked collection is unlocked through the
+  provider's own prompt, dismissed after 5 minutes without an answer. No
+  session bus, no provider or no default collection is `unsupported`; a
+  dismissed prompt or any other refusal leaves the key unreadable. Neither
+  falls back to the kernel keyring, a file or the passphrase alone.
+* **Prompts.** GTK starts on the `core-gtk` thread at the first prompt,
+  without changing the process locale (`gtk_disable_setlocale`), and adds no
+  chosen file to the recent-files list. Closing a yes-or-no question answers
+  "No". Without a display every prompt and file chooser is refused.
+* **Links.** A confirmed link is opened through the desktop's OpenURI portal
+  (`org.freedesktop.portal.OpenURI`) as one D-Bus string. No shell,
+  `xdg-open` or other program is started with the address. Without a portal
+  the link is not opened.
+* **UI process.** The parent-death signal is set in the child before `exec`.
+  The kernel sends it when the *thread* that started the UI ends, so the core
+  starts the UI from its main thread. The scope is a transient unit from
+  `org.freedesktop.systemd1.Manager.StartTransientUnit` with `MemoryMax` of
+  2 GiB (the Job's limit for the whole tree), `MemorySwapMax` of 0, so the UI
+  cannot move past the cap into swap, and removal after it ends. The core
+  waits until the kernel shows the UI in the scope and reads the cap back from
+  the cgroup. A session without a systemd user manager, or a cgroup that does
+  not show the cap (no memory controller for the user manager), gets the
+  warning above. Any other refusal ends the UI. With a scope, the window watch
+  counts the scope's processes, as the Job's on Windows. The Job's 1 GiB
+  per-process limit has no equivalent: an address-space limit would stop the
+  web view's large reservations.
+* **Idle lock.** No idle time is read on Linux; the idle lock (ADR-0025)
+  stays unavailable until the owner chooses its sources.
+* **glib advisory.** RUSTSEC-2024-0429 (`glib::VariantStrIter`) was checked
+  for the core's own GTK use: see
+  [Dependency evidence](../evidence/dependencies.md#linux-platform-layer-gtk-and-zbus-in-the-core-13-november-2026).
+
 ### Positive Consequences
 
 * The store key has the same two layers as on Windows.
@@ -75,6 +125,10 @@ the same plan):
   build is distributed.
 * The seccomp allowlist must be kept in step with the worker's actual system
   calls on each architecture (x86_64 and aarch64).
+* The `plain` Secret Service session shows the wrapping secret to any process
+  of the same user that monitors the session bus.
+* Desktops without the OpenURI portal cannot open links from messages or the
+  browser sign-in (ADR-0030).
 
 ## Links
 

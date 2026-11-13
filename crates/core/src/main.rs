@@ -5,18 +5,19 @@
 //! its requests over its stdin and stdout. When the UI exits or misbehaves, the
 //! core shuts it down, closes the stores and exits.
 //!
-//! The platform's [`UiHost`] starts and contains the UI; outside Windows it
-//! refuses for now, and the core exits with status 2. The core also watches
-//! the UI's window ([`ui_watch`]). If the page never reaches the core, or the
-//! web view's processes exit while the UI keeps running, the core asks in a
-//! native dialog whether to start the window again. Retry ends the old UI
-//! tree and starts a new UI; the session, its sync and any sign-in keep
-//! running in the core.
+//! The platform's [`UiHost`] starts and contains the UI; a platform without
+//! UI containment refuses, and the core exits with status 2. The core also
+//! watches the UI's window ([`ui_watch`]). If the page never reaches the
+//! core, or the web view's processes exit while the UI keeps running, the
+//! core asks in a native dialog whether to start the window again. Retry
+//! ends the old UI tree and starts a new UI; the session, its sync and any
+//! sign-in keep running in the core.
 //!
 //! On macOS the process main thread is kept for AppKit: the work above runs
 //! on a `core-main` thread and the main thread runs
 //! `platform::macos::run_main_loop`. Windows and Linux run it on the main
-//! thread.
+//! thread. Linux relies on that: the UI's parent-death signal fires when the
+//! thread that started the UI ends (`platform/linux/ui.rs`).
 //!
 //! Options:
 //! * No option opens (or creates) the default profile (ADR-0013,
