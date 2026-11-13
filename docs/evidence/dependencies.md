@@ -190,6 +190,21 @@ Review notes:
 | `webpki-root-certs 1.0.9` | RUSTSEC-2026-0383, bundled roots trust distrusted emSign intermediates | Not related. Same issue as the row above. |
 | `proc-macro-error 1.0.4`, `glib 0.18.5` | RUSTSEC-2024-0370, RUSTSEC-2024-0429 | Not related. `glib` is recorded above. `proc-macro-error` was not in the 19 October result. |
 
+## Linux platform layer: GTK and zbus in the core (13 November 2026)
+
+[ADR-0010](../adr/0010-linux-platform-layer.md) adds two direct, Linux-only dependencies to `persephone-core` (`[target.'cfg(target_os = "linux")'.dependencies]`). Both were already in the lockfile through Tauri; no version changed and no package was added. Before this change, GTK and glib were compiled only into the UI process on Linux; now the key-holding core links them too.
+
+| Crate | Features | Used for |
+| --- | --- | --- |
+| `gtk =0.18.2` (with `glib 0.18.5` through `gtk::glib`) | `default-features = false` | Prompts and file choosers on the core's `core-gtk` thread |
+| `zbus =5.19.0` | `default-features = false`, `async-io`, `blocking-api` | Secret Service vault, systemd user scope for the UI, OpenURI portal |
+
+`Cargo.lock` changes only in `persephone-core`'s own dependency list, which gains `gtk` and `zbus` (`git diff Cargo.lock`: 2 lines added). SHA-256 before: `a3e9b1bf…f129` (`630b59b`); after: `1ad1b07e…2fb3`. The `zbus` features are those its existing lock entry already resolves (`async-io` with `async-executor`, `async-process` and `blocking`); the `tokio` integration is off.
+
+**glib advisory, checked for the core's use.** [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) ([GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g)) reports unsound `Iterator` and `DoubleEndedIterator` implementations for `glib::VariantStrIter` in `glib >= 0.15.0, < 0.20.0`; the lockfile holds `0.18.5`. `grep -rlE 'VariantStrIter|str_iter\(|array_iter_str' crates/core/src` exits 1 (no match): the core does not create that iterator. The only `glib` item the core imports by name is `glib::translate::ToGlibPtr`, to read an entry's text; it also uses the `glib` traits in `gtk::prelude`. The [earlier search](#advisory-after-the-tauri-shell-glib) found no use in `gtk` 0.18.2 or the other GTK bindings. As before, this is a textual search, not proof that no path reaches the iterator. The disposition is unchanged: retain the pin, adopt a fixed GTK binding through a Tauri release, and recheck before any Linux build is distributed. OSV was not re-queried for this change.
+
+Checks run on 13 November 2026 in WSL Ubuntu 24.04 (Rust 1.99.1, GTK 3.24, debug build, `CARGO_TARGET_DIR` outside the repository): `cargo fmt --all -- --check` (exit 0), `cargo clippy --locked -p persephone-core --all-targets -- -D warnings` (exit 0) and `cargo test --locked -p persephone-core` with no display (exit 0; the library's two live tests are ignored by default). On Windows 11, `cargo check --locked -p persephone-core --all-targets` (exit 0). The two live tests were then run by hand in the same WSL: the Secret Service test against a disposable GNOME Keyring under `dbus-run-session`, with a throwaway `HOME` (passed, also when run a second time over the stored item; with the collection locked and no display for the unlock prompt, storing failed after 48 s instead of returning a secret), and the scope test against the session's systemd user manager (passed: the process was placed in its own scope, `memory.max` read back as 2147483648, the cgroup counted one process, and the scope was gone after the run). No GTK window, file chooser or OpenURI portal was exercised (WSL has no `xdg-desktop-portal`), and the application was not launched.
+
 ## Historical per-package inventory
 
 Before the repository restructure, five separate Rust lockfiles were audited: matrix (412 registry entries), storage (260), resources (0), Windows sandbox (2), and contracts (20), for 418 distinct crate/version pairs after deduplication. Those counts and package-specific notes describe that earlier workspace shape. They are not the scope of the current single-lockfile result above, and the current JSON must not be interpreted as five separate lockfile reports.

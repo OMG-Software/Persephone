@@ -149,6 +149,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.verifyDevice('OTHER'), 'verify_device', { deviceId: 'OTHER' }],
     [() => bridge.verifyMember('!r:s', '@b:s'), 'verify_member', { roomId: '!r:s', userId: '@b:s' }],
     [() => bridge.changeRecoveryKey(), 'change_recovery_key', {}],
+    [() => bridge.startNewBackup(), 'start_new_backup', {}],
     [() => bridge.notificationLevel(), 'notification_level', {}],
     [() => bridge.setNotificationLevel('mentions'), 'set_notification_level', { level: 'mentions' }],
     [() => bridge.profileList(), 'profile_list', {}],
@@ -206,6 +207,7 @@ test('GIVEN the account-change calls WHEN made THEN no password, code, key or pa
     'change_password',
     'add_three_pid',
     'change_recovery_key',
+    'start_new_backup',
     'request_phone_token',
     'verify_device'
   ]) {

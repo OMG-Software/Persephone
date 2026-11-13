@@ -1412,6 +1412,14 @@ async fn change_recovery_key(core: State<'_, CoreLink>) -> Result<SecurityStatus
     relay(core.inner(), Call::ChangeRecoveryKey {}).await
 }
 
+/// Deletes a key backup this device cannot use and starts a new one. Nothing
+/// crosses: the core asks, shows the new key and saves it in its own windows
+/// (ADR-0040).
+#[tauri::command]
+async fn start_new_backup(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::StartNewBackup {}).await
+}
+
 /// This account's notification level, from its push rules (ADR-0022).
 #[tauri::command]
 async fn notification_level(core: State<'_, CoreLink>) -> Result<NotificationSettings, String> {
@@ -1588,6 +1596,7 @@ pub fn configure<R: Runtime>(
             remove_three_pid,
             verify_device,
             change_recovery_key,
+            start_new_backup,
             notification_level,
             set_notification_level,
             profile_list,

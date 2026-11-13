@@ -10,7 +10,10 @@ export const securityErrorText: Record<SecurityError, string> = {
   identity_exists:
     'This account already has encryption set up. Verify this device with your recovery key instead.',
   wrong_recovery_key: 'That recovery key did not work.',
-  backup_exists_on_server: 'The homeserver already has a key backup that Persephone cannot use yet.',
+  backup_exists_on_server:
+    'The homeserver already has a key backup that this device cannot use. Use your recovery key, or start a new backup.',
+  backup_key_unavailable:
+    'This device is verified, but secret storage does not hold the key to the current backup. Start a new backup if no other device has it.',
   recovery_key_not_shown:
     'Recovery was set up, but its key could not be shown. Do not rely on it until it is set up again.',
   unreachable: 'The homeserver could not be reached.',

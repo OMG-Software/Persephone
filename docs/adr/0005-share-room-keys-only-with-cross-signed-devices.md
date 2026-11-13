@@ -57,7 +57,9 @@ Chosen options (owner decisions, 22 October 2026):
   Persephone. Verification emoji, which are public comparison data, are shown
   in the page.
 * Cross-signing and key backups are never created automatically; the user
-  starts them.
+  starts them. *[ADR-0040](0040-use-an-existing-key-backup-or-start-a-new-one-after-a-confirmation.md)
+  (13 November 2026) adds an explicit, core-confirmed step that deletes a key
+  backup this device cannot use and starts a new one.*
 
 ### Positive Consequences
 

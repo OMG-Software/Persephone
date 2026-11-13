@@ -56,6 +56,8 @@ struct Answers {
     shown: Mutex<Vec<String>>,
     change: Mutex<Result<bool, PromptError>>,
     changes_asked: AtomicUsize,
+    new_backup: Mutex<Result<bool, PromptError>>,
+    new_backups_asked: AtomicUsize,
     save_to: Mutex<Option<PathBuf>>,
 }
 
@@ -67,6 +69,8 @@ impl Answers {
             shown: Mutex::default(),
             change: Mutex::new(Err(PromptError::Cancelled)),
             changes_asked: AtomicUsize::new(0),
+            new_backup: Mutex::new(Err(PromptError::Cancelled)),
+            new_backups_asked: AtomicUsize::new(0),
             save_to: Mutex::default(),
         })
     }
@@ -129,6 +133,11 @@ impl CredentialSource for Answers {
 
     fn choose_recovery_key_file(&self) -> Result<Option<PathBuf>, PromptError> {
         Ok(self.save_to.lock().unwrap().clone())
+    }
+
+    fn confirm_new_backup(&self) -> Result<bool, PromptError> {
+        self.new_backups_asked.fetch_add(1, Ordering::SeqCst);
+        *self.new_backup.lock().unwrap()
     }
 }
 
@@ -905,6 +914,7 @@ struct KeyState {
     user_signing: Option<Value>,
     account_data: serde_json::Map<String, Value>,
     backup: Option<Value>,
+    deleted_backups: Vec<String>,
     batch: u64,
 }
 
@@ -1004,6 +1014,21 @@ impl wiremock::Respond for KeyServer {
                     Some(backup) => ok(backup.clone()),
                     None => not_found("M_NOT_FOUND"),
                 }
+            }
+        } else if let Some(version) = path
+            .strip_prefix("/_matrix/client/v3/room_keys/version/")
+            .filter(|_| http == "DELETE")
+        {
+            if state
+                .backup
+                .as_ref()
+                .is_some_and(|backup| backup["version"] == version)
+            {
+                state.backup = None;
+                state.deleted_backups.push(version.to_owned());
+                ok(json!({}))
+            } else {
+                not_found("M_NOT_FOUND")
             }
         } else if path.starts_with("/_matrix/client/v3/room_keys/") {
             ok(json!({"etag":"1","count":0}))
@@ -1118,4 +1143,116 @@ fn given_recovery_then_the_key_changes_only_after_a_yes_and_is_saved_by_the_core
     });
     assert_eq!(security(&core).error, None);
     assert_eq!(answers.changes_asked.load(Ordering::SeqCst), 2);
+}
+
+/// GIVEN a homeserver that keeps a key backup whose key no device here has
+/// WHEN encryption is set up THEN recovery stops at that backup, and only
+/// "start a new backup" is offered. WHEN the user says no in the core's
+/// window THEN the old backup stays; WHEN they say yes THEN the core deletes
+/// it, starts a new one, and shows and saves the new recovery key itself.
+#[test]
+fn given_an_unusable_backup_then_a_new_one_starts_only_after_a_yes() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let keys = KeyServer::default();
+    keys.0.lock().unwrap().backup = Some(json!({
+        "algorithm": "m.megolm_backup.v1.curve25519-aes-sha2",
+        "auth_data": {
+            "public_key": "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo",
+            "signatures": {}
+        },
+        "version": "7", "count": 12, "etag": "3"
+    }));
+    let server = runtime.block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(keys.clone())
+            .mount(&server)
+            .await;
+        server
+    });
+    let dir = TempDir::new().unwrap();
+    let saved = TempDir::new().unwrap();
+    let answers = Answers::new();
+    let core = Core::default()
+        .with_credentials(answers.clone())
+        .with_session(common::open_session(dir.path()));
+    let _ = call(
+        &core,
+        Call::SignIn {
+            homeserver: server.uri(),
+        },
+    );
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("no identity", || {
+        security(&core).identity == IdentityState::None
+    });
+    let refused = security(&core);
+    assert!(!refused.can_start_new_backup);
+    let status: SecurityStatus = value(call(&core, Call::StartNewBackup {}));
+    assert_eq!(status, refused, "not offered without an identity");
+    assert_eq!(answers.new_backups_asked.load(Ordering::SeqCst), 0);
+
+    // Set-up makes the identity, then stops at the backup it cannot use.
+    answers.answer(&[Ok(PASSWORD)]);
+    let _ = call(&core, Call::SetUpEncryption {});
+    wait_for("the offer", || {
+        let status = security(&core);
+        status.operation == SecurityOperation::Idle && status.can_start_new_backup
+    });
+    let offered = security(&core);
+    assert_eq!(offered.identity, IdentityState::Verified);
+    assert_eq!(offered.recovery, RecoveryState::Disabled);
+    assert_eq!(offered.error, Some(SecurityError::BackupExistsOnServer));
+    assert!(
+        !offered.can_set_up_recovery,
+        "set-up would hit the same backup"
+    );
+    assert!(answers.shown.lock().unwrap().is_empty());
+
+    // "No" keeps the old backup.
+    *answers.new_backup.lock().unwrap() = Ok(false);
+    let asked: SecurityStatus = value(call(&core, Call::StartNewBackup {}));
+    assert_eq!(asked.operation, SecurityOperation::WaitingForConfirmation);
+    wait_for("the answer", || {
+        security(&core).operation == SecurityOperation::Idle
+    });
+    assert_eq!(security(&core).error, Some(SecurityError::Cancelled));
+    assert!(security(&core).can_start_new_backup, "still offered");
+    {
+        let state = keys.0.lock().unwrap();
+        assert!(state.deleted_backups.is_empty());
+        assert_eq!(state.backup.as_ref().unwrap()["version"], "7");
+    }
+
+    // "Yes" deletes it and starts a new one with a new key.
+    *answers.new_backup.lock().unwrap() = Ok(true);
+    *answers.save_to.lock().unwrap() = Some(saved.path().join("key.txt"));
+    let reply = call(&core, Call::StartNewBackup {});
+    wait_for("the new key", || answers.shown.lock().unwrap().len() == 1);
+    let key = answers.shown.lock().unwrap()[0].clone();
+    assert!(
+        !serde_json::to_string(&reply).unwrap().contains(&key),
+        "no key in the reply"
+    );
+    wait_for("the file", || {
+        std::fs::read_to_string(saved.path().join("key.txt")).is_ok_and(|text| {
+            text == format!(
+                "{key}
+"
+            )
+        })
+    });
+    wait_for("recovery", || {
+        let status = security(&core);
+        status.operation == SecurityOperation::Idle && status.recovery == RecoveryState::Enabled
+    });
+    let done = security(&core);
+    assert_eq!(done.error, None);
+    assert!(!done.can_start_new_backup);
+    let state = keys.0.lock().unwrap();
+    assert_eq!(state.deleted_backups, ["7"]);
+    assert_eq!(state.backup.as_ref().unwrap()["version"], "1");
+    assert_eq!(answers.new_backups_asked.load(Ordering::SeqCst), 2);
 }

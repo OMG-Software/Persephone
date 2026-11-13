@@ -1,9 +1,11 @@
 //! The macOS platform layer (ADR-0011): a Keychain item for the wrapping
-//! secret, `NSAlert` prompts and an `NSOpenPanel` on the main thread, the UI
-//! in its own process group, killed with the core, the shared Unix read rules
-//! for a picked image, and the media worker in its Seatbelt sandbox. Nothing here has
-//! been seen to work with a real user, display or Keychain prompt; macOS is
-//! built and tested on CI only.
+//! secret, `NSAlert` prompts, open and save panels and `NSWorkspace` for a
+//! confirmed link on the main thread, the UI in its own process group,
+//! killed with the core, the shared Unix read rules for a picked image or
+//! file and the owner-only save, the system idle time from CoreGraphics, and
+//! the media worker in its Seatbelt sandbox. Nothing here has been seen to
+//! work with a real user, display or Keychain prompt; macOS is built and
+//! tested on CI only.
 //!
 //! AppKit windows must be created on the process main thread, so on macOS
 //! the core binary keeps that thread free: its usual work runs on a
@@ -33,15 +35,40 @@ use std::{
     sync::Arc,
 };
 
+/// `kCGEventSourceStateCombinedSessionState` (`CGEventSourceStateID`): the
+/// events of every source in the login session.
+const COMBINED_SESSION_STATE: i32 = 0;
+/// `kCGAnyInputEventType`, defined in `CGEventTypes.h` as
+/// `((CGEventType)(~0))`: the latest keyboard, mouse or tablet input.
+const ANY_INPUT_EVENT_TYPE: u32 = !0;
+
+// CoreGraphics is a system framework; the core declares this one function
+// instead of adding a binding crate (ADR-0025: no new dependency).
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    /// `CFTimeInterval CGEventSourceSecondsSinceLastEventType(
+    /// CGEventSourceStateID, CGEventType)`: an `int32_t` and a `uint32_t`
+    /// in, a `double` out.
+    fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
+}
+
+/// How long this login session has had no keyboard, mouse or tablet input
+/// (ADR-0025), from `CGEventSourceSecondsSinceLastEventType`. It is a
+/// CoreGraphics query, not AppKit, so it is read on the idle check's own
+/// thread. A value that is not a finite, non-negative number of seconds is
+/// unknown (`None`), and an unknown idle time never locks.
+pub(crate) fn idle_time() -> Option<std::time::Duration> {
+    // SAFETY: the function takes two integers by value and returns a
+    // double; it has no pointers and no other preconditions.
+    let seconds = unsafe {
+        CGEventSourceSecondsSinceLastEventType(COMBINED_SESSION_STATE, ANY_INPUT_EVENT_TYPE)
+    };
+    super::idle_from_seconds(seconds)
+}
+
 /// The default profile (ADR-0013):
 /// `~/Library/Application Support/OMG-Software/Persephone/profile`. A
 /// missing or relative `HOME` gives `None`.
-/// No idle time is read here yet: the idle lock is unavailable
-/// (ADR-0025).
-pub(crate) fn idle_time() -> Option<std::time::Duration> {
-    None
-}
-
 pub(crate) fn default_profile_dir() -> Option<PathBuf> {
     super::unix::absolute(env::var_os("HOME")).map(|home| {
         home.join("Library")

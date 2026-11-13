@@ -17,6 +17,8 @@
 * [0012 - Sign releases and publish them as drafts](0012-sign-and-publish-releases-as-drafts.md)
 * [0014 - Start encrypted direct conversations by Matrix ID](0014-start-encrypted-direct-conversations-by-matrix-id.md)
 * [0015 - Keep accounts in separate profiles and switch by restart](0015-keep-accounts-in-separate-profiles-and-switch-by-restart.md)
+* [0039 - Obtain SDK stop-and-join upstream instead of forking or gating on task counts](0039-obtain-sdk-stop-and-join-upstream-instead-of-forking.md)
+* [0040 - Use an existing key backup, or start a new one after a confirmation](0040-use-an-existing-key-backup-or-start-a-new-one-after-a-confirmation.md)
 
 ## Proposed Records
 

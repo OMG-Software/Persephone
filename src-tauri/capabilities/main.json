@@ -97,6 +97,7 @@
     "allow-remove-three-pid",
     "allow-verify-device",
     "allow-change-recovery-key",
+    "allow-start-new-backup",
     "allow-notification-level",
     "allow-set-notification-level",
     "allow-profile-list",

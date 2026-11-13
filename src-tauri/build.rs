@@ -107,6 +107,7 @@ fn main() {
             "remove_three_pid",
             "verify_device",
             "change_recovery_key",
+            "start_new_backup",
             "notification_level",
             "set_notification_level",
             "profile_list",

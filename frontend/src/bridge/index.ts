@@ -801,6 +801,15 @@ export function changeRecoveryKey(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('change_recovery_key');
 }
 
+/**
+ * Deletes the homeserver's key backup, which this device cannot use, and
+ * starts a new one. The core asks first, then shows the new key and offers to
+ * save it in its own windows; the key never reaches this page.
+ */
+export function startNewBackup(): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('start_new_backup');
+}
+
 /** This account's notification level, from its push rules. */
 export function notificationLevel(): Promise<NotificationSettings> {
   return invoke<NotificationSettings>('notification_level');

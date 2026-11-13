@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -21,6 +22,8 @@ RUST_LCOV = ROOT / ".local/coverage/rust/lcov.info"
 # Instrumented builds have their own target directory, so they do not
 # invalidate the normal build in .local/build/rust.
 COVERAGE_TARGET = ROOT / ".local/build/rust-coverage"
+# Disposable data directories of the Linux live tests (`coverage --linux-live`).
+LIVE_DATA = ROOT / ".local/live"
 # The cargo-llvm-cov release that docs/development.md and the SonarQube
 # workflow install; another may write a different report.
 LLVM_COV_VERSION = "0.9.1"
@@ -28,6 +31,33 @@ LLVM_COV_VERSION = "0.9.1"
 REPORT_PATH = re.compile(r"[A-Za-z0-9_.\-/]+")
 # A variable name in `cargo llvm-cov show-env` output.
 VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def linux_live_tests(cargo_flags, environment):
+    """Runs the core's ignored Linux live tests. The UI scope tests use the
+    systemd user manager on the session bus in `environment`. The Secret
+    Service test runs on a private bus (`dbus-run-session`) with a new GNOME
+    Keyring in a temporary data directory, unlocked with a throwaway
+    password, so it never reaches the user's own keyring. Its runtime
+    directory is a private temporary one too: GNOME Keyring finds a running
+    daemon through `$XDG_RUNTIME_DIR/keyring/control`, and would otherwise
+    unlock and use the user's. It holds only sockets, so it is in the system
+    temporary directory, which supports them wherever the repository is."""
+    live = ["cargo", "test", *cargo_flags, "-p", "persephone-core", "--lib", "--", "--ignored"]
+    run([*live, "platform::linux::ui::"], environment)
+    LIVE_DATA.mkdir(parents=True, exist_ok=True)
+    with (
+        tempfile.TemporaryDirectory(dir=LIVE_DATA) as data,
+        tempfile.TemporaryDirectory(prefix="persephone-keyring-") as runtime,
+    ):
+        keyring = {**environment, "XDG_DATA_HOME": data, "XDG_RUNTIME_DIR": runtime}
+        # `--unlock` creates and unlocks the keyring; `--start` then puts its
+        # Secret Service on the private bus.
+        start = (
+            "printf %s disposable | gnome-keyring-daemon --unlock --components=secrets >/dev/null"
+            ' && gnome-keyring-daemon --start --components=secrets >/dev/null && exec "$@"'
+        )
+        run(["dbus-run-session", "--", "sh", "-c", start, "sh", *live, "platform::linux::vault::"], keyring)
 
 
 def run(command, environment, *, cwd=ROOT):
@@ -97,9 +127,16 @@ def main():
     )
     parser.add_argument("--offline", action="store_true", help="Use previously cached dependencies")
     parser.add_argument("--release", action="store_true", help="build: use the release profile instead of debug")
+    parser.add_argument(
+        "--linux-live",
+        action="store_true",
+        help="coverage on Linux: also run the ignored live tests (a disposable runner only; see docs/development.md)",
+    )
     args = parser.parse_args()
     if args.release and args.command != "build":
         parser.error("--release applies only to build")
+    if args.linux_live and (args.command != "coverage" or not sys.platform.startswith("linux")):
+        parser.error("--linux-live applies only to coverage on Linux")
     environment = os.environ.copy()
     environment["CARGO_HOME"] = str(ROOT / ".local/cache/cargo")
     environment["CARGO_TARGET_DIR"] = str(ROOT / ".local/build/rust")
@@ -153,6 +190,8 @@ def main():
         shutil.copy2(ROOT / ".local/build/rust/debug" / worker, COVERAGE_TARGET / "debug" / worker)
         run(["cargo", "test", *cargo_flags, *workspace], coverage)
         run(["cargo", "test", *cargo_flags, *dev_core, *dev_core_tests], coverage)
+        if args.linux_live:
+            linux_live_tests(cargo_flags, coverage)
         RUST_LCOV.parent.mkdir(parents=True, exist_ok=True)
         RUST_LCOV.unlink(missing_ok=True)
         run(["cargo", "llvm-cov", "report", "--lcov", "--output-path", RUST_LCOV], coverage)

@@ -205,6 +205,11 @@ enum SecurityCommand {
     ResetRecoveryKey {
         source: Arc<dyn CredentialSource>,
     },
+    /// Delete the homeserver's key backup this device cannot use and start a
+    /// new one; the user said yes in the core's own window (ADR-0040).
+    StartNewBackup {
+        source: Arc<dyn CredentialSource>,
+    },
 }
 
 struct SecurityShared {
@@ -967,7 +972,7 @@ fn run_security(
             }
         };
         let ran = command.is_some();
-        let (outcome, key, identity, recovery, private_keys, view) =
+        let (outcome, key, identity, recovery, private_keys, new_backup, view) =
             lease.stores().block_on(async {
                 // A new request from another device replaces a finished flow.
                 if flow.as_ref().is_none_or(Flow::is_over) {
@@ -1032,6 +1037,12 @@ fn run_security(
                             Err(error) => (Some(error), None),
                         }
                     }
+                    Some(SecurityCommand::StartNewBackup { source }) => {
+                        match security::start_new_backup(&client).await {
+                            Ok(key) => (None, Some((key, source))),
+                            Err(error) => (Some(error), None),
+                        }
+                    }
                     Some(SecurityCommand::ResetRecoveryKey { source }) => {
                         match security::reset_recovery_key(&client).await {
                             Ok(key) => (None, Some((key, source))),
@@ -1088,12 +1099,20 @@ fn run_security(
                     flow.drive().await;
                     flow.refresh_contact(&client).await;
                 }
+                let identity = security::identity_state(&client, &user_id, published).await;
+                let recovery = security::recovery_state(&client);
+                let private_keys =
+                    published == Some(true) && security::holds_private_keys(&client).await;
+                let new_backup = private_keys
+                    && identity == IdentityState::Verified
+                    && security::backup_unusable(&client, recovery).await;
                 (
                     outcome,
                     key,
-                    security::identity_state(&client, &user_id, published).await,
-                    security::recovery_state(&client),
-                    published == Some(true) && security::holds_private_keys(&client).await,
+                    identity,
+                    recovery,
+                    private_keys,
+                    new_backup,
                     flow.as_ref().map(Flow::view),
                 )
             });
@@ -1102,12 +1121,17 @@ fn run_security(
         let published_now = if current {
             next_refresh = Instant::now() + SECURITY_REFRESH;
             shared.with_security(generation, |security| {
-                security.can_set_up_recovery = private_keys;
+                // Setting up recovery over a backup this device cannot use
+                // would fail (`backup_exists_on_server`); a new backup is
+                // offered instead.
+                let set_up = private_keys && !new_backup;
+                security.can_set_up_recovery = set_up;
                 let status = &mut security.status;
                 status.identity = identity;
                 status.recovery = recovery;
                 status.verification = view;
-                status.can_set_up_recovery = private_keys;
+                status.can_set_up_recovery = set_up;
+                status.can_start_new_backup = new_backup;
                 if ran {
                     status.operation = SecurityOperation::Idle;
                     status.error = outcome;
@@ -1754,6 +1778,29 @@ impl Session {
         Ok(self.account_status())
     }
 
+    /// The start of a lock: a protected session stops admitting work, moves
+    /// to the next generation and runs `announce`, once, so the page clears
+    /// before anything waits. Leases already held keep running; the lock
+    /// waits for them. Any other state is left as it is. The caller holds
+    /// `transition`.
+    fn close_admission(&self, announce: impl FnOnce()) {
+        let mut inner = lock(&self.shared);
+        if inner.state != StoreState::Protected {
+            return;
+        }
+        inner.state = match inner.generation.checked_add(1) {
+            Some(next) => {
+                inner.generation = next;
+                StoreState::Locking
+            }
+            None => StoreState::LockFailed,
+        };
+        *guard(&self.shared.health) = SyncHealth::default();
+        self.shared.drained.notify_all();
+        drop(inner);
+        announce();
+    }
+
     /// Locks the session (see the module documentation). `announce` runs once,
     /// right after admission closes and before waiting, when this call is the
     /// one that began the lock. Returns the resulting state and, when the
@@ -1768,27 +1815,10 @@ impl Session {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let deadline = Instant::now() + timeout;
+        self.close_admission(announce);
         let mut inner = lock(&self.shared);
-        match inner.state {
-            StoreState::Protected => {
-                inner.state = match inner.generation.checked_add(1) {
-                    Some(next) => {
-                        inner.generation = next;
-                        StoreState::Locking
-                    }
-                    None => StoreState::LockFailed,
-                };
-                *guard(&self.shared.health) = SyncHealth::default();
-                self.shared.drained.notify_all();
-                drop(inner);
-                announce();
-                inner = lock(&self.shared);
-                if inner.state == StoreState::LockFailed {
-                    return (StoreState::LockFailed, None);
-                }
-            }
-            StoreState::Locking => {}
-            other => return (other, None),
+        if inner.state != StoreState::Locking {
+            return (inner.state, None);
         }
         while inner.active > 0 {
             let now = Instant::now();
@@ -1855,9 +1885,12 @@ impl Session {
 
     /// Signs out (owner decisions, 21 October 2026): revokes the session on
     /// the homeserver if it can be reached, then deletes this device's local
-    /// profile. The key goes first, so the encrypted stores are unreadable at
-    /// once; then the session locks as usual (ending `restart_required`, since
-    /// a client ran). The store files are deleted by the next start, before
+    /// profile. The lock starts before the revocation request
+    /// (docs/architecture/sdk-lifecycle.md): admission closes, the generation
+    /// moves on and `announce` clears the page, while the request runs under
+    /// the lease it was admitted with. The key goes next, so the encrypted
+    /// stores are unreadable at once; then the lock finishes as usual (ending
+    /// `restart_required`, since a client ran). The store files are deleted by the next start, before
     /// any client exists: the SDK's background work is not proven stopped in
     /// this process (docs/architecture/sdk-lifecycle.md), so its files are not
     /// deleted under it. A failed revocation still signs out locally and is
@@ -1876,12 +1909,26 @@ impl Session {
             return Ok(self.state());
         };
         let deadline = Instant::now() + timeout;
+        let mut announce = Some(announce);
         let (began, revoked) = loop {
             match self.with_client() {
                 Ok(Some((lease, client))) => {
                     // Before the request: an interrupted sign-out must never
                     // restore this account on the next start.
                     let began = store::begin_sign_out(&dir).is_ok();
+                    // The lock starts now, not after the request: nothing new
+                    // is admitted and the page clears while it runs. This
+                    // lease was admitted first, so the request still runs and
+                    // the lock below waits for it.
+                    {
+                        let _transition = self
+                            .transition
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if let Some(announce) = announce.take() {
+                            self.close_admission(announce);
+                        }
+                    }
                     let revoked = lease.stores().block_on(client.logout()).is_ok();
                     break (began, revoked);
                 }
@@ -1893,7 +1940,8 @@ impl Session {
             }
         };
         let marked = store::mark_signed_out(&dir, revoked).is_ok() && began;
-        let (state, _) = self.lock(timeout, announce);
+        // Admission closed above, so this only waits and finishes the lock.
+        let (state, _) = self.lock(timeout, || {});
         // The sync loop has been joined, so this status is not overwritten.
         self.shared.set_status(AccountStatus {
             state: AccountState::SignedOut,
@@ -2159,7 +2207,7 @@ impl Session {
     /// else is running. Returns the status at once.
     pub fn set_up_encryption(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
         self.start_secret_operation(
-            IdentityState::None,
+            |status| status.identity == IdentityState::None,
             SecurityOperation::WaitingForPassword,
             source,
             |prompt_source, user_id, host| {
@@ -2173,12 +2221,18 @@ impl Session {
         )
     }
 
-    /// Starts verifying this device with the recovery key, asked in the
-    /// core's own window. Does nothing unless the account has an identity this
-    /// device is not verified with and nothing else is running.
+    /// Starts opening secret storage with the recovery key, asked in the
+    /// core's own window: it verifies a device that is not verified yet, and
+    /// gives a verified device whose recovery is incomplete (verified by
+    /// another device, say) the stored secrets it lacks, such as the key
+    /// backup's key. Does nothing otherwise, or while something else runs.
     pub fn recover_with_key(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
         self.start_secret_operation(
-            IdentityState::Unverified,
+            |status| {
+                status.identity == IdentityState::Unverified
+                    || (status.identity == IdentityState::Verified
+                        && status.recovery == RecoveryState::Incomplete)
+            },
             SecurityOperation::WaitingForRecoveryKey,
             source,
             |prompt_source, user_id, _host| {
@@ -2352,12 +2406,69 @@ impl Session {
         self.security_status()
     }
 
+    /// Starts deleting the homeserver's key backup and starting a new one
+    /// (ADR-0040), for a verified device that holds the account's private
+    /// keys but cannot use the backup (`can_start_new_backup`). The core warns
+    /// in its own window that nothing can undo it, and only an explicit yes
+    /// leaves the command for the security thread, which checks the backup
+    /// again, then shows the new recovery key and offers to save it. The
+    /// window runs on its own thread without a lease. Does nothing while
+    /// another operation runs.
+    pub fn start_new_backup(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
+        if guard(&self.shared.account).is_none() {
+            return self.security_status();
+        }
+        let Some(started) = self.shared.open_generation() else {
+            return self.security_status();
+        };
+        let accepted = self.shared.with_security(started, |security| {
+            let free = security.status.can_start_new_backup
+                && security.status.operation == SecurityOperation::Idle
+                && security.command.is_none();
+            if free {
+                security.status.operation = SecurityOperation::WaitingForConfirmation;
+                security.status.error = None;
+            }
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
+        }
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-new-backup".into())
+            .spawn(move || {
+                let answer = source.confirm_new_backup();
+                shared.with_security(started, |security| match answer {
+                    Ok(true) => {
+                        security.command = Some(SecurityCommand::StartNewBackup { source });
+                        security.status.operation = SecurityOperation::Working;
+                    }
+                    Ok(false) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(SecurityError::Cancelled);
+                    }
+                    Err(error) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(security_prompt_error(error));
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
+            });
+        }
+        self.security_status()
+    }
+
     /// Asks for a secret on a prompt thread without a lease, then leaves the
     /// command for the security thread, unless the session was locked (and
     /// perhaps unlocked) meanwhile.
     fn start_secret_operation(
         &self,
-        required: IdentityState,
+        allowed: impl FnOnce(&SecurityStatus) -> bool,
         waiting: SecurityOperation,
         source: Arc<dyn CredentialSource>,
         ask: impl FnOnce(&Arc<dyn CredentialSource>, &str, &str) -> Result<SecurityCommand, PromptError>
@@ -2372,7 +2483,7 @@ impl Session {
             return self.security_status();
         };
         let accepted = self.shared.with_security(started, |security| {
-            let free = security.status.identity == required
+            let free = allowed(&security.status)
                 && security.status.operation == SecurityOperation::Idle
                 && security.command.is_none();
             if free {
