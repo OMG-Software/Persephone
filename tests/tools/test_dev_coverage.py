@@ -136,6 +136,7 @@ def coverage(*arguments, platform="linux"):
         commands.append(([str(part) for part in command], environment))
 
     with (
+        mock.patch.dict(dev.os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"}),
         mock.patch.object(sys, "argv", ["dev.py", "coverage", *arguments]),
         mock.patch.object(sys, "platform", platform),
         mock.patch.object(dev, "run", record),
@@ -163,14 +164,20 @@ class LinuxLiveTest(unittest.TestCase):
         scope, keyring = (commands[index] for index in live)
         self.assertEqual(scope[0][-1], "platform::linux::ui::")
         self.assertEqual(scope[1]["CARGO_LLVM_COV"], "1", "instrumented")
+        self.assertEqual(scope[1]["XDG_RUNTIME_DIR"], "/run/user/1000", "the user manager's")
 
-        # THEN the Secret Service test gets a private bus and a keyring
-        # directory of its own, inside the ignored .local tree.
+        # THEN the Secret Service test gets a private bus, keyring data in the
+        # ignored .local tree, and a new runtime directory, so it cannot find
+        # the user's running keyring; both are removed after the run.
         self.assertEqual(keyring[0][:2], ["dbus-run-session", "--"])
         self.assertEqual(keyring[0][-1], "platform::linux::vault::")
         self.assertEqual(keyring[1]["CARGO_LLVM_COV"], "1", "instrumented")
         data = Path(keyring[1]["XDG_DATA_HOME"])
         self.assertEqual(data.parent, dev.LIVE_DATA)
+        runtime = Path(keyring[1]["XDG_RUNTIME_DIR"])
+        self.assertTrue(runtime.name.startswith("persephone-keyring-"))
+        self.assertNotEqual(runtime, Path("/run/user/1000"))
+        self.assertFalse(runtime.exists(), "removed after the run")
         self.assertFalse(data.exists(), "removed after the run")
 
     def test_given_linux_live_off_linux_or_outside_coverage_then_it_is_refused(self):

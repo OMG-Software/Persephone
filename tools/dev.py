@@ -38,14 +38,26 @@ def linux_live_tests(cargo_flags, environment):
     systemd user manager on the session bus in `environment`. The Secret
     Service test runs on a private bus (`dbus-run-session`) with a new GNOME
     Keyring in a temporary data directory, unlocked with a throwaway
-    password, so it never reaches the user's own keyring."""
+    password, so it never reaches the user's own keyring. Its runtime
+    directory is a private temporary one too: GNOME Keyring finds a running
+    daemon through `$XDG_RUNTIME_DIR/keyring/control`, and would otherwise
+    unlock and use the user's. It holds only sockets, so it is in the system
+    temporary directory, which supports them wherever the repository is."""
     live = ["cargo", "test", *cargo_flags, "-p", "persephone-core", "--lib", "--", "--ignored"]
     run([*live, "platform::linux::ui::"], environment)
     LIVE_DATA.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=LIVE_DATA) as data:
-        keyring = {**environment, "XDG_DATA_HOME": data}
-        unlock = 'printf %s disposable | gnome-keyring-daemon --unlock --components=secrets >/dev/null && exec "$@"'
-        run(["dbus-run-session", "--", "sh", "-c", unlock, "sh", *live, "platform::linux::vault::"], keyring)
+    with (
+        tempfile.TemporaryDirectory(dir=LIVE_DATA) as data,
+        tempfile.TemporaryDirectory(prefix="persephone-keyring-") as runtime,
+    ):
+        keyring = {**environment, "XDG_DATA_HOME": data, "XDG_RUNTIME_DIR": runtime}
+        # `--unlock` creates and unlocks the keyring; `--start` then puts its
+        # Secret Service on the private bus.
+        start = (
+            "printf %s disposable | gnome-keyring-daemon --unlock --components=secrets >/dev/null"
+            ' && gnome-keyring-daemon --start --components=secrets >/dev/null && exec "$@"'
+        )
+        run(["dbus-run-session", "--", "sh", "-c", start, "sh", *live, "platform::linux::vault::"], keyring)
 
 
 def run(command, environment, *, cwd=ROOT):
