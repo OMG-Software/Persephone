@@ -25,30 +25,35 @@ pub enum BusError {
 }
 
 /// A new connection to the session bus, with [`METHOD_TIMEOUT`] on every
-/// call. See [`connect_error`] for what counts as no session bus.
+/// call. See [`connect_error`] for what counts as no session bus; an
+/// address set in `DBUS_SESSION_BUS_ADDRESS` is a configured one.
 pub fn session() -> Result<Connection, BusError> {
+    let configured =
+        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|address| !address.is_empty());
     Builder::session()
         .and_then(|builder| builder.method_timeout(METHOD_TIMEOUT).build())
-        .map_err(|error| connect_error(&error))
+        .map_err(|error| connect_error(&error, configured))
 }
 
 /// A new connection to the bus at `address` (tests use one with no bus
-/// behind it), sorted as for [`session`].
+/// behind it), sorted as for [`session`], with `address` as a configured
+/// address.
 pub fn at(address: &str) -> Result<Connection, BusError> {
     Builder::address(address)
         .and_then(|builder| builder.method_timeout(METHOD_TIMEOUT).build())
-        .map_err(|error| connect_error(&error))
+        .map_err(|error| connect_error(&error, true))
 }
 
 /// Sorts a failed connection. Only a confirmed absence is
-/// [`BusError::Absent`]: no bus address can be made, or no socket exists at
-/// it. A socket that refuses the connection or the permission, a failed
+/// [`BusError::Absent`]: no address is configured and none can be made, or
+/// no socket exists at the address. A configured address that cannot be
+/// read, a socket that refuses the connection or the permission, a failed
 /// authentication and anything else are [`BusError::Failed`], so a caller
-/// never takes the "no session bus" path for a bus that exists.
-pub fn connect_error(error: &zbus::Error) -> BusError {
+/// never takes the "no session bus" path for a bus that may exist.
+pub fn connect_error(error: &zbus::Error, configured: bool) -> BusError {
     let missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
     match error {
-        zbus::Error::Address(_) => BusError::Absent,
+        zbus::Error::Address(_) if !configured => BusError::Absent,
         zbus::Error::Connection(error, _) | zbus::Error::InputOutput(error) if missing(error) => {
             BusError::Absent
         }
@@ -135,12 +140,21 @@ mod tests {
         drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
         let refused = format!("unix:path={}", stale.display());
         assert_eq!(at(&refused).err(), Some(BusError::Failed));
+        // No address configured, and none could be made: no bus.
         assert_eq!(
-            connect_error(&zbus::Error::Address("no session bus".into())),
+            connect_error(&zbus::Error::Address("no session bus".into()), false),
             BusError::Absent
         );
+        // A configured address that cannot be read is not a missing bus.
+        for malformed in ["not-an-address", "unix:", "unix:path=/x,abstract=y"] {
+            assert_eq!(at(malformed).err(), Some(BusError::Failed), "{malformed}");
+        }
         assert_eq!(
-            connect_error(&zbus::Error::Handshake("rejected".into())),
+            connect_error(&zbus::Error::Address("malformed".into()), true),
+            BusError::Failed
+        );
+        assert_eq!(
+            connect_error(&zbus::Error::Handshake("rejected".into()), false),
             BusError::Failed
         );
     }

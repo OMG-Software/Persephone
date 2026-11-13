@@ -14,9 +14,15 @@
 //!   session bus, for a transient scope holding the UI (`StartTransientUnit`)
 //!   with `MemoryMax` equal to the Windows Job's 2 GiB and no swap, and
 //!   waits until the kernel shows the UI in that scope. The cap and the swap
-//!   limit are read back from the scope's cgroup, and every live descendant
-//!   of the UI must be in it: a process the UI forked between `exec` and the
-//!   stop would stay outside, so its presence ends the UI. The web view's
+//!   limit are read back from the scope's cgroup, and every live process of
+//!   the window must be in it: each descendant of the UI, and each member of
+//!   its process group, which also finds a grandchild whose parent exited
+//!   and that was given to another parent. A process the UI started between
+//!   `exec` and the stop would stay outside, so its presence ends the UI.
+//!   Only a process that both left the group (`setsid`) and lost its parent
+//!   in those microseconds, before the UI's own `main` runs, is not found;
+//!   the UI does neither. Rust's `spawn` returns only after `exec`, so the
+//!   UI cannot be held before it. The web view's
 //!   processes, started by the UI after it continues, are in the same scope.
 //!   There is no per-process cap like the Job's 1 GiB: an address-space
 //!   limit would stop the web view's large reservations.
@@ -241,8 +247,8 @@ fn place(pid: u32, unit: &str) -> io::Result<Placement> {
     let cgroup = Cgroup::at(Path::new(CGROUP_ROOT), &path);
     if let Some(cgroup) = &cgroup {
         let inside = cgroup.processes()?;
-        let tree = descendants(pid as libc::pid_t, &live_processes()?);
-        if !outside(&tree, &inside).is_empty() {
+        let window = window_processes(pid as libc::pid_t, &live_processes()?);
+        if !outside(&window, &inside).is_empty() {
             return Err(io::Error::other(
                 "a process of the window is outside its scope",
             ));
@@ -255,10 +261,17 @@ fn place(pid: u32, unit: &str) -> io::Result<Placement> {
     Ok(Placement { cgroup, capped })
 }
 
-/// Every live process as (process, parent), from `/proc`. Exited (zombie)
-/// processes are left out: they run nothing and a cgroup does not list
-/// them.
-fn live_processes() -> io::Result<Vec<(libc::pid_t, libc::pid_t)>> {
+/// One live process: its ID, parent and process group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessEntry {
+    pub pid: libc::pid_t,
+    pub parent: libc::pid_t,
+    pub group: libc::pid_t,
+}
+
+/// Every live process, from `/proc`. Exited (zombie) processes are left
+/// out: they run nothing and a cgroup does not list them.
+fn live_processes() -> io::Result<Vec<ProcessEntry>> {
     let mut processes = Vec::new();
     for entry in fs::read_dir("/proc")? {
         let Ok(entry) = entry else { continue };
@@ -273,29 +286,32 @@ fn live_processes() -> io::Result<Vec<(libc::pid_t, libc::pid_t)>> {
         let Ok(stat) = read_bounded(&PathBuf::from(format!("/proc/{pid}/stat"))) else {
             continue;
         };
-        if let Some((state, parent)) = state_and_parent(&stat)
+        if let Some((state, parent, group)) = stat_fields(&stat)
             && state != 'Z'
             && state != 'X'
         {
-            processes.push((pid, parent));
+            processes.push(ProcessEntry { pid, parent, group });
         }
     }
     Ok(processes)
 }
 
-/// `root` and every process descended from it in `processes`, given as
-/// (process, parent).
-pub fn descendants(
-    root: libc::pid_t,
-    processes: &[(libc::pid_t, libc::pid_t)],
-) -> Vec<libc::pid_t> {
+/// The window's processes: `root` (the UI, which leads its process group),
+/// every process descended from it, and every member of its group, which
+/// includes a descendant whose parent exited and that was reparented.
+pub fn window_processes(root: libc::pid_t, processes: &[ProcessEntry]) -> Vec<libc::pid_t> {
     let mut found = vec![root];
+    for entry in processes {
+        if entry.group == root && !found.contains(&entry.pid) {
+            found.push(entry.pid);
+        }
+    }
     let mut next = 0;
     while let Some(&parent) = found.get(next) {
         next += 1;
-        for &(pid, of) in processes {
-            if of == parent && !found.contains(&pid) {
-                found.push(pid);
+        for entry in processes {
+            if entry.parent == parent && !found.contains(&entry.pid) {
+                found.push(entry.pid);
             }
         }
     }
@@ -476,14 +492,15 @@ impl ProcessGroup {
     }
 }
 
-/// The state and parent in a `/proc/<pid>/stat` line, read as for
-/// [`state_and_group`].
-pub fn state_and_parent(stat: &str) -> Option<(char, libc::pid_t)> {
+/// The state, parent and process group in a `/proc/<pid>/stat` line, read
+/// as for [`state_and_group`].
+pub fn stat_fields(stat: &str) -> Option<(char, libc::pid_t, libc::pid_t)> {
     let rest = &stat[stat.rfind(')')? + 1..];
     let mut fields = rest.split_whitespace();
     let state = fields.next()?.chars().next()?;
     let parent = fields.next()?.parse().ok()?;
-    Some((state, parent))
+    let group = fields.next()?.parse().ok()?;
+    Some((state, parent, group))
 }
 
 /// The state and process group in a `/proc/<pid>/stat` line. The command
@@ -675,32 +692,38 @@ mod tests {
         assert_eq!(state_and_group("garbage"), None);
         assert_eq!(state_and_group("1 (x) S 1"), None);
         assert_eq!(
-            state_and_parent("77 (Web (Content) x) S 4242 77 77 0"),
-            Some(('S', 4242))
+            stat_fields("77 (Web (Content) x) S 4242 77 77 0"),
+            Some(('S', 4242, 77))
         );
-        assert_eq!(state_and_parent("1 (x) S"), None);
+        assert_eq!(stat_fields("1 (x) S 1"), None);
     }
 
-    /// GIVEN a process table WHEN the UI's tree is taken THEN it holds the
-    /// UI and every process below it, not its siblings; GIVEN a cgroup list
-    /// THEN a descendant missing from it is outside the scope.
+    /// GIVEN a process table WHEN the window's processes are taken THEN
+    /// they are the UI, every process below it and every member of its
+    /// group, including a grandchild reparented to init and that one's own
+    /// child, but not other processes; GIVEN a cgroup list THEN a window
+    /// process missing from it is outside the scope.
     #[test]
-    fn given_a_process_table_then_descendants_outside_the_scope_are_found() {
+    fn given_a_process_table_then_window_processes_outside_the_scope_are_found() {
+        let entry = |pid, parent, group| ProcessEntry { pid, parent, group };
         let table = [
-            (1, 0),
-            (10, 1),
-            (11, 10),
-            (12, 11),
-            (13, 10),
-            (20, 1),
-            (21, 20),
+            entry(1, 0, 1),
+            entry(10, 1, 10),
+            entry(11, 10, 10),
+            entry(12, 11, 12),
+            entry(13, 10, 10),
+            // A grandchild whose parent exited: reparented, still in the group.
+            entry(14, 1, 10),
+            entry(15, 14, 15),
+            entry(20, 1, 20),
+            entry(21, 20, 20),
         ];
-        let mut tree = descendants(10, &table);
-        tree.sort_unstable();
-        assert_eq!(tree, [10, 11, 12, 13]);
-        assert_eq!(descendants(99, &table), [99], "no children");
-        assert!(outside(&tree, &[10, 11, 12, 13, 21]).is_empty());
-        assert_eq!(outside(&tree, &[10, 11, 13]), [12]);
+        let mut window = window_processes(10, &table);
+        window.sort_unstable();
+        assert_eq!(window, [10, 11, 12, 13, 14, 15]);
+        assert_eq!(window_processes(99, &table), [99], "no processes");
+        assert!(outside(&window, &[10, 11, 12, 13, 14, 15, 21]).is_empty());
+        assert_eq!(outside(&window, &[10, 11, 12, 13, 15]), [14]);
     }
 
     fn sleeper(script: &str) -> Child {
@@ -798,6 +821,26 @@ mod tests {
         };
         assert_eq!(run.active_processes().unwrap(), 1);
         assert!(run.terminate(Duration::from_secs(10)));
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// GIVEN a process that started a grandchild before it was placed, whose
+    /// parent then exited (the grandchild is reparented and stays in the old
+    /// cgroup) WHEN it is placed THEN placement fails.
+    #[test]
+    #[ignore = "needs a systemd user manager with the memory controller"]
+    fn given_a_reparented_grandchild_then_placement_fails() {
+        let mut child = sleeper("(sleep 30 &); exec sleep 30");
+        let group = ProcessGroup::of(&child);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while group.running().unwrap() < 2 {
+            assert!(Instant::now() < deadline, "the grandchild did not start");
+            thread::sleep(POLL);
+        }
+        let unit = unit_name(std::process::id(), 1002);
+        let error = place(child.id(), &unit).err().expect("refused");
+        assert!(error.to_string().contains("outside its scope"), "{error}");
+        group.kill();
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 
