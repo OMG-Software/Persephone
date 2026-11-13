@@ -205,6 +205,11 @@ enum SecurityCommand {
     ResetRecoveryKey {
         source: Arc<dyn CredentialSource>,
     },
+    /// Delete the homeserver's key backup this device cannot use and start a
+    /// new one; the user said yes in the core's own window (ADR-0040).
+    StartNewBackup {
+        source: Arc<dyn CredentialSource>,
+    },
 }
 
 struct SecurityShared {
@@ -967,7 +972,7 @@ fn run_security(
             }
         };
         let ran = command.is_some();
-        let (outcome, key, identity, recovery, private_keys, view) =
+        let (outcome, key, identity, recovery, private_keys, new_backup, view) =
             lease.stores().block_on(async {
                 // A new request from another device replaces a finished flow.
                 if flow.as_ref().is_none_or(Flow::is_over) {
@@ -1032,6 +1037,12 @@ fn run_security(
                             Err(error) => (Some(error), None),
                         }
                     }
+                    Some(SecurityCommand::StartNewBackup { source }) => {
+                        match security::start_new_backup(&client).await {
+                            Ok(key) => (None, Some((key, source))),
+                            Err(error) => (Some(error), None),
+                        }
+                    }
                     Some(SecurityCommand::ResetRecoveryKey { source }) => {
                         match security::reset_recovery_key(&client).await {
                             Ok(key) => (None, Some((key, source))),
@@ -1088,12 +1099,20 @@ fn run_security(
                     flow.drive().await;
                     flow.refresh_contact(&client).await;
                 }
+                let identity = security::identity_state(&client, &user_id, published).await;
+                let recovery = security::recovery_state(&client);
+                let private_keys =
+                    published == Some(true) && security::holds_private_keys(&client).await;
+                let new_backup = private_keys
+                    && identity == IdentityState::Verified
+                    && security::backup_unusable(&client, recovery).await;
                 (
                     outcome,
                     key,
-                    security::identity_state(&client, &user_id, published).await,
-                    security::recovery_state(&client),
-                    published == Some(true) && security::holds_private_keys(&client).await,
+                    identity,
+                    recovery,
+                    private_keys,
+                    new_backup,
                     flow.as_ref().map(Flow::view),
                 )
             });
@@ -1102,12 +1121,17 @@ fn run_security(
         let published_now = if current {
             next_refresh = Instant::now() + SECURITY_REFRESH;
             shared.with_security(generation, |security| {
-                security.can_set_up_recovery = private_keys;
+                // Setting up recovery over a backup this device cannot use
+                // would fail (`backup_exists_on_server`); a new backup is
+                // offered instead.
+                let set_up = private_keys && !new_backup;
+                security.can_set_up_recovery = set_up;
                 let status = &mut security.status;
                 status.identity = identity;
                 status.recovery = recovery;
                 status.verification = view;
-                status.can_set_up_recovery = private_keys;
+                status.can_set_up_recovery = set_up;
+                status.can_start_new_backup = new_backup;
                 if ran {
                     status.operation = SecurityOperation::Idle;
                     status.error = outcome;
@@ -2183,7 +2207,7 @@ impl Session {
     /// else is running. Returns the status at once.
     pub fn set_up_encryption(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
         self.start_secret_operation(
-            IdentityState::None,
+            |status| status.identity == IdentityState::None,
             SecurityOperation::WaitingForPassword,
             source,
             |prompt_source, user_id, host| {
@@ -2197,12 +2221,18 @@ impl Session {
         )
     }
 
-    /// Starts verifying this device with the recovery key, asked in the
-    /// core's own window. Does nothing unless the account has an identity this
-    /// device is not verified with and nothing else is running.
+    /// Starts opening secret storage with the recovery key, asked in the
+    /// core's own window: it verifies a device that is not verified yet, and
+    /// gives a verified device whose recovery is incomplete (verified by
+    /// another device, say) the stored secrets it lacks, such as the key
+    /// backup's key. Does nothing otherwise, or while something else runs.
     pub fn recover_with_key(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
         self.start_secret_operation(
-            IdentityState::Unverified,
+            |status| {
+                status.identity == IdentityState::Unverified
+                    || (status.identity == IdentityState::Verified
+                        && status.recovery == RecoveryState::Incomplete)
+            },
             SecurityOperation::WaitingForRecoveryKey,
             source,
             |prompt_source, user_id, _host| {
@@ -2376,12 +2406,69 @@ impl Session {
         self.security_status()
     }
 
+    /// Starts deleting the homeserver's key backup and starting a new one
+    /// (ADR-0040), for a verified device that holds the account's private
+    /// keys but cannot use the backup (`can_start_new_backup`). The core warns
+    /// in its own window that nothing can undo it, and only an explicit yes
+    /// leaves the command for the security thread, which checks the backup
+    /// again, then shows the new recovery key and offers to save it. The
+    /// window runs on its own thread without a lease. Does nothing while
+    /// another operation runs.
+    pub fn start_new_backup(&self, source: Arc<dyn CredentialSource>) -> SecurityStatus {
+        if guard(&self.shared.account).is_none() {
+            return self.security_status();
+        }
+        let Some(started) = self.shared.open_generation() else {
+            return self.security_status();
+        };
+        let accepted = self.shared.with_security(started, |security| {
+            let free = security.status.can_start_new_backup
+                && security.status.operation == SecurityOperation::Idle
+                && security.command.is_none();
+            if free {
+                security.status.operation = SecurityOperation::WaitingForConfirmation;
+                security.status.error = None;
+            }
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
+        }
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("core-new-backup".into())
+            .spawn(move || {
+                let answer = source.confirm_new_backup();
+                shared.with_security(started, |security| match answer {
+                    Ok(true) => {
+                        security.command = Some(SecurityCommand::StartNewBackup { source });
+                        security.status.operation = SecurityOperation::Working;
+                    }
+                    Ok(false) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(SecurityError::Cancelled);
+                    }
+                    Err(error) => {
+                        security.status.operation = SecurityOperation::Idle;
+                        security.status.error = Some(security_prompt_error(error));
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
+            });
+        }
+        self.security_status()
+    }
+
     /// Asks for a secret on a prompt thread without a lease, then leaves the
     /// command for the security thread, unless the session was locked (and
     /// perhaps unlocked) meanwhile.
     fn start_secret_operation(
         &self,
-        required: IdentityState,
+        allowed: impl FnOnce(&SecurityStatus) -> bool,
         waiting: SecurityOperation,
         source: Arc<dyn CredentialSource>,
         ask: impl FnOnce(&Arc<dyn CredentialSource>, &str, &str) -> Result<SecurityCommand, PromptError>
@@ -2396,7 +2483,7 @@ impl Session {
             return self.security_status();
         };
         let accepted = self.shared.with_security(started, |security| {
-            let free = security.status.identity == required
+            let free = allowed(&security.status)
                 && security.status.operation == SecurityOperation::Idle
                 && security.command.is_none();
             if free {

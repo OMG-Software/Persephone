@@ -191,3 +191,11 @@ third and fourth have no live run:
 * Not tested: an account whose identity was reset elsewhere, a homeserver that
   refuses key backup, other users' devices (no messages yet), and Linux and
   macOS (no prompt there: set-up and recovery report `unsupported`).
+* *Later note, 13 November 2026 (ADR-0040).* A verified device can now take
+  the backup key with the recovery key when recovery is `incomplete`, and can
+  delete a backup it cannot use after a "Yes" in the core's window. The
+  wiremock test `given_an_unusable_backup_then_a_new_one_starts_only_after_a_yes`
+  (`crates/core/tests/account_settings.rs`) covers the offer, "No", and "Yes"
+  with deletion, the new key shown and saved. Not yet tested: a live
+  homeserver, the recovery key on a verified device with `incomplete`
+  recovery, and a deletion that succeeds before the new set-up fails.

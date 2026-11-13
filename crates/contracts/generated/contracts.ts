@@ -31,7 +31,7 @@ export type RecoveryState = "unknown" | "disabled" | "incomplete" | "enabled";
 
 export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_confirmation" | "working";
 
-export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "cannot_sign_devices" | "device_not_found" | "recovery_key_not_saved" | "failed";
+export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "backup_key_unavailable" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "cannot_sign_devices" | "device_not_found" | "recovery_key_not_saved" | "failed";
 
 export type VerificationPhase = "incoming" | "waiting" | "compare" | "confirmed" | "done" | "cancelled";
 
@@ -57,7 +57,14 @@ export type SecurityStatus = { identity: IdentityState, recovery: RecoveryState,
  * This device can set up recovery alone (it holds the private keys of a
  * published identity whose recovery is not set up).
  */
-canSetUpRecovery: boolean, };
+canSetUpRecovery: boolean, 
+/**
+ * This verified device holds the account's private keys, but cannot use
+ * a key backup: the homeserver's backup has a key it lacks, or recovery
+ * is incomplete. It may delete that backup and start a new one, after a
+ * confirmation in the core's own window (ADR-0040).
+ */
+canStartNewBackup: boolean, };
 
 export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
 

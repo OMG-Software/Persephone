@@ -1608,8 +1608,12 @@ pub enum SecurityError {
     IdentityExists,
     /// The recovery key did not open the account's secret storage.
     WrongRecoveryKey,
-    /// The homeserver already holds a key backup this device cannot use.
+    /// The homeserver already holds a key backup whose key this device does
+    /// not have, so recovery was not set up over it.
     BackupExistsOnServer,
+    /// The recovery key verified this device, but the key backup's key it
+    /// holds is missing or does not match the homeserver's backup.
+    BackupKeyUnavailable,
     /// Recovery was set up, but its key could not be shown.
     RecoveryKeyNotShown,
     /// The homeserver could not be reached.
@@ -1743,6 +1747,11 @@ pub struct SecurityStatus {
     /// This device can set up recovery alone (it holds the private keys of a
     /// published identity whose recovery is not set up).
     pub can_set_up_recovery: bool,
+    /// This verified device holds the account's private keys, but cannot use
+    /// a key backup: the homeserver's backup has a key it lacks, or recovery
+    /// is incomplete. It may delete that backup and start a new one, after a
+    /// confirmation in the core's own window (ADR-0040).
+    pub can_start_new_backup: bool,
 }
 
 impl SecurityStatus {
@@ -1754,6 +1763,7 @@ impl SecurityStatus {
             error: None,
             verification: None,
             can_set_up_recovery: false,
+            can_start_new_backup: false,
         }
     }
 }

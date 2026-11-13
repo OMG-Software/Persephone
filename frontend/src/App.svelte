@@ -95,6 +95,7 @@
     verifyThisDevice,
     verifyDevice,
     changeRecoveryKey,
+    startNewBackup,
     acceptVerification,
     confirmVerification,
     cancelVerification,
@@ -2045,6 +2046,7 @@
             onsetuprecovery={() => startSecurity(setUpRecovery)}
             onverify={() => startSecurity(verifyThisDevice)}
             onchangekey={() => startSecurity(changeRecoveryKey)}
+            onnewbackup={() => startSecurity(startNewBackup)}
           />
         {:else}
           <section class="settings-page" aria-labelledby="security-heading">

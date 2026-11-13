@@ -179,6 +179,11 @@ impl CredentialSource for NativePrompt {
         yes_or_no(caption, message)
     }
 
+    fn confirm_new_backup(&self) -> Result<bool, PromptError> {
+        let (caption, message) = prompt_text::NEW_BACKUP;
+        yes_or_no(caption, message)
+    }
+
     fn confirm_open_link(&self, caption: &str, message: &str) -> Result<bool, PromptError> {
         yes_or_no(caption, message)
     }

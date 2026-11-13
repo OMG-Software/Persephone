@@ -147,6 +147,13 @@ pub trait CredentialSource: Send + Sync {
         Err(PromptError::Unsupported)
     }
 
+    /// Asks whether to delete the homeserver's key backup and start a new one
+    /// (ADR-0040): nothing can undo it. `Ok(true)` only for an explicit yes.
+    /// Unsupported unless a source provides it.
+    fn confirm_new_backup(&self) -> Result<bool, PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
     /// Asks where to save a new recovery key, in the core's own Save dialog.
     /// `Ok(None)` when the user chose not to save it. Unsupported unless a
     /// source provides it.
@@ -432,6 +439,11 @@ pub mod dev {
             super::platform().confirm_recovery_key_change()
         }
 
+        /// The native window, like the recovery-key change.
+        fn confirm_new_backup(&self) -> Result<bool, PromptError> {
+            super::platform().confirm_new_backup()
+        }
+
         /// The native Save dialog.
         fn choose_recovery_key_file(&self) -> Result<Option<std::path::PathBuf>, PromptError> {
             super::platform().choose_recovery_key_file()
@@ -534,6 +546,10 @@ mod tests {
         // So do the recovery-key change and its Save dialog.
         assert_eq!(
             Unsupported.confirm_recovery_key_change(),
+            Err(PromptError::Unsupported)
+        );
+        assert_eq!(
+            Unsupported.confirm_new_backup(),
             Err(PromptError::Unsupported)
         );
         assert_eq!(

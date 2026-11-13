@@ -554,6 +554,11 @@ pub enum Call {
     /// offers to save it to a file it writes itself. The key never crosses
     /// this channel. Replies at once with the status.
     ChangeRecoveryKey {},
+    /// Delete the homeserver's key backup, which this verified device cannot
+    /// use, and start a new one with a new recovery key (ADR-0040). The core
+    /// asks in its own window first, then shows the new key as for
+    /// `ChangeRecoveryKey`. Replies at once with the status.
+    StartNewBackup {},
     /// This account's notification level, from its push rules (ADR-0022).
     NotificationLevel {},
     /// Set this account's notification level in its push rules. `custom`
@@ -1575,6 +1580,10 @@ mod tests {
                 r#"{"id":1,"call":{"command":"change_recovery_key"}}"#,
             ),
             (
+                Call::StartNewBackup {},
+                r#"{"id":1,"call":{"command":"start_new_backup"}}"#,
+            ),
+            (
                 Call::NotificationLevel {},
                 r#"{"id":1,"call":{"command":"notification_level"}}"#,
             ),
@@ -1611,6 +1620,8 @@ mod tests {
             br#"{"id":1,"call":{"command":"verify_device","device_id":null}}"#,
             br#"{"id":1,"call":{"command":"change_recovery_key","key":"x"}}"#,
             br#"{"id":1,"call":{"command":"change_recovery_key","path":"C:\\x"}}"#,
+            br#"{"id":1,"call":{"command":"start_new_backup","key":"x"}}"#,
+            br#"{"id":1,"call":{"command":"start_new_backup","delete":true}}"#,
             br#"{"id":1,"call":{"command":"set_notification_level"}}"#,
             br#"{"id":1,"call":{"command":"set_notification_level","level":"loud"}}"#,
         ] {

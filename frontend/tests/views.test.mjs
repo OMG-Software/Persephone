@@ -366,6 +366,47 @@ test('GIVEN the server picker WHEN another server is chosen THEN it asks only fo
   assert.match(picker('https://chat.example.org'), />Use this server</);
 });
 
+test('GIVEN a verified device that cannot use the key backup WHEN the panel renders THEN it offers the recovery key first and a new backup with its cost', () => {
+  const status = (recovery, canStartNewBackup) => ({
+    identity: 'verified',
+    recovery,
+    operation: 'idle',
+    error: null,
+    verification: null,
+    canSetUpRecovery: false,
+    canStartNewBackup
+  });
+  const calls = [];
+  const panel = (security) =>
+    render(Security, {
+      props: {
+        security,
+        busy: false,
+        onsetup: () => {},
+        onrecover: () => calls.push('recover'),
+        onsetuprecovery: () => {},
+        onverify: () => {},
+        onnewbackup: () => calls.push('new')
+      }
+    }).body;
+  const buttons = (html) => [...html.matchAll(/<button[^>]*>([^<]+)</g)].map((m) => m[1]);
+
+  const incomplete = panel(status('incomplete', true));
+  assert.deepEqual(buttons(incomplete), ['Use recovery key', 'Start a new backup…']);
+  assert.match(incomplete, /Messages kept only in the old backup can\s+then not be read\./);
+  const serverOnly = panel(status('disabled', true));
+  assert.deepEqual(buttons(serverOnly), ['Start a new backup…']);
+  assert.match(serverOnly, /The homeserver has a key backup this device cannot use\./);
+  assert.doesNotMatch(serverOnly, /Set up recovery/);
+  // Not offered when the core does not say so, whatever the recovery state.
+  assert.doesNotMatch(panel(status('incomplete', false)), /Start a new backup/);
+  assert.doesNotMatch(panel(status('enabled', false)), /Start a new backup/);
+  for (const html of [incomplete, serverOnly]) {
+    assert.doesNotMatch(html, /<input/, 'no field for a recovery key');
+  }
+  assert.deepEqual(calls, []);
+});
+
 test('the encryption panel offers the step that fits and never asks for a secret itself', () => {
   const status = (identity, extra = {}) => ({
     identity,
@@ -374,6 +415,7 @@ test('the encryption panel offers the step that fits and never asks for a secret
     error: null,
     verification: null,
     canSetUpRecovery: false,
+    canStartNewBackup: false,
     ...extra
   });
   const panel = (security, busy = false) =>
@@ -691,7 +733,8 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
           operation: 'idle',
           error: null,
           verification: flow(phase),
-          canSetUpRecovery: false
+          canSetUpRecovery: false,
+          canStartNewBackup: false
         },
         busy: false,
         onsetup: () => {},

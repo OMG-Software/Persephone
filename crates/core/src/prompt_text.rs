@@ -195,6 +195,21 @@ pub const RECOVERY_KEY_CHANGE: (&str, &str) = (
      Make a new recovery key?",
 );
 
+/// The warning before deleting the homeserver's key backup and starting a new
+/// one (ADR-0040). Nothing can undo the deletion.
+pub const NEW_BACKUP: (&str, &str) = (
+    "Start a new key backup?",
+    "The homeserver keeps a key backup that this device cannot open. \
+     Persephone deletes it from the homeserver, starts a new one, and makes \
+     a new recovery key that it shows once.\n\n\
+     Messages whose keys are only in the old backup become unreadable on \
+     every device that does not already have them. This cannot be undone. \
+     Any old recovery key stops working.\n\n\
+     If another device or your old recovery key can still open the backup, \
+     use that instead.\n\n\
+     Delete the old backup and start a new one?",
+);
+
 /// The Save dialog's title for a new recovery key, and the file name it
 /// suggests.
 pub const SAVE_RECOVERY_KEY: (&str, &str) = (
@@ -423,6 +438,16 @@ mod tests {
         let (_, warning) = RECOVERY_KEY_CHANGE;
         assert!(warning.contains("old key stops working"));
         assert!(warning.ends_with("Make a new recovery key?"));
+    }
+
+    /// GIVEN the new-backup warning THEN it says the deletion cannot be
+    /// undone and what is lost, and it ends with the question.
+    #[test]
+    fn given_the_new_backup_warning_then_it_names_the_loss() {
+        let (_, warning) = NEW_BACKUP;
+        assert!(warning.contains("cannot be undone"));
+        assert!(warning.contains("become unreadable"));
+        assert!(warning.ends_with("Delete the old backup and start a new one?"));
     }
 
     /// GIVEN a copy hint WHEN the recovery key text is built THEN the hint

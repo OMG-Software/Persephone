@@ -182,7 +182,57 @@ pub async fn reset_recovery_key(client: &Client) -> Result<Zeroizing<String>, Se
         .map_err(|error| recovery_error(&error))
 }
 
-/// Verifies this device with the recovery key (or its passphrase).
+/// Whether this device cannot use a key backup: it has none enabled, and
+/// either recovery is incomplete (secret storage lacks a backup key this
+/// device can use) or the homeserver keeps a backup whose key this device
+/// lacks. Uses the SDK's last answer about the homeserver's backup when it
+/// has one. A failure to tell is `false`, so nothing is offered on a guess.
+pub async fn backup_unusable(client: &Client, recovery: RecoveryState) -> bool {
+    let backups = client.encryption().backups();
+    if backups.are_enabled().await {
+        return false;
+    }
+    match recovery {
+        RecoveryState::Incomplete => true,
+        RecoveryState::Disabled => backups.exists_on_server().await.unwrap_or(false),
+        RecoveryState::Enabled | RecoveryState::Unknown => false,
+    }
+}
+
+/// Deletes the homeserver's key backup and starts a new one with new secret
+/// storage (ADR-0040); the caller had the user confirm it. Returns the new
+/// recovery key. The state is checked again first: a backup this device can
+/// use now (another device sent its key meanwhile) is kept, and the start
+/// fails. If the deletion succeeds and the new set-up fails, the account has
+/// no backup; the status then offers to set up recovery.
+pub async fn start_new_backup(client: &Client) -> Result<Zeroizing<String>, SecurityError> {
+    let encryption = client.encryption();
+    if encryption.backups().are_enabled().await {
+        return Err(SecurityError::Failed);
+    }
+    if encryption
+        .backups()
+        .fetch_exists_on_server()
+        .await
+        .map_err(|error| sdk_error(&error))?
+    {
+        encryption
+            .backups()
+            .disable_and_delete()
+            .await
+            .map_err(|error| sdk_error(&error))?;
+    }
+    encryption
+        .recovery()
+        .enable()
+        .await
+        .map(Zeroizing::new)
+        .map_err(|error| recovery_error(&error))
+}
+
+/// Verifies this device with the recovery key (or its passphrase), and takes
+/// the key backup's key from secret storage when it matches the homeserver's
+/// backup.
 pub async fn recover(client: &Client, key: &Zeroizing<String>) -> Result<(), SecurityError> {
     client
         .encryption()
@@ -200,6 +250,12 @@ fn recovery_error(error: &RecoveryError) -> SecurityError {
             SecretStorageError::SecretStorageKey(_) | SecretStorageError::Decryption(_),
         ) => SecurityError::WrongRecoveryKey,
         RecoveryError::SecretStorage(SecretStorageError::Sdk(error)) => sdk_error(error),
+        // The key opened secret storage and verified the device; only the
+        // backup's key is missing or belongs to another backup.
+        RecoveryError::SecretStorage(
+            SecretStorageError::InconsistentBackupDecryptionKey
+            | SecretStorageError::MissingOrInvalidBackupDecryptionKey,
+        ) => SecurityError::BackupKeyUnavailable,
         RecoveryError::SecretStorage(_) => SecurityError::Failed,
     }
 }

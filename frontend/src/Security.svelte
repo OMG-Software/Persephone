@@ -9,7 +9,8 @@
     onrecover,
     onsetuprecovery,
     onverify,
-    onchangekey = () => {}
+    onchangekey = () => {},
+    onnewbackup = () => {}
   }: {
     security: SecurityStatus;
     busy: boolean;
@@ -19,6 +20,9 @@
     onverify: () => void;
     // Replaces the recovery key; the core warns, shows and saves it.
     onchangekey?: () => void;
+    // Deletes a key backup this device cannot use and starts a new one; the
+    // core asks first, then shows and saves the new key.
+    onnewbackup?: () => void;
   } = $props();
 
   // A running verification has its own screen; no second one starts meanwhile.
@@ -125,6 +129,25 @@
         <div class="actions">
           <button type="button" disabled={waiting} class="primary" onclick={onsetuprecovery}
             >Set up recovery</button
+          >
+        </div>
+      {/if}
+      {#if security.canStartNewBackup}
+        <p>
+          {security.recovery === 'incomplete'
+            ? 'This device cannot use the key backup yet. Your recovery key may give it the key.'
+            : 'The homeserver has a key backup this device cannot use.'}
+          If you no longer have the key, start a new backup. Messages kept only in the old backup can
+          then not be read.
+        </p>
+        <div class="actions">
+          {#if security.recovery === 'incomplete'}
+            <button type="button" disabled={waiting} class="primary" onclick={onrecover}
+              >Use recovery key</button
+            >
+          {/if}
+          <button type="button" disabled={waiting} class="secondary" onclick={onnewbackup}
+            >Start a new backup…</button
           >
         </div>
       {/if}
