@@ -1,16 +1,30 @@
-//! The Linux platform layer (ADR-0010). Implemented: the default profile
-//! directory, reading a picked image file (the shared Unix read rules) and
-//! the contained media worker (seccomp, checked by the broker before any
-//! input). Not implemented yet, and failing closed: the vault (the profile
-//! stays locked), the prompts and the file dialog (refused), and the UI host
-//! (the UI is not started).
+//! The Linux platform layer (ADR-0010): a Secret Service item for the
+//! wrapping secret ([`vault`]), GTK3 prompts and file choosers on a
+//! `core-gtk` thread ([`credentials`], [`pick`]), links opened through the
+//! OpenURI portal ([`portal`]), the UI in its own process group and a
+//! memory-capped systemd user scope ([`ui`]), the shared Unix read rules for
+//! a picked file, and the media worker under its seccomp allowlist.
+//!
+//! Every service the layer needs fails closed when it is missing: no Secret
+//! Service keeps the profile locked, no display refuses the prompts and
+//! choosers, no portal opens no link. The one exception is the one ADR-0010
+//! names: without a systemd user manager, the UI starts with a visible
+//! warning that its memory is not capped.
+
+pub mod bus;
+pub mod credentials;
+pub mod gtk_thread;
+pub mod pick;
+pub mod portal;
+pub mod ui;
+pub mod vault;
 
 use crate::{
-    credentials::{self, CredentialSource},
+    credentials::CredentialSource,
     media::{self, Encoded, ImageWorker},
-    pick::{self, ImagePicker},
-    ui_host::{self, UiHost},
-    vault::{self, KeyProtector},
+    pick::ImagePicker,
+    ui_host::UiHost,
+    vault::KeyProtector,
 };
 use persephone_core_protocol::ErrorCode;
 use persephone_media_protocol::ResourceBudgets;
@@ -21,14 +35,16 @@ use std::{
     sync::Arc,
 };
 
-/// The default profile (ADR-0013): `persephone/profile` under the XDG data
-/// directory.
-/// No idle time is read here yet: the idle lock is unavailable
-/// (ADR-0025).
+/// No idle time is read on Linux yet, so the idle lock is unavailable
+/// (ADR-0025). The owner has not yet chosen the sources (for example the
+/// session's idle hint or a desktop-specific idle monitor), so none is
+/// guessed here.
 pub(crate) fn idle_time() -> Option<std::time::Duration> {
     None
 }
 
+/// The default profile (ADR-0013): `persephone/profile` under the XDG data
+/// directory.
 pub(crate) fn default_profile_dir() -> Option<PathBuf> {
     data_home(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
         .map(|base| base.join("persephone").join("profile"))
@@ -42,24 +58,23 @@ fn data_home(xdg_data_home: Option<OsString>, home: Option<OsString>) -> Option<
         .or_else(|| super::unix::absolute(home).map(|home| home.join(".local").join("share")))
 }
 
-/// Plan "Linux", Vault: a Secret Service item holding the wrapping secret.
+/// The store key's outer layer: the shared XChaCha20-Poly1305 wrap under a
+/// secret kept in the user's Secret Service.
 pub(crate) fn key_protector() -> Arc<dyn KeyProtector> {
-    Arc::new(vault::Unsupported)
+    Arc::new(super::unix::Wrapped(vault::SecretService::session_bus()))
 }
 
-/// Plan "Linux", Prompts and picker: GTK3 prompts on a `core-gtk` thread.
+/// GTK3 prompts on the `core-gtk` thread.
 pub(crate) fn credential_source() -> Box<dyn CredentialSource> {
-    Box::new(credentials::Unsupported)
+    Box::new(credentials::NativePrompt)
 }
 
-/// Plan "Linux", Prompts and picker: `FileChooserNative` limited to PNG and
-/// JPEG.
+/// `FileChooserNative` on the `core-gtk` thread.
 pub(crate) fn image_picker() -> Box<dyn ImagePicker> {
-    Box::new(pick::NoPicker)
+    Box::new(pick::NativeChooser)
 }
 
-/// Plan "Linux", Prompts and picker: the read rules with `O_NOFOLLOW` and
-/// `fstat`.
+/// The shared Unix read rules with `O_NOFOLLOW` and `fstat`.
 pub(crate) fn read_image_file(
     path: &Path,
     budgets: &ResourceBudgets,
@@ -84,13 +99,14 @@ pub(crate) fn image_worker() -> Arc<dyn ImageWorker> {
     Arc::new(media::contained::ContainedWorker::next_to_core())
 }
 
-/// Plan "Linux", UI launch: a systemd user scope with `MemoryMax`.
+/// The UI in its own process group and a systemd user scope with
+/// `MemoryMax`.
 pub(crate) fn ui_host() -> Box<dyn UiHost> {
-    Box::new(ui_host::Unsupported)
+    Box::new(ui::ScopeHost::default())
 }
 
-/// Starts a new core for a profile switch. Linux starts no UI yet, so no
-/// switch is asked for; the start itself works as on macOS.
+/// Starts a new core for a profile switch. It is not in the UI's process
+/// group or scope, so ending the old UI does not end it.
 pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Result<()> {
     command.spawn().map(drop)
 }

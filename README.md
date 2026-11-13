@@ -42,7 +42,7 @@ lists recorded results and open gates.
 | --- | --- |
 | Windows | Runs. Live-tested against disposable Merovingian and Synapse servers, and with Element Web. |
 | macOS | Builds and passes CI. It has its Keychain vault, prompts and UI host, but it has never run with a display. |
-| Linux | Builds and passes CI. The vault, prompts, file dialog and UI host are not built yet, so the core fails closed and does not start the UI. |
+| Linux | Builds and passes CI. It has its Secret Service vault, GTK prompts and file choosers, and a UI host with a systemd memory cap, but the app has never been launched with a display. |
 
 On Windows, the app can do these things today:
 

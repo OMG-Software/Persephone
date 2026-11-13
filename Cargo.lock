@@ -3835,6 +3835,7 @@ dependencies = [
  "dispatch2",
  "futures-core",
  "getrandom 0.4.3",
+ "gtk",
  "libc",
  "matrix-sdk",
  "matrix-sdk-base",
@@ -3857,6 +3858,7 @@ dependencies = [
  "url",
  "windows-sys 0.61.2",
  "wiremock",
+ "zbus",
  "zeroize",
 ]
 

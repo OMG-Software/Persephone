@@ -62,7 +62,7 @@ pub enum StartError {
 impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unsupported => f.write_str("UI containment is implemented for Windows only"),
+            Self::Unsupported => f.write_str("UI containment is not implemented for this platform"),
             Self::NoExe => f.write_str("cannot locate its own executable"),
             Self::Spawn { ui, error } => {
                 write!(f, "cannot start the UI at {}: {error}", ui.display())
@@ -137,7 +137,7 @@ mod tests {
         assert!(matches!(error, StartError::Unsupported));
         assert_eq!(
             error.to_string(),
-            "UI containment is implemented for Windows only"
+            "UI containment is not implemented for this platform"
         );
         assert!(!Unsupported.ask_to_retry());
     }

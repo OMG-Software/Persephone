@@ -59,6 +59,17 @@ wiremock = "=0.6.5"
 # Linux and macOS: open flags for reading a picked image (O_NOFOLLOW).
 libc = "=0.2.191"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# ADR-0010. Both are already in the lock through the Tauri GTK stack.
+# GTK3 runs the core's prompts and file choosers on its `core-gtk` thread;
+# `gtk::glib` is used through this crate, not as a separate dependency. See
+# docs/evidence/dependencies.md for the glib 0.18.5 advisory.
+gtk = { version = "=0.18.2", default-features = false }
+# The session bus: the Secret Service vault (plain session), the systemd user
+# manager's transient scope for the UI, and the OpenURI portal. Only the
+# blocking API on zbus's own async-io executor; no tokio integration.
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # ADR-0011. All are already in the lock through the Tauri and TLS stacks.
 # The Keychain vault: core-foundation builds the SecItem queries,
