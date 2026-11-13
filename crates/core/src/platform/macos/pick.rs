@@ -1,12 +1,15 @@
-//! The macOS file dialogs: an `NSSavePanel` for where to save a new recovery
-//! key (ADR-0021), and an `NSOpenPanel` on the main thread, for one PNG or
-//! JPEG file. It does not resolve aliases, so it returns the path the user
-//! chose; the read (`unix::read_image_file`) then refuses a symbolic link,
-//! and an alias file is not an image. The panel does not create folders or
-//! open packages.
+//! The macOS file dialogs, all on the main thread: an `NSOpenPanel` for one
+//! PNG or JPEG file to send, or for one file of any type (ADR-0029), and an
+//! `NSSavePanel` for where to save a new recovery key (ADR-0021) or a
+//! received file (ADR-0029). The open panel does not resolve aliases, so it
+//! returns the path the user chose; the read (`unix::read_image_file`) then
+//! refuses a symbolic link and anything that is not a regular file, and an
+//! alias file is not an image (as any file, it is sent as the small file it
+//! is). The open panel does not create folders or open packages. The save
+//! panel always shows the whole file name, extension included.
 
 use super::{credentials::bring_to_front, main_loop::main_thread};
-use crate::{credentials::PromptError, pick::ImagePicker};
+use crate::{credentials::PromptError, files, pick::ImagePicker};
 use objc2::{MainThreadMarker, rc::autoreleasepool};
 use objc2_app_kit::{NSOpenPanel, NSSavePanel};
 use objc2_foundation::{NSArray, NSString};
@@ -15,6 +18,12 @@ use std::path::PathBuf;
 
 /// The extensions the panel offers.
 pub const IMAGE_TYPES: [&str; 3] = ["png", "jpg", "jpeg"];
+/// The open panel's message for an image to send.
+pub const PICK_IMAGE_MESSAGE: &str = "Choose a PNG or JPEG image to send.";
+/// The open panel's message for any file to send (ADR-0029).
+pub const PICK_FILE_MESSAGE: &str = "Choose a file to send to this room.";
+/// The save panel's message for a received file (ADR-0029).
+pub const SAVE_FILE_MESSAGE: &str = "Save the file";
 /// `NSModalResponseOK` and `NSModalResponseCancel`.
 const PANEL_OK: isize = 1;
 const PANEL_CANCEL: isize = 0;
@@ -23,12 +32,33 @@ pub struct NativePanel;
 
 impl ImagePicker for NativePanel {
     fn pick(&self) -> Result<Option<PathBuf>, ErrorCode> {
-        main_thread(|| {
-            let mtm = MainThreadMarker::new().ok_or(ErrorCode::Unavailable)?;
-            autoreleasepool(|_| show(mtm))
-        })
-        .unwrap_or(Err(ErrorCode::Unavailable))
+        open_panel(Some(IMAGE_TYPES.as_slice()), PICK_IMAGE_MESSAGE)
     }
+
+    /// Any one file (ADR-0029). The caller reads it under the same rules as
+    /// a picked image.
+    fn pick_file(&self) -> Result<Option<PathBuf>, ErrorCode> {
+        open_panel(None, PICK_FILE_MESSAGE)
+    }
+
+    /// Where to save a received file (ADR-0029). The suggested name is made
+    /// safe again here ([`files::safe_name`]), whoever built it. No main
+    /// loop, or a failed panel, is `unavailable`, so nothing is written.
+    fn save_file(&self, suggested: &str) -> Result<Option<PathBuf>, ErrorCode> {
+        save_panel(SAVE_FILE_MESSAGE, &files::safe_name(suggested))
+            .map_err(|_| ErrorCode::Unavailable)
+    }
+}
+
+/// Shows the open panel on the main thread, for one file with one of
+/// `types` as its extension, or any file when `types` is `None`.
+/// `unavailable` when no main loop runs in this process.
+fn open_panel(types: Option<&[&str]>, message: &str) -> Result<Option<PathBuf>, ErrorCode> {
+    main_thread(|| {
+        let mtm = MainThreadMarker::new().ok_or(ErrorCode::Unavailable)?;
+        autoreleasepool(|_| show(mtm, types, message))
+    })
+    .unwrap_or(Err(ErrorCode::Unavailable))
 }
 
 /// The result of a closed panel: OK with a path picks it, Cancel picks
@@ -46,7 +76,7 @@ pub fn chosen(response: isize, path: Option<PathBuf>) -> Result<Option<PathBuf>,
 /// main thread. `Ok(None)` when the user cancelled. The panel asks before
 /// replacing a file. `Unsupported` when no main loop runs in this process;
 /// a panel that fails, or answers OK without a path, is `Failed`, so the
-/// caller reports the key as not saved.
+/// caller reports the file as not saved.
 pub fn save_panel(title: &str, suggested: &str) -> Result<Option<PathBuf>, PromptError> {
     main_thread(|| {
         let mtm = MainThreadMarker::new().ok_or(PromptError::Failed)?;
@@ -54,6 +84,10 @@ pub fn save_panel(title: &str, suggested: &str) -> Result<Option<PathBuf>, Promp
             let panel = NSSavePanel::savePanel(mtm);
             panel.setCanCreateDirectories(true);
             panel.setTreatsFilePackagesAsDirectories(false);
+            // The whole name stays visible, so a suggested name cannot hide
+            // its real extension, and the panel offers no way to hide it.
+            panel.setExtensionHidden(false);
+            panel.setCanSelectHiddenExtension(false);
             panel.setNameFieldStringValue(&NSString::from_str(suggested));
             panel.setMessage(Some(&NSString::from_str(title)));
             bring_to_front(mtm, &panel);
@@ -65,7 +99,11 @@ pub fn save_panel(title: &str, suggested: &str) -> Result<Option<PathBuf>, Promp
     .unwrap_or(Err(PromptError::Unsupported))
 }
 
-fn show(mtm: MainThreadMarker) -> Result<Option<PathBuf>, ErrorCode> {
+fn show(
+    mtm: MainThreadMarker,
+    types: Option<&[&str]>,
+    message: &str,
+) -> Result<Option<PathBuf>, ErrorCode> {
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseFiles(true);
     panel.setCanChooseDirectories(false);
@@ -74,14 +112,14 @@ fn show(mtm: MainThreadMarker) -> Result<Option<PathBuf>, ErrorCode> {
     panel.setCanCreateDirectories(false);
     panel.setTreatsFilePackagesAsDirectories(false);
     panel.setAllowsOtherFileTypes(false);
-    let types: Vec<_> = IMAGE_TYPES.iter().map(|t| NSString::from_str(t)).collect();
-    // `allowedContentTypes` needs UTType, which is in no crate already used;
-    // file name extensions still work on every supported macOS.
-    #[allow(deprecated)]
-    panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&types)));
-    panel.setMessage(Some(&NSString::from_str(
-        "Choose a PNG or JPEG image to send.",
-    )));
+    if let Some(types) = types {
+        let types: Vec<_> = types.iter().map(|t| NSString::from_str(t)).collect();
+        // `allowedContentTypes` needs UTType, which is in no crate already
+        // used; file name extensions still work on every supported macOS.
+        #[allow(deprecated)]
+        panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&types)));
+    }
+    panel.setMessage(Some(&NSString::from_str(message)));
     bring_to_front(mtm, &panel);
     let response = panel.runModal();
     let path = panel.URL().and_then(|url| url.to_file_path());
@@ -109,6 +147,13 @@ mod tests {
     #[test]
     fn given_no_main_loop_then_the_dialog_is_unavailable() {
         assert_eq!(NativePanel.pick(), Err(ErrorCode::Unavailable));
+        // Any file, and saving a received one, the same way: nothing is
+        // read or written.
+        assert_eq!(NativePanel.pick_file(), Err(ErrorCode::Unavailable));
+        assert_eq!(
+            NativePanel.save_file("report.pdf"),
+            Err(ErrorCode::Unavailable)
+        );
         // The Save panel too, as unsupported: no window could be shown.
         assert_eq!(save_panel("Save", "key.txt"), Err(PromptError::Unsupported));
     }

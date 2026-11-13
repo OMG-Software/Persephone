@@ -117,7 +117,13 @@ checkpointing them.
   backups and secure deletion are not built. (Later: lock and unlock while
   running were added; see the [session owner evidence](session-owner.md).)
 * Linux Secret Service and macOS Keychain adapters are not built; those
-  platforms report `unsupported`.
+  platforms report `unsupported`. (Later, 13 November 2026: this is stale
+  for macOS. The Keychain adapter is built in
+  [`platform/macos/vault.rs`](../../crates/core/src/platform/macos/vault.rs)
+  under [ADR-0011](../adr/0011-macos-platform-layer.md), and is compiled
+  and unit-tested on macOS CI runners only, against a temporary keychain.
+  No one has seen it work with a real user or Keychain prompt, and this
+  record was not rerun on macOS.)
 * Debug builds on one Windows host only.
 
 ## Dependencies
