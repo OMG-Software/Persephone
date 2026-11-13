@@ -2,8 +2,11 @@
 # and on pull requests from this repository. It first runs the frontend checks
 # (python tools/dev.py frontend), whose Node tests write the LCOV line coverage
 # of the frontend's TypeScript, then the Rust tests instrumented (python
-# tools/dev.py coverage), which write the LCOV line coverage of the Rust
-# crates. The analysis settings are in sonar-project.properties at the
+# tools/dev.py coverage --linux-live), which write the LCOV line coverage of
+# the Rust crates. On this disposable runner the coverage run also includes
+# the core's ignored Linux live tests: the UI scope tests against the runner's
+# systemd user manager, and the Secret Service test against a throwaway GNOME
+# Keyring on a private bus. The analysis settings are in sonar-project.properties at the
 # repository root.
 # Pull requests from forks get no SONAR_TOKEN, so the job is skipped for them.
 # The project must use CI-based analysis: Automatic Analysis is turned off in
@@ -57,6 +60,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config
+          sudo apt-get install -y --no-install-recommends dbus-daemon gnome-keyring
 
       - name: Install Rust
         run: |
@@ -92,11 +96,26 @@ jobs:
       - name: Frontend checks and coverage
         run: python tools/dev.py frontend
 
+      # A job runs outside any login session, so it has no systemd user
+      # manager. Lingering starts one; the UI scope tests then reach it on
+      # the user's session bus.
+      - name: Start a systemd user manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          runtime="/run/user/$(id -u)"
+          for _ in $(seq 100); do
+            [ -S "$runtime/bus" ] && break
+            sleep 0.1
+          done
+          test -S "$runtime/bus"
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" >> "$GITHUB_ENV"
+
       # Writes .local/coverage/rust/lcov.info.
       - name: Rust tests and coverage
         run: |
           export PATH="$PWD/.local/tools/cargo-llvm-cov/bin:$PATH"
-          python tools/dev.py coverage
+          python tools/dev.py coverage --linux-live
 
       - name: Cache SonarQube packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

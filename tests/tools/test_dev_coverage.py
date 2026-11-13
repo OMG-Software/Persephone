@@ -127,5 +127,65 @@ class CoverageEnvironmentTest(unittest.TestCase):
                         dev.coverage_environment({})
 
 
+def coverage(*arguments, platform="linux"):
+    """Runs `dev.py coverage` with these arguments on `platform`, recording
+    each command and its environment instead of starting it."""
+    commands = []
+
+    def record(command, environment, *, cwd=dev.ROOT):
+        commands.append(([str(part) for part in command], environment))
+
+    with (
+        mock.patch.object(sys, "argv", ["dev.py", "coverage", *arguments]),
+        mock.patch.object(sys, "platform", platform),
+        mock.patch.object(dev, "run", record),
+        mock.patch.object(dev, "coverage_environment", lambda environment: {**environment, "CARGO_LLVM_COV": "1"}),
+        mock.patch.object(dev, "repository_paths"),
+        mock.patch.object(dev.shutil, "which", return_value="npm"),
+        mock.patch.object(dev.shutil, "copy2"),
+    ):
+        dev.main()
+    return commands
+
+
+class LinuxLiveTest(unittest.TestCase):
+    def test_given_no_linux_live_then_coverage_runs_no_ignored_test(self):
+        commands = coverage()
+        self.assertFalse([command for command, _ in commands if "--ignored" in command])
+
+    def test_given_linux_live_then_the_live_tests_run_instrumented_before_the_report(self):
+        commands = coverage("--linux-live")
+        names = [command for command, _ in commands]
+        report = names.index(next(c for c in names if c[:3] == ["cargo", "llvm-cov", "report"]))
+        live = [index for index, command in enumerate(names) if "--ignored" in command]
+        self.assertEqual(len(live), 2)
+        self.assertTrue(all(index < report for index in live))
+        scope, keyring = (commands[index] for index in live)
+        self.assertEqual(scope[0][-1], "platform::linux::ui::")
+        self.assertEqual(scope[1]["CARGO_LLVM_COV"], "1", "instrumented")
+
+        # THEN the Secret Service test gets a private bus and a keyring
+        # directory of its own, inside the ignored .local tree.
+        self.assertEqual(keyring[0][:2], ["dbus-run-session", "--"])
+        self.assertEqual(keyring[0][-1], "platform::linux::vault::")
+        self.assertEqual(keyring[1]["CARGO_LLVM_COV"], "1", "instrumented")
+        data = Path(keyring[1]["XDG_DATA_HOME"])
+        self.assertEqual(data.parent, dev.LIVE_DATA)
+        self.assertFalse(data.exists(), "removed after the run")
+
+    def test_given_linux_live_off_linux_or_outside_coverage_then_it_is_refused(self):
+        for platform, command in (("win32", "coverage"), ("darwin", "coverage"), ("linux", "rust")):
+            with self.subTest(platform=platform, command=command):
+                with (
+                    mock.patch.object(sys, "argv", ["dev.py", command, "--linux-live"]),
+                    mock.patch.object(sys, "platform", platform),
+                    mock.patch.object(dev, "run") as run,
+                    mock.patch("sys.stderr"),
+                ):
+                    with self.assertRaises(SystemExit):
+                        dev.main()
+                run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
