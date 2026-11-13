@@ -46,6 +46,15 @@ pub fn checked(raw: &str) -> Option<Url> {
     allowed.then_some(url)
 }
 
+/// The link a platform opener may hand to the operating system, checked
+/// again where it is opened: a link [`checked`] accepts, already in the
+/// form the `url` crate serializes it (as the question showed it), and
+/// printable ASCII only. Anything else is `None` and opens nothing.
+pub fn openable(raw: &str) -> Option<Url> {
+    let url = checked(raw)?;
+    (url.as_str() == raw && raw.bytes().all(|b| b.is_ascii_graphic())).then_some(url)
+}
+
 /// The question asked before a link opens: caption and message. Everything
 /// shown is printable ASCII, from the serialized URL.
 pub fn question(url: &Url) -> Result<(&'static str, String), PromptError> {
@@ -189,6 +198,41 @@ mod tests {
         }
         let long = format!("https://example.org/{}", "a".repeat(MAX_LINK_BYTES));
         assert!(checked(&long).is_none());
+    }
+
+    /// GIVEN links handed to an opener WHEN checked again THEN only a
+    /// checked link in its serialized, printable ASCII form is opened; the
+    /// raw text of an international or unnormalized link, and every link
+    /// `checked` refuses, are not.
+    #[test]
+    fn given_links_at_the_opener_then_only_serialized_checked_links_open() {
+        for good in [
+            "https://example.org/a?b=c#d",
+            "http://example.org/",
+            "https://xn--pple-43d.com/login",
+            "https://example.org/caf%C3%A9",
+        ] {
+            assert_eq!(openable(good).map(String::from), Some(good.to_owned()));
+        }
+        // What `links::open` and OIDC sign-in hand over: a serialized URL.
+        let serialized = checked("https://\u{0430}pple.com/caf\u{e9}").unwrap();
+        assert!(openable(serialized.as_str()).is_some());
+        for bad in [
+            "https://\u{0430}pple.com/login",
+            "https://example.org/caf\u{e9}",
+            "HTTPS://EXAMPLE.ORG/",
+            "https://example.org",
+            "https://example.org/a b",
+            "https://example.org/\u{202E}",
+            "https://user@example.org/",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "",
+        ] {
+            assert!(openable(bad).is_none(), "{bad:?}");
+        }
+        let long = format!("https://example.org/{}", "a".repeat(MAX_LINK_BYTES));
+        assert!(openable(&long).is_none());
     }
 
     /// GIVEN a look-alike international host and a plain-HTTP link WHEN the

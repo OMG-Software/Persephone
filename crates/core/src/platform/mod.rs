@@ -100,3 +100,43 @@ mod other {
         Err(std::io::ErrorKind::Unsupported.into())
     }
 }
+
+/// An idle time an OS reports in seconds (macOS, ADR-0025), as a duration.
+/// A value that is not a finite number of seconds, is negative or does not
+/// fit a duration gives `None`: an unknown idle time, which never locks.
+pub fn idle_from_seconds(seconds: f64) -> Option<std::time::Duration> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    std::time::Duration::try_from_secs_f64(seconds).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::idle_from_seconds;
+    use std::time::Duration;
+
+    /// GIVEN idle times in seconds WHEN converted THEN finite values from
+    /// zero up are kept, and NaN, infinities, negative values and values too
+    /// large for a duration are unknown.
+    #[test]
+    fn given_idle_seconds_then_only_finite_non_negative_values_are_kept() {
+        assert_eq!(idle_from_seconds(0.0), Some(Duration::ZERO));
+        assert_eq!(idle_from_seconds(-0.0), Some(Duration::ZERO));
+        assert_eq!(idle_from_seconds(1.5), Some(Duration::from_millis(1500)));
+        assert_eq!(
+            idle_from_seconds(3600.0),
+            Some(Duration::from_secs(60 * 60))
+        );
+        for unknown in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -f64::MIN_POSITIVE,
+            -1.0,
+            f64::MAX,
+        ] {
+            assert_eq!(idle_from_seconds(unknown), None, "{unknown}");
+        }
+    }
+}

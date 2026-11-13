@@ -6,6 +6,12 @@
 //! [`crate::prompt_text`]; shared limits and checks are in
 //! [`crate::credentials`].
 //!
+//! A link (ADR-0024, and the OIDC sign-in page of ADR-0030) is asked about
+//! in the same warning, "No" by default, with the address as plain alert
+//! text. Only after a yes is it checked again ([`crate::links::openable`])
+//! and handed to `NSWorkspace`, on the main thread, which opens it in the
+//! default browser.
+//!
 //! A field is read as UTF-16 into zeroed-on-drop memory and then cleared.
 //! The text AppKit itself keeps while a field is edited, and the
 //! `NSString` copies it hands out, are outside this guarantee, as are the
@@ -23,9 +29,9 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSApplication, NSFloatingWindowLevel, NSSecureTextField, NSTextField,
-    NSView, NSWindow,
+    NSView, NSWindow, NSWorkspace,
 };
-use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString, NSURL};
 use std::ptr::NonNull;
 use zeroize::Zeroizing;
 
@@ -357,12 +363,49 @@ impl CredentialSource for NativePrompt {
         yes(prompt(&question_alert(caption, message))?.response)
     }
 
+    /// The question from `links::question` or `oauth_login::question`, as
+    /// a warning whose default answer is "No". The text is plain alert
+    /// text, never interpreted.
+    fn confirm_open_link(&self, caption: &str, message: &str) -> Result<bool, PromptError> {
+        yes(prompt(&question_alert(caption, message))?.response)
+    }
+
+    /// Checks the link again (`links::openable`), so only a serialized
+    /// `http` or `https` link reaches the system, then opens it with
+    /// `NSWorkspace` on the main thread. `Unsupported` when no main loop
+    /// runs in this process.
+    fn open_link(&self, url: &str) -> Result<(), PromptError> {
+        let url = crate::links::openable(url).ok_or(PromptError::Invalid)?;
+        main_thread(|| autoreleasepool(|_| open_in_browser(url.as_str())))
+            .unwrap_or(Err(PromptError::Unsupported))
+    }
+
     /// Any panel error is `Failed`, so the key is reported as not saved; a
     /// cancel stays `Ok(None)`. The key window just ran, so a missing main
     /// loop is a failure here too, not a platform without the dialog.
     fn choose_recovery_key_file(&self) -> Result<Option<std::path::PathBuf>, PromptError> {
         let (title, suggested) = prompt_text::SAVE_RECOVERY_KEY;
         super::pick::save_panel(title, suggested).map_err(|_| PromptError::Failed)
+    }
+}
+
+/// Opens a checked web link in the default browser. Foundation must read it
+/// as an `http` or `https` link with a host, not a file link; anything else
+/// is `Invalid` and opens nothing. `NSWorkspace` reporting no success is
+/// `Failed`.
+fn open_in_browser(url: &str) -> Result<(), PromptError> {
+    let url = NSURL::URLWithString(&NSString::from_str(url)).ok_or(PromptError::Invalid)?;
+    let scheme = url.scheme().map(|scheme| scheme.to_string());
+    if !matches!(scheme.as_deref(), Some("http" | "https"))
+        || url.host().is_none()
+        || url.isFileURL()
+    {
+        return Err(PromptError::Invalid);
+    }
+    if NSWorkspace::sharedWorkspace().openURL(&url) {
+        Ok(())
+    } else {
+        Err(PromptError::Failed)
     }
 }
 
@@ -559,5 +602,35 @@ mod tests {
             Err(PromptError::Invalid)
         );
         assert!(!ask_to_retry());
+        // Links: no question can be asked, and a checked link is not opened.
+        assert_eq!(
+            prompt.confirm_open_link("Open this link?", "https://example.org/"),
+            Err(PromptError::Unsupported)
+        );
+        assert_eq!(
+            prompt.open_link("https://example.org/"),
+            Err(PromptError::Unsupported)
+        );
+    }
+
+    /// GIVEN links that are not serialized, checked web links WHEN asked to
+    /// open them THEN each is refused before anything reaches the main
+    /// thread or the system.
+    #[test]
+    fn given_unchecked_links_then_nothing_opens() {
+        for bad in [
+            "file:///Applications/Calculator.app",
+            "javascript:alert(1)",
+            "https://user@example.org/",
+            "https://example.org",
+            "https://\u{0430}pple.com/",
+            "",
+        ] {
+            assert_eq!(
+                NativePrompt.open_link(bad),
+                Err(PromptError::Invalid),
+                "{bad:?}"
+            );
+        }
     }
 }
