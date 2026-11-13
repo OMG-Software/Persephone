@@ -6,10 +6,12 @@
 //!   the child, before `exec`, it asks the kernel for `SIGKILL` when the
 //!   core goes away (`PR_SET_PDEATHSIG`) and gives up gaining privileges
 //!   (`PR_SET_NO_NEW_PRIVS`).
-//! * **Held while placed.** As soon as the UI has started, the core stops
-//!   its process group (`SIGSTOP`), so nothing in it can run or fork until
-//!   it is placed. It continues the group (`SIGCONT`) only after the checks
-//!   below, and ends it on any failure.
+//! * **Placed before it runs.** The new process holds itself before `exec`
+//!   ([`spawn_gated`]): still running only the core's own code, it sends its
+//!   process ID over a pipe and waits. A core thread places it in its scope
+//!   and runs the checks below; only then does the process `exec` the UI.
+//!   On any failure it exits without running the UI. So nothing of the UI
+//!   runs, or starts another process, outside the scope.
 //! * **Memory cap.** The core asks the systemd user manager, over the
 //!   session bus, for a transient scope holding the UI (`StartTransientUnit`)
 //!   with `MemoryMax` equal to the Windows Job's 2 GiB and no swap, and
@@ -18,11 +20,9 @@
 //!   the window must be in it: each descendant of the UI, and each member of
 //!   its process group, which also finds a grandchild whose parent exited
 //!   and that was given to another parent. A process the UI started between
-//!   `exec` and the stop would stay outside, so its presence ends the UI.
-//!   Only a process that both left the group (`setsid`) and lost its parent
-//!   in those microseconds, before the UI's own `main` runs, is not found;
-//!   the UI does neither. Rust's `spawn` returns only after `exec`, so the
-//!   UI cannot be held before it. The web view's
+//!   `exec` would stay outside, so its presence ends the UI. With the hold
+//!   before `exec` there is none; the check stays as a second line of
+//!   defence. The web view's
 //!   processes, started by the UI after it continues, are in the same scope.
 //!   There is no per-process cap like the Job's 1 GiB: an address-space
 //!   limit would stop the web view's large reservations.
@@ -46,7 +46,8 @@ use super::credentials;
 use crate::ui_host::{StartError, StartedUi, UiHost, UiTree, ui_command, ui_exe};
 use std::{
     fs, io,
-    io::Read,
+    io::{Read, Write},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command},
@@ -96,38 +97,24 @@ pub struct ScopeHost {
 impl UiHost for ScopeHost {
     fn start(&self) -> Result<StartedUi, StartError> {
         let ui = ui_exe().map_err(|_| StartError::NoExe)?;
-        let mut child =
-            spawn_contained(ui_command(&ui)).map_err(|error| StartError::Spawn { ui, error })?;
-        let group = ProcessGroup::of(&child);
-        // Hold the UI and anything it forked so far until it is placed.
-        let placed = group.signal(libc::SIGSTOP).and_then(|()| {
-            let unit = unit_name(std::process::id(), RUNS.fetch_add(1, Ordering::Relaxed));
-            let placement = place(child.id(), &unit)?;
-            group.signal(libc::SIGCONT)?;
-            Ok(placement)
-        });
-        match placed {
-            Ok(placement) => {
-                if !placement.capped && !self.warned.swap(true, Ordering::AcqRel) {
-                    eprintln!("persephone: the window's memory is not capped");
-                    let (caption, message) = UNCAPPED;
-                    credentials::post(credentials::notice_alert(caption, message));
-                }
-                Ok(StartedUi {
-                    child,
-                    tree: Box::new(UiRun {
-                        group,
-                        cgroup: placement.cgroup,
-                    }),
-                })
-            }
-            Err(error) => {
-                group.kill();
-                let _ = child.kill();
-                let _ = child.wait();
-                Err(StartError::Contain(error))
-            }
+        let unit = unit_name(std::process::id(), RUNS.fetch_add(1, Ordering::Relaxed));
+        let (child, placement) = spawn_gated(ui_command(&ui), move |pid| place(pid, &unit))
+            .map_err(|error| match error {
+                GateError::Spawn(error) => StartError::Spawn { ui, error },
+                GateError::Admit(error) => StartError::Contain(error),
+            })?;
+        if !placement.capped && !self.warned.swap(true, Ordering::AcqRel) {
+            eprintln!("persephone: the window's memory is not capped");
+            let (caption, message) = UNCAPPED;
+            credentials::post(credentials::notice_alert(caption, message));
         }
+        Ok(StartedUi {
+            tree: Box::new(UiRun {
+                group: ProcessGroup::of(&child),
+                cgroup: placement.cgroup,
+            }),
+            child,
+        })
     }
 
     fn ask_to_retry(&self) -> bool {
@@ -149,6 +136,134 @@ pub fn spawn_contained(mut command: Command) -> io::Result<Child> {
     // allocates nothing.
     unsafe { command.pre_exec(move || child_setup(core)) };
     command.spawn()
+}
+
+/// Why a held start did not run its command.
+#[derive(Debug)]
+pub enum GateError {
+    /// The process could not be started or set up.
+    Spawn(io::Error),
+    /// `admit` refused it: the command never ran.
+    Admit(io::Error),
+}
+
+/// Spawns `command` as [`spawn_contained`] does, but holds it before
+/// `exec`. The new process, still running only the core's own code, sends
+/// its process ID over a pipe and waits on a second one. `admit` runs on a
+/// thread of its own with that ID; only when it returns `Ok` is the process
+/// let through to `exec`. Otherwise its pipe closes, the process exits
+/// without running `command`, and `admit`'s error comes back.
+///
+/// Both pipes are close-on-exec, so neither reaches the command. The
+/// process closes the core's ends of them first, so it sees the end of the
+/// pipe when `admit` fails.
+pub fn spawn_gated<T: Send + 'static>(
+    mut command: Command,
+    admit: impl FnOnce(u32) -> io::Result<T> + Send + 'static,
+) -> Result<(Child, T), GateError> {
+    let core = std::process::id() as libc::pid_t;
+    let (id_read, id_write) = cloexec_pipe().map_err(GateError::Spawn)?;
+    let (go_read, go_write) = cloexec_pipe().map_err(GateError::Spawn)?;
+    let core_ends = [id_read.as_raw_fd(), go_write.as_raw_fd()];
+    let (child_id, child_go) = (id_write.as_raw_fd(), go_read.as_raw_fd());
+    let gate = thread::Builder::new()
+        .name("core-ui-gate".into())
+        .spawn(move || -> io::Result<T> {
+            let mut pid = [0u8; 4];
+            fs::File::from(id_read).read_exact(&mut pid)?;
+            let admitted = admit(u32::from_ne_bytes(pid))?;
+            fs::File::from(go_write).write_all(&[GO])?;
+            Ok(admitted)
+        })
+        .map_err(GateError::Spawn)?;
+    command.process_group(0);
+    // SAFETY: `child_setup` and `wait_at_gate` make only async-signal-safe
+    // system calls and allocate nothing.
+    unsafe {
+        command.pre_exec(move || {
+            child_setup(core)?;
+            wait_at_gate(core_ends, child_id, child_go)
+        })
+    };
+    let spawned = command.spawn();
+    // The core's copies of the process's ends: without them, the gate
+    // thread sees the end of the pipe if the process never wrote.
+    drop(id_write);
+    drop(go_read);
+    let admitted = gate
+        .join()
+        .unwrap_or_else(|_| Err(io::Error::other("the window's gate thread failed")));
+    match (spawned, admitted) {
+        (Ok(child), Ok(admitted)) => Ok((child, admitted)),
+        (Ok(mut child), Err(error)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(GateError::Admit(error))
+        }
+        (Err(error), Ok(_)) => Err(GateError::Spawn(error)),
+        // The process exited at the gate because `admit` refused it, or
+        // could not be set up; `admit`'s error says which when it ran.
+        (Err(spawn), Err(admit)) => {
+            if admit.kind() == io::ErrorKind::UnexpectedEof {
+                Err(GateError::Spawn(spawn))
+            } else {
+                Err(GateError::Admit(admit))
+            }
+        }
+    }
+}
+
+/// The byte that lets a held process through.
+const GO: u8 = 1;
+
+fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` has room for the two descriptors pipe2 writes.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: pipe2 succeeded, so both are open descriptors owned by no one
+    // else.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Runs in the child between fork and exec. Async-signal-safe: sends this
+/// process's ID, then waits for [`GO`]. The end of the pipe, or anything
+/// else, refuses the `exec`.
+fn wait_at_gate(core_ends: [RawFd; 2], id: RawFd, go: RawFd) -> io::Result<()> {
+    for fd in core_ends {
+        // SAFETY: closes this process's copy of a descriptor the core owns.
+        unsafe { libc::close(fd) };
+    }
+    // SAFETY: getpid takes no arguments.
+    let pid = unsafe { libc::getpid() }.to_ne_bytes();
+    let mut sent = 0;
+    while sent < pid.len() {
+        // SAFETY: writes from a live buffer within its length.
+        let n = unsafe { libc::write(id, pid[sent..].as_ptr().cast(), pid.len() - sent) };
+        if n < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        sent += n as usize;
+    }
+    // SAFETY: closes this process's own end; nothing else uses it.
+    unsafe { libc::close(id) };
+    let mut byte = 0u8;
+    loop {
+        // SAFETY: reads one byte into a live local.
+        let n = unsafe { libc::read(go, (&raw mut byte).cast(), 1) };
+        if n == 1 && byte == GO {
+            return Ok(());
+        }
+        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
 }
 
 fn prctl(option: libc::c_int, value: libc::c_ulong) -> io::Result<()> {
@@ -248,7 +363,14 @@ fn place(pid: u32, unit: &str) -> io::Result<Placement> {
     if let Some(cgroup) = &cgroup {
         let inside = cgroup.processes()?;
         let window = window_processes(pid as libc::pid_t, &live_processes()?);
-        if !outside(&window, &inside).is_empty() {
+        let strays = outside(&window, &inside);
+        if !strays.is_empty() {
+            // The caller ends the UI's group and the UI; a process outside
+            // both (a new session) would outlive them, so end it here.
+            for stray in strays {
+                // SAFETY: plain system call; ESRCH needs no handling.
+                unsafe { libc::kill(stray, libc::SIGKILL) };
+            }
             return Err(io::Error::other(
                 "a process of the window is outside its scope",
             ));
@@ -452,15 +574,6 @@ impl ProcessGroup {
         // SAFETY: plain system call; a group that no longer exists gives
         // ESRCH, which needs no handling.
         unsafe { libc::killpg(self.leader, libc::SIGKILL) };
-    }
-
-    /// Sends `signal` to every process in the group.
-    pub fn signal(&self, signal: libc::c_int) -> io::Result<()> {
-        // SAFETY: plain system call with integer arguments.
-        if unsafe { libc::killpg(self.leader, signal) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
     }
 
     /// Processes still running in the group; an exited but unreaped UI
@@ -824,6 +937,78 @@ mod tests {
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 
+    /// GIVEN a held start WHEN `admit` runs THEN the process is still the
+    /// core's own program, its command has not run, and it leads its group;
+    /// after `Ok` the command runs as that same process.
+    #[test]
+    fn given_a_held_start_then_the_command_runs_only_after_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "touch \"$0\"", marker.to_str().unwrap()]);
+        let seen = marker.clone();
+        let (mut child, held) = spawn_gated(command, move |pid| {
+            let exe = fs::read_link(format!("/proc/{pid}/exe"))?;
+            let stat = read_bounded(&PathBuf::from(format!("/proc/{pid}/stat")))?;
+            Ok((pid, exe, seen.exists(), stat_fields(&stat).map(|f| f.2)))
+        })
+        .expect("admitted");
+        let (pid, exe, ran_early, group) = held;
+        assert_eq!(pid, child.id());
+        assert_eq!(exe, std::env::current_exe().unwrap(), "still the core");
+        assert!(!ran_early, "the command waited at the gate");
+        assert_eq!(group, Some(pid as libc::pid_t), "leads its group");
+        assert!(child.wait().unwrap().success());
+        assert!(marker.exists(), "ran after admission");
+    }
+
+    /// GIVEN a held start WHEN `admit` refuses THEN its error comes back and
+    /// the command never runs.
+    #[test]
+    fn given_a_refused_admission_then_the_command_never_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "touch \"$0\"", marker.to_str().unwrap()]);
+        let refused = spawn_gated(command, |_| -> io::Result<()> {
+            Err(io::Error::other("not placed"))
+        });
+        match refused {
+            Err(GateError::Admit(error)) => assert_eq!(error.to_string(), "not placed"),
+            other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+        }
+        thread::sleep(Duration::from_millis(200));
+        assert!(!marker.exists(), "never ran");
+    }
+
+    /// GIVEN a user manager WHEN a held start runs a command that starts a
+    /// process in a new session (`setsid`) whose parent then exits THEN that
+    /// process is in the scope too: the command ran only after placement.
+    #[test]
+    #[ignore = "needs a systemd user manager with the memory controller"]
+    fn given_a_held_start_then_even_a_new_session_starts_in_the_scope() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "setsid sh -c 'sleep 30 &'; exec sleep 30"]);
+        let unit = unit_name(std::process::id(), 1003);
+        let (mut child, placement) =
+            spawn_gated(command, move |pid| place(pid, &unit)).expect("placed");
+        assert!(placement.capped);
+        let run = UiRun {
+            group: ProcessGroup::of(&child),
+            cgroup: placement.cgroup,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while run.active_processes().unwrap() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the new session is not in the scope"
+            );
+            thread::sleep(POLL);
+        }
+        assert!(run.terminate(Duration::from_secs(10)));
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
     /// GIVEN a process that started a grandchild before it was placed, whose
     /// parent then exited (the grandchild is reparented and stays in the old
     /// cgroup) WHEN it is placed THEN placement fails.
@@ -841,6 +1026,45 @@ mod tests {
         let error = place(child.id(), &unit).err().expect("refused");
         assert!(error.to_string().contains("outside its scope"), "{error}");
         group.kill();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// GIVEN a process with a helper in a new session (`setsid`), started
+    /// before placement while its parent lives WHEN it is placed THEN
+    /// placement fails and the helper is ended too, though it is in neither
+    /// the UI's group nor the scope.
+    #[test]
+    #[ignore = "needs a systemd user manager with the memory controller"]
+    fn given_a_helper_in_a_new_session_then_placement_fails_and_ends_it() {
+        let mut child = sleeper("setsid sleep 30 & exec sleep 30");
+        let pid = child.id() as libc::pid_t;
+        let helper = || {
+            live_processes()
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.parent == pid && entry.group != pid)
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let started = loop {
+            if let Some(entry) = helper() {
+                break entry;
+            }
+            assert!(Instant::now() < deadline, "the helper did not start");
+            thread::sleep(POLL);
+        };
+        let unit = unit_name(std::process::id(), 1004);
+        let error = place(child.id(), &unit).err().expect("refused");
+        assert!(error.to_string().contains("outside its scope"), "{error}");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while live_processes()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.pid == started.pid)
+        {
+            assert!(Instant::now() < deadline, "the helper still runs");
+            thread::sleep(POLL);
+        }
+        ProcessGroup::of(&child).kill();
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 

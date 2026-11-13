@@ -25,14 +25,26 @@ pub enum BusError {
 }
 
 /// A new connection to the session bus, with [`METHOD_TIMEOUT`] on every
-/// call. See [`connect_error`] for what counts as no session bus; an
-/// address set in `DBUS_SESSION_BUS_ADDRESS` is a configured one.
+/// call. See [`configured_address`] and [`connect_error`] for what counts
+/// as no session bus.
 pub fn session() -> Result<Connection, BusError> {
-    let configured =
-        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|address| !address.is_empty());
+    let configured = configured_address(std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref())?;
     Builder::session()
         .and_then(|builder| builder.method_timeout(METHOD_TIMEOUT).build())
         .map_err(|error| connect_error(&error, configured))
+}
+
+/// Whether `DBUS_SESSION_BUS_ADDRESS` (`value`) names a session bus. Unset
+/// is `false`: zbus then uses the runtime directory's bus. A value that is
+/// set but empty or not UTF-8 is [`BusError::Failed`]: zbus would ignore
+/// it and fall back to that default, so a broken setting could be taken for
+/// a missing bus.
+pub fn configured_address(value: Option<&std::ffi::OsStr>) -> Result<bool, BusError> {
+    match value {
+        None => Ok(false),
+        Some(value) if value.is_empty() || value.to_str().is_none() => Err(BusError::Failed),
+        Some(_) => Ok(true),
+    }
 }
 
 /// A new connection to the bus at `address` (tests use one with no bus
@@ -125,6 +137,32 @@ mod tests {
         let denied = zbus::Error::FDO(Box::new(zbus::fdo::Error::AccessDenied("x".into())));
         assert_eq!(classify(&denied), BusError::Failed);
         assert_eq!(classify(&zbus::Error::InvalidReply), BusError::Failed);
+    }
+
+    /// GIVEN the session bus setting THEN unset means "not configured", a
+    /// readable value means configured, and an empty or non-UTF-8 value is a
+    /// failure, never a missing bus.
+    #[test]
+    fn given_session_bus_settings_then_only_unset_is_unconfigured() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        assert_eq!(configured_address(None), Ok(false));
+        assert_eq!(
+            configured_address(Some(OsStr::new("unix:path=/run/user/1000/bus"))),
+            Ok(true)
+        );
+        // Read but not parsed here: a malformed one fails at the connection.
+        assert_eq!(
+            configured_address(Some(OsStr::new("not-an-address"))),
+            Ok(true)
+        );
+        assert_eq!(
+            configured_address(Some(OsStr::new(""))),
+            Err(BusError::Failed)
+        );
+        assert_eq!(
+            configured_address(Some(OsStr::from_bytes(b"unix:path=/x\xff"))),
+            Err(BusError::Failed)
+        );
     }
 
     /// GIVEN a bus address with no socket behind it THEN there is no bus;
