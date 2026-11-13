@@ -15,28 +15,45 @@ pub const METHOD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Why a bus call did not succeed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BusError {
-    /// There is no session bus, or no service owns the name and none can be
-    /// started for it.
+    /// There is no session bus (no address for one, or no socket where it
+    /// should be), or no service owns the name and none can be started for
+    /// it.
     Absent,
-    /// The service refused the call, or its reply did not have the expected
-    /// form.
+    /// The bus or the service refused, failed or timed out, or a reply did
+    /// not have the expected form.
     Failed,
 }
 
 /// A new connection to the session bus, with [`METHOD_TIMEOUT`] on every
-/// call. No reachable session bus is [`BusError::Absent`].
+/// call. See [`connect_error`] for what counts as no session bus.
 pub fn session() -> Result<Connection, BusError> {
     Builder::session()
         .and_then(|builder| builder.method_timeout(METHOD_TIMEOUT).build())
-        .map_err(|_| BusError::Absent)
+        .map_err(|error| connect_error(&error))
 }
 
 /// A new connection to the bus at `address` (tests use one with no bus
-/// behind it). An unreachable address is [`BusError::Absent`].
+/// behind it), sorted as for [`session`].
 pub fn at(address: &str) -> Result<Connection, BusError> {
     Builder::address(address)
         .and_then(|builder| builder.method_timeout(METHOD_TIMEOUT).build())
-        .map_err(|_| BusError::Absent)
+        .map_err(|error| connect_error(&error))
+}
+
+/// Sorts a failed connection. Only a confirmed absence is
+/// [`BusError::Absent`]: no bus address can be made, or no socket exists at
+/// it. A socket that refuses the connection or the permission, a failed
+/// authentication and anything else are [`BusError::Failed`], so a caller
+/// never takes the "no session bus" path for a bus that exists.
+pub fn connect_error(error: &zbus::Error) -> BusError {
+    let missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    match error {
+        zbus::Error::Address(_) => BusError::Absent,
+        zbus::Error::Connection(error, _) | zbus::Error::InputOutput(error) if missing(error) => {
+            BusError::Absent
+        }
+        _ => BusError::Failed,
+    }
 }
 
 /// Whether a D-Bus error name says that no service owns the called name and
@@ -103,5 +120,28 @@ mod tests {
         let denied = zbus::Error::FDO(Box::new(zbus::fdo::Error::AccessDenied("x".into())));
         assert_eq!(classify(&denied), BusError::Failed);
         assert_eq!(classify(&zbus::Error::InvalidReply), BusError::Failed);
+    }
+
+    /// GIVEN a bus address with no socket behind it THEN there is no bus;
+    /// GIVEN a socket that exists but refuses the connection THEN the
+    /// connection failed, and is never taken for a missing bus.
+    #[test]
+    fn given_connection_failures_then_only_a_missing_socket_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = format!("unix:path={}", dir.path().join("no-bus").display());
+        assert_eq!(at(&missing).err(), Some(BusError::Absent));
+        // A socket file left by a listener that has gone: ECONNREFUSED.
+        let stale = dir.path().join("stale-bus");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        let refused = format!("unix:path={}", stale.display());
+        assert_eq!(at(&refused).err(), Some(BusError::Failed));
+        assert_eq!(
+            connect_error(&zbus::Error::Address("no session bus".into())),
+            BusError::Absent
+        );
+        assert_eq!(
+            connect_error(&zbus::Error::Handshake("rejected".into())),
+            BusError::Failed
+        );
     }
 }

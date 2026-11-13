@@ -6,21 +6,28 @@
 //!   the child, before `exec`, it asks the kernel for `SIGKILL` when the
 //!   core goes away (`PR_SET_PDEATHSIG`) and gives up gaining privileges
 //!   (`PR_SET_NO_NEW_PRIVS`).
-//! * **Memory cap.** The core then asks the systemd user manager, over the
+//! * **Held while placed.** As soon as the UI has started, the core stops
+//!   its process group (`SIGSTOP`), so nothing in it can run or fork until
+//!   it is placed. It continues the group (`SIGCONT`) only after the checks
+//!   below, and ends it on any failure.
+//! * **Memory cap.** The core asks the systemd user manager, over the
 //!   session bus, for a transient scope holding the UI (`StartTransientUnit`)
 //!   with `MemoryMax` equal to the Windows Job's 2 GiB and no swap, and
-//!   waits until the kernel shows the UI in that scope. The cap is read
-//!   back from the scope's cgroup. The web view's processes, started by the
-//!   UI later, are in the same scope. As on Windows, the UI runs for a few
-//!   milliseconds before it is contained; it creates no web view process in
-//!   that time. There is no per-process cap like the Job's 1 GiB: an
-//!   address-space limit would stop the web view's large reservations.
-//! * **No manager.** Without a session bus or a systemd user manager on it,
-//!   or when the scope's cgroup does not show the cap (no memory controller
-//!   for the user manager), the UI runs anyway and the core shows a warning
-//!   once that its memory is not capped. Any other refusal by the manager,
-//!   or a UI that does not appear in the scope in time, ends the UI: the
-//!   core does not run a UI it could not contain as asked.
+//!   waits until the kernel shows the UI in that scope. The cap and the swap
+//!   limit are read back from the scope's cgroup, and every live descendant
+//!   of the UI must be in it: a process the UI forked between `exec` and the
+//!   stop would stay outside, so its presence ends the UI. The web view's
+//!   processes, started by the UI after it continues, are in the same scope.
+//!   There is no per-process cap like the Job's 1 GiB: an address-space
+//!   limit would stop the web view's large reservations.
+//! * **No manager.** Without a session bus (no address, or no socket) or a
+//!   systemd user manager on it, or when the scope's cgroup does not show
+//!   the cap and the swap limit (no memory controller for the user manager),
+//!   the UI runs anyway and the core shows a warning once that its memory is
+//!   not capped. A session bus that refuses or fails the connection, any
+//!   other refusal by the manager, a UI that does not appear in the scope in
+//!   time, or a descendant outside it ends the UI: the core does not run a
+//!   UI it could not contain as asked.
 //! * **Watch and end.** With a scope, the window watch counts the processes
 //!   in the scope's cgroup (the UI and its web view, as in the Job), and the
 //!   tree is ended through `cgroup.kill` and the process group. Without
@@ -86,8 +93,14 @@ impl UiHost for ScopeHost {
         let mut child =
             spawn_contained(ui_command(&ui)).map_err(|error| StartError::Spawn { ui, error })?;
         let group = ProcessGroup::of(&child);
-        let unit = unit_name(std::process::id(), RUNS.fetch_add(1, Ordering::Relaxed));
-        match place(child.id(), &unit) {
+        // Hold the UI and anything it forked so far until it is placed.
+        let placed = group.signal(libc::SIGSTOP).and_then(|()| {
+            let unit = unit_name(std::process::id(), RUNS.fetch_add(1, Ordering::Relaxed));
+            let placement = place(child.id(), &unit)?;
+            group.signal(libc::SIGCONT)?;
+            Ok(placement)
+        });
+        match placed {
             Ok(placement) => {
                 if !placement.capped && !self.warned.swap(true, Ordering::AcqRel) {
                     eprintln!("persephone: the window's memory is not capped");
@@ -200,8 +213,14 @@ fn place(pid: u32, unit: &str) -> io::Result<Placement> {
         cgroup: None,
         capped: false,
     };
-    let Ok(connection) = bus::session() else {
-        return Ok(uncapped);
+    let connection = match bus::session() {
+        Ok(connection) => connection,
+        Err(BusError::Absent) => return Ok(uncapped),
+        Err(BusError::Failed) => {
+            return Err(io::Error::other(
+                "the session bus refused or failed the connection",
+            ));
+        }
     };
     match connection.call_method(
         Some(SYSTEMD),
@@ -220,10 +239,75 @@ fn place(pid: u32, unit: &str) -> io::Result<Placement> {
     }
     let path = wait_in_scope(pid, unit)?;
     let cgroup = Cgroup::at(Path::new(CGROUP_ROOT), &path);
-    let capped = cgroup
-        .as_ref()
-        .is_some_and(|cgroup| cgroup.memory_max().ok() == Some(UI_MEMORY_MAX));
+    if let Some(cgroup) = &cgroup {
+        let inside = cgroup.processes()?;
+        let tree = descendants(pid as libc::pid_t, &live_processes()?);
+        if !outside(&tree, &inside).is_empty() {
+            return Err(io::Error::other(
+                "a process of the window is outside its scope",
+            ));
+        }
+    }
+    let capped = cgroup.as_ref().is_some_and(|cgroup| {
+        cgroup.memory_max().ok() == Some(UI_MEMORY_MAX)
+            && cgroup.swap_max().ok() == Some(UI_SWAP_MAX)
+    });
     Ok(Placement { cgroup, capped })
+}
+
+/// Every live process as (process, parent), from `/proc`. Exited (zombie)
+/// processes are left out: they run nothing and a cgroup does not list
+/// them.
+fn live_processes() -> io::Result<Vec<(libc::pid_t, libc::pid_t)>> {
+    let mut processes = Vec::new();
+    for entry in fs::read_dir("/proc")? {
+        let Ok(entry) = entry else { continue };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        // A process may exit while the list is read.
+        let Ok(stat) = read_bounded(&PathBuf::from(format!("/proc/{pid}/stat"))) else {
+            continue;
+        };
+        if let Some((state, parent)) = state_and_parent(&stat)
+            && state != 'Z'
+            && state != 'X'
+        {
+            processes.push((pid, parent));
+        }
+    }
+    Ok(processes)
+}
+
+/// `root` and every process descended from it in `processes`, given as
+/// (process, parent).
+pub fn descendants(
+    root: libc::pid_t,
+    processes: &[(libc::pid_t, libc::pid_t)],
+) -> Vec<libc::pid_t> {
+    let mut found = vec![root];
+    let mut next = 0;
+    while let Some(&parent) = found.get(next) {
+        next += 1;
+        for &(pid, of) in processes {
+            if of == parent && !found.contains(&pid) {
+                found.push(pid);
+            }
+        }
+    }
+    found
+}
+
+/// The processes in `tree` that are not in `inside` (a cgroup's list).
+pub fn outside(tree: &[libc::pid_t], inside: &[libc::pid_t]) -> Vec<libc::pid_t> {
+    tree.iter()
+        .copied()
+        .filter(|pid| !inside.contains(pid))
+        .collect()
 }
 
 /// Waits until `/proc/<pid>/cgroup` shows the process in `unit`, and
@@ -294,6 +378,15 @@ impl Cgroup {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "memory.max"))
     }
 
+    /// The swap limit, in bytes; an error for "max" (not limited) or an
+    /// unreadable file (no swap accounting).
+    pub fn swap_max(&self) -> io::Result<u64> {
+        let text = read_bounded(&self.dir.join("memory.swap.max"))?;
+        text.trim()
+            .parse()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "memory.swap.max"))
+    }
+
     /// Processes in the cgroup. Zombies are not listed (cgroup v2), and a
     /// cgroup that systemd has removed, because it emptied, has none.
     pub fn processes(&self) -> io::Result<Vec<libc::pid_t>> {
@@ -345,6 +438,15 @@ impl ProcessGroup {
         unsafe { libc::killpg(self.leader, libc::SIGKILL) };
     }
 
+    /// Sends `signal` to every process in the group.
+    pub fn signal(&self, signal: libc::c_int) -> io::Result<()> {
+        // SAFETY: plain system call with integer arguments.
+        if unsafe { libc::killpg(self.leader, signal) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Processes still running in the group; an exited but unreaped UI
     /// counts as ended.
     pub fn running(&self) -> io::Result<usize> {
@@ -372,6 +474,16 @@ impl ProcessGroup {
         }
         Ok(running)
     }
+}
+
+/// The state and parent in a `/proc/<pid>/stat` line, read as for
+/// [`state_and_group`].
+pub fn state_and_parent(stat: &str) -> Option<(char, libc::pid_t)> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let parent = fields.next()?.parse().ok()?;
+    Some((state, parent))
 }
 
 /// The state and process group in a `/proc/<pid>/stat` line. The command
@@ -535,6 +647,11 @@ mod tests {
         let cgroup = Cgroup::at(root.path(), "/app.slice/persephone-ui-1-0.scope").unwrap();
         assert_eq!(cgroup.processes().unwrap(), [101, 102, 103]);
         assert_eq!(cgroup.memory_max().unwrap(), UI_MEMORY_MAX);
+        assert!(cgroup.swap_max().is_err(), "no swap accounting");
+        fs::write(dir.join("memory.swap.max"), "max\n").unwrap();
+        assert!(cgroup.swap_max().is_err(), "swap not limited");
+        fs::write(dir.join("memory.swap.max"), "0\n").unwrap();
+        assert_eq!(cgroup.swap_max().unwrap(), UI_SWAP_MAX);
         fs::write(dir.join("memory.max"), "max\n").unwrap();
         assert!(cgroup.memory_max().is_err(), "not capped");
         fs::remove_dir_all(&dir).unwrap();
@@ -557,6 +674,33 @@ mod tests {
         );
         assert_eq!(state_and_group("garbage"), None);
         assert_eq!(state_and_group("1 (x) S 1"), None);
+        assert_eq!(
+            state_and_parent("77 (Web (Content) x) S 4242 77 77 0"),
+            Some(('S', 4242))
+        );
+        assert_eq!(state_and_parent("1 (x) S"), None);
+    }
+
+    /// GIVEN a process table WHEN the UI's tree is taken THEN it holds the
+    /// UI and every process below it, not its siblings; GIVEN a cgroup list
+    /// THEN a descendant missing from it is outside the scope.
+    #[test]
+    fn given_a_process_table_then_descendants_outside_the_scope_are_found() {
+        let table = [
+            (1, 0),
+            (10, 1),
+            (11, 10),
+            (12, 11),
+            (13, 10),
+            (20, 1),
+            (21, 20),
+        ];
+        let mut tree = descendants(10, &table);
+        tree.sort_unstable();
+        assert_eq!(tree, [10, 11, 12, 13]);
+        assert_eq!(descendants(99, &table), [99], "no children");
+        assert!(outside(&tree, &[10, 11, 12, 13, 21]).is_empty());
+        assert_eq!(outside(&tree, &[10, 11, 13]), [12]);
     }
 
     fn sleeper(script: &str) -> Child {
@@ -644,13 +788,37 @@ mod tests {
         let mut child = sleeper("exec sleep 30");
         let unit = unit_name(std::process::id(), 1000);
         let placement = place(child.id(), &unit).expect("placed");
-        assert!(placement.capped, "memory.max shows the cap");
+        assert!(
+            placement.capped,
+            "memory.max and memory.swap.max show the cap"
+        );
         let run = UiRun {
             group: ProcessGroup::of(&child),
             cgroup: placement.cgroup,
         };
         assert_eq!(run.active_processes().unwrap(), 1);
         assert!(run.terminate(Duration::from_secs(10)));
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// GIVEN a process that forked before it was placed (its child stays in
+    /// the old cgroup) WHEN it is placed THEN placement fails, so the caller
+    /// ends the UI instead of running part of it outside the cap.
+    #[test]
+    #[ignore = "needs a systemd user manager with the memory controller"]
+    fn given_a_child_forked_before_placement_then_placement_fails() {
+        let mut child = sleeper("sleep 30 & exec sleep 30");
+        let group = ProcessGroup::of(&child);
+        // Let the shell fork its background child first.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while group.running().unwrap() < 2 {
+            assert!(Instant::now() < deadline, "the child did not start");
+            thread::sleep(POLL);
+        }
+        let unit = unit_name(std::process::id(), 1001);
+        let error = place(child.id(), &unit).err().expect("refused");
+        assert!(error.to_string().contains("outside its scope"), "{error}");
+        group.kill();
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 }

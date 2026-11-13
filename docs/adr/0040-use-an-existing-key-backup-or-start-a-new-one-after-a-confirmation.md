@@ -83,6 +83,12 @@ backup, while the destructive step stays explicit.
   hide the offer, not delete a backup that no longer exists or is now usable.
 * Each supported platform needs its own confirmation window. Until one exists,
   the step is unsupported there.
+* The final check and the deletion are not atomic. matrix-sdk 0.19.1 keeps
+  its backup lock private, and `disable_and_delete` deletes without a
+  condition. The core checks again right before the deletion, so only a
+  backup key that arrives in that moment is missed; the user has already
+  chosen to delete that backup. Closing the gap needs a conditional delete
+  in the SDK.
 
 ## Pros and Cons of the Options
 

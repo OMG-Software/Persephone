@@ -205,17 +205,29 @@ pub async fn backup_unusable(client: &Client, recovery: RecoveryState) -> bool {
 /// use now (another device sent its key meanwhile) is kept, and the start
 /// fails. If the deletion succeeds and the new set-up fails, the account has
 /// no backup; the status then offers to set up recovery.
+///
+/// The check and the deletion are not atomic: matrix-sdk 0.19.1 serializes
+/// backup changes under a lock it does not expose, and `disable_and_delete`
+/// deletes unconditionally. The check is repeated after the homeserver's
+/// answer, right before the deletion, so only a backup key that arrives in
+/// the moment between that check and the deletion request is missed. The
+/// user has then already chosen to delete that backup (ADR-0040).
 pub async fn start_new_backup(client: &Client) -> Result<Zeroizing<String>, SecurityError> {
     let encryption = client.encryption();
     if encryption.backups().are_enabled().await {
         return Err(SecurityError::Failed);
     }
-    if encryption
+    let exists = encryption
         .backups()
         .fetch_exists_on_server()
         .await
-        .map_err(|error| sdk_error(&error))?
-    {
+        .map_err(|error| sdk_error(&error))?;
+    // A key may have arrived during the request: keep a backup that is
+    // usable now.
+    if encryption.backups().are_enabled().await {
+        return Err(SecurityError::Failed);
+    }
+    if exists {
         encryption
             .backups()
             .disable_and_delete()
