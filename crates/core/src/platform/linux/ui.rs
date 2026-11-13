@@ -96,7 +96,17 @@ pub struct ScopeHost {
 
 impl UiHost for ScopeHost {
     fn start(&self) -> Result<StartedUi, StartError> {
-        let ui = ui_exe().map_err(|_| StartError::NoExe)?;
+        self.start_at(ui_exe().map_err(|_| StartError::NoExe)?)
+    }
+
+    fn ask_to_retry(&self) -> bool {
+        credentials::ask_to_retry()
+    }
+}
+
+impl ScopeHost {
+    /// [`UiHost::start`] with the UI executable at `ui`.
+    fn start_at(&self, ui: PathBuf) -> Result<StartedUi, StartError> {
         let unit = unit_name(std::process::id(), RUNS.fetch_add(1, Ordering::Relaxed));
         let (child, placement) = spawn_gated(ui_command(&ui), move |pid| place(pid, &unit))
             .map_err(|error| match error {
@@ -115,10 +125,6 @@ impl UiHost for ScopeHost {
             }),
             child,
         })
-    }
-
-    fn ask_to_retry(&self) -> bool {
-        credentials::ask_to_retry()
     }
 }
 
@@ -935,6 +941,49 @@ mod tests {
         assert_eq!(run.active_processes().unwrap(), 1);
         assert!(run.terminate(Duration::from_secs(10)));
         assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// GIVEN no UI executable at the path WHEN the host starts it THEN the
+    /// start fails as a spawn failure naming that path, before any placement.
+    #[test]
+    fn given_a_missing_ui_then_the_start_fails_to_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("persephone-ui");
+        match ScopeHost::default().start_at(missing.clone()) {
+            Err(StartError::Spawn { ui, error }) => {
+                assert_eq!(ui, missing);
+                assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("expected a spawn failure, got {:?}", other.err()),
+        }
+    }
+
+    /// GIVEN a user manager WHEN the host starts a UI THEN it runs capped in
+    /// a scope of its own, and ending its tree ends it and empties the scope.
+    #[test]
+    #[ignore = "needs a systemd user manager with the memory controller"]
+    fn given_a_user_manager_then_the_host_starts_the_ui_in_its_scope() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ui = dir.path().join("persephone-ui");
+        fs::write(
+            &ui,
+            "#!/bin/sh
+exec sleep 30
+",
+        )
+        .unwrap();
+        fs::set_permissions(&ui, fs::Permissions::from_mode(0o700)).unwrap();
+        let host = ScopeHost::default();
+        let StartedUi { mut child, tree } = host.start_at(ui).expect("started");
+        let cgroup = read_bounded(&PathBuf::from(format!("/proc/{}/cgroup", child.id()))).unwrap();
+        let unit = format!("persephone-ui-{}-", std::process::id());
+        assert!(cgroup.contains(&unit), "in its own scope: {cgroup}");
+        assert!(!host.warned.load(Ordering::Acquire), "capped: no warning");
+        assert_eq!(tree.active_processes().unwrap(), 1);
+        assert!(tree.terminate(Duration::from_secs(10)));
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert_eq!(tree.active_processes().unwrap(), 0);
     }
 
     /// GIVEN a held start WHEN `admit` runs THEN the process is still the
