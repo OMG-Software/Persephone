@@ -993,18 +993,27 @@ mod tests {
         let (mut child, placement) =
             spawn_gated(command, move |pid| place(pid, &unit)).expect("placed");
         assert!(placement.capped);
-        let ui = child.id() as libc::pid_t;
         let cgroup = placement.cgroup.expect("the scope's cgroup");
-        // The helper: a process in the scope that is in a session of its own
-        // (`setsid`) and no longer the UI's child (its parent exited). Wait
-        // for exactly that, so the test cannot pass before it happens.
-        let escaped = |pid: libc::pid_t| {
+        // Parent and session in a `/proc/<pid>/stat` line.
+        let parent_and_session = |pid: libc::pid_t| {
             let stat = read_bounded(&PathBuf::from(format!("/proc/{pid}/stat"))).ok()?;
             let rest = &stat[stat.rfind(')')? + 1..];
             let fields: Vec<&str> = rest.split_whitespace().collect();
             let parent: libc::pid_t = fields.get(1)?.parse().ok()?;
             let session: libc::pid_t = fields.get(3)?.parse().ok()?;
-            (pid != ui && session != ui && parent != ui).then_some(pid)
+            Some((parent, session))
+        };
+        let (_, ui_session) = parent_and_session(child.id() as libc::pid_t).unwrap();
+        // The helper is `sleep`, started by the `setsid` shell, which leads a
+        // new session and then exits. Wait for exactly that: a process in the
+        // scope whose session is not the UI's, that does not lead it, and
+        // whose session leader (its original parent) has exited, so it was
+        // reparented. The test cannot pass before all of that has happened.
+        let escaped = |pid: libc::pid_t| {
+            let (parent, session) = parent_and_session(pid)?;
+            let leader_gone = !Path::new(&format!("/proc/{session}")).exists();
+            (session != ui_session && pid != session && parent != session && leader_gone)
+                .then_some(pid)
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         let helper = loop {
