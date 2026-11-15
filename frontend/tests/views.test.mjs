@@ -1156,7 +1156,8 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     sendTyping: false,
     sendReadReceipts: false,
     idleLockMinutes: 0,
-    notificationNames: true
+    notificationNames: true,
+    loadRoomPictures: false
   };
   const html = render(Preferences, {
     props: { settings, failure: null, mac: false, onchange: () => {} }
@@ -1180,6 +1181,9 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
   }
   assert.match(html, /never the message itself/);
   assert.match(html, /Show desktop notifications/);
+  // Room pictures load only on request until the user turns this on (ADR-0041).
+  assert.match(html, /<input type="checkbox" role="switch"\s*\/?>\s*<span>Load room pictures automatically<\/span>/);
+  assert.match(html, /tells your homeserver, and the server that holds the picture/);
   // The level is read from the homeserver; until then nothing can be chosen.
   assert.match(html, /<fieldset class="choices" disabled/);
 });

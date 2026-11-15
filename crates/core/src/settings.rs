@@ -33,6 +33,7 @@ struct Stored {
     send_read_receipts: bool,
     idle_lock_minutes: u16,
     notification_names: bool,
+    load_room_pictures: bool,
 }
 
 impl Default for Stored {
@@ -52,6 +53,7 @@ impl From<AccountSettings> for Stored {
             send_read_receipts: settings.send_read_receipts,
             idle_lock_minutes: settings.idle_lock_minutes,
             notification_names: settings.notification_names,
+            load_room_pictures: settings.load_room_pictures,
         }
     }
 }
@@ -68,6 +70,7 @@ impl From<Stored> for AccountSettings {
             send_read_receipts: stored.send_read_receipts,
             idle_lock_minutes: stored.idle_lock_minutes,
             notification_names: stored.notification_names,
+            load_room_pictures: stored.load_room_pictures,
         };
         if settings.idle_lock_minutes > persephone_contracts::IDLE_LOCK_MINUTES_MAX {
             settings.idle_lock_minutes = defaults.idle_lock_minutes;
@@ -138,6 +141,7 @@ mod tests {
             send_read_receipts: true,
             idle_lock_minutes: 30,
             notification_names: false,
+            load_room_pictures: true,
         };
         let bytes = serde_json::to_vec(&Stored::from(changed)).unwrap();
         assert_eq!(decode(&bytes), changed);
@@ -157,6 +161,10 @@ mod tests {
         assert!(
             decode(br#"{"desktop_notifications":true}"#).notification_names,
             "a record from before the setting names the sender, as before"
+        );
+        assert!(
+            !decode(br#"{"notification_names":true}"#).load_room_pictures,
+            "a record from before the setting loads no room picture by itself"
         );
     }
 

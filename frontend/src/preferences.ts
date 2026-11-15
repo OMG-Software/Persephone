@@ -13,7 +13,8 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   sendTyping: false,
   sendReadReceipts: false,
   idleLockMinutes: 0,
-  notificationNames: true
+  notificationNames: true,
+  loadRoomPictures: false
 };
 
 /** The idle-lock choices offered, in minutes; 0 never locks (ADR-0025). */

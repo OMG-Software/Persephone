@@ -46,6 +46,7 @@
 * [0035 - Keep favourites and room sections local to the profile](0035-keep-favourites-and-room-sections-local-to-the-profile.md)
 * [0036 - Bound room navigation and inspection in the core](0036-bound-room-navigation-and-inspection-in-the-core.md)
 * [0037 - Browse public room directories and join only listed rooms](0037-browse-public-room-directories-and-join-only-listed-rooms.md)
+* [0041 - Load room pictures in the core, on request or when turned on](0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md)
 
 ## Superseded Records
 

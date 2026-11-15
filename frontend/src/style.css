@@ -559,6 +559,21 @@ kbd {
   color: var(--ink3);
 }
 
+/* A room's picture (ADR-0041): decoded pixels on a canvas, scaled to fill
+   a circle. */
+.room-picture {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.room-picture.large {
+  width: 32px;
+  height: 32px;
+}
+
 .room-name {
   flex: 1;
   min-width: 0;

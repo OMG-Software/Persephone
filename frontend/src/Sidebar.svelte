@@ -5,6 +5,7 @@
   import Icon from './Icon.svelte';
   import Invites from './Invites.svelte';
   import RoomList from './RoomList.svelte';
+  import type { RoomPictures } from './roomPictures';
   import { avatarColour, initials } from './people';
 
   let {
@@ -26,6 +27,7 @@
     ondecline = () => {},
     onfavourite,
     favouriteBusy = false,
+    pictures = null,
     width,
     menu,
     notice,
@@ -58,6 +60,8 @@
     // Adds a room to Favourites or removes it; absent without an account.
     onfavourite?: (roomId: string) => void;
     favouriteBusy?: boolean;
+    // Loaded room pictures, shown in the room list.
+    pictures?: RoomPictures | null;
     // The width in CSS pixels, set by the resize handle.
     width?: number;
     // The main menu, shown next to the new-conversation buttons.
@@ -118,6 +122,7 @@
         {preferences}
         {onfavourite}
         {favouriteBusy}
+        {pictures}
       />
     {:else}
       <p class="note" role="status">Loading rooms…</p>

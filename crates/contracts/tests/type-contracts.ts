@@ -8,6 +8,7 @@ import type {
   ImageView,
   PendingMessage,
   RoomChange,
+  RoomPicture,
   RoomSettings,
   RoomSummary,
   TimelineItem,
@@ -31,6 +32,14 @@ const invalidName: RoomSummary = {
   unreadCount: 0,
   encryption: "encrypted",
   contact: null,
+  pictureId: null,
+};
+
+const pictureWithUrl: RoomPicture = {
+  pictureId: "0123456789abcdef",
+  image: { handle: "h", width: 1, height: 1, bands: 1, bandRows: 1 },
+  // @ts-expect-error a room picture is named by its ID, never by URL
+  url: "mxc://s/m",
 };
 
 const unknownStore: AppStatus = {
@@ -140,6 +149,7 @@ void bigTime;
 void bigImageSize;
 void unknownMime;
 void missingBandRows;
+void pictureWithUrl;
 void missingKind;
 void unknownChange;
 void wrongChangeField;

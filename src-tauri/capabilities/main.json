@@ -65,6 +65,7 @@
     "allow-identity-changes",
     "allow-accept-identity",
     "allow-load-image",
+    "allow-load-room-picture",
     "allow-image-band",
     "allow-release-image",
     "allow-pick-image",

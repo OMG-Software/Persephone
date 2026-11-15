@@ -12,6 +12,8 @@
   import ImageMessage from './ImageMessage.svelte';
   import Message from './Message.svelte';
   import MessageActions from './MessageActions.svelte';
+  import RoomPicture from './RoomPicture.svelte';
+  import type { RoomPictures } from './roomPictures';
   import { stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
   import { applyRelations, newestEvent, quoteOf, type ShownItem } from './timeline';
@@ -42,7 +44,10 @@
     unreadFrom = null,
     onread,
     readBy = [],
-    onlink
+    onlink,
+    pictureId = null,
+    pictures = null,
+    onloadpicture
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -91,6 +96,12 @@
     readBy?: string[];
     // Asks the core to open a link from a message.
     onlink?: (url: string) => void;
+    // The room's current picture, the pictures loaded so far, and the
+    // request to load this room's; absent where pictures are not offered
+    // (ADR-0041). The button shows only while the picture is not loaded.
+    pictureId?: string | null;
+    pictures?: RoomPictures | null;
+    onloadpicture?: () => void;
   } = $props();
 
   // Edits, deletions and reactions are not lines of their own: each message
@@ -172,6 +183,7 @@
   <header class="chat-header">
     <EncryptionIcon {encryption} size="large" />
     {#if contact}
+      <RoomPicture {pictures} {roomId} {pictureId} size="large" onload={onloadpicture} />
       <div class="room-title">
         <h2 id="timeline-heading">
           <bdi>{title}</bdi>
@@ -184,7 +196,9 @@
         </p>
       </div>
     {:else}
-      <Icon name="hash" class="hash" />
+      <RoomPicture {pictures} {roomId} {pictureId} size="large" onload={onloadpicture}>
+        <Icon name="hash" class="hash" />
+      </RoomPicture>
       <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
     {/if}
     {#if onfavourite}

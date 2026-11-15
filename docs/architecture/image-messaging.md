@@ -138,6 +138,37 @@ travel in row bands instead:
    text. A retry can upload the file again; Persephone does not promise to
    delete an uploaded object.
 
+## Room pictures
+
+Recorded 15 November 2026 ([ADR-0041](../adr/0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md),
+proposed).
+
+1. The room list gives each room a `pictureId`: 16 hex characters of a hash of
+   the current `m.room.avatar` URI (or the Sliding Sync `avatar` field), or
+   none. It names the picture only; the page never receives the URI. Any sync
+   that touches a room refreshes the list, so a changed picture gets a new ID.
+2. The page sends `load_room_picture` with the room ID only, when the user
+   asks, or for each listed room when the account's `loadRoomPictures`
+   setting is on (off by default). The core checks the session and that the
+   room is joined.
+3. The core asks for the server's thumbnail of the picture: 96 × 96, cropped,
+   `animated=false`, through the authenticated media API with the access
+   token, or the legacy one without it. A 404 or another refusal (4xx) falls
+   back to the file itself. Both downloads use the 20 MiB cap, checked before
+   allocation, and the lock checks of the image download. A room picture is
+   never encrypted.
+4. The contained worker decodes it (PNG or JPEG only). The core scales it to
+   fit 96 × 96 and keeps it under an opaque handle in `RetainedPixels`. The
+   reply holds the picture ID it loaded and the image view.
+5. The page reads the bands, keeps the pixels and releases the handle. It
+   keeps at most 200 pictures, loads one at a time, and drops a room's
+   picture when its ID changes or the room leaves the list. A lock or sign-out
+   drops them all.
+
+Admission: at most one `load_room_picture` runs at a time, counted apart from
+`load_image`, so pictures never take an image's slot. Both share the one
+worker slot.
+
 ## Limits
 
 | Item | Limit |
@@ -148,7 +179,8 @@ travel in row bands instead:
 | Displayed image | Scaled to fit 2048 × 2048 |
 | Retained pixels | 64 MiB, least recently used evicted |
 | Band | At most 1 MiB of RGBA |
-| Concurrent work | 1 decode, 2 transfers, 1 image in the outbox |
+| Room picture | Thumbnail of 96 × 96 asked for; shown scaled to fit 96 × 96 |
+| Concurrent work | 1 decode, 2 transfers, 1 room picture, 1 image in the outbox |
 
 ## Implementation notes
 

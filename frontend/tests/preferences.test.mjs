@@ -42,7 +42,8 @@ test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes ar
     sendTyping: false,
     sendReadReceipts: false,
     idleLockMinutes: 0,
-    notificationNames: true
+    notificationNames: true,
+    loadRoomPictures: false
   });
 });
 

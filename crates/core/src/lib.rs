@@ -78,7 +78,9 @@ use credentials::CredentialSource;
 use homeserver::Homeserver;
 use matrix_views::MatrixViews;
 use media::{ImageWorker, MediaService};
-use persephone_contracts::{AccountStatus, AppStatus, ImagePick, ImageView, RoomList, StoreState};
+use persephone_contracts::{
+    AccountStatus, AppStatus, ImagePick, ImageView, RoomList, RoomPicture, StoreState,
+};
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_EVENT_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
     MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, MAX_USER_ID_BYTES, Outcome,
@@ -606,6 +608,10 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            Call::LoadRoomPicture { room_id } => match self.load_room_picture(room_id) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::PickImage { room_id } => match self.pick_image(room_id) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
@@ -912,6 +918,10 @@ impl Core {
                 }
             }
             Call::LoadImage { room_id, event_id } => match self.load_image(room_id, event_id) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::LoadRoomPicture { room_id } => match self.load_room_picture(room_id) {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
@@ -1947,6 +1957,69 @@ impl Core {
             .keep_view(generation, &|| self.media_generation(), pixels)
     }
 
+    /// Admits a `load_room_picture` (ADR-0041): checks the argument and the
+    /// session now; the download and decode run later, on their own thread.
+    /// The page decides whether a picture loads automatically or on request;
+    /// the core cannot tell the two apart, and treats both like `load_image`.
+    fn load_room_picture<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+        if !valid_room_id(room_id) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        match self.source() {
+            Source::Locked => return Err(ErrorCode::Locked),
+            // Synthetic rooms have no pictures.
+            Source::Fixtures | Source::SignedOut => return Err(ErrorCode::NotFound),
+            Source::Matrix(_lease, client) => {
+                if !MatrixViews::has_room(&client, room_id) {
+                    return Err(ErrorCode::NotFound);
+                }
+            }
+        }
+        let slot = self.media.begin_picture()?;
+        let room_id = room_id.to_owned();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            refused(self.finish_room_picture(&room_id))
+        }))
+    }
+
+    /// Downloads a room picture under a lease, which ends before the decode,
+    /// like [`Self::finish_load`]; the picture is scaled to fit
+    /// [`media::ROOM_PICTURE_SIDE`] square.
+    fn finish_room_picture(&self, room_id: &str) -> Result<RoomPicture, ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let generation = lease.generation();
+        let current = || self.session.open_generation() == Some(generation);
+        let fetched = lease.stores().block_on(media::fetch_room_picture(
+            &client,
+            client.http_client(),
+            room_id,
+            &self.budgets,
+            &current,
+        ));
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        let (picture_id, encoded) = fetched?;
+        if !current() {
+            return Err(ErrorCode::Locked);
+        }
+        let decoded = self.media.decode(encoded.bytes())?;
+        drop(encoded);
+        let (pixels, _) = self.media.shown_within(decoded, media::ROOM_PICTURE_SIDE)?;
+        let image = self
+            .media
+            .keep_view(generation, &|| self.media_generation(), pixels)?;
+        Ok(RoomPicture { picture_id, image })
+    }
+
     /// Admits a `pick_image` for a joined room: the dialog, the read and the
     /// strip run later, on their own thread, without a lease (nothing there
     /// touches the stores); the draft is kept only if the generation is still
@@ -2898,6 +2971,18 @@ mod tests {
                 Call::LoadImage {
                     room_id: "!r:s".into(),
                     event_id: format!("${}", "e".repeat(MAX_EVENT_ID_BYTES)),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::LoadRoomPicture {
+                    room_id: "!r:s".into(),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::LoadRoomPicture {
+                    room_id: "#alias:s".into(),
                 },
                 ErrorCode::InvalidArgument,
             ),

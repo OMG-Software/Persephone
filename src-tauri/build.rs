@@ -75,6 +75,7 @@ fn main() {
             "identity_changes",
             "accept_identity",
             "load_image",
+            "load_room_picture",
             "image_band",
             "release_image",
             "pick_image",

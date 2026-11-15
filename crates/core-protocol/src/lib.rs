@@ -416,6 +416,13 @@ pub enum Call {
         room_id: String,
         event_id: String,
     },
+    /// Download and decode the current picture of a joined room in the
+    /// contained worker (ADR-0041): a server thumbnail when there is one,
+    /// otherwise the file. Replies with a room picture: the picture's ID and
+    /// an image view. `not_found` when the room has no picture.
+    LoadRoomPicture {
+        room_id: String,
+    },
     /// One band of rows of a loaded or picked image. Answered by a
     /// [`PixelReply`] and one pixel frame, or by an ordinary error reply.
     ImageBand {
@@ -1459,9 +1466,10 @@ mod tests {
                         send_read_receipts: true,
                         idle_lock_minutes: 15,
                         notification_names: false,
+                        load_room_pictures: true,
                     },
                 },
-                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false}}}"#,
+                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false,"loadRoomPictures":true}}}"#,
             ),
             (
                 Call::ProfileList {},
@@ -2006,6 +2014,12 @@ mod tests {
                     .to_owned(),
             ),
             (
+                Call::LoadRoomPicture {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"load_room_picture","room_id":"!r:s"}}"#.to_owned(),
+            ),
+            (
                 Call::ImageBand {
                     handle: handle.into(),
                     band: 3,
@@ -2056,6 +2070,9 @@ mod tests {
             &br#"{"id":1,"call":{"command":"load_image","room_id":"!r:s"}}"#[..],
             br#"{"id":1,"call":{"command":"load_image","room_id":"!r:s","event_id":null}}"#,
             br#"{"id":1,"call":{"command":"load_image","room_id":"!r:s","event_id":"$e","url":"mxc://s/m"}}"#,
+            br#"{"id":1,"call":{"command":"load_room_picture"}}"#,
+            br#"{"id":1,"call":{"command":"load_room_picture","room_id":null}}"#,
+            br#"{"id":1,"call":{"command":"load_room_picture","room_id":"!r:s","url":"mxc://s/m"}}"#,
             br#"{"id":1,"call":{"command":"image_band","handle":"h"}}"#,
             br#"{"id":1,"call":{"command":"image_band","handle":"h","band":-1}}"#,
             br#"{"id":1,"call":{"command":"image_band","handle":"h","band":4294967296}}"#,

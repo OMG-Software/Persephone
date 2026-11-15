@@ -54,6 +54,7 @@
   import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
   import { OwnNameKeeper } from './ownName';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
+  import { RoomPictures } from './roomPictures';
   import { securityErrorText } from './securityText';
   import {
     applyRelations,
@@ -106,6 +107,9 @@
     acceptIdentity,
     signOut,
     roomList,
+    loadRoomPicture,
+    imageBand,
+    releaseImage,
     roomDraft,
     saveRoomDraft,
     type RoomDraft,
@@ -290,6 +294,9 @@
   let confirmedRooms = new Set<string>();
   let unavailable = $state(false);
   let rooms = $state<Rooms | null>(null);
+  // Room pictures (ADR-0041): loaded on request, or for every listed room
+  // when the account's setting says so; dropped with the session.
+  const pictures = new RoomPictures({ load: loadRoomPicture, band: imageBand, release: releaseImage });
   let selected = $state<string | null>(null);
   let items = $state<TimelineItem[]>([]);
   let nextCursor = $state<string | null>(null);
@@ -407,6 +414,12 @@
   // Signed in, signed out, or no profile (synthetic data only).
   const profileOpen = $derived(status?.store === 'protected');
   const signedIn = $derived(profileOpen && status?.account.state === 'signed_in');
+  // Keep the pictures in step with the listed rooms; load each by itself only
+  // when the account turned that on.
+  $effect(() => {
+    const listed = rooms?.rooms.map((room) => ({ roomId: room.roomId, pictureId: room.pictureId })) ?? [];
+    pictures.sync(listed, signedIn && settings.loadRoomPictures);
+  });
 
   // The room shell: signed in, or synthetic rooms with no profile.
   const shellOpen = $derived(status !== null && (signedIn || status.store === 'not_configured'));
@@ -726,6 +739,7 @@
     confirmedRooms = new Set();
     selected = null;
     rooms = null;
+    pictures.clear();
     items = [];
     nextCursor = null;
     error = null;
@@ -2144,6 +2158,7 @@
         ondecline={(roomId) => answerInvite(roomId, false)}
         onfavourite={signedIn ? toggleFavourite : undefined}
         favouriteBusy={favouriteBusy || groupsBusy}
+        {pictures}
         width={shownSidebar}
       >
         {#snippet menu()}
@@ -2248,6 +2263,11 @@
             onread={signedIn && !focusedContext ? readTo : undefined}
             readBy={focusedContext ? [] : (activity?.readBy ?? [])}
             onlink={signedIn ? followLink : undefined}
+            pictureId={selectedRoom.pictureId}
+            {pictures}
+            onloadpicture={signedIn && selectedRoom.pictureId !== null
+              ? () => selectedRoom.pictureId !== null && pictures.request(selectedRoom.roomId, selectedRoom.pictureId)
+              : undefined}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
