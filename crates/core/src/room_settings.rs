@@ -39,6 +39,7 @@ use crate::views::{MAX_PAGE_BYTES, project_body, project_name};
 use matrix_sdk::{
     Client, EncryptionState, Room, RoomMemberships, RoomState,
     notification_settings::RoomNotificationMode,
+    room::RoomMember as StoredMember,
     ruma::{
         Int, OwnedRoomAliasId, OwnedUserId, RoomAliasId, RoomId, ServerName, UserId,
         api::{
@@ -585,6 +586,47 @@ fn fit(members: &mut RoomMembers) {
     }
 }
 
+/// The room's members with `memberships`, which must include joined and
+/// invited ones. The stored list stays current only while every member event
+/// reaches the SDK. Sliding Sync sends other people's member events in the
+/// timeline only, so a join made while the app was closed, or more events in
+/// one round than the timeline holds, leaves the list stale until the next
+/// member event. Every sync round carries the homeserver's joined and invited
+/// counts: when the stored list disagrees with them, it is asked for again,
+/// once. A count of no joined members means the homeserver sent none.
+async fn current_members(
+    room: &Room,
+    memberships: RoomMemberships,
+) -> matrix_sdk::Result<Vec<StoredMember>> {
+    let members = room.members(memberships).await?;
+    if counts_agree(
+        room.joined_members_count(),
+        room.invited_members_count(),
+        &members,
+    ) {
+        return Ok(members);
+    }
+    drop(members);
+    room.mark_members_missing();
+    room.members(memberships).await
+}
+
+/// Whether `members` has `joined` joined and `invited` invited members, or
+/// the counts are unknown (no joined members).
+fn counts_agree(joined: u64, invited: u64, members: &[StoredMember]) -> bool {
+    joined == 0
+        || stored_counts(members.iter().map(|member| member.membership())) == (joined, invited)
+}
+
+/// How many of `memberships` are joined and how many invited.
+fn stored_counts<'a>(memberships: impl Iterator<Item = &'a MembershipState>) -> (u64, u64) {
+    memberships.fold((0, 0), |(joined, invited), membership| match membership {
+        MembershipState::Join => (joined.saturating_add(1), invited),
+        MembershipState::Invite => (joined, invited.saturating_add(1)),
+        _ => (joined, invited),
+    })
+}
+
 /// A joined room's members that match `filter` (see the module notes).
 /// Who can read a joined room's new messages: up to [`MAX_LISTED_MEMBERS`]
 /// joined or invited members by user ID, each with this account's trust in
@@ -593,8 +635,7 @@ fn fit(members: &mut RoomMembers) {
 pub async fn readers(client: &Client, room_id: &str) -> Result<RoomReaders, ErrorCode> {
     let room = joined(client, room_id)?;
     let own = own_user(client)?;
-    let all = room
-        .members(RoomMemberships::JOIN | RoomMemberships::INVITE)
+    let all = current_members(&room, RoomMemberships::JOIN | RoomMemberships::INVITE)
         .await
         .map_err(|_| ErrorCode::Unavailable)?;
     // Sorted and cut by reference first: only the listed IDs are copied.
@@ -698,15 +739,15 @@ pub async fn members(
     let room = joined(client, room_id)?;
     let own = own_user(client)?;
     let levels = power_levels(client, &room).await?;
-    let all = room
-        .members(
-            RoomMemberships::JOIN
-                | RoomMemberships::INVITE
-                | RoomMemberships::KNOCK
-                | RoomMemberships::BAN,
-        )
-        .await
-        .map_err(|_| ErrorCode::Unavailable)?;
+    let all = current_members(
+        &room,
+        RoomMemberships::JOIN
+            | RoomMemberships::INVITE
+            | RoomMemberships::KNOCK
+            | RoomMemberships::BAN,
+    )
+    .await
+    .map_err(|_| ErrorCode::Unavailable)?;
     let filter = filter.trim().to_lowercase();
     let mut listed: Vec<RoomMember> = all
         .iter()
