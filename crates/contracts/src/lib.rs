@@ -1206,6 +1206,22 @@ pub struct AccountSettings {
     pub load_room_pictures: bool,
     /// Which kinds of room changes the timeline shows. All on by default.
     pub timeline_events: TimelineEvents,
+    /// The colours of the interface. Grey and orange by default.
+    pub theme: Theme,
+}
+
+/// The colour themes of the interface, all dark. Only the page reads the
+/// choice: it changes no other behaviour.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// Dark grey surfaces with an orange accent.
+    #[default]
+    Orange,
+    /// Nearly black surfaces with a red accent.
+    Red,
+    /// Nearly black surfaces with a blue accent.
+    Blue,
 }
 
 /// Which kinds of room changes the timeline shows, one switch each. Only
@@ -1301,6 +1317,7 @@ impl Default for AccountSettings {
             notification_names: true,
             load_room_pictures: false,
             timeline_events: TimelineEvents::default(),
+            theme: Theme::Orange,
         }
     }
 }
@@ -2063,6 +2080,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),
         format!("export {}", TimelineEvents::decl(&config)),
+        format!("export {}", Theme::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
         format!("export {}", RoomActivity::decl(&config)),
         format!("export {}", RoomServer::decl(&config)),

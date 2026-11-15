@@ -399,7 +399,8 @@ impl CoreTransport for FakeCore {
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
                 "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
                 "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false,
-                "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}
+                "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+                "theme": "red"
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
@@ -1750,13 +1751,30 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         invoke("account_settings", serde_json::json!({})).unwrap()["chatTextPercent"],
         120
     );
-    let settings = |enter_sends: bool| {
+    let settings_with = |enter_sends: bool, theme: &str| {
         serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
             "interfaceTextPercent": 100, "desktopNotifications": false,
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
-            "notificationNames": true, "loadRoomPictures": false, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}}})
+            "notificationNames": true, "loadRoomPictures": false, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+            "theme": theme}})
     };
+    let settings = |enter_sends: bool| settings_with(enter_sends, "orange");
+    assert_eq!(
+        invoke("account_settings", serde_json::json!({})).unwrap()["theme"],
+        "red"
+    );
     assert!(invoke("set_account_settings", settings(true)).is_ok());
+    // GIVEN each known theme WHEN saved THEN it crosses; an unknown theme
+    // or one in another case does not reach the core.
+    for theme in ["red", "blue"] {
+        assert!(invoke("set_account_settings", settings_with(true, theme)).is_ok());
+    }
+    for theme in ["green", "Red", ""] {
+        assert!(
+            invoke("set_account_settings", settings_with(true, theme)).is_err(),
+            "{theme}"
+        );
+    }
     assert_eq!(
         invoke("set_account_settings", settings(false)).unwrap_err(),
         "locked"

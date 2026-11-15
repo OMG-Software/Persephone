@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import markUrl from './assets/mark.svg';
   import AccountPage from './AccountPage.svelte';
+  import BrandMark from './BrandMark.svelte';
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
   import RoomTools from './RoomTools.svelte';
@@ -52,6 +52,7 @@
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate, withNames } from './people';
   import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
+  import { applyTheme } from './themes.ts';
   import { OwnNameKeeper } from './ownName';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
   import { RoomPictures } from './roomPictures';
@@ -647,6 +648,13 @@
   $effect(() => {
     if (signedIn) settingsKeeper.load();
     else settingsKeeper.clear();
+  });
+
+  // The account's theme, on the root element so dialogs and the page
+  // background follow it. It changes as soon as a choice is made; the
+  // keeper puts it back if the core cannot save it.
+  $effect(() => {
+    applyTheme(document.documentElement, settings.theme);
   });
 
   // The account's display name for its labels. With none set, or none read,
@@ -1910,7 +1918,7 @@
 
 {#snippet brand()}
   <div class="auth-brand">
-    <img src={markUrl} alt="" width="32" height="32" />
+    <BrandMark />
     Persephone
   </div>
 {/snippet}

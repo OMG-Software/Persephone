@@ -12,6 +12,7 @@
     idleLockText,
     type SettingsPatch
   } from './preferences';
+  import { DEFAULT_THEME, THEMES, themeOf } from './themes.ts';
 
   // This account's preferences. The settings are kept in its encrypted
   // profile through the caller; the notification level is the account's
@@ -142,6 +143,24 @@
       {/each}
     </select>
     <p class="note">The interface size scales everything else: menus, lists, buttons and settings.</p>
+  </div>
+  <div class="panel">
+    <h3>Theme</h3>
+    <label for="theme">Colours</label>
+    <select
+      id="theme"
+      class="field"
+      value={themeOf(settings.theme)}
+      onchange={(event) => onchange({ theme: themeOf(event.currentTarget.value) })}
+    >
+      {#each THEMES as theme (theme.value)}
+        <option value={theme.value}>{theme.label}{theme.value === DEFAULT_THEME ? ' (default)' : ''}</option>
+      {/each}
+    </select>
+    <p class="note">
+      All themes are dark. The theme changes at once and belongs to this account; before you sign
+      in or while Persephone is locked, the default theme shows.
+    </p>
   </div>
   <div class="panel">
     <h3>Notifications</h3>

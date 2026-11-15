@@ -1,46 +1,55 @@
-/* Persephone design tokens. The palette, type, and corner radii follow the
-   OMG Software project page (omg-software.org/projects/persephone): warm
-   near-black surfaces, warm off-white text, and an orange accent. The dark
-   theme uses the site colours directly. The light theme keeps the same hues
-   with a darker orange so accent text and white-on-accent stay at 4.5:1 or
-   more. The CSP allows no font downloads, so only installed fonts are used. */
+/* Persephone design tokens. Type, corner radii and the default palette
+   follow the OMG Software project page (omg-software.org/projects/persephone):
+   warm dark grey surfaces, warm off-white text and an orange accent. The CSP
+   allows no font downloads, so only installed fonts are used.
+
+   Every colour in this file and in the components is a token. There are
+   three themes, all dark, chosen by `data-theme` on the root element
+   (themes.ts); without one, or with a name this build does not know, the
+   default (grey and orange) shows. Each theme block sets the same tokens,
+   and tests/themes.test.mjs checks that and the contrast of each pair below
+   against WCAG 2.2 AA:
+   - Text tokens (--ink, --ink2, --ink3, --accent, --accent-hover,
+     --danger-text, --warn-ink, --enc-fg) are 4.5:1 or more on every surface
+     (--rail, --bg, --panel, --card, --hover, --sel).
+   - --accent-ink is 4.5:1 or more on --accent and --accent-hover; --ink and
+     --accent are 4.5:1 or more on --accent-soft; --ink on --line (badges).
+   - --focus and --line-strong (control borders) are 3:1 or more on every
+     surface they sit on.
+   - Surfaces step up in lightness: rail, bg, panel, card, hover, sel.
+   Disabled colours (--disabled-bg, --disabled-ink) are exempt from contrast
+   minimums and are kept clearly dimmer than enabled text. */
 :root {
-  --bg: #f8f7f3;
-  --panel: #efeee8;
-  --rail: #e6e5de;
-  --line: #d9d8d0;
-  --ink: #151616;
-  --ink2: #53574b;
-  --ink3: #626558;
-  --accent: #a8461a;
-  --accent-soft: #fbe4d7;
-  --accent-ink: #ffffff;
-  --hover: #e8e7e0;
-  --card: #ffffff;
-  --sel: #e0dfd7;
-  --enc-bg: #ddefe6;
-  --enc-fg: #1d7a5a;
-  --warn-bg: #fdecea;
-  --warn-ink: #912018;
-  --danger: #d92d20;
-  /* Solid green for the encrypted icon, the counterpart of --danger in both
-     themes: a white glyph on it is 4.1:1 and it is 3:1 or more on every
-     panel, so encrypted and not encrypted stand out equally. */
+  /* Colours shared by every theme: status colours, solid icon fills and
+     avatars, each with a white glyph or text on it. */
+  --danger: #e0362a;
+  /* Solid green for the encrypted icon, the counterpart of --danger: a
+     white glyph on it is 4.1:1 and it is 3:1 or more on every surface, so
+     encrypted and not encrypted stand out equally. */
   --secure: #1a8f55;
-  /* Red for text and outlined buttons: --danger is below 4.5:1 on some
-     surfaces, so it is kept for icons and borders. */
-  --danger-text: #b42318;
+  --on-solid: #ffffff;
   --presence: #3dbe7a;
   --ok: #4fc89b;
   --attention: #e5b454;
-  --match: #f7e3a6;
-  --scrim: rgba(21, 22, 22, 0.42);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-modal: 0 24px 80px rgba(0, 0, 0, 0.25);
+  --match: #f2d98c;
+  --match-ink: #1a1709;
+  /* Avatar fills: white initials are 4.5:1 or more on each. */
+  --avatar-0: #b5532c;
+  --avatar-1: #3a68a8;
+  --avatar-2: #7e52a6;
+  --avatar-3: #24785b;
+  --avatar-4: #a83d63;
+  --avatar-5: #86681e;
+  --scrim: rgba(0, 0, 0, 0.6);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-modal: 0 24px 80px rgba(0, 0, 0, 0.6);
   --radius: 4px;
   --font: Arial, Helvetica, 'Liberation Sans', sans-serif;
   --mono: Consolas, 'Cascadia Mono', 'SF Mono', 'Liberation Mono', 'Courier New', monospace;
 
+  /* Native controls (check boxes, drop-down lists, scroll bars) draw dark. */
+  color-scheme: dark;
+  accent-color: var(--accent);
   color: var(--ink);
   background: var(--bg);
   font-family: var(--font);
@@ -50,28 +59,84 @@
   -webkit-font-smoothing: antialiased;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #151616;
-    --panel: #1b1c1b;
-    --rail: #111211;
-    --line: #343632;
-    --ink: #efeee8;
-    --ink2: #a6a8a0;
-    --ink3: #94978d;
-    --accent: #ff8954;
-    --accent-soft: #392a21;
-    --accent-ink: #191a17;
-    --hover: #242522;
-    --card: #1f201e;
-    --sel: #2b2c29;
-    --enc-bg: #1d3a2f;
-    --enc-fg: #4fc89b;
-    --warn-bg: #3a1a18;
-    --warn-ink: #ffb4ab;
-    --danger-text: #ff6b5e;
-    --scrim: rgba(0, 0, 0, 0.55);
-  }
+/* Grey and orange, the default: warm dark grey surfaces, orange accent. */
+:root,
+:root[data-theme='orange'] {
+  --rail: #111211;
+  --bg: #161716;
+  --panel: #1b1c1b;
+  --card: #20211f;
+  --hover: #272826;
+  --sel: #2e2f2c;
+  --line: #383a35;
+  --line-strong: #71746b;
+  --ink: #f1f0ea;
+  --ink2: #b6b8af;
+  --ink3: #a1a498;
+  --accent: #ff8954;
+  --accent-hover: #ffa37a;
+  --accent-ink: #1a1109;
+  --accent-soft: #3b2a20;
+  --focus: #ff9a6b;
+  --danger-text: #ff7b6e;
+  --warn-bg: #3d1c19;
+  --warn-ink: #ffb8af;
+  --enc-fg: #5fd3a5;
+  --disabled-bg: #262725;
+  --disabled-ink: #73766d;
+}
+
+/* Black and red: nearly black neutral surfaces, a crimson accent. Errors
+   and warnings lean to orange-red, so they do not read as the accent. */
+:root[data-theme='red'] {
+  --rail: #060606;
+  --bg: #0a0a0a;
+  --panel: #0f0f0f;
+  --card: #141414;
+  --hover: #1b1a1a;
+  --sel: #242222;
+  --line: #2e2b2b;
+  --line-strong: #706969;
+  --ink: #f3eeee;
+  --ink2: #bcb3b3;
+  --ink3: #a59c9c;
+  --accent: #ff5468;
+  --accent-hover: #ff7584;
+  --accent-ink: #1c0306;
+  --accent-soft: #3a1219;
+  --focus: #ff6b7c;
+  --danger-text: #ff8a70;
+  --warn-bg: #3d1a12;
+  --warn-ink: #ffbca6;
+  --enc-fg: #5fd3a5;
+  --disabled-bg: #1c1b1b;
+  --disabled-ink: #6f6868;
+}
+
+/* Black and blue: nearly black, slightly cool surfaces, a blue accent. */
+:root[data-theme='blue'] {
+  --rail: #060709;
+  --bg: #0a0b0e;
+  --panel: #0f1115;
+  --card: #14171c;
+  --hover: #1b1f26;
+  --sel: #232832;
+  --line: #2c323c;
+  --line-strong: #666f7d;
+  --ink: #eef2f7;
+  --ink2: #b0b8c5;
+  --ink3: #99a2b0;
+  --accent: #5ca0ff;
+  --accent-hover: #80b6ff;
+  --accent-ink: #050d1a;
+  --accent-soft: #142640;
+  --focus: #6fadff;
+  --danger-text: #ff7b6e;
+  --warn-bg: #3d1c19;
+  --warn-ink: #ffb8af;
+  --enc-fg: #5fd3a5;
+  --disabled-bg: #1a1d23;
+  --disabled-ink: #686f7b;
 }
 
 ::selection {
@@ -134,7 +199,7 @@ button:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -198,7 +263,7 @@ button:disabled {
 }
 
 .secondary {
-  border-color: var(--line);
+  border-color: var(--line-strong);
   background: var(--card);
   color: var(--ink);
 }
@@ -210,7 +275,7 @@ button:disabled {
 }
 
 .primary:hover:not(:disabled) {
-  filter: brightness(1.06);
+  background: var(--accent-hover);
 }
 
 .secondary:hover:not(:disabled),
@@ -218,10 +283,18 @@ button:disabled {
   background: var(--hover);
 }
 
+.secondary:hover:not(:disabled) {
+  border-color: var(--ink3);
+}
+
+/* Disabled controls share one flat look in every theme: no accent, no
+   border, dimmed text. */
 .primary:disabled,
 .secondary:disabled,
 .danger:disabled {
-  opacity: 0.55;
+  border-color: transparent;
+  background: var(--disabled-bg);
+  color: var(--disabled-ink);
 }
 
 .wide {
@@ -255,6 +328,11 @@ button:disabled {
 
 .icon-button:hover:not(:disabled) {
   background: var(--hover);
+  color: var(--ink);
+}
+
+.icon-button:disabled {
+  color: var(--disabled-ink);
 }
 
 .actions {
@@ -282,7 +360,7 @@ kbd {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  color: #ffffff;
+  color: var(--on-solid);
   font-size: 13px;
   font-weight: 600;
   line-height: 1;
@@ -290,27 +368,27 @@ kbd {
 }
 
 .avatar.c0 {
-  background: #c2643f;
+  background: var(--avatar-0);
 }
 
 .avatar.c1 {
-  background: #3e6fb0;
+  background: var(--avatar-1);
 }
 
 .avatar.c2 {
-  background: #8a5bb0;
+  background: var(--avatar-2);
 }
 
 .avatar.c3 {
-  background: #2f8a6b;
+  background: var(--avatar-3);
 }
 
 .avatar.c4 {
-  background: #b0466a;
+  background: var(--avatar-4);
 }
 
 .avatar.c5 {
-  background: #b08a2e;
+  background: var(--avatar-5);
 }
 
 .avatar.small {
@@ -346,11 +424,11 @@ kbd {
 }
 
 .enc-icon.encrypted svg {
-  stroke: #ffffff;
+  stroke: var(--on-solid);
 }
 
 .enc-icon.encrypted rect {
-  fill: #ffffff;
+  fill: var(--on-solid);
 }
 
 .enc-icon.not_encrypted {
@@ -358,11 +436,11 @@ kbd {
 }
 
 .enc-icon.not_encrypted svg {
-  stroke: #ffffff;
+  stroke: var(--on-solid);
 }
 
 .enc-icon.not_encrypted rect {
-  fill: #ffffff;
+  fill: var(--on-solid);
 }
 
 /* Unknown: neither claim is made; the core refuses to send here. */
@@ -1321,7 +1399,7 @@ kbd {
 }
 
 .composer-box:focus-within {
-  border-color: var(--accent);
+  border-color: var(--focus);
 }
 
 .composer.plain .composer-box:focus-within {
@@ -1388,8 +1466,13 @@ kbd {
   stroke-width: 2.2;
 }
 
+.send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
 .send:disabled {
-  opacity: 0.45;
+  background: var(--disabled-bg);
+  color: var(--disabled-ink);
 }
 
 .composer > .note {
@@ -1566,7 +1649,7 @@ kbd {
 }
 
 .attach:disabled {
-  opacity: 0.45;
+  color: var(--disabled-ink);
 }
 
 /* Centred screens: connecting, locked, sign-in, verification. */
@@ -1604,6 +1687,18 @@ kbd {
   gap: 10px;
   font-size: 15px;
   font-weight: 600;
+}
+
+.brand-mark rect {
+  fill: var(--bg);
+}
+
+.brand-mark path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 5;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
 }
 
 .auth-card h1,
@@ -1680,16 +1775,25 @@ kbd {
   width: 100%;
   height: 42px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   outline: none;
   background: var(--bg);
   font-size: 14px;
 }
 
+/* The focus ring is the border and a 1px ring in --focus: 2px in all,
+   without moving the text. */
 .field:focus {
-  border: 1.5px solid var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.field:disabled {
+  border-color: var(--line);
+  background: var(--disabled-bg);
+  color: var(--disabled-ink);
+  cursor: default;
 }
 
 /* Modal dialogs use the native <dialog> top layer. */
@@ -1975,7 +2079,7 @@ dialog::backdrop {
 mark {
   border-radius: var(--radius);
   background: var(--match);
-  color: #1d1c1a;
+  color: var(--match-ink);
 }
 
 .palette-footer {
@@ -2708,7 +2812,7 @@ mark {
   overflow-wrap: anywhere;
 }
 
-.feature-dialog::backdrop { background: #0008; }
+.feature-dialog::backdrop { background: var(--scrim); }
 .feature-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .feature-dialog form { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
 .feature-dialog p { margin: 12px 0; }
@@ -2737,14 +2841,14 @@ mark {
 .local-results li { margin: 8px 0; }
 .search-result { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 12px; text-align: start; overflow-wrap: anywhere; }
 .search-result span { max-width: 100%; }
-.search-selected { outline: 2px solid var(--accent, #1d7a5a); outline-offset: -2px; }
+.search-selected { outline: 2px solid var(--focus); outline-offset: -2px; }
 .search-location, .draft-status { padding: 8px 16px; }
 .search-location { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
 .pane-error { padding: 8px 16px; }
 .discard-draft { align-self: flex-start; margin: 4px 16px 8px; }
 .draft-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; user-select: text; }
 
-.feature-dialog fieldset { margin: 1rem 0; border: 1px solid var(--line, #777); border-radius: .4rem; padding: .75rem; }
+.feature-dialog fieldset { margin: 1rem 0; border: 1px solid var(--line); border-radius: .4rem; padding: .75rem; }
 .feature-dialog fieldset label { display: grid; gap: .3rem; margin: .6rem 0; }
 .feature-dialog dl { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 2fr); gap: .6rem; }
 .feature-dialog dd { margin: 0; overflow-wrap: anywhere; }
@@ -2828,8 +2932,7 @@ mark {
 }
 
 .icon-action:disabled {
-  color: var(--ink3);
-  opacity: 0.6;
+  color: var(--disabled-ink);
 }
 
 /* Favourite stars: shown on hover and focus, and always when on. */
@@ -2921,7 +3024,7 @@ mark {
 }
 
 .menu-list [role='menuitem']:disabled {
-  color: var(--ink3);
+  color: var(--disabled-ink);
 }
 
 .menu-trigger[aria-expanded='true'] {

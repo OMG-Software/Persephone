@@ -2,8 +2,8 @@ use persephone_contracts::{
     AccountChange, AccountSettings, AccountState, AccountStatus, AppStatus, CHAT_TEXT_PERCENT_MAX,
     ConversationStart, DeviceList, DisplayName, INTERFACE_TEXT_PERCENT_MAX, InviteList, JoinedRoom,
     NotificationLevel, NotificationSettings, ProfileList, PublicRoomPage, RoomCreation, RoomInvite,
-    RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, ThreePidList, TimelineEvents, UserSearch,
-    generated_typescript, sample_room_summary, sample_timeline_page,
+    RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, Theme, ThreePidList, TimelineEvents,
+    UserSearch, generated_typescript, sample_room_summary, sample_timeline_page,
 };
 
 #[test]
@@ -529,11 +529,42 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true}}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"orange"}"#
     );
     // Every kind of room change shows by default.
     assert_eq!(defaults.timeline_events, TimelineEvents::default());
     assert!(defaults.timeline_events.leaves && defaults.timeline_events.room_picture);
+    // GIVEN each theme WHEN it crosses THEN it keeps its snake_case name,
+    // and grey and orange is the default.
+    assert_eq!(defaults.theme, Theme::Orange);
+    for (theme, name) in [
+        (Theme::Orange, r#""orange""#),
+        (Theme::Red, r#""red""#),
+        (Theme::Blue, r#""blue""#),
+    ] {
+        assert_eq!(serde_json::to_string(&theme).unwrap(), name);
+        assert_eq!(serde_json::from_str::<Theme>(name).unwrap(), theme);
+    }
+    // GIVEN settings from the page WHEN the theme is missing, unknown, not
+    // a name, or in another case THEN the wire form refuses them: only the
+    // stored form is lenient.
+    let complete = serde_json::to_string(&defaults).unwrap();
+    let without_theme = complete.replace(r#","theme":"orange""#, "");
+    assert_ne!(without_theme, complete);
+    for theme in [
+        r#""green""#,
+        "null",
+        "1",
+        r#""Orange""#,
+        r#"{"orange":true}"#,
+    ] {
+        let sent = complete.replace(r#""theme":"orange""#, &format!(r#""theme":{theme}"#));
+        assert!(
+            serde_json::from_str::<AccountSettings>(&sent).is_err(),
+            "{sent}"
+        );
+    }
+    assert!(serde_json::from_str::<AccountSettings>(&without_theme).is_err());
     for invalid in [
         r#"{}"#,
         r#"{"enterSends":false}"#,

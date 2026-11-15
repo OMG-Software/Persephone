@@ -65,7 +65,8 @@ test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes ar
       serverAccess: true,
       creation: true,
       upgrades: true
-    }
+    },
+    theme: 'orange'
   });
 });
 
@@ -117,6 +118,46 @@ const STORED = {
   desktopNotifications: true
 };
 const { DEFAULT_SETTINGS } = preferences;
+
+test('GIVEN a theme chosen WHEN the save is still in flight THEN it shows at once, and a restarted page reads it back', async () => {
+  // A core that keeps what it saves, as the encrypted profile does.
+  let profile = { ...DEFAULT_SETTINGS };
+  const core = {
+    load: async () => ({ ...profile }),
+    save: async (settings) => {
+      profile = { ...settings };
+    }
+  };
+  const shown = [];
+  const first = new preferences.SettingsKeeper(core, (settings) => shown.push(settings.theme));
+  await first.load();
+  const choosing = first.change({ theme: 'red' });
+  assert.equal(shown.at(-1), 'red', 'shown before the save finishes');
+  await choosing;
+  assert.equal(profile.theme, 'red');
+  assert.equal(profile.chatTextPercent, DEFAULT_SETTINGS.chatTextPercent, 'the other settings are kept');
+
+  // A restart: a new page and keeper, the same profile.
+  const reopened = [];
+  const second = new preferences.SettingsKeeper(core, (settings) => reopened.push(settings.theme));
+  await second.load();
+  assert.equal(reopened.at(-1), 'red');
+});
+
+test('GIVEN a theme change WHEN the core cannot save it THEN the stored theme comes back with a failure', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  waiting.load[0].resolve({ ...DEFAULT_SETTINGS, theme: 'blue' });
+  await loading;
+  const changing = kept.change({ theme: 'red' });
+  assert.equal(shown.settings.theme, 'red');
+  await tick();
+  assert.equal(waiting.save[0].settings.theme, 'red');
+  waiting.save[0].reject('core_unavailable');
+  await changing;
+  assert.equal(shown.settings.theme, 'blue');
+  assert.equal(shown.failure, preferences.SAVE_FAILED);
+});
 
 test('GIVEN a signed-in account WHEN its settings load THEN they are shown', async () => {
   const { kept, waiting, shown } = keeper();

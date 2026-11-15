@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { createServer } from 'vite';
+import { DEFAULT_SETTINGS as DEFAULT_PREFERENCES } from '../src/preferences.ts';
 
 // Every timeline switch, in the order the settings list them.
 const EVENT_KEYS = ['joins', 'leaves', 'invitations', 'removals', 'joinRequests', 'displayNames', 'profilePictures', 'roomName', 'topic', 'roomPicture', 'encryption', 'joinRule', 'historyVisibility', 'permissions', 'addresses', 'pinnedMessages', 'guestAccess', 'serverAccess', 'creation', 'upgrades'];
@@ -1161,7 +1162,8 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     idleLockMinutes: 0,
     notificationNames: true,
     loadRoomPictures: false,
-    timelineEvents: Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves']))
+    timelineEvents: Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves'])),
+    theme: 'orange'
   };
   const html = render(Preferences, {
     props: { settings, failure: null, mac: false, onchange: () => {} }
@@ -1192,6 +1194,31 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
   assert.match(html, /<fieldset class="choices" disabled/);
 });
 
+test('GIVEN the preferences WHEN they show THEN a theme drop-down offers the three dark themes with the saved one chosen', () => {
+  const page = (theme) =>
+    render(Preferences, {
+      props: {
+        settings: { ...DEFAULT_PREFERENCES, theme },
+        failure: null,
+        mac: false,
+        onchange: () => {}
+      }
+    }).body;
+  const chosen = (html) => {
+    const list = html.slice(html.indexOf('id="theme"'), html.indexOf('</select>', html.indexOf('id="theme"')));
+    return [...list.matchAll(/<option value="(\w+)"( selected(?:="")?)?/g)].map(([, value, on]) => [value, Boolean(on)]);
+  };
+  const html = page('red');
+  assert.match(html, /<label for="theme">Colours<\/label>/);
+  assert.match(html, />Dark grey and orange \(default\)<\/option>/);
+  assert.match(html, />Black and red<\/option>/);
+  assert.match(html, />Black and blue<\/option>/);
+  assert.deepEqual(chosen(html), [['orange', false], ['red', true], ['blue', false]]);
+  assert.deepEqual(chosen(page('blue')), [['orange', false], ['red', false], ['blue', true]]);
+  // A stored value this build does not know shows as the default theme.
+  assert.deepEqual(chosen(page('sepia')), [['orange', true], ['red', false], ['blue', false]]);
+});
+
 test('GIVEN the preferences WHEN they show THEN each kind of room change has its own switch, set as saved', () => {
   const events = Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves']));
   const html = render(Preferences, {
@@ -1205,7 +1232,8 @@ test('GIVEN the preferences WHEN they show THEN each kind of room change has its
         sendReadReceipts: false,
         idleLockMinutes: 0,
         notificationNames: true,
-        timelineEvents: events
+        timelineEvents: events,
+        theme: 'orange'
       },
       failure: null,
       mac: false,

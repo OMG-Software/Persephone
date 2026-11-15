@@ -711,7 +711,8 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       idleLockMinutes: settings.idleLockMinutes,
       notificationNames: settings.notificationNames,
       loadRoomPictures: settings.loadRoomPictures,
-      timelineEvents: timelineEvents(settings.timelineEvents)
+      timelineEvents: timelineEvents(settings.timelineEvents),
+      theme: settings.theme
     }
   });
 }

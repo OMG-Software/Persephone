@@ -132,7 +132,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           idleLockMinutes: 15,
           notificationNames: false,
           loadRoomPictures: true,
-          timelineEvents: { ...ALL_SHOWN, leaves: false }
+          timelineEvents: { ...ALL_SHOWN, leaves: false },
+          theme: 'red'
         }),
       'set_account_settings',
       {
@@ -146,7 +147,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           idleLockMinutes: 15,
           notificationNames: false,
           loadRoomPictures: true,
-          timelineEvents: { ...ALL_SHOWN, leaves: false }
+          timelineEvents: { ...ALL_SHOWN, leaves: false },
+          theme: 'red'
         }
       }
     ],
@@ -216,7 +218,8 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       notificationNames: true,
       loadRoomPictures: false,
       timelineEvents: { ...ALL_SHOWN, polls: false },
-      theme: 'dark'
+      theme: 'blue',
+      accent: 'green'
     })
   );
   assert.deepEqual(made.args, {
@@ -230,7 +233,8 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       idleLockMinutes: 0,
       notificationNames: true,
       loadRoomPictures: false,
-      timelineEvents: ALL_SHOWN
+      timelineEvents: ALL_SHOWN,
+      theme: 'blue'
     }
   });
 });
