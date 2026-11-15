@@ -911,6 +911,13 @@ kbd {
   white-space: nowrap;
 }
 
+/* A user ID beside a display name: softer than the name it follows. */
+.person-id {
+  color: var(--ink3);
+  font-size: 0.9em;
+  font-weight: 400;
+}
+
 .message-body p,
 .pending p[dir='auto'] {
   font-size: calc(14.5px * var(--chat-scale, 1));
@@ -1781,6 +1788,13 @@ dialog::backdrop {
   width: 16px;
   height: 16px;
   accent-color: var(--accent);
+}
+
+/* The timeline's room-change switches: two columns where they fit. */
+.event-switches {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px 16px;
 }
 
 .directory-results {

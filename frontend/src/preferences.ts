@@ -3,6 +3,7 @@
 // keeps none (no web storage).
 
 import type { AccountSettings } from './bridge';
+import type { TimelineEvents } from '../../crates/contracts/generated/contracts';
 
 /** The settings an account has until its own have loaded. */
 export const DEFAULT_SETTINGS: AccountSettings = {
@@ -14,7 +15,30 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   sendReadReceipts: false,
   idleLockMinutes: 0,
   notificationNames: true,
-  loadRoomPictures: false
+  loadRoomPictures: false,
+  // Every kind of room change shows until the account turns one off.
+  timelineEvents: {
+    joins: true,
+    leaves: true,
+    invitations: true,
+    removals: true,
+    joinRequests: true,
+    displayNames: true,
+    profilePictures: true,
+    roomName: true,
+    topic: true,
+    roomPicture: true,
+    encryption: true,
+    joinRule: true,
+    historyVisibility: true,
+    permissions: true,
+    addresses: true,
+    pinnedMessages: true,
+    guestAccess: true,
+    serverAccess: true,
+    creation: true,
+    upgrades: true
+  }
 };
 
 /** The idle-lock choices offered, in minutes; 0 never locks (ADR-0025). */
@@ -78,6 +102,58 @@ export type SettingsCore = {
 };
 
 /**
+ * A change to the settings: some top-level settings, and some of the
+ * timeline's switches. A switch left out keeps its value.
+ */
+export type SettingsPatch = Partial<Omit<AccountSettings, 'timelineEvents'>> & {
+  timelineEvents?: Partial<TimelineEvents>;
+};
+
+/**
+ * One setting the keeper tracks on its own: a top-level setting, or one of
+ * the timeline's switches as `timelineEvents.<switch>`. Each switch is its
+ * own field, so a switch changed while the settings load never writes the
+ * other switches' defaults over their stored values.
+ */
+type Field = string;
+
+const NESTED = 'timelineEvents';
+
+/** The fields a patch sets, with their values. */
+function fieldsOf(patch: SettingsPatch): Map<Field, unknown> {
+  const fields = new Map<Field, unknown>();
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === NESTED && value !== null && typeof value === 'object') {
+      for (const [name, on] of Object.entries(value)) fields.set(`${NESTED}.${name}`, on);
+    } else {
+      fields.set(key, value);
+    }
+  }
+  return fields;
+}
+
+/** The value of one field in `settings`. */
+function read(settings: AccountSettings, field: Field): unknown {
+  const [key, name] = field.split('.');
+  const value = (settings as Record<string, unknown>)[key];
+  return name === undefined ? value : (value as Record<string, unknown> | undefined)?.[name];
+}
+
+/** `settings` with `fields` set; nothing else changes. */
+function applied(settings: AccountSettings, fields: ReadonlyMap<Field, unknown>): AccountSettings {
+  const next: Record<string, unknown> = { ...settings };
+  for (const [field, value] of fields) {
+    const [key, name] = field.split('.');
+    if (name === undefined) {
+      next[key] = value;
+    } else {
+      next[key] = { ...(next[key] as Record<string, unknown> | undefined), [name]: value };
+    }
+  }
+  return next as AccountSettings;
+}
+
+/**
  * Keeps the signed-in account's settings in step with the core. A change is
  * a patch of the settings it touches: it shows at once, and is saved only
  * once the account's stored settings are known, laid over them, so a change
@@ -99,11 +175,17 @@ export class SettingsKeeper {
   // The settings the core last confirmed: loaded or saved. A failed save
   // puts its fields back to these.
   #stored: AccountSettings | null = null;
-  // Changes not yet saved, shown over the stored settings when they load.
-  #unsaved: Partial<AccountSettings> = {};
+  // Changes not yet saved, by field, shown over the stored settings when
+  // they load.
+  #unsaved = new Map<Field, unknown>();
   // Which change set each unsaved field last: a change undoes or forgets
   // only the fields it still owns, even when another set the same value.
-  #owners: Partial<Record<keyof AccountSettings, number>> = {};
+  #owners = new Map<Field, number>();
+  // What each unsaved field showed before its first unsaved change: what a
+  // failure puts back while the stored settings are not known. A second
+  // change to the same field keeps it, so an unconfirmed value never
+  // becomes the value to return to.
+  #baseline = new Map<Field, unknown>();
   #changes = 0;
   // The last save asked for; the next one starts after it settles.
   #saving: Promise<void> = Promise.resolve();
@@ -121,8 +203,9 @@ export class SettingsKeeper {
     this.#epoch += 1;
     this.#known = Promise.resolve(false);
     this.#stored = null;
-    this.#unsaved = {};
-    this.#owners = {};
+    this.#unsaved = new Map();
+    this.#owners = new Map();
+    this.#baseline = new Map();
     this.#set(DEFAULT_SETTINGS, null);
   }
 
@@ -135,7 +218,7 @@ export class SettingsKeeper {
         if (epoch !== this.#epoch) return false;
         if (load === this.#loads) {
           this.#stored = stored;
-          this.#set({ ...stored, ...this.#unsaved }, null);
+          this.#set(applied(stored, this.#unsaved), null);
         }
         return true;
       },
@@ -146,17 +229,17 @@ export class SettingsKeeper {
     return known.then(() => {});
   }
 
-  async change(patch: Partial<AccountSettings>) {
+  async change(patch: SettingsPatch) {
     const epoch = this.#epoch;
-    const keys = Object.keys(patch) as (keyof AccountSettings)[];
+    const changed = fieldsOf(patch);
+    const fields = [...changed.keys()];
     const change = ++this.#changes;
-    // What a failure puts back while the stored settings are not known.
-    const before: Partial<AccountSettings> = Object.fromEntries(
-      keys.map((key) => [key, this.#current[key]])
-    );
-    this.#unsaved = { ...this.#unsaved, ...patch };
-    for (const key of keys) this.#owners[key] = change;
-    this.#set({ ...this.#current, ...patch }, null);
+    for (const [field, value] of changed) {
+      if (!this.#unsaved.has(field)) this.#baseline.set(field, read(this.#current, field));
+      this.#unsaved.set(field, value);
+      this.#owners.set(field, change);
+    }
+    this.#set(applied(this.#current, changed), null);
     // The stored settings come first: saving before them would write the
     // defaults over every setting this change does not touch. Read them now
     // if no load has.
@@ -167,7 +250,7 @@ export class SettingsKeeper {
     }
     if (epoch !== this.#epoch) return;
     if (!known) {
-      this.#undo(change, keys, before);
+      this.#undo(change, fields);
       return;
     }
     // Saves go one at a time, in the order they were made: two calls in
@@ -182,45 +265,46 @@ export class SettingsKeeper {
       try {
         await this.#core.save(sent);
       } catch {
-        if (epoch === this.#epoch) this.#undo(change, keys, before);
+        if (epoch === this.#epoch) this.#undo(change, fields);
         return;
       }
       if (epoch !== this.#epoch) return;
       this.#stored = sent;
-      this.#forget(change, keys);
+      this.#forget(change, fields);
     });
     this.#saving = save.catch(() => {});
     await save;
   }
 
-  /** The fields of `keys` that `change` still owns: no newer change set them. */
-  #owned(change: number, keys: (keyof AccountSettings)[]): (keyof AccountSettings)[] {
-    return keys.filter((key) => this.#owners[key] === change);
+  /** The fields of `fields` that `change` still owns: no newer change set them. */
+  #owned(change: number, fields: Field[]): Field[] {
+    return fields.filter((field) => this.#owners.get(field) === change);
   }
 
   /** Drops a saved change's fields from the unsaved ones, where it still owns them. */
-  #forget(change: number, keys: (keyof AccountSettings)[]) {
-    for (const key of this.#owned(change, keys)) {
-      delete this.#unsaved[key];
-      delete this.#owners[key];
+  #forget(change: number, fields: Field[]) {
+    for (const field of this.#owned(change, fields)) {
+      this.#unsaved.delete(field);
+      this.#owners.delete(field);
+      this.#baseline.delete(field);
     }
   }
 
   /**
    * Puts back the fields of a change that was not saved, with a failure: to
    * what the core holds now (an earlier save may have confirmed a value
-   * since the change began), or to what was shown before it while the
-   * stored settings are not known. A field a newer change set keeps the
-   * newer value.
+   * since the change began), or, while the stored settings are not known,
+   * to what the field showed before its first unsaved change. A field a
+   * newer change set keeps the newer value.
    */
-  #undo(change: number, keys: (keyof AccountSettings)[], before: Partial<AccountSettings>) {
+  #undo(change: number, fields: Field[]) {
     const stored = this.#stored;
-    const restored = { ...this.#current };
-    for (const key of this.#owned(change, keys)) {
-      Object.assign(restored, { [key]: stored ? stored[key] : before[key] });
-    }
-    this.#forget(change, keys);
-    this.#set(restored, SAVE_FAILED);
+    const owned = this.#owned(change, fields);
+    const restored = new Map(
+      owned.map((field) => [field, stored ? read(stored, field) : this.#baseline.get(field)])
+    );
+    this.#forget(change, fields);
+    this.#set(applied(this.#current, restored), SAVE_FAILED);
   }
 
   #set(settings: AccountSettings, failure: string | null) {

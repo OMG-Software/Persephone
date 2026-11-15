@@ -50,7 +50,7 @@
   import TipButton from './TipButton.svelte';
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
-  import { isolate } from './people';
+  import { isolate, withNames } from './people';
   import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
   import { OwnNameKeeper } from './ownName';
   import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
@@ -299,6 +299,9 @@
   const pictures = new RoomPictures({ load: loadRoomPicture, band: imageBand, release: releaseImage });
   let selected = $state<string | null>(null);
   let items = $state<TimelineItem[]>([]);
+  // The display names the open room's pages listed, by user ID. A name can
+  // differ between rooms, so it is forgotten when another room opens.
+  let senderNames = $state<ReadonlyMap<string, string>>(new Map());
   let nextCursor = $state<string | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
@@ -741,6 +744,7 @@
     rooms = null;
     pictures.clear();
     items = [];
+    senderNames = new Map();
     nextCursor = null;
     error = null;
     // The host already ended the room subscription.
@@ -1131,6 +1135,7 @@
     imageError = null;
     if (roomSettingsOf !== roomId) roomSettingsOf = null;
     if (selected !== roomId) sectionOpen = false;
+    if (selected !== roomId) senderNames = new Map();
     selected = roomId;
     const contentEpoch = ++timelineEpoch;
     focusEvent = null;
@@ -1165,6 +1170,7 @@
       const page = await timelinePage(roomId, null);
       if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
       items = page.items;
+      senderNames = withNames(senderNames, page, true);
       // The restore may finish before history; replace the fallback quote now.
       refreshDraftQuote();
       nextCursor = page.nextCursor;
@@ -1237,6 +1243,7 @@
         const page = await timelinePage(roomId, null);
         if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
         items = mergeNewest(items, page.items);
+        senderNames = withNames(senderNames, page, true);
         if (signedIn) {
           loadActivity(roomId, generation);
           await loadPending(roomId, generation);
@@ -1631,6 +1638,7 @@
     if (imageDraft) cancelImage();
     selected = null;
     items = [];
+    senderNames = new Map();
     pending = [];
     contact = null;
     changes = null;
@@ -1666,6 +1674,7 @@
       const page = await timelinePage(roomId, nextCursor);
       if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
       items = [...page.items, ...items];
+      senderNames = withNames(senderNames, page, false);
       nextCursor = page.nextCursor;
     } catch (reason) {
       if (current(roomId, generation) && contentEpoch === timelineEpoch) error = describe(reason);
@@ -1689,8 +1698,13 @@
     searchLocation = 'Looking for the message in bounded history pages…';
     loading = true;
     try {
+      const named = async (roomId: string, cursor: string | null) => {
+        const page = await timelinePage(roomId, cursor);
+        if (searchContextCurrent()) senderNames = withNames(senderNames, page, cursor === null);
+        return page;
+      };
       const context = await findSearchContext(hit.roomId, hit.eventId, items, nextCursor,
-        timelinePage, searchContextCurrent);
+        named, searchContextCurrent);
       if (!context) return;
       items = context.items;
       nextCursor = context.cursor;
@@ -1724,7 +1738,7 @@
     loading = true;
     try {
       const page = await timelinePage(roomId, null);
-      if (current(roomId, generation) && contentEpoch === timelineEpoch) { items = page.items; nextCursor = page.nextCursor; refreshDraftQuote(); }
+      if (current(roomId, generation) && contentEpoch === timelineEpoch) { items = page.items; senderNames = withNames(senderNames, page, true); nextCursor = page.nextCursor; refreshDraftQuote(); }
     } catch {
       if (current(roomId, generation) && contentEpoch === timelineEpoch) error = 'The filtered timeline could not be loaded. Try opening this room again.';
     } finally {
@@ -1749,6 +1763,7 @@
       const context = await fetch(roomId);
       if (!valid()) return;
       items = context.page.items;
+      senderNames = withNames(senderNames, context.page, false);
       nextCursor = context.page.nextCursor;
       focusedContext = true;
       focusEvent = null;
@@ -2268,6 +2283,8 @@
             onloadpicture={signedIn && selectedRoom.pictureId !== null
               ? () => selectedRoom.pictureId !== null && pictures.request(selectedRoom.roomId, selectedRoom.pictureId)
               : undefined}
+            names={senderNames}
+            events={settings.timelineEvents}
           />
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>

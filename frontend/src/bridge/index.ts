@@ -64,6 +64,7 @@ import type {
   ThreePid,
   ThreePidList,
   ThreePidMedium,
+  TimelineEvents,
   TimelineItem,
   TimelinePage,
   UserMatch,
@@ -709,9 +710,40 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       sendReadReceipts: settings.sendReadReceipts,
       idleLockMinutes: settings.idleLockMinutes,
       notificationNames: settings.notificationNames,
-      loadRoomPictures: settings.loadRoomPictures
+      loadRoomPictures: settings.loadRoomPictures,
+      timelineEvents: timelineEvents(settings.timelineEvents)
     }
   });
+}
+
+/**
+ * Exactly the timeline switches the contract names, each as given. A switch
+ * left out stays out, and the host refuses the call, as for any other setting.
+ */
+function timelineEvents(given: TimelineEvents | undefined): Partial<TimelineEvents> {
+  const events: Partial<TimelineEvents> = given ?? {};
+  return {
+    joins: events.joins,
+    leaves: events.leaves,
+    invitations: events.invitations,
+    removals: events.removals,
+    joinRequests: events.joinRequests,
+    displayNames: events.displayNames,
+    profilePictures: events.profilePictures,
+    roomName: events.roomName,
+    topic: events.topic,
+    roomPicture: events.roomPicture,
+    encryption: events.encryption,
+    joinRule: events.joinRule,
+    historyVisibility: events.historyVisibility,
+    permissions: events.permissions,
+    addresses: events.addresses,
+    pinnedMessages: events.pinnedMessages,
+    guestAccess: events.guestAccess,
+    serverAccess: events.serverAccess,
+    creation: events.creation,
+    upgrades: events.upgrades
+  };
 }
 
 /** The profile's SOCKS5 proxy as `host:port`, or none (ADR-0028). */

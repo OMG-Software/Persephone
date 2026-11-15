@@ -127,6 +127,7 @@ async fn focused_context(
             None if items.iter().any(|item| item_id(item) == Some(raw)) => raw.to_owned(),
             None => return Err(ErrorCode::NotFound),
         };
+        let names = crate::matrix_views::page_names(&joined, &items, &context.state).await;
         items.push(TimelineItem::Gap { next_cursor: None });
         // Register only after the budget check to avoid evicting useful cursors
         // for responses that will be retried.
@@ -135,6 +136,7 @@ async fn focused_context(
                 room_id: room.to_owned(),
                 items,
                 next_cursor: None,
+                names,
             },
             event_id: selected,
         };

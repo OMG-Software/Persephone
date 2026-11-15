@@ -58,7 +58,7 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"rooms":[{"roomId":"!r:example.invalid","favourite":true,"section":"Work"}]}),
             ),
             Call::JumpToDate { room_id, .. } | Call::EventContext { room_id, .. } => Ok(
-                serde_json::json!({"page":{"roomId":room_id,"items":[],"nextCursor":null},"eventId":"$match"}),
+                serde_json::json!({"page":{"roomId":room_id,"items":[],"nextCursor":null,"names":[]},"eventId":"$match"}),
             ),
             Call::PinnedMessages { room_id } => Ok(
                 serde_json::json!({"roomId":room_id,"eventIds":["$match"],"items":[],"canManage":true,"truncated":false}),
@@ -258,11 +258,12 @@ impl CoreTransport for FakeCore {
                 ("!r:example.invalid", None) => Ok(serde_json::json!({
                     "roomId": room_id,
                     "items": [{"kind": "message", "event_id": "$1", "sender": "@a:example.invalid", "body": "hi", "origin_server_ts": 1_767_258_000_000_u64}],
-                    "nextCursor": null
+                    "nextCursor": null,
+                    "names": [{"userId": "@a:example.invalid", "displayName": "A"}]
                 })),
                 // A reply with a field the contract does not have.
                 ("!bad-reply:example.invalid", _) => Ok(serde_json::json!({
-                    "roomId": room_id, "items": [], "nextCursor": null, "accessToken": "x"
+                    "roomId": room_id, "items": [], "nextCursor": null, "names": [], "accessToken": "x"
                 })),
                 (_, Some(_)) => Err(CoreError::Core(ErrorCode::InvalidArgument)),
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
@@ -397,7 +398,8 @@ impl CoreTransport for FakeCore {
             Call::AccountSettings {} => Ok(serde_json::json!({
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
                 "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
-                "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false
+                "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false,
+                "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
@@ -1752,7 +1754,7 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
             "interfaceTextPercent": 100, "desktopNotifications": false,
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
-            "notificationNames": true, "loadRoomPictures": false}})
+            "notificationNames": true, "loadRoomPictures": false, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}}})
     };
     assert!(invoke("set_account_settings", settings(true)).is_ok());
     assert_eq!(
