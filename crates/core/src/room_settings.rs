@@ -41,7 +41,7 @@ use matrix_sdk::{
     notification_settings::RoomNotificationMode,
     room::RoomMember as StoredMember,
     ruma::{
-        Int, OwnedRoomAliasId, OwnedUserId, RoomAliasId, RoomId, ServerName, UserId,
+        Int, OwnedRoomAliasId, OwnedRoomId, OwnedUserId, RoomAliasId, RoomId, ServerName, UserId,
         api::{
             client::{
                 room::{Visibility, aliases},
@@ -79,7 +79,10 @@ use persephone_core_protocol::{
     MAX_ROOM_NAME_BYTES, MAX_TOPIC_BYTES, MAX_USER_ID_BYTES,
 };
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Mutex, MutexGuard, PoisonError},
+};
 
 /// A change the page asked for, after validation.
 #[derive(Debug, PartialEq)]
@@ -586,36 +589,100 @@ fn fit(members: &mut RoomMembers) {
     }
 }
 
+/// Most rooms [`Refreshed`] remembers; the oldest is forgotten first.
+const MAX_REFRESHED_ROOMS: usize = 64;
+
+/// The homeserver's joined and invited counts that rooms' member lists were
+/// last asked for against, in one session generation. `/members` answers
+/// with current state, and the counts can trail it: a list asked for again
+/// is not asked for once more while its room's counts stay the same.
+#[derive(Default)]
+pub struct Refreshed {
+    generation: u64,
+    rooms: VecDeque<(OwnedRoomId, (u64, u64))>,
+}
+
+impl Refreshed {
+    /// Whether `room_id`'s list was asked for in `generation` against
+    /// `counts`.
+    fn covers(&self, generation: u64, room_id: &RoomId, counts: (u64, u64)) -> bool {
+        self.generation == generation
+            && self
+                .rooms
+                .iter()
+                .any(|(known, seen)| known == room_id && *seen == counts)
+    }
+
+    /// Remembers that `room_id`'s list was asked for in `generation` against
+    /// `counts`. A new generation forgets every room of the one before; an
+    /// older generation, which finished after the session changed, is
+    /// ignored.
+    fn remember(&mut self, generation: u64, room_id: &RoomId, counts: (u64, u64)) {
+        if generation < self.generation {
+            return;
+        }
+        if self.generation != generation {
+            self.generation = generation;
+            self.rooms.clear();
+        }
+        self.rooms.retain(|(known, _)| known != room_id);
+        if self.rooms.len() == MAX_REFRESHED_ROOMS {
+            self.rooms.pop_front();
+        }
+        self.rooms.push_back((room_id.to_owned(), counts));
+    }
+}
+
 /// The room's members with `memberships`, which must include joined and
 /// invited ones. The stored list stays current only while every member event
 /// reaches the SDK. Sliding Sync sends other people's member events in the
-/// timeline only, so a join made while the app was closed, or more events in
-/// one round than the timeline holds, leaves the list stale until the next
-/// member event. Every sync round carries the homeserver's joined and invited
-/// counts: when the stored list disagrees with them, it is asked for again,
-/// once. A count of no joined members means the homeserver sent none.
+/// timeline only, so a join among more events than one round's timeline
+/// holds leaves the list stale until the next member event. Every sync round
+/// carries the homeserver's joined and invited counts: when the stored list
+/// disagrees with them, it is asked for again, once per change of the
+/// counts (see [`Refreshed`]). A count of no joined members means the
+/// homeserver sent none. If asking again fails, the stored list is used and
+/// the next listing asks again.
 async fn current_members(
     room: &Room,
     memberships: RoomMemberships,
+    refreshed: &Mutex<Refreshed>,
+    generation: u64,
 ) -> matrix_sdk::Result<Vec<StoredMember>> {
+    let counts = (room.joined_members_count(), room.invited_members_count());
+    // A list marked missing is asked for now, so it is already current.
+    let asked = !room.are_members_synced();
     let members = room.members(memberships).await?;
-    if counts_agree(
-        room.joined_members_count(),
-        room.invited_members_count(),
-        &members,
-    ) {
+    if asked {
+        remember(refreshed, generation, room.room_id(), counts);
         return Ok(members);
     }
-    drop(members);
+    if counts_agree(counts, &members) || lock(refreshed).covers(generation, room.room_id(), counts)
+    {
+        return Ok(members);
+    }
     room.mark_members_missing();
-    room.members(memberships).await
+    match room.members(memberships).await {
+        Ok(current) => {
+            remember(refreshed, generation, room.room_id(), counts);
+            Ok(current)
+        }
+        Err(_) => Ok(members),
+    }
 }
 
-/// Whether `members` has `joined` joined and `invited` invited members, or
-/// the counts are unknown (no joined members).
-fn counts_agree(joined: u64, invited: u64, members: &[StoredMember]) -> bool {
-    joined == 0
-        || stored_counts(members.iter().map(|member| member.membership())) == (joined, invited)
+fn remember(refreshed: &Mutex<Refreshed>, generation: u64, room_id: &RoomId, counts: (u64, u64)) {
+    lock(refreshed).remember(generation, room_id, counts);
+}
+
+fn lock(refreshed: &Mutex<Refreshed>) -> MutexGuard<'_, Refreshed> {
+    refreshed.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether `members` has the `(joined, invited)` counts, or the counts are
+/// unknown (no joined members).
+fn counts_agree(counts: (u64, u64), members: &[StoredMember]) -> bool {
+    counts.0 == 0 || stored_counts(members.iter().map(|member| member.membership())) == counts
 }
 
 /// How many of `memberships` are joined and how many invited.
@@ -632,12 +699,22 @@ fn stored_counts<'a>(memberships: impl Iterator<Item = &'a MembershipState>) -> 
 /// joined or invited members by user ID, each with this account's trust in
 /// them and their devices split by whether they receive room keys
 /// (ADR-0005), from the local crypto store.
-pub async fn readers(client: &Client, room_id: &str) -> Result<RoomReaders, ErrorCode> {
+pub async fn readers(
+    client: &Client,
+    room_id: &str,
+    refreshed: &Mutex<Refreshed>,
+    generation: u64,
+) -> Result<RoomReaders, ErrorCode> {
     let room = joined(client, room_id)?;
     let own = own_user(client)?;
-    let all = current_members(&room, RoomMemberships::JOIN | RoomMemberships::INVITE)
-        .await
-        .map_err(|_| ErrorCode::Unavailable)?;
+    let all = current_members(
+        &room,
+        RoomMemberships::JOIN | RoomMemberships::INVITE,
+        refreshed,
+        generation,
+    )
+    .await
+    .map_err(|_| ErrorCode::Unavailable)?;
     // Sorted and cut by reference first: only the listed IDs are copied.
     let mut sorted: Vec<&UserId> = all.iter().map(|member| member.user_id()).collect();
     sorted.sort();
@@ -735,6 +812,8 @@ pub async fn members(
     client: &Client,
     room_id: &str,
     filter: &str,
+    refreshed: &Mutex<Refreshed>,
+    generation: u64,
 ) -> Result<RoomMembers, ErrorCode> {
     let room = joined(client, room_id)?;
     let own = own_user(client)?;
@@ -745,6 +824,8 @@ pub async fn members(
             | RoomMemberships::INVITE
             | RoomMemberships::KNOCK
             | RoomMemberships::BAN,
+        refreshed,
+        generation,
     )
     .await
     .map_err(|_| ErrorCode::Unavailable)?;
@@ -981,6 +1062,56 @@ fn request_error(error: &matrix_sdk::Error) -> ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn room(n: usize) -> OwnedRoomId {
+        RoomId::parse(format!("!r{n}:example.invalid")).unwrap()
+    }
+
+    /// GIVEN a room's list asked for against some counts WHEN the same counts
+    /// are seen again THEN it is covered, and other counts or another room
+    /// are not.
+    #[test]
+    fn given_a_refresh_then_only_its_room_and_counts_are_covered() {
+        let mut refreshed = Refreshed::default();
+        refreshed.remember(1, &room(1), (1, 1));
+        assert!(refreshed.covers(1, &room(1), (1, 1)));
+        assert!(!refreshed.covers(1, &room(1), (2, 0)), "the counts changed");
+        assert!(!refreshed.covers(1, &room(2), (1, 1)), "another room");
+        refreshed.remember(1, &room(1), (2, 0));
+        assert!(refreshed.covers(1, &room(1), (2, 0)));
+        assert!(
+            !refreshed.covers(1, &room(1), (1, 1)),
+            "only the last counts"
+        );
+    }
+
+    /// GIVEN refreshes of one session generation WHEN another generation is
+    /// seen THEN nothing of the first is covered, and a late refresh from an
+    /// older generation is ignored.
+    #[test]
+    fn given_a_new_session_generation_then_older_refreshes_are_forgotten() {
+        let mut refreshed = Refreshed::default();
+        refreshed.remember(1, &room(1), (1, 1));
+        assert!(!refreshed.covers(2, &room(1), (1, 1)));
+        refreshed.remember(2, &room(2), (1, 0));
+        assert!(!refreshed.covers(1, &room(1), (1, 1)), "forgotten");
+        refreshed.remember(1, &room(3), (1, 0));
+        assert!(!refreshed.covers(1, &room(3), (1, 0)), "older generation");
+        assert!(refreshed.covers(2, &room(2), (1, 0)));
+    }
+
+    /// GIVEN more rooms refreshed than are remembered WHEN one more is
+    /// refreshed THEN the oldest is forgotten and the count stays bounded.
+    #[test]
+    fn given_too_many_refreshed_rooms_then_the_oldest_is_forgotten() {
+        let mut refreshed = Refreshed::default();
+        for n in 0..=MAX_REFRESHED_ROOMS {
+            refreshed.remember(1, &room(n), (1, 0));
+        }
+        assert_eq!(refreshed.rooms.len(), MAX_REFRESHED_ROOMS);
+        assert!(!refreshed.covers(1, &room(0), (1, 0)));
+        assert!(refreshed.covers(1, &room(MAX_REFRESHED_ROOMS), (1, 0)));
+    }
 
     /// GIVEN devices that are and are not cross-signed by their owner WHEN
     /// split THEN each counts on its side, and no devices count as none.

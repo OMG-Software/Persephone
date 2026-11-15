@@ -1037,6 +1037,42 @@ impl Homeserver {
         joined
     }
 
+    /// Sliding Sync whose counts still show `CONTACT` as invited, as a
+    /// server's can trail its state, while `/members` already lists them as
+    /// joined.
+    fn counts_trail_members(&self) {
+        let own = json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}});
+        self.runtime.block_on(async {
+            Mock::given(method("POST"))
+                .and(path(
+                    "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+                ))
+                .respond_with(SlidingJoin {
+                    joined: Arc::new(AtomicBool::new(false)),
+                    in_timeline: false,
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+                .respond_with(Members(json!([own, {"type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$bobjoin","origin_server_ts":12,"content":{"membership":"join"}}])))
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Requests for a room's member list.
+    fn members_requests(&self) -> usize {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path().ends_with("/members"))
+            .count()
+    }
+
     /// Accepts every state event sent to a room.
     fn state_events_accepted(&self) {
         self.runtime.block_on(
@@ -1587,6 +1623,53 @@ fn given_sliding_sync_when_an_invited_member_joins_then_the_list_shows_them_join
 #[test]
 fn given_sliding_sync_when_a_join_is_missed_then_the_counts_refresh_the_list() {
     invited_member_joins(false);
+}
+
+/// GIVEN Sliding Sync counts that still show `CONTACT` as invited while
+/// `/members` lists them as joined WHEN the members and readers are listed
+/// again and again THEN the list shows them joined and is not asked for
+/// again while the counts stay the same.
+#[test]
+fn given_counts_that_trail_the_member_list_then_it_is_not_asked_for_again() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.settings_endpoints();
+    server.counts_trail_members();
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
+    let contact = || {
+        value::<RoomMembers>(call(
+            &core,
+            Call::RoomMembers {
+                room_id: ROOM.into(),
+                filter: String::new(),
+            },
+        ))
+        .members
+        .into_iter()
+        .find(|member| member.user_id == CONTACT)
+        .map(|member| member.membership)
+    };
+    assert_eq!(contact(), Some(Membership::Join));
+    let asked = server.members_requests();
+    for _ in 0..3 {
+        assert_eq!(contact(), Some(Membership::Join));
+        let _ = call(
+            &core,
+            Call::RoomReaders {
+                room_id: ROOM.into(),
+            },
+        );
+    }
+    assert_eq!(server.members_requests(), asked);
 }
 
 /// `CONTACT` is listed as invited, joins (`in_timeline` as in
