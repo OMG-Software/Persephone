@@ -258,10 +258,13 @@ fn history() -> Value {
     )
 }
 
-/// `/messages` for `ROOM` with `history()`. When the request's filter asks
-/// for lazy-loaded members, the answer's `state` has the member events of
-/// `USER`, who sent the page's events, and of `@mallory:synthetic.test`,
-/// whose only event (a forged edit) the page leaves out; otherwise it has
+/// `/messages` for `ROOM` with `history()` and, newest, a message each
+/// from `@nameless:synthetic.test` and `@stranger:synthetic.test`. When the
+/// request's filter asks for lazy-loaded members, the answer's `state` has
+/// the member events of `USER`, who sent most of the page's events, of
+/// `@nameless:synthetic.test`, which has no display name, and of
+/// `@mallory:synthetic.test`, whose only event (a forged edit) the page
+/// leaves out; it has none for `@stranger:synthetic.test`. Otherwise it has
 /// none, like a server that does not lazy-load.
 struct LazyHistory;
 
@@ -277,14 +280,27 @@ impl wiremock::Respond for LazyHistory {
                 ROOM,
                 json!([
                     {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$lazyme","origin_server_ts":1,"content":{"membership":"join","displayname":"Alice <b>admin</b>"}},
-                    {"type":"m.room.member","state_key":"@mallory:synthetic.test","sender":"@mallory:synthetic.test","event_id":"$lazymal","origin_server_ts":1,"content":{"membership":"join","displayname":"Mallory"}}
+                    {"type":"m.room.member","state_key":"@mallory:synthetic.test","sender":"@mallory:synthetic.test","event_id":"$lazymal","origin_server_ts":1,"content":{"membership":"join","displayname":"Mallory"}},
+                    {"type":"m.room.member","state_key":"@nameless:synthetic.test","sender":"@nameless:synthetic.test","event_id":"$lazynameless","origin_server_ts":1,"content":{"membership":"join"}}
                 ]),
             )
         } else {
             json!([])
         };
+        let mut chunk = in_room(
+            ROOM,
+            json!([
+                {"type":"m.room.message","sender":"@nameless:synthetic.test","event_id":"$nameless","origin_server_ts":13,"content":{"msgtype":"m.text","body":"no name"}},
+                {"type":"m.room.message","sender":"@stranger:synthetic.test","event_id":"$stranger","origin_server_ts":12,"content":{"msgtype":"m.text","body":"unknown"}}
+            ]),
+        );
+        let older = history();
+        chunk
+            .as_array_mut()
+            .unwrap()
+            .extend(older.as_array().unwrap().iter().cloned());
         ResponseTemplate::new(200)
-            .set_body_json(json!({"start":"history","end":"older","chunk":history(),"state":state}))
+            .set_body_json(json!({"start":"history","end":"older","chunk":chunk,"state":state}))
     }
 }
 
@@ -1491,6 +1507,9 @@ fn given_native_sliding_sync_then_room_settings_come_from_the_room_state() {
 /// GIVEN a homeserver that lazy-loads members WHEN a page of history is
 /// read THEN the core asks for the page's members, and the page lists the
 /// display name of each person it shows, as inert text, and no one else's.
+/// A person whose member event has no name is listed without one; a person
+/// with no member event in the answer or the store is not listed, so their
+/// name stays unknown rather than removed.
 #[test]
 fn given_lazy_loaded_members_then_a_page_lists_the_display_names_it_shows() {
     let server = Homeserver::start(
@@ -1521,10 +1540,16 @@ fn given_lazy_loaded_members_then_a_page_lists_the_display_names_it_shows() {
     ));
     assert_eq!(
         page.names,
-        [SenderName {
-            user_id: USER.into(),
-            display_name: "Alice <b>admin</b>".into(),
-        }]
+        [
+            SenderName {
+                user_id: USER.into(),
+                display_name: Some("Alice <b>admin</b>".into()),
+            },
+            SenderName {
+                user_id: "@nameless:synthetic.test".into(),
+                display_name: None,
+            },
+        ]
     );
 }
 

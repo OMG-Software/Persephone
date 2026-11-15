@@ -66,6 +66,19 @@ fn serde_rejects_unknown_fields_and_variants() {
     assert!(
         serde_json::from_str::<persephone_contracts::TimelinePage>(unknown_nested_field).is_err()
     );
+
+    // A name entry says "no display name" only with an explicit null; one
+    // without the field is refused, not read as having none.
+    type Name = persephone_contracts::SenderName;
+    let none: Name = serde_json::from_str(r#"{"userId":"@a:s","displayName":null}"#).unwrap();
+    assert_eq!(none.display_name, None);
+    for invalid in [
+        r#"{"userId":"@a:s"}"#,
+        r#"{"userId":"@a:s","displayName":7}"#,
+        r#"{"userId":"@a:s","displayName":null,"avatarUrl":"mxc://s/m"}"#,
+    ] {
+        assert!(serde_json::from_str::<Name>(invalid).is_err(), "{invalid}");
+    }
 }
 
 #[test]

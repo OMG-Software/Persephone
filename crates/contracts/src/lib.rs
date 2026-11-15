@@ -386,8 +386,9 @@ pub struct TimelinePage {
     pub items: Vec<TimelineItem>,
     pub next_cursor: Option<String>,
     /// The display names of the senders and member-change targets of
-    /// `items` that have one, at most one entry per user ID. A user ID not
-    /// listed has no known display name.
+    /// `items` whose member event the core found, at most one entry per
+    /// user ID. A user ID not listed has an unknown display name, which is
+    /// not the same as an entry without one.
     pub names: Vec<SenderName>,
 }
 
@@ -397,7 +398,10 @@ pub struct TimelinePage {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SenderName {
     pub user_id: String,
-    pub display_name: String,
+    /// `None` when the user's member event shows no display name. Required:
+    /// an entry without it would say "no name" for "not sent".
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub display_name: Option<String>,
 }
 
 /// Reply of the `room_list` command. The core caps the number of rooms;
@@ -1903,10 +1907,16 @@ pub fn sample_timeline_page() -> TimelinePage {
             TimelineItem::Gap { next_cursor: None },
         ],
         next_cursor: Some("cursor-2".into()),
-        names: vec![SenderName {
-            user_id: "@alice:server.invalid".into(),
-            display_name: "Alice <b>admin</b>".into(),
-        }],
+        names: vec![
+            SenderName {
+                user_id: "@alice:server.invalid".into(),
+                display_name: Some("Alice <b>admin</b>".into()),
+            },
+            SenderName {
+                user_id: "@bob:server.invalid".into(),
+                display_name: None,
+            },
+        ],
     }
 }
 

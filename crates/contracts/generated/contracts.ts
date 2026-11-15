@@ -523,13 +523,19 @@ origin_server_ts: number | null, redacts: string, } | { "kind": "state", event_i
  */
 origin_server_ts: number | null, change: StateChange, };
 
-export type SenderName = { userId: string, displayName: string, };
+export type SenderName = { userId: string, 
+/**
+ * `None` when the user's member event shows no display name. Required:
+ * an entry without it would say "no name" for "not sent".
+ */
+displayName: string | null, };
 
 export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, 
 /**
  * The display names of the senders and member-change targets of
- * `items` that have one, at most one entry per user ID. A user ID not
- * listed has no known display name.
+ * `items` whose member event the core found, at most one entry per
+ * user ID. A user ID not listed has an unknown display name, which is
+ * not the same as an entry without one.
  */
 names: Array<SenderName>, };
 
@@ -605,6 +611,10 @@ export const timelinePageFixture = {
     {
       "userId": "@alice:server.invalid",
       "displayName": "Alice <b>admin</b>"
+    },
+    {
+      "userId": "@bob:server.invalid",
+      "displayName": null
     }
   ]
 } as const satisfies TimelinePage;

@@ -412,14 +412,17 @@ fn named_users(items: &[TimelineItem]) -> BTreeSet<&str> {
 /// The display names of the people `items` show, for
 /// [`TimelinePage::names`]: from `state`, the member events that a
 /// lazy-loading `/messages` or `/context` answer carries, or else from the
-/// store. One entry per person who has a name; nothing is fetched.
+/// store; nothing is fetched. A person whose member event was found has an
+/// entry: their name, or `None` when that event shows none. A person whose
+/// member event was not found, or could not be read, has no entry: their
+/// name is unknown, which is not the same as having none.
 pub(crate) async fn page_names(
     room: &matrix_sdk::Room,
     items: &[TimelineItem],
     state: &[Raw<AnyStateEvent>],
 ) -> Vec<SenderName> {
     let wanted = named_users(items);
-    let mut names: BTreeMap<&str, String> = BTreeMap::new();
+    let mut names: BTreeMap<&str, Option<String>> = BTreeMap::new();
     for raw in state.iter().take(MAX_NAME_EVENTS) {
         if raw.get_field::<String>("type").ok().flatten().as_deref() != Some("m.room.member") {
             continue;
@@ -430,14 +433,15 @@ pub(crate) async fn page_names(
         let Some(&user) = wanted.get(user.as_str()) else {
             continue;
         };
-        let name = raw
-            .get_field::<serde_json::Value>("content")
-            .ok()
-            .flatten()
-            .and_then(|content| content.get("displayname")?.as_str().and_then(shown_text));
-        if let Some(name) = name {
-            names.entry(user).or_insert(name);
-        }
+        // An event whose content cannot be read says nothing about the name.
+        let Some(content) = raw.get_field::<serde_json::Value>("content").ok().flatten() else {
+            continue;
+        };
+        let name = content
+            .get("displayname")
+            .and_then(serde_json::Value::as_str)
+            .and_then(shown_text);
+        names.entry(user).or_insert(name);
     }
     for &user in &wanted {
         if names.contains_key(user) {
@@ -446,10 +450,10 @@ pub(crate) async fn page_names(
         let Ok(id) = UserId::parse(user) else {
             continue;
         };
-        if let Ok(Some(member)) = room.get_member_no_sync(&id).await
-            && let Some(name) = member.display_name().and_then(shown_text)
-        {
-            names.insert(user, name);
+        // A member the store does not have, or a failed read, leaves the
+        // name unknown.
+        if let Ok(Some(member)) = room.get_member_no_sync(&id).await {
+            names.insert(user, member.display_name().and_then(shown_text));
         }
     }
     names

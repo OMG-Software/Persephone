@@ -48,6 +48,10 @@
     {
       "userId": "@alice:server.invalid",
       "displayName": "Alice <b>admin</b>"
+    },
+    {
+      "userId": "@bob:server.invalid",
+      "displayName": null
     }
   ]
 }

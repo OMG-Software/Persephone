@@ -1,6 +1,6 @@
 // Display helpers for Matrix user IDs. Pure functions; the results are
 // rendered as escaped text only.
-import type { SenderName, TimelineItem } from '../../crates/contracts/generated/contracts';
+import type { SenderName } from '../../crates/contracts/generated/contracts';
 
 /** The localpart of `@name:server`, or the whole text if it has no such form. */
 export function localpart(userId: string): string {
@@ -70,56 +70,31 @@ export function isolate(text: string): string {
 export const MAX_KNOWN_NAMES = 1000;
 
 /**
- * The people a page can name: every sender, and the person a membership,
- * display name or profile picture line is about. The core lists names for
- * the same people, so one it leaves out has no display name.
- */
-export function pageUsers(items: readonly TimelineItem[]): Set<string> {
-  const users = new Set<string>();
-  for (const item of items) {
-    if (item.kind === 'gap') continue;
-    users.add(item.sender);
-    if (item.kind === 'state') {
-      const change = item.change;
-      if (
-        change.type === 'member' ||
-        change.type === 'display_name' ||
-        change.type === 'profile_picture'
-      ) {
-        users.add(change.target);
-      }
-    }
-  }
-  return users;
-}
-
-/**
- * `known` with the display names of a page. A page of the newest messages
- * holds each of its people's current names: a newer name replaces the older
- * one, and a person it lists without one is kept as known to have none, by
- * their own ID (which `shownName` does not show). An older page (older
- * history, or the messages around a search result or reply) only adds the
- * names of people not yet known: its names can be out of date, so it never
- * brings back a name a newer page removed. When more than `max` people are
- * known, the longest-known are dropped. Names are untrusted text.
+ * `known` with the display names of a page. The core lists a person only
+ * when it found their member event: with their name, or with `null` when
+ * that event shows none. A person not listed has an unknown name, and what
+ * is known about them stays.
+ *
+ * A page of the newest messages holds its people's current names: a newer
+ * name replaces the older one, and a person listed without one is kept as
+ * known to have none, by their own ID (which `shownName` does not show). An
+ * older page (older history, or the messages around a search result or
+ * reply) only adds the names of people not yet known: its names can be out
+ * of date, so it never brings back a name a newer page removed. When more
+ * than `max` people are known, the longest-known are dropped. Names are
+ * untrusted text.
  */
 export function withNames(
   known: ReadonlyMap<string, string>,
-  page: { readonly items: readonly TimelineItem[]; readonly names: readonly SenderName[] },
+  page: { readonly names: readonly SenderName[] },
   newest: boolean,
   max: number = MAX_KNOWN_NAMES
 ): Map<string, string> {
   const names = new Map(known);
-  if (newest) {
-    for (const userId of pageUsers(page.items)) {
-      names.delete(userId);
-      names.set(userId, userId);
-    }
-  }
   for (const { userId, displayName } of page.names) {
-    if (!newest && names.has(userId)) continue;
+    if (!newest && (names.has(userId) || displayName === null)) continue;
     names.delete(userId);
-    names.set(userId, displayName);
+    names.set(userId, displayName ?? userId);
   }
   for (const userId of names.keys()) {
     if (names.size <= max) break;
