@@ -1156,7 +1156,7 @@
       const page = await timelinePage(roomId, null);
       if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
       items = page.items;
-      senderNames = withNames(senderNames, page.names);
+      senderNames = withNames(senderNames, page, true);
       // The restore may finish before history; replace the fallback quote now.
       refreshDraftQuote();
       nextCursor = page.nextCursor;
@@ -1229,7 +1229,7 @@
         const page = await timelinePage(roomId, null);
         if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
         items = mergeNewest(items, page.items);
-        senderNames = withNames(senderNames, page.names);
+        senderNames = withNames(senderNames, page, true);
         if (signedIn) {
           loadActivity(roomId, generation);
           await loadPending(roomId, generation);
@@ -1660,7 +1660,7 @@
       const page = await timelinePage(roomId, nextCursor);
       if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
       items = [...page.items, ...items];
-      senderNames = withNames(senderNames, page.names);
+      senderNames = withNames(senderNames, page, false);
       nextCursor = page.nextCursor;
     } catch (reason) {
       if (current(roomId, generation) && contentEpoch === timelineEpoch) error = describe(reason);
@@ -1686,7 +1686,7 @@
     try {
       const named = async (roomId: string, cursor: string | null) => {
         const page = await timelinePage(roomId, cursor);
-        if (searchContextCurrent()) senderNames = withNames(senderNames, page.names);
+        if (searchContextCurrent()) senderNames = withNames(senderNames, page, cursor === null);
         return page;
       };
       const context = await findSearchContext(hit.roomId, hit.eventId, items, nextCursor,
@@ -1724,7 +1724,7 @@
     loading = true;
     try {
       const page = await timelinePage(roomId, null);
-      if (current(roomId, generation) && contentEpoch === timelineEpoch) { items = page.items; senderNames = withNames(senderNames, page.names); nextCursor = page.nextCursor; refreshDraftQuote(); }
+      if (current(roomId, generation) && contentEpoch === timelineEpoch) { items = page.items; senderNames = withNames(senderNames, page, true); nextCursor = page.nextCursor; refreshDraftQuote(); }
     } catch {
       if (current(roomId, generation) && contentEpoch === timelineEpoch) error = 'The filtered timeline could not be loaded. Try opening this room again.';
     } finally {
@@ -1749,7 +1749,7 @@
       const context = await fetch(roomId);
       if (!valid()) return;
       items = context.page.items;
-      senderNames = withNames(senderNames, context.page.names);
+      senderNames = withNames(senderNames, context.page, false);
       nextCursor = context.page.nextCursor;
       focusedContext = true;
       focusEvent = null;

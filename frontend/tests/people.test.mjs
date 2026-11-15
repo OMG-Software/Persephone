@@ -49,20 +49,57 @@ test('GIVEN typed text that cannot be invited WHEN a room is created THEN it is 
   assert.deepEqual(inviteesWith(full, '@extra:s'), { problem: 'too_many' });
 });
 
-test('GIVEN pages of display names WHEN remembered THEN a newer name replaces an older one and only the newest are kept', () => {
+const said = (sender) => ({ kind: 'message', event_id: `$${sender}`, sender, body: 'hi', origin_server_ts: null, reply_to: null });
+const page = (senders, names) => ({ items: senders.map(said), names });
+
+test('GIVEN pages of the newest messages WHEN remembered THEN a newer name replaces an older one and only the newest are kept', () => {
   const { withNames } = people;
-  const first = withNames(new Map(), [
+  const first = withNames(new Map(), page(['@a:s', '@b:s'], [
     { userId: '@a:s', displayName: 'Ann' },
     { userId: '@b:s', displayName: 'Ben' }
-  ]);
-  const second = withNames(first, [{ userId: '@a:s', displayName: 'Annie' }]);
+  ]), true);
+  const second = withNames(first, page(['@a:s'], [{ userId: '@a:s', displayName: 'Annie' }]), true);
   assert.deepEqual([...second], [
     ['@b:s', 'Ben'],
     ['@a:s', 'Annie']
   ]);
   assert.equal(first.get('@a:s'), 'Ann', 'the known names are not changed in place');
-  const bounded = withNames(second, [{ userId: '@c:s', displayName: 'Cy' }], 2);
+  const bounded = withNames(second, page(['@c:s'], [{ userId: '@c:s', displayName: 'Cy' }]), true, 2);
   assert.deepEqual([...bounded.keys()], ['@a:s', '@c:s'], 'the longest-known name goes first');
+});
+
+test('GIVEN a newest page that names a person without a display name WHEN remembered THEN their old name is gone and others stay', () => {
+  const known = new Map([
+    ['@a:s', 'Ann'],
+    ['@b:s', 'Ben']
+  ]);
+  const names = people.withNames(known, page(['@a:s'], []), true);
+  assert.deepEqual([...names], [['@b:s', 'Ben']], 'Ben is not on the page, so the page says nothing about him');
+});
+
+test('GIVEN an older page WHEN remembered THEN it only adds people not yet known, and never removes a name', () => {
+  const known = new Map([['@a:s', 'Annie']]);
+  const names = people.withNames(known, page(['@a:s', '@b:s', '@c:s'], [
+    { userId: '@a:s', displayName: 'Ann' },
+    { userId: '@b:s', displayName: 'Ben' }
+  ]), false);
+  assert.deepEqual([...names], [
+    ['@a:s', 'Annie'],
+    ['@b:s', 'Ben']
+  ]);
+});
+
+test('GIVEN a page WHEN its people are found THEN senders and the people membership and profile lines are about count, and gaps do not', () => {
+  const state = (sender, change) => ({ kind: 'state', event_id: `$${sender}`, sender, origin_server_ts: null, change });
+  const users = people.pageUsers([
+    said('@a:s'),
+    { kind: 'gap' },
+    state('@b:s', { type: 'member', target: '@c:s', membership: 'invited' }),
+    state('@d:s', { type: 'display_name', target: '@d2:s', name: 'D' }),
+    state('@e:s', { type: 'profile_picture', target: '@e2:s' }),
+    state('@f:s', { type: 'topic', topic: '@not-a-person:s' })
+  ]);
+  assert.deepEqual([...users].sort(), ['@a:s', '@b:s', '@c:s', '@d2:s', '@d:s', '@e2:s', '@e:s', '@f:s'].sort());
 });
 
 test('GIVEN known names WHEN a person is shown THEN the name comes with the ID, and a missing or ID-only name gives the ID once', () => {

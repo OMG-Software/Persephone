@@ -9,7 +9,8 @@
     CHAT_TEXT_SIZES,
     IDLE_LOCK_CHOICES,
     INTERFACE_TEXT_SIZES,
-    idleLockText
+    idleLockText,
+    type SettingsPatch
   } from './preferences';
 
   // This account's preferences. The settings are kept in its encrypted
@@ -24,9 +25,9 @@
     settings: AccountSettings;
     failure: string | null;
     mac: boolean;
-    // Only the settings a control changes; the caller lays them over the
-    // stored ones.
-    onchange: (patch: Partial<AccountSettings>) => void;
+    // Only the settings a control changes, down to one timeline switch; the
+    // caller lays them over the stored ones.
+    onchange: (patch: SettingsPatch) => void;
   } = $props();
 
   // Whether the core cannot read this computer's idle time (ADR-0025).
@@ -107,10 +108,7 @@
             type="checkbox"
             role="switch"
             checked={settings.timelineEvents[key]}
-            onchange={(event) =>
-              onchange({
-                timelineEvents: { ...settings.timelineEvents, [key]: event.currentTarget.checked }
-              })}
+            onchange={(event) => onchange({ timelineEvents: { [key]: event.currentTarget.checked } })}
           />
           <span>{label}</span>
         </label>

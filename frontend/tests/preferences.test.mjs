@@ -144,6 +144,47 @@ test('GIVEN a change made while the settings load WHEN the load finishes THEN on
   assert.equal(shown.failure, null);
 });
 
+test('GIVEN one timeline switch changed while the settings load WHEN the load finishes THEN the other stored switches are kept', async () => {
+  const { kept, waiting, shown } = keeper();
+  const stored = {
+    ...STORED,
+    timelineEvents: { ...DEFAULT_SETTINGS.timelineEvents, joins: false, topic: false }
+  };
+  const loading = kept.load();
+  const changing = kept.change({ timelineEvents: { leaves: false } });
+  assert.equal(shown.settings.timelineEvents.leaves, false, 'shown at once');
+  assert.equal(shown.settings.timelineEvents.joins, true, 'the default until the stored switches are known');
+  waiting.load[0].resolve(stored);
+  await loading;
+  const expected = { ...stored, timelineEvents: { ...stored.timelineEvents, leaves: false } };
+  assert.deepEqual(shown.settings, expected);
+  await tick();
+  assert.deepEqual(waiting.save[0].settings, expected, 'the stored switches are not overwritten with defaults');
+  waiting.save[0].resolve();
+  await changing;
+  assert.deepEqual(shown.settings, expected);
+});
+
+test('GIVEN two switches changed WHEN the first save fails THEN only its switch returns, and the second is kept', async () => {
+  const { kept, waiting, shown } = keeper();
+  const stored = { ...STORED, timelineEvents: DEFAULT_SETTINGS.timelineEvents };
+  const loading = kept.load();
+  waiting.load[0].resolve(stored);
+  await loading;
+  const first = kept.change({ timelineEvents: { leaves: false } });
+  const second = kept.change({ timelineEvents: { joins: false } });
+  await tick();
+  waiting.save[0].reject('locked');
+  await first;
+  assert.equal(shown.settings.timelineEvents.leaves, true);
+  assert.equal(shown.settings.timelineEvents.joins, false);
+  assert.equal(shown.failure, preferences.SAVE_FAILED);
+  await tick();
+  assert.deepEqual(waiting.save[1].settings.timelineEvents, { ...DEFAULT_SETTINGS.timelineEvents, joins: false });
+  waiting.save[1].resolve();
+  await second;
+});
+
 test('GIVEN a change WHEN the core refuses to save it THEN only that setting returns, with a failure', async () => {
   const { kept, waiting, shown } = keeper();
   const loading = kept.load();
