@@ -23,7 +23,9 @@
     | 'flag'
     | 'verify'
     | 'shield-alert'
-    | 'shield-off';
+    | 'shield-off'
+    | 'chevron-left'
+    | 'chevron-right';
 </script>
 
 <script lang="ts">
@@ -70,6 +72,10 @@
   {:else if name === 'users'}
     <circle cx="9" cy="8" r="3.5" />
     <path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14.5a6.5 6.5 0 0 1 3.5 5.5" />
+  {:else if name === 'chevron-left'}
+    <path d="m15 6-6 6 6 6" />
+  {:else if name === 'chevron-right'}
+    <path d="m9 6 6 6-6 6" />
   {:else if name === 'close'}
     <path d="M6 6l12 12M18 6 6 18" />
   {:else if name === 'star'}

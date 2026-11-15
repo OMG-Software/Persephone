@@ -21,15 +21,23 @@
   import { findSearchContext } from './searchNavigation';
   import Devices from './Devices.svelte';
   import Icon from './Icon.svelte';
+  import IconAction from './IconAction.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
   import MemberPanel from './MemberPanel.svelte';
   import {
+    MEMBERS,
+    MEMBERS_DEFAULT,
+    MEMBERS_MIN,
     SIDEBAR_DEFAULT,
     SIDEBAR_MIN,
     clampSidebar,
+    clampWidth,
     draggedSidebar,
+    draggedWidth,
     keyedSidebar,
+    keyedWidth,
     membersFit,
+    membersLimit,
     sidebarLimit
   } from './layout';
   import IdentityChanges from './IdentityChanges.svelte';
@@ -280,6 +288,8 @@
   let trustVersion = $state(0);
   // The room list width, changed with the resize handle; kept in memory only.
   let sidebarWidth = $state(SIDEBAR_DEFAULT);
+  // The member panel width, changed with its own handle; in memory only.
+  let membersWidth = $state(MEMBERS_DEFAULT);
   let focusEvent = $state<string | null>(null);
   let searchLocation = $state<string | null>(null);
   /** Open the manager even when a full draft cannot be saved, so another draft can be removed. */
@@ -333,6 +343,8 @@
   const sidebarMax = $derived(sidebarLimit(available));
   const shownSidebar = $derived(Math.min(sidebarWidth, sidebarMax));
   const membersRoom = $derived(membersFit(available, shownSidebar));
+  const membersMax = $derived(membersLimit(available, shownSidebar));
+  const shownMembers = $derived(Math.min(membersWidth, membersMax));
   const settingsKeeper = new SettingsKeeper(
     { load: accountSettings, save: setAccountSettings },
     (next, failure) => {
@@ -1837,19 +1849,24 @@
     }
   }
 
-  // Resizing the room list with the pointer: the pointer that owns the drag,
-  // the width and pointer position when it started, and pointer pixels per
-  // CSS pixel (the interface zoom). Other pointers cannot move or end it.
-  let drag: { pointerId: number; width: number; x: number; ratio: number } | null = null;
-  function startResize(event: PointerEvent) {
+  // Resizing the room list or the member panel with the pointer: which
+  // column, the pointer that owns the drag, the width and pointer position
+  // when it started, and pointer pixels per CSS pixel (the interface zoom).
+  // Other pointers cannot move or end it.
+  type Column = 'sidebar' | 'members';
+  let drag: { column: Column; pointerId: number; width: number; x: number; ratio: number } | null = null;
+  function startResize(event: PointerEvent, column: Column) {
     if (event.button !== 0) return;
     const handle = event.currentTarget as HTMLElement;
     // A drag in progress keeps its pointer. A drag whose handle went away
     // (the shell was replaced mid-drag) holds no capture and is replaced.
     if (drag && drag.pointerId !== event.pointerId && handle.hasPointerCapture(drag.pointerId)) return;
-    const sidebar = handle.previousElementSibling;
-    const shown = sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : shownSidebar;
-    drag = { pointerId: event.pointerId, width: shownSidebar, x: event.clientX, ratio: shown / shownSidebar };
+    const width = column === 'sidebar' ? shownSidebar : shownMembers;
+    // The column the handle resizes: the room list before it, or the
+    // member panel after it.
+    const beside = column === 'sidebar' ? handle.previousElementSibling : handle.nextElementSibling;
+    const shown = beside instanceof HTMLElement ? beside.getBoundingClientRect().width : width;
+    drag = { column, pointerId: event.pointerId, width, x: event.clientX, ratio: shown / width };
     handle.setPointerCapture(event.pointerId);
     event.preventDefault();
   }
@@ -1860,7 +1877,12 @@
       drag = null;
       return;
     }
-    sidebarWidth = draggedSidebar(drag.width, drag.x, event.clientX, drag.ratio, sidebarMax);
+    if (drag.column === 'sidebar') {
+      sidebarWidth = draggedSidebar(drag.width, drag.x, event.clientX, drag.ratio, sidebarMax);
+    } else {
+      // The member panel's handle is on its left edge: it grows leftwards.
+      membersWidth = draggedWidth(MEMBERS, drag.width, drag.x, event.clientX, drag.ratio, membersMax, -1);
+    }
   }
   function endResize(event: PointerEvent) {
     if (!drag || event.pointerId !== drag.pointerId) return;
@@ -1868,11 +1890,25 @@
     const handle = event.currentTarget as HTMLElement;
     if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
   }
-  function keyResize(event: KeyboardEvent) {
-    const next = keyedSidebar(shownSidebar, event.key, sidebarMax);
+  function keyResize(event: KeyboardEvent, column: Column) {
+    const next =
+      column === 'sidebar'
+        ? keyedSidebar(shownSidebar, event.key, sidebarMax)
+        : keyedWidth(MEMBERS, shownMembers, event.key, membersMax, 'ArrowLeft');
     if (next === null) return;
     event.preventDefault();
-    sidebarWidth = next;
+    if (column === 'sidebar') sidebarWidth = next;
+    else membersWidth = next;
+  }
+
+  // Collapse or open the member panel from its own buttons. The button
+  // pressed goes away, so focus moves to the one that undoes it.
+  async function showMembers(shown: boolean) {
+    membersShown = shown;
+    await tick();
+    document
+      .querySelector<HTMLButtonElement>(shown ? '.member-heading button' : '.members-rail button')
+      ?.focus();
   }
 
   // The main menu: account-wide tools that used to be buttons above the room.
@@ -2222,11 +2258,11 @@
         aria-valuemax={sidebarMax}
         aria-valuenow={shownSidebar}
         tabindex="0"
-        onpointerdown={startResize}
+        onpointerdown={(event) => startResize(event, 'sidebar')}
         onpointermove={moveResize}
         onpointerup={endResize}
         onpointercancel={endResize}
-        onkeydown={keyResize}
+        onkeydown={(event) => keyResize(event, 'sidebar')}
         ondblclick={() => (sidebarWidth = clampSidebar(SIDEBAR_DEFAULT, sidebarMax))}
       ></div>
       <div class="pane">
@@ -2247,7 +2283,7 @@
           />
         {/if}
         {#if selectedRoom}
-          <div class="room-view">
+          <div class="room-view" style:--members-width="{shownMembers}px">
           <div class="room-main">
           {#if searchLocation || (signedIn && focusedContext)}
             <div class="search-location">
@@ -2404,23 +2440,50 @@
             {/if}
           {/if}
           </div>
-          {#if signedIn && membersShown && membersRoom}
-            {#key selectedRoom.roomId + ':' + sessionGeneration}
-              <MemberPanel
-                roomId={selectedRoom.roomId}
-                version={roomChanges + trustVersion}
-                {contact}
-                paused={roomSettingsOf !== null}
-                canVerify={security?.identity === 'verified'}
-                verifying={securityBusy ||
-                  security?.operation !== 'idle' ||
-                  (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
-                asking={memberNeedsRoom}
-                onverify={verifyMember}
-                oncancelask={() => (memberAsked = null)}
-                onmessage={messageMember}
-              />
-            {/key}
+          {#if signedIn && membersRoom}
+            {#if membersShown}
+              <!-- Drag, or focus and use the arrow keys, to resize the member
+                   list; it grows to the left. The same window-splitter pattern
+                   as the room list's handle. -->
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+              <div
+                class="resize-handle"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize member list"
+                aria-valuemin={MEMBERS_MIN}
+                aria-valuemax={membersMax}
+                aria-valuenow={shownMembers}
+                tabindex="0"
+                onpointerdown={(event) => startResize(event, 'members')}
+                onpointermove={moveResize}
+                onpointerup={endResize}
+                onpointercancel={endResize}
+                onkeydown={(event) => keyResize(event, 'members')}
+                ondblclick={() => (membersWidth = clampWidth(MEMBERS, MEMBERS_DEFAULT, membersMax))}
+              ></div>
+              {#key selectedRoom.roomId + ':' + sessionGeneration}
+                <MemberPanel
+                  roomId={selectedRoom.roomId}
+                  version={roomChanges + trustVersion}
+                  {contact}
+                  paused={roomSettingsOf !== null}
+                  canVerify={security?.identity === 'verified'}
+                  verifying={securityBusy ||
+                    security?.operation !== 'idle' ||
+                    (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
+                  asking={memberNeedsRoom}
+                  onverify={verifyMember}
+                  oncancelask={() => (memberAsked = null)}
+                  onmessage={messageMember}
+                  oncollapse={() => showMembers(false)}
+                />
+              {/key}
+            {:else}
+              <div class="members-rail">
+                <IconAction icon="users" label="Show members" tip="start" onclick={() => showMembers(true)} />
+              </div>
+            {/if}
           {/if}
           </div>
         {:else}

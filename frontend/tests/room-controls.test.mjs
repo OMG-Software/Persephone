@@ -73,6 +73,16 @@ test('GIVEN room members WHEN listed THEN each unverified person has a Verify ic
   assert.doesNotMatch(html, /Verify this device to verify other people/);
 });
 
+test('GIVEN the member panel WHEN it can collapse THEN its heading has a Hide members button, and none without the callback', () => {
+  const collapsible = members({ rows: [row('@amy:s', 'verified')], oncollapse() {} });
+  assert.match(collapsible, /<div class="member-heading"><h2 id="members-heading">/);
+  assert.match(collapsible, /<span class="action-anchor tip-start"><button type="button" class="icon-action[^"]*"[^>]*>/);
+  assert.match(collapsible, /aria-hidden="true">Hide members<\/span>/);
+  const fixed = members({ rows: [row('@amy:s', 'verified')] });
+  assert.doesNotMatch(fixed, /Hide members/);
+  assert.match(fixed, /id="members-heading"/, 'the heading still names the panel');
+});
+
 test('GIVEN this device is not verified, or a verification runs WHEN members are listed THEN Verify is disabled', () => {
   const unverifiedDevice = members({ rows: [row('@amy:s', 'unverified')], canVerify: false });
   assert.match(unverifiedDevice, /class="icon-action member-verify" disabled/);

@@ -870,9 +870,12 @@ kbd {
   margin: 8px 20px 0;
 }
 
+/* The timeline scrolls only up and down: text wraps, and nothing in it is
+   wider than the room. */
 .scroller {
   flex: 1;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   overflow-anchor: auto;
 }
@@ -2882,7 +2885,9 @@ mark {
   white-space: nowrap;
   pointer-events: none;
   transform: translateX(-50%);
-  visibility: hidden;
+  /* Not drawn and given no space until shown: a hidden tip near an edge
+     would otherwise widen its scroll area. */
+  display: none;
 }
 
 .tip-above > .action-tip {
@@ -2902,11 +2907,20 @@ mark {
 
 .action-anchor:hover > .action-tip,
 .action-anchor > button:focus-visible + .action-tip {
-  visibility: visible;
+  display: block;
 }
 
 .action-anchor > .action-tip.dismissed {
-  visibility: hidden;
+  display: none;
+}
+
+/* The actions of a message sit at the right edge of the timeline: their
+   tips end at the button's right edge, so none reaches past the room. */
+.message-actions .tip-above > .action-tip,
+.message-actions .tip-below > .action-tip {
+  right: 0;
+  left: auto;
+  transform: none;
 }
 
 .icon-action {
@@ -3051,7 +3065,8 @@ mark {
   flex: none;
   flex-direction: column;
   gap: 8px;
-  width: 248px;
+  /* Set by the member panel's resize handle (App.svelte, layout.ts). */
+  width: var(--members-width, 248px);
   min-height: 0;
   padding: 16px 8px 12px 12px;
   overflow-y: auto;
@@ -3059,12 +3074,33 @@ mark {
   background: var(--panel);
 }
 
+.member-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .member-panel h2 {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
+}
+
+/* The member panel while it is collapsed: a narrow strip with the button
+   that opens it again. */
+.members-rail {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  width: 40px;
+  padding: 12px 0;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
 }
 
 .member-count {
