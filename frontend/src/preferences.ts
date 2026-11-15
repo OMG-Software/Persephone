@@ -180,6 +180,11 @@ export class SettingsKeeper {
   // Which change set each unsaved field last: a change undoes or forgets
   // only the fields it still owns, even when another set the same value.
   #owners = new Map<Field, number>();
+  // What each unsaved field showed before its first unsaved change: what a
+  // failure puts back while the stored settings are not known. A second
+  // change to the same field keeps it, so an unconfirmed value never
+  // becomes the value to return to.
+  #baseline = new Map<Field, unknown>();
   #changes = 0;
   // The last save asked for; the next one starts after it settles.
   #saving: Promise<void> = Promise.resolve();
@@ -199,6 +204,7 @@ export class SettingsKeeper {
     this.#stored = null;
     this.#unsaved = new Map();
     this.#owners = new Map();
+    this.#baseline = new Map();
     this.#set(DEFAULT_SETTINGS, null);
   }
 
@@ -227,9 +233,8 @@ export class SettingsKeeper {
     const changed = fieldsOf(patch);
     const fields = [...changed.keys()];
     const change = ++this.#changes;
-    // What a failure puts back while the stored settings are not known.
-    const before = new Map(fields.map((field) => [field, read(this.#current, field)]));
     for (const [field, value] of changed) {
+      if (!this.#unsaved.has(field)) this.#baseline.set(field, read(this.#current, field));
       this.#unsaved.set(field, value);
       this.#owners.set(field, change);
     }
@@ -244,7 +249,7 @@ export class SettingsKeeper {
     }
     if (epoch !== this.#epoch) return;
     if (!known) {
-      this.#undo(change, fields, before);
+      this.#undo(change, fields);
       return;
     }
     // Saves go one at a time, in the order they were made: two calls in
@@ -259,7 +264,7 @@ export class SettingsKeeper {
       try {
         await this.#core.save(sent);
       } catch {
-        if (epoch === this.#epoch) this.#undo(change, fields, before);
+        if (epoch === this.#epoch) this.#undo(change, fields);
         return;
       }
       if (epoch !== this.#epoch) return;
@@ -280,21 +285,22 @@ export class SettingsKeeper {
     for (const field of this.#owned(change, fields)) {
       this.#unsaved.delete(field);
       this.#owners.delete(field);
+      this.#baseline.delete(field);
     }
   }
 
   /**
    * Puts back the fields of a change that was not saved, with a failure: to
    * what the core holds now (an earlier save may have confirmed a value
-   * since the change began), or to what was shown before it while the
-   * stored settings are not known. A field a newer change set keeps the
-   * newer value.
+   * since the change began), or, while the stored settings are not known,
+   * to what the field showed before its first unsaved change. A field a
+   * newer change set keeps the newer value.
    */
-  #undo(change: number, fields: Field[], before: ReadonlyMap<Field, unknown>) {
+  #undo(change: number, fields: Field[]) {
     const stored = this.#stored;
     const owned = this.#owned(change, fields);
     const restored = new Map(
-      owned.map((field) => [field, stored ? read(stored, field) : before.get(field)])
+      owned.map((field) => [field, stored ? read(stored, field) : this.#baseline.get(field)])
     );
     this.#forget(change, fields);
     this.#set(applied(this.#current, restored), SAVE_FAILED);

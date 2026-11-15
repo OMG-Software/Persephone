@@ -185,6 +185,24 @@ test('GIVEN two switches changed WHEN the first save fails THEN only its switch 
   await second;
 });
 
+test('GIVEN one switch changed twice while the settings cannot be read WHEN every load fails THEN it returns to its value before the first change', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  const first = kept.change({ timelineEvents: { leaves: false } });
+  const second = kept.change({ timelineEvents: { leaves: true } });
+  assert.equal(shown.settings.timelineEvents.leaves, true);
+  waiting.load[0].reject('locked');
+  await loading;
+  // Each change reads the settings again before it gives up.
+  for (let i = 0; i < 10 && waiting.load.length < 3; i += 1) await tick();
+  assert.equal(waiting.load.length, 3);
+  for (const load of waiting.load.slice(1)) load.reject('locked');
+  await Promise.all([first, second]);
+  assert.equal(waiting.save.length, 0, 'nothing is saved without the stored settings');
+  assert.deepEqual(shown.settings, DEFAULT_SETTINGS, 'no unconfirmed value is left showing');
+  assert.equal(shown.failure, preferences.SAVE_FAILED);
+});
+
 test('GIVEN a change WHEN the core refuses to save it THEN only that setting returns, with a failure', async () => {
   const { kept, waiting, shown } = keeper();
   const loading = kept.load();
