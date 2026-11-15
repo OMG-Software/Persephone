@@ -551,10 +551,23 @@ kbd {
   background: var(--panel);
 }
 
+/* The top of the room list: the main menu at the left, then a spacer and
+   the actions at the right; the search below them. */
 .sidebar-top {
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  padding: 14px 12px 8px;
+  padding: 10px 12px 8px;
+}
+
+.sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar-spacer {
+  flex: 1;
 }
 
 .search-trigger {
@@ -2831,7 +2844,6 @@ mark {
 .room-group-list .actions { margin: 0; }
 .feature-dialog .room-group-rooms { max-height: 50vh; overflow-y: auto; }
 .feature-dialog .room-group-rooms label { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: .4rem 0; overflow-wrap: anywhere; }
-.explore-rooms { display: block; margin: 12px 8px 4px; }
 .public-room-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: 40vh; overflow-y: auto; }
 .public-room-row { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 6px 8px; border: 0; border-radius: var(--radius); background: transparent; color: inherit; text-align: start; overflow-wrap: anywhere; }
 .public-room-row:hover, .public-room-row[aria-current='true'] { background: var(--hover); }
@@ -2920,6 +2932,13 @@ mark {
 .message-actions .tip-below > .action-tip {
   right: 0;
   left: auto;
+  transform: none;
+}
+
+/* The main menu sits at the left edge of the room list: its tip starts at
+   the button's left edge, so none reaches past the window. */
+.sidebar-actions > .tip-below > .action-tip {
+  left: 0;
   transform: none;
 }
 

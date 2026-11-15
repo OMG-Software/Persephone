@@ -64,7 +64,7 @@
     pictures?: RoomPictures | null;
     // The width in CSS pixels, set by the resize handle.
     width?: number;
-    // The main menu, shown next to the new-conversation buttons.
+    // The main menu, at the top left; the other actions are at the right.
     menu?: Snippet;
     // Shown above the account footer, such as a prompt to verify this device.
     notice?: Snippet;
@@ -75,6 +75,37 @@
 
 <aside class="sidebar" aria-label="Navigation" style:width={width === undefined ? undefined : width + 'px'}>
   <div class="sidebar-top">
+    <div class="sidebar-actions">
+      {@render menu?.()}
+      <span class="sidebar-spacer"></span>
+      {#if onnewconversation}
+        <button
+          type="button"
+          class="icon-button"
+          aria-label="New conversation"
+          title="New conversation"
+          onclick={onnewconversation}
+        >
+          <Icon name="plus" />
+        </button>
+      {/if}
+      {#if onnewroom}
+        <button type="button" class="icon-button" aria-label="New room" title="New room" onclick={onnewroom}>
+          <Icon name="users" />
+        </button>
+      {/if}
+      {#if onexplore}
+        <button
+          type="button"
+          class="icon-button"
+          aria-label="Explore public rooms"
+          title="Explore public rooms"
+          onclick={onexplore}
+        >
+          <Icon name="globe" />
+        </button>
+      {/if}
+    </div>
     <button
       type="button"
       class="search-trigger"
@@ -85,23 +116,6 @@
       <span>Search or jump to…</span>
       <kbd>{shortcut}</kbd>
     </button>
-    {#if onnewconversation}
-      <button
-        type="button"
-        class="icon-button"
-        aria-label="New conversation"
-        title="New conversation"
-        onclick={onnewconversation}
-      >
-        <Icon name="plus" />
-      </button>
-    {/if}
-    {#if onnewroom}
-      <button type="button" class="icon-button" aria-label="New room" title="New room" onclick={onnewroom}>
-        <Icon name="users" />
-      </button>
-    {/if}
-    {@render menu?.()}
   </div>
   <div class="sidebar-scroll">
     {#if invites && invites.invites.length > 0}
@@ -126,9 +140,6 @@
       />
     {:else}
       <p class="note" role="status">Loading rooms…</p>
-    {/if}
-    {#if onexplore}
-      <button type="button" class="link explore-rooms" onclick={onexplore}>Explore public rooms</button>
     {/if}
   </div>
   {@render notice?.()}

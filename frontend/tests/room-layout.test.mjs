@@ -148,6 +148,8 @@ test('GIVEN the stylesheet WHEN the timeline and tooltips are laid out THEN noth
     rule('.message-actions .tip-above > .action-tip, .message-actions .tip-below > .action-tip'),
     /right:\s*0/
   );
+  // The main menu's tip, at the window's left edge, starts at the button.
+  assert.match(rule('.sidebar-actions > .tip-below > .action-tip'), /left:\s*0/);
 });
 
 const reader = (userId, trust, own = false) => ({ userId, trust, receiving: 1, refused: 0, own });

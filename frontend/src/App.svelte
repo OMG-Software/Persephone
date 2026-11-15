@@ -2222,7 +2222,7 @@
       >
         {#snippet menu()}
           {#if signedIn}
-            <Menu id="main-menu" label="Main menu" icon="menu" items={mainMenu} />
+            <Menu id="main-menu" label="Main menu" icon="menu" items={mainMenu} align="start" />
           {/if}
         {/snippet}
         {#snippet notice()}
