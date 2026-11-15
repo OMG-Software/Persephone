@@ -525,8 +525,8 @@ origin_server_ts: number | null, change: StateChange, };
 
 export type SenderName = { userId: string, 
 /**
- * `None` when the user's member event shows no display name. Required:
- * an entry without it would say "no name" for "not sent".
+ * `None` when the user's member event shows no display name. An unknown
+ * name is a user ID not listed at all, never an entry.
  */
 displayName: string | null, };
 

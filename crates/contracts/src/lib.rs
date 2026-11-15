@@ -398,9 +398,8 @@ pub struct TimelinePage {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SenderName {
     pub user_id: String,
-    /// `None` when the user's member event shows no display name. Required:
-    /// an entry without it would say "no name" for "not sent".
-    #[serde(deserialize_with = "Option::deserialize")]
+    /// `None` when the user's member event shows no display name. An unknown
+    /// name is a user ID not listed at all, never an entry.
     pub display_name: Option<String>,
 }
 
