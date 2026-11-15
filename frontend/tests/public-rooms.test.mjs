@@ -142,7 +142,6 @@ test('GIVEN the room list WHEN an account is signed in THEN Explore public rooms
     shortcut: 'Ctrl K',
     onselect() {},
     onsearch() {},
-    onsettings() {}
   };
   const html = shown(render(Sidebar, { props: { ...props, onexplore() {} } }).body);
   const row = html.slice(html.indexOf('class="sidebar-actions"'), html.indexOf('class="search-trigger"'));
@@ -161,7 +160,6 @@ test('GIVEN the room list top WHEN it renders THEN the menu is at the left, then
         shortcut: 'Ctrl K',
         onselect() {},
         onsearch() {},
-        onsettings() {},
         onnewconversation() {},
         onnewroom() {},
         onexplore() {},
@@ -183,5 +181,6 @@ test('GIVEN the room list top WHEN it renders THEN the menu is at the left, then
     'aria-label="Explore public rooms"',
     'class="search-trigger"'
   ].map(at);
-  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));  // Settings and Lock are in the main menu, not in the account footer.
+  assert.doesNotMatch(html.slice(html.indexOf('class="account-footer"')), /<button/);
 });

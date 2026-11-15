@@ -19,7 +19,6 @@
     shortcut,
     onselect,
     onsearch,
-    onsettings,
     onnewconversation,
     onnewroom,
     onexplore,
@@ -30,8 +29,7 @@
     pictures = null,
     width,
     menu,
-    notice,
-    lock
+    notice
   }: {
     rooms: Rooms | null;
     // Room invitations, or null when there are none to show.
@@ -48,7 +46,6 @@
     shortcut: string;
     onselect: (roomId: string) => void;
     onsearch: () => void;
-    onsettings: () => void;
     // Opens the new-conversation dialog; absent when there is no account.
     onnewconversation?: () => void;
     // Opens the new-room dialog; absent when there is no account.
@@ -68,8 +65,6 @@
     menu?: Snippet;
     // Shown above the account footer, such as a prompt to verify this device.
     notice?: Snippet;
-    // The Lock button, when the session can be locked.
-    lock?: Snippet;
   } = $props();
 </script>
 
@@ -154,9 +149,5 @@
         <span class="account-id">No account</span>
       </div>
     {/if}
-    {@render lock?.()}
-    <button type="button" class="icon-button" aria-label="Settings" title="Settings" onclick={onsettings}>
-      <Icon name="settings" />
-    </button>
   </div>
 </aside>

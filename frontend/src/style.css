@@ -716,7 +716,7 @@ kbd {
   align-items: center;
   gap: 10px;
   height: 60px;
-  padding: 0 10px 0 14px;
+  padding: 0 14px;
   border-top: 1px solid var(--line);
 }
 

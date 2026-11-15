@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { menuTarget } from '../src/menu.ts';
+import { mainMenuItems, menuTarget } from '../src/menu.ts';
 import {
   SIDEBAR_DEFAULT,
   SIDEBAR_MAX,
@@ -41,6 +41,39 @@ test('GIVEN an open menu WHEN a key does not move focus or nothing can take it T
   assert.equal(menuTarget('Enter', 0, [true, true]), null);
   assert.equal(menuTarget('ArrowDown', 0, [false, false]), null);
   assert.equal(menuTarget('Home', 0, []), null);
+});
+
+const chosen = [];
+const actions = Object.fromEntries(
+  ['explore', 'groups', 'search', 'drafts', 'ignored', 'health', 'settings', 'lock'].map((name) => [name, () => chosen.push(name)])
+);
+const mainMenu = (state) =>
+  mainMenuItems({ signedIn: true, canLock: true, switching: false, confirmingSignOut: false, ...state }, actions);
+
+test('GIVEN a signed-in account WHEN the main menu opens THEN Settings and Lock Persephone follow the account tools', () => {
+  const items = mainMenu({});
+  assert.deepEqual(items.map((item) => item.label), [
+    'Explore public rooms', 'Room groups', 'Search cached messages', 'Saved drafts', 'Ignored users', 'Connection health',
+    'Settings', 'Lock Persephone'
+  ]);
+  assert.equal(items[6].separated, true, 'a line sets Settings and Lock apart');
+  chosen.length = 0;
+  items.at(-2).onselect();
+  items.at(-1).onselect();
+  assert.deepEqual(chosen, ['settings', 'lock']);
+  assert.equal(items.at(-1).disabled, false);
+});
+
+test('GIVEN no account WHEN the main menu opens THEN Settings is still there and nothing else is', () => {
+  const items = mainMenu({ signedIn: false, canLock: false });
+  assert.deepEqual(items.map((item) => [item.label, Boolean(item.separated)]), [['Settings', false]]);
+});
+
+test('GIVEN the session is changing or the sign-out question is open WHEN the main menu opens THEN Lock is disabled', () => {
+  const working = mainMenu({ switching: true }).at(-1);
+  assert.deepEqual([working.label, working.disabled], ['Working…', true]);
+  const asking = mainMenu({ confirmingSignOut: true }).at(-1);
+  assert.deepEqual([asking.label, asking.disabled], ['Lock Persephone', true]);
 });
 
 test('GIVEN a room list width WHEN it is clamped THEN it stays in range and a value that is not a number gives the default', () => {

@@ -23,6 +23,7 @@
   import Icon from './Icon.svelte';
   import IconAction from './IconAction.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
+  import { mainMenuItems } from './menu.ts';
   import MemberPanel from './MemberPanel.svelte';
   import {
     MEMBERS,
@@ -1911,15 +1912,27 @@
       ?.focus();
   }
 
-  // The main menu: account-wide tools that used to be buttons above the room.
-  const mainMenu: MenuItem[] = [
-    { label: 'Explore public rooms', onselect: () => (directoryOpen = true) },
-    { label: 'Room groups', onselect: () => (groupsOpen = rooms !== null) },
-    { label: 'Search cached messages', onselect: () => (searchOpen = true) },
-    { label: 'Saved drafts', onselect: () => void openSavedDrafts() },
-    { label: 'Ignored users', onselect: () => (ignoreOpen = true) },
-    { label: 'Connection health', onselect: () => (healthOpen = true) }
-  ];
+  // The main menu: account-wide tools, Settings and Lock.
+  const mainMenu = $derived(
+    mainMenuItems(
+      {
+        signedIn,
+        canLock: status?.store === 'protected' || status?.store === 'locking',
+        switching,
+        confirmingSignOut
+      },
+      {
+        explore: () => (directoryOpen = true),
+        groups: () => (groupsOpen = rooms !== null),
+        search: () => (searchOpen = true),
+        drafts: () => void openSavedDrafts(),
+        ignored: () => (ignoreOpen = true),
+        health: () => (healthOpen = true),
+        settings: () => openSettings('security'),
+        lock: () => void toggleLock()
+      }
+    )
+  );
 
   /** The selected room's menu: what used to be buttons at the top of the room. */
   function roomMenu(roomId: string, direct: boolean): MenuItem[] {
@@ -1965,22 +1978,16 @@
   {/if}
 {/snippet}
 
-{#snippet lockButton(above: boolean, iconOnly: boolean)}
+{#snippet lockButton()}
   <!-- Not while the sign-out question is open: it would apply to a locked session. -->
   <TipButton
     id="lock-help"
     help={LOCK_HELP}
-    {above}
-    class={iconOnly ? 'icon-button' : 'secondary'}
-    label={iconOnly ? (switching ? 'Working…' : 'Lock') : undefined}
+    class="secondary"
     disabled={switching || confirmingSignOut}
     onclick={toggleLock}
   >
-    {#if iconOnly}
-      <Icon name="lock" />
-    {:else}
-      {switching ? 'Working…' : 'Lock'}
-    {/if}
+    {switching ? 'Working…' : 'Lock'}
   </TipButton>
 {/snippet}
 
@@ -2028,7 +2035,7 @@
         {#if error}
           <p role="alert" class="error">{error}</p>
         {/if}
-        {@render lockButton(false, false)}
+        {@render lockButton()}
         <Accounts compact />
       </div>
     </div>
@@ -2151,7 +2158,7 @@
             <div class="panel">
               <h3>Lock</h3>
               <p>{LOCK_HELP}</p>
-              <div class="actions">{@render lockButton(false, false)}</div>
+              <div class="actions">{@render lockButton()}</div>
             </div>
           {/if}
           {#if signedIn}
@@ -2207,7 +2214,6 @@
         {shortcut}
         onselect={open}
         onsearch={() => (paletteOpen = rooms !== null)}
-        onsettings={() => openSettings('security')}
         {invites}
         {inviteBusy}
         onnewconversation={signedIn ? () => (newConversationOpen = true) : undefined}
@@ -2221,9 +2227,7 @@
         width={shownSidebar}
       >
         {#snippet menu()}
-          {#if signedIn}
-            <Menu id="main-menu" label="Main menu" icon="menu" items={mainMenu} align="start" />
-          {/if}
+          <Menu id="main-menu" label="Main menu" icon="menu" items={mainMenu} align="start" />
         {/snippet}
         {#snippet notice()}
           {#if signedIn && (security?.identity === 'none' || security?.identity === 'unverified')}
@@ -2237,11 +2241,6 @@
                 {security.identity === 'none' ? 'Set up encryption' : 'Verify this device'}
               </button>
             </div>
-          {/if}
-        {/snippet}
-        {#snippet lock()}
-          {#if status?.store === 'protected' || status?.store === 'locking'}
-            {@render lockButton(true, true)}
           {/if}
         {/snippet}
       </Sidebar>
@@ -2605,7 +2604,7 @@
         {/if}
         <div class="actions">
           {#if status.store === 'locking'}
-            {@render lockButton(false, false)}
+            {@render lockButton()}
           {:else if unlockable.includes(status.store)}
             <button type="button" class="primary" disabled={switching} onclick={toggleLock}>
               {switching ? 'Unlocking…' : 'Unlock'}
