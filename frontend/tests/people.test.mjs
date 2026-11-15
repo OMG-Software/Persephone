@@ -74,7 +74,17 @@ test('GIVEN a newest page that names a person without a display name WHEN rememb
     ['@b:s', 'Ben']
   ]);
   const names = people.withNames(known, page(['@a:s'], []), true);
-  assert.deepEqual([...names], [['@b:s', 'Ben']], 'Ben is not on the page, so the page says nothing about him');
+  assert.equal(people.shownName('@a:s', names), null);
+  assert.equal(people.shownName('@b:s', names), 'Ben', 'Ben is not on the page, so the page says nothing about him');
+});
+
+test('GIVEN a name a newest page removed WHEN an older page still has it THEN it does not come back', () => {
+  const cleared = people.withNames(new Map([['@a:s', 'Ann']]), page(['@a:s'], []), true);
+  const older = people.withNames(cleared, page(['@a:s'], [{ userId: '@a:s', displayName: 'Ann' }]), false);
+  assert.equal(people.shownName('@a:s', older), null);
+  // A later newest page that names them again is believed.
+  const renamed = people.withNames(older, page(['@a:s'], [{ userId: '@a:s', displayName: 'Annie' }]), true);
+  assert.equal(people.shownName('@a:s', renamed), 'Annie');
 });
 
 test('GIVEN an older page WHEN remembered THEN it only adds people not yet known, and never removes a name', () => {

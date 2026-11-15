@@ -96,11 +96,12 @@ export function pageUsers(items: readonly TimelineItem[]): Set<string> {
 /**
  * `known` with the display names of a page. A page of the newest messages
  * holds each of its people's current names: a newer name replaces the older
- * one, and a person it names without one loses theirs. An older page (older
+ * one, and a person it lists without one is kept as known to have none, by
+ * their own ID (which `shownName` does not show). An older page (older
  * history, or the messages around a search result or reply) only adds the
- * names of people not yet known: its names can be out of date. When more
- * than `max` are known, the longest-known are dropped. Names are untrusted
- * text.
+ * names of people not yet known: its names can be out of date, so it never
+ * brings back a name a newer page removed. When more than `max` people are
+ * known, the longest-known are dropped. Names are untrusted text.
  */
 export function withNames(
   known: ReadonlyMap<string, string>,
@@ -110,7 +111,10 @@ export function withNames(
 ): Map<string, string> {
   const names = new Map(known);
   if (newest) {
-    for (const userId of pageUsers(page.items)) names.delete(userId);
+    for (const userId of pageUsers(page.items)) {
+      names.delete(userId);
+      names.set(userId, userId);
+    }
   }
   for (const { userId, displayName } of page.names) {
     if (!newest && names.has(userId)) continue;
