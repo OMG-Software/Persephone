@@ -283,6 +283,9 @@ pub struct Core {
     /// The rooms public room directory pages offered to join, with the
     /// session generation they were listed in.
     offers: Mutex<directory::Offers>,
+    /// The member counts each room's member list was last asked for
+    /// against, in one session generation.
+    member_refreshes: Mutex<room_settings::Refreshed>,
     /// Serializes encrypted record read/modify/write operations.
     personal: conversations::Busy,
     local_search: conversations::Busy,
@@ -485,6 +488,7 @@ impl Core {
             search: conversations::Busy::default(),
             public_rooms: conversations::Busy::default(),
             offers: Mutex::new(directory::Offers::default()),
+            member_refreshes: Mutex::new(room_settings::Refreshed::default()),
             personal: conversations::Busy::default(),
             local_search: conversations::Busy::default(),
             room_reads: conversations::Busy::default(),
@@ -1511,7 +1515,14 @@ impl Core {
                     }),
                 Work::RoomMembers(room_id, filter) => {
                     json(self.with_matrix(generation, async |client| {
-                        room_settings::members(&client, room_id, filter).await
+                        room_settings::members(
+                            &client,
+                            room_id,
+                            filter,
+                            &self.member_refreshes,
+                            generation,
+                        )
+                        .await
                     }))
                 }
                 Work::RoomServers(room_id) => json(self.with_matrix(generation, async |client| {
@@ -1519,7 +1530,8 @@ impl Core {
                 })),
                 Work::RoomReaders(room_id) => self
                     .with_matrix(generation, async |client| {
-                        room_settings::readers(&client, room_id).await
+                        room_settings::readers(&client, room_id, &self.member_refreshes, generation)
+                            .await
                     })
                     .and_then(|readers| match bounded(&readers) {
                         Outcome::Ok(value) => Ok(value),

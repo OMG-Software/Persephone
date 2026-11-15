@@ -165,37 +165,53 @@ const LATER_STATE: &[&str] = &[
 
 impl wiremock::Respond for SlidingRoom {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
-        sliding_answer(request, self.withheld, json!([text("$live", "live")]))
+        sliding_answer(
+            request,
+            self.withheld,
+            json!([text("$live", "live")]),
+            (1, 1),
+        )
     }
 }
 
-/// Sliding Sync for `ROOM` whose timeline also has `CONTACT` accepting the
-/// invitation once `joined` is set. Like a server, it sends their member
-/// event in the timeline only: the list asks for this account's alone.
+/// Sliding Sync for `ROOM` where `CONTACT` accepts the invitation once
+/// `joined` is set. Like a server, it sends their member event in the
+/// timeline only (the list asks for this account's alone), and only when
+/// `in_timeline`: otherwise the join came while the app was closed or among
+/// more events than the timeline holds, and only the counts change.
 struct SlidingJoin {
     joined: Arc<AtomicBool>,
+    in_timeline: bool,
 }
 
 impl wiremock::Respond for SlidingJoin {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
         let mut timeline = vec![text("$live", "live")];
-        if self.joined.load(Ordering::SeqCst) {
+        let joined = self.joined.load(Ordering::SeqCst);
+        if joined && self.in_timeline {
             timeline.push(json!({
                 "type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$bobjoin",
                 "origin_server_ts":12,"content":{"membership":"join"},
                 "unsigned":{"prev_content":{"membership":"invite"}}
             }));
         }
-        sliding_answer(request, &[], Value::Array(timeline))
+        let counts = if joined { (2, 0) } else { (1, 1) };
+        // Like a server, it sends state only in the connection's first
+        // answer and when it changes: later rounds carry no member event.
+        let later = request.url.query_pairs().any(|(key, _)| key == "pos");
+        let withheld: &[&str] = if later { &["m.room.member"] } else { &[] };
+        sliding_answer(request, withheld, Value::Array(timeline), counts)
     }
 }
 
-/// The Sliding Sync answer for `ROOM` with `timeline`: only the state the
-/// request's list asks for, less the `withheld` event types.
+/// The Sliding Sync answer for `ROOM` with `timeline` and the homeserver's
+/// joined and invited `counts`: only the state the request's list asks for,
+/// less the `withheld` event types.
 fn sliding_answer(
     request: &wiremock::Request,
     withheld: &[&str],
     timeline: Value,
+    (joined, invited): (u32, u32),
 ) -> ResponseTemplate {
     let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
     let wanted = body["lists"]["rooms"]["required_state"]
@@ -216,7 +232,7 @@ fn sliding_answer(
         .collect();
     ResponseTemplate::new(200).set_body_json(json!({
         "pos":"sliding-pos","lists":{"rooms":{"count":1}},
-        "rooms":{ROOM:{"initial":true,"joined_count":1,"invited_count":0,"required_state":state,"timeline":timeline,"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
+        "rooms":{ROOM:{"initial":true,"joined_count":joined,"invited_count":invited,"required_state":state,"timeline":timeline,"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
         "extensions":{"e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},"to_device":{"events":[],"next_batch":"to-device-pos"}}
     }))
 }
@@ -986,10 +1002,11 @@ impl Homeserver {
         );
     }
 
-    /// Sliding Sync whose `ROOM` timeline gets `CONTACT`'s join once the
-    /// returned flag is set, and `/members` answers that first list
-    /// `CONTACT` as invited, then as joined.
-    fn invited_contact_joins(&self) -> Arc<AtomicBool> {
+    /// Sliding Sync where `CONTACT` joins `ROOM` once the returned flag is
+    /// set, with the join in the timeline when `in_timeline` (see
+    /// [`SlidingJoin`]), and `/members` answers that first list `CONTACT` as
+    /// invited, then as joined.
+    fn invited_contact_joins(&self, in_timeline: bool) -> Arc<AtomicBool> {
         let joined = Arc::new(AtomicBool::new(false));
         let own = json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}});
         self.runtime.block_on(async {
@@ -999,6 +1016,7 @@ impl Homeserver {
                 ))
                 .respond_with(SlidingJoin {
                     joined: joined.clone(),
+                    in_timeline,
                 })
                 .with_priority(1)
                 .mount(&self.server)
@@ -1017,6 +1035,42 @@ impl Homeserver {
                 .await;
         });
         joined
+    }
+
+    /// Sliding Sync whose counts still show `CONTACT` as invited, as a
+    /// server's can trail its state, while `/members` already lists them as
+    /// joined.
+    fn counts_trail_members(&self) {
+        let own = json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}});
+        self.runtime.block_on(async {
+            Mock::given(method("POST"))
+                .and(path(
+                    "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+                ))
+                .respond_with(SlidingJoin {
+                    joined: Arc::new(AtomicBool::new(false)),
+                    in_timeline: false,
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+                .respond_with(Members(json!([own, {"type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$bobjoin","origin_server_ts":12,"content":{"membership":"join"}}])))
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Requests for a room's member list.
+    fn members_requests(&self) -> usize {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path().ends_with("/members"))
+            .count()
     }
 
     /// Accepts every state event sent to a room.
@@ -1559,6 +1613,24 @@ fn given_lazy_loaded_members_then_a_page_lists_the_display_names_it_shows() {
 /// joined, not still invited.
 #[test]
 fn given_sliding_sync_when_an_invited_member_joins_then_the_list_shows_them_joined() {
+    invited_member_joins(true);
+}
+
+/// GIVEN Sliding Sync and a member list that shows `CONTACT` as invited WHEN
+/// `CONTACT` joins but their member event never reaches the timeline, as
+/// when the app was closed, and only the homeserver's member counts change
+/// THEN the member list shows them as joined, not still invited.
+#[test]
+fn given_sliding_sync_when_a_join_is_missed_then_the_counts_refresh_the_list() {
+    invited_member_joins(false);
+}
+
+/// GIVEN Sliding Sync counts that still show `CONTACT` as invited while
+/// `/members` lists them as joined WHEN the members and readers are listed
+/// again and again THEN the list shows them joined and is not asked for
+/// again while the counts stay the same.
+#[test]
+fn given_counts_that_trail_the_member_list_then_it_is_not_asked_for_again() {
     let server = Homeserver::start(
         (
             200,
@@ -1568,7 +1640,51 @@ fn given_sliding_sync_when_an_invited_member_joins_then_the_list_shows_them_join
         true,
     );
     server.settings_endpoints();
-    let joined = server.invited_contact_joins();
+    server.counts_trail_members();
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
+    let contact = || {
+        value::<RoomMembers>(call(
+            &core,
+            Call::RoomMembers {
+                room_id: ROOM.into(),
+                filter: String::new(),
+            },
+        ))
+        .members
+        .into_iter()
+        .find(|member| member.user_id == CONTACT)
+        .map(|member| member.membership)
+    };
+    assert_eq!(contact(), Some(Membership::Join));
+    let asked = server.members_requests();
+    for _ in 0..3 {
+        assert_eq!(contact(), Some(Membership::Join));
+        let _ = call(
+            &core,
+            Call::RoomReaders {
+                room_id: ROOM.into(),
+            },
+        );
+    }
+    assert_eq!(server.members_requests(), asked);
+}
+
+/// `CONTACT` is listed as invited, joins (`in_timeline` as in
+/// [`SlidingJoin`]), and is then listed as joined.
+fn invited_member_joins(in_timeline: bool) {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.settings_endpoints();
+    let joined = server.invited_contact_joins(in_timeline);
     let dir = TempDir::new().unwrap();
     let core = make_core(dir.path(), Fixed::new(Ok(())));
     let _locked = LockOnDrop(&core);
