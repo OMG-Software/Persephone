@@ -13,7 +13,30 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   sendTyping: false,
   sendReadReceipts: false,
   idleLockMinutes: 0,
-  notificationNames: true
+  notificationNames: true,
+  // Every kind of room change shows until the account turns one off.
+  timelineEvents: {
+    joins: true,
+    leaves: true,
+    invitations: true,
+    removals: true,
+    joinRequests: true,
+    displayNames: true,
+    profilePictures: true,
+    roomName: true,
+    topic: true,
+    roomPicture: true,
+    encryption: true,
+    joinRule: true,
+    historyVisibility: true,
+    permissions: true,
+    addresses: true,
+    pinnedMessages: true,
+    guestAccess: true,
+    serverAccess: true,
+    creation: true,
+    upgrades: true
+  }
 };
 
 /** The idle-lock choices offered, in minutes; 0 never locks (ADR-0025). */

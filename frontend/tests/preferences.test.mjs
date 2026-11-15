@@ -42,7 +42,29 @@ test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes ar
     sendTyping: false,
     sendReadReceipts: false,
     idleLockMinutes: 0,
-    notificationNames: true
+    notificationNames: true,
+    timelineEvents: {
+      joins: true,
+      leaves: true,
+      invitations: true,
+      removals: true,
+      joinRequests: true,
+      displayNames: true,
+      profilePictures: true,
+      roomName: true,
+      topic: true,
+      roomPicture: true,
+      encryption: true,
+      joinRule: true,
+      historyVisibility: true,
+      permissions: true,
+      addresses: true,
+      pinnedMessages: true,
+      guestAccess: true,
+      serverAccess: true,
+      creation: true,
+      upgrades: true
+    }
   });
 });
 

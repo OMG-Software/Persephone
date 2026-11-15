@@ -46,12 +46,14 @@ use matrix_sdk::{
     deserialized_responses::{TimelineEvent, TimelineEventKind, UnableToDecryptReason},
     room::MessagesOptions,
     ruma::{
-        EventId, OwnedEventId, OwnedUserId, RoomId, UInt,
+        EventId, OwnedEventId, OwnedUserId, RoomId, UInt, UserId,
+        api::client::filter::LazyLoadOptions,
         events::{
-            AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
-            SyncStateEvent,
+            AnyStateEvent, AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent,
+            SyncMessageLikeEvent, SyncStateEvent,
             room::{
-                member::MembershipChange as Change,
+                guest_access::GuestAccess,
+                member::{MembershipChange as Change, MembershipState},
                 message::{
                     MessageType, OriginalSyncRoomMessageEvent, Relation,
                     sanitize::remove_plain_reply_fallback,
@@ -59,15 +61,16 @@ use matrix_sdk::{
                 redaction::SyncRoomRedactionEvent,
             },
         },
+        serde::Raw,
     },
 };
 use persephone_contracts::{
-    ContactStatus, MembershipChange, NoticeKind, RoomEncryption, RoomList, RoomSummary,
+    ContactStatus, MembershipChange, NoticeKind, RoomEncryption, RoomList, RoomSummary, SenderName,
     StateChange, TimelineItem, TimelinePage, UnixMillis,
 };
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Mutex, MutexGuard},
 };
 
@@ -373,6 +376,91 @@ fn shown_text(raw: &str) -> Option<String> {
     (!shown.trim().is_empty()).then_some(shown)
 }
 
+/// Most member events of one answer's `state` read for names. A server
+/// sends one per person a page names, at most a sender and a member-change
+/// target per item.
+const MAX_NAME_EVENTS: usize = MAX_PAGE_ITEMS * 2;
+
+/// The user IDs `items` show: each sender, and the member a change names.
+fn named_users(items: &[TimelineItem]) -> BTreeSet<&str> {
+    let mut users = BTreeSet::new();
+    for item in items {
+        let sender = match item {
+            TimelineItem::Message { sender, .. }
+            | TimelineItem::Notice { sender, .. }
+            | TimelineItem::Image { sender, .. }
+            | TimelineItem::File { sender, .. }
+            | TimelineItem::Edit { sender, .. }
+            | TimelineItem::Reaction { sender, .. }
+            | TimelineItem::Redaction { sender, .. } => sender,
+            TimelineItem::State { sender, change, .. } => {
+                if let StateChange::Member { target, .. }
+                | StateChange::DisplayName { target, .. }
+                | StateChange::ProfilePicture { target } = change
+                {
+                    users.insert(target.as_str());
+                }
+                sender
+            }
+            TimelineItem::Gap { .. } => continue,
+        };
+        users.insert(sender.as_str());
+    }
+    users
+}
+
+/// The display names of the people `items` show, for
+/// [`TimelinePage::names`]: from `state`, the member events that a
+/// lazy-loading `/messages` or `/context` answer carries, or else from the
+/// store. One entry per person who has a name; nothing is fetched.
+pub(crate) async fn page_names(
+    room: &matrix_sdk::Room,
+    items: &[TimelineItem],
+    state: &[Raw<AnyStateEvent>],
+) -> Vec<SenderName> {
+    let wanted = named_users(items);
+    let mut names: BTreeMap<&str, String> = BTreeMap::new();
+    for raw in state.iter().take(MAX_NAME_EVENTS) {
+        if raw.get_field::<String>("type").ok().flatten().as_deref() != Some("m.room.member") {
+            continue;
+        }
+        let Some(user) = raw.get_field::<String>("state_key").ok().flatten() else {
+            continue;
+        };
+        let Some(&user) = wanted.get(user.as_str()) else {
+            continue;
+        };
+        let name = raw
+            .get_field::<serde_json::Value>("content")
+            .ok()
+            .flatten()
+            .and_then(|content| content.get("displayname")?.as_str().and_then(shown_text));
+        if let Some(name) = name {
+            names.entry(user).or_insert(name);
+        }
+    }
+    for &user in &wanted {
+        if names.contains_key(user) {
+            continue;
+        }
+        let Ok(id) = UserId::parse(user) else {
+            continue;
+        };
+        if let Ok(Some(member)) = room.get_member_no_sync(&id).await
+            && let Some(name) = member.display_name().and_then(shown_text)
+        {
+            names.insert(user, name);
+        }
+    }
+    names
+        .into_iter()
+        .map(|(user_id, display_name)| SenderName {
+            user_id: user_id.to_owned(),
+            display_name,
+        })
+        .collect()
+}
+
 /// What a state event changed, or `None` for a change not shown.
 fn state_change(event: &AnySyncStateEvent) -> Option<StateChange> {
     use crate::room_settings::{history_visibility, join_rule};
@@ -380,6 +468,20 @@ fn state_change(event: &AnySyncStateEvent) -> Option<StateChange> {
         AnySyncStateEvent::RoomMember(SyncStateEvent::Original(member)) => {
             let target = project_name(member.state_key.as_str());
             let membership = match member.membership_change() {
+                // Without the earlier membership (`unsigned.prev_content`,
+                // which a server leaves out where the history is hidden)
+                // ruma takes it as "left", so a leave reads as no change.
+                // The member left, or someone else removed them.
+                Change::None
+                    if member.content.membership == MembershipState::Leave
+                        && member.unsigned.prev_content.is_none() =>
+                {
+                    if member.sender == member.state_key {
+                        MembershipChange::Left
+                    } else {
+                        MembershipChange::Kicked
+                    }
+                }
                 Change::Joined | Change::InvitationAccepted => MembershipChange::Joined,
                 Change::Left => MembershipChange::Left,
                 Change::Invited | Change::KnockAccepted => MembershipChange::Invited,
@@ -400,7 +502,11 @@ fn state_change(event: &AnySyncStateEvent) -> Option<StateChange> {
                         name: change.new.and_then(shown_text),
                     });
                 }
-                // A new picture alone, no change, or one ruma cannot name.
+                Change::ProfileChanged {
+                    avatar_url_change: Some(_),
+                    ..
+                } => return Some(StateChange::ProfilePicture { target }),
+                // No change, or one ruma cannot name.
                 _ => return None,
             };
             StateChange::Member { target, membership }
@@ -434,6 +540,14 @@ fn state_change(event: &AnySyncStateEvent) -> Option<StateChange> {
         AnySyncStateEvent::RoomCreate(SyncStateEvent::Original(_)) => StateChange::Created {},
         AnySyncStateEvent::RoomServerAcl(SyncStateEvent::Original(_)) => StateChange::ServerAcl {},
         AnySyncStateEvent::RoomTombstone(SyncStateEvent::Original(_)) => StateChange::Upgraded {},
+        AnySyncStateEvent::RoomPinnedEvents(SyncStateEvent::Original(_)) => {
+            StateChange::PinnedMessages {}
+        }
+        AnySyncStateEvent::RoomGuestAccess(SyncStateEvent::Original(guests)) => {
+            StateChange::GuestAccess {
+                allowed: guests.content.guest_access == GuestAccess::CanJoin,
+            }
+        }
         _ => return None,
     })
 }
@@ -748,6 +862,11 @@ impl MatrixViews {
         loop {
             let mut options = MessagesOptions::backward().from(from.as_deref());
             options.limit = UInt::try_from(limit as u64).unwrap_or(UInt::MIN);
+            // The answer then carries the member events of the people the
+            // page shows, for their display names.
+            options.filter.lazy_load_options = LazyLoadOptions::Enabled {
+                include_redundant_members: true,
+            };
             let messages = joined
                 .messages(options)
                 .await
@@ -776,9 +895,15 @@ impl MatrixViews {
                 };
                 items.extend(item);
             }
+            let mut names = page_names(&joined, &items, &messages.state).await;
             let bytes: usize = items
                 .iter()
                 .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |v| v.len()))
+                .chain(
+                    names
+                        .iter()
+                        .map(|name| serde_json::to_vec(name).map_or(usize::MAX, |v| v.len())),
+                )
                 .fold(0usize, usize::saturating_add);
             if bytes > MAX_PAGE_BYTES && limit > 1 {
                 limit /= 2;
@@ -788,6 +913,7 @@ impl MatrixViews {
                 // One event over the budget cannot happen with projected
                 // bodies; drop it rather than exceed the frame.
                 items.clear();
+                names.clear();
             }
             let next_cursor = messages
                 .end
@@ -797,6 +923,7 @@ impl MatrixViews {
                 room_id: room.to_owned(),
                 items,
                 next_cursor,
+                names,
             });
         }
     }
@@ -1233,12 +1360,77 @@ mod tests {
         assert_eq!(member(B, B, "join", Some("join")), None);
     }
 
+    /// GIVEN a leave without the earlier membership, which a server leaves
+    /// out where the history is hidden WHEN projected THEN it is shown as
+    /// leaving when the member sent it, and as a removal when someone else
+    /// did, like a join without it is shown as joining.
+    #[test]
+    fn given_a_leave_without_the_earlier_membership_then_it_is_still_shown() {
+        const A: &str = "@alice:example.org";
+        const B: &str = "@bob:example.org";
+        let change = |membership| {
+            Some(StateChange::Member {
+                target: B.into(),
+                membership,
+            })
+        };
+        assert_eq!(member(B, B, "leave", None), change(MembershipChange::Left));
+        assert_eq!(
+            member(A, B, "leave", None),
+            change(MembershipChange::Kicked)
+        );
+        assert_eq!(member(B, B, "join", None), change(MembershipChange::Joined));
+        // A leave after a leave that the event does say is still no change.
+        assert_eq!(member(B, B, "leave", Some("leave")), None);
+    }
+
+    /// GIVEN page items from several people WHEN their user IDs are
+    /// collected for names THEN each sender and each member a change names
+    /// is listed once, and a gap names no one.
+    #[test]
+    fn given_page_items_then_named_users_are_senders_and_change_targets() {
+        let state = |sender: &str, change| TimelineItem::State {
+            event_id: "$s".into(),
+            sender: sender.into(),
+            origin_server_ts: None,
+            change,
+        };
+        let items = [
+            TimelineItem::Message {
+                event_id: "$m".into(),
+                sender: "@alice:s".into(),
+                body: "hi".into(),
+                origin_server_ts: None,
+                reply_to: None,
+            },
+            state(
+                "@alice:s",
+                StateChange::Member {
+                    target: "@bob:s".into(),
+                    membership: MembershipChange::Invited,
+                },
+            ),
+            state(
+                "@carol:s",
+                StateChange::ProfilePicture {
+                    target: "@carol:s".into(),
+                },
+            ),
+            state("@dave:s", StateChange::Topic { topic: None }),
+            TimelineItem::Gap { next_cursor: None },
+        ];
+        assert_eq!(
+            named_users(&items).into_iter().collect::<Vec<_>>(),
+            ["@alice:s", "@bob:s", "@carol:s", "@dave:s"]
+        );
+    }
+
     /// GIVEN a member changing their display name, to something hostile or
     /// to nothing, or only their picture WHEN projected THEN the name is
     /// inert bounded text, a removed name is `None`, and a picture change
-    /// alone is not shown.
+    /// alone is a picture change, without the picture's address.
     #[test]
-    fn given_profile_changes_then_names_are_projected_and_pictures_alone_hidden() {
+    fn given_profile_changes_then_names_are_projected_and_pictures_are_shown() {
         const B: &str = "@bob:example.org";
         let profile = |content: serde_json::Value, prev: serde_json::Value| {
             change_of(&state_event("m.room.member", B, B, content, Some(prev)))
@@ -1272,7 +1464,14 @@ mod tests {
                 serde_json::json!({ "membership": "join", "avatar_url": "mxc://s/new" }),
                 serde_json::json!({ "membership": "join", "avatar_url": "mxc://s/old" }),
             ),
-            None
+            Some(StateChange::ProfilePicture { target: B.into() })
+        );
+        assert_eq!(
+            profile(
+                serde_json::json!({ "membership": "join" }),
+                serde_json::json!({ "membership": "join", "avatar_url": "mxc://s/old" }),
+            ),
+            Some(StateChange::ProfilePicture { target: B.into() })
         );
     }
 
@@ -1345,6 +1544,27 @@ mod tests {
                 serde_json::json!({ "allow": ["*"], "deny": [] })
             ),
             Some(StateChange::ServerAcl {})
+        );
+        assert_eq!(
+            room(
+                "m.room.pinned_events",
+                serde_json::json!({ "pinned": ["$a"] })
+            ),
+            Some(StateChange::PinnedMessages {})
+        );
+        assert_eq!(
+            room(
+                "m.room.guest_access",
+                serde_json::json!({ "guest_access": "can_join" })
+            ),
+            Some(StateChange::GuestAccess { allowed: true })
+        );
+        assert_eq!(
+            room(
+                "m.room.guest_access",
+                serde_json::json!({ "guest_access": "forbidden" })
+            ),
+            Some(StateChange::GuestAccess { allowed: false })
         );
         assert_eq!(
             room("org.example.custom", serde_json::json!({ "x": 1 })),

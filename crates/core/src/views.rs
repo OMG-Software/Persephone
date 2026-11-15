@@ -307,6 +307,8 @@ impl Fixtures {
             room_id: room_id.into(),
             items,
             next_cursor: (start > 0).then(|| format!("{CURSOR_PREFIX}{start}")),
+            // The demo rooms' senders have no display names.
+            names: Vec::new(),
         })
     }
 }

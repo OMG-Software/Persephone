@@ -255,6 +255,11 @@ pub enum StateChange {
         target: String,
         name: Option<String>,
     },
+    /// A member set, changed or removed their picture in this room, and
+    /// kept their display name.
+    ProfilePicture {
+        target: String,
+    },
     /// The room's name was set, or removed (`None`).
     Name {
         name: Option<String>,
@@ -283,6 +288,12 @@ pub enum StateChange {
     ServerAcl {},
     /// The room was replaced by a new version.
     Upgraded {},
+    /// The room's pinned messages changed.
+    PinnedMessages {},
+    /// Guests may now join (`allowed`), or may no longer.
+    GuestAccess {
+        allowed: bool,
+    },
 }
 
 /// How a member's membership changed. `sender` made the change; for
@@ -374,6 +385,19 @@ pub struct TimelinePage {
     pub room_id: String,
     pub items: Vec<TimelineItem>,
     pub next_cursor: Option<String>,
+    /// The display names of the senders and member-change targets of
+    /// `items` that have one, at most one entry per user ID. A user ID not
+    /// listed has no known display name.
+    pub names: Vec<SenderName>,
+}
+
+/// A user's display name in a room, projected like other names. Untrusted:
+/// anyone can choose any name, so the page shows the user ID beside it.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SenderName {
+    pub user_id: String,
+    pub display_name: String,
 }
 
 /// Reply of the `room_list` command. The core caps the number of rooms;
@@ -1149,6 +1173,67 @@ pub struct AccountSettings {
     /// only that a message arrived, and no name leaves the core. On by
     /// default (ADR-0022).
     pub notification_names: bool,
+    /// Which kinds of room changes the timeline shows. All on by default.
+    pub timeline_events: TimelineEvents,
+}
+
+/// Which kinds of room changes the timeline shows, one switch each. Only
+/// the page reads them: the core sends every change either way.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TimelineEvents {
+    pub joins: bool,
+    pub leaves: bool,
+    /// Invitations, declined invitations and withdrawn invitations.
+    pub invitations: bool,
+    /// Members removed, banned or unbanned by someone else.
+    pub removals: bool,
+    /// Requests to join, withdrawn requests and refused requests.
+    pub join_requests: bool,
+    pub display_names: bool,
+    pub profile_pictures: bool,
+    pub room_name: bool,
+    pub topic: bool,
+    pub room_picture: bool,
+    pub encryption: bool,
+    pub join_rule: bool,
+    pub history_visibility: bool,
+    /// Who may do what (power levels).
+    pub permissions: bool,
+    pub addresses: bool,
+    pub pinned_messages: bool,
+    pub guest_access: bool,
+    /// Which homeservers may take part (server ACL).
+    pub server_access: bool,
+    pub creation: bool,
+    pub upgrades: bool,
+}
+
+impl Default for TimelineEvents {
+    fn default() -> Self {
+        Self {
+            joins: true,
+            leaves: true,
+            invitations: true,
+            removals: true,
+            join_requests: true,
+            display_names: true,
+            profile_pictures: true,
+            room_name: true,
+            topic: true,
+            room_picture: true,
+            encryption: true,
+            join_rule: true,
+            history_visibility: true,
+            permissions: true,
+            addresses: true,
+            pinned_messages: true,
+            guest_access: true,
+            server_access: true,
+            creation: true,
+            upgrades: true,
+        }
+    }
 }
 
 /// The smallest text size either setting accepts, in percent.
@@ -1183,6 +1268,7 @@ impl Default for AccountSettings {
             send_read_receipts: false,
             idle_lock_minutes: 0,
             notification_names: true,
+            timeline_events: TimelineEvents::default(),
         }
     }
 }
@@ -1817,6 +1903,10 @@ pub fn sample_timeline_page() -> TimelinePage {
             TimelineItem::Gap { next_cursor: None },
         ],
         next_cursor: Some("cursor-2".into()),
+        names: vec![SenderName {
+            user_id: "@alice:server.invalid".into(),
+            display_name: "Alice <b>admin</b>".into(),
+        }],
     }
 }
 
@@ -1920,6 +2010,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", HomeserverFound::decl(&config)),
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),
+        format!("export {}", TimelineEvents::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
         format!("export {}", RoomActivity::decl(&config)),
         format!("export {}", RoomServer::decl(&config)),
@@ -1943,6 +2034,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", MembershipChange::decl(&config)),
         format!("export {}", StateChange::decl(&config)),
         format!("export {}", TimelineItem::decl(&config)),
+        format!("export {}", SenderName::decl(&config)),
         format!("export {}", TimelinePage::decl(&config)),
         format!("export {}", ImageMime::decl(&config)),
         format!("export {}", ImageView::decl(&config)),

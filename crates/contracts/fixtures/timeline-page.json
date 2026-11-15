@@ -43,5 +43,11 @@
       "next_cursor": null
     }
   ],
-  "nextCursor": "cursor-2"
+  "nextCursor": "cursor-2",
+  "names": [
+    {
+      "userId": "@alice:server.invalid",
+      "displayName": "Alice <b>admin</b>"
+    }
+  ]
 }

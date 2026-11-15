@@ -5,7 +5,8 @@
   import Icon from './Icon.svelte';
   import ImageCanvas from './ImageCanvas.svelte';
   import { canRetryLoad, declaredText, loadErrorText, shownImages } from './image';
-  import { avatarColour, initials, isolate } from './people';
+  import PersonName from './PersonName.svelte';
+  import { avatarColour, initials, isolate, personText, shownName } from './people';
   import { clockTime, fullTime, toDate } from './time';
 
   type ImageItem = Extract<TimelineItem, { kind: 'image' }>;
@@ -13,7 +14,11 @@
   // A received image (ADR-0009). Nothing is fetched until the user chooses
   // "Load image". Every field is the sender's: the name is inert, isolated
   // text, and the declared size and dimensions are shown as text only.
-  let { roomId, item }: { roomId: string; item: ImageItem } = $props();
+  let {
+    roomId,
+    item,
+    names = new Map()
+  }: { roomId: string; item: ImageItem; names?: ReadonlyMap<string, string> } = $props();
 
   // idle: placeholder. loading: waiting for the core to decode. drawing: the
   // bands are being fetched. shown: drawn, and the core's copy released.
@@ -85,11 +90,11 @@
   });
 </script>
 
-<article class="message" aria-label={'Image from ' + item.sender}>
+<article class="message" aria-label={'Image from ' + personText(item.sender, names)}>
   <span class="avatar {avatarColour(item.sender)}" aria-hidden="true">{initials(item.sender)}</span>
   <div class="message-body">
     <div class="message-head">
-      <strong class="sender"><bdi>{item.sender}</bdi></strong>
+      <strong class="sender"><PersonName userId={item.sender} name={shownName(item.sender, names)} /></strong>
       {#if date}
         <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
       {/if}

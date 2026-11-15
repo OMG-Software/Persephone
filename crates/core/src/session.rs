@@ -58,7 +58,10 @@ use matrix_sdk::{
             GlobalAccountDataEvent,
             direct::DirectEventContent,
             key::verification::request::ToDeviceKeyVerificationRequestEvent,
-            room::message::{MessageType, OriginalSyncRoomMessageEvent},
+            room::{
+                member::SyncRoomMemberEvent,
+                message::{MessageType, OriginalSyncRoomMessageEvent},
+            },
             typing::SyncTypingEvent,
         },
     },
@@ -725,6 +728,19 @@ fn run_sync(
             std::future::ready(())
         })
     };
+    // Sliding Sync asks only for this account's own member event, and the
+    // SDK reads room state from `required_state` alone, never from the
+    // timeline. So once the member list is loaded, another person's join,
+    // leave or new name never reaches the store: an invited person who
+    // joined stays invited. Any member event seen in a round marks the list
+    // as missing, and the next member listing asks the homeserver again.
+    let members_handler = {
+        let _context = runtime.enter();
+        client.add_event_handler(|_: SyncRoomMemberEvent, room: Room| {
+            room.mark_members_missing();
+            std::future::ready(())
+        })
+    };
     // The SDK keeps notification handlers as long as the client, so this one
     // holds the session only weakly.
     let mut notifying = false;
@@ -898,6 +914,7 @@ fn run_sync(
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
     client.remove_event_handler(typing_handler);
+    client.remove_event_handler(members_handler);
     drop(changes);
     drop(identities);
     drop(keys);

@@ -46,6 +46,31 @@ async function sent(call, reply = null) {
   return calls[0];
 }
 
+
+// Every timeline switch on, as a new account has them.
+const ALL_SHOWN = {
+  joins: true,
+  leaves: true,
+  invitations: true,
+  removals: true,
+  joinRequests: true,
+  displayNames: true,
+  profilePictures: true,
+  roomName: true,
+  topic: true,
+  roomPicture: true,
+  encryption: true,
+  joinRule: true,
+  historyVisibility: true,
+  permissions: true,
+  addresses: true,
+  pinnedMessages: true,
+  guestAccess: true,
+  serverAccess: true,
+  creation: true,
+  upgrades: true
+};
+
 test('GIVEN the room, account, settings and profile calls WHEN made THEN each matches a host command and its arguments', async () => {
   const cases = [
     [() => bridge.createRoom('Plans', ['@b:s']), 'create_room', { name: 'Plans', invite: ['@b:s'] }],
@@ -105,7 +130,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           sendTyping: true,
           sendReadReceipts: false,
           idleLockMinutes: 15,
-          notificationNames: false
+          notificationNames: false,
+          timelineEvents: { ...ALL_SHOWN, leaves: false }
         }),
       'set_account_settings',
       {
@@ -117,7 +143,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           sendTyping: true,
           sendReadReceipts: false,
           idleLockMinutes: 15,
-          notificationNames: false
+          notificationNames: false,
+          timelineEvents: { ...ALL_SHOWN, leaves: false }
         }
       }
     ],
@@ -184,6 +211,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       sendReadReceipts: false,
       idleLockMinutes: 0,
       notificationNames: true,
+      timelineEvents: { ...ALL_SHOWN, polls: false },
       theme: 'dark'
     })
   );
@@ -196,7 +224,8 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       sendTyping: false,
       sendReadReceipts: false,
       idleLockMinutes: 0,
-      notificationNames: true
+      notificationNames: true,
+      timelineEvents: ALL_SHOWN
     }
   });
 });

@@ -48,3 +48,32 @@ test('GIVEN typed text that cannot be invited WHEN a room is created THEN it is 
   const full = Array.from({ length: MAX_INVITEES }, (_, n) => `@u${n}:s`);
   assert.deepEqual(inviteesWith(full, '@extra:s'), { problem: 'too_many' });
 });
+
+test('GIVEN pages of display names WHEN remembered THEN a newer name replaces an older one and only the newest are kept', () => {
+  const { withNames } = people;
+  const first = withNames(new Map(), [
+    { userId: '@a:s', displayName: 'Ann' },
+    { userId: '@b:s', displayName: 'Ben' }
+  ]);
+  const second = withNames(first, [{ userId: '@a:s', displayName: 'Annie' }]);
+  assert.deepEqual([...second], [
+    ['@b:s', 'Ben'],
+    ['@a:s', 'Annie']
+  ]);
+  assert.equal(first.get('@a:s'), 'Ann', 'the known names are not changed in place');
+  const bounded = withNames(second, [{ userId: '@c:s', displayName: 'Cy' }], 2);
+  assert.deepEqual([...bounded.keys()], ['@a:s', '@c:s'], 'the longest-known name goes first');
+});
+
+test('GIVEN known names WHEN a person is shown THEN the name comes with the ID, and a missing or ID-only name gives the ID once', () => {
+  const { personText, shownName } = people;
+  const names = new Map([
+    ['@a:s', 'Ann'],
+    ['@id:s', '@id:s']
+  ]);
+  assert.equal(shownName('@a:s', names), 'Ann');
+  assert.equal(shownName('@id:s', names), null);
+  assert.equal(shownName('@none:s', names), null);
+  assert.equal(personText('@a:s', names), 'Ann (@a:s)');
+  assert.equal(personText('@none:s', names), '@none:s');
+});

@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { createServer } from 'vite';
 
+// Every timeline switch, in the order the settings list them.
+const EVENT_KEYS = ['joins', 'leaves', 'invitations', 'removals', 'joinRequests', 'displayNames', 'profilePictures', 'roomName', 'topic', 'roomPicture', 'encryption', 'joinRule', 'historyVisibility', 'permissions', 'addresses', 'pinnedMessages', 'guestAccess', 'serverAccess', 'creation', 'upgrades'];
+
 let vite;
 let RoomList;
 let Timeline;
@@ -1156,7 +1159,8 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     sendTyping: false,
     sendReadReceipts: false,
     idleLockMinutes: 0,
-    notificationNames: true
+    notificationNames: true,
+    timelineEvents: Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves']))
   };
   const html = render(Preferences, {
     props: { settings, failure: null, mac: false, onchange: () => {} }
@@ -1182,6 +1186,105 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
   assert.match(html, /Show desktop notifications/);
   // The level is read from the homeserver; until then nothing can be chosen.
   assert.match(html, /<fieldset class="choices" disabled/);
+});
+
+test('GIVEN the preferences WHEN they show THEN each kind of room change has its own switch, set as saved', () => {
+  const events = Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves']));
+  const html = render(Preferences, {
+    props: {
+      settings: {
+        enterSends: true,
+        chatTextPercent: 100,
+        interfaceTextPercent: 100,
+        desktopNotifications: false,
+        sendTyping: false,
+        sendReadReceipts: false,
+        idleLockMinutes: 0,
+        notificationNames: true,
+        timelineEvents: events
+      },
+      failure: null,
+      mac: false,
+      onchange: () => {}
+    }
+  }).body;
+  const group = html.slice(html.indexOf('Room changes in the timeline'), html.indexOf('Text size'));
+  const switches = [...group.matchAll(/<input type="checkbox" role="switch"( checked(?:="")?)?/g)];
+  assert.equal(switches.length, EVENT_KEYS.length);
+  assert.match(group, /<input type="checkbox" role="switch"\/?> <span>Someone leaves<\/span>/);
+  assert.match(group, /<input type="checkbox" role="switch" checked(?:="")?\/?> <span>Someone joins<\/span>/);
+  assert.equal(switches.filter((entry) => entry[1]).length, EVENT_KEYS.length - 1);
+});
+
+test('GIVEN known display names WHEN the timeline shows THEN each person reads as their name with the user ID in brackets, both inert', () => {
+  const { body: html } = render(Timeline, {
+    props: {
+      title: 'Room',
+      items: [
+        {
+          kind: 'message',
+          event_id: '$m',
+          sender: '@alice:example.invalid',
+          body: 'hi',
+          origin_server_ts: null,
+          reply_to: null
+        },
+        {
+          kind: 'state',
+          event_id: '$s',
+          sender: '@alice:example.invalid',
+          origin_server_ts: null,
+          change: { type: 'member', target: '@bob:example.invalid', membership: 'invited' }
+        },
+        {
+          kind: 'message',
+          event_id: '$n',
+          sender: '@carol:example.invalid',
+          body: 'no name',
+          origin_server_ts: null,
+          reply_to: null
+        }
+      ],
+      names: new Map([
+        ['@alice:example.invalid', hostileName],
+        ['@carol:example.invalid', '@carol:example.invalid']
+      ]),
+      hasOlder: false,
+      loading: false,
+      error: null,
+      onolder: () => {}
+    }
+  });
+  const shown = html.replace(/<!--.*?-->/g, '');
+  assert.doesNotMatch(shown, /<img\b/i);
+  assert.match(
+    shown,
+    /<strong class="sender"><bdi class="person-name">&lt;img src=x onerror=alert\(1\)><\/bdi> <span class="person-id">\(<bdi>@alice:example\.invalid<\/bdi>\)<\/span><\/strong>/
+  );
+  // A person without a name, or whose name is their ID, reads as the ID once.
+  assert.match(shown, /<strong class="sender"><bdi>@carol:example\.invalid<\/bdi><\/strong>/);
+  assert.match(shown, /\(<bdi>@alice:example\.invalid<\/bdi>\)<\/span> invited <bdi>@bob:example\.invalid<\/bdi>/);
+  assert.match(shown, /aria-label="Message from &lt;img src=x onerror=alert\(1\)> \(@alice:example\.invalid\)"/);
+});
+
+test('GIVEN a kind of room change switched off WHEN the timeline shows THEN its lines are left out and the others stay', () => {
+  const change = (id, membership) => ({
+    kind: 'state',
+    event_id: id,
+    sender: '@bob:example.invalid',
+    origin_server_ts: null,
+    change: { type: 'member', target: '@bob:example.invalid', membership }
+  });
+  const items = [change('$join', 'joined'), change('$leave', 'left')];
+  const props = { title: 'Room', items, hasOlder: false, loading: false, error: null, onolder: () => {} };
+  const all = render(Timeline, { props }).body.replace(/<!--.*?-->/g, '');
+  assert.match(all, /<bdi>@bob:example\.invalid<\/bdi> joined/);
+  assert.match(all, /<bdi>@bob:example\.invalid<\/bdi> left/);
+  const events = Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves']));
+  const some = render(Timeline, { props: { ...props, events } }).body.replace(/<!--.*?-->/g, '');
+  assert.match(some, /<bdi>@bob:example\.invalid<\/bdi> joined/);
+  assert.doesNotMatch(some, / left/);
+  assert.doesNotMatch(some, /data-event-id="\$leave"/);
 });
 
 test('GIVEN the account page WHEN it shows THEN passwords are never asked on the page and other sessions are signed out by default', () => {

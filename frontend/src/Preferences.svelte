@@ -4,6 +4,7 @@
   import { notificationLevelText } from './accountChanges';
   import ProxySettings from './ProxySettings.svelte';
   import { notWindows } from './image';
+  import { EVENT_SWITCHES } from './stateText';
   import {
     CHAT_TEXT_SIZES,
     IDLE_LOCK_CHOICES,
@@ -92,6 +93,29 @@
         ? 'Enter sends. Shift+Enter starts a new line.'
         : `Enter starts a new line. ${mac ? '⌘Enter' : 'Ctrl+Enter'} sends.`}
     </p>
+  </div>
+  <div class="panel" role="group" aria-labelledby="event-switches-heading">
+    <h3 id="event-switches-heading">Room changes in the timeline</h3>
+    <p class="note">
+      Choose which changes to a room show as lines between the messages. Hiding a kind of change
+      hides only its lines; the room itself does not change.
+    </p>
+    <div class="event-switches">
+      {#each EVENT_SWITCHES as { key, label } (key)}
+        <label class="switch-row">
+          <input
+            type="checkbox"
+            role="switch"
+            checked={settings.timelineEvents[key]}
+            onchange={(event) =>
+              onchange({
+                timelineEvents: { ...settings.timelineEvents, [key]: event.currentTarget.checked }
+              })}
+          />
+          <span>{label}</span>
+        </label>
+      {/each}
+    </div>
   </div>
   <div class="panel">
     <h3>Text size</h3>
