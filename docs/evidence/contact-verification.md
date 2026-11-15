@@ -44,9 +44,22 @@ flow was cancelled on both sides and the contact stayed unverified.**
   (`cannot_sign_contacts` otherwise); without it the SDK would end the flow as
   done without verifying anyone.
 * **Incoming requests**: a request in a room is taken only when it is
-  addressed to this account and comes from the contact of the direct-message
-  room it arrived in. One flow at a time, as before; the flow's view now
-  carries the contact's user ID (untrusted, projected like a name).
+  addressed to this account, comes from another user, and the room's member
+  list (joined or invited) is exactly this account and the sender, both
+  joined. A member list that cannot be read drops the request. The
+  receiving account's own `m.direct` marks do not count (owner decision,
+  issue 49): they are private, so the sender cannot check them, and before
+  this change a request into a room the receiver had not marked was dropped
+  without notice to either side. Both ways to start (from a contact's room
+  or from a member of another room) send into the same kind of room, so the
+  receiver applies one rule to both. One flow at a time, as before; the
+  flow's view carries the contact's user ID (untrusted, projected like a
+  name). Remaining limits: members can change after the check, as on the
+  sending side, and a request is dropped, not queued, when the member list
+  cannot be read. Nothing is created, invited or marked to make a request
+  fit. Covered by the mocked-homeserver tests in
+  `crates/core/tests/contacts.rs`; not yet run live against Merovingian or
+  Synapse.
 * **Trust** (`contact_status`): `verified`, `unverified`, `no_identity` or
   `unknown`, read from the local crypto store. Starting a verification also
   asks the homeserver before it reports `contact_has_no_identity`. Sync loads members lazily, so

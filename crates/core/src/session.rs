@@ -53,7 +53,7 @@ use crate::verification::{self, Action as VerifyAction, Flow};
 use matrix_sdk::{
     Client, Room,
     ruma::{
-        OwnedUserId,
+        OwnedRoomId, OwnedUserId,
         events::{
             GlobalAccountDataEvent,
             direct::DirectEventContent,
@@ -922,6 +922,11 @@ fn run_sync(
     drop(client);
 }
 
+/// An incoming verification request as sync saw it: the sender, the flow ID,
+/// and the room it arrived in (`None` for one from the account's own other
+/// devices).
+type Noted = (OwnedUserId, String, Option<OwnedRoomId>);
+
 /// The security loop: runs the command the prompts leave and keeps the shown
 /// state current, one lease per step; a lock is noticed between steps.
 fn run_security(
@@ -937,36 +942,43 @@ fn run_security(
     // A recovery-key window can outlive this session; what it reports applies
     // only while the session is still this one.
     let generation = lock(shared).generation;
-    // At most one verification at a time. Requests are noted (sender and
-    // flow ID) as they arrive during sync: from the account's own other
-    // devices, and from the contact of a direct-message room in that room.
+    // At most one verification at a time. Requests are noted (sender, flow ID
+    // and room) as they arrive during sync: from the account's own other
+    // devices (no room), and from the other member of a room with two
+    // members, in that room. A room request is shown only after the room's
+    // member list says it is just the two of them (`contacts::may_request`),
+    // read here rather than during sync so a member-list request never holds
+    // up sync. The account's direct marks do not count.
     let mut flow: Option<Flow> = None;
-    let incoming: Arc<Mutex<Option<(OwnedUserId, String)>>> = Arc::default();
+    let incoming: Arc<Mutex<Option<Noted>>> = Arc::default();
     let recorder = incoming.clone();
     let own = user_id.clone();
     let handler = client.add_event_handler(move |event: ToDeviceKeyVerificationRequestEvent| {
         if event.sender == own
             && event.content.transaction_id.as_str().len() <= verification::MAX_FLOW_ID_BYTES
         {
-            *guard(&recorder) = Some((own.clone(), event.content.transaction_id.to_string()));
+            *guard(&recorder) = Some((own.clone(), event.content.transaction_id.to_string(), None));
         }
         std::future::ready(())
     });
     let recorder = incoming.clone();
     let own = user_id.clone();
-    let room_handler = client.add_event_handler(
-        move |event: OriginalSyncRoomMessageEvent, room: Room, client: Client| {
+    let room_handler =
+        client.add_event_handler(move |event: OriginalSyncRoomMessageEvent, room: Room| {
             if let MessageType::VerificationRequest(request) = &event.content.msgtype
                 && request.to == own
                 && event.sender != own
                 && event.event_id.as_str().len() <= verification::MAX_FLOW_ID_BYTES
-                && contacts::contact_of(&client, &room).as_ref() == Some(&event.sender)
+                && room.active_members_count() == 2
             {
-                *guard(&recorder) = Some((event.sender.clone(), event.event_id.to_string()));
+                *guard(&recorder) = Some((
+                    event.sender.clone(),
+                    event.event_id.to_string(),
+                    Some(room.room_id().to_owned()),
+                ));
             }
             std::future::ready(())
-        },
-    );
+        });
     loop {
         if !shared.wait_open(SECURITY_TICK) {
             break;
@@ -994,7 +1006,11 @@ fn run_security(
                 // A new request from another device replaces a finished flow.
                 if flow.as_ref().is_none_or(Flow::is_over) {
                     let noted = guard(&incoming).take();
-                    if let Some((sender, flow_id)) = noted
+                    if let Some((sender, flow_id, room)) = noted
+                        && match &room {
+                            Some(room) => contacts::may_request(&client, room, &sender).await,
+                            None => true,
+                        }
                         && let Some(new) = verification::incoming(&client, &sender, &flow_id).await
                     {
                         flow = Some(new);

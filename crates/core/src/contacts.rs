@@ -25,6 +25,11 @@
 //!   contact's entry changes; the rooms and their members do not. A stale
 //!   room is one whose member list was read and shows it is not just the two
 //!   of them; a list that cannot be read changes nothing and is `failed`.
+//! * An incoming request in a room is shown when the room's member list is
+//!   exactly this account and the sender, both joined ([`may_request`]). The
+//!   account's direct marks do not count: they are private, so the sender
+//!   cannot see them, and the sender's own check is on members too. A list
+//!   that cannot be read drops the request.
 //! * Trust is read from the local crypto store. Sync keeps it current only
 //!   for users the SDK follows, so `status` makes the SDK follow the contact
 //!   first (see there).
@@ -226,6 +231,24 @@ pub async fn verifiable_member(
         return Err(SecurityError::Failed);
     }
     checked_target(client, member).await
+}
+
+/// Whether `sender` may ask this account to verify each other with a request
+/// in this room: the room is joined, the sender is not this account, and the
+/// room's member list (joined or invited) is exactly this account and the
+/// sender, both joined. The account's direct marks for the room do not count
+/// (see the module notes). `false` when the list cannot be read.
+pub async fn may_request(client: &Client, room_id: &RoomId, sender: &UserId) -> bool {
+    let Some(room) = client
+        .get_room(room_id)
+        .filter(|room| room.state() == RoomState::Joined)
+    else {
+        return false;
+    };
+    if client.user_id().is_none_or(|own| own == sender) {
+        return false;
+    }
+    just_us(client, &room, sender).await == Some(true)
 }
 
 /// How far this account trusts `contact`, as the local crypto store says.

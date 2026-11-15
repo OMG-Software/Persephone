@@ -5,13 +5,14 @@
 //! in `!a-old` varies by test. Carol's mark on another room must survive any
 //! change. Sync answers with the `m.direct` the client last saved, so a
 //! saved change comes back as it would from a homeserver. Plain HTTP on
-//! loopback, used by these test clients only.
+//! loopback, used by these test clients only. The last tests check the
+//! receiving side: which incoming requests are shown.
 
 use matrix_sdk::{
     Client, SessionMeta, SessionTokens,
     authentication::matrix::MatrixSession,
     config::{RequestConfig, SyncSettings},
-    ruma::{OwnedUserId, user_id},
+    ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId, user_id},
 };
 use persephone_contracts::SecurityError;
 use persephone_core::contacts;
@@ -338,6 +339,122 @@ async fn given_a_room_someone_else_joined_then_it_is_not_direct() {
         contacts::verifiable_contact(&setup.client, OLD).await,
         Err(SecurityError::NotDirectRoom)
     );
+
+    setup.server.verify().await;
+}
+
+fn room(id: &str) -> OwnedRoomId {
+    RoomId::parse(id).unwrap()
+}
+
+fn user(id: &str) -> OwnedUserId {
+    UserId::parse(id).unwrap()
+}
+
+/// Waits until sync has removed every direct mark this client holds for Bob.
+async fn wait_unmarked(client: &Client) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while client.get_dm_rooms(&bob()).next().is_some() {
+        assert!(tokio::time::Instant::now() < deadline, "marks not synced");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+// Incoming requests. Both ways to start a verification (from a contact's
+// room, or from a member of another room) send the request into the room the
+// SDK picks for the contact, so the receiving side sees the same request
+// either way: an in-room request from the other member. These tests are
+// Alice's side, receiving a request from Bob.
+
+/// GIVEN a room marked direct for Bob where Alice and Bob are both joined
+/// WHEN Bob asks Alice to verify in it THEN the request is shown.
+#[tokio::test]
+async fn given_a_marked_room_with_just_us_then_bobs_request_is_shown() {
+    let setup = synced(&[member(ALICE, "join"), member(BOB, "join")], true, 0).await;
+
+    assert!(contacts::may_request(&setup.client, &room(DM), &bob()).await);
+
+    setup.server.verify().await;
+}
+
+/// GIVEN a room where Alice and Bob are both joined that Alice's account does
+/// not mark direct (Bob's client marked it, Alice's did not) WHEN Bob asks
+/// Alice to verify in it THEN the request is still shown, and no mark is
+/// written.
+#[tokio::test]
+async fn given_an_unmarked_room_with_just_us_then_bobs_request_is_shown() {
+    let setup = synced(&[member(ALICE, "join"), member(BOB, "join")], true, 0).await;
+    *setup.direct.lock().unwrap() = json!({ CAROL: [CAROLS] });
+    wait_unmarked(&setup.client).await;
+
+    assert!(contacts::may_request(&setup.client, &room(DM), &bob()).await);
+
+    assert_eq!(*setup.direct.lock().unwrap(), json!({ CAROL: [CAROLS] }));
+    setup.server.verify().await;
+}
+
+/// GIVEN a room marked direct for Bob that Carol also joined WHEN Bob asks
+/// Alice to verify in it THEN the request is not shown: the mark does not
+/// make up for a third member.
+#[tokio::test]
+async fn given_a_marked_room_with_a_third_member_then_bobs_request_is_not_shown() {
+    let setup = synced(
+        &[
+            member(ALICE, "join"),
+            member(BOB, "join"),
+            member(CAROL, "join"),
+        ],
+        true,
+        0,
+    )
+    .await;
+
+    assert!(!contacts::may_request(&setup.client, &room(OLD), &bob()).await);
+
+    setup.server.verify().await;
+}
+
+/// GIVEN a room where Bob is only invited WHEN a request from Bob is seen in
+/// it THEN it is not shown: both must be joined.
+#[tokio::test]
+async fn given_bob_only_invited_then_his_request_is_not_shown() {
+    let setup = synced(&[member(ALICE, "join"), member(BOB, "invite")], true, 0).await;
+
+    assert!(!contacts::may_request(&setup.client, &room(OLD), &bob()).await);
+
+    setup.server.verify().await;
+}
+
+/// GIVEN a room with just Alice and Bob WHEN the request names Carol, who is
+/// not a member, or Alice herself as the sender THEN it is not shown.
+#[tokio::test]
+async fn given_a_sender_who_is_not_the_other_member_then_the_request_is_not_shown() {
+    let setup = synced(&[member(ALICE, "join"), member(BOB, "join")], true, 0).await;
+
+    assert!(!contacts::may_request(&setup.client, &room(DM), &user(CAROL)).await);
+    assert!(!contacts::may_request(&setup.client, &room(DM), &user(ALICE)).await);
+
+    setup.server.verify().await;
+}
+
+/// GIVEN a room whose member list cannot be loaded WHEN Bob asks Alice to
+/// verify in it THEN the request is not shown (fail closed).
+#[tokio::test]
+async fn given_an_unreadable_member_list_then_bobs_request_is_not_shown() {
+    let setup = synced(&[member(ALICE, "join"), member(BOB, "join")], false, 0).await;
+
+    assert!(!contacts::may_request(&setup.client, &room(OLD), &bob()).await);
+
+    setup.server.verify().await;
+}
+
+/// GIVEN a room this client does not know WHEN a request from Bob names it
+/// THEN it is not shown.
+#[tokio::test]
+async fn given_an_unknown_room_then_bobs_request_is_not_shown() {
+    let setup = synced(&[member(ALICE, "join"), member(BOB, "join")], true, 0).await;
+
+    assert!(!contacts::may_request(&setup.client, &room("!unknown:synthetic.test"), &bob()).await);
 
     setup.server.verify().await;
 }
