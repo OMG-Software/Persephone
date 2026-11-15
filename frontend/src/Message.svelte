@@ -1,12 +1,14 @@
 <script lang="ts">
   import MessageActions from './MessageActions.svelte';
-  import { avatarColour, initials } from './people';
+  import PersonName from './PersonName.svelte';
+  import { avatarColour, initials, personText, shownName } from './people';
   import { clockTime, fullTime, toDate } from './time';
   import { bodyParts } from './links';
   import { QUICK_REACTIONS, type Quote, type ReactionCount } from './timeline';
 
   let {
     name,
+    names = new Map(),
     body,
     time = null,
     quote = null,
@@ -21,7 +23,10 @@
     onreport,
     onlink
   }: {
+    // The sender's user ID.
     name: string;
+    // The room's known display names, by user ID.
+    names?: ReadonlyMap<string, string>;
     body: string;
     time?: number | null;
     // What this message replies to: a quote from the loaded history,
@@ -54,16 +59,17 @@
 
   // The sender's homeserver sets this time; a value no date can show is left out.
   const date = $derived(toDate(time));
+  const label = $derived(personText(name, names));
 </script>
 
 <!-- Names are isolated with <bdi> and bodies with dir="auto", so bidi control
      characters in one message cannot reorder text outside it. All text is
      rendered as escaped text, never as HTML. -->
-<article class="message" aria-label={'Message from ' + name}>
+<article class="message" aria-label={'Message from ' + label}>
   <span class="avatar {avatarColour(name)}" aria-hidden="true">{initials(name)}</span>
   <div class="message-body">
     <div class="message-head">
-      <strong class="sender"><bdi>{name}</bdi></strong>
+      <strong class="sender"><PersonName userId={name} name={shownName(name, names)} /></strong>
       {#if date}
         <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
       {/if}
@@ -71,7 +77,7 @@
         <span class="edited">(edited)</span>
       {/if}
       <MessageActions
-        sender={name}
+        sender={label}
         reacting={picking}
         onreact={onreact && (() => (picking = !picking))}
         {onreply}
@@ -85,7 +91,9 @@
       <p class="reply-quote">In reply to an earlier message</p>
     {:else if quote}
       <p class="reply-quote">
-        In reply to <bdi>{quote.sender}</bdi>: <span dir="auto">{quote.text}</span>
+        In reply to <PersonName userId={quote.sender} name={shownName(quote.sender, names)} />: <span
+          dir="auto">{quote.text}</span
+        >
       </p>
     {/if}
     <!-- A link is a button that asks the core, never an anchor: the page

@@ -2,7 +2,7 @@ use persephone_contracts::{
     AccountChange, AccountSettings, AccountState, AccountStatus, AppStatus, CHAT_TEXT_PERCENT_MAX,
     ConversationStart, DeviceList, DisplayName, INTERFACE_TEXT_PERCENT_MAX, InviteList, JoinedRoom,
     NotificationLevel, NotificationSettings, ProfileList, PublicRoomPage, RoomCreation, RoomInvite,
-    RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, ThreePidList, UserSearch,
+    RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, ThreePidList, TimelineEvents, UserSearch,
     generated_typescript, sample_room_summary, sample_timeline_page,
 };
 
@@ -66,6 +66,19 @@ fn serde_rejects_unknown_fields_and_variants() {
     assert!(
         serde_json::from_str::<persephone_contracts::TimelinePage>(unknown_nested_field).is_err()
     );
+
+    // A name entry without a display name reads as having none; a name that
+    // is not text, or an extra field, is refused.
+    type Name = persephone_contracts::SenderName;
+    let none: Name = serde_json::from_str(r#"{"userId":"@a:s","displayName":null}"#).unwrap();
+    assert_eq!(none.display_name, None);
+    for invalid in [
+        r#"{"displayName":"A"}"#,
+        r#"{"userId":"@a:s","displayName":7}"#,
+        r#"{"userId":"@a:s","displayName":null,"avatarUrl":"mxc://s/m"}"#,
+    ] {
+        assert!(serde_json::from_str::<Name>(invalid).is_err(), "{invalid}");
+    }
 }
 
 #[test]
@@ -481,8 +494,11 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true}}"#
     );
+    // Every kind of room change shows by default.
+    assert_eq!(defaults.timeline_events, TimelineEvents::default());
+    assert!(defaults.timeline_events.leaves && defaults.timeline_events.room_picture);
     for invalid in [
         r#"{}"#,
         r#"{"enterSends":false}"#,
@@ -493,6 +509,13 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":-5}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":"yes","sendReadReceipts":false}"#,
+        // An older page without the timeline switches, one switch missing,
+        // a switch that is not true or false, and a switch this build does
+        // not know are each refused.
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true}}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true,"leaves":"no","invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true}}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"polls":false}}"#,
     ] {
         assert!(
             serde_json::from_str::<AccountSettings>(invalid).is_err(),

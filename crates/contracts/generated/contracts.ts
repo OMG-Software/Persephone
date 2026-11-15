@@ -288,6 +288,28 @@ export type NewSession = { deviceId: string, displayName: string | null, };
 
 export type NewSessions = { sessions: Array<NewSession>, truncated: boolean, };
 
+export type TimelineEvents = { joins: boolean, leaves: boolean, 
+/**
+ * Invitations, declined invitations and withdrawn invitations.
+ */
+invitations: boolean, 
+/**
+ * Members removed, banned or unbanned by someone else.
+ */
+removals: boolean, 
+/**
+ * Requests to join, withdrawn requests and refused requests.
+ */
+joinRequests: boolean, displayNames: boolean, profilePictures: boolean, roomName: boolean, topic: boolean, roomPicture: boolean, encryption: boolean, joinRule: boolean, historyVisibility: boolean, 
+/**
+ * Who may do what (power levels).
+ */
+permissions: boolean, addresses: boolean, pinnedMessages: boolean, guestAccess: boolean, 
+/**
+ * Which homeservers may take part (server ACL).
+ */
+serverAccess: boolean, creation: boolean, upgrades: boolean, };
+
 export type AccountSettings = { 
 /**
  * Enter sends a message; otherwise it starts a new line. On by default.
@@ -333,7 +355,11 @@ idleLockMinutes: number,
  * only that a message arrived, and no name leaves the core. On by
  * default (ADR-0022).
  */
-notificationNames: boolean, };
+notificationNames: boolean, 
+/**
+ * Which kinds of room changes the timeline shows. All on by default.
+ */
+timelineEvents: TimelineEvents, };
 
 export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
 
@@ -437,7 +463,7 @@ export type NoticeKind = "undecryptable" | "withheld" | "untrusted_sender" | "un
 
 export type MembershipChange = "joined" | "left" | "invited" | "invite_rejected" | "invite_withdrawn" | "kicked" | "banned" | "unbanned" | "knocked" | "knock_withdrawn" | "knock_denied";
 
-export type StateChange = { "type": "member", target: string, membership: MembershipChange, } | { "type": "display_name", target: string, name: string | null, } | { "type": "name", name: string | null, } | { "type": "topic", topic: string | null, } | { "type": "avatar", } | { "type": "encryption", } | { "type": "join_rule", rule: JoinRule, } | { "type": "history_visibility", visibility: HistoryVisibility, } | { "type": "power_levels", } | { "type": "addresses", } | { "type": "created", } | { "type": "server_acl", } | { "type": "upgraded", };
+export type StateChange = { "type": "member", target: string, membership: MembershipChange, } | { "type": "display_name", target: string, name: string | null, } | { "type": "profile_picture", target: string, } | { "type": "name", name: string | null, } | { "type": "topic", topic: string | null, } | { "type": "avatar", } | { "type": "encryption", } | { "type": "join_rule", rule: JoinRule, } | { "type": "history_visibility", visibility: HistoryVisibility, } | { "type": "power_levels", } | { "type": "addresses", } | { "type": "created", } | { "type": "server_acl", } | { "type": "upgraded", } | { "type": "pinned_messages", } | { "type": "guest_access", allowed: boolean, };
 
 export type TimelineItem = { "kind": "message", event_id: string, sender: string, 
 /**
@@ -497,7 +523,21 @@ origin_server_ts: number | null, redacts: string, } | { "kind": "state", event_i
  */
 origin_server_ts: number | null, change: StateChange, };
 
-export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, };
+export type SenderName = { userId: string, 
+/**
+ * `None` when the user's member event shows no display name. An unknown
+ * name is a user ID not listed at all, never an entry.
+ */
+displayName: string | null, };
+
+export type TimelinePage = { roomId: string, items: Array<TimelineItem>, nextCursor: string | null, 
+/**
+ * The display names of the senders and member-change targets of
+ * `items` whose member event the core found, at most one entry per
+ * user ID. A user ID not listed has an unknown display name, which is
+ * not the same as an entry without one.
+ */
+names: Array<SenderName>, };
 
 export type ImageMime = "image/png" | "image/jpeg";
 
@@ -566,5 +606,15 @@ export const timelinePageFixture = {
       "next_cursor": null
     }
   ],
-  "nextCursor": "cursor-2"
+  "nextCursor": "cursor-2",
+  "names": [
+    {
+      "userId": "@alice:server.invalid",
+      "displayName": "Alice <b>admin</b>"
+    },
+    {
+      "userId": "@bob:server.invalid",
+      "displayName": null
+    }
+  ]
 } as const satisfies TimelinePage;

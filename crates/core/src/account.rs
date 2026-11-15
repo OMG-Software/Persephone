@@ -394,8 +394,11 @@ pub async fn select_engine(client: &Client) -> Result<Engine, SignInError> {
                 .sync_mode(SlidingSyncMode::new_growing(50))
                 // The server sends only this state. The room list needs the
                 // first five; the room settings read the rest, and without
-                // the power levels they cannot be shown at all.
+                // the power levels they cannot be shown at all. The room
+                // picture is asked for so the stored one stays current: the
+                // SDK never reads state from the timeline.
                 .required_state(vec![
+                    (StateEventType::RoomAvatar, String::new()),
                     (StateEventType::RoomName, String::new()),
                     (StateEventType::RoomCanonicalAlias, String::new()),
                     (StateEventType::RoomEncryption, String::new()),

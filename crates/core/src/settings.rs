@@ -14,8 +14,9 @@
 
 use crate::store::Stores;
 use matrix_sdk_crypto::store::CryptoStore;
-use persephone_contracts::AccountSettings;
+use persephone_contracts::{AccountSettings, TimelineEvents};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 pub const SETTINGS_KEY: &str = "persephone.account_settings.v1";
 const MAX_SETTINGS_BYTES: usize = 4096;
@@ -33,6 +34,8 @@ struct Stored {
     send_read_receipts: bool,
     idle_lock_minutes: u16,
     notification_names: bool,
+    /// Kept as a map of switch names, read by [`timeline_events`].
+    timeline_events: Map<String, Value>,
 }
 
 impl Default for Stored {
@@ -52,8 +55,28 @@ impl From<AccountSettings> for Stored {
             send_read_receipts: settings.send_read_receipts,
             idle_lock_minutes: settings.idle_lock_minutes,
             notification_names: settings.notification_names,
+            timeline_events: match serde_json::to_value(settings.timeline_events) {
+                Ok(Value::Object(switches)) => switches,
+                _ => Map::new(),
+            },
         }
     }
+}
+
+/// The timeline's switches from a stored map, leniently: a switch the map
+/// does not have, or does not hold as true or false, takes its default
+/// (shown), and a name this build does not know is ignored.
+fn timeline_events(stored: &Map<String, Value>) -> TimelineEvents {
+    let defaults = TimelineEvents::default();
+    let Ok(Value::Object(mut switches)) = serde_json::to_value(defaults) else {
+        return defaults;
+    };
+    for (name, value) in &mut switches {
+        if let Some(Value::Bool(on)) = stored.get(name) {
+            *value = Value::Bool(*on);
+        }
+    }
+    serde_json::from_value(Value::Object(switches)).unwrap_or(defaults)
 }
 
 impl From<Stored> for AccountSettings {
@@ -68,6 +91,7 @@ impl From<Stored> for AccountSettings {
             send_read_receipts: stored.send_read_receipts,
             idle_lock_minutes: stored.idle_lock_minutes,
             notification_names: stored.notification_names,
+            timeline_events: timeline_events(&stored.timeline_events),
         };
         if settings.idle_lock_minutes > persephone_contracts::IDLE_LOCK_MINUTES_MAX {
             settings.idle_lock_minutes = defaults.idle_lock_minutes;
@@ -138,9 +162,39 @@ mod tests {
             send_read_receipts: true,
             idle_lock_minutes: 30,
             notification_names: false,
+            timeline_events: TimelineEvents {
+                leaves: false,
+                room_picture: false,
+                ..TimelineEvents::default()
+            },
         };
         let bytes = serde_json::to_vec(&Stored::from(changed)).unwrap();
         assert_eq!(decode(&bytes), changed);
+    }
+
+    /// GIVEN stored timeline switches that are partial, damaged, or from
+    /// another build WHEN read THEN each known switch held as true or false
+    /// keeps its value, and every other switch is on (shown).
+    #[test]
+    fn given_partial_or_damaged_timeline_switches_then_the_rest_are_shown() {
+        let read = |record: &[u8]| decode(record).timeline_events;
+        assert_eq!(read(b"{}"), TimelineEvents::default());
+        assert_eq!(
+            read(br#"{"timeline_events":{"leaves":false,"futureKind":false}}"#),
+            TimelineEvents {
+                leaves: false,
+                ..TimelineEvents::default()
+            }
+        );
+        assert_eq!(
+            read(br#"{"timeline_events":{"joins":"no","topic":0,"leaves":null}}"#),
+            TimelineEvents::default()
+        );
+        // Not a map at all: the whole record is damaged, so all defaults.
+        assert_eq!(
+            decode(br#"{"enter_sends":false,"timeline_events":[false]}"#),
+            AccountSettings::default()
+        );
     }
 
     #[test]

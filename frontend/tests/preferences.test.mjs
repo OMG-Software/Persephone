@@ -42,7 +42,29 @@ test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes ar
     sendTyping: false,
     sendReadReceipts: false,
     idleLockMinutes: 0,
-    notificationNames: true
+    notificationNames: true,
+    timelineEvents: {
+      joins: true,
+      leaves: true,
+      invitations: true,
+      removals: true,
+      joinRequests: true,
+      displayNames: true,
+      profilePictures: true,
+      roomName: true,
+      topic: true,
+      roomPicture: true,
+      encryption: true,
+      joinRule: true,
+      historyVisibility: true,
+      permissions: true,
+      addresses: true,
+      pinnedMessages: true,
+      guestAccess: true,
+      serverAccess: true,
+      creation: true,
+      upgrades: true
+    }
   });
 });
 
@@ -120,6 +142,65 @@ test('GIVEN a change made while the settings load WHEN the load finishes THEN on
   await changing;
   assert.deepEqual(shown.settings, { ...STORED, chatTextPercent: 90 });
   assert.equal(shown.failure, null);
+});
+
+test('GIVEN one timeline switch changed while the settings load WHEN the load finishes THEN the other stored switches are kept', async () => {
+  const { kept, waiting, shown } = keeper();
+  const stored = {
+    ...STORED,
+    timelineEvents: { ...DEFAULT_SETTINGS.timelineEvents, joins: false, topic: false }
+  };
+  const loading = kept.load();
+  const changing = kept.change({ timelineEvents: { leaves: false } });
+  assert.equal(shown.settings.timelineEvents.leaves, false, 'shown at once');
+  assert.equal(shown.settings.timelineEvents.joins, true, 'the default until the stored switches are known');
+  waiting.load[0].resolve(stored);
+  await loading;
+  const expected = { ...stored, timelineEvents: { ...stored.timelineEvents, leaves: false } };
+  assert.deepEqual(shown.settings, expected);
+  await tick();
+  assert.deepEqual(waiting.save[0].settings, expected, 'the stored switches are not overwritten with defaults');
+  waiting.save[0].resolve();
+  await changing;
+  assert.deepEqual(shown.settings, expected);
+});
+
+test('GIVEN two switches changed WHEN the first save fails THEN only its switch returns, and the second is kept', async () => {
+  const { kept, waiting, shown } = keeper();
+  const stored = { ...STORED, timelineEvents: DEFAULT_SETTINGS.timelineEvents };
+  const loading = kept.load();
+  waiting.load[0].resolve(stored);
+  await loading;
+  const first = kept.change({ timelineEvents: { leaves: false } });
+  const second = kept.change({ timelineEvents: { joins: false } });
+  await tick();
+  waiting.save[0].reject('locked');
+  await first;
+  assert.equal(shown.settings.timelineEvents.leaves, true);
+  assert.equal(shown.settings.timelineEvents.joins, false);
+  assert.equal(shown.failure, preferences.SAVE_FAILED);
+  await tick();
+  assert.deepEqual(waiting.save[1].settings.timelineEvents, { ...DEFAULT_SETTINGS.timelineEvents, joins: false });
+  waiting.save[1].resolve();
+  await second;
+});
+
+test('GIVEN one switch changed twice while the settings cannot be read WHEN every load fails THEN it returns to its value before the first change', async () => {
+  const { kept, waiting, shown } = keeper();
+  const loading = kept.load();
+  const first = kept.change({ timelineEvents: { leaves: false } });
+  const second = kept.change({ timelineEvents: { leaves: true } });
+  assert.equal(shown.settings.timelineEvents.leaves, true);
+  waiting.load[0].reject('locked');
+  await loading;
+  // Each change reads the settings again before it gives up.
+  for (let i = 0; i < 10 && waiting.load.length < 3; i += 1) await tick();
+  assert.equal(waiting.load.length, 3);
+  for (const load of waiting.load.slice(1)) load.reject('locked');
+  await Promise.all([first, second]);
+  assert.equal(waiting.save.length, 0, 'nothing is saved without the stored settings');
+  assert.deepEqual(shown.settings, DEFAULT_SETTINGS, 'no unconfirmed value is left showing');
+  assert.equal(shown.failure, preferences.SAVE_FAILED);
 });
 
 test('GIVEN a change WHEN the core refuses to save it THEN only that setting returns, with a failure', async () => {

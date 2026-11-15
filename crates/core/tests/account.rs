@@ -7,8 +7,8 @@ use persephone_contracts::{
     AccountState, AccountStatus, ContactStatus, ContactTrust, DisplayName, HistoryVisibility,
     IdentityState, JoinRule, LevelKey, Membership, NoticeKind, PendingMessage, PendingState,
     PowerLevel, RoomChange, RoomEncryption, RoomIdentityChanges, RoomList, RoomMembers,
-    RoomSettings, SecurityError, SecurityOperation, SecurityStatus, SendFailure, SignInError,
-    StoreState, TimelineItem, TimelinePage,
+    RoomSettings, SecurityError, SecurityOperation, SecurityStatus, SendFailure, SenderName,
+    SignInError, StoreState, TimelineItem, TimelinePage,
 };
 use persephone_core::{
     Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
@@ -23,7 +23,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -165,30 +165,60 @@ const LATER_STATE: &[&str] = &[
 
 impl wiremock::Respond for SlidingRoom {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
-        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
-        let wanted = body["lists"]["rooms"]["required_state"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let state: Vec<Value> = room_state()
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|event| wanted.iter().any(|entry| requested(entry, event)))
-            .filter(|event| {
-                !self
-                    .withheld
-                    .iter()
-                    .any(|kind| event["type"].as_str() == Some(kind))
-            })
-            .cloned()
-            .collect();
-        ResponseTemplate::new(200).set_body_json(json!({
-            "pos":"sliding-pos","lists":{"rooms":{"count":1}},
-            "rooms":{ROOM:{"initial":true,"joined_count":1,"invited_count":0,"required_state":state,"timeline":[text("$live","live")],"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
-            "extensions":{"e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},"to_device":{"events":[],"next_batch":"to-device-pos"}}
-        }))
+        sliding_answer(request, self.withheld, json!([text("$live", "live")]))
     }
+}
+
+/// Sliding Sync for `ROOM` whose timeline also has `CONTACT` accepting the
+/// invitation once `joined` is set. Like a server, it sends their member
+/// event in the timeline only: the list asks for this account's alone.
+struct SlidingJoin {
+    joined: Arc<AtomicBool>,
+}
+
+impl wiremock::Respond for SlidingJoin {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let mut timeline = vec![text("$live", "live")];
+        if self.joined.load(Ordering::SeqCst) {
+            timeline.push(json!({
+                "type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$bobjoin",
+                "origin_server_ts":12,"content":{"membership":"join"},
+                "unsigned":{"prev_content":{"membership":"invite"}}
+            }));
+        }
+        sliding_answer(request, &[], Value::Array(timeline))
+    }
+}
+
+/// The Sliding Sync answer for `ROOM` with `timeline`: only the state the
+/// request's list asks for, less the `withheld` event types.
+fn sliding_answer(
+    request: &wiremock::Request,
+    withheld: &[&str],
+    timeline: Value,
+) -> ResponseTemplate {
+    let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+    let wanted = body["lists"]["rooms"]["required_state"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let state: Vec<Value> = room_state()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| wanted.iter().any(|entry| requested(entry, event)))
+        .filter(|event| {
+            !withheld
+                .iter()
+                .any(|kind| event["type"].as_str() == Some(kind))
+        })
+        .cloned()
+        .collect();
+    ResponseTemplate::new(200).set_body_json(json!({
+        "pos":"sliding-pos","lists":{"rooms":{"count":1}},
+        "rooms":{ROOM:{"initial":true,"joined_count":1,"invited_count":0,"required_state":state,"timeline":timeline,"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
+        "extensions":{"e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},"to_device":{"events":[],"next_batch":"to-device-pos"}}
+    }))
 }
 
 fn text(id: &str, body: &str) -> Value {
@@ -228,6 +258,52 @@ fn history() -> Value {
     )
 }
 
+/// `/messages` for `ROOM` with `history()` and, newest, a message each
+/// from `@nameless:synthetic.test` and `@stranger:synthetic.test`. When the
+/// request's filter asks for lazy-loaded members, the answer's `state` has
+/// the member events of `USER`, who sent most of the page's events, of
+/// `@nameless:synthetic.test`, which has no display name, and of
+/// `@mallory:synthetic.test`, whose only event (a forged edit) the page
+/// leaves out; it has none for `@stranger:synthetic.test`. Otherwise it has
+/// none, like a server that does not lazy-load.
+struct LazyHistory;
+
+impl wiremock::Respond for LazyHistory {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let lazy = request.url.query_pairs().any(|(key, value)| {
+            key == "filter"
+                && serde_json::from_str::<Value>(&value)
+                    .is_ok_and(|filter| filter["lazy_load_members"] == json!(true))
+        });
+        let state = if lazy {
+            in_room(
+                ROOM,
+                json!([
+                    {"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$lazyme","origin_server_ts":1,"content":{"membership":"join","displayname":"Alice <b>admin</b>"}},
+                    {"type":"m.room.member","state_key":"@mallory:synthetic.test","sender":"@mallory:synthetic.test","event_id":"$lazymal","origin_server_ts":1,"content":{"membership":"join","displayname":"Mallory"}},
+                    {"type":"m.room.member","state_key":"@nameless:synthetic.test","sender":"@nameless:synthetic.test","event_id":"$lazynameless","origin_server_ts":1,"content":{"membership":"join"}}
+                ]),
+            )
+        } else {
+            json!([])
+        };
+        let mut chunk = in_room(
+            ROOM,
+            json!([
+                {"type":"m.room.message","sender":"@nameless:synthetic.test","event_id":"$nameless","origin_server_ts":13,"content":{"msgtype":"m.text","body":"no name"}},
+                {"type":"m.room.message","sender":"@stranger:synthetic.test","event_id":"$stranger","origin_server_ts":12,"content":{"msgtype":"m.text","body":"unknown"}}
+            ]),
+        );
+        let older = history();
+        chunk
+            .as_array_mut()
+            .unwrap()
+            .extend(older.as_array().unwrap().iter().cloned());
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"start":"history","end":"older","chunk":chunk,"state":state}))
+    }
+}
+
 /// `GET /rooms/{roomId}/state/{eventType}/` as Matrix v1.19 answers it for
 /// `ROOM`: the content of its event of that type, or 404 `M_NOT_FOUND`.
 struct RoomStateEvent;
@@ -250,6 +326,21 @@ impl wiremock::Respond for RoomStateEvent {
             None => ResponseTemplate::new(404)
                 .set_body_json(json!({"errcode": "M_NOT_FOUND", "error": "no such state"})),
         }
+    }
+}
+
+/// `/members` answers in order: each call gets the next list of member
+/// events in the requested room, and the last one repeats.
+struct MembersInOrder {
+    lists: Vec<Value>,
+    calls: AtomicUsize,
+}
+
+impl wiremock::Respond for MembersInOrder {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let list = &self.lists[call.min(self.lists.len() - 1)];
+        Members(list.clone()).respond(request)
     }
 }
 
@@ -895,6 +986,39 @@ impl Homeserver {
         );
     }
 
+    /// Sliding Sync whose `ROOM` timeline gets `CONTACT`'s join once the
+    /// returned flag is set, and `/members` answers that first list
+    /// `CONTACT` as invited, then as joined.
+    fn invited_contact_joins(&self) -> Arc<AtomicBool> {
+        let joined = Arc::new(AtomicBool::new(false));
+        let own = json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}});
+        self.runtime.block_on(async {
+            Mock::given(method("POST"))
+                .and(path(
+                    "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+                ))
+                .respond_with(SlidingJoin {
+                    joined: joined.clone(),
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+                .respond_with(MembersInOrder {
+                    lists: vec![
+                        json!([own, {"type":"m.room.member","state_key":CONTACT,"sender":USER,"event_id":"$invite","origin_server_ts":9,"content":{"membership":"invite"}}]),
+                        json!([own, {"type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$bobjoin","origin_server_ts":12,"content":{"membership":"join"}}]),
+                    ],
+                    calls: AtomicUsize::new(0),
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+        });
+        joined
+    }
+
     /// Accepts every state event sent to a room.
     fn state_events_accepted(&self) {
         self.runtime.block_on(
@@ -1378,6 +1502,96 @@ fn settings_come_from_the_room_state(sliding: bool) {
 #[test]
 fn given_native_sliding_sync_then_room_settings_come_from_the_room_state() {
     settings_come_from_the_room_state(true);
+}
+
+/// GIVEN a homeserver that lazy-loads members WHEN a page of history is
+/// read THEN the core asks for the page's members, and the page lists the
+/// display name of each person it shows, as inert text, and no one else's.
+/// A person whose member event has no name is listed without one; a person
+/// with no member event in the answer or the store is not listed, so their
+/// name stays unknown rather than removed.
+#[test]
+fn given_lazy_loaded_members_then_a_page_lists_the_display_names_it_shows() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        false,
+        true,
+    );
+    server.runtime.block_on(
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/messages$"))
+            .respond_with(LazyHistory)
+            .with_priority(1)
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
+    let page: TimelinePage = value(call(
+        &core,
+        Call::TimelinePage {
+            room_id: ROOM.into(),
+            cursor: None,
+        },
+    ));
+    assert_eq!(
+        page.names,
+        [
+            SenderName {
+                user_id: USER.into(),
+                display_name: Some("Alice <b>admin</b>".into()),
+            },
+            SenderName {
+                user_id: "@nameless:synthetic.test".into(),
+                display_name: None,
+            },
+        ]
+    );
+}
+
+/// GIVEN Sliding Sync, which sends other people's member events only in
+/// the timeline, and a member list that shows `CONTACT` as invited WHEN
+/// `CONTACT` accepts the invitation THEN the member list shows them as
+/// joined, not still invited.
+#[test]
+fn given_sliding_sync_when_an_invited_member_joins_then_the_list_shows_them_joined() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.settings_endpoints();
+    let joined = server.invited_contact_joins();
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
+    let contact = || {
+        value::<RoomMembers>(call(
+            &core,
+            Call::RoomMembers {
+                room_id: ROOM.into(),
+                filter: String::new(),
+            },
+        ))
+        .members
+        .into_iter()
+        .find(|member| member.user_id == CONTACT)
+        .map(|member| member.membership)
+    };
+    assert_eq!(contact(), Some(Membership::Invite));
+
+    joined.store(true, Ordering::SeqCst);
+    wait_for("the contact to show as joined", || {
+        contact() == Some(Membership::Join)
+    });
 }
 
 /// GIVEN Sliding Sync that sent `ROOM` without the power levels, join rule,

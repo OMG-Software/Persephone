@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { stateLine, stateParts } from '../src/stateText.ts';
+import { EVENT_SWITCHES, changeShown, eventSwitch, stateLine, stateParts } from '../src/stateText.ts';
 
 const A = '@alice:example.invalid';
 const B = '@bob:example.invalid';
@@ -52,10 +52,10 @@ test('GIVEN room changes WHEN described THEN set and removed values read differe
   }
 });
 
-test('GIVEN names from the event WHEN split into parts THEN only they are name parts', () => {
+test('GIVEN names from the event WHEN split into parts THEN only they are person or name parts', () => {
   const hostile = '\u202Egnp.exe <b>';
   const parts = stateParts(hostile, { type: 'member', target: hostile, membership: 'kicked' });
-  assert.deepEqual(parts, [{ name: hostile }, { text: ' removed ' }, { name: hostile }]);
+  assert.deepEqual(parts, [{ person: hostile }, { text: ' removed ' }, { person: hostile }]);
   const topic = stateParts(A, { type: 'topic', topic: hostile });
   assert.deepEqual(topic[2], { name: hostile });
   assert.ok(topic.filter((part) => 'text' in part).every((part) => !part.text.includes(hostile)));
@@ -63,4 +63,77 @@ test('GIVEN names from the event WHEN split into parts THEN only they are name p
 
 test('GIVEN a change this build does not know WHEN described THEN a neutral line shows', () => {
   assert.equal(stateLine(A, { type: 'future' }), `${A} changed the room`);
+});
+
+test('GIVEN a profile picture, pins and guest access WHEN described THEN each has its own line', () => {
+  assert.equal(stateLine(A, { type: 'profile_picture', target: B }), `${B} changed their profile picture`);
+  assert.equal(stateLine(A, { type: 'pinned_messages' }), `${A} changed the pinned messages`);
+  assert.equal(stateLine(A, { type: 'guest_access', allowed: true }), `${A} let guests join`);
+  assert.equal(stateLine(A, { type: 'guest_access', allowed: false }), `${A} stopped guests from joining`);
+});
+
+test('GIVEN display names WHEN a line is made THEN people read as name and ID, and a renamed person as their ID', () => {
+  const names = new Map([
+    [A, 'Alice'],
+    [B, 'Bobby']
+  ]);
+  assert.equal(stateLine(A, member('invited'), names), `Alice (${A}) invited Bobby (${B})`);
+  assert.equal(
+    stateLine(B, { type: 'display_name', target: B, name: 'Bobby' }, names),
+    `${B} is now shown as Bobby`,
+    'the current name would read as the new one'
+  );
+  const parts = stateParts(A, member('kicked'));
+  assert.deepEqual(parts, [{ person: A }, { text: ' removed ' }, { person: B }]);
+  assert.deepEqual(stateParts(A, { type: 'topic', topic: B }), [{ person: A }, { text: ' changed the topic to ' }, { name: B }]);
+});
+
+test('GIVEN every kind of change WHEN its switch is found THEN each kind has one listed switch, and every switch is listed once', () => {
+  const memberships = [
+    ['joined', 'joins'],
+    ['left', 'leaves'],
+    ['invited', 'invitations'],
+    ['invite_rejected', 'invitations'],
+    ['invite_withdrawn', 'invitations'],
+    ['kicked', 'removals'],
+    ['banned', 'removals'],
+    ['unbanned', 'removals'],
+    ['knocked', 'joinRequests'],
+    ['knock_withdrawn', 'joinRequests'],
+    ['knock_denied', 'joinRequests']
+  ];
+  for (const [membership, key] of memberships) assert.equal(eventSwitch(member(membership)), key, membership);
+  const others = [
+    [{ type: 'display_name', target: B, name: null }, 'displayNames'],
+    [{ type: 'profile_picture', target: B }, 'profilePictures'],
+    [{ type: 'name', name: null }, 'roomName'],
+    [{ type: 'topic', topic: null }, 'topic'],
+    [{ type: 'avatar' }, 'roomPicture'],
+    [{ type: 'encryption' }, 'encryption'],
+    [{ type: 'join_rule', rule: 'invite' }, 'joinRule'],
+    [{ type: 'history_visibility', visibility: 'shared' }, 'historyVisibility'],
+    [{ type: 'power_levels' }, 'permissions'],
+    [{ type: 'addresses' }, 'addresses'],
+    [{ type: 'pinned_messages' }, 'pinnedMessages'],
+    [{ type: 'guest_access', allowed: true }, 'guestAccess'],
+    [{ type: 'server_acl' }, 'serverAccess'],
+    [{ type: 'created' }, 'creation'],
+    [{ type: 'upgraded' }, 'upgrades']
+  ];
+  for (const [change, key] of others) assert.equal(eventSwitch(change), key, change.type);
+  const used = new Set([...memberships.map(([, key]) => key), ...others.map(([, key]) => key)]);
+  const listed = EVENT_SWITCHES.map((entry) => entry.key);
+  assert.deepEqual([...used].sort(), [...listed].sort());
+  assert.equal(new Set(listed).size, listed.length);
+  assert.equal(eventSwitch({ type: 'future_kind' }), null);
+});
+
+test('GIVEN switches WHEN a change is checked THEN only a switch set to false hides it', () => {
+  const all = Object.fromEntries(EVENT_SWITCHES.map(({ key }) => [key, true]));
+  assert.equal(changeShown(member('left'), all), true);
+  assert.equal(changeShown(member('left'), { ...all, leaves: false }), false);
+  assert.equal(changeShown(member('joined'), { ...all, leaves: false }), true);
+  // A change no switch names, or a switch an older page does not have, shows.
+  assert.equal(changeShown({ type: 'future_kind' }, { ...all, leaves: false }), true);
+  assert.equal(changeShown(member('left'), {}), true);
 });

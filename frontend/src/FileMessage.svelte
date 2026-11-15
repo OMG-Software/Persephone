@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { TimelineItem } from '../../crates/contracts/generated/contracts';
   import { saveFile } from './bridge';
-  import { avatarColour, initials } from './people';
+  import PersonName from './PersonName.svelte';
+  import { avatarColour, initials, personText, shownName } from './people';
   import { clockTime, fullTime, toDate } from './time';
 
   // A received file (ADR-0029). Nothing is fetched, opened or played: the
@@ -10,10 +11,13 @@
   // by the core: isolated text.
   let {
     roomId,
-    item
+    item,
+    names = new Map()
   }: {
     roomId: string;
     item: Extract<TimelineItem, { kind: 'file' }>;
+    // The room's known display names, by user ID.
+    names?: ReadonlyMap<string, string>;
   } = $props();
 
   const date = $derived(toDate(item.origin_server_ts));
@@ -49,11 +53,11 @@
   }
 </script>
 
-<article class="message" aria-label={'File from ' + item.sender}>
+<article class="message" aria-label={'File from ' + personText(item.sender, names)}>
   <span class="avatar {avatarColour(item.sender)}" aria-hidden="true">{initials(item.sender)}</span>
   <div class="message-body">
     <div class="message-head">
-      <strong class="sender"><bdi>{item.sender}</bdi></strong>
+      <strong class="sender"><PersonName userId={item.sender} name={shownName(item.sender, names)} /></strong>
       {#if date}
         <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
       {/if}

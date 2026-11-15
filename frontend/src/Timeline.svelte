@@ -3,6 +3,7 @@
   import type {
     ContactStatus,
     RoomEncryption,
+    TimelineEvents,
     TimelineItem
   } from '../../crates/contracts/generated/contracts';
   import EncryptionIcon from './EncryptionIcon.svelte';
@@ -12,8 +13,11 @@
   import ImageMessage from './ImageMessage.svelte';
   import Message from './Message.svelte';
   import MessageActions from './MessageActions.svelte';
-  import { stateParts } from './stateText';
+  import PersonName from './PersonName.svelte';
+  import { personText, shownName } from './people';
+  import { changeShown, stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
+  import { DEFAULT_SETTINGS } from './preferences';
   import { applyRelations, newestEvent, quoteOf, type ShownItem } from './timeline';
 
   let {
@@ -42,7 +46,9 @@
     unreadFrom = null,
     onread,
     readBy = [],
-    onlink
+    onlink,
+    names = new Map(),
+    events = DEFAULT_SETTINGS.timelineEvents
   }: {
     title: string;
     // The room the items come from; images are loaded from it.
@@ -91,11 +97,20 @@
     readBy?: string[];
     // Asks the core to open a link from a message.
     onlink?: (url: string) => void;
+    // The room's known display names, by user ID: shown beside each ID.
+    names?: ReadonlyMap<string, string>;
+    // Which kinds of room changes to show (the account's settings).
+    events?: TimelineEvents;
   } = $props();
 
   // Edits, deletions and reactions are not lines of their own: each message
   // shows its newest edit and its reactions, or that it was deleted.
-  const shown = $derived(applyRelations(items, ownUserId));
+  // Room changes whose switch is off in the settings are left out.
+  const shown = $derived(
+    applyRelations(items, ownUserId).filter(
+      (item) => item.kind !== 'state' || changeShown(item.change, events)
+    )
+  );
 
   // Fixed text per trust level; the core sends codes only.
   const trustText: Record<string, string> = {
@@ -234,6 +249,7 @@
             {#if item.kind === 'message'}
               <Message
                 name={item.sender}
+                {names}
                 body={item.body}
                 time={item.origin_server_ts}
                 quote={item.reply_to === null || item.reply_to === undefined
@@ -257,13 +273,17 @@
                 {onlink}
               />
             {:else if item.kind === 'image'}
-              <ImageMessage {roomId} {item} />
+              <ImageMessage {roomId} {item} {names} />
             {:else if item.kind === 'file'}
-              <FileMessage {roomId} {item} />
+              <FileMessage {roomId} {item} {names} />
             {:else if item.kind === 'notice'}
               {@const date = toDate(item.origin_server_ts)}
               <p class="notice">
-                <span><bdi>{item.sender}</bdi>: {noticeText[item.notice] ?? noticeText.unsupported}</span>
+                <span
+                  ><PersonName userId={item.sender} name={shownName(item.sender, names)} />: {noticeText[
+                    item.notice
+                  ] ?? noticeText.unsupported}</span
+                >
                 {#if date}
                   <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
                 {/if}
@@ -272,8 +292,10 @@
               {@const date = toDate(item.origin_server_ts)}
               <p class="notice state-change">
                 <span
-                  >{#each stateParts(item.sender, item.change) as part, at (at)}{#if 'name' in part}<bdi
-                        >{part.name}</bdi
+                  >{#each stateParts(item.sender, item.change) as part, at (at)}{#if 'person' in part}<PersonName
+                        userId={part.person}
+                        name={shownName(part.person, names)}
+                      />{:else if 'name' in part}<bdi>{part.name}</bdi
                       >{:else}{part.text}{/if}{/each}</span
                 >
                 {#if date}
@@ -286,7 +308,7 @@
             {#if item.kind === 'image' || item.kind === 'file' || item.kind === 'notice'}
               <div class="item-actions">
                 <MessageActions
-                  sender={item.sender}
+                  sender={personText(item.sender, names)}
                   onpin={onpin && item.kind !== 'notice' ? () => onpin(item.event_id) : undefined}
                   onreport={onreport && ownUserId !== null && item.sender !== ownUserId
                     ? () => onreport(item.event_id, item.sender)

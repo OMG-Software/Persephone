@@ -278,7 +278,7 @@ test('GIVEN a received image WHEN the timeline shows THEN it is an inert placeho
   assert.doesNotMatch(html, /<img/i, 'the name is text');
   assert.doesNotMatch(html, /<canvas/, 'nothing is drawn or fetched before the user asks');
   assert.match(html, /<p class="attachment-name"><bdi>&lt;img src=x onerror=alert\(1\)>‮gnp\.exe<\/bdi><\/p>/);
-  assert.match(html, /<strong class="sender"><bdi>&lt;img/);
+  assert.match(html, /<strong class="sender">(?:<!--[^>]*-->)*<bdi>&lt;img/);
   assert.match(html, /640 × 480 · 48 KB/);
   assert.equal((html.match(/>Load image</g) ?? []).length, 2);
   assert.match(html, /<button type="button" class="secondary">Load image<span class="visually-hidden">: <bdi>&lt;img/);
