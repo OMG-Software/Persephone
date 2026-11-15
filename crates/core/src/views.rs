@@ -252,6 +252,7 @@ impl Fixtures {
                 // Synthetic rooms: nothing can be sent to them.
                 encryption: RoomEncryption::Unknown,
                 contact: None,
+                picture_id: None,
             })
             .collect();
         RoomList {

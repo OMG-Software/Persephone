@@ -35,8 +35,8 @@ use persephone_contracts::{
     DeviceList, DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom,
     NewSessions, NotificationLevel, NotificationSettings, PendingMessage, ProfileList,
     ProxySetting, PublicRoomPage, RoomActivity, RoomChange, RoomCreation, RoomIdentityChanges,
-    RoomInvite, RoomList, RoomMembers, RoomReaders, RoomServers, RoomSettings, SecurityStatus,
-    StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
+    RoomInvite, RoomList, RoomMembers, RoomPicture, RoomReaders, RoomServers, RoomSettings,
+    SecurityStatus, StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
     COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
@@ -919,6 +919,20 @@ async fn load_image(
     relay(core.inner(), Call::LoadImage { room_id, event_id }).await
 }
 
+/// Downloads and decodes the current picture of a joined room in the core's
+/// contained worker (ADR-0041). The page names only the room; no URL crosses
+/// this command. Replies with the picture's ID and an image view.
+#[tauri::command]
+async fn load_room_picture(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<RoomPicture, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::LoadRoomPicture { room_id }).await
+}
+
 /// Most `image_band` calls the page may have running at once. This bounds
 /// only the concurrent core `image_band` calls and the bands (each at most
 /// `MAX_BAND_BYTES`, 1 MiB) they hold while they run. A slot is given back
@@ -1564,6 +1578,7 @@ pub fn configure<R: Runtime>(
             identity_changes,
             accept_identity,
             load_image,
+            load_room_picture,
             image_band,
             release_image,
             pick_image,

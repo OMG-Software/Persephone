@@ -14,6 +14,8 @@
   import Message from './Message.svelte';
   import MessageActions from './MessageActions.svelte';
   import PersonName from './PersonName.svelte';
+  import RoomPicture from './RoomPicture.svelte';
+  import type { RoomPictures } from './roomPictures';
   import { personText, shownName } from './people';
   import { changeShown, stateParts } from './stateText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
@@ -47,6 +49,9 @@
     onread,
     readBy = [],
     onlink,
+    pictureId = null,
+    pictures = null,
+    onloadpicture,
     names = new Map(),
     events = DEFAULT_SETTINGS.timelineEvents
   }: {
@@ -97,6 +102,12 @@
     readBy?: string[];
     // Asks the core to open a link from a message.
     onlink?: (url: string) => void;
+    // The room's current picture, the pictures loaded so far, and the
+    // request to load this room's; absent where pictures are not offered
+    // (ADR-0041). The button shows only while the picture is not loaded.
+    pictureId?: string | null;
+    pictures?: RoomPictures | null;
+    onloadpicture?: () => void;
     // The room's known display names, by user ID: shown beside each ID.
     names?: ReadonlyMap<string, string>;
     // Which kinds of room changes to show (the account's settings).
@@ -187,6 +198,7 @@
   <header class="chat-header">
     <EncryptionIcon {encryption} size="large" />
     {#if contact}
+      <RoomPicture {pictures} {roomId} {pictureId} size="large" onload={onloadpicture} />
       <div class="room-title">
         <h2 id="timeline-heading">
           <bdi>{title}</bdi>
@@ -199,7 +211,9 @@
         </p>
       </div>
     {:else}
-      <Icon name="hash" class="hash" />
+      <RoomPicture {pictures} {roomId} {pictureId} size="large" onload={onloadpicture}>
+        <Icon name="hash" class="hash" />
+      </RoomPicture>
       <h2 id="timeline-heading"><bdi>{title}</bdi></h2>
     {/if}
     {#if onfavourite}

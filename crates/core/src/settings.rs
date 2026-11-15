@@ -34,6 +34,7 @@ struct Stored {
     send_read_receipts: bool,
     idle_lock_minutes: u16,
     notification_names: bool,
+    load_room_pictures: bool,
     /// Kept as a map of switch names, read by [`timeline_events`].
     timeline_events: Map<String, Value>,
 }
@@ -55,6 +56,7 @@ impl From<AccountSettings> for Stored {
             send_read_receipts: settings.send_read_receipts,
             idle_lock_minutes: settings.idle_lock_minutes,
             notification_names: settings.notification_names,
+            load_room_pictures: settings.load_room_pictures,
             timeline_events: match serde_json::to_value(settings.timeline_events) {
                 Ok(Value::Object(switches)) => switches,
                 _ => Map::new(),
@@ -91,6 +93,7 @@ impl From<Stored> for AccountSettings {
             send_read_receipts: stored.send_read_receipts,
             idle_lock_minutes: stored.idle_lock_minutes,
             notification_names: stored.notification_names,
+            load_room_pictures: stored.load_room_pictures,
             timeline_events: timeline_events(&stored.timeline_events),
         };
         if settings.idle_lock_minutes > persephone_contracts::IDLE_LOCK_MINUTES_MAX {
@@ -162,6 +165,7 @@ mod tests {
             send_read_receipts: true,
             idle_lock_minutes: 30,
             notification_names: false,
+            load_room_pictures: true,
             timeline_events: TimelineEvents {
                 leaves: false,
                 room_picture: false,
@@ -211,6 +215,10 @@ mod tests {
         assert!(
             decode(br#"{"desktop_notifications":true}"#).notification_names,
             "a record from before the setting names the sender, as before"
+        );
+        assert!(
+            !decode(br#"{"notification_names":true}"#).load_room_pictures,
+            "a record from before the setting loads no room picture by itself"
         );
     }
 

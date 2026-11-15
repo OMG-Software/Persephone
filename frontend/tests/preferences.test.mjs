@@ -43,6 +43,7 @@ test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes ar
     sendReadReceipts: false,
     idleLockMinutes: 0,
     notificationNames: true,
+    loadRoomPictures: false,
     timelineEvents: {
       joins: true,
       leaves: true,

@@ -719,6 +719,8 @@ impl MatrixViews {
                             EncryptionState::Unknown => RoomEncryption::Unknown,
                         },
                         contact: contact.as_ref().map(|contact| contacts::shown(contact)),
+                        // Names the picture only; the page cannot fetch it.
+                        picture_id: room.avatar_url().as_deref().map(crate::media::picture_id),
                     }
                 })
                 .collect(),

@@ -3517,6 +3517,228 @@ fn given_image_events_then_load_image_fetches_decrypts_and_decodes_them() {
     assert_eq!(load("$plain"), Outcome::Error(ErrorCode::Locked));
 }
 
+/// Classic sync with one joined room per room-picture case: `!pic` has a
+/// picture with a thumbnail, `!nothumb` one without, `!huge` one larger than
+/// the cap, `!garbage` one that is not an image, and `!none` no picture.
+#[cfg(windows)]
+struct PictureRooms;
+
+#[cfg(windows)]
+const PICTURE_ROOMS: [(&str, Option<&str>); 5] = [
+    ("!pic:synthetic.test", Some("mxc://synthetic.test/avatar")),
+    (
+        "!nothumb:synthetic.test",
+        Some("mxc://synthetic.test/nothumb"),
+    ),
+    ("!huge:synthetic.test", Some("mxc://synthetic.test/huge")),
+    (
+        "!garbage:synthetic.test",
+        Some("mxc://synthetic.test/garbage"),
+    ),
+    ("!none:synthetic.test", None),
+];
+
+#[cfg(windows)]
+impl wiremock::Respond for PictureRooms {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        let mut rooms = json!({});
+        for (index, (room, picture)) in PICTURE_ROOMS.iter().enumerate() {
+            let mut state = vec![
+                json!({"type":"m.room.create","state_key":"","sender":USER,"event_id":format!("$c{index}"),"origin_server_ts":1,"content":{"room_version":"11"}}),
+                json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":format!("$m{index}"),"origin_server_ts":2,"content":{"membership":"join"}}),
+            ];
+            if let Some(url) = picture {
+                state.push(json!({"type":"m.room.avatar","state_key":"","sender":USER,"event_id":format!("$a{index}"),"origin_server_ts":3,"content":{"url":url}}));
+            }
+            rooms[*room] = json!({"state":{"events":state},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+        }
+        ResponseTemplate::new(200).set_body_json(json!({
+            "next_batch":"pictures",
+            "account_data":{"events":[]},
+            "rooms":{"join":rooms},
+            "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
+        }))
+    }
+}
+
+/// GIVEN joined rooms with and without pictures WHEN the room list is read
+/// and the page loads each picture THEN the list names each picture by an
+/// opaque ID and never by URL; a picture loads from the authenticated
+/// thumbnail endpoint (96 square, cropped, not animated) with the access
+/// token, or from the file when the server has no thumbnail, and is decoded
+/// in the contained worker; a picture over the cap, one that is not an image,
+/// a room without a picture and a room that is not joined are refused; and a
+/// lock refuses the call.
+#[cfg(windows)]
+#[test]
+fn given_room_pictures_then_load_room_picture_fetches_thumbnails_and_refuses_the_rest() {
+    use persephone_contracts::RoomPicture;
+
+    let server = Homeserver::signed_in();
+    let oversize = vec![0u8; 20 * 1024 * 1024 + 1];
+    server.runtime.block_on(async {
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v3/sync"))
+            .respond_with(PictureRooms)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        for (endpoint, status, body) in [
+            ("thumbnail/synthetic.test/avatar", 200, JPEG.to_vec()),
+            ("thumbnail/synthetic.test/nothumb", 404, Vec::new()),
+            ("download/synthetic.test/nothumb", 200, JPEG.to_vec()),
+            ("thumbnail/synthetic.test/huge", 200, oversize.clone()),
+            ("download/synthetic.test/huge", 200, oversize),
+            (
+                "thumbnail/synthetic.test/garbage",
+                200,
+                b"not an image".to_vec(),
+            ),
+        ] {
+            let response = if status == 200 {
+                ResponseTemplate::new(200)
+                    .set_body_raw(body, "image/jpeg")
+                    .insert_header("Content-Disposition", "inline; filename=\"picture\"")
+            } else {
+                ResponseTemplate::new(status)
+                    .set_body_json(json!({"errcode":"M_NOT_FOUND","error":"no thumbnail"}))
+            };
+            Mock::given(method("GET"))
+                .and(path(format!("/_matrix/client/v1/media/{endpoint}")))
+                .respond_with(response)
+                .mount(&server.server)
+                .await;
+        }
+    });
+    let dir = TempDir::new().unwrap();
+    let core = core_with_worker(dir.path());
+    sign_in(&core, &server.uri());
+    // The SDK can list a room before it applies the state that came with
+    // it, so wait for every room's picture, not only for the rooms.
+    wait_for("the picture rooms and their pictures", || {
+        let list: RoomList = value(call(&core, Call::RoomList {}));
+        PICTURE_ROOMS.iter().all(|(room, picture)| {
+            list.rooms.iter().any(|summary| {
+                summary.room_id == *room && summary.picture_id.is_some() == picture.is_some()
+            })
+        })
+    });
+    let list: RoomList = value(call(&core, Call::RoomList {}));
+    let picture_of = |room: &str| {
+        list.rooms
+            .iter()
+            .find(|summary| summary.room_id == room)
+            .unwrap()
+            .picture_id
+            .clone()
+    };
+    let shown = picture_of("!pic:synthetic.test")
+        .unwrap_or_else(|| panic!("the room has a picture: {list:?}"));
+    assert!(
+        shown.len() == persephone_contracts::PICTURE_ID_BYTES
+            && shown
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{shown}"
+    );
+    assert_ne!(Some(shown.clone()), picture_of("!nothumb:synthetic.test"));
+    assert_eq!(picture_of("!none:synthetic.test"), None);
+    let listed = serde_json::to_string(&list).unwrap();
+    assert!(
+        !listed.contains("mxc:") && !listed.contains("avatar"),
+        "{listed}"
+    );
+
+    let load = |room: &str| {
+        call(
+            &core,
+            Call::LoadRoomPicture {
+                room_id: room.into(),
+            },
+        )
+    };
+    let picture: RoomPicture = value(load("!pic:synthetic.test"));
+    assert_eq!(picture.picture_id, shown);
+    assert_eq!((picture.image.width, picture.image.height), (16, 8));
+    let requests = server
+        .runtime
+        .block_on(server.server.received_requests())
+        .unwrap_or_default();
+    let thumbnail = requests
+        .iter()
+        .find(|request| {
+            request
+                .url
+                .path()
+                .ends_with("/thumbnail/synthetic.test/avatar")
+        })
+        .expect("the thumbnail was fetched");
+    let query: std::collections::HashMap<_, _> = thumbnail.url.query_pairs().collect();
+    for (name, wanted) in [
+        ("width", "96"),
+        ("height", "96"),
+        ("method", "crop"),
+        ("animated", "false"),
+    ] {
+        assert_eq!(query.get(name).map(AsRef::as_ref), Some(wanted), "{name}");
+    }
+    assert_eq!(
+        thumbnail
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+    assert_eq!(
+        server.requests_to("/_matrix/client/v1/media/download/synthetic.test/avatar"),
+        0,
+        "a thumbnail is enough"
+    );
+
+    let fallback: RoomPicture = value(load("!nothumb:synthetic.test"));
+    assert_eq!((fallback.image.width, fallback.image.height), (16, 8));
+    assert_ne!(fallback.picture_id, shown);
+    assert_ne!(fallback.image.handle, picture.image.handle);
+
+    assert_eq!(
+        load("!huge:synthetic.test"),
+        Outcome::Error(ErrorCode::Rejected)
+    );
+    assert_eq!(
+        load("!garbage:synthetic.test"),
+        Outcome::Error(ErrorCode::Rejected)
+    );
+    assert_eq!(
+        load("!none:synthetic.test"),
+        Outcome::Error(ErrorCode::NotFound)
+    );
+    assert_eq!(
+        load("!absent:synthetic.test"),
+        Outcome::Error(ErrorCode::NotFound)
+    );
+    assert_eq!(
+        load("#alias:synthetic.test"),
+        Outcome::Error(ErrorCode::InvalidArgument)
+    );
+
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    assert_eq!(
+        call(
+            &core,
+            Call::ReleaseImage {
+                handle: picture.image.handle
+            }
+        ),
+        Outcome::Error(ErrorCode::NotFound),
+        "a lock drops every picture"
+    );
+    assert_eq!(
+        load("!pic:synthetic.test"),
+        Outcome::Error(ErrorCode::Locked)
+    );
+}
+
 /// Picks one fixed file instead of showing the dialog.
 #[cfg(windows)]
 struct PickFile(std::path::PathBuf);

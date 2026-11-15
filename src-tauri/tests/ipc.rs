@@ -144,6 +144,19 @@ impl CoreTransport for FakeCore {
                     "url": "mxc://example.invalid/m"
                 })),
             },
+            Call::LoadRoomPicture { room_id } => match room_id.as_str() {
+                "!pic:example.invalid" => Ok(serde_json::json!({
+                    "pictureId": "0123456789abcdef",
+                    "image": {"handle": HANDLE, "width": 96, "height": 96, "bands": 1, "bandRows": 96}
+                })),
+                "!none:example.invalid" => Err(CoreError::Core(ErrorCode::NotFound)),
+                "!bad:example.invalid" => Err(CoreError::Core(ErrorCode::Rejected)),
+                // A picture that names where it is: outside the contract.
+                _ => Ok(serde_json::json!({
+                    "pictureId": "0123456789abcdef", "url": "mxc://example.invalid/m",
+                    "image": {"handle": HANDLE, "width": 1, "height": 1, "bands": 1, "bandRows": 1}
+                })),
+            },
             // Answered with pixels, through `image_band`; the UI never sends
             // it as an ordinary call.
             Call::ImageBand { .. } => Err(CoreError::BadReply),
@@ -385,7 +398,7 @@ impl CoreTransport for FakeCore {
             Call::AccountSettings {} => Ok(serde_json::json!({
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
                 "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
-                "idleLockMinutes": 0, "notificationNames": true,
+                "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false,
                 "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
@@ -797,6 +810,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-identity-changes",
             "allow-accept-identity",
             "allow-load-image",
+            "allow-load-room-picture",
             "allow-image-band",
             "allow-release-image",
             "allow-pick-image",
@@ -1740,7 +1754,7 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
             "interfaceTextPercent": 100, "desktopNotifications": false,
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
-            "notificationNames": true, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}}})
+            "notificationNames": true, "loadRoomPictures": false, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}}})
     };
     assert!(invoke("set_account_settings", settings(true)).is_ok());
     assert_eq!(
@@ -2301,6 +2315,7 @@ fn bad_image_arguments() -> Vec<(&'static str, serde_json::Value)> {
             serde_json::json!({"roomId": "!r:example.invalid", "eventId": "$".repeat(256)}),
         ),
         ("pick_image", serde_json::json!({"roomId": long_id})),
+        ("load_room_picture", serde_json::json!({"roomId": long_id})),
         (
             "send_image",
             serde_json::json!({"roomId": long_id, "handle": HANDLE}),
@@ -2357,6 +2372,22 @@ fn given_image_commands_then_handles_cross_and_replies_are_checked() {
     assert_eq!(load("$bad").unwrap_err(), "rejected");
     assert_eq!(load("$busy").unwrap_err(), "limit_exceeded");
     assert_eq!(load("$odd").unwrap_err(), "core_unavailable");
+
+    let picture = |room: &str| invoke("load_room_picture", serde_json::json!({"roomId": room}));
+    assert_eq!(
+        picture("!pic:example.invalid"),
+        Ok(serde_json::json!({
+            "pictureId": "0123456789abcdef",
+            "image": {"handle": HANDLE, "width": 96, "height": 96, "bands": 1, "bandRows": 96}
+        }))
+    );
+    assert_eq!(picture("!none:example.invalid").unwrap_err(), "not_found");
+    assert_eq!(picture("!bad:example.invalid").unwrap_err(), "rejected");
+    assert_eq!(
+        picture("!url:example.invalid").unwrap_err(),
+        "core_unavailable",
+        "a picture's URL never reaches the page"
+    );
 
     let draft = invoke("pick_image", serde_json::json!({"roomId": room})).unwrap();
     assert_eq!(draft["kind"], "draft");
@@ -2510,6 +2541,10 @@ fn given_image_commands_from_a_remote_origin_then_they_are_denied() {
         (
             "load_image",
             serde_json::json!({"roomId": room, "eventId": "$image"}),
+        ),
+        (
+            "load_room_picture",
+            serde_json::json!({"roomId": "!pic:example.invalid"}),
         ),
         (
             "image_band",

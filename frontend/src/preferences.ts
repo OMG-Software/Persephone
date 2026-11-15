@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   sendReadReceipts: false,
   idleLockMinutes: 0,
   notificationNames: true,
+  loadRoomPictures: false,
   // Every kind of room change shows until the account turns one off.
   timelineEvents: {
     joins: true,

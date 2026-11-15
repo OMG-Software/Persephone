@@ -226,6 +226,20 @@
       Both are off by default: each tells the homeserver and everyone in the room when you are
       active. You still see other people's. Your other devices always learn what you have read.
     </p>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.loadRoomPictures}
+        onchange={(event) => onchange({ loadRoomPictures: event.currentTarget.checked })}
+      />
+      <span>Load room pictures automatically</span>
+    </label>
+    <p class="note">
+      Off by default: each room shows its picture only after you choose to load it. Loading a
+      picture tells your homeserver, and the server that holds the picture, that you looked at it.
+      Persephone decodes pictures in its contained image decoder.
+    </p>
     <label for="idle-lock">Lock Persephone when this computer is not used</label>
     <!-- Only Windows reads the computer's idle time yet (ADR-0025); elsewhere
          the setting could not take effect, so it is not offered. -->

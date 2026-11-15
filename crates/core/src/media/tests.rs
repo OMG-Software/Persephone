@@ -398,6 +398,69 @@ fn given_admission_limits_then_extra_work_is_refused_not_queued() {
     assert!(media.begin_pick().is_ok());
 }
 
+/// GIVEN loads and room pictures WHEN both start THEN pictures have their own
+/// single slot: a picture never takes a `load_image` slot, and a second
+/// picture is refused at once.
+#[test]
+fn given_room_pictures_then_they_are_admitted_apart_from_images() {
+    let media = service(FakeWorker::new((1, 1), 1));
+    let picture = media.begin_picture().unwrap();
+    assert_eq!(media.begin_picture().err(), Some(ErrorCode::LimitExceeded));
+    let loads = (media.begin_load().unwrap(), media.begin_load().unwrap());
+    assert_eq!(media.begin_load().err(), Some(ErrorCode::LimitExceeded));
+    drop(loads);
+    drop(picture);
+    assert!(media.begin_picture().is_ok());
+}
+
+/// GIVEN a large decoded picture WHEN shown as a room picture THEN it is
+/// scaled to fit the picture square, keeping its shape, and reserves only
+/// those pixels; a small one is not enlarged; one the worker refuses is
+/// `rejected`.
+#[test]
+fn given_a_decoded_room_picture_then_it_fits_the_picture_square() {
+    let media = service(FakeWorker::new((960, 480), 1));
+    let decoded = media.decode(b"large").unwrap();
+    let (pixels, oriented) = media.shown_within(decoded, ROOM_PICTURE_SIDE).unwrap();
+    assert_eq!(oriented, (960, 480));
+    assert_eq!((pixels.width(), pixels.height()), (96, 48));
+    assert_eq!(
+        media.budgets().class_used(BudgetClass::RetainedPixels),
+        96 * 48 * 4
+    );
+    drop(pixels);
+
+    let media = service(FakeWorker::new((16, 8), 1));
+    let (pixels, _) = media
+        .shown_within(media.decode(b"small").unwrap(), ROOM_PICTURE_SIDE)
+        .unwrap();
+    assert_eq!((pixels.width(), pixels.height()), (16, 8));
+    assert_eq!(media.decode(b"bad").err(), Some(ErrorCode::Rejected));
+}
+
+/// GIVEN room picture URIs WHEN named THEN each ID is 16 lowercase hex
+/// characters, the same for the same picture and different for another, and
+/// holds nothing of the URI.
+#[test]
+fn given_room_pictures_then_their_ids_are_opaque_and_follow_the_picture() {
+    let first = OwnedMxcUri::from("mxc://example.org/first");
+    let id = picture_id(&first);
+    assert_eq!(id.len(), persephone_contracts::PICTURE_ID_BYTES);
+    assert!(
+        id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{id}"
+    );
+    assert_eq!(
+        id,
+        picture_id(&OwnedMxcUri::from("mxc://example.org/first"))
+    );
+    assert_ne!(
+        id,
+        picture_id(&OwnedMxcUri::from("mxc://example.org/second"))
+    );
+    assert!(!id.contains("example") && !id.contains("first"));
+}
+
 fn encoded(budgets: &ResourceBudgets, bytes: &[u8]) -> Encoded {
     let mut encoded = Encoded::reserve(budgets, bytes.len() as u64).unwrap();
     encoded.extend(bytes).unwrap();
@@ -676,6 +739,47 @@ fn given_server_versions_then_the_media_endpoint_follows_the_sdk_choice() {
     ] {
         assert_eq!(
             media_url(base, &OwnedMxcUri::from(bad), &versions(&["v1.11"])),
+            Err(ErrorCode::Rejected),
+            "{bad}"
+        );
+    }
+}
+
+/// GIVEN homeservers of different versions WHEN a room picture's thumbnail
+/// URL is built THEN it asks for a cropped, still square of the given side,
+/// from the authenticated endpoint (with the token) where advertised and the
+/// legacy one otherwise; a media ID outside the grammar is refused.
+#[test]
+fn given_server_versions_then_the_thumbnail_endpoint_follows_the_media_choice() {
+    let uri = OwnedMxcUri::from("mxc://example.org/AbC_12-x");
+    let base = "https://matrix.example.org/";
+    assert_eq!(
+        thumbnail_url(base, &uri, &versions(&["v1.11"]), 96),
+        Ok((
+            "https://matrix.example.org/_matrix/client/v1/media/thumbnail/example.org/AbC_12-x?width=96&height=96&method=crop&animated=false"
+                .to_owned(),
+            true
+        ))
+    );
+    assert_eq!(
+        thumbnail_url(base, &uri, &versions(&["v1.10"]), 96),
+        Ok((
+            "https://matrix.example.org/_matrix/media/v3/thumbnail/example.org/AbC_12-x?width=96&height=96&method=crop&animated=false"
+                .to_owned(),
+            false
+        ))
+    );
+    assert_eq!(
+        thumbnail_url(base, &uri, &versions(&[]), 96),
+        Err(ErrorCode::Unavailable)
+    );
+    for bad in [
+        "mxc://example.org/a%2Fb",
+        "mxc://example.org/../x",
+        "https://example.org/x",
+    ] {
+        assert_eq!(
+            thumbnail_url(base, &OwnedMxcUri::from(bad), &versions(&["v1.11"]), 96),
             Err(ErrorCode::Rejected),
             "{bad}"
         );

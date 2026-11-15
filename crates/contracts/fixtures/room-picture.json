@@ -1,0 +1,10 @@
+{
+  "pictureId": "0123456789abcdef",
+  "image": {
+    "handle": "00112233445566778899aabbccddeeff",
+    "width": 96,
+    "height": 96,
+    "bands": 1,
+    "bandRows": 96
+  }
+}

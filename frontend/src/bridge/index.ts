@@ -58,6 +58,7 @@ import type {
   RoomSettings,
   SignInError,
   RoomList,
+  RoomPicture,
   SecurityStatus,
   StoreState,
   ThreePid,
@@ -128,6 +129,7 @@ export type {
   RoomSettings,
   PendingMessage,
   RoomList,
+  RoomPicture,
   SecurityStatus,
   SignInError,
   StoreState,
@@ -450,6 +452,16 @@ export function loadImage(roomId: string, eventId: string): Promise<ImageView> {
 }
 
 /**
+ * Downloads and decodes a joined room's current picture in the core's
+ * contained worker (ADR-0041). The page names the room only; it never learns
+ * where the picture is. Call it when the user asks, or when they turned on
+ * loading room pictures automatically. Release the reply's handle when done.
+ */
+export function loadRoomPicture(roomId: string): Promise<RoomPicture> {
+  return invoke<RoomPicture>('load_room_picture', { roomId });
+}
+
+/**
  * One band of rows of a loaded or picked image. The host answers with raw
  * bytes, never JSON: width and rows as little-endian u32, then the RGBA
  * pixels. Rejects with `bad_image` when the answer is not exactly that.
@@ -698,6 +710,7 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       sendReadReceipts: settings.sendReadReceipts,
       idleLockMinutes: settings.idleLockMinutes,
       notificationNames: settings.notificationNames,
+      loadRoomPictures: settings.loadRoomPictures,
       timelineEvents: timelineEvents(settings.timelineEvents)
     }
   });

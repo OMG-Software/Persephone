@@ -131,6 +131,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           sendReadReceipts: false,
           idleLockMinutes: 15,
           notificationNames: false,
+          loadRoomPictures: true,
           timelineEvents: { ...ALL_SHOWN, leaves: false }
         }),
       'set_account_settings',
@@ -144,10 +145,12 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           sendReadReceipts: false,
           idleLockMinutes: 15,
           notificationNames: false,
+          loadRoomPictures: true,
           timelineEvents: { ...ALL_SHOWN, leaves: false }
         }
       }
     ],
+    [() => bridge.loadRoomPicture('!r:s'), 'load_room_picture', { roomId: '!r:s' }],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
     [() => bridge.newSessions(), 'new_sessions', {}],
     [() => bridge.signInWithOidc('https://e.org'), 'sign_in_with_oidc', { homeserver: 'https://e.org' }],
@@ -211,6 +214,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       sendReadReceipts: false,
       idleLockMinutes: 0,
       notificationNames: true,
+      loadRoomPictures: false,
       timelineEvents: { ...ALL_SHOWN, polls: false },
       theme: 'dark'
     })
@@ -225,6 +229,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       sendReadReceipts: false,
       idleLockMinutes: 0,
       notificationNames: true,
+      loadRoomPictures: false,
       timelineEvents: ALL_SHOWN
     }
   });

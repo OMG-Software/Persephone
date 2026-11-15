@@ -214,8 +214,14 @@ fn room_list_rejects_unknown_fields() {
 
 #[test]
 fn image_fixtures_match_checked_in_json() {
-    use persephone_contracts::{sample_image_pick, sample_image_view, sample_pending_image};
+    use persephone_contracts::{
+        sample_image_pick, sample_image_view, sample_pending_image, sample_room_picture,
+    };
     for (value, fixture) in [
+        (
+            serde_json::to_value(sample_room_picture()).unwrap(),
+            include_str!("../fixtures/room-picture.json"),
+        ),
         (
             serde_json::to_value(sample_image_view()).unwrap(),
             include_str!("../fixtures/image-view.json"),
@@ -238,6 +244,35 @@ fn image_fixtures_match_checked_in_json() {
         serde_json::to_value(persephone_contracts::ImagePick::Cancelled {}).unwrap(),
         serde_json::json!({"kind": "cancelled"})
     );
+}
+
+/// GIVEN a room picture reply or a room summary WHEN read THEN the picture is
+/// named only by its ID: a URL, a missing image or an unknown field is refused.
+#[test]
+fn room_picture_contracts_carry_no_url() {
+    use persephone_contracts::{RoomPicture, RoomSummary};
+    let image = r#"{"handle":"h","width":96,"height":96,"bands":1,"bandRows":96}"#;
+    let picture = format!(r#"{{"pictureId":"0123456789abcdef","image":{image}}}"#);
+    assert!(serde_json::from_str::<RoomPicture>(&picture).is_ok());
+    for invalid in [
+        format!(r#"{{"pictureId":"0123456789abcdef","image":{image},"url":"mxc://s/m"}}"#),
+        format!(r#"{{"image":{image}}}"#),
+        r#"{"pictureId":"0123456789abcdef"}"#.to_owned(),
+        format!(r#"{{"pictureId":null,"image":{image}}}"#),
+    ] {
+        assert!(
+            serde_json::from_str::<RoomPicture>(&invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    let summary = |extra: &str| {
+        format!(
+            r#"{{"roomId":"!r:s","displayName":null,"unreadCount":0,"encryption":"unknown","contact":null{extra}}}"#
+        )
+    };
+    let without = serde_json::from_str::<RoomSummary>(&summary(r#","pictureId":null"#)).unwrap();
+    assert_eq!(without.picture_id, None);
+    assert!(serde_json::from_str::<RoomSummary>(&summary(r#","pictureUrl":"mxc://s/m""#)).is_err());
 }
 
 /// GIVEN image DTOs WHEN read THEN unknown fields, tags and MIME types, a
@@ -494,7 +529,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true}}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true}}"#
     );
     // Every kind of room change shows by default.
     assert_eq!(defaults.timeline_events, TimelineEvents::default());
@@ -505,7 +540,10 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         r#"{"enterSends":null,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#,
         r#"{"enterSends":"true","chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false}"#,
         r#"{"enterSends":true,"chatTextPercent":-1,"interfaceTextPercent":100,"desktopNotifications":false}"#,
-        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"userId":"@a:s"}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"userId":"@a:s"}"#,
+        // A page from before the room picture setting.
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true}"#,
+        r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":"yes"}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":-5}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false}"#,
         r#"{"enterSends":true,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":"yes","sendReadReceipts":false}"#,
