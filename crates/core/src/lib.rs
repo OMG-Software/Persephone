@@ -34,6 +34,7 @@ pub mod account;
 pub mod account_changes;
 pub mod account_details;
 pub mod activity;
+pub mod calls;
 pub mod contacts;
 pub mod conversations;
 pub mod credentials;
