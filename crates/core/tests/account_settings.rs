@@ -211,7 +211,10 @@ impl Homeserver {
     fn start(push_rules: Option<Value>) -> Self {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let server = runtime.block_on(async {
-            let server = MockServer::start().await;
+            // Its own listener, closed when the test ends. `MockServer::start`
+            // lends a pooled server, and its address, to the next test, so a
+            // core a test leaves running would sync against that test's mocks.
+            let server = MockServer::builder().start().await;
             Mock::given(method("GET"))
                 .and(path("/_matrix/client/versions"))
                 .respond_with(
@@ -867,10 +870,6 @@ fn given_push_rules_then_the_level_reads_and_sets_them() {
     let _: NotificationSettings = value(call(&core, Call::NotificationLevel {}));
 }
 
-/// GIVEN messages from another member that the push rules notify of WHEN
-/// desktop notifications are off THEN nothing waits to be shown; WHEN they
-/// are turned on THEN a notification waits with the room's and sender's
-/// names, never the message text.
 /// GIVEN a signed-in account with the default theme WHEN the page saves
 /// another theme THEN the core reads it back from the encrypted profile, and
 /// a theme saved later replaces it.
@@ -894,6 +893,10 @@ fn given_a_saved_theme_then_the_profile_reads_it_back() {
     }
 }
 
+/// GIVEN messages from another member that the push rules notify of WHEN
+/// desktop notifications are off THEN nothing waits to be shown; WHEN they
+/// are turned on THEN a notification waits with the room's and sender's
+/// names, never the message text.
 #[test]
 fn given_desktop_notifications_then_only_names_wait_to_be_shown() {
     let server = Homeserver::start(None);
