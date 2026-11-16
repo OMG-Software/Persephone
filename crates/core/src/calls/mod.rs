@@ -20,15 +20,26 @@
 //!   token. The answer must name a `wss://` URL and a well-formed JWT.
 //! * [`readiness`]: whether the homeserver offers an SFU transport and TURN
 //!   servers, so the page can say a call is not possible before it starts.
+//! * [`delayed`]: the delayed leave (MSC4140) that ends a membership when the
+//!   core stops restarting it.
+//! * [`incoming`]: the bounded to-device handler for other members' keys and
+//!   the one decision that accepts or drops each.
+//! * [`controller`]: the one running call. It starts the worker first, writes
+//!   the membership, gets the SFU grant, rotates and sends keys, and shows the
+//!   page a content-free state.
 //!
 //! Every limit below applies before data is kept. Malformed input is skipped
 //! or refused; nothing here panics on peer data.
 
+pub mod controller;
+pub mod delayed;
 pub mod encryption_keys;
+pub mod incoming;
 pub mod keys;
 pub mod membership;
 pub mod readiness;
 pub mod sfu;
+pub mod worker;
 
 /// Most call members kept: examined events become at most this many members,
 /// key holders and key recipients.

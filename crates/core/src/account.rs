@@ -409,6 +409,11 @@ pub async fn select_engine(client: &Client) -> Result<Engine, SignInError> {
                     (StateEventType::RoomHistoryVisibility, String::new()),
                     (StateEventType::RoomTopic, String::new()),
                     (StateEventType::RoomGuestAccess, String::new()),
+                    // Call members of every device, for the call controller.
+                    (
+                        StateEventType::from("org.matrix.msc3401.call.member"),
+                        "*".into(),
+                    ),
                 ])
                 .timeline_limit(20),
         )
