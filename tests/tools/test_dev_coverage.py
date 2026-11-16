@@ -142,6 +142,7 @@ def coverage(*arguments, platform="linux"):
         mock.patch.object(dev, "run", record),
         mock.patch.object(dev, "coverage_environment", lambda environment: {**environment, "CARGO_LLVM_COV": "1"}),
         mock.patch.object(dev, "repository_paths"),
+        mock.patch.object(dev.webrtc, "ensure", return_value=Path("webrtc-root")),
         mock.patch.object(dev.shutil, "which", return_value="npm"),
         mock.patch.object(dev.shutil, "copy2"),
     ):

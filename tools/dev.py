@@ -121,6 +121,20 @@ def coverage_environment(environment):
     return environment
 
 
+def call_worker_environment(environment):
+    """`environment` for building and testing the call worker. The prebuilt
+    libwebrtc objects use the static C runtime on Windows, so the worker and its
+    dependencies must too (a mismatch fails at link time). That is why the
+    worker builds apart from the rest of the workspace, which keeps the dynamic
+    runtime."""
+    environment = dict(environment)
+    if os.name == "nt":
+        flags = environment.get("RUSTFLAGS", "")
+        if "crt-static" not in flags:
+            environment["RUSTFLAGS"] = (flags + " -C target-feature=+crt-static").strip()
+    return environment
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -145,6 +159,15 @@ def main():
     environment["npm_config_cache"] = str(ROOT / ".local/cache/npm")
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     cargo_flags = ["--locked"] + (["--offline"] if args.offline else [])
+    if args.command in ("check", "rust", "build", "coverage"):
+        # The call worker links the pinned, SHA-256-verified libwebrtc, and
+        # webrtc-sys must never download one itself (ADR-0043).
+        try:
+            environment["LK_CUSTOM_WEBRTC"] = str(webrtc.ensure(ROOT, offline=args.offline))
+        except webrtc.WebrtcError as error:
+            print(f"webrtc: {error}", file=sys.stderr)
+            return 1
+    call_worker = ["-p", "persephone-call-worker"]
     # The sandbox tests load this guest module; `rust` lints its wasm-only code.
     wasm_guest = ["-p", "persephone-media-decoder", "--target", "wasm32-unknown-unknown"]
     # Mock-homeserver account, account-settings and registration tests need
@@ -166,8 +189,16 @@ def main():
         # guest. `cargo test` does not build another package's binary, so a
         # missing or stale worker would otherwise be used.
         run(["cargo", "build", *cargo_flags, "-p", "persephone-media-worker"], environment)
-        run(["cargo", "test", *cargo_flags, "--workspace", "--all-targets"], environment)
-        run(["cargo", "clippy", *cargo_flags, "--workspace", "--all-targets", "--", "-D", "warnings"], environment)
+        # The call worker builds apart (see call_worker_environment).
+        run(["cargo", "test", *cargo_flags, "--workspace", "--exclude", "persephone-call-worker", "--all-targets"], environment)
+        run(
+            ["cargo", "clippy", *cargo_flags, "--workspace", "--exclude", "persephone-call-worker", "--all-targets", "--", "-D", "warnings"],
+            environment,
+        )
+        worker_environment = call_worker_environment(environment)
+        run(["cargo", "build", *cargo_flags, *call_worker], worker_environment)
+        run(["cargo", "test", *cargo_flags, *call_worker, "--all-targets"], worker_environment)
+        run(["cargo", "clippy", *cargo_flags, *call_worker, "--all-targets", "--", "-D", "warnings"], worker_environment)
         run(["cargo", "test", *cargo_flags, *dev_core, *dev_core_tests], environment)
         run(["cargo", "clippy", *cargo_flags, *dev_core, "--all-targets", "--", "-D", "warnings"], environment)
     if args.command == "coverage":
@@ -184,9 +215,11 @@ def main():
         # instrumented tests, which launch it from there. Its own package's
         # tests contain themselves the same way, so they are left out.
         run(["cargo", "build", *cargo_flags, "-p", "persephone-media-worker"], environment)
+        # The call worker builds apart, uninstrumented, and has no coverage yet.
+        run(["cargo", "build", *cargo_flags, *call_worker], call_worker_environment(environment))
         coverage = coverage_environment(environment)
         run(["cargo", "llvm-cov", "clean", "--workspace"], coverage)
-        workspace = ["--workspace", "--exclude", "persephone-media-worker", "--all-targets"]
+        workspace = ["--workspace", "--exclude", "persephone-media-worker", "--exclude", "persephone-call-worker", "--all-targets"]
         run(["cargo", "test", *cargo_flags, *workspace, "--no-run"], coverage)
         worker = "persephone-media-worker" + (".exe" if os.name == "nt" else "")
         shutil.copy2(ROOT / ".local/build/rust/debug" / worker, COVERAGE_TARGET / "debug" / worker)
@@ -210,6 +243,11 @@ def main():
         core_and_worker = ["-p", "persephone-core", "--bin", "persephone"]
         core_and_worker += ["-p", "persephone-media-worker", "--bin", "persephone-media-worker"]
         run(["cargo", "build", *cargo_flags, *profile, *core_and_worker], environment)
+        # Apart from the core and worker: the call worker needs the static C runtime.
+        run(
+            ["cargo", "build", *cargo_flags, *profile, *call_worker, "--bin", "persephone-call-worker"],
+            call_worker_environment(environment),
+        )
         run(["cargo", "build", *cargo_flags, *profile, "-p", "persephone-desktop", "--bin", "persephone-ui"], environment)
     if args.command in ("check", "frontend", "bootstrap"):
         if not npm:
