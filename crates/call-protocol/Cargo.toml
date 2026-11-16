@@ -1,0 +1,18 @@
+[package]
+name = "persephone-call-protocol"
+version = "0.0.1"
+edition = "2024"
+publish = false
+license = "GPL-3.0-only"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Also accept `ws://127.0.0.1` and `ws://[::1]` SFU URLs for disposable
+# loopback test servers. Never enable it in a release build.
+dev-disposable-servers = []
+
+[dependencies]
+persephone-media-protocol = { path = "../media-protocol" }
+zeroize = "=1.9.1"
