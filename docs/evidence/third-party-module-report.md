@@ -207,6 +207,16 @@ Checks run on `1e03d88` plus these fixes, all exited with status 0:
 The frontend and contract checks were not rerun: this round changed no
 contract or page file.
 
+Third round, after the review of `9e9c645`: the path reads moved into
+`read_paths`, which takes the read as a function, and the new test
+`a_failed_or_cut_path_read_makes_the_result_incomplete` makes one of three
+reads fail or fill the buffer (all reads working is the control). Rerun, all
+exited with status 0: `cargo fmt --all -- --check`; `cargo test --locked
+--offline -p persephone-core` (lib 287 passed, 1 ignored; integration
+binaries 13, 5, 5, 2, 12, 15, 20 and 4 passed); `cargo clippy --locked
+--offline -p persephone-core --all-targets -- -D warnings`, also with
+`--features dev-disposable-servers`.
+
 ## Live run
 
 `persephone.exe --demo` from this build, with `WEBVIEW2_USER_DATA_FOLDER` set

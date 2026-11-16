@@ -302,28 +302,34 @@ fn list_modules(pid: u32) -> Listed {
     // SAFETY: `raw` is a new handle that only this value owns.
     let process = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
     let handle = process.as_raw_handle() as HANDLE;
-    let Some((modules, mut complete)) = module_handles(handle) else {
+    let Some((modules, all_listed)) = module_handles(handle) else {
         return if has_exited(handle) {
             Listed::gone()
         } else {
             Listed::unreadable()
         };
     };
+    let mut listed = read_paths(&modules, |module, buffer| {
+        // SAFETY: the buffer holds `buffer.len()` characters, as passed.
+        unsafe { K32GetModuleFileNameExW(handle, module, buffer.as_mut_ptr(), buffer.len() as u32) }
+    });
+    listed.complete &= all_listed;
+    listed
+}
+
+/// Reads each module's path with `read`, which fills the buffer and returns
+/// the length, 0 on failure, like `K32GetModuleFileNameExW`. A failed or
+/// full read leaves that path out and makes the result incomplete.
+fn read_paths(modules: &[HMODULE], mut read: impl FnMut(HMODULE, &mut [u16]) -> u32) -> Listed {
     let mut buffer = vec![0u16; PATH_CHARS];
     let mut paths = Vec::with_capacity(modules.len());
-    for module in modules {
-        // SAFETY: the buffer holds `PATH_CHARS` characters, as passed.
-        let length = unsafe {
-            K32GetModuleFileNameExW(handle, module, buffer.as_mut_ptr(), PATH_CHARS as u32)
-        } as usize;
-        if length == 0 {
-            // Unloaded after the list was read, or not readable: the two
-            // cannot be told apart, so the result is not complete.
-            complete = false;
-            continue;
-        }
-        if length >= PATH_CHARS {
-            // A full buffer means the path was cut: it is not shown.
+    let mut complete = true;
+    for &module in modules {
+        let length = read(module, &mut buffer) as usize;
+        if length == 0 || length >= PATH_CHARS {
+            // Zero: unloaded after the list was read, or not readable; the
+            // two cannot be told apart. Full: the path was cut. Neither path
+            // is shown, so the result is not complete.
             complete = false;
             continue;
         }
@@ -790,6 +796,39 @@ mod tests {
         let result = Scanner::new().scan(&[target]);
         assert!(result.modules.is_empty());
         assert!(!result.incomplete);
+    }
+
+    /// GIVEN three modules WHEN one path read fails, or one fills the buffer
+    /// THEN that path is left out and the result is incomplete; WHEN every
+    /// read works THEN all paths are listed and it is complete (the control)
+    #[test]
+    fn a_failed_or_cut_path_read_makes_the_result_incomplete() {
+        let modules: Vec<HMODULE> = (1..=3usize).map(|n| n as HMODULE).collect();
+        let reader = |bad: Option<(usize, u32)>| {
+            move |module: HMODULE, buffer: &mut [u16]| -> u32 {
+                let n = module as usize;
+                if let Some((which, length)) = bad
+                    && which == n
+                {
+                    return length;
+                }
+                let path: Vec<u16> = format!(r"C:\x\m{n}.dll").encode_utf16().collect();
+                buffer[..path.len()].copy_from_slice(&path);
+                path.len() as u32
+            }
+        };
+        let all = read_paths(&modules, reader(None));
+        assert!(all.complete);
+        assert_eq!(all.paths.len(), 3);
+        for (length, case) in [(0, "failed"), (PATH_CHARS as u32, "cut")] {
+            let listed = read_paths(&modules, reader(Some((2, length))));
+            assert!(!listed.complete, "{case}");
+            assert_eq!(
+                listed.paths,
+                [PathBuf::from(r"C:\x\m1.dll"), PathBuf::from(r"C:\x\m3.dll")],
+                "{case}"
+            );
+        }
     }
 
     /// GIVEN the System process (pid 4), which a user process cannot open
