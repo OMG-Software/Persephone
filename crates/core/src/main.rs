@@ -9,9 +9,10 @@
 //! UI containment refuses, and the core exits with status 2. The core also
 //! watches the UI's window ([`ui_watch`]). If the page never reaches the
 //! core, or the web view's processes exit while the UI keeps running, the
-//! core asks in a native dialog whether to start the window again. Retry
-//! ends the old UI tree and starts a new UI; the session, its sync and any
-//! sign-in keep running in the core.
+//! core starts the window again once without asking. If the window fails
+//! again soon after, the core asks in a native dialog whether to start it
+//! again. A retry ends the old UI tree and starts a new UI; the session, its
+//! sync and any sign-in keep running in the core.
 //!
 //! On macOS the process main thread is kept for AppKit: the work above runs
 //! on a `core-main` thread and the main thread runs
@@ -218,9 +219,10 @@ fn run(options: Options) -> ExitCode {
         None => core,
     };
     let host = ui_host::platform();
+    let mut retries = ui_watch::Retries::default();
     let mut switch = None;
     let code = loop {
-        match run_ui(&core, &*host, options.demo_live) {
+        match run_ui(&core, &*host, &mut retries, options.demo_live) {
             Run::Exit(code) => break code,
             Run::Retry => {
                 eprintln!("persephone: starting the window again");
@@ -265,7 +267,7 @@ fn run(options: Options) -> ExitCode {
     }
 }
 
-fn run_ui(core: &Core, host: &dyn UiHost, demo_live: bool) -> Run {
+fn run_ui(core: &Core, host: &dyn UiHost, retries: &mut ui_watch::Retries, demo_live: bool) -> Run {
     // The host contains the UI before it creates its web view; a platform
     // without UI containment refuses here.
     let StartedUi { mut child, tree } = match host.start() {
@@ -284,7 +286,7 @@ fn run_ui(core: &Core, host: &dyn UiHost, demo_live: bool) -> Run {
         if demo_live {
             scope.spawn(|| demo(core));
         }
-        let watcher = scope.spawn(|| watch(core, host, &*tree, &finished));
+        let watcher = scope.spawn(|| watch(core, host, &*tree, &finished, retries));
         let end = serve(core, from_ui, to_ui);
         *finished.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
         finished.1.notify_all();
@@ -309,13 +311,15 @@ fn run_ui(core: &Core, host: &dyn UiHost, demo_live: bool) -> Run {
     }
 }
 
-/// Watches one UI run until it finishes. On a failed window it asks whether
-/// to retry, then ends the UI tree either way, which ends the run.
+/// Watches one UI run until it finishes. On a failed window it retries
+/// without asking if `retries` allows that, else asks whether to retry. It
+/// then ends the UI tree either way, which ends the run.
 fn watch(
     core: &Core,
     host: &dyn UiHost,
     tree: &dyn UiTree,
     finished: &(Mutex<bool>, Condvar),
+    retries: &mut ui_watch::Retries,
 ) -> Verdict {
     let mut window = ui_watch::Watch::new(Instant::now());
     let (done, wake) = finished;
@@ -344,7 +348,12 @@ fn watch(
         drop(done);
         // A code only: nothing from the page or the web view.
         eprintln!("persephone: the window failed: {failure:?}");
-        let retry = host.ask_to_retry();
+        let retry = if retries.automatic(Instant::now()) {
+            eprintln!("persephone: retrying the window without asking");
+            true
+        } else {
+            host.ask_to_retry()
+        };
         if !tree.terminate(REPLACE_TIMEOUT) {
             eprintln!("persephone: the old window did not exit; closing");
             return Verdict::Close;
@@ -459,6 +468,92 @@ mod tests {
         ] {
             assert!(parsed(args).is_err(), "{args:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::{Verdict, ui_watch::Retries, watch};
+    use persephone_core::{
+        Core,
+        ui_host::{StartError, StartedUi, UiHost, UiTree},
+    };
+    use std::{
+        io,
+        sync::{
+            Condvar, Mutex,
+            atomic::{AtomicU32, Ordering},
+        },
+        time::Duration,
+    };
+
+    /// A host whose dialog answers Cancel and counts how often it was shown.
+    #[derive(Default)]
+    struct Host {
+        asked: AtomicU32,
+    }
+
+    impl UiHost for Host {
+        fn start(&self) -> Result<StartedUi, StartError> {
+            Err(StartError::Unsupported)
+        }
+
+        fn ask_to_retry(&self) -> bool {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+    }
+
+    /// A tree whose web view runs at the first look and is gone after it.
+    #[derive(Default)]
+    struct VanishingWebView {
+        looks: AtomicU32,
+    }
+
+    impl UiTree for VanishingWebView {
+        fn active_processes(&self) -> io::Result<u32> {
+            Ok(if self.looks.fetch_add(1, Ordering::SeqCst) == 0 {
+                6
+            } else {
+                1
+            })
+        }
+
+        fn terminate(&self, _timeout: Duration) -> bool {
+            true
+        }
+    }
+
+    /// GIVEN a web view that exits while the UI stays WHEN it happens the
+    /// first time THEN the window is retried without the dialog; WHEN the
+    /// replacement fails the same way soon after THEN the dialog is shown,
+    /// and its Cancel closes Persephone.
+    #[test]
+    fn given_a_failed_window_then_only_a_repeated_failure_asks() {
+        let core = Core::default();
+        let host = Host::default();
+        let mut retries = Retries::default();
+        let running = (Mutex::new(false), Condvar::new());
+
+        let first = watch(
+            &core,
+            &host,
+            &VanishingWebView::default(),
+            &running,
+            &mut retries,
+        );
+        assert!(first == Verdict::Retry);
+        assert_eq!(host.asked.load(Ordering::SeqCst), 0);
+
+        let second = watch(
+            &core,
+            &host,
+            &VanishingWebView::default(),
+            &running,
+            &mut retries,
+        );
+        assert!(second == Verdict::Close);
+        assert_eq!(host.asked.load(Ordering::SeqCst), 1);
     }
 }
 

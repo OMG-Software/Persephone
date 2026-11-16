@@ -1,5 +1,5 @@
-//! Decides when the UI's window has failed, so the core can offer to start
-//! it again (owner decision, 21 October 2026).
+//! Decides when the UI's window has failed, so the core can start it again
+//! (owner decisions, 21 October and 16 November 2026).
 //!
 //! WebView2 sometimes fails on its own: its processes start and exit within
 //! seconds and leave the UI process running with a blank window. Two signs
@@ -11,7 +11,11 @@
 //!   alone in it for [`ALONE_GRACE`]. The grace covers a normal close, when
 //!   the web view ends a moment before the UI does.
 //!
-//! The decision is pure, so it is tested without a window.
+//! A failed window is started again once without asking ([`Retries`]). A
+//! failure within [`AUTO_RETRY_INTERVAL`] of that retry asks the user, so a
+//! window that keeps failing cannot restart in a loop.
+//!
+//! The decisions are pure, so they are tested without a window.
 
 use std::time::{Duration, Instant};
 
@@ -20,6 +24,9 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the UI may run without any web view process before that counts
 /// as a failure.
 pub const ALONE_GRACE: Duration = Duration::from_secs(3);
+/// How long after an automatic retry another failure is asked about instead
+/// of retried without asking.
+pub const AUTO_RETRY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Failure {
@@ -70,6 +77,29 @@ impl Watch {
             return Some(Failure::NotReady);
         }
         None
+    }
+}
+
+/// Decides, across the UI runs of one core, whether a failed window is
+/// started again without asking.
+#[derive(Debug, Default)]
+pub struct Retries {
+    last_automatic: Option<Instant>,
+}
+
+impl Retries {
+    /// Takes one failure at `now`. Returns `true`, and counts it as an
+    /// automatic retry, when no automatic retry was made within
+    /// [`AUTO_RETRY_INTERVAL`]; otherwise the user must be asked.
+    pub fn automatic(&mut self, now: Instant) -> bool {
+        if self
+            .last_automatic
+            .is_some_and(|last| now.saturating_duration_since(last) < AUTO_RETRY_INTERVAL)
+        {
+            return false;
+        }
+        self.last_automatic = Some(now);
+        true
     }
 }
 
@@ -160,5 +190,29 @@ mod tests {
             waiting.observe(at(start, 31.0), false, None),
             Some(Failure::NotReady)
         );
+    }
+
+    /// GIVEN no earlier automatic retry WHEN a window fails THEN it is
+    /// started again without asking.
+    #[test]
+    fn given_a_first_failure_then_the_window_is_retried_without_asking() {
+        let start = Instant::now();
+        assert!(Retries::default().automatic(at(start, 5.0)));
+    }
+
+    /// GIVEN an automatic retry WHEN its replacement fails within the
+    /// interval THEN the user is asked, every time, until the interval has
+    /// passed since that retry; then one more failure is retried without
+    /// asking.
+    #[test]
+    fn given_a_recent_automatic_retry_then_the_next_failures_ask_until_the_interval_passes() {
+        let start = Instant::now();
+        let interval = AUTO_RETRY_INTERVAL.as_secs_f64();
+        let mut retries = Retries::default();
+        assert!(retries.automatic(start));
+        assert!(!retries.automatic(at(start, 15.0)));
+        assert!(!retries.automatic(at(start, interval - 0.5)));
+        assert!(retries.automatic(at(start, interval)));
+        assert!(!retries.automatic(at(start, interval + 1.0)));
     }
 }
