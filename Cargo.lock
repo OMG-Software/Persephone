@@ -4371,6 +4371,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "persephone-call-protocol",
  "persephone-contracts",
  "persephone-core-protocol",
  "persephone-media-broker",

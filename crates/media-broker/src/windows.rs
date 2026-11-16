@@ -2,6 +2,10 @@
 //! AppContainer with process mitigations set at creation, inherits only its
 //! two pipe handles, and is placed in a Job before it runs. The deadline is
 //! enforced by terminating the Job.
+//!
+//! The call worker (ADR-0043) uses the same launcher with a closed set of two
+//! capabilities, relaxed mitigations where audio needs them, and a Job without
+//! a time limit, because a call is long-lived.
 
 use crate::{
     LaunchError, Mitigations, WorkerPolicy, WorkerStats,
@@ -21,13 +25,13 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
+        GetLastError, HANDLE, HANDLE_FLAG_INHERIT, LocalFree, SetHandleInformation, WAIT_OBJECT_0,
         WAIT_TIMEOUT,
     },
     Security::{
-        FreeSid, Isolation::CreateAppContainerProfile, Isolation::DeleteAppContainerProfile,
-        Isolation::DeriveAppContainerSidFromAppContainerName, PSID, SECURITY_ATTRIBUTES,
-        SECURITY_CAPABILITIES,
+        DeriveCapabilitySidsFromName, FreeSid, Isolation::CreateAppContainerProfile,
+        Isolation::DeleteAppContainerProfile, Isolation::DeriveAppContainerSidFromAppContainerName,
+        PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
     },
     System::{
         JobObjects::{
@@ -67,6 +71,14 @@ const IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON: u64 = 1 << 56;
 const IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON: u64 = 1 << 60;
 const HRESULT_ALREADY_EXISTS: i32 = 0x800700B7_u32 as i32;
 const PIPE_BUFFER_BYTES: u32 = 1024 * 1024;
+// SE_GROUP_ENABLED from winnt.h, as the unsigned attribute value.
+const SE_GROUP_ENABLED: u32 = 0x4;
+
+/// The only capabilities a call worker gets: network access for LiveKit and
+/// the microphone. A closed set; callers cannot add names.
+const CALL_CAPABILITIES: [&str; 2] = ["internetClient", "microphone"];
+/// Committed memory for the call worker process.
+const CALL_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
 fn mitigation_flags(mitigations: Mitigations) -> u64 {
     let mut flags = DEP_ENABLE
@@ -253,7 +265,113 @@ fn pipe(child_reads: bool) -> Result<(OwnedHandle, OwnedHandle), LaunchError> {
     Ok((child, broker))
 }
 
-fn job(policy: &WorkerPolicy) -> Result<OwnedHandle, LaunchError> {
+/// What differs between workers that share this launcher.
+struct LaunchSpec {
+    /// Capability names; empty for the media worker.
+    capabilities: &'static [&'static str],
+    mitigations: Mitigations,
+    memory_limit_bytes: usize,
+    /// User-mode CPU limit; `None` for a long-lived worker.
+    cpu_time_limit: Option<Duration>,
+}
+
+impl LaunchSpec {
+    /// The media worker: zero capabilities and the policy's limits.
+    fn media(policy: &WorkerPolicy) -> Self {
+        Self {
+            capabilities: &[],
+            mitigations: policy.mitigations,
+            memory_limit_bytes: policy.memory_limit_bytes,
+            cpu_time_limit: Some(policy.cpu_time_limit),
+        }
+    }
+
+    /// The call worker: two capabilities, no dynamic-code or Win32k
+    /// mitigation (the audio stack needs both), no CPU limit.
+    fn call() -> Self {
+        Self {
+            capabilities: &CALL_CAPABILITIES,
+            mitigations: Mitigations {
+                prohibit_dynamic_code: false,
+                disable_win32k: false,
+            },
+            memory_limit_bytes: CALL_MEMORY_LIMIT_BYTES,
+            cpu_time_limit: None,
+        }
+    }
+}
+
+/// Capability SIDs derived from names, freed on drop.
+struct CapabilitySids {
+    sids: Vec<PSID>,
+}
+
+impl CapabilitySids {
+    fn derive(names: &[&str]) -> Result<Self, LaunchError> {
+        // Built first, so the SIDs derived so far are freed on an error.
+        let mut result = Self { sids: Vec::new() };
+        for name in names {
+            let wide: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
+            let (mut group_sids, mut group_count): (*mut PSID, u32) = (null_mut(), 0);
+            let (mut capability_sids, mut capability_count): (*mut PSID, u32) = (null_mut(), 0);
+            // SAFETY: the name is NUL-terminated; all four out-pointers are valid.
+            let ok = unsafe {
+                DeriveCapabilitySidsFromName(
+                    wide.as_ptr(),
+                    &mut group_sids,
+                    &mut group_count,
+                    &mut capability_sids,
+                    &mut capability_count,
+                )
+            };
+            if ok == 0 {
+                return Err(api("DeriveCapabilitySidsFromName"));
+            }
+            // SAFETY: on success each array holds that many SIDs, and the
+            // arrays and the SIDs were allocated with LocalAlloc.
+            unsafe {
+                for index in 0..group_count as usize {
+                    LocalFree((*group_sids.add(index)).cast());
+                }
+                LocalFree(group_sids.cast());
+                let derived =
+                    std::slice::from_raw_parts(capability_sids, capability_count as usize);
+                // The capability SID, not the group SID, goes in the token.
+                result.sids.extend_from_slice(derived);
+                LocalFree(capability_sids.cast());
+            }
+            if capability_count != 1 {
+                // A name that maps to no single capability is refused.
+                return Err(LaunchError::Api {
+                    call: "DeriveCapabilitySidsFromName",
+                    code: capability_count,
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    fn attributes(&self) -> Vec<SID_AND_ATTRIBUTES> {
+        self.sids
+            .iter()
+            .map(|&sid| SID_AND_ATTRIBUTES {
+                Sid: sid,
+                Attributes: SE_GROUP_ENABLED,
+            })
+            .collect()
+    }
+}
+
+impl Drop for CapabilitySids {
+    fn drop(&mut self) {
+        for &sid in &self.sids {
+            // SAFETY: each SID was allocated by DeriveCapabilitySidsFromName.
+            unsafe { LocalFree(sid.cast()) };
+        }
+    }
+}
+
+fn job(spec: &LaunchSpec) -> Result<OwnedHandle, LaunchError> {
     // SAFETY: an anonymous Job with default security.
     let job = unsafe { CreateJobObjectW(null(), null()) };
     if job.is_null() {
@@ -264,12 +382,14 @@ fn job(policy: &WorkerPolicy) -> Result<OwnedHandle, LaunchError> {
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS
         | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
-        | JOB_OBJECT_LIMIT_PROCESS_MEMORY
-        | JOB_OBJECT_LIMIT_PROCESS_TIME;
+        | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    if let Some(cpu_time_limit) = spec.cpu_time_limit {
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
+        limits.BasicLimitInformation.PerProcessUserTimeLimit =
+            i64::try_from(cpu_time_limit.as_nanos() / 100).unwrap_or(i64::MAX);
+    }
     limits.BasicLimitInformation.ActiveProcessLimit = 1;
-    limits.BasicLimitInformation.PerProcessUserTimeLimit =
-        i64::try_from(policy.cpu_time_limit.as_nanos() / 100).unwrap_or(i64::MAX);
-    limits.ProcessMemoryLimit = policy.memory_limit_bytes;
+    limits.ProcessMemoryLimit = spec.memory_limit_bytes;
     // SAFETY: `limits` is the documented structure for this class.
     let ok = unsafe {
         SetInformationJobObject(
@@ -321,7 +441,12 @@ impl Launcher for AppContainerProfile {
         worker: &Path,
         policy: &WorkerPolicy,
     ) -> Result<Spawned<JobWorker>, LaunchError> {
-        launch(self, worker, policy)
+        let started = launch(self, worker, &LaunchSpec::media(policy))?;
+        Ok(Spawned {
+            worker: started.worker,
+            stdin: started.stdin,
+            stdout: started.stdout,
+        })
     }
 }
 
@@ -360,24 +485,78 @@ impl Worker for JobWorker {
     }
 }
 
+/// A call worker in its Job. It has no deadline: it runs until it exits or is
+/// killed. Dropping it closes the Job, and KILL_ON_JOB_CLOSE ends the process.
+pub struct LongLivedWorker(JobWorker);
+
+impl LongLivedWorker {
+    /// Ends the worker now by terminating its Job.
+    pub fn kill(&self) {
+        self.0.kill();
+    }
+
+    /// Waits up to `timeout` for the process to exit. Returns whether it did.
+    pub fn wait_exit(&self, timeout: Duration) -> bool {
+        self.0.wait(timeout) == Wait::Exited
+    }
+}
+
+/// A started call worker: its handle and the broker's ends of its pipes.
+pub struct StartedCallWorker {
+    pub worker: LongLivedWorker,
+    /// Writes to the worker's standard input.
+    pub stdin: File,
+    /// Reads from the worker's standard output.
+    pub stdout: File,
+}
+
+/// Starts the call worker in `profile` with the call containment: the
+/// `internetClient` and `microphone` capabilities only, the media worker's
+/// mitigations except dynamic-code prohibition and Win32k disable, and a Job
+/// with kill-on-close and a memory limit. The worker is in the Job before it
+/// runs.
+pub fn start_call_worker(
+    profile: &AppContainerProfile,
+    exe: &Path,
+) -> Result<StartedCallWorker, LaunchError> {
+    let started = launch(profile, exe, &LaunchSpec::call())?;
+    Ok(StartedCallWorker {
+        worker: LongLivedWorker(started.worker),
+        stdin: started.stdin,
+        stdout: started.stdout,
+    })
+}
+
+struct Started {
+    worker: JobWorker,
+    stdin: File,
+    stdout: File,
+}
+
 fn launch(
     profile: &AppContainerProfile,
     worker: &Path,
-    policy: &WorkerPolicy,
-) -> Result<Spawned<JobWorker>, LaunchError> {
+    spec: &LaunchSpec,
+) -> Result<Started, LaunchError> {
     let sid = profile.sid()?;
     let (child_stdin, broker_stdin) = pipe(true)?;
     let (child_stdout, broker_stdout) = pipe(false)?;
-    let job = job(policy)?;
+    let job = job(spec)?;
 
+    let capability_sids = CapabilitySids::derive(spec.capabilities)?;
+    let mut capability_list = capability_sids.attributes();
     let capabilities = SECURITY_CAPABILITIES {
         AppContainerSid: sid.0,
-        Capabilities: null_mut(),
-        CapabilityCount: 0,
+        Capabilities: if capability_list.is_empty() {
+            null_mut()
+        } else {
+            capability_list.as_mut_ptr()
+        },
+        CapabilityCount: capability_list.len() as u32,
         Reserved: 0,
     };
     let inherited = [raw(&child_stdin), raw(&child_stdout)];
-    let mitigations = mitigation_flags(policy.mitigations);
+    let mitigations = mitigation_flags(spec.mitigations);
     let mut attributes = AttributeList::new(3)?;
     // SAFETY: each value outlives CreateProcessW below.
     unsafe {
@@ -460,7 +639,7 @@ fn launch(
         unsafe { TerminateJobObject(raw(&job), 1) };
         return Err(error);
     }
-    Ok(Spawned {
+    Ok(Started {
         worker: JobWorker { process, job },
         stdin: File::from(broker_stdin),
         stdout: File::from(broker_stdout),
@@ -524,6 +703,54 @@ mod tests {
             relaxed & (PROHIBIT_DYNAMIC_CODE_ALWAYS_ON | WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON),
             0
         );
+    }
+
+    /// GIVEN the call worker's launch spec WHEN read THEN it has exactly the
+    /// two capabilities, no CPU limit, and the 512 MiB memory limit.
+    #[test]
+    fn given_call_spec_then_capabilities_are_exactly_network_and_microphone() {
+        let spec = LaunchSpec::call();
+        assert_eq!(spec.capabilities, ["internetClient", "microphone"]);
+        assert_eq!(spec.cpu_time_limit, None);
+        assert_eq!(spec.memory_limit_bytes, 512 * 1024 * 1024);
+    }
+
+    /// GIVEN the call worker's mitigations WHEN flags are built THEN every
+    /// bit of the media worker's set stays except dynamic-code prohibition
+    /// and Win32k disable.
+    #[test]
+    fn given_call_spec_then_mitigations_keep_every_bit_but_two() {
+        let call = mitigation_flags(LaunchSpec::call().mitigations);
+        let media = mitigation_flags(Mitigations::default());
+        let dropped = PROHIBIT_DYNAMIC_CODE_ALWAYS_ON | WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
+        assert_eq!(media & dropped, dropped);
+        assert_eq!(call, media & !dropped);
+        assert_ne!(call, 0);
+    }
+
+    /// GIVEN the media worker's policy WHEN its launch spec is built THEN it
+    /// has zero capabilities, the policy's mitigations and limits.
+    #[test]
+    fn given_media_policy_then_launch_spec_is_unchanged() {
+        let policy = WorkerPolicy::default();
+        let spec = LaunchSpec::media(&policy);
+        assert!(spec.capabilities.is_empty());
+        assert_eq!(
+            mitigation_flags(spec.mitigations),
+            mitigation_flags(Mitigations::default())
+        );
+        assert_eq!(spec.memory_limit_bytes, policy.memory_limit_bytes);
+        assert_eq!(spec.cpu_time_limit, Some(policy.cpu_time_limit));
+    }
+
+    /// GIVEN the two call capability names WHEN the OS derives their SIDs
+    /// THEN each yields one capability SID and the SIDs differ.
+    #[test]
+    fn given_call_capabilities_then_the_os_derives_two_distinct_sids() {
+        let sids = CapabilitySids::derive(&CALL_CAPABILITIES).unwrap();
+        assert_eq!(sids.sids.len(), 2);
+        assert_ne!(sids.sids[0], sids.sids[1]);
+        assert!(sids.attributes().iter().all(|a| a.Attributes == 4));
     }
 
     #[test]

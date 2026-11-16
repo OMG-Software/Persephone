@@ -2,6 +2,7 @@
 //! read, saving a file, the contained media worker, the UI's Job, and the default profile
 //! directory.
 
+pub mod call;
 pub mod credentials;
 pub mod media;
 pub mod pick;
@@ -119,4 +120,9 @@ pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Re
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map(drop)
+}
+
+/// The contained call worker host (ADR-0043).
+pub(crate) fn call_host() -> Arc<dyn crate::calls::worker::CallHost> {
+    Arc::new(call::ContainedCallHost::next_to_core())
 }

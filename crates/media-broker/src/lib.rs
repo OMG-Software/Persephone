@@ -39,7 +39,7 @@ pub use linux::SeccompContainment;
 #[cfg(target_os = "macos")]
 pub use macos::SeatbeltContainment;
 #[cfg(windows)]
-pub use windows::AppContainerProfile;
+pub use windows::{AppContainerProfile, LongLivedWorker, StartedCallWorker, start_call_worker};
 
 /// The OS containment context a worker runs in: on Windows the AppContainer
 /// profile whose SID the worker runs under; on Linux and macOS a marker,
