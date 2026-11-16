@@ -121,6 +121,21 @@ Proposed option: "a contained call worker".
   `experimental-send-custom-to-device` feature of `matrix-sdk`. The
   version does not change.
 
+### Session lifecycle
+
+* A running call holds no Matrix client. Each SDK operation of the call
+  (a delayed-leave restart, a membership refresh, a member read, a key
+  send, the leave) takes its own session lease, like the sync loop. It is
+  refused when the call stopped, when the session admits no more work, or
+  when the session generation changed.
+* The proxy question is asked under no lease, so a lock never waits for an
+  answer. The join itself runs under one lease.
+* Lock, idle lock, sign-out, a session the homeserver ended, and exit stop
+  the call when admission closes: the core kills the worker at once, so
+  audio stops, and sends no Matrix leave. The delayed leave ends the
+  membership on the server within about 8 seconds.
+* A leave during a join cancels the join, which undoes its steps.
+
 ### Owner choices
 
 * TLS: `livekit-net` compiles TLS 1.2 in and has no setting to turn it

@@ -26,7 +26,10 @@
     | 'shield-off'
     | 'chevron-left'
     | 'chevron-right'
-    | 'globe';
+    | 'globe'
+    | 'phone'
+    | 'mic'
+    | 'mic-off';
 </script>
 
 <script lang="ts">
@@ -76,6 +79,13 @@
   {:else if name === 'globe'}
     <circle cx="12" cy="12" r="9" />
     <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+  {:else if name === 'phone'}
+    <path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z" />
+  {:else if name === 'mic'}
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+  {:else if name === 'mic-off'}
+    <path d="M9 9v2a3 3 0 0 0 5 2.2M15 9.3V6a3 3 0 0 0-5.9-.7M5 11a7 7 0 0 0 11.3 5.5M19 11a7 7 0 0 1-.6 2.8M12 18v3M3 3l18 18" />
   {:else if name === 'chevron-left'}
     <path d="m15 6-6 6 6 6" />
   {:else if name === 'chevron-right'}

@@ -36,6 +36,8 @@
     favouriteBusy = false,
     onfavourite,
     menu,
+    headerAction,
+    headerNotice,
     onreply,
     ownUserId = null,
     onedit,
@@ -72,6 +74,9 @@
     // A favourite change is being saved: the star waits.
     favouriteBusy?: boolean;
     onfavourite?: () => void;
+    // The call button, before the room menu, and a notice under the header.
+    headerAction?: Snippet;
+    headerNotice?: Snippet;
     // The room menu, at the end of the header. People are verified from the
     // member panel, not here.
     menu?: Snippet;
@@ -231,10 +236,14 @@
         <bdi>{title}</bdi>
       </IconAction>
     {/if}
+    {#if headerAction}
+      <span class="header-action">{@render headerAction()}</span>
+    {/if}
     {#if menu}
       <span class="header-end">{@render menu()}</span>
     {/if}
   </header>
+  {#if headerNotice}{@render headerNotice()}{/if}
   <div class="scroller" bind:this={scroller} onscroll={scrolled}>
     <div class="stream">
       <button type="button" disabled={!hasOlder || loading} class="older" onclick={onolder}>
