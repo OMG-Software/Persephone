@@ -9,7 +9,7 @@ use persephone_desktop::{
 };
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tauri::{
     ipc::{CallbackFn, InvokeBody},
@@ -26,6 +26,8 @@ struct FakeCore {
     verified_member: Mutex<Option<(String, String)>>,
     // The room and bytes of the last pasted image that reached the core.
     pasted: Mutex<Option<(String, Vec<u8>)>>,
+    // What the stored account settings say about capture protection.
+    capture_protection: AtomicBool,
 }
 
 impl FakeCore {
@@ -35,6 +37,7 @@ impl FakeCore {
             calls: AtomicUsize::new(0),
             verified_member: Mutex::new(None),
             pasted: Mutex::new(None),
+            capture_protection: AtomicBool::new(true),
         })
     }
 }
@@ -404,6 +407,7 @@ impl CoreTransport for FakeCore {
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
                 "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
                 "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false,
+                "captureProtection": self.capture_protection.load(Ordering::SeqCst),
                 "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
                 "theme": "red"
             })),
@@ -426,6 +430,22 @@ impl CoreTransport for FakeCore {
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
             })),
             Call::AcknowledgeSessions { .. } => Ok(serde_json::Value::Null),
+            Call::ThirdPartyModules {} | Call::AcknowledgeModules { .. } => Ok(serde_json::json!({
+                "state": "ready",
+                "scannedAt": 1_700_000_000_000_u64,
+                "modules": [{
+                    "id": "hook.dll\u{1f}unsigned",
+                    "fileName": "<b>hook.dll</b>",
+                    "path": "C:\\Tools\\hook.dll",
+                    "signer": null,
+                    "signature": "unsigned",
+                    "processes": ["core", "web_view"],
+                    "firstSeen": 1_700_000_000_000_u64,
+                    "acknowledged": false
+                }],
+                "truncated": false,
+                "incomplete": false
+            })),
             Call::RemoveDevice { device_id } => match device_id.as_str() {
                 "NEWDEV" => Ok(serde_json::json!("done")),
                 _ => Ok(serde_json::json!("invalid_password")),
@@ -817,6 +837,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-room-readers",
             "allow-new-sessions",
             "allow-acknowledge-sessions",
+            "allow-third-party-modules",
+            "allow-acknowledge-modules",
             "allow-remove-device",
             "allow-pending-messages",
             "allow-retry-message",
@@ -1082,9 +1104,14 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     });
     subscriptions.dispatch(Event::RoomListChanged {});
     subscriptions.dispatch(Event::SecurityChanged {});
+    subscriptions.dispatch(Event::ModulesChanged {});
     let delivered = delivered.lock().unwrap().clone();
     assert!(
         delivered.contains(&(3, r#""security""#.into())),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&(3, r#""modules""#.into())),
         "{delivered:?}"
     );
     assert!(
@@ -1778,7 +1805,7 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
             "interfaceTextPercent": 100, "desktopNotifications": false,
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
-            "notificationNames": true, "loadRoomPictures": false, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+            "notificationNames": true, "loadRoomPictures": false, "captureProtection": true, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
             "theme": theme}})
     };
     let settings = |enter_sends: bool| settings_with(enter_sends, "orange");
@@ -2804,6 +2831,63 @@ fn personal_commands_cross_only_with_bounded_input_and_typed_replies() {
     );
 }
 
+/// GIVEN the module report commands WHEN they run from the app origin and from
+/// a foreign origin THEN only the app origin reaches the core, the report keeps
+/// its typed shape, and out-of-limit ids are refused before the core.
+#[test]
+fn module_commands_work_from_the_app_origin_and_refuse_bad_ids_before_relay() {
+    let fake = FakeCore::new(true);
+    let app = app_with(fake.clone());
+    let window = create_main_window(&app).unwrap();
+    for (cmd, body) in [
+        ("third_party_modules", serde_json::json!({})),
+        (
+            "acknowledge_modules",
+            serde_json::json!({"ids": ["hook.dll\u{1f}unsigned"]}),
+        ),
+    ] {
+        let reply = invoke_on(&window, cmd, app_origin(), body.clone()).unwrap();
+        assert_eq!(reply["state"], "ready", "{cmd}");
+        assert_eq!(reply["modules"][0]["processes"][1], "web_view", "{cmd}");
+        let calls = fake.calls.load(Ordering::SeqCst);
+        assert!(
+            invoke_on(&window, cmd, "https://evil.invalid", body).is_err(),
+            "{cmd}"
+        );
+        assert_eq!(fake.calls.load(Ordering::SeqCst), calls, "{cmd}");
+    }
+    let calls = fake.calls.load(Ordering::SeqCst);
+    let too_many: Vec<String> = (0..129).map(|n| format!("id{n}")).collect();
+    for ids in [
+        Vec::new(),
+        too_many,
+        vec!["x".repeat(513)],
+        vec![String::new()],
+    ] {
+        assert_eq!(
+            invoke_on(
+                &window,
+                "acknowledge_modules",
+                app_origin(),
+                serde_json::json!({ "ids": ids })
+            )
+            .unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+    let largest = vec!["x".repeat(512); 128];
+    assert!(
+        invoke_on(
+            &window,
+            "acknowledge_modules",
+            app_origin(),
+            serde_json::json!({ "ids": largest })
+        )
+        .is_ok()
+    );
+}
+
 /// Reject invalid personal arguments before they reach the core transport.
 #[test]
 fn personal_limits_reject_before_relay_and_nested_extra_fields_are_refused() {
@@ -2929,4 +3013,63 @@ fn navigation_commands_allow_local_views_and_deny_remote_origins_before_relay() 
             assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
         }
     }
+}
+
+/// GIVEN a new app WHEN the page reads or saves settings, or a session
+/// changes THEN capture protection starts on, follows only a successful
+/// reply or save, and turns on again with the session.
+#[test]
+fn given_account_settings_then_capture_protection_follows_only_successful_calls() {
+    let core = FakeCore::new(true);
+    let subscriptions = Arc::new(Subscriptions::default());
+    let app = configure(mock_builder(), core.clone(), subscriptions.clone())
+        .build(context())
+        .unwrap();
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| invoke_on(&window, cmd, app_origin(), args);
+    let capture = subscriptions.capture();
+    assert!(capture.wanted(), "on when the window is created");
+
+    // A reply that turns it off.
+    core.capture_protection.store(false, Ordering::SeqCst);
+    assert_eq!(
+        invoke("account_settings", serde_json::json!({})).unwrap()["captureProtection"],
+        false
+    );
+    assert!(!capture.wanted());
+
+    // A new session turns it on again, before the settings are read.
+    subscriptions.dispatch(Event::SessionChanged {});
+    assert!(capture.wanted());
+
+    // A saved setting turns it off; the sent value counts.
+    let saved = |enter_sends: bool, capture_protection: bool| {
+        serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
+            "interfaceTextPercent": 100, "desktopNotifications": false,
+            "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
+            "notificationNames": true, "loadRoomPictures": false,
+            "captureProtection": capture_protection,
+            "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+            "theme": "orange"}})
+    };
+    assert!(invoke("set_account_settings", saved(true, false)).is_ok());
+    assert!(!capture.wanted());
+
+    // A refused save changes nothing, either way.
+    assert_eq!(
+        invoke("set_account_settings", saved(false, true)).unwrap_err(),
+        "locked"
+    );
+    assert!(!capture.wanted(), "a refused save leaves it off");
+    assert!(invoke("set_account_settings", saved(true, true)).is_ok());
+    assert!(capture.wanted());
+    assert_eq!(
+        invoke("set_account_settings", saved(false, false)).unwrap_err(),
+        "locked"
+    );
+    assert!(capture.wanted(), "a refused save leaves it on");
+
+    // A call the page cannot make (a setting missing) changes nothing.
+    assert!(invoke("set_account_settings", serde_json::json!({"settings": {}})).is_err());
+    assert!(capture.wanted());
 }

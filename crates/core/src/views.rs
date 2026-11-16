@@ -41,7 +41,7 @@ pub fn now_millis() -> UnixMillis {
     UnixMillis::saturating(millis)
 }
 
-fn is_bidi_control(c: char) -> bool {
+pub(crate) fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 

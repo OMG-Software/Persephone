@@ -24,6 +24,7 @@ let RoomSettings;
 let LevelPicker;
 let AccountText;
 let Preferences;
+let CaptureProtection;
 let AccountPage;
 let Devices;
 let render;
@@ -57,6 +58,7 @@ before(async () => {
   ({ default: LevelPicker } = await vite.ssrLoadModule('/src/LevelPicker.svelte'));
   ({ default: AccountText } = await vite.ssrLoadModule('/src/AccountText.svelte'));
   ({ default: Preferences } = await vite.ssrLoadModule('/src/Preferences.svelte'));
+  ({ default: CaptureProtection } = await vite.ssrLoadModule('/src/CaptureProtection.svelte'));
   ({ default: AccountPage } = await vite.ssrLoadModule('/src/AccountPage.svelte'));
   ({ default: Devices } = await vite.ssrLoadModule('/src/Devices.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
@@ -1162,6 +1164,7 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     idleLockMinutes: 0,
     notificationNames: true,
     loadRoomPictures: false,
+    captureProtection: true,
     timelineEvents: Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves'])),
     theme: 'orange'
   };
@@ -1192,6 +1195,23 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
   assert.match(html, /tells your homeserver, and the server that holds the picture/);
   // The level is read from the homeserver; until then nothing can be chosen.
   assert.match(html, /<fieldset class="choices" disabled/);
+});
+
+test('GIVEN the capture setting WHEN it shows THEN the switch is labelled, follows the setting and shows inert text', () => {
+  const page = (captureProtection) =>
+    render(CaptureProtection, {
+      props: {
+        settings: { ...DEFAULT_PREFERENCES, captureProtection },
+        failure: null,
+        onchange: () => {}
+      }
+    }).body;
+  assert.match(page(true), /<span>Hide Persephone from screenshots and screen sharing<\/span>/);
+  assert.match(page(true), /checked/);
+  assert.doesNotMatch(page(false), /checked/);
+  assert.match(page(true), /screen sharing show the window blank/);
+  assert.doesNotMatch(page(true), /Recall/);
+  assert.doesNotMatch(page(true), /<script|<img|href=/);
 });
 
 test('GIVEN the preferences WHEN they show THEN a theme drop-down offers the three dark themes with the saved one chosen', () => {
@@ -1388,4 +1408,64 @@ test('GIVEN sessions WHEN this device cannot vouch THEN no Verify shows, and WHE
   assert.match(source, /onclick=\{\(\) => remove\(device\.deviceId\)\}/);
   const html = render(Devices, { props: { canVerify: true } }).body;
   assert.doesNotMatch(html, />Verify</, 'nothing listed yet');
+});
+
+test('GIVEN a module report WHEN the section renders THEN hostile names stay inert and each state has its text', async () => {
+  const { default: LoadedCode } = await vite.ssrLoadModule('/src/LoadedCode.svelte');
+  const show = (report) =>
+    render(LoadedCode, { props: { report, onacknowledge: () => {} } }).body.replace(/<!--.*?-->/g, '');
+  const row = (fileName, overrides = {}) => ({
+    id: fileName,
+    fileName,
+    path: `C:\Tools\${fileName}`,
+    signer: null,
+    signature: 'unsigned',
+    processes: ['core', 'web_view'],
+    firstSeen: 1_700_000_000_000,
+    acknowledged: false,
+    ...overrides
+  });
+  const ready = (modules, truncated = false, incomplete = false) => ({
+    state: 'ready',
+    scannedAt: 1,
+    modules,
+    truncated,
+    incomplete
+  });
+
+  const html = show(
+    ready(
+      [
+        row(hostileName),
+        row('bad.dll', { signature: 'invalid' }),
+        row('ok.dll', { signature: 'valid', signer: 'Sophos Ltd', acknowledged: true, processes: ['ui'] })
+      ],
+      true
+    )
+  );
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /Code loaded into Persephone/);
+  assert.match(html, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  assert.match(html, /Signature not valid/);
+  assert.match(html, /Sophos Ltd/);
+  assert.match(html, /Persephone core, Web view/);
+  assert.match(html, />Window</);
+  assert.equal((html.match(/>New</g) ?? []).length, 2);
+  assert.match(html, />\s*Mark all as reviewed\s*</);
+  assert.match(html, /More modules are loaded than this list shows\./);
+
+  const reviewed = show(ready([row('a.dll', { acknowledged: true })]));
+  assert.doesNotMatch(reviewed, /Mark all as reviewed/);
+  assert.doesNotMatch(reviewed, />New</);
+  assert.doesNotMatch(html, /could not be checked/);
+  assert.match(show(ready([])), /No other code is loaded\./);
+  const partial = show(ready([], false, true));
+  assert.match(partial, /Some Persephone processes could not be checked\./);
+  assert.doesNotMatch(partial, /No other code is loaded/);
+  assert.match(show(ready([row('a.dll')], false, true)), /Code loaded into them is not listed\./);
+  assert.match(
+    show({ state: 'unsupported', scannedAt: null, modules: [], truncated: false, incomplete: false }),
+    /Not available on this system\./
+  );
+  assert.match(show(null), /Checking…/);
 });

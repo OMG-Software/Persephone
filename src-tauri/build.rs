@@ -59,6 +59,8 @@ fn main() {
             "room_readers",
             "new_sessions",
             "acknowledge_sessions",
+            "third_party_modules",
+            "acknowledge_modules",
             "remove_device",
             "pending_messages",
             "retry_message",

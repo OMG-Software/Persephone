@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-third-party-modules"
+description = "Enables the third_party_modules command without any pre-configured scope."
+commands.allow = ["third_party_modules"]
+
+[[permission]]
+identifier = "deny-third-party-modules"
+description = "Denies the third_party_modules command without any pre-configured scope."
+commands.deny = ["third_party_modules"]

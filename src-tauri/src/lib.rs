@@ -26,6 +26,7 @@
 //! prefix holding the band's width and then its row count, each a
 //! little-endian `u32`, followed by exactly `width * rows * 4` RGBA bytes.
 
+pub mod capture;
 pub mod core_link;
 #[cfg(windows)]
 mod harden;
@@ -350,6 +351,7 @@ pub struct Subscriptions {
     channels: Mutex<HashMap<String, Channel<()>>>,
     session: Mutex<Option<Channel<&'static str>>>,
     toasts: Mutex<Toasts>,
+    capture: Arc<capture::CaptureState>,
 }
 
 impl Subscriptions {
@@ -363,6 +365,11 @@ impl Subscriptions {
         self.session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The wanted capture protection, which a new session turns on again.
+    pub fn capture(&self) -> Arc<capture::CaptureState> {
+        self.capture.clone()
     }
 
     fn toasts(&self) -> MutexGuard<'_, Toasts> {
@@ -391,6 +398,9 @@ impl Subscriptions {
                 }
             }
             Event::SessionChanged {} => {
+                // Sign-in, sign-out, lock and unlock: protect the window
+                // until the settings say otherwise.
+                self.capture.protect();
                 self.channels().clear();
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("session");
@@ -404,6 +414,11 @@ impl Subscriptions {
             Event::SecurityChanged {} => {
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("security");
+                }
+            }
+            Event::ModulesChanged {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("modules");
                 }
             }
             // Names only; the core bounds them, and so does this check.
@@ -1327,8 +1342,14 @@ async fn device_list(core: State<'_, CoreLink>) -> Result<DeviceList, String> {
 
 /// This account's settings, from its encrypted profile.
 #[tauri::command]
-async fn account_settings(core: State<'_, CoreLink>) -> Result<AccountSettings, String> {
-    relay(core.inner(), Call::AccountSettings {}).await
+async fn account_settings(
+    core: State<'_, CoreLink>,
+    capture: State<'_, Arc<capture::CaptureState>>,
+) -> Result<AccountSettings, String> {
+    let session = capture.session();
+    let settings: AccountSettings = relay(core.inner(), Call::AccountSettings {}).await?;
+    capture.set_for(session, settings.capture_protection);
+    Ok(settings)
 }
 
 /// Replaces this account's settings. The record refuses missing and unknown
@@ -1336,9 +1357,14 @@ async fn account_settings(core: State<'_, CoreLink>) -> Result<AccountSettings, 
 #[tauri::command]
 async fn set_account_settings(
     core: State<'_, CoreLink>,
+    capture: State<'_, Arc<capture::CaptureState>>,
     settings: AccountSettings,
 ) -> Result<(), String> {
-    relay::<()>(core.inner(), Call::SetAccountSettings { settings }).await
+    let protect = settings.capture_protection;
+    let session = capture.session();
+    relay::<()>(core.inner(), Call::SetAccountSettings { settings }).await?;
+    capture.set_for(session, protect);
+    Ok(())
 }
 
 /// Changes this account's password. Nothing secret crosses: the core asks
@@ -1400,6 +1426,25 @@ async fn acknowledge_sessions(
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(core.inner(), Call::AcknowledgeSessions { device_ids }).await
+}
+
+/// The code loaded into Persephone that is not Microsoft's or Persephone's
+/// own. The core scans; the page only reads the report.
+#[tauri::command]
+async fn third_party_modules(
+    core: State<'_, CoreLink>,
+) -> Result<persephone_contracts::ThirdPartyModules, String> {
+    personal_relay(core.inner(), Call::ThirdPartyModules {}).await
+}
+
+/// Marks these modules as reviewed. The core ignores unknown ids; the
+/// bounds are checked here before the relay and again in the core.
+#[tauri::command]
+async fn acknowledge_modules(
+    core: State<'_, CoreLink>,
+    ids: Vec<String>,
+) -> Result<persephone_contracts::ThirdPartyModules, String> {
+    personal_relay(core.inner(), Call::AcknowledgeModules { ids }).await
 }
 
 /// Signs out another session of this account. Nothing secret crosses: the
@@ -1579,6 +1624,7 @@ pub fn configure<R: Runtime>(
 ) -> tauri::Builder<R> {
     builder
         .manage(core)
+        .manage(subscriptions.capture())
         .manage(subscriptions)
         .manage(BandsInFlight::default())
         .manage(PasteInFlight::default())
@@ -1629,6 +1675,8 @@ pub fn configure<R: Runtime>(
             proxy_setting,
             set_proxy_setting,
             acknowledge_sessions,
+            third_party_modules,
+            acknowledge_modules,
             remove_device,
             pending_messages,
             retry_message,
@@ -1696,12 +1744,41 @@ pub fn configure<R: Runtime>(
         })
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            create_main_window(app.handle())?;
+            let window = create_main_window(app.handle())?;
+            #[cfg(windows)]
+            hide_from_capture(&window, &app.state::<Arc<capture::CaptureState>>());
+            #[cfg(not(windows))]
+            let _ = window;
             let handle = app.handle().clone();
             app.state::<Arc<Subscriptions>>()
                 .set_toaster(Box::new(move |room, sender| toast(&handle, room, sender)));
             Ok(())
         })
+}
+
+/// Hides the main window from capture, and again whenever the wanted state
+/// changes (ADR-0045). The call runs on the window's thread, in the order the
+/// changes were made.
+#[cfg(windows)]
+fn hide_from_capture<R: Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    state: &Arc<capture::CaptureState>,
+) {
+    match window.hwnd() {
+        Ok(hwnd) => {
+            let hwnd = hwnd.0 as isize;
+            let app = window.app_handle().clone();
+            state.set_applier(Box::new(move |on| {
+                if app
+                    .run_on_main_thread(move || capture::apply_to_window(hwnd, on))
+                    .is_err()
+                {
+                    eprintln!("persephone-ui: cannot hide the window from capture");
+                }
+            }));
+        }
+        Err(_) => eprintln!("persephone-ui: cannot hide the window from capture"),
+    }
 }
 
 /// Shows one desktop notification (ADR-0022): the room as the title and the

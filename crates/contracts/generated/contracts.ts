@@ -295,6 +295,44 @@ export type NewSession = { deviceId: string, displayName: string | null, };
 
 export type NewSessions = { sessions: Array<NewSession>, truncated: boolean, };
 
+export type ModuleSignature = "valid" | "unsigned" | "invalid";
+
+export type ModuleProcess = "core" | "ui" | "web_view";
+
+export type ModuleScanState = "pending" | "ready" | "unsupported";
+
+export type ThirdPartyModule = { 
+/**
+ * Opaque acknowledgement key, at most `MAX_MODULE_ID_BYTES`.
+ */
+id: string, fileName: string, 
+/**
+ * The full path, at most `MAX_MODULE_PATH_BYTES`, cut with "…".
+ */
+path: string, 
+/**
+ * The verified signer's simple name. Only for `Valid`; otherwise null.
+ */
+signer: string | null, signature: ModuleSignature, 
+/**
+ * The processes it is loaded in: sorted, unique, one to three.
+ */
+processes: Array<ModuleProcess>, 
+/**
+ * When this core process first saw it.
+ */
+firstSeen: number, 
+/**
+ * The user marked it as reviewed.
+ */
+acknowledged: boolean, };
+
+export type ThirdPartyModules = { state: ModuleScanState, 
+/**
+ * Null until the first scan finishes.
+ */
+scannedAt: number | null, modules: Array<ThirdPartyModule>, truncated: boolean, incomplete: boolean, };
+
 export type TimelineEvents = { joins: boolean, leaves: boolean, 
 /**
  * Invitations, declined invitations and withdrawn invitations.
@@ -372,6 +410,12 @@ notificationNames: boolean,
  * default (ADR-0041).
  */
 loadRoomPictures: boolean, 
+/**
+ * Hide the main window from screenshots, screen recording and screen
+ * sharing that use the Windows capture APIs. On by default. Windows only;
+ * before Windows 10 version 2004 a capture shows it black (ADR-0045).
+ */
+captureProtection: boolean, 
 /**
  * Which kinds of room changes the timeline shows. All on by default.
  */

@@ -17,6 +17,8 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   idleLockMinutes: 0,
   notificationNames: true,
   loadRoomPictures: false,
+  // Hidden from screenshots and screen sharing until the account turns it off.
+  captureProtection: true,
   // Every kind of room change shows until the account turns one off.
   timelineEvents: {
     joins: true,

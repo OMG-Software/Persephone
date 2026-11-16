@@ -33,6 +33,12 @@ pub const MAX_LOCAL_SEARCH_BYTES: usize = 128;
 pub const MAX_SECTION_BYTES: usize = 64;
 pub const MAX_REPORT_REASON_BYTES: usize = 1000;
 pub const MAX_SAFE_TIMESTAMP: u64 = 9_007_199_254_740_991;
+/// The most modules a report lists.
+pub const MAX_THIRD_PARTY_MODULES: usize = 128;
+/// The longest acknowledgement key of a module.
+pub const MAX_MODULE_ID_BYTES: usize = 512;
+/// The longest module path in a report.
+pub const MAX_MODULE_PATH_BYTES: usize = 1024;
 
 /// Bound shared local filters before relay. Matrix identifier syntax is checked
 /// again in the core. A missing date range never authorizes extra cache reads.
@@ -93,7 +99,13 @@ pub fn personal_call_within_limits(call: &Call) -> bool {
                     .is_none_or(|id| text(id, MAX_ROOM_ID_BYTES))
                 && search_filters_within_limits(filters)
         }
-        Call::ConnectionHealth {} => true,
+        Call::ConnectionHealth {} | Call::ThirdPartyModules {} => true,
+        Call::AcknowledgeModules { ids } => {
+            (1..=MAX_THIRD_PARTY_MODULES).contains(&ids.len())
+                && ids
+                    .iter()
+                    .all(|id| !id.is_empty() && id.len() <= MAX_MODULE_ID_BYTES)
+        }
         Call::JumpToDate {
             room_id,
             timestamp_ms,
@@ -520,6 +532,16 @@ pub enum Call {
     AcknowledgeSessions {
         device_ids: Vec<String>,
     },
+    /// The third-party modules loaded into Persephone's processes. Replies
+    /// with `ThirdPartyModules`.
+    ThirdPartyModules {},
+    /// Mark these modules as reviewed (1 to [`MAX_THIRD_PARTY_MODULES`] ids,
+    /// each non-empty and at most [`MAX_MODULE_ID_BYTES`], as
+    /// `third_party_modules` gave them). Unknown ids are ignored. Replies
+    /// with the updated `ThirdPartyModules`.
+    AcknowledgeModules {
+        ids: Vec<String>,
+    },
     /// Sign out another session of this account (ADR-0026). The core asks
     /// for the account password in its own window. Replies when done with
     /// an `AccountChange` code; this device's own ID is `invalid_argument`
@@ -830,6 +852,9 @@ pub enum Event {
     /// The account's encryption state changed: ask for `security_status`.
     /// Coalesced; it does not clear what the UI shows.
     SecurityChanged {},
+    /// The list of third-party modules changed: ask for `third_party_modules`.
+    /// Content-free and coalesced like `SecurityChanged`.
+    ModulesChanged {},
     /// A message arrived that the account's push rules say to notify of, and
     /// desktop notifications are on (ADR-0022). The UI process shows a
     /// desktop notification with these names and never forwards it to the
@@ -1222,6 +1247,7 @@ mod tests {
         let session = CoreMessage::Event(Event::SessionChanged {});
         let list = CoreMessage::Event(Event::RoomListChanged {});
         let security = CoreMessage::Event(Event::SecurityChanged {});
+        let modules = CoreMessage::Event(Event::ModulesChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
         send(&mut wire, &session).unwrap();
@@ -1235,9 +1261,14 @@ mod tests {
             String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"security_changed":{}}}"#),
             "wire form of the security event"
         );
+        send(&mut wire, &modules).unwrap();
+        assert!(
+            String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"modules_changed":{}}}"#),
+            "wire form of the modules event"
+        );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session, list, security] {
+        for expected in [reply, event, session, list, security, modules] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -1547,6 +1578,16 @@ mod tests {
                 r#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":["DEV"]}}"#,
             ),
             (
+                Call::ThirdPartyModules {},
+                r#"{"id":1,"call":{"command":"third_party_modules"}}"#,
+            ),
+            (
+                Call::AcknowledgeModules {
+                    ids: vec!["a.dll".into()],
+                },
+                r#"{"id":1,"call":{"command":"acknowledge_modules","ids":["a.dll"]}}"#,
+            ),
+            (
                 Call::RemoveDevice {
                     device_id: "DEV".into(),
                 },
@@ -1572,6 +1613,7 @@ mod tests {
                         idle_lock_minutes: 15,
                         notification_names: false,
                         load_room_pictures: true,
+                        capture_protection: false,
                         timeline_events: persephone_contracts::TimelineEvents {
                             leaves: false,
                             ..persephone_contracts::TimelineEvents::default()
@@ -1579,7 +1621,7 @@ mod tests {
                         theme: persephone_contracts::Theme::Red,
                     },
                 },
-                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false,"loadRoomPictures":true,"timelineEvents":{"joins":true,"leaves":false,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"red"}}}"#,
+                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false,"loadRoomPictures":true,"captureProtection":false,"timelineEvents":{"joins":true,"leaves":false,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"red"}}}"#,
             ),
             (
                 Call::ProfileList {},
@@ -2405,6 +2447,41 @@ mod tests {
             assert!(send_pixel_reply(&mut wire, &reply, &vec![0; length]).is_err());
             assert!(wire.is_empty(), "{reply:?}");
         }
+    }
+
+    /// GIVEN module calls WHEN the argument limits are checked THEN 1 to 128
+    /// ids of 1 to 512 bytes pass and every other shape is refused.
+    #[test]
+    fn given_module_calls_when_limits_are_checked_then_bounds_hold() {
+        let ack = |ids: Vec<String>| Call::AcknowledgeModules { ids };
+        assert!(personal_call_within_limits(&Call::ThirdPartyModules {}));
+        assert!(personal_call_within_limits(&ack(vec!["a".into()])));
+        assert!(personal_call_within_limits(&ack(vec![
+            "x".repeat(MAX_MODULE_ID_BYTES)
+        ])));
+        assert!(personal_call_within_limits(&ack(
+            vec!["a".to_string(); MAX_THIRD_PARTY_MODULES]
+        )));
+        assert!(!personal_call_within_limits(&ack(Vec::new())));
+        assert!(!personal_call_within_limits(&ack(vec![
+            "a".to_string();
+            MAX_THIRD_PARTY_MODULES
+                + 1
+        ])));
+        assert!(!personal_call_within_limits(&ack(vec![String::new()])));
+        assert!(!personal_call_within_limits(&ack(vec![
+            "a".into(),
+            String::new()
+        ])));
+        assert!(!personal_call_within_limits(&ack(vec![
+            "x".repeat(MAX_MODULE_ID_BYTES + 1)
+        ])));
+        // Two bytes per character: 257 characters are 514 bytes.
+        assert!(!personal_call_within_limits(&ack(vec!["é".repeat(257)])));
+        assert!(serde_json::from_str::<Call>(r#"{"command":"acknowledge_modules"}"#).is_err());
+        assert!(
+            serde_json::from_str::<Call>(r#"{"command":"third_party_modules","x":1}"#).is_err()
+        );
     }
 
     #[test]
