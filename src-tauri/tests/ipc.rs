@@ -24,6 +24,8 @@ struct FakeCore {
     calls: AtomicUsize,
     // The room and user of the last `verify_member` that reached the core.
     verified_member: Mutex<Option<(String, String)>>,
+    // The room and bytes of the last pasted image that reached the core.
+    pasted: Mutex<Option<(String, Vec<u8>)>>,
 }
 
 impl FakeCore {
@@ -32,6 +34,7 @@ impl FakeCore {
             available,
             calls: AtomicUsize::new(0),
             verified_member: Mutex::new(None),
+            pasted: Mutex::new(None),
         })
     }
 }
@@ -167,6 +170,8 @@ impl CoreTransport for FakeCore {
                     Err(CoreError::Core(ErrorCode::NotFound))
                 }
             }
+            // Only `paste_image`, with its image frame, sends one.
+            Call::PasteImage { .. } => Err(CoreError::BadReply),
             Call::PickImage { room_id } => match room_id.as_str() {
                 "!r:example.invalid" => Ok(serde_json::json!({
                     "kind": "draft", "size": 48_213, "mime": "image/png",
@@ -552,6 +557,23 @@ impl CoreTransport for FakeCore {
             pixels,
         })
     }
+
+    fn paste_image(&self, room_id: String, bytes: Vec<u8>) -> Result<serde_json::Value, CoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.available {
+            return Err(CoreError::Unavailable);
+        }
+        let draft = room_id == "!r:example.invalid";
+        *self.pasted.lock().unwrap() = Some((room_id, bytes));
+        if draft {
+            Ok(serde_json::json!({
+                "kind": "draft", "size": 4, "mime": "image/png",
+                "preview": {"handle": HANDLE, "width": 3, "height": 5, "bands": 2, "bandRows": 4}
+            }))
+        } else {
+            Err(CoreError::Core(ErrorCode::NotFound))
+        }
+    }
 }
 
 /// A well-formed image handle the fake core knows.
@@ -815,6 +837,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-image-band",
             "allow-release-image",
             "allow-pick-image",
+            "allow-paste-image",
             "allow-pick-file",
             "allow-save-file",
             "allow-send-image",
@@ -2589,6 +2612,114 @@ fn given_image_commands_from_a_remote_origin_then_they_are_denied() {
         }
         assert_eq!(core.calls.load(Ordering::SeqCst), calls, "{cmd}");
     }
+}
+
+/// A `paste_image` request as the page sends it: the image as the raw body
+/// and the room in its header.
+fn paste_request(origin: &str, room: Option<&[u8]>, body: InvokeBody) -> InvokeRequest {
+    let mut headers = tauri::http::HeaderMap::new();
+    if let Some(room) = room {
+        headers.insert(
+            persephone_desktop::PASTE_ROOM_HEADER,
+            tauri::http::HeaderValue::from_bytes(room).unwrap(),
+        );
+    }
+    InvokeRequest {
+        cmd: "paste_image".into(),
+        callback: CallbackFn(0),
+        error: CallbackFn(1),
+        url: origin.parse().unwrap(),
+        body,
+        headers,
+        invoke_key: INVOKE_KEY.to_string(),
+    }
+}
+
+/// GIVEN a pasted image WHEN the page sends it as a raw body with its room
+/// THEN exactly those bytes reach the core and the draft comes back, checked
+/// against the contract; the core's codes reach the page as fixed strings.
+#[test]
+fn given_a_pasted_image_then_its_bytes_reach_the_core_and_a_draft_comes_back() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let image = b"\x89PNG\r\n\x1a\n".to_vec();
+    let paste = |room: &[u8]| {
+        get_ipc_response(
+            &window,
+            paste_request(app_origin(), Some(room), InvokeBody::Raw(image.clone())),
+        )
+        .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let draft = paste(b"!r:example.invalid").unwrap();
+    assert_eq!(draft["kind"], "draft");
+    assert_eq!(draft["preview"]["handle"], HANDLE);
+    assert_eq!(
+        core.pasted.lock().unwrap().take(),
+        Some(("!r:example.invalid".to_owned(), image.clone()))
+    );
+    assert_eq!(paste(b"!other:example.invalid").unwrap_err(), "not_found");
+}
+
+/// GIVEN a paste that is not a raw image of 1 byte to the limit with a room
+/// header of at most the room ID limit WHEN sent THEN it is refused as
+/// `invalid_argument` and nothing reaches the core; from a remote origin it
+/// is denied.
+#[test]
+fn given_a_paste_outside_its_limits_then_it_never_reaches_the_core() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let room: &[u8] = b"!r:example.invalid";
+    let long_room = vec![b'!'; 256];
+    let image = || InvokeBody::Raw(b"\x89PNG".to_vec());
+    let too_long = vec![0; persephone_core_protocol::MAX_PASTED_IMAGE_BYTES as usize + 1];
+    for (case, request) in [
+        (
+            "JSON body",
+            paste_request(
+                app_origin(),
+                Some(room),
+                InvokeBody::Json(serde_json::json!({"roomId": "!r:example.invalid"})),
+            ),
+        ),
+        ("no room", paste_request(app_origin(), None, image())),
+        (
+            "empty room",
+            paste_request(app_origin(), Some(b""), image()),
+        ),
+        (
+            "long room",
+            paste_request(app_origin(), Some(&long_room), image()),
+        ),
+        (
+            "room not visible ASCII",
+            paste_request(app_origin(), Some(b"!r\xe9:example.invalid"), image()),
+        ),
+        (
+            "empty image",
+            paste_request(app_origin(), Some(room), InvokeBody::Raw(Vec::new())),
+        ),
+        (
+            "image over the limit",
+            paste_request(app_origin(), Some(room), InvokeBody::Raw(too_long.clone())),
+        ),
+    ] {
+        assert_eq!(
+            get_ipc_response(&window, request)
+                .map(|reply| reply.deserialize::<serde_json::Value>().unwrap()),
+            Err(serde_json::json!("invalid_argument")),
+            "{case}"
+        );
+    }
+    for origin in ["https://example.org", "http://localhost:1420"] {
+        assert!(
+            get_ipc_response(&window, paste_request(origin, Some(room), image())).is_err(),
+            "from {origin}"
+        );
+    }
+    assert_eq!(core.calls.load(Ordering::SeqCst), 0);
+    assert!(core.pasted.lock().unwrap().is_none());
 }
 
 /// GIVEN an unreachable core WHEN a band is asked for THEN the page gets the

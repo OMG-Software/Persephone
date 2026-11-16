@@ -219,6 +219,25 @@ impl Encoded {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Keeps a pasted image's frame (ADR-0042) under the reservation its
+    /// reader made: `rejected` unless it is an `EncodedImage` frame of 1 to
+    /// [`MAX_ENCODED_BYTES`] bytes.
+    pub fn from_frame(frame: ReceivedFrame) -> Result<Self, ErrorCode> {
+        let header = frame.header();
+        if header.kind != FrameKind::EncodedImage
+            || header.length == 0
+            || header.length > MAX_ENCODED_BYTES
+        {
+            return Err(ErrorCode::Rejected);
+        }
+        let (bytes, permit) = frame.into_parts();
+        Ok(Self {
+            limit: bytes.len(),
+            bytes: Zeroizing::new(bytes),
+            _permit: permit,
+        })
+    }
 }
 
 /// RGBA pixels the core shows, reserved in the `RetainedPixels` budget.

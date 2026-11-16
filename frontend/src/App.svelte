@@ -7,7 +7,7 @@
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
   import { jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
-  import type { FocusedTimeline } from '../../crates/contracts/generated/contracts';
+  import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
   import ReportAbuse from './ReportAbuse.svelte';
@@ -63,7 +63,7 @@
   import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
   import { applyTheme } from './themes.ts';
   import { OwnNameKeeper } from './ownName';
-  import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
+  import { PASTE_UNSUPPORTED, attachErrorText, sendImageErrorText, type ImageDraft, type PastedImage } from './image';
   import { RoomPictures } from './roomPictures';
   import { securityErrorText } from './securityText';
   import {
@@ -83,6 +83,7 @@
     discardMessage,
     displayName,
     pickImage,
+    pasteImage,
     sendImage,
     lockSession,
     pendingMessages,
@@ -1543,16 +1544,18 @@
     }
   }
 
-  // Opens the core's file dialog. A draft that arrives after the room or the
-  // session changed is dropped at once.
-  async function attachImage() {
+  // Makes an image draft for the selected room: from the core's file dialog
+  // or from a paste (ADR-0042). Either way the core strips and decodes the
+  // image, and the draft waits for Send. A draft that arrives after the room
+  // or the session changed is dropped at once.
+  async function attachWith(draft: (roomId: string) => Promise<ImagePick>) {
     const roomId = selected;
     if (!roomId || attaching || imageDraft) return;
     const generation = sessionGeneration;
     attaching = true;
     imageError = null;
     try {
-      const pick = await pickImage(roomId);
+      const pick = await draft(roomId);
       if (pick.kind !== 'draft') return;
       if (current(roomId, generation) && !imageDraft) {
         imageDraft = { roomId, preview: pick.preview, size: pick.size, mime: pick.mime };
@@ -1563,6 +1566,20 @@
       if (current(roomId, generation)) imageError = attachErrorText(reason);
     } finally {
       if (generation === sessionGeneration) attaching = false;
+    }
+  }
+
+  const attachImage = () => attachWith(pickImage);
+
+  // A paste that holds an image attaches it, unless one is already attached.
+  function pasteAttached(pasted: PastedImage) {
+    if (!selected || pasted.kind === 'none') return;
+    if (pasted.kind === 'unsupported') {
+      imageError = PASTE_UNSUPPORTED;
+    } else if (attaching || imageDraft) {
+      imageError = 'An image is already attached. Send or cancel it, then paste again.';
+    } else {
+      void attachWith((roomId) => pasteImage(roomId, pasted.file));
     }
   }
 
@@ -2415,6 +2432,7 @@
               {sendingImage}
               {imageError}
               onattach={attachImage}
+              onpasteimage={signedIn ? pasteAttached : undefined}
               {attachingFile}
               onattachfile={attachFile}
               onsendimage={sendAttached}

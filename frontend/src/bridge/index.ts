@@ -73,7 +73,7 @@ import type {
   PublicRoomPage,
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
-import { parseBand, type Band } from '../image.ts';
+import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
 
 export type {
   AccountChange,
@@ -482,6 +482,25 @@ export function releaseImage(handle: string): Promise<void> {
  */
 export function pickImage(roomId: string): Promise<ImagePick> {
   return invoke<ImagePick>('pick_image', { roomId });
+}
+
+/**
+ * Attaches a pasted PNG or JPEG image (ADR-0042). Its bytes go to the core as
+ * the raw request body, and the room in a header; the core strips and
+ * decodes them in its contained worker, as for a picked file. The reply is a
+ * draft. Another type, or an empty or oversized image, is `rejected` before
+ * the file is read.
+ */
+export async function pasteImage(roomId: string, image: Blob): Promise<ImagePick> {
+  if (
+    (image.type !== 'image/png' && image.type !== 'image/jpeg') ||
+    image.size === 0 ||
+    image.size > MAX_PASTED_IMAGE_BYTES
+  ) {
+    throw 'rejected';
+  }
+  const bytes = new Uint8Array(await image.arrayBuffer());
+  return invoke<ImagePick>('paste_image', bytes, { headers: { 'persephone-room-id': roomId } });
 }
 
 /**

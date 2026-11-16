@@ -7,7 +7,7 @@
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
   import ImageDraftView from './ImageDraft.svelte';
-  import type { ImageDraft } from './image';
+  import { pastedImage, type ImageDraft, type PastedImage } from './image';
   import { isolate } from './people';
   import { composerKey } from './preferences';
   import { clockTime, fullTime, toDate } from './time';
@@ -33,6 +33,7 @@
     sendingImage = false,
     imageError = null,
     onattach = () => {},
+    onpasteimage,
     onsendimage = () => {},
     oncancelimage = () => {},
     enterSends = true,
@@ -72,6 +73,9 @@
     // Why the last attach or image send failed, as fixed text.
     imageError?: string | null;
     onattach?: () => void;
+    // A paste that holds an image instead of text (ADR-0042); absent where
+    // images cannot be attached.
+    onpasteimage?: (pasted: PastedImage) => void;
     onsendimage?: () => void;
     oncancelimage?: () => void;
     // Whether Enter sends (Shift+Enter starts a line) or starts a line
@@ -150,6 +154,16 @@
   }
 
   // See `composerKey` for which keys send.
+  // A pasted image is attached instead of pasted as text; a paste with text
+  // stays text (see `pastedImage`).
+  function paste(event: ClipboardEvent) {
+    if (!onpasteimage) return;
+    const pasted = pastedImage(event.clipboardData);
+    if (pasted.kind === 'none') return;
+    event.preventDefault();
+    onpasteimage(pasted);
+  }
+
   function keydown(event: KeyboardEvent) {
     if (event.key === 'Escape' && (replyingTo || editing)) {
       event.preventDefault();
@@ -304,6 +318,7 @@
         dir="auto"
         aria-keyshortcuts={enterSends ? 'Enter' : 'Control+Enter Meta+Enter'}
         onkeydown={keydown}
+        onpaste={paste}
         oninput={(event) => { onchange(event.currentTarget.value); ontyping?.(); }}
       ></textarea>
       {#if encryption === 'encrypted'}

@@ -138,6 +138,25 @@ travel in row bands instead:
    text. A retry can upload the file again; Persephone does not promise to
    delete an uploaded object.
 
+## Pasting an image
+
+[ADR-0042](../adr/0042-accept-a-pasted-image-from-the-page-as-hostile-bytes.md)
+adds a second way to make a draft. It replaces steps 1 and 2 above; steps 3
+to 7 are the same.
+
+1. The user pastes into the message box. The page attaches an image only when
+   the paste holds one PNG or JPEG file and no plain text; a paste with plain
+   text stays text. The page refuses an empty file, a file over 20 MiB and
+   other types before it reads the file.
+2. The page sends `paste_image` with the bytes as the raw request body and
+   the room ID in the `persephone-room-id` header. The UI process refuses
+   anything else, relays one paste at a time, and writes the request and one
+   `EncodedImage` frame of the declared length together.
+3. The core checks the image frame's header against the request before it
+   reserves the budget and allocates the body, and then applies the checks of
+   a pick. A frame that does not match ends the connection; a full budget
+   replies `limit_exceeded`.
+
 ## Room pictures
 
 Recorded 15 November 2026 ([ADR-0041](../adr/0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md),
@@ -173,7 +192,7 @@ worker slot.
 
 | Item | Limit |
 | --- | --- |
-| Encoded file, download or selection | 20 MiB, checked before allocation |
+| Encoded file, download, selection or paste | 20 MiB, checked before allocation |
 | Image or file sent | 20 MiB after stripping; the SDK's copies of one send (input, upload buffer, request clone, HTTP body) are reserved in a 100 MiB `OutgoingSend` budget ([ADR-0031](../adr/0031-reserve-the-sdks-copies-of-a-send-in-a-budget-of-their-own.md)) |
 | Decoded image | 8192 per side, 16 megapixels, 64 MiB RGBA |
 | Displayed image | Scaled to fit 2048 × 2048 |
@@ -203,8 +222,9 @@ Recorded 24 October 2026 from the implementation on `p5/image-messaging`.
   `/_matrix/client/v1/media/download` endpoint when the server versions
   support it, as the SDK does, and otherwise the legacy
   `/_matrix/media/v3/download` endpoint without the token.
-* `load_image` and `pick_image` run outside the serving loop and reply later.
-  At most two loads and one pick run at a time, and they share one worker.
+* `load_image`, `pick_image` and `paste_image` run outside the serving loop
+  and reply later. At most two loads and one pick or paste run at a time, and
+  they share one worker.
 
 Known limits of this implementation:
 
@@ -218,6 +238,8 @@ Known limits of this implementation:
 * Decoded pixel frames and the SDK's copy of an upload are not zeroed when they
   are dropped.
 * An open file dialog keeps the core from ending until the dialog closes.
+* Tauri allocates a pasted image's whole request body in the UI process
+  before `paste_image` checks its length (ADR-0042).
 * The UI process limits concurrent `image_band` calls to the core (four), but
   it does not count band responses that wait for delivery to the web view. A
   page that asks for bands faster than it reads them can make the UI process

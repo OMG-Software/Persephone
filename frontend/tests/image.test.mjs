@@ -379,3 +379,28 @@ test('GIVEN the page sources WHEN read THEN images never use blob: or data: URLs
     assert.doesNotMatch(text, /<img\b/, file);
   }
 });
+
+const file = (type) => ({ type, size: 4, name: 'x' });
+const data = (types, files) => ({ types, files });
+
+test('GIVEN a paste with plain text WHEN checked THEN it stays text, even with a picture of the text beside it', () => {
+  assert.deepEqual(image.pastedImage(data(['text/plain', 'Files'], [file('image/png')])), { kind: 'none' });
+  assert.deepEqual(image.pastedImage(data(['text/plain'], [])), { kind: 'none' });
+  assert.deepEqual(image.pastedImage(null), { kind: 'none' });
+  assert.deepEqual(image.pastedImage(data(['text/html'], [])), { kind: 'none' }, 'nothing to attach');
+});
+
+test('GIVEN a paste of one PNG or JPEG and no text WHEN checked THEN that file is attached', () => {
+  for (const type of ['image/png', 'image/jpeg']) {
+    const one = file(type);
+    assert.deepEqual(image.pastedImage(data(['Files'], [one])), { kind: 'image', file: one });
+    assert.deepEqual(image.pastedImage(data(['Files', 'text/html'], [one])), { kind: 'image', file: one }, 'a copied web image');
+  }
+});
+
+test('GIVEN a paste of another image type or several files and no text WHEN checked THEN it is unsupported and nothing is attached', () => {
+  for (const files of [[file('image/gif')], [file('image/webp')], [file('image/bmp')], [file('')], [file('image/png'), file('image/png')]]) {
+    assert.deepEqual(image.pastedImage(data(['Files'], files)), { kind: 'unsupported' });
+  }
+  assert.match(image.PASTE_UNSUPPORTED, /PNG or JPEG/);
+});
