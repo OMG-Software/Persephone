@@ -4113,6 +4113,9 @@ fn given_a_pasted_image_then_only_its_stripped_copy_is_sent() {
     server.upload_endpoint();
     let dir = TempDir::new().unwrap();
     let core = image_core(&server, dir.path(), &dir.path().join("never-picked.jpg"));
+    // Stop the sync loop when the test ends, so it cannot reach the next
+    // test's homeserver.
+    let _locked = LockOnDrop(&core);
     wait_for("the plain room", || {
         value::<RoomList>(call(&core, Call::RoomList {}))
             .rooms
