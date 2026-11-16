@@ -61,6 +61,13 @@ jobs:
           key: deps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: deps-${{ runner.os }}-
 
+      # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
+      # copy by its SHA-256 marker file and does not hash the files again.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: webrtc-${{ runner.os }}-${{ hashFiles('tools/webrtc.json') }}
+
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
 
@@ -118,6 +125,13 @@ jobs:
             .local/cache/npm
           key: deps-${{ matrix.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: deps-${{ matrix.os }}-
+
+      # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
+      # copy by its SHA-256 marker file and does not hash the files again.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: webrtc-${{ matrix.os }}-${{ hashFiles('tools/webrtc.json') }}
 
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
@@ -200,6 +214,13 @@ jobs:
             .local/cache/npm
           key: deps-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: deps-${{ matrix.name }}-
+
+      # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
+      # copy by its SHA-256 marker file and does not hash the files again.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: webrtc-${{ matrix.name }}-${{ hashFiles('tools/webrtc.json') }}
 
       - name: Install frontend dependencies
         run: python3 tools/dev.py bootstrap

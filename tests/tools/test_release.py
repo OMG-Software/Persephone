@@ -316,26 +316,124 @@ class RepositoryTests(TempTree):
         self.assertNotIn("9.8.7", (release.ROOT / "Cargo.lock").read_text(encoding="utf-8"))
 
 
+class AppendNoticeTests(TempTree):
+    TITLE = "Prebuilt libwebrtc (webrtc-test)"
+
+    def setUp(self):
+        super().setUp()
+        self.notices = self.root / "notices.txt"
+        self.notices.write_text("first notices\n", encoding="utf-8")
+        self.source = self.root / "LICENSE.md"
+        self.source.write_text("# webrtc\nBSD licence text\n", encoding="utf-8")
+
+    def append(self, title=None):
+        args = ["append-notice", "--notices", str(self.notices), "--source", str(self.source)]
+        return run_main(args + (["--title", title] if title else []), self.root)
+
+    def test_appends_header_and_text(self):
+        # GIVEN notices and a licence file WHEN the notice is appended
+        code, _, _ = self.append(self.TITLE)
+        # THEN the old text stays and the title, the linking line and the licence text follow
+        self.assertEqual(code, 0)
+        text = self.notices.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("first notices\n"))
+        self.assertIn(f"\n{self.TITLE}\n", text)
+        self.assertIn("Linked statically into persephone-call-worker.exe. Licence texts as shipped in the pinned archive:", text)
+        self.assertTrue(text.endswith("# webrtc\nBSD licence text\n"))
+
+    def test_title_defaults_to_the_pinned_tag(self):
+        # GIVEN pins in the root WHEN no title is given THEN the tag names the section
+        (self.root / "tools").mkdir()
+        (self.root / "tools/webrtc.json").write_text('{"tag": "webrtc-abc"}', encoding="utf-8")
+        code, _, _ = self.append()
+        self.assertEqual(code, 0)
+        self.assertIn("\nPrebuilt libwebrtc (webrtc-abc)\n", self.notices.read_text(encoding="utf-8"))
+
+    def test_bad_sources_are_refused_and_leave_notices_alone(self):
+        big = self.root / "big.md"
+        big.write_bytes(b"a" * (release.NOTICE_SOURCE_LIMIT + 1))
+        empty = self.root / "empty.md"
+        empty.write_bytes(b"")
+        for name, source in (("missing", self.root / "absent.md"), ("empty", empty), ("oversized", big)):
+            with self.subTest(source=name):
+                # GIVEN a missing, empty or oversized licence file WHEN it is appended
+                self.source = source
+                code, _, stderr = self.append(self.TITLE)
+                # THEN it is refused and the notices are unchanged
+                self.assertEqual(code, 2)
+                self.assertIn("licence file", stderr)
+                self.assertEqual(self.notices.read_text(encoding="utf-8"), "first notices\n")
+
+    def test_second_append_is_refused(self):
+        # GIVEN notices that already hold the section WHEN it is appended again
+        self.assertEqual(self.append(self.TITLE)[0], 0)
+        before = self.notices.read_text(encoding="utf-8")
+        code, _, stderr = self.append(self.TITLE)
+        # THEN it is refused and nothing changes
+        self.assertEqual(code, 2)
+        self.assertIn("already contain", stderr)
+        self.assertEqual(self.notices.read_text(encoding="utf-8"), before)
+
+
 class BundleConfigTests(TempTree):
-    def test_release_config_names_sidecars_and_licence_files(self):
-        # GIVEN generated notices WHEN the release configuration is written
+    def write_config(self, platform):
         notices = self.root / "notices.txt"
         notices.write_text("notices\n", encoding="utf-8")
         output = self.root / "out/tauri.release.json"
-        code, _, _ = run_main(["bundle-config", "--notices", str(notices), "--output", str(output)], release.ROOT)
-        # THEN it adds both sidecars and both licence files, and no signing hook.
+        args = ["bundle-config", "--notices", str(notices), "--output", str(output)]
+        if platform:
+            args += ["--platform", platform]
+        code, _, stderr = run_main(args, release.ROOT)
+        return code, stderr, notices, output
+
+    def test_windows_config_names_all_sidecars_and_licence_files(self):
+        # GIVEN generated notices WHEN the Windows release configuration is written
+        code, _, notices, output = self.write_config("windows")
+        # THEN it adds the call worker, both licence files, and no signing hook.
         self.assertEqual(code, 0)
         bundle = json.loads(output.read_text(encoding="utf-8"))["bundle"]
         self.assertIs(bundle["active"], True)
-        self.assertEqual(bundle["externalBin"], ["binaries/persephone", "binaries/persephone-media-worker"])
+        self.assertEqual(
+            bundle["externalBin"],
+            ["binaries/persephone", "binaries/persephone-media-worker", "binaries/persephone-call-worker"],
+        )
         resources = {(release.ROOT / "src-tauri" / source).resolve(): target for source, target in bundle["resources"].items()}
         self.assertEqual(resources, {(release.ROOT / "LICENSE").resolve(): "LICENSE.txt",
                                      notices.resolve(): "THIRD-PARTY-NOTICES.txt"})
         self.assertNotIn("windows", bundle)
 
+    def test_linux_and_macos_configs_leave_out_the_call_worker(self):
+        for platform in ("linux", "macos"):
+            with self.subTest(platform=platform):
+                # GIVEN generated notices WHEN a non-Windows configuration is written
+                code, _, _, output = self.write_config(platform)
+                # THEN calls are not shipped, so only the core and media worker are sidecars.
+                self.assertEqual(code, 0)
+                bundle = json.loads(output.read_text(encoding="utf-8"))["bundle"]
+                self.assertEqual(bundle["externalBin"], ["binaries/persephone", "binaries/persephone-media-worker"])
+
+    def test_unknown_platform_is_refused(self):
+        # GIVEN a platform that the release does not build
+        notices = self.root / "notices.txt"
+        notices.write_text("notices\n", encoding="utf-8")
+        # WHEN the configuration is requested THEN it is refused, on the command line and in the function
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.write_config("freebsd")
+        self.assertFalse((self.root / "out/tauri.release.json").exists())
+        with self.assertRaises(release.ReleaseError):
+            release.bundle_config(release.ROOT, notices, "freebsd")
+
+    def test_platform_is_required(self):
+        # GIVEN a call without --platform WHEN it runs THEN the parser refuses it
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.write_config(None)
+
     def test_missing_notices_are_refused(self):
         output = self.root / "tauri.release.json"
-        code, _, stderr = run_main(["bundle-config", "--notices", str(self.root / "absent.txt"), "--output", str(output)], release.ROOT)
+        code, _, stderr = run_main(
+            ["bundle-config", "--platform", "windows", "--notices", str(self.root / "absent.txt"), "--output", str(output)],
+            release.ROOT,
+        )
         self.assertEqual(code, 2)
         self.assertIn("notices not found", stderr)
         self.assertFalse(output.exists())

@@ -9,7 +9,10 @@ with `cargo metadata --locked --offline` that the lockfile is still valid.
 `check-tag vX.Y.Z[-pre]` exits 1 and lists each manifest whose version differs
 from the tag. The release workflow runs it before it builds anything.
 
-`bundle-config --notices FILE --output FILE` writes the release-only Tauri
+`append-notice --notices FILE --source FILE [--title TEXT]` appends the prebuilt
+libwebrtc licence texts to a notices file once.
+
+`bundle-config --platform windows|linux|macos --notices FILE --output FILE` writes the release-only Tauri
 configuration (sidecars and bundled licence files) that the workflow merges
 with `cargo tauri --config`. It never adds a signing hook: signing runs in
 separate jobs that build nothing (see docs/release.md).
@@ -300,15 +303,23 @@ def cargo_lock_is_valid(root):
 
 
 SIDECARS = ("binaries/persephone", "binaries/persephone-media-worker")
+# Calls run on Windows only, so only the Windows bundle carries the call worker.
+PLATFORM_SIDECARS = {
+    "windows": SIDECARS + ("binaries/persephone-call-worker",),
+    "linux": SIDECARS,
+    "macos": SIDECARS,
+}
 
 
-def bundle_config(root, notices):
+def bundle_config(root, notices, platform):
     """The release-only Tauri configuration that `cargo tauri --config` merges.
 
     It stays out of tauri.conf.json because tauri-build copies `externalBin`
     and `resources` on every build and fails when they are missing, which
     would break development builds and tests.
     """
+    if platform not in PLATFORM_SIDECARS:
+        raise ReleaseError(f"unknown platform {platform!r}; expected one of {', '.join(PLATFORM_SIDECARS)}")
     tauri_dir = root / "src-tauri"
     notices = Path(notices).resolve()
     if not notices.is_file():
@@ -317,7 +328,7 @@ def bundle_config(root, notices):
         "bundle": {
             # tauri.conf.json keeps bundling off for development builds.
             "active": True,
-            "externalBin": list(SIDECARS),
+            "externalBin": list(PLATFORM_SIDECARS[platform]),
             "resources": {
                 os.path.relpath(root / "LICENSE", tauri_dir).replace(os.sep, "/"): "LICENSE.txt",
                 os.path.relpath(notices, tauri_dir).replace(os.sep, "/"): "THIRD-PARTY-NOTICES.txt",
@@ -327,18 +338,80 @@ def bundle_config(root, notices):
     return config
 
 
+NOTICE_SOURCE_LIMIT = 1024 * 1024
+NOTICE_SEPARATOR = "=" * 78
+
+
+def webrtc_title(root):
+    """The notice title for the libwebrtc release that tools/webrtc.json pins."""
+    try:
+        tag = json.loads(_read(root / "tools/webrtc.json"))["tag"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ReleaseError(f"cannot read the libwebrtc tag from tools/webrtc.json: {error}") from error
+    if not isinstance(tag, str) or not tag:
+        raise ReleaseError("tools/webrtc.json has no libwebrtc tag")
+    return f"Prebuilt libwebrtc ({tag})"
+
+
+def append_notice(notices, title, source):
+    """Append the licence texts of the prebuilt libwebrtc to a notices file.
+
+    The text comes from the pinned archive itself, whose SHA-256 tools/webrtc.py
+    checks, so no copy is committed. It refuses a missing, empty or oversized
+    source, and a second append of the same title.
+    """
+    notices, source = Path(notices), Path(source)
+    if not notices.is_file():
+        raise ReleaseError(f"third-party notices not found at {notices}")
+    if not source.is_file():
+        raise ReleaseError(f"licence file not found at {source}")
+    size = source.stat().st_size
+    if size == 0:
+        raise ReleaseError(f"licence file {source} is empty")
+    if size > NOTICE_SOURCE_LIMIT:
+        raise ReleaseError(f"licence file {source} is {size} bytes; the limit is {NOTICE_SOURCE_LIMIT}")
+    try:
+        text = _read(source).replace("\r\n", "\n")
+    except UnicodeDecodeError as error:
+        raise ReleaseError(f"licence file {source} is not UTF-8: {error}") from error
+    if not text.strip():
+        raise ReleaseError(f"licence file {source} is empty")
+    existing = _read(notices)
+    if f"\n{title}\n" in f"\n{existing}":
+        raise ReleaseError(f"notices already contain {title!r}")
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    if not text.endswith("\n"):
+        text += "\n"
+    section = (
+        f"\n{NOTICE_SEPARATOR}\n{title}\n{NOTICE_SEPARATOR}\n\n"
+        "Linked statically into persephone-call-worker.exe. "
+        "Licence texts as shipped in the pinned archive:\n\n"
+        f"{text}"
+    )
+    _write(notices, existing + section)
+
+
 def main(argv=None, root=ROOT):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("version", help="set the release version").add_argument("version")
     commands.add_parser("check-tag", help="compare every version with a vX.Y.Z tag").add_argument("tag")
     bundle = commands.add_parser("bundle-config", help="write the release-only Tauri configuration")
+    bundle.add_argument("--platform", required=True, choices=sorted(PLATFORM_SIDECARS), help="bundle platform")
     bundle.add_argument("--notices", required=True, help="third-party notices file to bundle")
     bundle.add_argument("--output", required=True, help="JSON file for `cargo tauri --config`")
+    append = commands.add_parser("append-notice", help="append the prebuilt libwebrtc licence texts to a notices file")
+    append.add_argument("--notices", required=True, help="notices file to extend (use a Windows-only copy)")
+    append.add_argument("--source", required=True, help="LICENSE.md from the verified libwebrtc directory")
+    append.add_argument("--title", help="section title; default from the tag in tools/webrtc.json")
     args = parser.parse_args(argv)
     try:
+        if args.command == "append-notice":
+            append_notice(args.notices, args.title or webrtc_title(root), args.source)
+            return 0
         if args.command == "bundle-config":
-            config = bundle_config(root, args.notices)
+            config = bundle_config(root, args.notices, args.platform)
             output = Path(args.output)
             output.parent.mkdir(parents=True, exist_ok=True)
             _write(output, json.dumps(config, indent=2) + "\n")
