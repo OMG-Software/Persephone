@@ -94,6 +94,14 @@ evidence text. After that: `cargo fmt --all -- --check` passed; `cargo test
 test --locked --offline -p persephone-desktop` 19 passed, 1 ignored, IPC 36
 passed; `Cargo.lock` unchanged.
 
+It was then rebased onto `0589122`, which changes the module scanner and the
+core's shutdown order. After that: `cargo fmt --all -- --check` passed;
+`cargo test --locked --offline -p persephone-core --lib` 289 passed, 1
+ignored; `cargo test --locked --offline -p persephone-desktop` 19 passed, 1
+ignored, IPC 36 passed; `cargo clippy --locked --offline -p persephone-core
+-p persephone-desktop --all-targets -- -D warnings` passed; `Cargo.lock`
+unchanged.
+
 The live run below used the build rebased onto `9e9c645`.
 
 ## Live run
