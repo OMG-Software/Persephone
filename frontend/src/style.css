@@ -1705,14 +1705,10 @@ kbd {
   font-weight: 600;
 }
 
-.brand-mark rect {
-  fill: var(--bg);
-}
-
+/* Each path sets its own stroke width. */
 .brand-mark path {
   fill: none;
   stroke: var(--accent);
-  stroke-width: 5;
   stroke-linecap: butt;
   stroke-linejoin: miter;
 }
