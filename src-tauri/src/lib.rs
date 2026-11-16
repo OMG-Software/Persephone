@@ -27,6 +27,8 @@
 //! little-endian `u32`, followed by exactly `width * rows * 4` RGBA bytes.
 
 pub mod core_link;
+#[cfg(windows)]
+mod harden;
 pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink};
@@ -1756,6 +1758,12 @@ pub fn context<R: Runtime>() -> tauri::Context<R> {
 /// launcher for the core ([`launcher`]) before any Tauri or channel state
 /// exists, because without the core channel the UI has nothing to relay to.
 pub fn run() {
+    // First, before any Tauri, window or web view state exists.
+    #[cfg(windows)]
+    if let Err(error) = harden::block_injected_dlls() {
+        eprintln!("persephone-ui: cannot block injected code: {error}");
+        std::process::exit(2);
+    }
     if launcher::mode(std::env::args_os(), STARTED_BY_CORE) == launcher::Mode::Launcher {
         launcher::run();
     }

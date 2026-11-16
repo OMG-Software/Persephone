@@ -5,6 +5,12 @@
 //! its requests over its stdin and stdout. When the UI exits or misbehaves, the
 //! core shuts it down, closes the stores and exits.
 //!
+//! On Windows the core first blocks images not signed by Microsoft and the
+//! legacy extension points for the rest of its life
+//! (`platform::windows::harden`), so a third-party hook DLL cannot load into
+//! the process that holds the keys. This does not stop a program of the same
+//! user from reading the process's memory by other means.
+//!
 //! The platform's [`UiHost`] starts and contains the UI; a platform without
 //! UI containment refuses, and the core exits with status 2. The core also
 //! watches the UI's window ([`ui_watch`]). If the page never reaches the
@@ -133,6 +139,11 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Options, String> {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if let Err(error) = persephone_core::platform::windows::harden::block_injected_dlls() {
+        eprintln!("persephone: cannot block injected code: {error}");
+        return ExitCode::from(2);
+    }
     let options = match parse(env::args_os().skip(1)) {
         Ok(options) => options,
         Err(error) => {
