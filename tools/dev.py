@@ -10,6 +10,8 @@ import sys
 import tempfile
 import time
 
+import webrtc
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
@@ -123,7 +125,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("check", "build", "rust", "frontend", "contracts", "coverage", "audit", "bootstrap", "sandbox"),
+        choices=("check", "build", "rust", "frontend", "contracts", "coverage", "audit", "bootstrap", "sandbox", "webrtc"),
     )
     parser.add_argument("--offline", action="store_true", help="Use previously cached dependencies")
     parser.add_argument("--release", action="store_true", help="build: use the release profile instead of debug")
@@ -240,6 +242,12 @@ def main():
         environment["PERSEPHONE_PROBE_DIR"] = str(ROOT / ".local/runs" / f"windows-{time.time_ns()}-{os.getpid()}")
         # Preserve the native probe's nonzero gate result; never turn it into a pass.
         run([ROOT / ".local/build/rust/release/persephone-test-windows.exe"], environment)
+    if args.command == "webrtc":
+        try:
+            print(webrtc.ensure(ROOT, offline=args.offline))
+        except webrtc.WebrtcError as error:
+            print(f"webrtc: {error}", file=sys.stderr)
+            return 1
     return 0
 
 

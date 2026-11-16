@@ -1,0 +1,14 @@
+{
+  "tag": "webrtc-a545de4",
+  "url": "https://github.com/livekit/rust-sdks/releases/download/{tag}/{name}",
+  "recorded": "2026-11-16",
+  "source": "GitHub release asset digests reported by the GitHub API on 2026-11-16",
+  "assets": {
+    "win-x64": {"name": "webrtc-win-x64-release.zip", "size": 114348165, "sha256": "862403fcb248c7d8803487e4c22b8821c6130e89100cb9c69be95ef45ff46146"},
+    "win-arm64": {"name": "webrtc-win-arm64-release.zip", "size": 112508729, "sha256": "1666ced8f6b66f95c32acb33ab7f4775f3d2222412415defae91e2634fe67624"},
+    "linux-x64": {"name": "webrtc-linux-x64-release.zip", "size": 156115675, "sha256": "2ece73b9a72a2cacd73d0c62ac3a414e202f37885c3c8f49dddb43c1443ac0bd"},
+    "linux-arm64": {"name": "webrtc-linux-arm64-release.zip", "size": 172252473, "sha256": "e87dff71422c5cb1470f6cf00ecc4ad6964e746c5039831b7206b946b5d13c5f"},
+    "mac-x64": {"name": "webrtc-mac-x64-release.zip", "size": 234306750, "sha256": "c53d7d20277f7729956854f1268c372360f08732520136b559034eedae0980a2"},
+    "mac-arm64": {"name": "webrtc-mac-arm64-release.zip", "size": 277130371, "sha256": "153a1f1a268b812b4a501deda6505037f29481691efec52be817f560ff09e206"}
+  }
+}

@@ -85,6 +85,21 @@ Proposed option: "a contained call worker".
   which Element Call writes and reads in its default compatibility mode,
   with the LiveKit focus. The core schedules a delayed leave (MSC4140) and
   restarts it while the call runs, so a crash ends the membership.
+* The member event follows what matrix-js-sdk writes (read 16 November
+  2026): state key `_{user}_{device}_m.call`, `application` `m.call`,
+  empty `call_id`, `scope` `m.room`, `expires` 4 hours, `focus_active`
+  `{"type":"livekit","focus_selection":"multi_sfu"}`, one
+  `foci_preferred` entry with this homeserver's LiveKit service URL,
+  `membershipID` `{user}:{device}`, and `m.call.intent` `audio`. The
+  LiveKit participant identity is `{user}:{device}`. The delayed leave
+  is 8 seconds, restarted every 5 seconds. Leaving writes `{}`.
+* Each member publishes to the SFU named first in its own
+  `foci_preferred` ("multi-SFU"). This first version connects only to
+  the SFU of this homeserver. Members who publish to another SFU are shown
+  as not reachable. Connecting to more than one SFU is later work.
+* Only memberships whose state key names the event's sender, whose
+  service URL is `https://`, and that have not expired are used. At most
+  32 members are kept.
 * Sticky `m.rtc.member` events (MSC4354) are not written. The pinned SDK
   does not compile them. Reading them is later work.
 * SFU discovery: `discover_rtc_transports()` (the unstable
@@ -117,7 +132,10 @@ Proposed option: "a contained call worker".
 * libwebrtc: `tools/dev.py` downloads the pinned prebuilt archive into
   `.local/`, checks its SHA-256 against a committed value, and gives its
   path to the build in `LK_CUSTOM_WEBRTC`. A wrong hash stops the build.
-  The build script's own unchecked download is not used.
+  The build script's own unchecked download is not used. The committed
+  values are the SHA-256 digests that GitHub reported for the
+  `webrtc-a545de4` release assets on 16 November 2026. They detect a
+  changed archive after that date; they do not prove who built it.
 * Proxy: WebRTC media and LiveKit signalling cannot use a SOCKS5 proxy.
   When the profile has a proxy, the core asks in its own window before a
   call: the call connects directly, and the SFU and TURN server see this

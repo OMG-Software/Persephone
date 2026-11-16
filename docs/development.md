@@ -89,7 +89,10 @@ python tools/dev.py contracts
 python tools/dev.py coverage
 python tools/dev.py audit
 python tools/dev.py sandbox --offline
+python tools/dev.py webrtc
 ```
+
+`webrtc` downloads the pinned libwebrtc archive from `tools/webrtc.json`, verifies its size and SHA-256, and extracts it into `.local/cache/webrtc` for the call worker (ADR-0043). It prints the directory for `LK_CUSTOM_WEBRTC`. It needs network access unless the verified archive is already cached. With `--offline` it fails if nothing is cached.
 
 `coverage` runs the Rust tests instrumented and writes the Rust crates' line coverage to `.local/coverage/rust/lcov.info`, as the SonarQube workflow does. Instrumented builds go to `.local/build/rust-coverage`. It needs the LLVM tools component and cargo-llvm-cov 0.9.1 on `PATH`; `dev.py` refuses another version:
 
