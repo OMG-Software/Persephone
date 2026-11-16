@@ -17,20 +17,36 @@ Project page: <https://omg-software.github.io/Persephone/> (source in
 
 ## Screenshots
 
-A Windows development build in demo mode (`--demo`), which shows synthetic
-rooms and stores nothing.
+A Windows development build signed in to a disposable local Merovingian
+server. The accounts, rooms and messages are synthetic.
 
-![The Persephone window with the room list on the left and the message history
-of the Project planning room on the right](site/screenshots/room-history.png)
+An encrypted room with text and an image message. The room list shows each
+room's encryption and unread count, and the members are on the right.
+
+![The Persephone window. The room list is on the left, the encrypted Project
+planning room is open in the middle with a conversation between Alice and Bob
+and an image of a beta schedule, and the two members are on the right](site/screenshots/room-history.png)
 
 Hostile room names and messages stay inert text. The markup and the
 `javascript:` link below do not run. The right-to-left override still
 reverses its own line, but bidirectional isolation keeps it out of the text
 around it.
 
-![A test room whose name is an HTML image tag, with messages that contain a
-script tag, a javascript: link, a right-to-left override and control
-characters, each shown as plain text](site/screenshots/hostile-content.png)
+![A room whose name is an HTML image tag, with messages that contain a script
+tag, a javascript: link, a right-to-left override and control characters, each
+shown as plain text](site/screenshots/hostile-content.png)
+
+Settings, Security & encryption, after setting up encryption: cross-signing
+is ready, this device is verified and recovery is set up.
+
+![The Security and encryption settings page with three status cards: cross-signing
+ready, this device verified, and recovery set up](site/screenshots/security-settings.png)
+
+The sign-in page. Persephone asks for the username and password in a separate
+Windows window, so the page never sees the password.
+
+![The sign-in page with the matrix.org server selected, a Continue button, a
+single sign-on button and a link to create an account](site/screenshots/sign-in.png)
 
 ## Status
 
