@@ -116,7 +116,44 @@ application detection off should stop the injection; this was not tested.
 * A UI that exits on its own (a crash of the UI process, or a missing runtime)
   ends Persephone as before; it is not retried.
 * Retries are not limited in number; each needs the user's answer.
+  (Superseded on 16 November 2026: see [Automatic first retry](#automatic-first-retry-16-november-2026).)
 * The crashes occur in third-party code outside Persephone. Blocking injected
   third-party DLLs in the UI tree (for example with a process mitigation
   policy) could prevent it and would also harden the UI. It is not evaluated.
 * Debug builds on one Windows host only.
+
+## Automatic first retry (16 November 2026)
+
+Owner decision (16 November 2026): start a failed window again once without
+asking. The owner saw the retry dialog on every start of the installed build
+(built 24 October 2026) after entering the profile passphrase. The five
+Crashpad dumps in the UI's WebView2 data folder, dated 21 October to
+16 November 2026, all name the `browser` process, `0xC0000005` and
+`RTSSHooks64.dll` at the same offset as above. RivaTuner Statistics Server was
+running with its hook loader. The replacement window stayed up in the
+observed case.
+
+* **Rule** ([`ui_watch.rs`](../../crates/core/src/ui_watch.rs), `Retries`): a
+  failure is retried without the dialog if no automatic retry was made in the
+  previous 10 minutes (`AUTO_RETRY_INTERVAL`). Otherwise the dialog is shown as
+  before. Answers in the dialog do not count as automatic retries. A window
+  that keeps failing therefore gets at most one automatic retry in 10 minutes,
+  and every further failure in that time needs the user's answer.
+* **Wiring** ([`main.rs`](../../crates/core/src/main.rs)): the core keeps one
+  `Retries` across its UI runs. On an automatic retry it prints only
+  `retrying the window without asking` after the failure code. The old tree is
+  ended exactly as for a Retry answer.
+* The rule applies to both signs (`NotReady`, `WebViewGone`) and on every
+  platform that runs the watch.
+
+Tests added: two decision tests in `ui_watch.rs` (a first failure retries
+without asking; failures within the interval ask until it has passed), and one
+test of the watch itself in `main.rs` with a stand-in host and tree (the first
+vanished web view is retried without the dialog; the next one shows it, and
+Cancel closes).
+
+Not rerun: the live runs above. The automatic retry was not checked with a real
+WebView2 crash. Because three of seven earlier replacements also crashed within
+about 15 s, the second failure may still reach the dialog. An RTSS application
+profile for `msedgewebview2.exe` with detection off remains the measure that
+addresses the injection itself; it is still untested.
