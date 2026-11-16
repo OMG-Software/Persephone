@@ -1,5 +1,10 @@
 import type {
   AppStatus,
+  CallEnd,
+  CallJoinError,
+  CallReadiness,
+  CallStatus,
+  CallUnavailable,
   LocalSearchFilters,
   ConnectionHealth,
   AttachmentKind,
@@ -173,3 +178,19 @@ void bigintFilter;
 void unknownAttachment;
 void unknownSync;
 void missingHealth;
+const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null };
+const readyCall: CallReadiness = { available: false, reason: "no_call_server", activeMembers: 0 };
+// @ts-expect-error a status carries codes, never a token or URL
+const callWithToken: CallStatus = { ...idleCall, token: "secret" };
+// @ts-expect-error only the defined unavailable reasons are accepted
+const unknownReason: CallUnavailable = "no_microphone";
+// @ts-expect-error only the defined end codes are accepted
+const unknownEnd: CallEnd = "crashed";
+// @ts-expect-error only the defined join errors are accepted
+const unknownJoin: CallJoinError = "busy";
+void idleCall;
+void readyCall;
+void callWithToken;
+void unknownReason;
+void unknownEnd;
+void unknownJoin;

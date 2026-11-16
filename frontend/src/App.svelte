@@ -1103,7 +1103,8 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity);
+      // Call changes are not shown yet.
+      await watchSession(reset, refreshRooms, refreshSecurity, () => {});
     } catch {
       unavailable = true;
       return;

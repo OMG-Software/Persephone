@@ -95,7 +95,7 @@ use std::{
     collections::BTreeSet,
     io::{Read, Write},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -140,6 +140,8 @@ struct Notifications {
     room_list_changed: bool,
     /// The account's encryption state changed since the last notification.
     security_changed: bool,
+    /// The call changed since the last notification.
+    calls_changed: bool,
     /// The latest desktop notification waiting to be sent (ADR-0022): room
     /// and sender names. A newer one replaces it.
     toast: Option<(String, String)>,
@@ -154,6 +156,10 @@ struct Notifications {
 struct Hub {
     notifications: Mutex<Notifications>,
     changed: Condvar,
+    /// The core's call controller, which the end of a session must stop.
+    /// Weak: the core owns the controller, and the controller's admission
+    /// reaches the session that holds this hub.
+    calls: OnceLock<Weak<calls::controller::CallController>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -174,6 +180,15 @@ impl Hub {
         notifications.toast = None;
         notifications.session_changed = true;
         self.changed.notify_all();
+    }
+
+    /// Queues one call event; changes before the UI reads coalesce.
+    fn calls_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.calls_changed {
+            notifications.calls_changed = true;
+            self.changed.notify_all();
+        }
     }
 
     /// Queues events for the subscribed rooms among `rooms`, and one room-list
@@ -248,8 +263,13 @@ impl SessionListener for Hub {
         self.changed.notify_all();
     }
 
-    /// Wakes the watch in [`serve`], which finishes the ended session.
+    /// Wakes the watch in [`serve`], which finishes the ended session. A
+    /// call stops first: the homeserver ended the session, so no more call
+    /// work may start.
     fn session_ended(&self) {
+        if let Some(calls) = self.calls.get().and_then(Weak::upgrade) {
+            calls.stop_for_session_end();
+        }
         let _notifications = lock(&self.notifications);
         self.changed.notify_all();
     }
@@ -299,6 +319,12 @@ pub struct Core {
     link: conversations::Busy,
     /// Reading or setting the display name, one at a time.
     display_name: conversations::Busy,
+    /// The audio call (ADR-0043): at most one controller; readiness, join
+    /// and leave each run one at a time, so a leave can end a join.
+    calls: Arc<calls::controller::CallController>,
+    call_readiness: conversations::Busy,
+    call_join: conversations::Busy,
+    call_leave: conversations::Busy,
     /// One device-list request at a time.
     devices: conversations::Busy,
     /// Reading a room's settings, listing its members, and changing it, each
@@ -476,13 +502,26 @@ impl Core {
     /// gates. A real account and its stores are supplied by `with_session`.
     pub fn new(fixtures: views::Fixtures) -> Self {
         let budgets = Arc::new(ResourceBudgets::default());
+        let session = Session::not_configured();
+        let hub = Arc::<Hub>::default();
+        let calls = Arc::new(calls::controller::CallController::new(
+            calls::worker::platform(),
+            session.admission(),
+        ));
+        let _ = hub.calls.set(Arc::downgrade(&calls));
+        let tell = Arc::downgrade(&hub);
+        calls.set_listener(Arc::new(move || {
+            if let Some(hub) = tell.upgrade() {
+                hub.calls_changed();
+            }
+        }));
         Self {
-            session: Session::not_configured(),
+            session,
             credentials: Arc::from(credentials::platform()),
             picker: Arc::from(pick::platform()),
             fixtures: Mutex::new(fixtures),
             matrix: MatrixViews::default(),
-            hub: Arc::default(),
+            hub,
             media: MediaService::new(budgets.clone(), media::platform_worker()),
             budgets,
             conversation: conversations::Busy::default(),
@@ -498,6 +537,10 @@ impl Core {
             discovery: conversations::Busy::default(),
             link: conversations::Busy::default(),
             display_name: conversations::Busy::default(),
+            calls,
+            call_readiness: conversations::Busy::default(),
+            call_join: conversations::Busy::default(),
+            call_leave: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             room_settings: conversations::Busy::default(),
             room_members: turns::Queue::new(LISTING_PLACES),
@@ -538,6 +581,7 @@ impl Core {
     /// Gives the core its session owner and restores a saved account.
     pub fn with_session(mut self, session: Session) -> Self {
         session.set_listener(self.hub.clone());
+        self.calls.set_admission(session.admission());
         self.session = session;
         self.session.restore_account();
         self
@@ -635,6 +679,12 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            Call::CallReadiness { .. } | Call::CallJoin { .. } | Call::CallLeave {} => {
+                match self.call_work(&request.call) {
+                    Ok(call) => Answer::Later(id, call),
+                    Err(code) => error(code),
+                }
+            }
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
@@ -946,6 +996,17 @@ impl Core {
             },
             Call::SaveFile { room_id, event_id } => match self.save_file(room_id, event_id) {
                 Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::CallReadiness { .. } | Call::CallJoin { .. } | Call::CallLeave {} => {
+                match self.call_work(call) {
+                    Ok(call) => call(),
+                    Err(code) => Outcome::Error(code),
+                }
+            }
+            Call::CallMute { muted } => self.call_mute(*muted),
+            Call::CallStatus {} => match self.calls_open() {
+                Ok(()) => ok(&calls::status::status(&self.calls.state())),
                 Err(code) => Outcome::Error(code),
             },
             Call::ImageBand { .. } => Outcome::Error(ErrorCode::Unavailable),
@@ -1896,8 +1957,10 @@ impl Core {
     }
 
     /// Runs when a lock or sign-out has closed admission and advanced the
-    /// generation: drops every image and draft, then tells the UI.
+    /// generation: stops the call first, so its audio ends before anything
+    /// waits; then drops every image and draft and tells the UI.
     fn announce_lock(&self) {
+        self.calls.stop_for_session_end();
         self.media.purge();
         self.hub.announce_session_change();
     }
@@ -1911,6 +1974,177 @@ impl Core {
         } else {
             Some(0)
         }
+    }
+
+    /// Stops the call because the session stops admitting work. The core's
+    /// exit calls it before its own lock, which has no announcement.
+    pub fn stop_calls_for_session_end(&self) {
+        self.calls.stop_for_session_end();
+    }
+
+    /// `locked` while the open profile is locked; a lease for no work, so a
+    /// reply is refused the same way as for other calls. Synthetic data and
+    /// a signed-out profile have no call, and answer idle.
+    fn calls_open(&self) -> Result<(), ErrorCode> {
+        if !self.session.is_configured() {
+            return Ok(());
+        }
+        match self.session.admit() {
+            Ok(_lease) => Ok(()),
+            Err(session::AdmissionError::Locked) => Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => Err(ErrorCode::LimitExceeded),
+        }
+    }
+
+    /// Mutes or unmutes the microphone. No call is not an error: the reply
+    /// is the call state, and the page sees there is none.
+    fn call_mute(&self, muted: bool) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        let _ = self.calls.set_muted(muted);
+        ok(&calls::status::status(&self.calls.state()))
+    }
+
+    /// Admits a call command that waits on the homeserver or the worker
+    /// (ADR-0043): readiness, join and leave. Each kind runs one at a time,
+    /// on its own thread, so a leave can cancel a join in progress.
+    fn call_work<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
+        enum Work {
+            Readiness(matrix_sdk::ruma::OwnedRoomId),
+            Join(matrix_sdk::ruma::OwnedRoomId),
+            Leave,
+        }
+        let room = |room_id: &str| {
+            if valid_room_id(room_id) {
+                matrix_sdk::ruma::OwnedRoomId::try_from(room_id)
+                    .map_err(|_| ErrorCode::InvalidArgument)
+            } else {
+                Err(ErrorCode::InvalidArgument)
+            }
+        };
+        let work = match call {
+            Call::CallReadiness { room_id } => Work::Readiness(room(room_id)?),
+            Call::CallJoin { room_id } => Work::Join(room(room_id)?),
+            Call::CallLeave {} => Work::Leave,
+            _ => return Err(ErrorCode::InvalidArgument),
+        };
+        // Synthetic data has no homeserver and no call to leave.
+        if !self.session.is_configured() {
+            return match work {
+                Work::Leave => Ok(Box::new(|| ok(&persephone_contracts::CallStatus::idle()))),
+                _ => Err(ErrorCode::NotFound),
+            };
+        }
+        self.calls_open()?;
+        let slot = match work {
+            Work::Readiness(_) => self.call_readiness.begin()?,
+            Work::Join(_) => self.call_join.begin()?,
+            Work::Leave => self.call_leave.begin()?,
+        };
+        Ok(Box::new(move || {
+            let _slot = slot;
+            match work {
+                Work::Readiness(room_id) => refused(self.finish_call_readiness(&room_id)),
+                Work::Join(room_id) => refused(self.finish_call_join(&room_id)),
+                Work::Leave => refused(self.finish_call_leave()),
+            }
+        }))
+    }
+
+    /// A lease and the client; the client must be dropped inside the stores'
+    /// runtime, before the lease.
+    fn call_lease(&self) -> Result<(session::Lease, matrix_sdk::Client), ErrorCode> {
+        match self.session.with_client() {
+            Ok(Some(granted)) => Ok(granted),
+            Ok(None) => Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => Err(ErrorCode::LimitExceeded),
+        }
+    }
+
+    fn finish_call_readiness(
+        &self,
+        room_id: &matrix_sdk::ruma::RoomId,
+    ) -> Result<persephone_contracts::CallReadiness, ErrorCode> {
+        let (lease, client) = self.call_lease()?;
+        let supported = self.calls.supported();
+        let readiness = lease
+            .stores()
+            .block_on(calls::status::readiness(&client, room_id, supported));
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        Ok(readiness)
+    }
+
+    /// Joins the call (ADR-0043). The profile's proxy is read under one
+    /// lease and the user's question is asked under none, so a lock never
+    /// waits for a dialog. The join itself runs under one lease, as one
+    /// complete operation, in the session generation the proxy was read in.
+    fn finish_call_join(
+        &self,
+        room_id: &matrix_sdk::ruma::RoomId,
+    ) -> Result<persephone_contracts::CallStatus, ErrorCode> {
+        use calls::controller::{CallError, JoinScope};
+        let refuse = |error: CallError| Ok(calls::status::join_reply(error, &self.calls.state()));
+        if !self.calls.supported() {
+            return refuse(CallError::Worker(calls::worker::StartError::Unsupported));
+        }
+        let (lease, client) = self.call_lease()?;
+        let generation = lease.generation();
+        let proxy = lease
+            .stores()
+            .block_on(calls::controller::proxy_configured(lease.stores()));
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        let proxy = match proxy {
+            Ok(proxy) => proxy,
+            Err(error) => return refuse(error),
+        };
+        let consent = match self.calls.confirm_direct(proxy) {
+            Ok(consent) => consent,
+            Err(error) => return refuse(error),
+        };
+        let (lease, client) = self.call_lease()?;
+        if lease.generation() != generation {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+            return Err(ErrorCode::Locked);
+        }
+        let scope = JoinScope {
+            generation,
+            runtime: lease.stores().runtime().handle().clone(),
+        };
+        let joined = lease
+            .stores()
+            .block_on(self.calls.join(scope, &client, room_id, consent));
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        match joined {
+            Ok(()) => Ok(calls::status::status(&self.calls.state())),
+            Err(error) => refuse(error),
+        }
+    }
+
+    /// Leaves the call, or cancels a join in progress. No call is not an
+    /// error: the reply is the call state.
+    fn finish_call_leave(&self) -> Result<persephone_contracts::CallStatus, ErrorCode> {
+        let lease = self.session.admit().map_err(|error| match error {
+            session::AdmissionError::Locked => ErrorCode::Locked,
+            session::AdmissionError::Saturated => ErrorCode::LimitExceeded,
+        })?;
+        let _ = lease.stores().block_on(self.calls.leave());
+        drop(lease);
+        Ok(calls::status::status(&self.calls.state()))
     }
 
     /// Admits a `load_image`: checks the arguments and the session now; the
@@ -2556,6 +2790,7 @@ impl Core {
             && !notifications.session_changed
             && !notifications.room_list_changed
             && !notifications.security_changed
+            && !notifications.calls_changed
             && notifications.toast.is_none()
             && !notifications.closed
         {
@@ -2574,6 +2809,8 @@ impl Core {
             .then_some(Event::RoomListChanged {});
         let security = std::mem::take(&mut notifications.security_changed)
             .then_some(Event::SecurityChanged {});
+        let call =
+            std::mem::take(&mut notifications.calls_changed).then_some(Event::CallChanged {});
         let toast = notifications
             .toast
             .take()
@@ -2584,6 +2821,7 @@ impl Core {
                 .into_iter()
                 .chain(list)
                 .chain(security)
+                .chain(call)
                 .chain(toast)
                 .chain(
                     rooms
@@ -2856,6 +3094,18 @@ mod tests {
                 Outcome::Error(ErrorCode::InvalidArgument)
             ));
         }
+    }
+
+    /// GIVEN many call changes before the UI reads WHEN the events are taken
+    /// THEN one coalesced call event carries them, and none stays pending.
+    #[test]
+    fn given_many_call_changes_then_one_call_event_is_taken() {
+        let core = Core::default();
+        for _ in 0..5 {
+            core.hub.calls_changed();
+        }
+        assert_eq!(core.take_events(), Some(vec![Event::CallChanged {}]));
+        assert!(!lock(&core.hub.notifications).calls_changed);
     }
 
     /// GIVEN each setting, profile state and idle time WHEN checked THEN the

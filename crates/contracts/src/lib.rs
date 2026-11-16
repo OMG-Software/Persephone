@@ -1919,6 +1919,126 @@ impl SecurityStatus {
     }
 }
 
+/// Why a call cannot start in a room (ADR-0043).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallUnavailable {
+    /// This computer has no reviewed call containment.
+    UnsupportedPlatform,
+    /// The room is unknown or not joined.
+    NotJoined,
+    /// A call never runs without end-to-end encryption.
+    NotEncrypted,
+    /// The homeserver offers no call server.
+    NoCallServer,
+    /// The homeserver could not be asked.
+    ServerUnreachable,
+}
+
+/// Reply of `call_readiness`. Codes and a count only.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallReadiness {
+    pub available: bool,
+    /// Why not, when `available` is false.
+    pub reason: Option<CallUnavailable>,
+    /// Other devices in this room's call, at most [`CALL_PARTICIPANTS_MAX`].
+    /// Reported also when the call is unavailable.
+    pub active_members: u8,
+}
+
+/// Most other devices a call shows.
+pub const CALL_PARTICIPANTS_MAX: usize = 32;
+
+/// Where the call is.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallPhase {
+    Idle,
+    Joining,
+    Active,
+    Ended,
+}
+
+/// Another device in the call. The IDs are validated Matrix IDs (untrusted,
+/// shown as text).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallParticipant {
+    pub user_id: String,
+    pub device_id: String,
+    pub speaking: bool,
+    /// It publishes to the call server this call uses. Others cannot be
+    /// heard in this version.
+    pub reachable: bool,
+    /// This device holds a key for it. Without one it cannot be heard.
+    pub keyed: bool,
+}
+
+/// Why a call ended.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallEnd {
+    Left,
+    ConnectionFailed,
+    AudioDevice,
+    Containment,
+    WorkerStopped,
+    MembershipLost,
+    KeysUnavailable,
+    SessionEnded,
+    Internal,
+}
+
+/// Why a join was refused or failed.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallJoinError {
+    AlreadyInCall,
+    NotJoined,
+    NotEncrypted,
+    NoCallServer,
+    /// The profile has a proxy and the user did not allow a direct call.
+    Declined,
+    UnsupportedPlatform,
+    Containment,
+    NoWorker,
+    NoDelayedEvents,
+    Membership,
+    CallServer,
+    Keys,
+    ProxyUnreadable,
+}
+
+/// Reply of every call command except `call_readiness`. Codes, bounded IDs
+/// and flags only: never a key, token, URL or peer text.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallStatus {
+    pub phase: CallPhase,
+    pub room_id: Option<String>,
+    pub muted: bool,
+    /// At most [`CALL_PARTICIPANTS_MAX`], other devices only.
+    pub participants: Vec<CallParticipant>,
+    /// Set while `phase` is `ended`.
+    pub ended: Option<CallEnd>,
+    /// Set when this reply refuses a join.
+    pub join_error: Option<CallJoinError>,
+}
+
+impl CallStatus {
+    pub fn idle() -> Self {
+        Self {
+            phase: CallPhase::Idle,
+            room_id: None,
+            muted: false,
+            participants: Vec::new(),
+            ended: None,
+            join_error: None,
+        }
+    }
+}
+
 pub fn sample_room_summary() -> RoomSummary {
     RoomSummary {
         room_id: "!example:server.invalid".into(),
@@ -2048,6 +2168,13 @@ pub fn generated_typescript() -> String {
         format!("export {}", SasEmoji::decl(&config)),
         format!("export {}", VerificationView::decl(&config)),
         format!("export {}", SecurityStatus::decl(&config)),
+        format!("export {}", CallUnavailable::decl(&config)),
+        format!("export {}", CallReadiness::decl(&config)),
+        format!("export {}", CallPhase::decl(&config)),
+        format!("export {}", CallParticipant::decl(&config)),
+        format!("export {}", CallEnd::decl(&config)),
+        format!("export {}", CallJoinError::decl(&config)),
+        format!("export {}", CallStatus::decl(&config)),
         format!("export {}", ContactTrust::decl(&config)),
         format!("export {}", ContactStatus::decl(&config)),
         format!("export {}", IdentityChange::decl(&config)),
@@ -2201,6 +2328,8 @@ mod personal_contract_tests {
         fixture::<PinnedMessages>(include_str!("../fixtures/pinned-messages.json"));
         fixture::<AttachmentPage>(include_str!("../fixtures/attachment-page.json"));
         fixture::<ConnectionHealth>(include_str!("../fixtures/connection-health.json"));
+        fixture::<CallReadiness>(include_str!("../fixtures/call-readiness.json"));
+        fixture::<CallStatus>(include_str!("../fixtures/call-status.json"));
         fixture::<LocalSearchFilters>(include_str!("../fixtures/local-search-filters.json"));
         let mut focused: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/focused-timeline.json")).unwrap();
@@ -2208,6 +2337,37 @@ mod personal_contract_tests {
         assert!(serde_json::from_value::<FocusedTimeline>(focused).is_err());
         assert!(serde_json::from_str::<AttachmentKind>("\"videos\"").is_err());
         assert!(serde_json::from_str::<SyncMode>("\"polling\"").is_err());
+    }
+
+    /// GIVEN the call DTOs WHEN given an unknown field, code or a wrong
+    /// type THEN they are refused; the idle status is the documented shape.
+    #[test]
+    fn call_contracts_refuse_unknown_fields_and_codes() {
+        assert_eq!(
+            serde_json::to_string(&CallStatus::idle()).unwrap(),
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null}"#
+        );
+        for wire in [
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"token":"x"}"#,
+            r#"{"phase":"paused","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null}"#,
+            r#"{"phase":"ended","roomId":null,"muted":false,"participants":[],"ended":"crashed","joinError":null}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":"busy"}"#,
+            r#"{"phase":"idle","roomId":null,"muted":"no","participants":[],"ended":null,"joinError":null}"#,
+            r#"{"phase":"active","roomId":null,"muted":false,"participants":[{"userId":"@a:s","deviceId":"D","speaking":false,"reachable":true,"keyed":true,"url":"x"}],"ended":null,"joinError":null}"#,
+        ] {
+            assert!(serde_json::from_str::<CallStatus>(wire).is_err(), "{wire}");
+        }
+        for wire in [
+            r#"{"available":true,"reason":null,"activeMembers":256}"#,
+            r#"{"available":true,"reason":null,"activeMembers":-1}"#,
+            r#"{"available":false,"reason":"no_microphone","activeMembers":0}"#,
+            r#"{"available":true,"reason":null,"activeMembers":0,"sfu":"wss://x"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<CallReadiness>(wire).is_err(),
+                "{wire}"
+            );
+        }
     }
 
     /// Reject missing, duplicate, or invalid nullable fields and unsafe timestamps.

@@ -54,6 +54,16 @@ impl std::fmt::Debug for DelayedLeave {
     }
 }
 
+#[cfg(test)]
+impl DelayedLeave {
+    /// A leave that was never scheduled, for tests of the call controller.
+    pub(super) fn for_test() -> Self {
+        Self {
+            delay_id: "test".to_owned(),
+        }
+    }
+}
+
 impl DelayedLeave {
     /// Schedules the leave of `state_key` in `room_id`.
     pub async fn schedule(

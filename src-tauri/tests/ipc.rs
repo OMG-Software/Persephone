@@ -1,7 +1,7 @@
 //! IPC permission tests against the shell's real configuration and compiled
 //! capabilities, using Tauri's mock runtime (no window or web view).
 
-use persephone_core_protocol::{Call, ErrorCode, Event};
+use persephone_core_protocol::{Call, ErrorCode, Event, MAX_ROOM_ID_BYTES};
 use persephone_desktop::{
     BAND_PREFIX_BYTES, MAIN_WINDOW, Subscriptions, configure, context,
     core_link::{Band, CoreError, CoreLink, CoreTransport},
@@ -103,6 +103,33 @@ impl CoreTransport for FakeCore {
             Call::SignOut {} => Ok(serde_json::json!("restart_required")),
             Call::SecurityStatus {} => Ok(
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false}),
+            ),
+            Call::CallStatus {} | Call::CallLeave {} => Ok(call_idle()),
+            Call::CallReadiness { room_id } => match room_id.as_str() {
+                "!r:example.invalid" => {
+                    Ok(serde_json::json!({"available": true, "reason": null, "activeMembers": 1}))
+                }
+                // A reason outside the contract must not reach the page.
+                "!odd:example.invalid" => Ok(
+                    serde_json::json!({"available": false, "reason": "no_microphone", "activeMembers": 0}),
+                ),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
+            Call::CallJoin { room_id } => match room_id.as_str() {
+                "!r:example.invalid" => Ok(
+                    serde_json::json!({"phase": "joining", "roomId": room_id, "muted": false, "participants": [], "ended": null, "joinError": null}),
+                ),
+                // A refused join is a status with a code, not an error.
+                "!plain:example.invalid" => Ok(
+                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": "not_encrypted"}),
+                ),
+                // A reply with a field the contract does not have.
+                _ => Ok(
+                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "sfuUrl": "wss://x"}),
+                ),
+            },
+            Call::CallMute { muted } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": muted, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true}], "ended": null, "joinError": null}),
             ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
                 "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false,
@@ -577,6 +604,11 @@ impl CoreTransport for FakeCore {
 }
 
 /// A well-formed image handle the fake core knows.
+/// The call status when no call exists.
+fn call_idle() -> serde_json::Value {
+    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null})
+}
+
 const HANDLE: &str = "0123456789abcdef0123456789abcdef";
 
 fn app_with(core: CoreLink) -> tauri::App<MockRuntime> {
@@ -803,6 +835,11 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-register",
             "allow-sign-out",
             "allow-security-status",
+            "allow-call-readiness",
+            "allow-call-join",
+            "allow-call-leave",
+            "allow-call-mute",
+            "allow-call-status",
             "allow-set-up-encryption",
             "allow-recover-with-key",
             "allow-send-message",
@@ -1082,9 +1119,14 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     });
     subscriptions.dispatch(Event::RoomListChanged {});
     subscriptions.dispatch(Event::SecurityChanged {});
+    subscriptions.dispatch(Event::CallChanged {});
     let delivered = delivered.lock().unwrap().clone();
     assert!(
         delivered.contains(&(3, r#""security""#.into())),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&(3, r#""calls""#.into())),
         "{delivered:?}"
     );
     assert!(
@@ -1215,6 +1257,65 @@ fn given_encryption_commands_then_only_codes_cross_and_secrets_are_refused() {
     );
     assert_eq!(invoke("recover_with_key").unwrap_err(), "core_unavailable");
     assert_eq!(invoke("set_up_recovery").unwrap()["operation"], "working");
+}
+
+/// The call commands relay the room and flag only. An oversized room ID never
+/// reaches the core; a refused join is a status with a code; a reply with a
+/// field or a code outside the contract is refused.
+#[test]
+fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let invoke = |cmd: &str, args: serde_json::Value| {
+        get_ipc_response(&window, request(cmd, app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let room = |id: &str| serde_json::json!({"roomId": id});
+
+    assert_eq!(
+        invoke("call_readiness", room("!r:example.invalid")).unwrap(),
+        serde_json::json!({"available": true, "reason": null, "activeMembers": 1})
+    );
+    assert!(invoke("call_readiness", room("!odd:example.invalid")).is_err());
+    assert_eq!(
+        invoke("call_readiness", room("!nope:example.invalid")).unwrap_err(),
+        "not_found"
+    );
+    assert_eq!(
+        invoke("call_join", room("!r:example.invalid")).unwrap()["phase"],
+        "joining"
+    );
+    assert_eq!(
+        invoke("call_join", room("!plain:example.invalid")).unwrap()["joinError"],
+        "not_encrypted"
+    );
+    assert!(invoke("call_join", room("!leaky:example.invalid")).is_err());
+    assert_eq!(
+        invoke("call_leave", serde_json::json!({})).unwrap()["phase"],
+        "idle"
+    );
+    assert_eq!(
+        invoke("call_status", serde_json::json!({})).unwrap()["phase"],
+        "idle"
+    );
+    let muted = invoke("call_mute", serde_json::json!({"muted": true})).unwrap();
+    assert_eq!(muted["muted"], true);
+    assert_eq!(muted["participants"][0]["userId"], "@bob:example.invalid");
+
+    let before = core.calls.load(Ordering::SeqCst);
+    let long = "!".to_owned() + &"r".repeat(MAX_ROOM_ID_BYTES);
+    for cmd in ["call_readiness", "call_join"] {
+        assert_eq!(
+            invoke(cmd, room(&long)).unwrap_err(),
+            "invalid_argument",
+            "{cmd}"
+        );
+    }
+    // Arguments of the wrong type or extra arguments do not reach the core.
+    assert!(invoke("call_mute", serde_json::json!({"muted": "yes"})).is_err());
+    assert!(invoke("call_mute", serde_json::json!({})).is_err());
+    assert_eq!(core.calls.load(Ordering::SeqCst), before);
 }
 
 /// Sending relays the room and body only; oversized input never reaches the

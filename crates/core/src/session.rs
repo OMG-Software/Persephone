@@ -352,6 +352,14 @@ impl Shared {
         })
     }
 
+    fn with_client(self: &Arc<Self>) -> Result<Option<(Lease, Client)>, AdmissionError> {
+        let lease = self.admit()?;
+        let client = guard(&self.account)
+            .as_ref()
+            .map(|account| account.client.clone());
+        Ok(client.map(|client| (lease, client)))
+    }
+
     fn listener(&self) -> Option<Arc<dyn SessionListener>> {
         guard(&self.listener).clone()
     }
@@ -418,6 +426,10 @@ pub struct Session {
     /// Serializes lock and unlock; admission does not take it.
     transition: Mutex<()>,
 }
+
+/// Takes a lease and the client for one complete operation, or `None` once
+/// the session stops admitting work (lock, sign-out, saturation, no account).
+pub type Admission = Arc<dyn Fn() -> Option<(Lease, Client)> + Send + Sync>;
 
 /// Admitted work. While a lease exists the stores stay open; its results are
 /// published only through [`Lease::commit`], which refuses once the session
@@ -1487,11 +1499,16 @@ impl Session {
 
     /// A lease together with the signed-in client, for reading views.
     pub fn with_client(&self) -> Result<Option<(Lease, Client)>, AdmissionError> {
-        let lease = self.admit()?;
-        let client = guard(&self.shared.account)
-            .as_ref()
-            .map(|account| account.client.clone());
-        Ok(client.map(|client| (lease, client)))
+        self.shared.with_client()
+    }
+
+    /// Admission for background work that outlives one request, such as a
+    /// call: each use takes a lease and a client for one complete operation,
+    /// and is `None` once the session stops admitting work. The function
+    /// holds the session's shared state, never a client.
+    pub fn admission(&self) -> Admission {
+        let shared = self.shared.clone();
+        Arc::new(move || shared.with_client().ok().flatten())
     }
 
     /// Restores a saved account without a prompt and starts syncing. Does

@@ -24,6 +24,8 @@
 //!   core stops restarting it.
 //! * [`incoming`]: the bounded to-device handler for other members' keys and
 //!   the one decision that accepts or drops each.
+//! * [`status`]: the page's view of a call: readiness, state, and the codes for
+//!   an end or a refused join. Codes, flags and bounded IDs only.
 //! * [`controller`]: the one running call. It starts the worker first, writes
 //!   the membership, gets the SFU grant, rotates and sends keys, and shows the
 //!   page a content-free state.
@@ -39,6 +41,7 @@ pub mod keys;
 pub mod membership;
 pub mod readiness;
 pub mod sfu;
+pub mod status;
 pub mod worker;
 
 /// Most call members kept: examined events become at most this many members,

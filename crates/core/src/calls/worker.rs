@@ -79,7 +79,7 @@ pub struct CallWorkerLink {
     /// Messages from the worker. `None` after the worker exited or its
     /// channel failed.
     pub events: mpsc::Receiver<FromWorker>,
-    process: Box<dyn WorkerProcess>,
+    process: Arc<dyn WorkerProcess>,
 }
 
 impl CallWorkerLink {
@@ -93,8 +93,14 @@ impl CallWorkerLink {
         Self {
             commands,
             events,
-            process,
+            process: Arc::from(process),
         }
+    }
+
+    /// A handle that ends the worker from outside the task that owns the
+    /// link, for example when the session locks.
+    pub fn kill_handle(&self) -> Arc<dyn WorkerProcess> {
+        Arc::clone(&self.process)
     }
 
     /// Queues `message` for the worker without blocking.
@@ -131,6 +137,12 @@ pub trait CallHost: Send + Sync {
     /// TURN server will see this computer's IP address (ADR-0028 addition).
     /// Blocks until answered; `true` only for an explicit yes.
     fn confirm_direct_connection(&self) -> bool;
+
+    /// Whether this platform has reviewed call containment. `false` means
+    /// [`CallHost::start`] always refuses.
+    fn supported(&self) -> bool {
+        true
+    }
 }
 
 /// The platform's call host; [`Unsupported`] where call containment is not
@@ -149,6 +161,10 @@ impl CallHost for Unsupported {
     }
 
     fn confirm_direct_connection(&self) -> bool {
+        false
+    }
+
+    fn supported(&self) -> bool {
         false
     }
 }

@@ -11,9 +11,9 @@
 use super::encryption_keys::{self, IncomingKey};
 use super::keys::{InsertRefusal, RemoteKeys};
 use matrix_sdk::{
-    Client, Room,
+    Client,
     event_handler::EventHandlerHandle,
-    ruma::{OwnedDeviceId, OwnedUserId, RoomId, events::AnyToDeviceEvent, serde::Raw},
+    ruma::{OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, events::AnyToDeviceEvent, serde::Raw},
 };
 use matrix_sdk_base::deserialized_responses::{AlgorithmInfo, EncryptionInfo};
 use serde_json::Value;
@@ -151,15 +151,19 @@ struct Loose {
     content: Value,
 }
 
-/// Registers the handler for call keys in `room`. Remove the returned handle
-/// when the call ends. The handler only summarises: it forwards with a
-/// reserved queue slot and drops the event when the queue is full.
-pub fn register(client: &Client, room: Room, queue: mpsc::Sender<Candidate>) -> EventHandlerHandle {
-    let own = client.clone();
+/// Registers the handler for call keys in the room `room_id`. Remove the
+/// returned handle when the call ends. The handler only summarises: it
+/// forwards with a reserved queue slot and drops the event when the queue is
+/// full. It holds no client: the SDK gives it the client for each event, so
+/// the registration does not keep the client alive after a lock.
+pub fn register(
+    client: &Client,
+    room_id: OwnedRoomId,
+    queue: mpsc::Sender<Candidate>,
+) -> EventHandlerHandle {
     client.add_event_handler(
-        move |raw: Raw<AnyToDeviceEvent>, info: Option<EncryptionInfo>| {
-            let own = own.clone();
-            let room = room.clone();
+        move |raw: Raw<AnyToDeviceEvent>, info: Option<EncryptionInfo>, own: Client| {
+            let room_id = room_id.clone();
             let queue = queue.clone();
             async move {
                 if raw.json().get().len() > MAX_EVENT_BYTES {
@@ -201,9 +205,12 @@ pub fn register(client: &Client, room: Room, queue: mpsc::Sender<Candidate>) -> 
                     }
                     None => None,
                 };
-                let identity_changed = crate::identities::changed_members(&room)
-                    .await
-                    .map(|changed| changed.iter().any(|c| c.user_id == event.sender));
+                let identity_changed = match own.get_room(&room_id) {
+                    Some(room) => crate::identities::changed_members(&room)
+                        .await
+                        .map(|changed| changed.iter().any(|c| c.user_id == event.sender)),
+                    None => None,
+                };
                 permit.send(Candidate {
                     sender: event.sender,
                     content: event.content,

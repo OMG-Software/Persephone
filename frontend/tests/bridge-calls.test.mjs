@@ -180,6 +180,12 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     ],
     [() => bridge.verifyDevice('OTHER'), 'verify_device', { deviceId: 'OTHER' }],
     [() => bridge.verifyMember('!r:s', '@b:s'), 'verify_member', { roomId: '!r:s', userId: '@b:s' }],
+    [() => bridge.callReadiness('!r:s'), 'call_readiness', { roomId: '!r:s' }],
+    [() => bridge.callJoin('!r:s'), 'call_join', { roomId: '!r:s' }],
+    [() => bridge.callLeave(), 'call_leave', {}],
+    [() => bridge.callMute(true), 'call_mute', { muted: true }],
+    [() => bridge.callMute(false), 'call_mute', { muted: false }],
+    [() => bridge.callStatus(), 'call_status', {}],
     [() => bridge.changeRecoveryKey(), 'change_recovery_key', {}],
     [() => bridge.startNewBackup(), 'start_new_backup', {}],
     [() => bridge.notificationLevel(), 'notification_level', {}],
@@ -318,4 +324,24 @@ test('GIVEN a paste that is not one PNG or JPEG of 1 byte to 20 MiB WHEN attache
     await assert.rejects(bridge.pasteImage('!r:s', blob), (reason) => reason === 'rejected', `${blob.type} ${blob.size}`);
   }
   assert.deepEqual(sent, []);
+});
+
+test('GIVEN session channel messages WHEN delivered THEN each reaches its own callback and an unknown message counts as a session change', async () => {
+  let channel;
+  mockIPC((command, args) => {
+    assert.equal(command, 'watch_session');
+    channel = args.onChange;
+    return null;
+  });
+  const seen = [];
+  await bridge.watchSession(
+    () => seen.push('session'),
+    () => seen.push('rooms'),
+    () => seen.push('security'),
+    () => seen.push('calls')
+  );
+  for (const message of ['calls', 'rooms', 'security', 'session', 'something-new', 'calls']) {
+    channel.onmessage(message);
+  }
+  assert.deepEqual(seen, ['calls', 'rooms', 'security', 'session', 'session', 'calls']);
 });
