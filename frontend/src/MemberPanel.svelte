@@ -29,7 +29,8 @@
     asking = null,
     onverify,
     oncancelask,
-    onmessage
+    onmessage,
+    oncollapse
   }: {
     roomId: string;
     // Changes when the room or trust may have changed: the list loads again.
@@ -49,6 +50,8 @@
     oncancelask: () => void;
     // Starts or opens a direct conversation; resolves with why it failed.
     onmessage: (userId: string) => Promise<string | null>;
+    // Collapses the panel; shown as a button in its heading.
+    oncollapse?: () => void;
   } = $props();
 
   let readers = $state<RoomReader[] | null>(null);
@@ -193,4 +196,5 @@
     oncancelask();
   }}
   onretry={retry}
+  {oncollapse}
 />

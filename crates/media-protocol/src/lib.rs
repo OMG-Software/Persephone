@@ -338,6 +338,12 @@ impl ReceivedFrame {
     pub fn body(&self) -> &[u8] {
         &self.body
     }
+
+    /// The body and the budget reservation that covers it, so the receiver
+    /// can keep the bytes without copying them.
+    pub fn into_parts(self) -> (Vec<u8>, BudgetPermit) {
+        (self.body, self._permit)
+    }
 }
 
 /// Read only the fixed header first. Rejects lengths/dimensions before body allocation or read.

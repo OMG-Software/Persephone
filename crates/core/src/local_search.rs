@@ -679,7 +679,7 @@ mod tests {
     async fn given_encrypted_sqlite_cache_then_search_traverses_bounded_history_without_http() {
         use matrix_sdk::linked_chunk::{ChunkIdentifier, Position, Update};
         use matrix_sdk_sqlite::SqliteEventCacheStore;
-        let server = wiremock::MockServer::start().await;
+        let server = wiremock::MockServer::builder().start().await;
         let client =
             crate::abuse::test_client(&server.uri(), &[("!room:example.org", RoomState::Joined)])
                 .await;

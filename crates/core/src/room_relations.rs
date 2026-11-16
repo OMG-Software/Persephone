@@ -164,7 +164,7 @@ mod tests {
     #[tokio::test]
     /// Accept a complete bounded page without decrypting its raw entries.
     async fn given_bounded_complete_relations_then_raw_events_are_returned() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 serde_json::json!({"chunk":[{"type":"m.room.message","event_id":"$edit"}]}),
@@ -191,7 +191,7 @@ mod tests {
             // must happen while the page is still raw, without any room/SDK.
             (ResponseTemplate::new(200).set_body_json(serde_json::json!({"chunk":vec![serde_json::json!({"type":"m.room.encrypted"}); MAX_RELATIONS+1]})), ErrorCode::LimitExceeded),
         ] {
-            let server = MockServer::start().await;
+            let server = MockServer::builder().start().await;
             Mock::given(method("GET")).respond_with(template).mount(&server).await;
             let response = reqwest::Client::new().get(server.uri()).send().await.unwrap();
             assert!(matches!(read_page(response).await, Err(error) if error == expected));
@@ -329,7 +329,7 @@ mod tests {
     #[tokio::test]
     /// Require SDK refresh and the new bearer token on the single relation retry.
     async fn given_expired_token_then_sdk_refreshes_once_and_new_token_retries_relations() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let client = refresh_client(&server).await;
         authorized_response(&server, "expired-token", unknown_token(), 1).await;
         refresh_endpoint(&server, 1).await;
@@ -353,7 +353,7 @@ mod tests {
     #[tokio::test]
     /// Refuse a second token error without another refresh or relation retry.
     async fn given_repeated_unknown_token_then_only_one_refresh_and_two_requests_occur() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let client = refresh_client(&server).await;
         authorized_response(&server, "expired-token", unknown_token(), 1).await;
         refresh_endpoint(&server, 1).await;
@@ -367,7 +367,7 @@ mod tests {
     #[tokio::test]
     /// Enforce the initial error-body cap before requesting an SDK token refresh.
     async fn given_oversized_401_then_no_refresh_or_retry_occurs() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let client = refresh_client(&server).await;
         authorized_response(
             &server,
@@ -386,7 +386,7 @@ mod tests {
     #[tokio::test]
     /// Apply the same response byte limit after token refresh.
     async fn given_oversized_retry_401_then_retry_body_is_also_bounded() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let client = refresh_client(&server).await;
         authorized_response(&server, "expired-token", unknown_token(), 1).await;
         refresh_endpoint(&server, 1).await;
@@ -407,7 +407,7 @@ mod tests {
     /// Keep refresh limited to the Matrix unknown-token error.
     async fn given_other_auth_error_or_server_error_then_sdk_does_not_refresh() {
         for status in [401, 503] {
-            let server = MockServer::start().await;
+            let server = MockServer::builder().start().await;
             let client = refresh_client(&server).await;
             authorized_response(
                 &server,

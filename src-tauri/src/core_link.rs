@@ -7,6 +7,9 @@
 //! answered by one bounded reply frame; between replies the core may send
 //! content-free change events. One reader thread routes both.
 //!
+//! A `paste_image` call carries one bounded image frame after its request,
+//! written together under the writer lock (ADR-0042).
+//!
 //! An `image_band` call is answered by a pixel reply and one bounded pixel
 //! frame instead (or by an ordinary error reply). The reader checks that the
 //! band goes to a caller that asked for exactly that band; anything else
@@ -14,7 +17,7 @@
 
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, FromCore, Outcome, PixelBand, Request, receive_from_core,
-    send,
+    send, send_pasted_image,
 };
 use persephone_media_protocol::ResourceBudgets;
 use std::{
@@ -46,6 +49,9 @@ pub trait CoreTransport: Send + Sync {
 
     /// One band of rows of a loaded or picked image.
     fn image_band(&self, handle: String, band: u32) -> Result<Band, CoreError>;
+
+    /// A pasted image for `room_id`: its request and its image frame.
+    fn paste_image(&self, room_id: String, bytes: Vec<u8>) -> Result<serde_json::Value, CoreError>;
 }
 
 /// A band of RGBA rows the core sent: `rows` rows of `width` pixels. The
@@ -193,8 +199,14 @@ impl PipeTransport {
 }
 
 impl PipeTransport {
-    /// Sends one request and waits for the answer its caller expects.
-    fn exchange(&self, call: Call, expect: Expect) -> Result<Answer, CoreError> {
+    /// Sends one request, with the image frame of a paste, and waits for the
+    /// answer its caller expects.
+    fn exchange(
+        &self,
+        call: Call,
+        image: Option<&[u8]>,
+        expect: Expect,
+    ) -> Result<Answer, CoreError> {
         let (answer_to, answer) = sync_channel(1);
         {
             let mut writer = lock(&self.writer);
@@ -209,7 +221,12 @@ impl PipeTransport {
             }
             // A failed write leaves the stream position unknown, so the
             // channel is not reused.
-            if send(&mut writer.to_core, &Request { id, call }).is_err() {
+            let request = Request { id, call };
+            let written = match image {
+                Some(bytes) => send_pasted_image(&mut writer.to_core, &request, bytes),
+                None => send(&mut writer.to_core, &request),
+            };
+            if written.is_err() {
                 lock(&self.waiting).break_channel();
                 return Err(CoreError::Unavailable);
             }
@@ -226,10 +243,11 @@ impl CoreTransport for PipeTransport {
     fn call(&self, call: Call) -> Result<serde_json::Value, CoreError> {
         // Its answer is a pixel band, which only `image_band` accepts; sent
         // here, it would break the channel.
-        if matches!(call, Call::ImageBand { .. }) {
+        // A paste needs its image frame: only `paste_image` sends one.
+        if matches!(call, Call::ImageBand { .. } | Call::PasteImage { .. }) {
             return Err(CoreError::BadReply);
         }
-        match self.exchange(call, Expect::Reply)? {
+        match self.exchange(call, None, Expect::Reply)? {
             Answer::Outcome(Outcome::Ok(value)) => Ok(value),
             // `route` delivers nothing else to a reply waiter.
             Answer::Outcome(Outcome::Error(code)) => Err(CoreError::Core(code)),
@@ -238,11 +256,23 @@ impl CoreTransport for PipeTransport {
     }
 
     fn image_band(&self, handle: String, band: u32) -> Result<Band, CoreError> {
-        match self.exchange(Call::ImageBand { handle, band }, Expect::Band(band))? {
+        match self.exchange(Call::ImageBand { handle, band }, None, Expect::Band(band))? {
             Answer::Band(_, pixels) => Ok(pixels),
             // `route` delivers only bands and errors to a band waiter.
             Answer::Outcome(Outcome::Error(code)) => Err(CoreError::Core(code)),
             Answer::Outcome(Outcome::Ok(_)) => Err(CoreError::BadReply),
+        }
+    }
+
+    fn paste_image(&self, room_id: String, bytes: Vec<u8>) -> Result<serde_json::Value, CoreError> {
+        // The command checked the length; this keeps it from being cut.
+        let length =
+            u32::try_from(bytes.len()).map_err(|_| CoreError::Core(ErrorCode::InvalidArgument))?;
+        let call = Call::PasteImage { room_id, length };
+        match self.exchange(call, Some(&bytes), Expect::Reply)? {
+            Answer::Outcome(Outcome::Ok(value)) => Ok(value),
+            Answer::Outcome(Outcome::Error(code)) => Err(CoreError::Core(code)),
+            Answer::Band(..) => Err(CoreError::BadReply),
         }
     }
 }
@@ -593,6 +623,47 @@ mod tests {
         );
         assert_eq!(lock(&core.link.writer).next_id, 1, "nothing was written");
         assert!(!lock(&core.link.waiting).broken);
+    }
+
+    /// GIVEN a pasted image WHEN sent through the pipe THEN the core reads
+    /// its request and exactly its bytes as one pair, and the reply reaches
+    /// the caller; sent through `call`, a paste is refused before anything is
+    /// written, since it has no image frame.
+    #[test]
+    fn given_a_pasted_image_then_its_request_and_frame_cross_together() {
+        use persephone_core_protocol::{ToCore, receive_request};
+        let mut core = scripted();
+        assert_eq!(
+            core.link.call(Call::PasteImage {
+                room_id: "!r:s".into(),
+                length: 4
+            }),
+            Err(CoreError::BadReply)
+        );
+        assert_eq!(lock(&core.link.writer).next_id, 1, "nothing was written");
+        let link = core.link.clone();
+        let pasted = std::thread::spawn(move || link.paste_image("!r:s".into(), b"PNG!".to_vec()));
+        let budgets = ResourceBudgets::default();
+        let Ok(ToCore::Paste(request, image)) = receive_request(&mut core.from_ui, &budgets) else {
+            panic!("a paste with its image");
+        };
+        assert_eq!(
+            request.call,
+            Call::PasteImage {
+                room_id: "!r:s".into(),
+                length: 4
+            }
+        );
+        assert_eq!(image.body(), b"PNG!");
+        reply(
+            &mut core.to_ui,
+            request.id,
+            Outcome::Ok(serde_json::json!({"kind": "cancelled"})),
+        );
+        assert_eq!(
+            pasted.join().unwrap(),
+            Ok(serde_json::json!({"kind": "cancelled"}))
+        );
     }
 
     fn reply(to_ui: &mut impl Write, id: u32, outcome: Outcome) {

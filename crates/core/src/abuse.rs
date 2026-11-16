@@ -246,7 +246,7 @@ mod tests {
             Mock, MockServer, ResponseTemplate,
             matchers::{method, path_regex},
         };
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let client = test_client(&server.uri(), &[]).await;
         Mock::given(method("PUT"))
             .and(path_regex(".*/account_data/m.ignored_user_list"))
@@ -292,7 +292,7 @@ mod tests {
             Mock, MockServer, ResponseTemplate,
             matchers::{body_json, method, path_regex},
         };
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let client = test_client(&server.uri(), &[("!room:example.org", RoomState::Joined)]).await;
         Mock::given(method("POST"))
             .and(path_regex(".*/rooms/.*/report/.*"))
@@ -325,7 +325,7 @@ mod tests {
             Mock, MockServer, ResponseTemplate,
             matchers::{method, path, path_regex},
         };
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let client = test_client(&server.uri(), &[]).await;
         Mock::given(path_regex(
             r"^/_matrix/client/v3/user/[^/]+/account_data/m\.ignored_user_list$",

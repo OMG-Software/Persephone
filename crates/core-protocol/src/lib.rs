@@ -13,6 +13,13 @@
 //! frame of at most [`MAX_BAND_BYTES`] ([`send_pixel_reply`]). The UI reads
 //! the core's frames with [`receive_from_core`], which checks the pixel
 //! frame's header against its reply before it allocates the body.
+//!
+//! One call carries bytes the other way: `paste_image` is a control frame
+//! followed at once by exactly one `EncodedImage` frame of the length it
+//! declares, at most [`MAX_PASTED_IMAGE_BYTES`] ([`send_pasted_image`],
+//! ADR-0042). The core reads both with [`receive_request`], which checks the
+//! image frame's header against the request and reserves its budget before
+//! it allocates the body.
 
 pub use persephone_contracts::{AccountSettings, NotificationLevel, RoomChange, ThreePidMedium};
 use persephone_media_protocol::{
@@ -438,6 +445,14 @@ pub enum Call {
     /// draft (a stripped copy and its preview) or `cancelled`.
     PickImage {
         room_id: String,
+    },
+    /// Attach an image the user pasted into this room (ADR-0042). The request
+    /// is followed at once by exactly one `EncodedImage` frame of `length`
+    /// bytes. The core treats the bytes as hostile, like a picked file: the
+    /// guest strips and decodes them. Replies with a draft, like `PickImage`.
+    PasteImage {
+        room_id: String,
+        length: u32,
     },
     /// Queue a picked image (by its draft handle) for this room. Replies with
     /// the queued message, like `SendMessage`.
@@ -1018,6 +1033,96 @@ pub fn send_pixel_reply<W: Write>(
     write_frame(writer, header, pixels)
 }
 
+/// The most bytes of one pasted image, the same limit as a picked file.
+pub const MAX_PASTED_IMAGE_BYTES: u32 = 20 * 1024 * 1024;
+
+/// Writes a `paste_image` request and then its image frame. Everything is
+/// checked before anything is written: the call must be `PasteImage`, and
+/// `bytes` must be exactly its `length`, from 1 to [`MAX_PASTED_IMAGE_BYTES`].
+/// The caller holds its output lock across this call, so no other frame
+/// comes between the two.
+pub fn send_pasted_image<W: Write>(
+    writer: &mut W,
+    request: &Request,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
+    let Call::PasteImage { length, .. } = &request.call else {
+        return Err(invalid("only paste_image carries an image frame"));
+    };
+    if *length == 0
+        || *length > MAX_PASTED_IMAGE_BYTES
+        || u32::try_from(bytes.len()).ok() != Some(*length)
+    {
+        return Err(invalid("pasted image length outside its request or limit"));
+    }
+    let header = FrameHeader {
+        kind: FrameKind::EncodedImage,
+        length: u64::from(*length),
+        width: 0,
+        height: 0,
+    };
+    FrameHeader::decode(header.encode())
+        .map_err(|_| invalid("image frame header fails receiver validation"))?;
+    send(writer, request)?;
+    write_frame(writer, header, bytes)
+}
+
+/// What the core reads from the UI: a request, or a pasted image with its
+/// request.
+pub enum ToCore {
+    Request(Request),
+    /// The image frame, read under its `EncodedInFlight` reservation.
+    Paste(Request, ReceivedFrame),
+    /// A paste whose image did not fit the budget: its bytes were read and
+    /// dropped, so the channel stays in step, and it is answered with
+    /// `limit_exceeded`.
+    PasteRefused(Request),
+}
+
+/// Reads one request (the core side). After a `paste_image` request, the
+/// next frame must be an `EncodedImage` frame of exactly the declared
+/// length, at most [`MAX_PASTED_IMAGE_BYTES`]. That header is checked before
+/// the budget is reserved and the body allocated; anything else breaks the
+/// channel.
+pub fn receive_request<R: Read>(
+    reader: &mut R,
+    budgets: &ResourceBudgets,
+) -> Result<ToCore, ReceiveError> {
+    let request: Request = receive(reader, budgets)?;
+    let Call::PasteImage { length, .. } = &request.call else {
+        return Ok(ToCore::Request(request));
+    };
+    if *length == 0 || *length > MAX_PASTED_IMAGE_BYTES {
+        return Err(ReceiveError::Malformed);
+    }
+    let mut wire = [0; FRAME_HEADER_LEN];
+    reader
+        .read_exact(&mut wire)
+        .map_err(|_| ReceiveError::Closed)?;
+    let header = FrameHeader::decode(wire).map_err(ReceiveError::Frame)?;
+    if header.kind != FrameKind::EncodedImage {
+        return Err(ReceiveError::UnexpectedKind);
+    }
+    if header.length != u64::from(*length) {
+        return Err(ReceiveError::Malformed);
+    }
+    match read_frame(&mut (&wire[..]).chain(&mut *reader), budgets) {
+        Ok(frame) => Ok(ToCore::Paste(request, frame)),
+        // Refused before the body was read or allocated: read past it in
+        // small pieces.
+        Err(FrameError::Budget(_)) => {
+            let skipped = io::copy(&mut reader.by_ref().take(header.length), &mut io::sink())
+                .map_err(|_| ReceiveError::Closed)?;
+            if skipped != header.length {
+                return Err(ReceiveError::Closed);
+            }
+            Ok(ToCore::PasteRefused(request))
+        }
+        Err(error) => Err(frame_error(error)),
+    }
+}
+
 /// Reads one message or pixel band from the core (the UI side). After a
 /// [`PixelReply`], the next frame must be an `RgbaPixels` frame whose width,
 /// height and length match it. That header is checked before the body is
@@ -1471,9 +1576,10 @@ mod tests {
                             leaves: false,
                             ..persephone_contracts::TimelineEvents::default()
                         },
+                        theme: persephone_contracts::Theme::Red,
                     },
                 },
-                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false,"loadRoomPictures":true,"timelineEvents":{"joins":true,"leaves":false,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true}}}}"#,
+                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false,"loadRoomPictures":true,"timelineEvents":{"joins":true,"leaves":false,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"red"}}}"#,
             ),
             (
                 Call::ProfileList {},
@@ -2450,6 +2556,180 @@ mod navigation_wire_tests {
         ] {
             assert!(!search_filters_within_limits(
                 &serde_json::from_value(filters).unwrap()
+            ));
+        }
+    }
+}
+
+/// The pasted image: a request and its image frame (ADR-0042).
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn frame(kind: FrameKind, body: &[u8]) -> Vec<u8> {
+        let mut wire = FrameHeader {
+            kind,
+            length: body.len() as u64,
+            width: 0,
+            height: 0,
+        }
+        .encode()
+        .to_vec();
+        wire.extend_from_slice(body);
+        wire
+    }
+
+    fn paste(length: u32) -> Request {
+        Request {
+            id: 7,
+            call: Call::PasteImage {
+                room_id: "!r:s".into(),
+                length,
+            },
+        }
+    }
+
+    /// GIVEN a pasted image WHEN sent and received THEN the core gets the
+    /// request and exactly those bytes, and nothing more is read.
+    #[test]
+    fn given_a_pasted_image_then_its_request_and_bytes_cross_together() {
+        let bytes = b"\x89PNG not really".to_vec();
+        let mut wire = Vec::new();
+        send_pasted_image(&mut wire, &paste(bytes.len() as u32), &bytes).unwrap();
+        wire.extend_from_slice(&frame(
+            FrameKind::Control,
+            br#"{"id":8,"call":{"command":"app_status"}}"#,
+        ));
+        let mut reader = Cursor::new(wire);
+        let budgets = ResourceBudgets::default();
+        let Ok(ToCore::Paste(request, image)) = receive_request(&mut reader, &budgets) else {
+            panic!("a paste with its image");
+        };
+        assert_eq!(request, paste(bytes.len() as u32));
+        assert_eq!(image.header().kind, FrameKind::EncodedImage);
+        assert_eq!(image.body(), &bytes[..]);
+        assert!(matches!(
+            receive_request(&mut reader, &budgets),
+            Ok(ToCore::Request(Request { id: 8, .. }))
+        ));
+    }
+
+    /// GIVEN a pasted image that does not match its request or the limit WHEN
+    /// sent THEN nothing is written.
+    #[test]
+    fn given_a_paste_outside_its_request_or_limit_then_nothing_is_written() {
+        let too_long = vec![0; MAX_PASTED_IMAGE_BYTES as usize + 1];
+        for (request, bytes) in [
+            (paste(3), &b"ab"[..]),
+            (paste(0), &b""[..]),
+            (paste(MAX_PASTED_IMAGE_BYTES + 1), &too_long[..]),
+            (
+                Request {
+                    id: 1,
+                    call: Call::AppStatus {},
+                },
+                &b"abc"[..],
+            ),
+        ] {
+            let mut wire = Vec::new();
+            assert!(send_pasted_image(&mut wire, &request, bytes).is_err());
+            assert!(wire.is_empty());
+        }
+    }
+
+    /// GIVEN a paste request WHEN the next frame is not an image of exactly
+    /// the declared length, or the declared length is over the limit, THEN
+    /// the channel breaks before any image body is read.
+    #[test]
+    fn given_a_paste_without_its_exact_image_then_the_channel_breaks() {
+        let budgets = ResourceBudgets::default();
+        let request = |length: u32| {
+            frame(
+                FrameKind::Control,
+                &serde_json::to_vec(&paste(length)).unwrap(),
+            )
+        };
+        // Another control frame instead of the image.
+        let mut wire = request(4);
+        wire.extend_from_slice(&frame(FrameKind::Control, b"abcd"));
+        assert!(matches!(
+            receive_request(&mut Cursor::new(wire), &budgets),
+            Err(ReceiveError::UnexpectedKind)
+        ));
+        // An image of another length: its body is never read.
+        let mut wire = request(4);
+        let header_end = wire.len() + FRAME_HEADER_LEN;
+        wire.extend_from_slice(&frame(FrameKind::EncodedImage, b"abcde"));
+        let mut reader = Cursor::new(wire);
+        assert!(matches!(
+            receive_request(&mut reader, &budgets),
+            Err(ReceiveError::Malformed)
+        ));
+        assert_eq!(reader.position(), header_end as u64);
+        // A declared length over the limit: refused before any image header.
+        let mut wire = request(MAX_PASTED_IMAGE_BYTES + 1);
+        let request_end = wire.len();
+        wire.extend_from_slice(&frame(FrameKind::EncodedImage, b"a"));
+        let mut reader = Cursor::new(wire);
+        assert!(matches!(
+            receive_request(&mut reader, &budgets),
+            Err(ReceiveError::Malformed)
+        ));
+        assert_eq!(reader.position(), request_end as u64);
+        // No image at all: the stream ends.
+        assert!(matches!(
+            receive_request(&mut Cursor::new(request(4)), &budgets),
+            Err(ReceiveError::Closed)
+        ));
+    }
+
+    /// GIVEN the encoded budget is full WHEN a paste arrives THEN its bytes
+    /// are read past without being kept, it is refused, and the next request
+    /// still reads.
+    #[test]
+    fn given_a_full_budget_then_a_paste_is_refused_and_the_channel_stays_in_step() {
+        let budgets = ResourceBudgets::default();
+        let mut held = Vec::new();
+        while let Ok(permit) =
+            budgets.try_acquire(persephone_media_protocol::BudgetClass::EncodedInFlight, MIB)
+        {
+            held.push(permit);
+        }
+        let mut wire = Vec::new();
+        send_pasted_image(&mut wire, &paste(4), b"abcd").unwrap();
+        wire.extend_from_slice(&frame(
+            FrameKind::Control,
+            br#"{"id":8,"call":{"command":"app_status"}}"#,
+        ));
+        let mut reader = Cursor::new(wire);
+        assert!(matches!(
+            receive_request(&mut reader, &budgets),
+            Ok(ToCore::PasteRefused(Request { id: 7, .. }))
+        ));
+        assert!(matches!(
+            receive_request(&mut reader, &budgets),
+            Ok(ToCore::Request(Request { id: 8, .. }))
+        ));
+        drop(held);
+    }
+
+    /// GIVEN the paste call WHEN sent THEN it has a strict wire form.
+    #[test]
+    fn given_the_paste_call_then_it_has_a_strict_wire_form() {
+        let budgets = ResourceBudgets::default();
+        let wire = r#"{"id":7,"call":{"command":"paste_image","room_id":"!r:s","length":4}}"#;
+        assert_eq!(serde_json::to_string(&paste(4)).unwrap(), wire);
+        for body in [
+            &br#"{"id":1,"call":{"command":"paste_image","room_id":"!r:s"}}"#[..],
+            br#"{"id":1,"call":{"command":"paste_image","room_id":"!r:s","length":-1}}"#,
+            br#"{"id":1,"call":{"command":"paste_image","room_id":"!r:s","length":4,"mime":"image/png"}}"#,
+            br#"{"id":1,"call":{"command":"paste_image","room_id":null,"length":4}}"#,
+        ] {
+            let mut reader = Cursor::new(frame(FrameKind::Control, body));
+            assert!(matches!(
+                receive::<_, Request>(&mut reader, &budgets),
+                Err(ReceiveError::Malformed)
             ));
         }
     }

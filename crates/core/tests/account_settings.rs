@@ -10,7 +10,7 @@
 
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountState, IdentityState, NotificationLevel,
-    NotificationSettings, RecoveryState, SecurityError, SecurityOperation, SecurityStatus,
+    NotificationSettings, RecoveryState, SecurityError, SecurityOperation, SecurityStatus, Theme,
     ThreePidList, ThreePidMedium,
 };
 use persephone_core::{
@@ -211,7 +211,10 @@ impl Homeserver {
     fn start(push_rules: Option<Value>) -> Self {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let server = runtime.block_on(async {
-            let server = MockServer::start().await;
+            // Its own listener, closed when the test ends. `MockServer::start`
+            // lends a pooled server, and its address, to the next test, so a
+            // core a test leaves running would sync against that test's mocks.
+            let server = MockServer::builder().start().await;
             Mock::given(method("GET"))
                 .and(path("/_matrix/client/versions"))
                 .respond_with(
@@ -867,6 +870,29 @@ fn given_push_rules_then_the_level_reads_and_sets_them() {
     let _: NotificationSettings = value(call(&core, Call::NotificationLevel {}));
 }
 
+/// GIVEN a signed-in account with the default theme WHEN the page saves
+/// another theme THEN the core reads it back from the encrypted profile, and
+/// a theme saved later replaces it.
+#[test]
+fn given_a_saved_theme_then_the_profile_reads_it_back() {
+    let server = Homeserver::start(None);
+    let dir = TempDir::new().unwrap();
+    let core = signed_in(&server, dir.path(), Answers::new());
+    let read = |core: &Core| value::<AccountSettings>(call(core, Call::AccountSettings {}));
+    assert_eq!(read(&core).theme, Theme::Orange);
+    for theme in [Theme::Red, Theme::Blue] {
+        let settings = AccountSettings {
+            theme,
+            ..AccountSettings::default()
+        };
+        assert_eq!(
+            call(&core, Call::SetAccountSettings { settings }),
+            Outcome::Ok(Value::Null)
+        );
+        assert_eq!(read(&core), settings);
+    }
+}
+
 /// GIVEN messages from another member that the push rules notify of WHEN
 /// desktop notifications are off THEN nothing waits to be shown; WHEN they
 /// are turned on THEN a notification waits with the room's and sender's
@@ -1065,7 +1091,7 @@ impl wiremock::Respond for KeyServer {
 fn given_recovery_then_the_key_changes_only_after_a_yes_and_is_saved_by_the_core() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let server = runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(any())
             .respond_with(KeyServer::default())
             .mount(&server)
@@ -1163,7 +1189,7 @@ fn given_an_unusable_backup_then_a_new_one_starts_only_after_a_yes() {
         "version": "7", "count": 12, "etag": "3"
     }));
     let server = runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(any())
             .respond_with(keys.clone())
             .mount(&server)

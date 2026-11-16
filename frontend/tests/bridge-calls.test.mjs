@@ -132,7 +132,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           idleLockMinutes: 15,
           notificationNames: false,
           loadRoomPictures: true,
-          timelineEvents: { ...ALL_SHOWN, leaves: false }
+          timelineEvents: { ...ALL_SHOWN, leaves: false },
+          theme: 'red'
         }),
       'set_account_settings',
       {
@@ -146,7 +147,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           idleLockMinutes: 15,
           notificationNames: false,
           loadRoomPictures: true,
-          timelineEvents: { ...ALL_SHOWN, leaves: false }
+          timelineEvents: { ...ALL_SHOWN, leaves: false },
+          theme: 'red'
         }
       }
     ],
@@ -216,7 +218,8 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       notificationNames: true,
       loadRoomPictures: false,
       timelineEvents: { ...ALL_SHOWN, polls: false },
-      theme: 'dark'
+      theme: 'blue',
+      accent: 'green'
     })
   );
   assert.deepEqual(made.args, {
@@ -230,7 +233,8 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       idleLockMinutes: 0,
       notificationNames: true,
       loadRoomPictures: false,
-      timelineEvents: ALL_SHOWN
+      timelineEvents: ALL_SHOWN,
+      theme: 'blue'
     }
   });
 });
@@ -268,4 +272,50 @@ test('GIVEN a core rejection WHEN navigating or changing pins THEN preserve the 
     mockIPC(() => Promise.reject('rejected'));
     await assert.rejects(call, (error) => error === 'rejected');
   }
+});
+
+test('GIVEN a pasted image WHEN attached THEN its bytes go as the raw body with the room in a header, to a registered host command', async () => {
+  const calls = [];
+  mockIPC(() => null);
+  window.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+    calls.push({ command, args, options });
+    return { kind: 'cancelled' };
+  };
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+  const reply = await bridge.pasteImage('!r:s', new Blob([bytes], { type: 'image/png' }));
+  assert.deepEqual(reply, { kind: 'cancelled' });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'paste_image');
+  assert.ok(registered.has('paste_image'), 'paste_image is registered in build.rs');
+  assert.ok(calls[0].args instanceof Uint8Array, 'a raw body, not JSON');
+  assert.deepEqual([...calls[0].args], [...bytes]);
+  assert.deepEqual(calls[0].options, { headers: { 'persephone-room-id': '!r:s' } });
+  const host = await readFile(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  assert.match(host, /pub const PASTE_ROOM_HEADER: &str = "persephone-room-id";/, 'the header the host reads');
+});
+
+test('GIVEN a paste that is not one PNG or JPEG of 1 byte to 20 MiB WHEN attached THEN it is rejected and nothing is read or sent', async () => {
+  const sent = [];
+  mockIPC(() => null);
+  window.__TAURI_INTERNALS__.invoke = async (command) => {
+    sent.push(command);
+    return null;
+  };
+  const unread = (type, size) => ({
+    type,
+    size,
+    arrayBuffer() {
+      throw new Error('read');
+    }
+  });
+  for (const blob of [
+    unread('image/gif', 10),
+    unread('image/webp', 10),
+    unread('', 10),
+    unread('image/png', 0),
+    unread('image/jpeg', 20 * 1024 * 1024 + 1)
+  ]) {
+    await assert.rejects(bridge.pasteImage('!r:s', blob), (reason) => reason === 'rejected', `${blob.type} ${blob.size}`);
+  }
+  assert.deepEqual(sent, []);
 });

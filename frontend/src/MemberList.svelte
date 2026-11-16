@@ -19,7 +19,8 @@
     onverify,
     onmessage,
     oncancelask,
-    onretry
+    onretry,
+    oncollapse
   }: {
     // Null until the first list loads.
     rows: MemberRow[] | null;
@@ -39,6 +40,8 @@
     onmessage: (userId: string) => void;
     oncancelask: () => void;
     onretry: () => void;
+    // Collapses the panel to a narrow strip; without it, no button shows.
+    oncollapse?: () => void;
   } = $props();
 
   const markText = {
@@ -49,10 +52,15 @@
 </script>
 
 <aside class="member-panel" aria-labelledby="members-heading">
-  <h2 id="members-heading">
-    Members
-    {#if rows}<span class="member-count">{rows.length}{truncated ? '+' : ''}</span>{/if}
-  </h2>
+  <div class="member-heading">
+    <h2 id="members-heading">
+      Members
+      {#if rows}<span class="member-count">{rows.length}{truncated ? '+' : ''}</span>{/if}
+    </h2>
+    {#if oncollapse}
+      <IconAction icon="chevron-right" label="Hide members" tip="start" onclick={oncollapse} />
+    {/if}
+  </div>
   {#if rows && !canVerify}
     <p class="note">Verify this device to verify other people.</p>
   {/if}

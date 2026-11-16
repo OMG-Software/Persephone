@@ -19,6 +19,7 @@
 * [0015 - Keep accounts in separate profiles and switch by restart](0015-keep-accounts-in-separate-profiles-and-switch-by-restart.md)
 * [0039 - Obtain SDK stop-and-join upstream instead of forking or gating on task counts](0039-obtain-sdk-stop-and-join-upstream-instead-of-forking.md)
 * [0040 - Use an existing key backup, or start a new one after a confirmation](0040-use-an-existing-key-backup-or-start-a-new-one-after-a-confirmation.md)
+* [0042 - Accept a pasted image from the page as hostile bytes](0042-accept-a-pasted-image-from-the-page-as-hostile-bytes.md)
 
 ## Proposed Records
 

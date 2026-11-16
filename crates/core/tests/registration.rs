@@ -86,7 +86,7 @@ impl Homeserver {
     fn start(available: (u16, Value), flows: Value) -> Self {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let server = runtime.block_on(async {
-            let server = MockServer::start().await;
+            let server = MockServer::builder().start().await;
             Mock::given(method("GET"))
                 .and(path("/_matrix/client/versions"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({"versions":["v1.19"]})))

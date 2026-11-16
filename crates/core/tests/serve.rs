@@ -144,6 +144,53 @@ fn given_a_protocol_violation_then_the_core_stops_serving_without_replying_to_it
     }
 }
 
+fn paste(id: u32, length: u32) -> Request {
+    Request {
+        id,
+        call: Call::PasteImage {
+            room_id: "!r:s".into(),
+            length,
+        },
+    }
+}
+
+/// GIVEN no signed-in account WHEN an image is pasted THEN it is answered
+/// `not_found` like a pick, its bytes are read with it, and the next request
+/// is still answered.
+#[test]
+fn given_a_pasted_image_without_an_account_then_it_is_refused_and_the_channel_stays_in_step() {
+    let mut input = Vec::new();
+    persephone_core_protocol::send_pasted_image(&mut input, &paste(1, 4), b"PNG!").unwrap();
+    input.extend(requests(&[2]));
+    let mut output = Vec::new();
+    assert_eq!(serve(input, &mut output), ServeEnd::UiClosed);
+    let replies = replies(output);
+    assert_eq!(replies.iter().map(|r| r.id).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(replies[0].outcome, Outcome::Error(ErrorCode::NotFound));
+    assert!(matches!(replies[1].outcome, Outcome::Ok(_)));
+}
+
+/// GIVEN a paste request WHEN its image frame is missing, of another length
+/// or another kind THEN the core stops serving without answering it.
+#[test]
+fn given_a_paste_without_its_exact_image_then_the_core_stops_serving() {
+    for image in [
+        requests(&[2]),
+        raw_frame(FrameKind::EncodedImage, b"abc"),
+        raw_frame(FrameKind::Control, b"abcd"),
+    ] {
+        let mut input = requests(&[1]);
+        send(&mut input, &paste(5, 4)).unwrap();
+        input.extend(image);
+        let mut output = Vec::new();
+        assert_eq!(serve(input, &mut output), ServeEnd::ProtocolViolation);
+        assert_eq!(
+            replies(output).iter().map(|r| r.id).collect::<Vec<_>>(),
+            [1]
+        );
+    }
+}
+
 #[test]
 fn given_truncated_frame_then_it_counts_as_the_ui_closing() {
     let mut input = requests(&[1]);

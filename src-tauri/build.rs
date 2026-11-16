@@ -79,6 +79,7 @@ fn main() {
             "image_band",
             "release_image",
             "pick_image",
+            "paste_image",
             "pick_file",
             "save_file",
             "send_image",

@@ -1,17 +1,25 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { menuTarget } from '../src/menu.ts';
+import { mainMenuItems, menuTarget } from '../src/menu.ts';
 import {
   SIDEBAR_DEFAULT,
   SIDEBAR_MAX,
   SIDEBAR_MIN,
   SIDEBAR_STEP,
-  MEMBER_PANEL_WIDTH,
+  MEMBERS,
+  MEMBERS_DEFAULT,
+  MEMBERS_MAX,
+  MEMBERS_MIN,
   ROOM_MIN,
   clampSidebar,
+  clampWidth,
   draggedSidebar,
+  draggedWidth,
   keyedSidebar,
+  keyedWidth,
   membersFit,
+  membersLimit,
   sidebarLimit
 } from '../src/layout.ts';
 import { memberMark, memberRows } from '../src/members.ts';
@@ -33,6 +41,39 @@ test('GIVEN an open menu WHEN a key does not move focus or nothing can take it T
   assert.equal(menuTarget('Enter', 0, [true, true]), null);
   assert.equal(menuTarget('ArrowDown', 0, [false, false]), null);
   assert.equal(menuTarget('Home', 0, []), null);
+});
+
+const chosen = [];
+const actions = Object.fromEntries(
+  ['explore', 'groups', 'search', 'drafts', 'ignored', 'health', 'settings', 'lock'].map((name) => [name, () => chosen.push(name)])
+);
+const mainMenu = (state) =>
+  mainMenuItems({ signedIn: true, canLock: true, switching: false, confirmingSignOut: false, ...state }, actions);
+
+test('GIVEN a signed-in account WHEN the main menu opens THEN Settings and Lock Persephone follow the account tools', () => {
+  const items = mainMenu({});
+  assert.deepEqual(items.map((item) => item.label), [
+    'Explore public rooms', 'Room groups', 'Search cached messages', 'Saved drafts', 'Ignored users', 'Connection health',
+    'Settings', 'Lock Persephone'
+  ]);
+  assert.equal(items[6].separated, true, 'a line sets Settings and Lock apart');
+  chosen.length = 0;
+  items.at(-2).onselect();
+  items.at(-1).onselect();
+  assert.deepEqual(chosen, ['settings', 'lock']);
+  assert.equal(items.at(-1).disabled, false);
+});
+
+test('GIVEN no account WHEN the main menu opens THEN Settings is still there and nothing else is', () => {
+  const items = mainMenu({ signedIn: false, canLock: false });
+  assert.deepEqual(items.map((item) => [item.label, Boolean(item.separated)]), [['Settings', false]]);
+});
+
+test('GIVEN the session is changing or the sign-out question is open WHEN the main menu opens THEN Lock is disabled', () => {
+  const working = mainMenu({ switching: true }).at(-1);
+  assert.deepEqual([working.label, working.disabled], ['Working…', true]);
+  const asking = mainMenu({ confirmingSignOut: true }).at(-1);
+  assert.deepEqual([asking.label, asking.disabled], ['Lock Persephone', true]);
 });
 
 test('GIVEN a room list width WHEN it is clamped THEN it stays in range and a value that is not a number gives the default', () => {
@@ -79,11 +120,69 @@ test('GIVEN a lower limit WHEN the width is clamped, keyed or dragged THEN it ne
 });
 
 test('GIVEN the window and room list widths WHEN the member panel is placed THEN it shows only when the room keeps its minimum', () => {
-  const needed = SIDEBAR_DEFAULT + MEMBER_PANEL_WIDTH + ROOM_MIN;
+  // The panel fits when its narrowest width does.
+  const needed = SIDEBAR_DEFAULT + MEMBERS_MIN + ROOM_MIN;
   assert.equal(membersFit(needed, SIDEBAR_DEFAULT), true);
   assert.equal(membersFit(needed - 1, SIDEBAR_DEFAULT), false);
   assert.equal(membersFit(640, SIDEBAR_DEFAULT), false, 'not in the native minimum window');
   assert.equal(membersFit(Number.NaN, SIDEBAR_DEFAULT), false);
+});
+
+test('GIVEN the member panel handle WHEN keys are pressed THEN the left arrow widens it and Home and End go to the limits', () => {
+  const key = (width, name, max) => keyedWidth(MEMBERS, width, name, max, 'ArrowLeft');
+  assert.equal(key(248, 'ArrowLeft'), 248 + MEMBERS.step, 'the handle moves left, away from the panel');
+  assert.equal(key(248, 'ArrowRight'), 248 - MEMBERS.step);
+  assert.equal(key(MEMBERS_MIN, 'ArrowRight'), MEMBERS_MIN, 'never below the minimum');
+  assert.equal(key(MEMBERS_MAX, 'ArrowLeft'), MEMBERS_MAX, 'never above the maximum');
+  assert.equal(key(300, 'Home'), MEMBERS_MIN);
+  assert.equal(key(300, 'End'), MEMBERS_MAX);
+  assert.equal(key(300, 'End', 260), 260, 'End stops at the limit the room leaves');
+  assert.equal(key(300, 'Enter'), null, 'a key that does not resize');
+});
+
+test('GIVEN a drag of the member panel handle WHEN the pointer moves left THEN the panel widens by the CSS distance, within its range', () => {
+  const drag = (x, ratio = 1, max) => draggedWidth(MEMBERS, MEMBERS_DEFAULT, 900, x, ratio, max, -1);
+  assert.equal(drag(800), MEMBERS_DEFAULT + 100);
+  assert.equal(drag(920), MEMBERS_DEFAULT - 20, 'moving right narrows it');
+  // At 125% zoom, 100 pointer pixels are 80 CSS pixels.
+  assert.equal(drag(800, 1.25), MEMBERS_DEFAULT + 80);
+  assert.equal(drag(0), MEMBERS_MAX, 'clamped to the maximum');
+  assert.equal(drag(2000), MEMBERS_MIN, 'clamped to the minimum');
+  assert.equal(drag(0, 1, 300), 300, 'clamped to the limit the room leaves');
+  assert.equal(clampWidth(MEMBERS, Number.NaN), MEMBERS_DEFAULT, 'a width that is not a number gives the default');
+});
+
+test('GIVEN the window and room list widths WHEN the member panel limit is found THEN the room keeps its minimum, down to the panel minimum', () => {
+  assert.equal(membersLimit(2000, SIDEBAR_DEFAULT), MEMBERS_MAX);
+  assert.equal(membersLimit(SIDEBAR_DEFAULT + ROOM_MIN + 300, SIDEBAR_DEFAULT), 300);
+  assert.equal(membersLimit(640, SIDEBAR_DEFAULT), MEMBERS_MIN, 'never below the panel minimum');
+  assert.equal(membersLimit(Number.NaN, SIDEBAR_DEFAULT), MEMBERS_MAX);
+});
+
+test('GIVEN the stylesheet WHEN the timeline and tooltips are laid out THEN nothing can scroll the timeline sideways', async () => {
+  const css = (await readFile(new URL('../src/style.css', import.meta.url), 'utf8')).replace(/\/\*[^]*?\*\//g, '');
+  // The declarations of the one rule whose selector list is exactly `selector`.
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, selectors, body]) => ({
+    selectors: selectors.split(',').map((one) => one.trim()).join(', '),
+    body
+  }));
+  const rule = (selector) => {
+    const found = rules.filter((one) => one.selectors === selector);
+    assert.equal(found.length, 1, selector);
+    return found[0].body;
+  };
+  assert.match(rule('.scroller'), /overflow-x:\s*hidden/);
+  // A hidden tip takes no space: `visibility: hidden` would still widen the
+  // scroll area when a tip sits near the edge.
+  assert.match(rule('.action-tip'), /display:\s*none/);
+  assert.doesNotMatch(rule('.action-tip'), /visibility/);
+  // Tips of the message actions end at the button's right edge.
+  assert.match(
+    rule('.message-actions .tip-above > .action-tip, .message-actions .tip-below > .action-tip'),
+    /right:\s*0/
+  );
+  // The main menu's tip, at the window's left edge, starts at the button.
+  assert.match(rule('.sidebar-actions > .tip-below > .action-tip'), /left:\s*0/);
 });
 
 const reader = (userId, trust, own = false) => ({ userId, trust, receiving: 1, refused: 0, own });

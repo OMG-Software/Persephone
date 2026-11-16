@@ -4105,6 +4105,117 @@ fn given_a_picked_image_then_send_image_uploads_only_the_stripped_copy() {
     assert_eq!(state, StoreState::RestartRequired);
 }
 
+/// Pastes `bytes` into `room_id` over one UI connection, as the UI process
+/// sends it (ADR-0042), and returns the core's reply.
+#[cfg(windows)]
+fn paste(core: &Core, room_id: &str, bytes: &[u8]) -> Outcome {
+    use persephone_core_protocol::{CoreMessage, receive, send_pasted_image};
+    use std::io::Cursor;
+    let mut wire = Vec::new();
+    let request = Request {
+        id: 1,
+        call: Call::PasteImage {
+            room_id: room_id.into(),
+            length: bytes.len() as u32,
+        },
+    };
+    send_pasted_image(&mut wire, &request, bytes).unwrap();
+    let mut output = Vec::new();
+    assert_eq!(
+        persephone_core::serve(core, Cursor::new(wire), &mut output),
+        persephone_core::ServeEnd::UiClosed
+    );
+    let budgets = persephone_media_protocol::ResourceBudgets::default();
+    let mut reader = Cursor::new(output);
+    std::iter::from_fn(|| receive::<_, CoreMessage>(&mut reader, &budgets).ok())
+        .find_map(|message| match message {
+            CoreMessage::Reply(reply) if reply.id == 1 => Some(reply.outcome),
+            _ => None,
+        })
+        .expect("a reply to the paste")
+}
+
+/// GIVEN a pasted JPEG with a comment and a rotation WHEN it is attached and
+/// sent THEN the draft is the stripped, rotated copy, exactly as for a picked
+/// file, and only that copy is uploaded; bytes that are not an image are
+/// refused and leave no draft behind.
+#[cfg(windows)]
+#[test]
+fn given_a_pasted_image_then_only_its_stripped_copy_is_sent() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(200);
+    server.upload_endpoint();
+    let dir = TempDir::new().unwrap();
+    let core = image_core(&server, dir.path(), &dir.path().join("never-picked.jpg"));
+    // Stop the sync loop when the test ends, so it cannot reach the next
+    // test's homeserver.
+    let _locked = LockOnDrop(&core);
+    wait_for("the plain room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN)
+    });
+    assert!(
+        matches!(
+            paste(&core, PLAIN, b"not an image at all"),
+            Outcome::Error(_)
+        ),
+        "bytes that are not an image are refused"
+    );
+    let original = jpeg_with_comment();
+    let persephone_contracts::ImagePick::Draft {
+        preview,
+        size,
+        mime,
+    } = value(paste(&core, PLAIN, &original))
+    else {
+        panic!("a draft");
+    };
+    assert_eq!((preview.width, preview.height), (8, 16), "rotated");
+    assert_eq!(mime, persephone_contracts::ImageMime::Jpeg);
+    assert!((size as usize) < original.len(), "stripped");
+    let queued: PendingMessage = value(call(
+        &core,
+        Call::SendImage {
+            room_id: PLAIN.into(),
+            handle: preview.handle,
+        },
+    ));
+    wait_for("the confirmation request", || {
+        pending(&core, PLAIN)[0].state == PendingState::Failed
+    });
+    assert!(
+        server.upload_bodies().is_empty(),
+        "nothing uploaded before consent"
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::AllowUnencrypted {
+                room_id: PLAIN.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::RetryMessage {
+                local_id: queued.local_id
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    wait_for("the send", || {
+        pending(&core, PLAIN)[0].state == PendingState::Sent
+    });
+    let uploads = server.upload_bodies();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0].len(), size as usize);
+    assert!(!uploads[0].windows(6).any(|w| w == b"secret"), "stripped");
+}
+
 /// GIVEN an encrypted room and a device that is not verified WHEN an image
 /// is sent THEN it fails as `device_not_verified` with no event sent, and
 /// anything the SDK uploaded first is ciphertext, never the image itself.

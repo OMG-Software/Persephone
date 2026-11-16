@@ -69,6 +69,7 @@
     "allow-image-band",
     "allow-release-image",
     "allow-pick-image",
+    "allow-paste-image",
     "allow-pick-file",
     "allow-save-file",
     "allow-send-image",

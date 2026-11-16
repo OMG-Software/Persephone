@@ -217,7 +217,7 @@ impl Drop for Supervisor {
 #[tokio::test]
 async fn given_paused_sdk_handler_when_stop_times_out_then_replacement_waits_for_cooperative_drain()
 {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     Mock::given(method("GET"))
         .and(path("/_matrix/client/versions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({

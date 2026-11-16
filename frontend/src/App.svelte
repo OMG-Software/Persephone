@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import markUrl from './assets/mark.svg';
   import AccountPage from './AccountPage.svelte';
+  import BrandMark from './BrandMark.svelte';
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
   import { jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
-  import type { FocusedTimeline } from '../../crates/contracts/generated/contracts';
+  import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
   import ReportAbuse from './ReportAbuse.svelte';
@@ -21,15 +21,24 @@
   import { findSearchContext } from './searchNavigation';
   import Devices from './Devices.svelte';
   import Icon from './Icon.svelte';
+  import IconAction from './IconAction.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
+  import { mainMenuItems } from './menu.ts';
   import MemberPanel from './MemberPanel.svelte';
   import {
+    MEMBERS,
+    MEMBERS_DEFAULT,
+    MEMBERS_MIN,
     SIDEBAR_DEFAULT,
     SIDEBAR_MIN,
     clampSidebar,
+    clampWidth,
     draggedSidebar,
+    draggedWidth,
     keyedSidebar,
+    keyedWidth,
     membersFit,
+    membersLimit,
     sidebarLimit
   } from './layout';
   import IdentityChanges from './IdentityChanges.svelte';
@@ -52,8 +61,9 @@
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate, withNames } from './people';
   import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
+  import { applyTheme } from './themes.ts';
   import { OwnNameKeeper } from './ownName';
-  import { attachErrorText, sendImageErrorText, type ImageDraft } from './image';
+  import { PASTE_UNSUPPORTED, attachErrorText, sendImageErrorText, type ImageDraft, type PastedImage } from './image';
   import { RoomPictures } from './roomPictures';
   import { securityErrorText } from './securityText';
   import {
@@ -73,6 +83,7 @@
     discardMessage,
     displayName,
     pickImage,
+    pasteImage,
     sendImage,
     lockSession,
     pendingMessages,
@@ -279,6 +290,8 @@
   let trustVersion = $state(0);
   // The room list width, changed with the resize handle; kept in memory only.
   let sidebarWidth = $state(SIDEBAR_DEFAULT);
+  // The member panel width, changed with its own handle; in memory only.
+  let membersWidth = $state(MEMBERS_DEFAULT);
   let focusEvent = $state<string | null>(null);
   let searchLocation = $state<string | null>(null);
   /** Open the manager even when a full draft cannot be saved, so another draft can be removed. */
@@ -332,6 +345,8 @@
   const sidebarMax = $derived(sidebarLimit(available));
   const shownSidebar = $derived(Math.min(sidebarWidth, sidebarMax));
   const membersRoom = $derived(membersFit(available, shownSidebar));
+  const membersMax = $derived(membersLimit(available, shownSidebar));
+  const shownMembers = $derived(Math.min(membersWidth, membersMax));
   const settingsKeeper = new SettingsKeeper(
     { load: accountSettings, save: setAccountSettings },
     (next, failure) => {
@@ -647,6 +662,13 @@
   $effect(() => {
     if (signedIn) settingsKeeper.load();
     else settingsKeeper.clear();
+  });
+
+  // The account's theme, on the root element so dialogs and the page
+  // background follow it. It changes as soon as a choice is made; the
+  // keeper puts it back if the core cannot save it.
+  $effect(() => {
+    applyTheme(document.documentElement, settings.theme);
   });
 
   // The account's display name for its labels. With none set, or none read,
@@ -1522,16 +1544,18 @@
     }
   }
 
-  // Opens the core's file dialog. A draft that arrives after the room or the
-  // session changed is dropped at once.
-  async function attachImage() {
+  // Makes an image draft for the selected room: from the core's file dialog
+  // or from a paste (ADR-0042). Either way the core strips and decodes the
+  // image, and the draft waits for Send. A draft that arrives after the room
+  // or the session changed is dropped at once.
+  async function attachWith(draft: (roomId: string) => Promise<ImagePick>) {
     const roomId = selected;
     if (!roomId || attaching || imageDraft) return;
     const generation = sessionGeneration;
     attaching = true;
     imageError = null;
     try {
-      const pick = await pickImage(roomId);
+      const pick = await draft(roomId);
       if (pick.kind !== 'draft') return;
       if (current(roomId, generation) && !imageDraft) {
         imageDraft = { roomId, preview: pick.preview, size: pick.size, mime: pick.mime };
@@ -1542,6 +1566,20 @@
       if (current(roomId, generation)) imageError = attachErrorText(reason);
     } finally {
       if (generation === sessionGeneration) attaching = false;
+    }
+  }
+
+  const attachImage = () => attachWith(pickImage);
+
+  // A paste that holds an image attaches it, unless one is already attached.
+  function pasteAttached(pasted: PastedImage) {
+    if (!selected || pasted.kind === 'none') return;
+    if (pasted.kind === 'unsupported') {
+      imageError = PASTE_UNSUPPORTED;
+    } else if (attaching || imageDraft) {
+      imageError = 'An image is already attached. Send or cancel it, then paste again.';
+    } else {
+      void attachWith((roomId) => pasteImage(roomId, pasted.file));
     }
   }
 
@@ -1829,19 +1867,24 @@
     }
   }
 
-  // Resizing the room list with the pointer: the pointer that owns the drag,
-  // the width and pointer position when it started, and pointer pixels per
-  // CSS pixel (the interface zoom). Other pointers cannot move or end it.
-  let drag: { pointerId: number; width: number; x: number; ratio: number } | null = null;
-  function startResize(event: PointerEvent) {
+  // Resizing the room list or the member panel with the pointer: which
+  // column, the pointer that owns the drag, the width and pointer position
+  // when it started, and pointer pixels per CSS pixel (the interface zoom).
+  // Other pointers cannot move or end it.
+  type Column = 'sidebar' | 'members';
+  let drag: { column: Column; pointerId: number; width: number; x: number; ratio: number } | null = null;
+  function startResize(event: PointerEvent, column: Column) {
     if (event.button !== 0) return;
     const handle = event.currentTarget as HTMLElement;
     // A drag in progress keeps its pointer. A drag whose handle went away
     // (the shell was replaced mid-drag) holds no capture and is replaced.
     if (drag && drag.pointerId !== event.pointerId && handle.hasPointerCapture(drag.pointerId)) return;
-    const sidebar = handle.previousElementSibling;
-    const shown = sidebar instanceof HTMLElement ? sidebar.getBoundingClientRect().width : shownSidebar;
-    drag = { pointerId: event.pointerId, width: shownSidebar, x: event.clientX, ratio: shown / shownSidebar };
+    const width = column === 'sidebar' ? shownSidebar : shownMembers;
+    // The column the handle resizes: the room list before it, or the
+    // member panel after it.
+    const beside = column === 'sidebar' ? handle.previousElementSibling : handle.nextElementSibling;
+    const shown = beside instanceof HTMLElement ? beside.getBoundingClientRect().width : width;
+    drag = { column, pointerId: event.pointerId, width, x: event.clientX, ratio: shown / width };
     handle.setPointerCapture(event.pointerId);
     event.preventDefault();
   }
@@ -1852,7 +1895,12 @@
       drag = null;
       return;
     }
-    sidebarWidth = draggedSidebar(drag.width, drag.x, event.clientX, drag.ratio, sidebarMax);
+    if (drag.column === 'sidebar') {
+      sidebarWidth = draggedSidebar(drag.width, drag.x, event.clientX, drag.ratio, sidebarMax);
+    } else {
+      // The member panel's handle is on its left edge: it grows leftwards.
+      membersWidth = draggedWidth(MEMBERS, drag.width, drag.x, event.clientX, drag.ratio, membersMax, -1);
+    }
   }
   function endResize(event: PointerEvent) {
     if (!drag || event.pointerId !== drag.pointerId) return;
@@ -1860,22 +1908,48 @@
     const handle = event.currentTarget as HTMLElement;
     if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
   }
-  function keyResize(event: KeyboardEvent) {
-    const next = keyedSidebar(shownSidebar, event.key, sidebarMax);
+  function keyResize(event: KeyboardEvent, column: Column) {
+    const next =
+      column === 'sidebar'
+        ? keyedSidebar(shownSidebar, event.key, sidebarMax)
+        : keyedWidth(MEMBERS, shownMembers, event.key, membersMax, 'ArrowLeft');
     if (next === null) return;
     event.preventDefault();
-    sidebarWidth = next;
+    if (column === 'sidebar') sidebarWidth = next;
+    else membersWidth = next;
   }
 
-  // The main menu: account-wide tools that used to be buttons above the room.
-  const mainMenu: MenuItem[] = [
-    { label: 'Explore public rooms', onselect: () => (directoryOpen = true) },
-    { label: 'Room groups', onselect: () => (groupsOpen = rooms !== null) },
-    { label: 'Search cached messages', onselect: () => (searchOpen = true) },
-    { label: 'Saved drafts', onselect: () => void openSavedDrafts() },
-    { label: 'Ignored users', onselect: () => (ignoreOpen = true) },
-    { label: 'Connection health', onselect: () => (healthOpen = true) }
-  ];
+  // Collapse or open the member panel from its own buttons. The button
+  // pressed goes away, so focus moves to the one that undoes it.
+  async function showMembers(shown: boolean) {
+    membersShown = shown;
+    await tick();
+    document
+      .querySelector<HTMLButtonElement>(shown ? '.member-heading button' : '.members-rail button')
+      ?.focus();
+  }
+
+  // The main menu: account-wide tools, Settings and Lock.
+  const mainMenu = $derived(
+    mainMenuItems(
+      {
+        signedIn,
+        canLock: status?.store === 'protected' || status?.store === 'locking',
+        switching,
+        confirmingSignOut
+      },
+      {
+        explore: () => (directoryOpen = true),
+        groups: () => (groupsOpen = rooms !== null),
+        search: () => (searchOpen = true),
+        drafts: () => void openSavedDrafts(),
+        ignored: () => (ignoreOpen = true),
+        health: () => (healthOpen = true),
+        settings: () => openSettings('security'),
+        lock: () => void toggleLock()
+      }
+    )
+  );
 
   /** The selected room's menu: what used to be buttons at the top of the room. */
   function roomMenu(roomId: string, direct: boolean): MenuItem[] {
@@ -1910,7 +1984,7 @@
 
 {#snippet brand()}
   <div class="auth-brand">
-    <img src={markUrl} alt="" width="32" height="32" />
+    <BrandMark />
     Persephone
   </div>
 {/snippet}
@@ -1921,22 +1995,16 @@
   {/if}
 {/snippet}
 
-{#snippet lockButton(above: boolean, iconOnly: boolean)}
+{#snippet lockButton()}
   <!-- Not while the sign-out question is open: it would apply to a locked session. -->
   <TipButton
     id="lock-help"
     help={LOCK_HELP}
-    {above}
-    class={iconOnly ? 'icon-button' : 'secondary'}
-    label={iconOnly ? (switching ? 'Working…' : 'Lock') : undefined}
+    class="secondary"
     disabled={switching || confirmingSignOut}
     onclick={toggleLock}
   >
-    {#if iconOnly}
-      <Icon name="lock" />
-    {:else}
-      {switching ? 'Working…' : 'Lock'}
-    {/if}
+    {switching ? 'Working…' : 'Lock'}
   </TipButton>
 {/snippet}
 
@@ -1984,7 +2052,7 @@
         {#if error}
           <p role="alert" class="error">{error}</p>
         {/if}
-        {@render lockButton(false, false)}
+        {@render lockButton()}
         <Accounts compact />
       </div>
     </div>
@@ -2107,7 +2175,7 @@
             <div class="panel">
               <h3>Lock</h3>
               <p>{LOCK_HELP}</p>
-              <div class="actions">{@render lockButton(false, false)}</div>
+              <div class="actions">{@render lockButton()}</div>
             </div>
           {/if}
           {#if signedIn}
@@ -2163,7 +2231,6 @@
         {shortcut}
         onselect={open}
         onsearch={() => (paletteOpen = rooms !== null)}
-        onsettings={() => openSettings('security')}
         {invites}
         {inviteBusy}
         onnewconversation={signedIn ? () => (newConversationOpen = true) : undefined}
@@ -2177,9 +2244,7 @@
         width={shownSidebar}
       >
         {#snippet menu()}
-          {#if signedIn}
-            <Menu id="main-menu" label="Main menu" icon="menu" items={mainMenu} />
-          {/if}
+          <Menu id="main-menu" label="Main menu" icon="menu" items={mainMenu} align="start" />
         {/snippet}
         {#snippet notice()}
           {#if signedIn && (security?.identity === 'none' || security?.identity === 'unverified')}
@@ -2193,11 +2258,6 @@
                 {security.identity === 'none' ? 'Set up encryption' : 'Verify this device'}
               </button>
             </div>
-          {/if}
-        {/snippet}
-        {#snippet lock()}
-          {#if status?.store === 'protected' || status?.store === 'locking'}
-            {@render lockButton(true, true)}
           {/if}
         {/snippet}
       </Sidebar>
@@ -2214,11 +2274,11 @@
         aria-valuemax={sidebarMax}
         aria-valuenow={shownSidebar}
         tabindex="0"
-        onpointerdown={startResize}
+        onpointerdown={(event) => startResize(event, 'sidebar')}
         onpointermove={moveResize}
         onpointerup={endResize}
         onpointercancel={endResize}
-        onkeydown={keyResize}
+        onkeydown={(event) => keyResize(event, 'sidebar')}
         ondblclick={() => (sidebarWidth = clampSidebar(SIDEBAR_DEFAULT, sidebarMax))}
       ></div>
       <div class="pane">
@@ -2239,7 +2299,7 @@
           />
         {/if}
         {#if selectedRoom}
-          <div class="room-view">
+          <div class="room-view" style:--members-width="{shownMembers}px">
           <div class="room-main">
           {#if searchLocation || (signedIn && focusedContext)}
             <div class="search-location">
@@ -2372,6 +2432,7 @@
               {sendingImage}
               {imageError}
               onattach={attachImage}
+              onpasteimage={signedIn ? pasteAttached : undefined}
               {attachingFile}
               onattachfile={attachFile}
               onsendimage={sendAttached}
@@ -2396,23 +2457,50 @@
             {/if}
           {/if}
           </div>
-          {#if signedIn && membersShown && membersRoom}
-            {#key selectedRoom.roomId + ':' + sessionGeneration}
-              <MemberPanel
-                roomId={selectedRoom.roomId}
-                version={roomChanges + trustVersion}
-                {contact}
-                paused={roomSettingsOf !== null}
-                canVerify={security?.identity === 'verified'}
-                verifying={securityBusy ||
-                  security?.operation !== 'idle' ||
-                  (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
-                asking={memberNeedsRoom}
-                onverify={verifyMember}
-                oncancelask={() => (memberAsked = null)}
-                onmessage={messageMember}
-              />
-            {/key}
+          {#if signedIn && membersRoom}
+            {#if membersShown}
+              <!-- Drag, or focus and use the arrow keys, to resize the member
+                   list; it grows to the left. The same window-splitter pattern
+                   as the room list's handle. -->
+              <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+              <div
+                class="resize-handle"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize member list"
+                aria-valuemin={MEMBERS_MIN}
+                aria-valuemax={membersMax}
+                aria-valuenow={shownMembers}
+                tabindex="0"
+                onpointerdown={(event) => startResize(event, 'members')}
+                onpointermove={moveResize}
+                onpointerup={endResize}
+                onpointercancel={endResize}
+                onkeydown={(event) => keyResize(event, 'members')}
+                ondblclick={() => (membersWidth = clampWidth(MEMBERS, MEMBERS_DEFAULT, membersMax))}
+              ></div>
+              {#key selectedRoom.roomId + ':' + sessionGeneration}
+                <MemberPanel
+                  roomId={selectedRoom.roomId}
+                  version={roomChanges + trustVersion}
+                  {contact}
+                  paused={roomSettingsOf !== null}
+                  canVerify={security?.identity === 'verified'}
+                  verifying={securityBusy ||
+                    security?.operation !== 'idle' ||
+                    (flow !== null && flow.phase !== 'done' && flow.phase !== 'cancelled')}
+                  asking={memberNeedsRoom}
+                  onverify={verifyMember}
+                  oncancelask={() => (memberAsked = null)}
+                  onmessage={messageMember}
+                  oncollapse={() => showMembers(false)}
+                />
+              {/key}
+            {:else}
+              <div class="members-rail">
+                <IconAction icon="users" label="Show members" tip="start" onclick={() => showMembers(true)} />
+              </div>
+            {/if}
           {/if}
           </div>
         {:else}
@@ -2534,7 +2622,7 @@
         {/if}
         <div class="actions">
           {#if status.store === 'locking'}
-            {@render lockButton(false, false)}
+            {@render lockButton()}
           {:else if unlockable.includes(status.store)}
             <button type="button" class="primary" disabled={switching} onclick={toggleLock}>
               {switching ? 'Unlocking…' : 'Unlock'}

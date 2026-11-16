@@ -27,3 +27,55 @@ export function menuTarget(key: string, current: number, enabled: readonly boole
       return null;
   }
 }
+
+/** One command of a menu, as `Menu.svelte` shows it. */
+export type MenuCommand = {
+  label: string;
+  onselect: () => void;
+  disabled?: boolean;
+  separated?: boolean;
+};
+
+/** What the main menu's commands do. */
+export type MainMenuActions = {
+  explore: () => void;
+  groups: () => void;
+  search: () => void;
+  drafts: () => void;
+  ignored: () => void;
+  health: () => void;
+  settings: () => void;
+  lock: () => void;
+};
+
+/**
+ * The main menu. The account tools show only when signed in. Settings is
+ * always there, so it stays reachable with synthetic data. Lock shows when
+ * the profile can be locked, and is disabled while the session changes or
+ * the sign-out question is open.
+ */
+export function mainMenuItems(
+  state: { signedIn: boolean; canLock: boolean; switching: boolean; confirmingSignOut: boolean },
+  act: MainMenuActions
+): MenuCommand[] {
+  const account: MenuCommand[] = state.signedIn
+    ? [
+        { label: 'Explore public rooms', onselect: act.explore },
+        { label: 'Room groups', onselect: act.groups },
+        { label: 'Search cached messages', onselect: act.search },
+        { label: 'Saved drafts', onselect: act.drafts },
+        { label: 'Ignored users', onselect: act.ignored },
+        { label: 'Connection health', onselect: act.health }
+      ]
+    : [];
+  const lock: MenuCommand[] = state.canLock
+    ? [
+        {
+          label: state.switching ? 'Working…' : 'Lock Persephone',
+          onselect: act.lock,
+          disabled: state.switching || state.confirmingSignOut
+        }
+      ]
+    : [];
+  return [...account, { label: 'Settings', onselect: act.settings, separated: account.length > 0 }, ...lock];
+}

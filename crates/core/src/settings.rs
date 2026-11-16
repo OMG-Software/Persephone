@@ -10,11 +10,12 @@
 //! by an older or newer build still reads. A record that is too large or not
 //! JSON reads as the defaults; the next save replaces it. A text size out of
 //! its bounds reads as its default, so a damaged record cannot make the
-//! interface unusable.
+//! interface unusable. A theme this build does not know reads as the
+//! default theme and keeps the other settings.
 
 use crate::store::Stores;
 use matrix_sdk_crypto::store::CryptoStore;
-use persephone_contracts::{AccountSettings, TimelineEvents};
+use persephone_contracts::{AccountSettings, Theme, TimelineEvents};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -37,6 +38,9 @@ struct Stored {
     load_room_pictures: bool,
     /// Kept as a map of switch names, read by [`timeline_events`].
     timeline_events: Map<String, Value>,
+    /// Kept as any value, read by [`theme`]: a theme name from another
+    /// build must not make the whole record unreadable.
+    theme: Value,
 }
 
 impl Default for Stored {
@@ -61,8 +65,15 @@ impl From<AccountSettings> for Stored {
                 Ok(Value::Object(switches)) => switches,
                 _ => Map::new(),
             },
+            theme: serde_json::to_value(settings.theme).unwrap_or(Value::Null),
         }
     }
+}
+
+/// The theme from a stored value, leniently: a name this build does not
+/// know, or a value that is not a name, reads as the default theme.
+fn theme(stored: &Value) -> Theme {
+    Theme::deserialize(stored).unwrap_or_default()
 }
 
 /// The timeline's switches from a stored map, leniently: a switch the map
@@ -95,6 +106,7 @@ impl From<Stored> for AccountSettings {
             notification_names: stored.notification_names,
             load_room_pictures: stored.load_room_pictures,
             timeline_events: timeline_events(&stored.timeline_events),
+            theme: theme(&stored.theme),
         };
         if settings.idle_lock_minutes > persephone_contracts::IDLE_LOCK_MINUTES_MAX {
             settings.idle_lock_minutes = defaults.idle_lock_minutes;
@@ -171,6 +183,7 @@ mod tests {
                 room_picture: false,
                 ..TimelineEvents::default()
             },
+            theme: Theme::Blue,
         };
         let bytes = serde_json::to_vec(&Stored::from(changed)).unwrap();
         assert_eq!(decode(&bytes), changed);
@@ -199,6 +212,42 @@ mod tests {
             decode(br#"{"enter_sends":false,"timeline_events":[false]}"#),
             AccountSettings::default()
         );
+    }
+
+    /// GIVEN a stored theme WHEN read THEN a known theme keeps its value,
+    /// and an unknown, damaged or missing one reads as the default theme
+    /// while the other settings are kept.
+    #[test]
+    fn given_an_unknown_or_damaged_stored_theme_then_it_reads_as_the_default() {
+        for (record, expected) in [
+            (&br#"{"theme":"red"}"#[..], Theme::Red),
+            (br#"{"theme":"blue"}"#, Theme::Blue),
+            (br#"{"theme":"orange"}"#, Theme::Orange),
+            (br#"{}"#, Theme::Orange),
+        ] {
+            assert_eq!(decode(record).theme, expected);
+        }
+        for value in [
+            r#""green""#,
+            r#""Red""#,
+            "null",
+            "7",
+            r#"["red"]"#,
+            r#"{"red":true}"#,
+            r#"{"red":null}"#,
+        ] {
+            let record =
+                format!(r#"{{"enter_sends":false,"chat_text_percent":125,"theme":{value}}}"#);
+            assert_eq!(
+                decode(record.as_bytes()),
+                AccountSettings {
+                    enter_sends: false,
+                    chat_text_percent: 125,
+                    ..AccountSettings::default()
+                },
+                "{record}"
+            );
+        }
     }
 
     #[test]

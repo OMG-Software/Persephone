@@ -77,16 +77,16 @@ use account::KeyRooms;
 use credentials::CredentialSource;
 use homeserver::Homeserver;
 use matrix_views::MatrixViews;
-use media::{ImageWorker, MediaService};
+use media::{Encoded, ImageWorker, MediaService};
 use persephone_contracts::{
     AccountStatus, AppStatus, ImagePick, ImageView, RoomList, RoomPicture, StoreState,
 };
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_EVENT_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
     MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, MAX_USER_ID_BYTES, Outcome,
-    PixelReply, ReceiveError, Reply, Request, receive, send, send_pixel_reply,
+    PixelReply, ReceiveError, Reply, Request, ToCore, receive_request, send, send_pixel_reply,
 };
-use persephone_media_protocol::ResourceBudgets;
+use persephone_media_protocol::{ReceivedFrame, ResourceBudgets};
 use pick::ImagePicker;
 use serde::Serialize;
 use session::{Session, SessionListener};
@@ -620,6 +620,8 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            // Read with its image frame, so answered by `answer_paste`.
+            Call::PasteImage { .. } => error(ErrorCode::InvalidArgument),
             Call::DiscoverHomeserver { server_name } => match self.discover(server_name) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
@@ -946,6 +948,8 @@ impl Core {
                 Err(code) => Outcome::Error(code),
             },
             Call::ImageBand { .. } => Outcome::Error(ErrorCode::Unavailable),
+            // Its image frame reaches only `serve`.
+            Call::PasteImage { .. } => Outcome::Error(ErrorCode::InvalidArgument),
             Call::ReleaseImage { handle } => {
                 refused(self.media.release(self.media_generation(), handle))
             }
@@ -2205,20 +2209,26 @@ impl Core {
         files::write(&path, bytes.bytes()).map(|()| true)
     }
 
-    fn pick_image<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+    /// The session generation a new image draft for `room_id` belongs to:
+    /// the room must be a room of the signed-in account.
+    fn draft_generation(&self, room_id: &str) -> Result<u64, ErrorCode> {
         if !valid_room_id(room_id) {
             return Err(ErrorCode::InvalidArgument);
         }
-        let generation = match self.source() {
-            Source::Locked => return Err(ErrorCode::Locked),
-            Source::Fixtures | Source::SignedOut => return Err(ErrorCode::NotFound),
+        match self.source() {
+            Source::Locked => Err(ErrorCode::Locked),
+            Source::Fixtures | Source::SignedOut => Err(ErrorCode::NotFound),
             Source::Matrix(lease, client) => {
                 if !MatrixViews::has_room(&client, room_id) {
                     return Err(ErrorCode::NotFound);
                 }
-                lease.generation()
+                Ok(lease.generation())
             }
-        };
+        }
+    }
+
+    fn pick_image<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+        let generation = self.draft_generation(room_id)?;
         let slot = self.media.begin_pick()?;
         let room_id = room_id.to_owned();
         Ok(Box::new(move || {
@@ -2239,6 +2249,46 @@ impl Core {
         drop(path);
         self.media
             .prepare_draft(generation, &|| self.media_generation(), room_id, original)
+    }
+
+    /// Admits a pasted image (ADR-0042) for a joined room, like a picked
+    /// file: it shares the pick slot and the draft limit, and the strip and
+    /// the preview decode run later, in the guest. The bytes are hostile.
+    fn paste_image<'a>(
+        &'a self,
+        room_id: &str,
+        original: Encoded,
+    ) -> Result<LongCall<'a>, ErrorCode> {
+        let generation = self.draft_generation(room_id)?;
+        let slot = self.media.begin_pick()?;
+        let room_id = room_id.to_owned();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            refused(self.media.prepare_draft(
+                generation,
+                &|| self.media_generation(),
+                &room_id,
+                original,
+            ))
+        }))
+    }
+
+    /// How [`serve`] answers a pasted image and its frame.
+    fn answer_paste(&self, request: &Request, image: ReceivedFrame) -> Answer<'_> {
+        let id = request.id;
+        let Call::PasteImage { room_id, .. } = &request.call else {
+            return Answer::Reply(Reply {
+                id,
+                outcome: Outcome::Error(ErrorCode::InvalidArgument),
+            });
+        };
+        match Encoded::from_frame(image).and_then(|original| self.paste_image(room_id, original)) {
+            Ok(call) => Answer::Later(id, call),
+            Err(code) => Answer::Reply(Reply {
+                id,
+                outcome: Outcome::Error(code),
+            }),
+        }
     }
 
     /// Queues a draft picked for this room. The draft is taken out of the
@@ -2606,13 +2656,23 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
         });
         let mut ready = false;
         let end = loop {
-            match receive::<_, Request>(&mut input, &budgets) {
-                Ok(request) => {
+            match receive_request(&mut input, &budgets) {
+                Ok(incoming) => {
                     if !ready {
                         ready = true;
                         lock(&core.hub.notifications).ready = true;
                     }
-                    let written = match core.answer(&request) {
+                    let answer = match incoming {
+                        ToCore::Request(request) => core.answer(&request),
+                        ToCore::Paste(request, image) => core.answer_paste(&request, image),
+                        // The image did not fit the encoded budget; its bytes
+                        // were read past.
+                        ToCore::PasteRefused(request) => Answer::Reply(Reply {
+                            id: request.id,
+                            outcome: Outcome::Error(ErrorCode::LimitExceeded),
+                        }),
+                    };
+                    let written = match answer {
                         Answer::Reply(reply) => {
                             send(&mut *lock(&output), &CoreMessage::Reply(reply))
                         }

@@ -317,6 +317,8 @@ permissions: boolean, addresses: boolean, pinnedMessages: boolean, guestAccess: 
  */
 serverAccess: boolean, creation: boolean, upgrades: boolean, };
 
+export type Theme = "orange" | "red" | "blue";
+
 export type AccountSettings = { 
 /**
  * Enter sends a message; otherwise it starts a new line. On by default.
@@ -373,7 +375,11 @@ loadRoomPictures: boolean,
 /**
  * Which kinds of room changes the timeline shows. All on by default.
  */
-timelineEvents: TimelineEvents, };
+timelineEvents: TimelineEvents, 
+/**
+ * The colours of the interface. Grey and orange by default.
+ */
+theme: Theme, };
 
 export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
 

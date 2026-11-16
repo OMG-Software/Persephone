@@ -165,6 +165,42 @@ const attachText: Record<string, string> = {
   invalid_argument: 'That request was not valid.'
 };
 
+/** The most bytes of a pasted image; the core and the host check it too. */
+export const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/** The image types a paste may attach: the ones the core can send. */
+const PASTE_TYPES = new Set(['image/png', 'image/jpeg']);
+
+/** What a paste holds, as far as attaching goes. */
+export type PastedImage =
+  | { kind: 'none' }
+  | { kind: 'image'; file: File }
+  // An image the core cannot send, or more than one.
+  | { kind: 'unsupported' };
+
+/** The part of a paste event's `DataTransfer` this reads. */
+export type PasteData = { types: readonly string[]; files: ArrayLike<File> };
+
+/**
+ * The image a paste attaches, if any (ADR-0042). A paste that holds plain
+ * text is text: office programs also put a picture of the copied text on
+ * the clipboard, and that picture must not replace the text. Without text,
+ * one PNG or JPEG file is attached; any other image, or several files, is
+ * `unsupported`. Nothing here reads the file.
+ */
+export function pastedImage(data: PasteData | null | undefined): PastedImage {
+  if (!data || data.types.includes('text/plain')) return { kind: 'none' };
+  const files = Array.from(data.files);
+  if (files.length === 0) return { kind: 'none' };
+  const [file] = files;
+  if (files.length === 1 && PASTE_TYPES.has(file.type)) return { kind: 'image', file };
+  return { kind: 'unsupported' };
+}
+
+/** The text for a paste that cannot be attached as it is. */
+export const PASTE_UNSUPPORTED =
+  'Only one PNG or JPEG image can be pasted at a time. Save other images as PNG or JPEG first.';
+
 /** The text for a failed attach; the fallback follows `loadErrorText`. */
 export function attachErrorText(reason: unknown, userAgent: string = currentUserAgent()): string {
   return (
