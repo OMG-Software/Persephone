@@ -20,6 +20,7 @@
 * [0038 - Unlock the profile with a passkey through the PRF extension](0038-unlock-the-profile-with-a-passkey-through-prf.md)
 * [0039 - Obtain SDK stop-and-join upstream instead of forking or gating on task counts](0039-obtain-sdk-stop-and-join-upstream-instead-of-forking.md)
 * [0040 - Use an existing key backup, or start a new one after a confirmation](0040-use-an-existing-key-backup-or-start-a-new-one-after-a-confirmation.md)
+* [0042 - Accept a pasted image from the page as hostile bytes](0042-accept-a-pasted-image-from-the-page-as-hostile-bytes.md)
 
 ## Proposed Records
 
@@ -47,6 +48,7 @@
 * [0035 - Keep favourites and room sections local to the profile](0035-keep-favourites-and-room-sections-local-to-the-profile.md)
 * [0036 - Bound room navigation and inspection in the core](0036-bound-room-navigation-and-inspection-in-the-core.md)
 * [0037 - Browse public room directories and join only listed rooms](0037-browse-public-room-directories-and-join-only-listed-rooms.md)
+* [0041 - Load room pictures in the core, on request or when turned on](0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md)
 
 ## Superseded Records
 

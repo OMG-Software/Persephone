@@ -4,6 +4,8 @@
   import EncryptionIcon from './EncryptionIcon.svelte';
   import Icon from './Icon.svelte';
   import IconAction from './IconAction.svelte';
+  import RoomPicture from './RoomPicture.svelte';
+  import type { RoomPictures } from './roomPictures';
 
   let {
     rooms,
@@ -12,7 +14,8 @@
     preferences = [],
     onselect,
     onfavourite,
-    favouriteBusy = false
+    favouriteBusy = false,
+    pictures = null
   }: {
     rooms: RoomSummary[];
     truncated: boolean;
@@ -24,6 +27,8 @@
     onfavourite?: (roomId: string) => void;
     // A favourite change is being saved.
     favouriteBusy?: boolean;
+    // Loaded room pictures; a room shows its icon until its picture is loaded.
+    pictures?: RoomPictures | null;
   } = $props();
 
   const unreadLabel = (count: number) => (count > 999 ? '999+' : String(count));
@@ -48,7 +53,9 @@
           onclick={() => onselect(room.roomId)}
         >
           <EncryptionIcon encryption={room.encryption} />
-          <Icon name="hash" class="hash" />
+          <RoomPicture {pictures} roomId={room.roomId} pictureId={room.pictureId}>
+            <Icon name="hash" class="hash" />
+          </RoomPicture>
           <bdi class="room-name">{room.displayName ?? room.roomId}</bdi>
           {#if room.unreadCount > 0}
             <span class="badge" aria-label={unreadLabel(room.unreadCount) + ' unread'}

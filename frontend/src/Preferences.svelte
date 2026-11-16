@@ -12,6 +12,7 @@
     idleLockText,
     type SettingsPatch
   } from './preferences';
+  import { DEFAULT_THEME, THEMES, themeOf } from './themes.ts';
 
   // This account's preferences. The settings are kept in its encrypted
   // profile through the caller; the notification level is the account's
@@ -144,6 +145,24 @@
     <p class="note">The interface size scales everything else: menus, lists, buttons and settings.</p>
   </div>
   <div class="panel">
+    <h3>Theme</h3>
+    <label for="theme">Colours</label>
+    <select
+      id="theme"
+      class="field"
+      value={themeOf(settings.theme)}
+      onchange={(event) => onchange({ theme: themeOf(event.currentTarget.value) })}
+    >
+      {#each THEMES as theme (theme.value)}
+        <option value={theme.value}>{theme.label}{theme.value === DEFAULT_THEME ? ' (default)' : ''}</option>
+      {/each}
+    </select>
+    <p class="note">
+      All themes are dark. The theme changes at once and belongs to this account; before you sign
+      in or while Persephone is locked, the default theme shows.
+    </p>
+  </div>
+  <div class="panel">
     <h3>Notifications</h3>
     <fieldset class="choices" disabled={level === null || levelBusy}>
       <legend>Notify me of</legend>
@@ -225,6 +244,20 @@
     <p class="note">
       Both are off by default: each tells the homeserver and everyone in the room when you are
       active. You still see other people's. Your other devices always learn what you have read.
+    </p>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.loadRoomPictures}
+        onchange={(event) => onchange({ loadRoomPictures: event.currentTarget.checked })}
+      />
+      <span>Load room pictures automatically</span>
+    </label>
+    <p class="note">
+      Off by default: each room shows its picture only after you choose to load it. Loading a
+      picture tells your homeserver, and the server that holds the picture, that you looked at it.
+      Persephone decodes pictures in its contained image decoder.
     </p>
     <label for="idle-lock">Lock Persephone when this computer is not used</label>
     <!-- Only Windows reads the computer's idle time yet (ADR-0025); elsewhere

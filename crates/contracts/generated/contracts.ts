@@ -102,7 +102,14 @@ unreadCount: number, encryption: RoomEncryption,
  * In a direct-message room with one other person, that person's user ID
  * (untrusted, projected like a name). Otherwise none.
  */
-contact: string | null, };
+contact: string | null, 
+/**
+ * Names the room's current picture (`m.room.avatar`) without saying
+ * where it is: [`PICTURE_ID_BYTES`] lowercase hex characters that change
+ * when the picture changes. None when the room has no picture. The page
+ * loads the picture only through `load_room_picture` (ADR-0041).
+ */
+pictureId: string | null, };
 
 export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
@@ -310,6 +317,8 @@ permissions: boolean, addresses: boolean, pinnedMessages: boolean, guestAccess: 
  */
 serverAccess: boolean, creation: boolean, upgrades: boolean, };
 
+export type Theme = "orange" | "red" | "blue";
+
 export type AccountSettings = { 
 /**
  * Enter sends a message; otherwise it starts a new line. On by default.
@@ -357,9 +366,20 @@ idleLockMinutes: number,
  */
 notificationNames: boolean, 
 /**
+ * Load room pictures as soon as rooms are listed; otherwise each is
+ * loaded only when the user asks. Loading tells the homeserver, and the
+ * server that holds the picture, that this account looked at it. Off by
+ * default (ADR-0041).
+ */
+loadRoomPictures: boolean, 
+/**
  * Which kinds of room changes the timeline shows. All on by default.
  */
-timelineEvents: TimelineEvents, };
+timelineEvents: TimelineEvents, 
+/**
+ * The colours of the interface. Grey and orange by default.
+ */
+theme: Theme, };
 
 export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
 
@@ -547,6 +567,8 @@ export type ImageView = { handle: string,
  */
 width: number, height: number, bands: number, bandRows: number, };
 
+export type RoomPicture = { pictureId: string, image: ImageView, };
+
 export type ImagePick = { "kind": "draft", preview: ImageView, 
 /**
  * The stripped copy's size in bytes.
@@ -558,7 +580,8 @@ export const roomSummaryFixture = {
   "displayName": null,
   "unreadCount": 4294967295,
   "encryption": "encrypted",
-  "contact": "@alice:server.invalid"
+  "contact": "@alice:server.invalid",
+  "pictureId": "0123456789abcdef"
 } as const satisfies RoomSummary;
 
 export const timelinePageFixture = {

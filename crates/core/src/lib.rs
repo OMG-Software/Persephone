@@ -77,14 +77,16 @@ use account::KeyRooms;
 use credentials::CredentialSource;
 use homeserver::Homeserver;
 use matrix_views::MatrixViews;
-use media::{ImageWorker, MediaService};
-use persephone_contracts::{AccountStatus, AppStatus, ImagePick, ImageView, RoomList, StoreState};
+use media::{Encoded, ImageWorker, MediaService};
+use persephone_contracts::{
+    AccountStatus, AppStatus, ImagePick, ImageView, RoomList, RoomPicture, StoreState,
+};
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_EVENT_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
     MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, MAX_USER_ID_BYTES, Outcome,
-    PixelReply, ReceiveError, Reply, Request, receive, send, send_pixel_reply,
+    PixelReply, ReceiveError, Reply, Request, ToCore, receive_request, send, send_pixel_reply,
 };
-use persephone_media_protocol::ResourceBudgets;
+use persephone_media_protocol::{ReceivedFrame, ResourceBudgets};
 use pick::ImagePicker;
 use serde::Serialize;
 use session::{Session, SessionListener};
@@ -281,6 +283,9 @@ pub struct Core {
     /// The rooms public room directory pages offered to join, with the
     /// session generation they were listed in.
     offers: Mutex<directory::Offers>,
+    /// The member counts each room's member list was last asked for
+    /// against, in one session generation.
+    member_refreshes: Mutex<room_settings::Refreshed>,
     /// Serializes encrypted record read/modify/write operations.
     personal: conversations::Busy,
     local_search: conversations::Busy,
@@ -483,6 +488,7 @@ impl Core {
             search: conversations::Busy::default(),
             public_rooms: conversations::Busy::default(),
             offers: Mutex::new(directory::Offers::default()),
+            member_refreshes: Mutex::new(room_settings::Refreshed::default()),
             personal: conversations::Busy::default(),
             local_search: conversations::Busy::default(),
             room_reads: conversations::Busy::default(),
@@ -606,10 +612,16 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            Call::LoadRoomPicture { room_id } => match self.load_room_picture(room_id) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::PickImage { room_id } => match self.pick_image(room_id) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            // Read with its image frame, so answered by `answer_paste`.
+            Call::PasteImage { .. } => error(ErrorCode::InvalidArgument),
             Call::DiscoverHomeserver { server_name } => match self.discover(server_name) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
@@ -915,6 +927,10 @@ impl Core {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
+            Call::LoadRoomPicture { room_id } => match self.load_room_picture(room_id) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
             Call::PickImage { room_id } => match self.pick_image(room_id) {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
@@ -932,6 +948,8 @@ impl Core {
                 Err(code) => Outcome::Error(code),
             },
             Call::ImageBand { .. } => Outcome::Error(ErrorCode::Unavailable),
+            // Its image frame reaches only `serve`.
+            Call::PasteImage { .. } => Outcome::Error(ErrorCode::InvalidArgument),
             Call::ReleaseImage { handle } => {
                 refused(self.media.release(self.media_generation(), handle))
             }
@@ -1501,7 +1519,14 @@ impl Core {
                     }),
                 Work::RoomMembers(room_id, filter) => {
                     json(self.with_matrix(generation, async |client| {
-                        room_settings::members(&client, room_id, filter).await
+                        room_settings::members(
+                            &client,
+                            room_id,
+                            filter,
+                            &self.member_refreshes,
+                            generation,
+                        )
+                        .await
                     }))
                 }
                 Work::RoomServers(room_id) => json(self.with_matrix(generation, async |client| {
@@ -1509,7 +1534,8 @@ impl Core {
                 })),
                 Work::RoomReaders(room_id) => self
                     .with_matrix(generation, async |client| {
-                        room_settings::readers(&client, room_id).await
+                        room_settings::readers(&client, room_id, &self.member_refreshes, generation)
+                            .await
                     })
                     .and_then(|readers| match bounded(&readers) {
                         Outcome::Ok(value) => Ok(value),
@@ -1947,6 +1973,69 @@ impl Core {
             .keep_view(generation, &|| self.media_generation(), pixels)
     }
 
+    /// Admits a `load_room_picture` (ADR-0041): checks the argument and the
+    /// session now; the download and decode run later, on their own thread.
+    /// The page decides whether a picture loads automatically or on request;
+    /// the core cannot tell the two apart, and treats both like `load_image`.
+    fn load_room_picture<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+        if !valid_room_id(room_id) {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        match self.source() {
+            Source::Locked => return Err(ErrorCode::Locked),
+            // Synthetic rooms have no pictures.
+            Source::Fixtures | Source::SignedOut => return Err(ErrorCode::NotFound),
+            Source::Matrix(_lease, client) => {
+                if !MatrixViews::has_room(&client, room_id) {
+                    return Err(ErrorCode::NotFound);
+                }
+            }
+        }
+        let slot = self.media.begin_picture()?;
+        let room_id = room_id.to_owned();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            refused(self.finish_room_picture(&room_id))
+        }))
+    }
+
+    /// Downloads a room picture under a lease, which ends before the decode,
+    /// like [`Self::finish_load`]; the picture is scaled to fit
+    /// [`media::ROOM_PICTURE_SIDE`] square.
+    fn finish_room_picture(&self, room_id: &str) -> Result<RoomPicture, ErrorCode> {
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        let generation = lease.generation();
+        let current = || self.session.open_generation() == Some(generation);
+        let fetched = lease.stores().block_on(media::fetch_room_picture(
+            &client,
+            client.http_client(),
+            room_id,
+            &self.budgets,
+            &current,
+        ));
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        let (picture_id, encoded) = fetched?;
+        if !current() {
+            return Err(ErrorCode::Locked);
+        }
+        let decoded = self.media.decode(encoded.bytes())?;
+        drop(encoded);
+        let (pixels, _) = self.media.shown_within(decoded, media::ROOM_PICTURE_SIDE)?;
+        let image = self
+            .media
+            .keep_view(generation, &|| self.media_generation(), pixels)?;
+        Ok(RoomPicture { picture_id, image })
+    }
+
     /// Admits a `pick_image` for a joined room: the dialog, the read and the
     /// strip run later, on their own thread, without a lease (nothing there
     /// touches the stores); the draft is kept only if the generation is still
@@ -2120,20 +2209,26 @@ impl Core {
         files::write(&path, bytes.bytes()).map(|()| true)
     }
 
-    fn pick_image<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+    /// The session generation a new image draft for `room_id` belongs to:
+    /// the room must be a room of the signed-in account.
+    fn draft_generation(&self, room_id: &str) -> Result<u64, ErrorCode> {
         if !valid_room_id(room_id) {
             return Err(ErrorCode::InvalidArgument);
         }
-        let generation = match self.source() {
-            Source::Locked => return Err(ErrorCode::Locked),
-            Source::Fixtures | Source::SignedOut => return Err(ErrorCode::NotFound),
+        match self.source() {
+            Source::Locked => Err(ErrorCode::Locked),
+            Source::Fixtures | Source::SignedOut => Err(ErrorCode::NotFound),
             Source::Matrix(lease, client) => {
                 if !MatrixViews::has_room(&client, room_id) {
                     return Err(ErrorCode::NotFound);
                 }
-                lease.generation()
+                Ok(lease.generation())
             }
-        };
+        }
+    }
+
+    fn pick_image<'a>(&'a self, room_id: &str) -> Result<LongCall<'a>, ErrorCode> {
+        let generation = self.draft_generation(room_id)?;
         let slot = self.media.begin_pick()?;
         let room_id = room_id.to_owned();
         Ok(Box::new(move || {
@@ -2154,6 +2249,46 @@ impl Core {
         drop(path);
         self.media
             .prepare_draft(generation, &|| self.media_generation(), room_id, original)
+    }
+
+    /// Admits a pasted image (ADR-0042) for a joined room, like a picked
+    /// file: it shares the pick slot and the draft limit, and the strip and
+    /// the preview decode run later, in the guest. The bytes are hostile.
+    fn paste_image<'a>(
+        &'a self,
+        room_id: &str,
+        original: Encoded,
+    ) -> Result<LongCall<'a>, ErrorCode> {
+        let generation = self.draft_generation(room_id)?;
+        let slot = self.media.begin_pick()?;
+        let room_id = room_id.to_owned();
+        Ok(Box::new(move || {
+            let _slot = slot;
+            refused(self.media.prepare_draft(
+                generation,
+                &|| self.media_generation(),
+                &room_id,
+                original,
+            ))
+        }))
+    }
+
+    /// How [`serve`] answers a pasted image and its frame.
+    fn answer_paste(&self, request: &Request, image: ReceivedFrame) -> Answer<'_> {
+        let id = request.id;
+        let Call::PasteImage { room_id, .. } = &request.call else {
+            return Answer::Reply(Reply {
+                id,
+                outcome: Outcome::Error(ErrorCode::InvalidArgument),
+            });
+        };
+        match Encoded::from_frame(image).and_then(|original| self.paste_image(room_id, original)) {
+            Ok(call) => Answer::Later(id, call),
+            Err(code) => Answer::Reply(Reply {
+                id,
+                outcome: Outcome::Error(code),
+            }),
+        }
     }
 
     /// Queues a draft picked for this room. The draft is taken out of the
@@ -2521,13 +2656,23 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
         });
         let mut ready = false;
         let end = loop {
-            match receive::<_, Request>(&mut input, &budgets) {
-                Ok(request) => {
+            match receive_request(&mut input, &budgets) {
+                Ok(incoming) => {
                     if !ready {
                         ready = true;
                         lock(&core.hub.notifications).ready = true;
                     }
-                    let written = match core.answer(&request) {
+                    let answer = match incoming {
+                        ToCore::Request(request) => core.answer(&request),
+                        ToCore::Paste(request, image) => core.answer_paste(&request, image),
+                        // The image did not fit the encoded budget; its bytes
+                        // were read past.
+                        ToCore::PasteRefused(request) => Answer::Reply(Reply {
+                            id: request.id,
+                            outcome: Outcome::Error(ErrorCode::LimitExceeded),
+                        }),
+                    };
+                    let written = match answer {
                         Answer::Reply(reply) => {
                             send(&mut *lock(&output), &CoreMessage::Reply(reply))
                         }
@@ -2898,6 +3043,18 @@ mod tests {
                 Call::LoadImage {
                     room_id: "!r:s".into(),
                     event_id: format!("${}", "e".repeat(MAX_EVENT_ID_BYTES)),
+                },
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                Call::LoadRoomPicture {
+                    room_id: "!r:s".into(),
+                },
+                ErrorCode::NotFound,
+            ),
+            (
+                Call::LoadRoomPicture {
+                    room_id: "#alias:s".into(),
                 },
                 ErrorCode::InvalidArgument,
             ),

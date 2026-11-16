@@ -42,7 +42,7 @@ use matrix_sdk::{
         api::{
             Metadata, SupportedVersions,
             client::{authenticated_media, media},
-            path_builder::PathBuilder,
+            path_builder::{PathBuilder, VersionHistory},
         },
         events::{
             AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
@@ -102,6 +102,13 @@ pub const MAX_SHOWN_SIDE: u32 = 2048;
 /// Most `load_image` calls in progress at once (downloading, decrypting or
 /// decoding). Two 20 MiB downloads fill the 40 MiB `EncodedInFlight` budget.
 pub const MAX_LOADS: usize = 2;
+/// Most `load_room_picture` calls in progress at once. Pictures have their
+/// own count, so loading them never takes a `load_image` slot; they share the
+/// one worker slot with every other decode.
+pub const MAX_PICTURE_LOADS: usize = 1;
+/// The thumbnail size asked of the homeserver for a room picture, and the
+/// square a loaded picture is scaled to fit.
+pub const ROOM_PICTURE_SIDE: u32 = persephone_contracts::ROOM_PICTURE_SIDE;
 /// Most `pick_image` calls in progress at once (dialog, read and strip).
 pub const MAX_PICKS: usize = 1;
 /// Most picked images kept as drafts.
@@ -211,6 +218,25 @@ impl Encoded {
 
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Keeps a pasted image's frame (ADR-0042) under the reservation its
+    /// reader made: `rejected` unless it is an `EncodedImage` frame of 1 to
+    /// [`MAX_ENCODED_BYTES`] bytes.
+    pub fn from_frame(frame: ReceivedFrame) -> Result<Self, ErrorCode> {
+        let header = frame.header();
+        if header.kind != FrameKind::EncodedImage
+            || header.length == 0
+            || header.length > MAX_ENCODED_BYTES
+        {
+            return Err(ErrorCode::Rejected);
+        }
+        let (bytes, permit) = frame.into_parts();
+        Ok(Self {
+            limit: bytes.len(),
+            bytes: Zeroizing::new(bytes),
+            _permit: permit,
+        })
     }
 }
 
@@ -690,6 +716,7 @@ pub struct MediaService {
     worker: Arc<dyn ImageWorker>,
     store: Mutex<Store>,
     loads: AtomicUsize,
+    pictures: AtomicUsize,
     picks: AtomicUsize,
     /// One worker run at a time; admitted work waits here, bounded by the
     /// admission limits.
@@ -703,6 +730,7 @@ impl MediaService {
             worker,
             store: Mutex::default(),
             loads: AtomicUsize::new(0),
+            pictures: AtomicUsize::new(0),
             picks: AtomicUsize::new(0),
             worker_slot: Mutex::new(()),
         }
@@ -715,6 +743,11 @@ impl MediaService {
     /// Admits one `load_image`, or `limit_exceeded`.
     pub fn begin_load(&self) -> Result<Slot<'_>, ErrorCode> {
         take_slot(&self.loads, MAX_LOADS)
+    }
+
+    /// Admits one `load_room_picture`, or `limit_exceeded`.
+    pub fn begin_picture(&self) -> Result<Slot<'_>, ErrorCode> {
+        take_slot(&self.pictures, MAX_PICTURE_LOADS)
     }
 
     /// Admits one `pick_image`, or `limit_exceeded` (also while a draft
@@ -750,6 +783,16 @@ impl MediaService {
     /// Orients and scales decoded pixels for showing. Returns them with the
     /// image's oriented size before scaling.
     pub fn shown(&self, decoded: DecodedPixels) -> Result<(Pixels, (u32, u32)), ErrorCode> {
+        self.shown_within(decoded, MAX_SHOWN_SIDE)
+    }
+
+    /// Orients decoded pixels and scales them down to fit `side` square (at
+    /// most [`MAX_SHOWN_SIDE`]).
+    pub fn shown_within(
+        &self,
+        decoded: DecodedPixels,
+        side: u32,
+    ) -> Result<(Pixels, (u32, u32)), ErrorCode> {
         let header = decoded.frame.header();
         let (width, height) = (header.width, header.height);
         let expected = u64::from(width) * u64::from(height) * RGBA_BYTES_PER_PIXEL;
@@ -764,7 +807,7 @@ impl MediaService {
             return Err(ErrorCode::Rejected);
         }
         let oriented = oriented_size(width, height, decoded.orientation);
-        let shown = fit_within(oriented.0, oriented.1, MAX_SHOWN_SIDE);
+        let shown = fit_within(oriented.0, oriented.1, side.clamp(1, MAX_SHOWN_SIDE));
         let bytes = u64::from(shown.0) * u64::from(shown.1) * RGBA_BYTES_PER_PIXEL;
         let permit = self.reserve_pixels(bytes)?;
         let length = usize::try_from(bytes).map_err(|_| ErrorCode::Rejected)?;
@@ -1042,6 +1085,51 @@ pub fn media_url(
     uri: &MxcUri,
     versions: &SupportedVersions,
 ) -> Result<(String, bool), ErrorCode> {
+    #[allow(deprecated)]
+    let legacy = &media::get_content::v3::Request::PATH_BUILDER;
+    endpoint_url(
+        base,
+        uri,
+        versions,
+        &authenticated_media::get_content::v1::Request::PATH_BUILDER,
+        legacy,
+        "",
+    )
+}
+
+/// The URL of a server-made thumbnail of `uri` that fits `side` square,
+/// cropped to fill it and never animated, chosen like [`media_url`]. The
+/// server may answer with another size; the core scales it again.
+pub fn thumbnail_url(
+    base: &str,
+    uri: &MxcUri,
+    versions: &SupportedVersions,
+    side: u32,
+) -> Result<(String, bool), ErrorCode> {
+    let query = format!("width={side}&height={side}&method=crop&animated=false");
+    #[allow(deprecated)]
+    let legacy = &media::get_content_thumbnail::v3::Request::PATH_BUILDER;
+    endpoint_url(
+        base,
+        uri,
+        versions,
+        &authenticated_media::get_content_thumbnail::v1::Request::PATH_BUILDER,
+        legacy,
+        &query,
+    )
+}
+
+/// The authenticated endpoint's URL (`true`: send the access token) when the
+/// server advertises it, else the legacy one's (`false`), else
+/// `unavailable`. A media ID outside the Matrix grammar is `rejected`.
+fn endpoint_url(
+    base: &str,
+    uri: &MxcUri,
+    versions: &SupportedVersions,
+    authenticated: &VersionHistory,
+    legacy: &VersionHistory,
+    query: &str,
+) -> Result<(String, bool), ErrorCode> {
     let (server, media_id) = uri.parts().map_err(|_| ErrorCode::Rejected)?;
     if media_id.is_empty()
         || media_id.len() > MAX_MEDIA_ID_BYTES
@@ -1052,20 +1140,13 @@ pub fn media_url(
         return Err(ErrorCode::Rejected);
     }
     let args: [&dyn Display; 2] = [&server, &media_id];
-    let authenticated = authenticated_media::get_content::v1::Request::PATH_BUILDER;
-    if authenticated.is_supported(versions) {
-        return authenticated
-            .make_endpoint_url(Cow::Borrowed(versions), base, &args, "")
-            .map(|url| (url, true))
-            .map_err(|_| ErrorCode::Unavailable);
-    }
-    #[allow(deprecated)]
-    let legacy = media::get_content::v3::Request::PATH_BUILDER;
-    if legacy.is_supported(versions) {
-        return legacy
-            .make_endpoint_url(Cow::Borrowed(versions), base, &args, "")
-            .map(|url| (url, false))
-            .map_err(|_| ErrorCode::Unavailable);
+    for (builder, with_token) in [(authenticated, true), (legacy, false)] {
+        if builder.is_supported(versions) {
+            return builder
+                .make_endpoint_url(Cow::Borrowed(versions), base, &args, query)
+                .map(|url| (url, with_token))
+                .map_err(|_| ErrorCode::Unavailable);
+        }
     }
     Err(ErrorCode::Unavailable)
 }
@@ -1257,6 +1338,83 @@ pub async fn room_event(
         })
 }
 
+/// An opaque name for a room picture: [`persephone_contracts::PICTURE_ID_BYTES`]
+/// hex characters of a hash of its `mxc` URI. It says nothing about where the
+/// picture is, and changes when the picture does. It is compared only within
+/// one run of the core, so the hash need not be stable across builds.
+pub fn picture_id(uri: &MxcUri) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    uri.as_str().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Downloads the current picture of the joined room `room_id`: the server's
+/// [`ROOM_PICTURE_SIDE`] thumbnail, or, when the server has none or refuses
+/// to make one, the file itself; each at most [`MAX_ENCODED_BYTES`]. Returns
+/// the picture's ID with the encoded bytes. A room without a picture, or one
+/// that is not joined, is `not_found`. A room picture is never encrypted:
+/// `m.room.avatar` names a plain `mxc` URI.
+pub async fn fetch_room_picture(
+    client: &Client,
+    http: &reqwest::Client,
+    room_id: &str,
+    budgets: &ResourceBudgets,
+    current: &(dyn Fn() -> bool + Sync),
+) -> Result<(String, Encoded), ErrorCode> {
+    let room_id = <&RoomId>::try_from(room_id).map_err(|_| ErrorCode::InvalidArgument)?;
+    let room = client
+        .get_room(room_id)
+        .filter(|room| room.state() == RoomState::Joined)
+        .ok_or(ErrorCode::NotFound)?;
+    let uri = room.avatar_url().ok_or(ErrorCode::NotFound)?;
+    let id = picture_id(&uri);
+    let versions = client
+        .supported_versions()
+        .await
+        .map_err(|_| ErrorCode::Unavailable)?;
+    let base = client.homeserver();
+    let (url, authenticated) = thumbnail_url(base.as_str(), &uri, &versions, ROOM_PICTURE_SIDE)?;
+    let encoded =
+        match download_with_token(client, http, &url, authenticated, budgets, current).await {
+            // No thumbnail, or one the server will not make: the file itself.
+            Err(ErrorCode::NotFound | ErrorCode::Rejected) => {
+                let (url, authenticated) = media_url(base.as_str(), &uri, &versions)?;
+                download_with_token(client, http, &url, authenticated, budgets, current).await?
+            }
+            other => other?,
+        };
+    Ok((id, encoded))
+}
+
+/// [`download`] of at most [`MAX_ENCODED_BYTES`], with the session's access
+/// token when `authenticated`.
+async fn download_with_token(
+    client: &Client,
+    http: &reqwest::Client,
+    url: &str,
+    authenticated: bool,
+    budgets: &ResourceBudgets,
+    current: &(dyn Fn() -> bool + Sync),
+) -> Result<Encoded, ErrorCode> {
+    let token = if authenticated {
+        Some(Zeroizing::new(
+            client.access_token().ok_or(ErrorCode::Unavailable)?,
+        ))
+    } else {
+        None
+    };
+    download(
+        http,
+        url,
+        token.as_deref().map(String::as_str),
+        MAX_ENCODED_BYTES,
+        budgets,
+        current,
+    )
+    .await
+}
+
 /// Downloads `source` (at most [`MAX_ENCODED_BYTES`]) and decrypts it when
 /// it is encrypted.
 pub async fn fetch_source(
@@ -1278,23 +1436,8 @@ pub async fn fetch_source(
         .await
         .map_err(|_| ErrorCode::Unavailable)?;
     let (url, authenticated) = media_url(client.homeserver().as_str(), &uri, &versions)?;
-    let token = if authenticated {
-        Some(Zeroizing::new(
-            client.access_token().ok_or(ErrorCode::Unavailable)?,
-        ))
-    } else {
-        None
-    };
-    let mut encoded = download(
-        http,
-        &url,
-        token.as_deref().map(String::as_str),
-        MAX_ENCODED_BYTES,
-        budgets,
-        current,
-    )
-    .await?;
-    drop(token);
+    let mut encoded =
+        download_with_token(client, http, &url, authenticated, budgets, current).await?;
     if let Some(info) = encryption {
         decrypt_in_place(&mut encoded, info)?;
     }

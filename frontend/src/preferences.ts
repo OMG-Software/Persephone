@@ -4,6 +4,7 @@
 
 import type { AccountSettings } from './bridge';
 import type { TimelineEvents } from '../../crates/contracts/generated/contracts';
+import { DEFAULT_THEME } from './themes.ts';
 
 /** The settings an account has until its own have loaded. */
 export const DEFAULT_SETTINGS: AccountSettings = {
@@ -15,6 +16,7 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   sendReadReceipts: false,
   idleLockMinutes: 0,
   notificationNames: true,
+  loadRoomPictures: false,
   // Every kind of room change shows until the account turns one off.
   timelineEvents: {
     joins: true,
@@ -37,7 +39,8 @@ export const DEFAULT_SETTINGS: AccountSettings = {
     serverAccess: true,
     creation: true,
     upgrades: true
-  }
+  },
+  theme: DEFAULT_THEME
 };
 
 /** The idle-lock choices offered, in minutes; 0 never locks (ADR-0025). */

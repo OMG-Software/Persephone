@@ -85,7 +85,7 @@ async fn preferred_uses_advertised_mode_and_does_not_sync_before_cycle() -> Resu
         ("absent", None, SyncMode::Classic),
         ("disabled", Some(false), SyncMode::Classic),
     ] {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         mount_versions(
             &server,
             ResponseTemplate::new(200).set_body_json(capability(native)),
@@ -223,7 +223,7 @@ async fn discovery_errors_never_select_an_engine_or_fall_back() -> Result<()> {
     ];
 
     for (label, response, timeout) in cases {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         mount_versions(&server, response).await;
         let alice = client(&server.uri(), "alice", timeout).await?;
         let bob = client(&server.uri(), "bob", timeout).await?;
@@ -240,8 +240,8 @@ async fn discovery_errors_never_select_an_engine_or_fall_back() -> Result<()> {
 
 #[tokio::test]
 async fn preferred_rejects_clients_with_different_capabilities() -> Result<()> {
-    let alice_server = MockServer::start().await;
-    let bob_server = MockServer::start().await;
+    let alice_server = MockServer::builder().start().await;
+    let bob_server = MockServer::builder().start().await;
     mount_versions(
         &alice_server,
         ResponseTemplate::new(200).set_body_json(capability(Some(true))),

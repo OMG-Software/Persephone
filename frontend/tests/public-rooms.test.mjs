@@ -10,6 +10,7 @@ let vite;
 let render;
 let PublicRooms;
 let Sidebar;
+let createRawSnippet;
 
 before(async () => {
   // A cache of its own: test files run in parallel (see views.test.mjs).
@@ -24,6 +25,7 @@ before(async () => {
   ({ default: PublicRooms } = await vite.ssrLoadModule('/src/PublicRooms.svelte'));
   ({ default: Sidebar } = await vite.ssrLoadModule('/src/Sidebar.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
+  ({ createRawSnippet } = await vite.ssrLoadModule('svelte'));
 });
 
 after(async () => {
@@ -132,7 +134,7 @@ test('GIVEN the directory dialog opens WHEN nothing was browsed THEN it names th
   assert.match(html, /Your homeserver sees the server name and the search text/);
 });
 
-test('GIVEN the room list WHEN an account is signed in THEN Explore public rooms shows below the rooms, and not without an account', () => {
+test('GIVEN the room list WHEN an account is signed in THEN Explore public rooms is a button on the top row, and not without an account', () => {
   const props = {
     rooms: { rooms: [], truncated: false },
     selected: null,
@@ -140,8 +142,45 @@ test('GIVEN the room list WHEN an account is signed in THEN Explore public rooms
     shortcut: 'Ctrl K',
     onselect() {},
     onsearch() {},
-    onsettings() {}
   };
-  assert.match(shown(render(Sidebar, { props: { ...props, onexplore() {} } }).body), /class="link explore-rooms"[^>]*>Explore public rooms<\/button>/);
+  const html = shown(render(Sidebar, { props: { ...props, onexplore() {} } }).body);
+  const row = html.slice(html.indexOf('class="sidebar-actions"'), html.indexOf('class="search-trigger"'));
+  assert.match(row, /aria-label="Explore public rooms"/);
+  assert.doesNotMatch(html.slice(html.indexOf('class="sidebar-scroll"')), /Explore public rooms/, 'not below the rooms');
   assert.doesNotMatch(shown(render(Sidebar, { props }).body), /Explore public rooms/);
+});
+
+test('GIVEN the room list top WHEN it renders THEN the menu is at the left, then a spacer and the actions, then the search below', () => {
+  const html = shown(
+    render(Sidebar, {
+      props: {
+        rooms: { rooms: [], truncated: false },
+        selected: null,
+        userId: null,
+        shortcut: 'Ctrl K',
+        onselect() {},
+        onsearch() {},
+        onnewconversation() {},
+        onnewroom() {},
+        onexplore() {},
+        menu: createRawSnippet(() => ({ render: () => '<button aria-label="Main menu"></button>' }))
+      }
+    }).body
+  );
+  const at = (needle) => {
+    const index = html.indexOf(needle);
+    assert.notEqual(index, -1, needle);
+    return index;
+  };
+  const order = [
+    'class="sidebar-actions"',
+    'aria-label="Main menu"',
+    'class="sidebar-spacer"',
+    'aria-label="New conversation"',
+    'aria-label="New room"',
+    'aria-label="Explore public rooms"',
+    'class="search-trigger"'
+  ].map(at);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));  // Settings and Lock are in the main menu, not in the account footer.
+  assert.doesNotMatch(html.slice(html.indexOf('class="account-footer"')), /<button/);
 });

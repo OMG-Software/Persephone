@@ -20,6 +20,7 @@ use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
 use serde_json::{Value, json};
 use std::{
     fs,
+    net::{SocketAddr, TcpStream},
     path::Path,
     sync::{
         Arc,
@@ -165,37 +166,53 @@ const LATER_STATE: &[&str] = &[
 
 impl wiremock::Respond for SlidingRoom {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
-        sliding_answer(request, self.withheld, json!([text("$live", "live")]))
+        sliding_answer(
+            request,
+            self.withheld,
+            json!([text("$live", "live")]),
+            (1, 1),
+        )
     }
 }
 
-/// Sliding Sync for `ROOM` whose timeline also has `CONTACT` accepting the
-/// invitation once `joined` is set. Like a server, it sends their member
-/// event in the timeline only: the list asks for this account's alone.
+/// Sliding Sync for `ROOM` where `CONTACT` accepts the invitation once
+/// `joined` is set. Like a server, it sends their member event in the
+/// timeline only (the list asks for this account's alone), and only when
+/// `in_timeline`: otherwise the join came while the app was closed or among
+/// more events than the timeline holds, and only the counts change.
 struct SlidingJoin {
     joined: Arc<AtomicBool>,
+    in_timeline: bool,
 }
 
 impl wiremock::Respond for SlidingJoin {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
         let mut timeline = vec![text("$live", "live")];
-        if self.joined.load(Ordering::SeqCst) {
+        let joined = self.joined.load(Ordering::SeqCst);
+        if joined && self.in_timeline {
             timeline.push(json!({
                 "type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$bobjoin",
                 "origin_server_ts":12,"content":{"membership":"join"},
                 "unsigned":{"prev_content":{"membership":"invite"}}
             }));
         }
-        sliding_answer(request, &[], Value::Array(timeline))
+        let counts = if joined { (2, 0) } else { (1, 1) };
+        // Like a server, it sends state only in the connection's first
+        // answer and when it changes: later rounds carry no member event.
+        let later = request.url.query_pairs().any(|(key, _)| key == "pos");
+        let withheld: &[&str] = if later { &["m.room.member"] } else { &[] };
+        sliding_answer(request, withheld, Value::Array(timeline), counts)
     }
 }
 
-/// The Sliding Sync answer for `ROOM` with `timeline`: only the state the
-/// request's list asks for, less the `withheld` event types.
+/// The Sliding Sync answer for `ROOM` with `timeline` and the homeserver's
+/// joined and invited `counts`: only the state the request's list asks for,
+/// less the `withheld` event types.
 fn sliding_answer(
     request: &wiremock::Request,
     withheld: &[&str],
     timeline: Value,
+    (joined, invited): (u32, u32),
 ) -> ResponseTemplate {
     let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
     let wanted = body["lists"]["rooms"]["required_state"]
@@ -216,7 +233,7 @@ fn sliding_answer(
         .collect();
     ResponseTemplate::new(200).set_body_json(json!({
         "pos":"sliding-pos","lists":{"rooms":{"count":1}},
-        "rooms":{ROOM:{"initial":true,"joined_count":1,"invited_count":0,"required_state":state,"timeline":timeline,"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
+        "rooms":{ROOM:{"initial":true,"joined_count":joined,"invited_count":invited,"required_state":state,"timeline":timeline,"num_live":1,"prev_batch":"history","notification_count":0,"highlight_count":0}},
         "extensions":{"e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},"to_device":{"events":[],"next_batch":"to-device-pos"}}
     }))
 }
@@ -452,7 +469,10 @@ impl Homeserver {
     fn start(login: (u16, Value), sliding: bool, versions_ok: bool) -> Self {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let server = runtime.block_on(async {
-            let server = MockServer::start().await;
+            // Its own listener, closed when the test ends. `MockServer::start`
+            // lends a pooled server, and its address, to the next test, so a
+            // core a test leaves running would sync against that test's mocks.
+            let server = MockServer::builder().start().await;
             // A Matrix v1.19 homeserver; Sliding Sync is an unstable feature.
             let versions = if sliding {
                 json!({"versions":["v1.19"],"unstable_features":{"org.matrix.simplified_msc3575":true}})
@@ -944,6 +964,10 @@ impl Homeserver {
         self.server.uri()
     }
 
+    fn address(&self) -> SocketAddr {
+        *self.server.address()
+    }
+
     fn requests_to(&self, endpoint: &str) -> usize {
         self.runtime
             .block_on(self.server.received_requests())
@@ -986,10 +1010,11 @@ impl Homeserver {
         );
     }
 
-    /// Sliding Sync whose `ROOM` timeline gets `CONTACT`'s join once the
-    /// returned flag is set, and `/members` answers that first list
-    /// `CONTACT` as invited, then as joined.
-    fn invited_contact_joins(&self) -> Arc<AtomicBool> {
+    /// Sliding Sync where `CONTACT` joins `ROOM` once the returned flag is
+    /// set, with the join in the timeline when `in_timeline` (see
+    /// [`SlidingJoin`]), and `/members` answers that first list `CONTACT` as
+    /// invited, then as joined.
+    fn invited_contact_joins(&self, in_timeline: bool) -> Arc<AtomicBool> {
         let joined = Arc::new(AtomicBool::new(false));
         let own = json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}});
         self.runtime.block_on(async {
@@ -999,6 +1024,7 @@ impl Homeserver {
                 ))
                 .respond_with(SlidingJoin {
                     joined: joined.clone(),
+                    in_timeline,
                 })
                 .with_priority(1)
                 .mount(&self.server)
@@ -1017,6 +1043,42 @@ impl Homeserver {
                 .await;
         });
         joined
+    }
+
+    /// Sliding Sync whose counts still show `CONTACT` as invited, as a
+    /// server's can trail its state, while `/members` already lists them as
+    /// joined.
+    fn counts_trail_members(&self) {
+        let own = json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":"$join","origin_server_ts":2,"content":{"membership":"join"}});
+        self.runtime.block_on(async {
+            Mock::given(method("POST"))
+                .and(path(
+                    "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+                ))
+                .respond_with(SlidingJoin {
+                    joined: Arc::new(AtomicBool::new(false)),
+                    in_timeline: false,
+                })
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/members$"))
+                .respond_with(Members(json!([own, {"type":"m.room.member","state_key":CONTACT,"sender":CONTACT,"event_id":"$bobjoin","origin_server_ts":12,"content":{"membership":"join"}}])))
+                .with_priority(1)
+                .mount(&self.server)
+                .await;
+        });
+    }
+
+    /// Requests for a room's member list.
+    fn members_requests(&self) -> usize {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| request.url.path().ends_with("/members"))
+            .count()
     }
 
     /// Accepts every state event sent to a room.
@@ -1430,6 +1492,32 @@ fn given_native_sliding_sync_then_it_is_used_and_rooms_arrive() {
     assert_eq!(state, StoreState::RestartRequired);
 }
 
+/// GIVEN a core that a test left signed in and syncing, never locked WHEN that
+/// test's homeserver is dropped THEN its address refuses connections and the
+/// core's next round fails: what the core sends reaches no later test's
+/// homeserver. With a pooled mock server, the next test that took it received
+/// the rounds, and the Sliding Sync test counted them as classic fallback.
+#[test]
+fn given_a_core_left_syncing_when_its_homeserver_is_dropped_then_its_rounds_reach_nothing() {
+    let homeserver = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let left = signed_in_core(&homeserver, dir.path());
+    // Stopped only when this test ends, as a test that never locks leaves it.
+    let _locked = LockOnDrop(&left);
+    wait_for("a classic sync", || {
+        homeserver.requests_to("/_matrix/client/v3/sync") > 0
+    });
+    let address = homeserver.address();
+    drop(homeserver);
+    wait_for("the address to refuse connections", || {
+        TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+    });
+    wait_for("a failed round", || {
+        left.session().account_status().error == Some(SignInError::SyncFailed)
+    });
+}
+
 /// GIVEN `ROOM`'s state from Sliding Sync (`sliding`) or classic sync WHEN
 /// its settings and members are read THEN they show the room's own levels,
 /// join rule, history setting and topic, not the defaults a client assumes
@@ -1559,6 +1647,24 @@ fn given_lazy_loaded_members_then_a_page_lists_the_display_names_it_shows() {
 /// joined, not still invited.
 #[test]
 fn given_sliding_sync_when_an_invited_member_joins_then_the_list_shows_them_joined() {
+    invited_member_joins(true);
+}
+
+/// GIVEN Sliding Sync and a member list that shows `CONTACT` as invited WHEN
+/// `CONTACT` joins but their member event never reaches the timeline, as
+/// when the app was closed, and only the homeserver's member counts change
+/// THEN the member list shows them as joined, not still invited.
+#[test]
+fn given_sliding_sync_when_a_join_is_missed_then_the_counts_refresh_the_list() {
+    invited_member_joins(false);
+}
+
+/// GIVEN Sliding Sync counts that still show `CONTACT` as invited while
+/// `/members` lists them as joined WHEN the members and readers are listed
+/// again and again THEN the list shows them joined and is not asked for
+/// again while the counts stay the same.
+#[test]
+fn given_counts_that_trail_the_member_list_then_it_is_not_asked_for_again() {
     let server = Homeserver::start(
         (
             200,
@@ -1568,7 +1674,51 @@ fn given_sliding_sync_when_an_invited_member_joins_then_the_list_shows_them_join
         true,
     );
     server.settings_endpoints();
-    let joined = server.invited_contact_joins();
+    server.counts_trail_members();
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    let _locked = LockOnDrop(&core);
+    sign_in_to_room(&core, &server);
+    let contact = || {
+        value::<RoomMembers>(call(
+            &core,
+            Call::RoomMembers {
+                room_id: ROOM.into(),
+                filter: String::new(),
+            },
+        ))
+        .members
+        .into_iter()
+        .find(|member| member.user_id == CONTACT)
+        .map(|member| member.membership)
+    };
+    assert_eq!(contact(), Some(Membership::Join));
+    let asked = server.members_requests();
+    for _ in 0..3 {
+        assert_eq!(contact(), Some(Membership::Join));
+        let _ = call(
+            &core,
+            Call::RoomReaders {
+                room_id: ROOM.into(),
+            },
+        );
+    }
+    assert_eq!(server.members_requests(), asked);
+}
+
+/// `CONTACT` is listed as invited, joins (`in_timeline` as in
+/// [`SlidingJoin`]), and is then listed as joined.
+fn invited_member_joins(in_timeline: bool) {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.settings_endpoints();
+    let joined = server.invited_contact_joins(in_timeline);
     let dir = TempDir::new().unwrap();
     let core = make_core(dir.path(), Fixed::new(Ok(())));
     let _locked = LockOnDrop(&core);
@@ -3517,6 +3667,228 @@ fn given_image_events_then_load_image_fetches_decrypts_and_decodes_them() {
     assert_eq!(load("$plain"), Outcome::Error(ErrorCode::Locked));
 }
 
+/// Classic sync with one joined room per room-picture case: `!pic` has a
+/// picture with a thumbnail, `!nothumb` one without, `!huge` one larger than
+/// the cap, `!garbage` one that is not an image, and `!none` no picture.
+#[cfg(windows)]
+struct PictureRooms;
+
+#[cfg(windows)]
+const PICTURE_ROOMS: [(&str, Option<&str>); 5] = [
+    ("!pic:synthetic.test", Some("mxc://synthetic.test/avatar")),
+    (
+        "!nothumb:synthetic.test",
+        Some("mxc://synthetic.test/nothumb"),
+    ),
+    ("!huge:synthetic.test", Some("mxc://synthetic.test/huge")),
+    (
+        "!garbage:synthetic.test",
+        Some("mxc://synthetic.test/garbage"),
+    ),
+    ("!none:synthetic.test", None),
+];
+
+#[cfg(windows)]
+impl wiremock::Respond for PictureRooms {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        let mut rooms = json!({});
+        for (index, (room, picture)) in PICTURE_ROOMS.iter().enumerate() {
+            let mut state = vec![
+                json!({"type":"m.room.create","state_key":"","sender":USER,"event_id":format!("$c{index}"),"origin_server_ts":1,"content":{"room_version":"11"}}),
+                json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":format!("$m{index}"),"origin_server_ts":2,"content":{"membership":"join"}}),
+            ];
+            if let Some(url) = picture {
+                state.push(json!({"type":"m.room.avatar","state_key":"","sender":USER,"event_id":format!("$a{index}"),"origin_server_ts":3,"content":{"url":url}}));
+            }
+            rooms[*room] = json!({"state":{"events":state},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
+        }
+        ResponseTemplate::new(200).set_body_json(json!({
+            "next_batch":"pictures",
+            "account_data":{"events":[]},
+            "rooms":{"join":rooms},
+            "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
+        }))
+    }
+}
+
+/// GIVEN joined rooms with and without pictures WHEN the room list is read
+/// and the page loads each picture THEN the list names each picture by an
+/// opaque ID and never by URL; a picture loads from the authenticated
+/// thumbnail endpoint (96 square, cropped, not animated) with the access
+/// token, or from the file when the server has no thumbnail, and is decoded
+/// in the contained worker; a picture over the cap, one that is not an image,
+/// a room without a picture and a room that is not joined are refused; and a
+/// lock refuses the call.
+#[cfg(windows)]
+#[test]
+fn given_room_pictures_then_load_room_picture_fetches_thumbnails_and_refuses_the_rest() {
+    use persephone_contracts::RoomPicture;
+
+    let server = Homeserver::signed_in();
+    let oversize = vec![0u8; 20 * 1024 * 1024 + 1];
+    server.runtime.block_on(async {
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v3/sync"))
+            .respond_with(PictureRooms)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        for (endpoint, status, body) in [
+            ("thumbnail/synthetic.test/avatar", 200, JPEG.to_vec()),
+            ("thumbnail/synthetic.test/nothumb", 404, Vec::new()),
+            ("download/synthetic.test/nothumb", 200, JPEG.to_vec()),
+            ("thumbnail/synthetic.test/huge", 200, oversize.clone()),
+            ("download/synthetic.test/huge", 200, oversize),
+            (
+                "thumbnail/synthetic.test/garbage",
+                200,
+                b"not an image".to_vec(),
+            ),
+        ] {
+            let response = if status == 200 {
+                ResponseTemplate::new(200)
+                    .set_body_raw(body, "image/jpeg")
+                    .insert_header("Content-Disposition", "inline; filename=\"picture\"")
+            } else {
+                ResponseTemplate::new(status)
+                    .set_body_json(json!({"errcode":"M_NOT_FOUND","error":"no thumbnail"}))
+            };
+            Mock::given(method("GET"))
+                .and(path(format!("/_matrix/client/v1/media/{endpoint}")))
+                .respond_with(response)
+                .mount(&server.server)
+                .await;
+        }
+    });
+    let dir = TempDir::new().unwrap();
+    let core = core_with_worker(dir.path());
+    sign_in(&core, &server.uri());
+    // The SDK can list a room before it applies the state that came with
+    // it, so wait for every room's picture, not only for the rooms.
+    wait_for("the picture rooms and their pictures", || {
+        let list: RoomList = value(call(&core, Call::RoomList {}));
+        PICTURE_ROOMS.iter().all(|(room, picture)| {
+            list.rooms.iter().any(|summary| {
+                summary.room_id == *room && summary.picture_id.is_some() == picture.is_some()
+            })
+        })
+    });
+    let list: RoomList = value(call(&core, Call::RoomList {}));
+    let picture_of = |room: &str| {
+        list.rooms
+            .iter()
+            .find(|summary| summary.room_id == room)
+            .unwrap()
+            .picture_id
+            .clone()
+    };
+    let shown = picture_of("!pic:synthetic.test")
+        .unwrap_or_else(|| panic!("the room has a picture: {list:?}"));
+    assert!(
+        shown.len() == persephone_contracts::PICTURE_ID_BYTES
+            && shown
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{shown}"
+    );
+    assert_ne!(Some(shown.clone()), picture_of("!nothumb:synthetic.test"));
+    assert_eq!(picture_of("!none:synthetic.test"), None);
+    let listed = serde_json::to_string(&list).unwrap();
+    assert!(
+        !listed.contains("mxc:") && !listed.contains("avatar"),
+        "{listed}"
+    );
+
+    let load = |room: &str| {
+        call(
+            &core,
+            Call::LoadRoomPicture {
+                room_id: room.into(),
+            },
+        )
+    };
+    let picture: RoomPicture = value(load("!pic:synthetic.test"));
+    assert_eq!(picture.picture_id, shown);
+    assert_eq!((picture.image.width, picture.image.height), (16, 8));
+    let requests = server
+        .runtime
+        .block_on(server.server.received_requests())
+        .unwrap_or_default();
+    let thumbnail = requests
+        .iter()
+        .find(|request| {
+            request
+                .url
+                .path()
+                .ends_with("/thumbnail/synthetic.test/avatar")
+        })
+        .expect("the thumbnail was fetched");
+    let query: std::collections::HashMap<_, _> = thumbnail.url.query_pairs().collect();
+    for (name, wanted) in [
+        ("width", "96"),
+        ("height", "96"),
+        ("method", "crop"),
+        ("animated", "false"),
+    ] {
+        assert_eq!(query.get(name).map(AsRef::as_ref), Some(wanted), "{name}");
+    }
+    assert_eq!(
+        thumbnail
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+    assert_eq!(
+        server.requests_to("/_matrix/client/v1/media/download/synthetic.test/avatar"),
+        0,
+        "a thumbnail is enough"
+    );
+
+    let fallback: RoomPicture = value(load("!nothumb:synthetic.test"));
+    assert_eq!((fallback.image.width, fallback.image.height), (16, 8));
+    assert_ne!(fallback.picture_id, shown);
+    assert_ne!(fallback.image.handle, picture.image.handle);
+
+    assert_eq!(
+        load("!huge:synthetic.test"),
+        Outcome::Error(ErrorCode::Rejected)
+    );
+    assert_eq!(
+        load("!garbage:synthetic.test"),
+        Outcome::Error(ErrorCode::Rejected)
+    );
+    assert_eq!(
+        load("!none:synthetic.test"),
+        Outcome::Error(ErrorCode::NotFound)
+    );
+    assert_eq!(
+        load("!absent:synthetic.test"),
+        Outcome::Error(ErrorCode::NotFound)
+    );
+    assert_eq!(
+        load("#alias:synthetic.test"),
+        Outcome::Error(ErrorCode::InvalidArgument)
+    );
+
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+    assert_eq!(
+        call(
+            &core,
+            Call::ReleaseImage {
+                handle: picture.image.handle
+            }
+        ),
+        Outcome::Error(ErrorCode::NotFound),
+        "a lock drops every picture"
+    );
+    assert_eq!(
+        load("!pic:synthetic.test"),
+        Outcome::Error(ErrorCode::Locked)
+    );
+}
+
 /// Picks one fixed file instead of showing the dialog.
 #[cfg(windows)]
 struct PickFile(std::path::PathBuf);
@@ -3731,6 +4103,117 @@ fn given_a_picked_image_then_send_image_uploads_only_the_stripped_copy() {
     );
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// Pastes `bytes` into `room_id` over one UI connection, as the UI process
+/// sends it (ADR-0042), and returns the core's reply.
+#[cfg(windows)]
+fn paste(core: &Core, room_id: &str, bytes: &[u8]) -> Outcome {
+    use persephone_core_protocol::{CoreMessage, receive, send_pasted_image};
+    use std::io::Cursor;
+    let mut wire = Vec::new();
+    let request = Request {
+        id: 1,
+        call: Call::PasteImage {
+            room_id: room_id.into(),
+            length: bytes.len() as u32,
+        },
+    };
+    send_pasted_image(&mut wire, &request, bytes).unwrap();
+    let mut output = Vec::new();
+    assert_eq!(
+        persephone_core::serve(core, Cursor::new(wire), &mut output),
+        persephone_core::ServeEnd::UiClosed
+    );
+    let budgets = persephone_media_protocol::ResourceBudgets::default();
+    let mut reader = Cursor::new(output);
+    std::iter::from_fn(|| receive::<_, CoreMessage>(&mut reader, &budgets).ok())
+        .find_map(|message| match message {
+            CoreMessage::Reply(reply) if reply.id == 1 => Some(reply.outcome),
+            _ => None,
+        })
+        .expect("a reply to the paste")
+}
+
+/// GIVEN a pasted JPEG with a comment and a rotation WHEN it is attached and
+/// sent THEN the draft is the stripped, rotated copy, exactly as for a picked
+/// file, and only that copy is uploaded; bytes that are not an image are
+/// refused and leave no draft behind.
+#[cfg(windows)]
+#[test]
+fn given_a_pasted_image_then_only_its_stripped_copy_is_sent() {
+    let server = Homeserver::signed_in();
+    server.sending_endpoints(200);
+    server.upload_endpoint();
+    let dir = TempDir::new().unwrap();
+    let core = image_core(&server, dir.path(), &dir.path().join("never-picked.jpg"));
+    // Stop the sync loop when the test ends, so it cannot reach the next
+    // test's homeserver.
+    let _locked = LockOnDrop(&core);
+    wait_for("the plain room", || {
+        value::<RoomList>(call(&core, Call::RoomList {}))
+            .rooms
+            .iter()
+            .any(|room| room.room_id == PLAIN)
+    });
+    assert!(
+        matches!(
+            paste(&core, PLAIN, b"not an image at all"),
+            Outcome::Error(_)
+        ),
+        "bytes that are not an image are refused"
+    );
+    let original = jpeg_with_comment();
+    let persephone_contracts::ImagePick::Draft {
+        preview,
+        size,
+        mime,
+    } = value(paste(&core, PLAIN, &original))
+    else {
+        panic!("a draft");
+    };
+    assert_eq!((preview.width, preview.height), (8, 16), "rotated");
+    assert_eq!(mime, persephone_contracts::ImageMime::Jpeg);
+    assert!((size as usize) < original.len(), "stripped");
+    let queued: PendingMessage = value(call(
+        &core,
+        Call::SendImage {
+            room_id: PLAIN.into(),
+            handle: preview.handle,
+        },
+    ));
+    wait_for("the confirmation request", || {
+        pending(&core, PLAIN)[0].state == PendingState::Failed
+    });
+    assert!(
+        server.upload_bodies().is_empty(),
+        "nothing uploaded before consent"
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::AllowUnencrypted {
+                room_id: PLAIN.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    assert_eq!(
+        call(
+            &core,
+            Call::RetryMessage {
+                local_id: queued.local_id
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    wait_for("the send", || {
+        pending(&core, PLAIN)[0].state == PendingState::Sent
+    });
+    let uploads = server.upload_bodies();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0].len(), size as usize);
+    assert!(!uploads[0].windows(6).any(|w| w == b"secret"), "stripped");
 }
 
 /// GIVEN an encrypted room and a device that is not verified WHEN an image

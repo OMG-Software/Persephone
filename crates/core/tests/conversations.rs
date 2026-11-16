@@ -159,7 +159,7 @@ fn start_with_bob(
 ) -> (EncryptionState, ConversationStart) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         member_list(&server, members).await;
         let client = synced(&server, encrypted, members).await;
         match reply {

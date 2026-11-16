@@ -46,7 +46,15 @@ pub struct RoomSummary {
     /// In a direct-message room with one other person, that person's user ID
     /// (untrusted, projected like a name). Otherwise none.
     pub contact: Option<String>,
+    /// Names the room's current picture (`m.room.avatar`) without saying
+    /// where it is: [`PICTURE_ID_BYTES`] lowercase hex characters that change
+    /// when the picture changes. None when the room has no picture. The page
+    /// loads the picture only through `load_room_picture` (ADR-0041).
+    pub picture_id: Option<String>,
 }
+
+/// The length of a [`RoomSummary::picture_id`], in hex characters.
+pub const PICTURE_ID_BYTES: usize = 16;
 
 /// Whether a room's messages are end-to-end encrypted.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -344,6 +352,21 @@ pub struct ImageView {
     pub bands: u32,
     pub band_rows: u32,
 }
+
+/// Reply of `load_room_picture`: the room's picture, decoded in the
+/// contained worker and scaled to fit [`ROOM_PICTURE_SIDE`] square, under an
+/// opaque handle like a loaded image. `picture_id` names the picture that was
+/// loaded, which may differ from the room summary's when the picture changed
+/// meanwhile (ADR-0041).
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RoomPicture {
+    pub picture_id: String,
+    pub image: ImageView,
+}
+
+/// The largest side of a loaded room picture, in pixels.
+pub const ROOM_PICTURE_SIDE: u32 = 96;
 
 /// Reply of `pick_image`.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -1176,8 +1199,45 @@ pub struct AccountSettings {
     /// only that a message arrived, and no name leaves the core. On by
     /// default (ADR-0022).
     pub notification_names: bool,
+    /// Load room pictures as soon as rooms are listed; otherwise each is
+    /// loaded only when the user asks. Loading tells the homeserver, and the
+    /// server that holds the picture, that this account looked at it. Off by
+    /// default (ADR-0041).
+    pub load_room_pictures: bool,
     /// Which kinds of room changes the timeline shows. All on by default.
     pub timeline_events: TimelineEvents,
+    /// The colours of the interface. Grey and orange by default.
+    pub theme: Theme,
+}
+
+/// The colour themes of the interface, all dark. Only the page reads the
+/// choice: it changes no other behaviour. Read only from one of the three
+/// names (see the `Deserialize` impl).
+#[derive(Clone, Copy, Debug, Default, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// Dark grey surfaces with an orange accent.
+    #[default]
+    Orange,
+    /// Nearly black surfaces with a red accent.
+    Red,
+    /// Nearly black surfaces with a blue accent.
+    Blue,
+}
+
+/// A theme is a string: one of the three names. A derived enum would also
+/// accept the object form, such as `{"red":null}`, from `serde_json`.
+impl<'de> Deserialize<'de> for Theme {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        const NAMES: &[&str] = &["orange", "red", "blue"];
+        let name = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        match name.as_ref() {
+            "orange" => Ok(Self::Orange),
+            "red" => Ok(Self::Red),
+            "blue" => Ok(Self::Blue),
+            other => Err(serde::de::Error::unknown_variant(other, NAMES)),
+        }
+    }
 }
 
 /// Which kinds of room changes the timeline shows, one switch each. Only
@@ -1271,7 +1331,9 @@ impl Default for AccountSettings {
             send_read_receipts: false,
             idle_lock_minutes: 0,
             notification_names: true,
+            load_room_pictures: false,
             timeline_events: TimelineEvents::default(),
+            theme: Theme::Orange,
         }
     }
 }
@@ -1864,6 +1926,7 @@ pub fn sample_room_summary() -> RoomSummary {
         unread_count: u32::MAX,
         encryption: RoomEncryption::Encrypted,
         contact: Some("@alice:server.invalid".into()),
+        picture_id: Some("0123456789abcdef".into()),
     }
 }
 
@@ -1926,6 +1989,19 @@ pub fn sample_image_view() -> ImageView {
         height: 1536,
         bands: 12,
         band_rows: 128,
+    }
+}
+
+pub fn sample_room_picture() -> RoomPicture {
+    RoomPicture {
+        picture_id: "0123456789abcdef".into(),
+        image: ImageView {
+            handle: "00112233445566778899aabbccddeeff".into(),
+            width: 96,
+            height: 96,
+            bands: 1,
+            band_rows: 96,
+        },
     }
 }
 
@@ -2020,6 +2096,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),
         format!("export {}", TimelineEvents::decl(&config)),
+        format!("export {}", Theme::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
         format!("export {}", RoomActivity::decl(&config)),
         format!("export {}", RoomServer::decl(&config)),
@@ -2047,6 +2124,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", TimelinePage::decl(&config)),
         format!("export {}", ImageMime::decl(&config)),
         format!("export {}", ImageView::decl(&config)),
+        format!("export {}", RoomPicture::decl(&config)),
         format!("export {}", ImagePick::decl(&config)),
     ]
     .join("\n\n")

@@ -24,6 +24,8 @@ struct FakeCore {
     calls: AtomicUsize,
     // The room and user of the last `verify_member` that reached the core.
     verified_member: Mutex<Option<(String, String)>>,
+    // The room and bytes of the last pasted image that reached the core.
+    pasted: Mutex<Option<(String, Vec<u8>)>>,
 }
 
 impl FakeCore {
@@ -32,6 +34,7 @@ impl FakeCore {
             available,
             calls: AtomicUsize::new(0),
             verified_member: Mutex::new(None),
+            pasted: Mutex::new(None),
         })
     }
 }
@@ -144,6 +147,19 @@ impl CoreTransport for FakeCore {
                     "url": "mxc://example.invalid/m"
                 })),
             },
+            Call::LoadRoomPicture { room_id } => match room_id.as_str() {
+                "!pic:example.invalid" => Ok(serde_json::json!({
+                    "pictureId": "0123456789abcdef",
+                    "image": {"handle": HANDLE, "width": 96, "height": 96, "bands": 1, "bandRows": 96}
+                })),
+                "!none:example.invalid" => Err(CoreError::Core(ErrorCode::NotFound)),
+                "!bad:example.invalid" => Err(CoreError::Core(ErrorCode::Rejected)),
+                // A picture that names where it is: outside the contract.
+                _ => Ok(serde_json::json!({
+                    "pictureId": "0123456789abcdef", "url": "mxc://example.invalid/m",
+                    "image": {"handle": HANDLE, "width": 1, "height": 1, "bands": 1, "bandRows": 1}
+                })),
+            },
             // Answered with pixels, through `image_band`; the UI never sends
             // it as an ordinary call.
             Call::ImageBand { .. } => Err(CoreError::BadReply),
@@ -154,6 +170,8 @@ impl CoreTransport for FakeCore {
                     Err(CoreError::Core(ErrorCode::NotFound))
                 }
             }
+            // Only `paste_image`, with its image frame, sends one.
+            Call::PasteImage { .. } => Err(CoreError::BadReply),
             Call::PickImage { room_id } => match room_id.as_str() {
                 "!r:example.invalid" => Ok(serde_json::json!({
                     "kind": "draft", "size": 48_213, "mime": "image/png",
@@ -385,8 +403,9 @@ impl CoreTransport for FakeCore {
             Call::AccountSettings {} => Ok(serde_json::json!({
                 "enterSends": false, "chatTextPercent": 120, "interfaceTextPercent": 100,
                 "desktopNotifications": true, "sendTyping": false, "sendReadReceipts": false,
-                "idleLockMinutes": 0, "notificationNames": true,
-                "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}
+                "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false,
+                "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+                "theme": "red"
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
@@ -537,6 +556,23 @@ impl CoreTransport for FakeCore {
             rows,
             pixels,
         })
+    }
+
+    fn paste_image(&self, room_id: String, bytes: Vec<u8>) -> Result<serde_json::Value, CoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.available {
+            return Err(CoreError::Unavailable);
+        }
+        let draft = room_id == "!r:example.invalid";
+        *self.pasted.lock().unwrap() = Some((room_id, bytes));
+        if draft {
+            Ok(serde_json::json!({
+                "kind": "draft", "size": 4, "mime": "image/png",
+                "preview": {"handle": HANDLE, "width": 3, "height": 5, "bands": 2, "bandRows": 4}
+            }))
+        } else {
+            Err(CoreError::Core(ErrorCode::NotFound))
+        }
     }
 }
 
@@ -797,9 +833,11 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-identity-changes",
             "allow-accept-identity",
             "allow-load-image",
+            "allow-load-room-picture",
             "allow-image-band",
             "allow-release-image",
             "allow-pick-image",
+            "allow-paste-image",
             "allow-pick-file",
             "allow-save-file",
             "allow-send-image",
@@ -1736,13 +1774,30 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
         invoke("account_settings", serde_json::json!({})).unwrap()["chatTextPercent"],
         120
     );
-    let settings = |enter_sends: bool| {
+    let settings_with = |enter_sends: bool, theme: &str| {
         serde_json::json!({"settings": {"enterSends": enter_sends, "chatTextPercent": 100,
             "interfaceTextPercent": 100, "desktopNotifications": false,
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
-            "notificationNames": true, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true}}})
+            "notificationNames": true, "loadRoomPictures": false, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
+            "theme": theme}})
     };
+    let settings = |enter_sends: bool| settings_with(enter_sends, "orange");
+    assert_eq!(
+        invoke("account_settings", serde_json::json!({})).unwrap()["theme"],
+        "red"
+    );
     assert!(invoke("set_account_settings", settings(true)).is_ok());
+    // GIVEN each known theme WHEN saved THEN it crosses; an unknown theme
+    // or one in another case does not reach the core.
+    for theme in ["red", "blue"] {
+        assert!(invoke("set_account_settings", settings_with(true, theme)).is_ok());
+    }
+    for theme in ["green", "Red", ""] {
+        assert!(
+            invoke("set_account_settings", settings_with(true, theme)).is_err(),
+            "{theme}"
+        );
+    }
     assert_eq!(
         invoke("set_account_settings", settings(false)).unwrap_err(),
         "locked"
@@ -2301,6 +2356,7 @@ fn bad_image_arguments() -> Vec<(&'static str, serde_json::Value)> {
             serde_json::json!({"roomId": "!r:example.invalid", "eventId": "$".repeat(256)}),
         ),
         ("pick_image", serde_json::json!({"roomId": long_id})),
+        ("load_room_picture", serde_json::json!({"roomId": long_id})),
         (
             "send_image",
             serde_json::json!({"roomId": long_id, "handle": HANDLE}),
@@ -2357,6 +2413,22 @@ fn given_image_commands_then_handles_cross_and_replies_are_checked() {
     assert_eq!(load("$bad").unwrap_err(), "rejected");
     assert_eq!(load("$busy").unwrap_err(), "limit_exceeded");
     assert_eq!(load("$odd").unwrap_err(), "core_unavailable");
+
+    let picture = |room: &str| invoke("load_room_picture", serde_json::json!({"roomId": room}));
+    assert_eq!(
+        picture("!pic:example.invalid"),
+        Ok(serde_json::json!({
+            "pictureId": "0123456789abcdef",
+            "image": {"handle": HANDLE, "width": 96, "height": 96, "bands": 1, "bandRows": 96}
+        }))
+    );
+    assert_eq!(picture("!none:example.invalid").unwrap_err(), "not_found");
+    assert_eq!(picture("!bad:example.invalid").unwrap_err(), "rejected");
+    assert_eq!(
+        picture("!url:example.invalid").unwrap_err(),
+        "core_unavailable",
+        "a picture's URL never reaches the page"
+    );
 
     let draft = invoke("pick_image", serde_json::json!({"roomId": room})).unwrap();
     assert_eq!(draft["kind"], "draft");
@@ -2512,6 +2584,10 @@ fn given_image_commands_from_a_remote_origin_then_they_are_denied() {
             serde_json::json!({"roomId": room, "eventId": "$image"}),
         ),
         (
+            "load_room_picture",
+            serde_json::json!({"roomId": "!pic:example.invalid"}),
+        ),
+        (
             "image_band",
             serde_json::json!({"handle": HANDLE, "band": 0}),
         ),
@@ -2536,6 +2612,114 @@ fn given_image_commands_from_a_remote_origin_then_they_are_denied() {
         }
         assert_eq!(core.calls.load(Ordering::SeqCst), calls, "{cmd}");
     }
+}
+
+/// A `paste_image` request as the page sends it: the image as the raw body
+/// and the room in its header.
+fn paste_request(origin: &str, room: Option<&[u8]>, body: InvokeBody) -> InvokeRequest {
+    let mut headers = tauri::http::HeaderMap::new();
+    if let Some(room) = room {
+        headers.insert(
+            persephone_desktop::PASTE_ROOM_HEADER,
+            tauri::http::HeaderValue::from_bytes(room).unwrap(),
+        );
+    }
+    InvokeRequest {
+        cmd: "paste_image".into(),
+        callback: CallbackFn(0),
+        error: CallbackFn(1),
+        url: origin.parse().unwrap(),
+        body,
+        headers,
+        invoke_key: INVOKE_KEY.to_string(),
+    }
+}
+
+/// GIVEN a pasted image WHEN the page sends it as a raw body with its room
+/// THEN exactly those bytes reach the core and the draft comes back, checked
+/// against the contract; the core's codes reach the page as fixed strings.
+#[test]
+fn given_a_pasted_image_then_its_bytes_reach_the_core_and_a_draft_comes_back() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let image = b"\x89PNG\r\n\x1a\n".to_vec();
+    let paste = |room: &[u8]| {
+        get_ipc_response(
+            &window,
+            paste_request(app_origin(), Some(room), InvokeBody::Raw(image.clone())),
+        )
+        .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let draft = paste(b"!r:example.invalid").unwrap();
+    assert_eq!(draft["kind"], "draft");
+    assert_eq!(draft["preview"]["handle"], HANDLE);
+    assert_eq!(
+        core.pasted.lock().unwrap().take(),
+        Some(("!r:example.invalid".to_owned(), image.clone()))
+    );
+    assert_eq!(paste(b"!other:example.invalid").unwrap_err(), "not_found");
+}
+
+/// GIVEN a paste that is not a raw image of 1 byte to the limit with a room
+/// header of at most the room ID limit WHEN sent THEN it is refused as
+/// `invalid_argument` and nothing reaches the core; from a remote origin it
+/// is denied.
+#[test]
+fn given_a_paste_outside_its_limits_then_it_never_reaches_the_core() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    let room: &[u8] = b"!r:example.invalid";
+    let long_room = vec![b'!'; 256];
+    let image = || InvokeBody::Raw(b"\x89PNG".to_vec());
+    let too_long = vec![0; persephone_core_protocol::MAX_PASTED_IMAGE_BYTES as usize + 1];
+    for (case, request) in [
+        (
+            "JSON body",
+            paste_request(
+                app_origin(),
+                Some(room),
+                InvokeBody::Json(serde_json::json!({"roomId": "!r:example.invalid"})),
+            ),
+        ),
+        ("no room", paste_request(app_origin(), None, image())),
+        (
+            "empty room",
+            paste_request(app_origin(), Some(b""), image()),
+        ),
+        (
+            "long room",
+            paste_request(app_origin(), Some(&long_room), image()),
+        ),
+        (
+            "room not visible ASCII",
+            paste_request(app_origin(), Some(b"!r\xe9:example.invalid"), image()),
+        ),
+        (
+            "empty image",
+            paste_request(app_origin(), Some(room), InvokeBody::Raw(Vec::new())),
+        ),
+        (
+            "image over the limit",
+            paste_request(app_origin(), Some(room), InvokeBody::Raw(too_long.clone())),
+        ),
+    ] {
+        assert_eq!(
+            get_ipc_response(&window, request)
+                .map(|reply| reply.deserialize::<serde_json::Value>().unwrap()),
+            Err(serde_json::json!("invalid_argument")),
+            "{case}"
+        );
+    }
+    for origin in ["https://example.org", "http://localhost:1420"] {
+        assert!(
+            get_ipc_response(&window, paste_request(origin, Some(room), image())).is_err(),
+            "from {origin}"
+        );
+    }
+    assert_eq!(core.calls.load(Ordering::SeqCst), 0);
+    assert!(core.pasted.lock().unwrap().is_none());
 }
 
 /// GIVEN an unreachable core WHEN a band is asked for THEN the page gets the

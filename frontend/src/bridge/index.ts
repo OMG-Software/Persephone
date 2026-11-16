@@ -58,6 +58,7 @@ import type {
   RoomSettings,
   SignInError,
   RoomList,
+  RoomPicture,
   SecurityStatus,
   StoreState,
   ThreePid,
@@ -72,7 +73,7 @@ import type {
   PublicRoomPage,
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
-import { parseBand, type Band } from '../image.ts';
+import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
 
 export type {
   AccountChange,
@@ -128,6 +129,7 @@ export type {
   RoomSettings,
   PendingMessage,
   RoomList,
+  RoomPicture,
   SecurityStatus,
   SignInError,
   StoreState,
@@ -450,6 +452,16 @@ export function loadImage(roomId: string, eventId: string): Promise<ImageView> {
 }
 
 /**
+ * Downloads and decodes a joined room's current picture in the core's
+ * contained worker (ADR-0041). The page names the room only; it never learns
+ * where the picture is. Call it when the user asks, or when they turned on
+ * loading room pictures automatically. Release the reply's handle when done.
+ */
+export function loadRoomPicture(roomId: string): Promise<RoomPicture> {
+  return invoke<RoomPicture>('load_room_picture', { roomId });
+}
+
+/**
  * One band of rows of a loaded or picked image. The host answers with raw
  * bytes, never JSON: width and rows as little-endian u32, then the RGBA
  * pixels. Rejects with `bad_image` when the answer is not exactly that.
@@ -470,6 +482,25 @@ export function releaseImage(handle: string): Promise<void> {
  */
 export function pickImage(roomId: string): Promise<ImagePick> {
   return invoke<ImagePick>('pick_image', { roomId });
+}
+
+/**
+ * Attaches a pasted PNG or JPEG image (ADR-0042). Its bytes go to the core as
+ * the raw request body, and the room in a header; the core strips and
+ * decodes them in its contained worker, as for a picked file. The reply is a
+ * draft. Another type, or an empty or oversized image, is `rejected` before
+ * the file is read.
+ */
+export async function pasteImage(roomId: string, image: Blob): Promise<ImagePick> {
+  if (
+    (image.type !== 'image/png' && image.type !== 'image/jpeg') ||
+    image.size === 0 ||
+    image.size > MAX_PASTED_IMAGE_BYTES
+  ) {
+    throw 'rejected';
+  }
+  const bytes = new Uint8Array(await image.arrayBuffer());
+  return invoke<ImagePick>('paste_image', bytes, { headers: { 'persephone-room-id': roomId } });
 }
 
 /**
@@ -698,7 +729,9 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       sendReadReceipts: settings.sendReadReceipts,
       idleLockMinutes: settings.idleLockMinutes,
       notificationNames: settings.notificationNames,
-      timelineEvents: timelineEvents(settings.timelineEvents)
+      loadRoomPictures: settings.loadRoomPictures,
+      timelineEvents: timelineEvents(settings.timelineEvents),
+      theme: settings.theme
     }
   });
 }

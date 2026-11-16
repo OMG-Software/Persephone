@@ -35,30 +35,30 @@ use persephone_contracts::{
     DeviceList, DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom,
     NewSessions, NotificationLevel, NotificationSettings, PendingMessage, ProfileList,
     ProxySetting, PublicRoomPage, RoomActivity, RoomChange, RoomCreation, RoomIdentityChanges,
-    RoomInvite, RoomList, RoomMembers, RoomReaders, RoomServers, RoomSettings, SecurityStatus,
-    StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
+    RoomInvite, RoomList, RoomMembers, RoomPicture, RoomReaders, RoomServers, RoomSettings,
+    SecurityStatus, StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
     COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
     MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
     MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES,
     MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES, MAX_MEMBER_FILTER_BYTES,
-    MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PHONE_NUMBER_BYTES,
-    MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES,
-    MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES,
-    MAX_USERNAME_BYTES, room_change_within_limits,
+    MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PASTED_IMAGE_BYTES,
+    MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES,
+    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES,
+    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use tauri::{
     Manager, Runtime, State, Url, WebviewUrl, WebviewWindowBuilder,
-    ipc::{Channel, Response},
+    ipc::{Channel, InvokeBody, Response},
     webview::{NewWindowResponse, PageLoadEvent},
 };
 
@@ -919,6 +919,20 @@ async fn load_image(
     relay(core.inner(), Call::LoadImage { room_id, event_id }).await
 }
 
+/// Downloads and decodes the current picture of a joined room in the core's
+/// contained worker (ADR-0041). The page names only the room; no URL crosses
+/// this command. Replies with the picture's ID and an image view.
+#[tauri::command]
+async fn load_room_picture(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<RoomPicture, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::LoadRoomPicture { room_id }).await
+}
+
 /// Most `image_band` calls the page may have running at once. This bounds
 /// only the concurrent core `image_band` calls and the bands (each at most
 /// `MAX_BAND_BYTES`, 1 MiB) they hold while they run. A slot is given back
@@ -1013,6 +1027,70 @@ async fn pick_image(core: State<'_, CoreLink>, room_id: String) -> Result<ImageP
         return Err(INVALID_ARGUMENT.to_string());
     }
     relay(core.inner(), Call::PickImage { room_id }).await
+}
+
+/// The header that names the room of a pasted image; the body is the image.
+pub const PASTE_ROOM_HEADER: &str = "persephone-room-id";
+
+/// One pasted image at a time on its way to the core, so a page cannot make
+/// this process hold many copies.
+#[derive(Default)]
+struct PasteInFlight(AtomicBool);
+
+/// The slot in [`PasteInFlight`], given back when dropped.
+struct PasteSlot<'a>(&'a AtomicBool);
+
+impl PasteInFlight {
+    fn take(&self) -> Option<PasteSlot<'_>> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| PasteSlot(&self.0))
+    }
+}
+
+impl Drop for PasteSlot<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Attaches an image the user pasted (ADR-0042). The page sends the image as
+/// the raw request body, from 1 byte to `MAX_PASTED_IMAGE_BYTES`, and the
+/// room ID in the `persephone-room-id` header. The core treats the bytes as
+/// hostile, like a picked file: the guest strips and decodes them. The reply
+/// is a draft, like `pick_image`. A JSON body is refused.
+#[tauri::command]
+async fn paste_image(
+    core: State<'_, CoreLink>,
+    pastes: State<'_, PasteInFlight>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<ImagePick, String> {
+    let room_id = request
+        .headers()
+        .get(PASTE_ROOM_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|room_id| !room_id.is_empty() && room_id.len() <= MAX_ROOM_ID_BYTES)
+        .ok_or_else(|| INVALID_ARGUMENT.to_string())?
+        .to_owned();
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err(INVALID_ARGUMENT.to_string());
+    };
+    if bytes.is_empty() || bytes.len() > MAX_PASTED_IMAGE_BYTES as usize {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    let Some(_slot) = pastes.take() else {
+        return Err(LIMIT_EXCEEDED.to_string());
+    };
+    // Tauri keeps the body until this returns; the copy is bounded by the
+    // limit above and dropped once it is written to the core.
+    let bytes = bytes.clone();
+    let core = core.inner().clone();
+    let value = tauri::async_runtime::spawn_blocking(move || core.paste_image(room_id, bytes))
+        .await
+        .map_err(|_| UNAVAILABLE.to_string())?
+        .map_err(page_error)?;
+    serde_json::from_value(value).map_err(|_| page_error(CoreError::BadReply))
 }
 
 /// Asks the user for a file to send in the core's own dialog and queues it
@@ -1501,6 +1579,7 @@ pub fn configure<R: Runtime>(
         .manage(core)
         .manage(subscriptions)
         .manage(BandsInFlight::default())
+        .manage(PasteInFlight::default())
         .invoke_handler(tauri::generate_handler![
             app_status,
             room_list,
@@ -1564,9 +1643,11 @@ pub fn configure<R: Runtime>(
             identity_changes,
             accept_identity,
             load_image,
+            load_room_picture,
             image_band,
             release_image,
             pick_image,
+            paste_image,
             pick_file,
             save_file,
             send_image,

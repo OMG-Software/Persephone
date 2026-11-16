@@ -153,7 +153,7 @@ struct Setup {
 /// member list fails to load when `old_list` is false) and the `m.direct`
 /// saves expected `saves` times.
 async fn synced(old: &[Value], old_list: bool, saves: u64) -> Setup {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let dm = vec![member(ALICE, "join"), member(BOB, "join")];
     member_list(&server, "old", OLD, old_list.then_some(old)).await;
     member_list(&server, "dm", DM, Some(&dm)).await;

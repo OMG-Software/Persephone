@@ -138,17 +138,68 @@ travel in row bands instead:
    text. A retry can upload the file again; Persephone does not promise to
    delete an uploaded object.
 
+## Pasting an image
+
+[ADR-0042](../adr/0042-accept-a-pasted-image-from-the-page-as-hostile-bytes.md)
+adds a second way to make a draft. It replaces steps 1 and 2 above; steps 3
+to 7 are the same.
+
+1. The user pastes into the message box. The page attaches an image only when
+   the paste holds one PNG or JPEG file and no plain text; a paste with plain
+   text stays text. The page refuses an empty file, a file over 20 MiB and
+   other types before it reads the file.
+2. The page sends `paste_image` with the bytes as the raw request body and
+   the room ID in the `persephone-room-id` header. The UI process refuses
+   anything else, relays one paste at a time, and writes the request and one
+   `EncodedImage` frame of the declared length together.
+3. The core checks the image frame's header against the request before it
+   reserves the budget and allocates the body, and then applies the checks of
+   a pick. A frame that does not match ends the connection; a full budget
+   replies `limit_exceeded`.
+
+## Room pictures
+
+Recorded 15 November 2026 ([ADR-0041](../adr/0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md),
+proposed).
+
+1. The room list gives each room a `pictureId`: 16 hex characters of a hash of
+   the current `m.room.avatar` URI (or the Sliding Sync `avatar` field), or
+   none. It names the picture only; the page never receives the URI. Any sync
+   that touches a room refreshes the list, so a changed picture gets a new ID.
+2. The page sends `load_room_picture` with the room ID only, when the user
+   asks, or for each listed room when the account's `loadRoomPictures`
+   setting is on (off by default). The core checks the session and that the
+   room is joined.
+3. The core asks for the server's thumbnail of the picture: 96 × 96, cropped,
+   `animated=false`, through the authenticated media API with the access
+   token, or the legacy one without it. A 404 or another refusal (4xx) falls
+   back to the file itself. Both downloads use the 20 MiB cap, checked before
+   allocation, and the lock checks of the image download. A room picture is
+   never encrypted.
+4. The contained worker decodes it (PNG or JPEG only). The core scales it to
+   fit 96 × 96 and keeps it under an opaque handle in `RetainedPixels`. The
+   reply holds the picture ID it loaded and the image view.
+5. The page reads the bands, keeps the pixels and releases the handle. It
+   keeps at most 200 pictures, loads one at a time, and drops a room's
+   picture when its ID changes or the room leaves the list. A lock or sign-out
+   drops them all.
+
+Admission: at most one `load_room_picture` runs at a time, counted apart from
+`load_image`, so pictures never take an image's slot. Both share the one
+worker slot.
+
 ## Limits
 
 | Item | Limit |
 | --- | --- |
-| Encoded file, download or selection | 20 MiB, checked before allocation |
+| Encoded file, download, selection or paste | 20 MiB. The core checks it before it allocates. For a paste, the UI process checks it only after wry has read the whole request body |
 | Image or file sent | 20 MiB after stripping; the SDK's copies of one send (input, upload buffer, request clone, HTTP body) are reserved in a 100 MiB `OutgoingSend` budget ([ADR-0031](../adr/0031-reserve-the-sdks-copies-of-a-send-in-a-budget-of-their-own.md)) |
 | Decoded image | 8192 per side, 16 megapixels, 64 MiB RGBA |
 | Displayed image | Scaled to fit 2048 × 2048 |
 | Retained pixels | 64 MiB, least recently used evicted |
 | Band | At most 1 MiB of RGBA |
-| Concurrent work | 1 decode, 2 transfers, 1 image in the outbox |
+| Room picture | Thumbnail of 96 × 96 asked for; shown scaled to fit 96 × 96 |
+| Concurrent work | 1 decode, 2 transfers, 1 room picture, 1 image in the outbox |
 
 ## Implementation notes
 
@@ -171,8 +222,9 @@ Recorded 24 October 2026 from the implementation on `p5/image-messaging`.
   `/_matrix/client/v1/media/download` endpoint when the server versions
   support it, as the SDK does, and otherwise the legacy
   `/_matrix/media/v3/download` endpoint without the token.
-* `load_image` and `pick_image` run outside the serving loop and reply later.
-  At most two loads and one pick run at a time, and they share one worker.
+* `load_image`, `pick_image` and `paste_image` run outside the serving loop
+  and reply later. At most two loads and one pick or paste run at a time, and
+  they share one worker.
 
 Known limits of this implementation:
 
@@ -186,6 +238,15 @@ Known limits of this implementation:
 * Decoded pixel frames and the SDK's copy of an upload are not zeroed when they
   are dropped.
 * An open file dialog keeps the core from ending until the dialog closes.
+* The UI process reads a pasted image's whole request body before
+  `paste_image` checks its length or takes the one-paste slot, so concurrent
+  requests from a compromised page each allocate their body first. This is
+  not specific to paste. wry 0.57.0 reads the body of every IPC request into
+  memory without a limit, before Tauri looks up the command or checks its
+  permission: `prepare_request` in `src/webview2/mod.rs` on Windows, the
+  URL scheme handler on macOS, and `web_context.rs` with the `linux-body`
+  feature on Linux. ADR-0004 accepts this for the keyless UI process and
+  rejects a patched wry (ADR-0042).
 * The UI process limits concurrent `image_band` calls to the core (four), but
   it does not count band responses that wait for delivery to the web view. A
   page that asks for bands faster than it reads them can make the UI process

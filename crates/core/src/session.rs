@@ -2803,7 +2803,7 @@ mod tests {
             }
         }
         let server_runtime = tokio::runtime::Runtime::new().unwrap();
-        let server = server_runtime.block_on(MockServer::start());
+        let server = server_runtime.block_on(MockServer::builder().start());
         let responder = SyncResponse {
             fail: Arc::new(AtomicBool::new(false)),
             requests: Arc::new(AtomicUsize::new(0)),

@@ -70,7 +70,7 @@ mod tests {
     };
 
     async fn server(response: ResponseTemplate) -> MockServer {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(method("GET"))
             .and(path("/_matrix/client/versions"))
             .respond_with(response)

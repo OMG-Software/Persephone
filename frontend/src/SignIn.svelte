@@ -10,7 +10,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { AccountStatus } from '../../crates/contracts/generated/contracts';
-  import markUrl from './assets/mark.svg';
+  import BrandMark from './BrandMark.svelte';
   import ServerPicker from './ServerPicker.svelte';
   import ProxySettings from './ProxySettings.svelte';
   import {
@@ -99,7 +99,7 @@
 
 <section class="auth-card sign-in" aria-labelledby="sign-in-heading">
   <div class="auth-brand">
-    <img src={markUrl} alt="" width="32" height="32" />
+    <BrandMark />
     Persephone
   </div>
   <h2 id="sign-in-heading">{registering ? 'Create an account' : 'Sign in'}</h2>
