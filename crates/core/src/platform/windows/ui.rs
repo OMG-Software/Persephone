@@ -10,7 +10,7 @@
 //! UI's children, so they are in the Job), and ends the whole tree when a
 //! failed window is replaced.
 
-use crate::ui_host::{StartError, StartedUi, UiHost, UiTree, ui_command, ui_exe};
+use crate::ui_host::{ProcessIds, StartError, StartedUi, UiHost, UiTree, ui_command, ui_exe};
 use std::{
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
@@ -81,7 +81,7 @@ impl UiTree for UiJob {
         terminate(&self.0, timeout)
     }
 
-    fn process_ids(&self) -> io::Result<Vec<u32>> {
+    fn process_ids(&self) -> io::Result<ProcessIds> {
         process_ids(&self.0)
     }
 }
@@ -152,18 +152,24 @@ const MAX_PROCESS_IDS: usize = 256;
 /// The documented `JOBOBJECT_BASIC_PROCESS_ID_LIST` with room for
 /// [`MAX_PROCESS_IDS`] entries.
 #[repr(C)]
-struct ProcessIdList {
+struct ProcessIdList<const N: usize> {
     assigned: u32,
     listed: u32,
-    ids: [usize; MAX_PROCESS_IDS],
+    ids: [usize; N],
 }
 
-/// The IDs of the processes running in the Job, at most [`MAX_PROCESS_IDS`].
-pub fn process_ids(job: &OwnedHandle) -> io::Result<Vec<u32>> {
-    let mut list = ProcessIdList {
+/// The IDs of the processes running in the Job, at most [`MAX_PROCESS_IDS`],
+/// and whether that is all of them.
+pub fn process_ids(job: &OwnedHandle) -> io::Result<ProcessIds> {
+    list_ids::<MAX_PROCESS_IDS>(job)
+}
+
+/// [`process_ids`] with room for `N` IDs.
+fn list_ids<const N: usize>(job: &OwnedHandle) -> io::Result<ProcessIds> {
+    let mut list = ProcessIdList::<N> {
         assigned: 0,
         listed: 0,
-        ids: [0; MAX_PROCESS_IDS],
+        ids: [0; N],
     };
     // SAFETY: `list` has the documented layout with room for its length and
     // lives for the call; the returned length is not needed.
@@ -172,7 +178,7 @@ pub fn process_ids(job: &OwnedHandle) -> io::Result<Vec<u32>> {
             job.as_raw_handle() as HANDLE,
             JobObjectBasicProcessIdList,
             (&raw mut list).cast(),
-            size_of::<ProcessIdList>() as u32,
+            u32::try_from(size_of::<ProcessIdList<N>>()).map_err(io::Error::other)?,
             null_mut(),
         )
     };
@@ -180,11 +186,14 @@ pub fn process_ids(job: &OwnedHandle) -> io::Result<Vec<u32>> {
     if ok == 0 && io::Error::last_os_error().raw_os_error() != Some(ERROR_MORE_DATA as i32) {
         return Err(io::Error::last_os_error());
     }
-    let count = (list.listed as usize).min(MAX_PROCESS_IDS);
-    Ok(list.ids[..count]
+    let count = (list.listed as usize).min(N);
+    let ids: Vec<u32> = list.ids[..count]
         .iter()
         .filter_map(|id| u32::try_from(*id).ok())
-        .collect())
+        .collect();
+    // More assigned than listed: the buffer was too small (ERROR_MORE_DATA).
+    let complete = ok != 0 && list.assigned as usize <= count && ids.len() == count;
+    Ok(ProcessIds { ids, complete })
 }
 
 /// Ends every process in the Job, then waits up to `timeout` for them to
@@ -247,10 +256,43 @@ mod tests {
             .spawn()
             .expect("start child");
         let job = contain(&child).expect("contain child");
-        let ids = process_ids(&job).expect("list ids");
-        assert!(ids.contains(&child.id()), "child missing from {ids:?}");
+        let listed = process_ids(&job).expect("list ids");
+        assert!(listed.complete);
+        assert!(
+            listed.ids.contains(&child.id()),
+            "child missing from {:?}",
+            listed.ids
+        );
         assert!(terminate(&job, Duration::from_secs(10)));
-        assert!(process_ids(&job).expect("list ids").is_empty());
+        let empty = process_ids(&job).expect("list ids");
+        assert!(empty.ids.is_empty() && empty.complete);
+        let _ = child.wait();
+    }
+
+    /// GIVEN a Job holding cmd and its ping child
+    /// WHEN the IDs are listed with room for one
+    /// THEN one ID is listed and the list says it is not complete; with room
+    /// for all it is complete (the control)
+    #[test]
+    fn given_more_processes_than_room_then_the_list_is_incomplete() {
+        let mut child = Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("start child");
+        let job = contain(&child).expect("contain child");
+        // Wait until cmd has started ping inside the Job.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while active_processes(&job).expect("count") < 2 {
+            assert!(std::time::Instant::now() < deadline, "ping did not start");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let short = list_ids::<1>(&job).expect("list ids");
+        assert_eq!(short.ids.len(), 1);
+        assert!(!short.complete);
+        assert!(process_ids(&job).expect("list ids").complete);
+        assert!(terminate(&job, Duration::from_secs(10)));
         let _ = child.wait();
     }
 }

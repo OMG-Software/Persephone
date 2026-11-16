@@ -68,8 +68,9 @@ user informed.
   clears them. Without an open profile, reviews last only for the core
   process. Signing out deletes the profile store.
 * A scan is reported as incomplete when the UI Job's process list cannot be
-  read, a target process that has not exited cannot be opened or listed, a
-  process has more than 8192 modules, or a module path does not fit. Settings
+  read or does not fit, a target process that has not exited cannot be opened
+  or listed, a process has more than 8192 modules, or a module path cannot be
+  read or does not fit. Settings
   then says that some processes could not be checked, never "No other code is
   loaded".
 * Settings > Security lists the modules as inert text. The main window shows a

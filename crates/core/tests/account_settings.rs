@@ -1282,3 +1282,75 @@ fn given_an_unusable_backup_then_a_new_one_starts_only_after_a_yes() {
     assert_eq!(state.backup.as_ref().unwrap()["version"], "1");
     assert_eq!(answers.new_backups_asked.load(Ordering::SeqCst), 2);
 }
+
+/// GIVEN a signed-in profile that reviewed one of two modules
+/// WHEN it locks THEN the module shows as new again (the closed profile's
+/// reviews leave memory) and the store needs a restart, so no other profile
+/// can open in this core process
+/// WHEN the core starts again on the same profile THEN the review comes back
+/// from the profile's encrypted store, and only that one
+#[test]
+fn given_a_lock_then_module_reviews_leave_memory_and_return_from_the_store() {
+    use persephone_contracts::{
+        ModuleProcess, ModuleSignature, StoreState, ThirdPartyModules, UnixMillis,
+    };
+    use persephone_core::modules::Found;
+
+    let report =
+        |core: &Core| -> ThirdPartyModules { value(call(core, Call::ThirdPartyModules {})) };
+    let reviewed = |report: &ThirdPartyModules, name: &str| {
+        report
+            .modules
+            .iter()
+            .find(|module| module.file_name == name)
+            .map(|module| module.acknowledged)
+    };
+    let scan = |core: &Core| {
+        let found = |name: &str| Found {
+            path: format!(r"C:\Tools\{name}").into(),
+            process: ModuleProcess::Core,
+            signature: ModuleSignature::Unsigned,
+            signer: None,
+        };
+        core.update_modules(
+            vec![found("a.dll"), found("b.dll")],
+            false,
+            UnixMillis::saturating(1),
+        );
+    };
+    let server = Homeserver::start(None);
+    let dir = TempDir::new().unwrap();
+    let answers = Answers::new();
+    {
+        let core = signed_in(&server, dir.path(), answers.clone());
+        scan(&core);
+        let first = report(&core);
+        assert_eq!(reviewed(&first, "a.dll"), Some(false));
+        let a = first
+            .modules
+            .iter()
+            .find(|module| module.file_name == "a.dll")
+            .unwrap()
+            .id
+            .clone();
+        let _: ThirdPartyModules = value(call(&core, Call::AcknowledgeModules { ids: vec![a] }));
+        assert_eq!(reviewed(&report(&core), "a.dll"), Some(true));
+
+        let state: StoreState = value(call(&core, Call::LockSession {}));
+        assert_eq!(state, StoreState::RestartRequired);
+        assert_eq!(reviewed(&report(&core), "a.dll"), Some(false), "locked");
+    }
+
+    let core = Core::default()
+        .with_credentials(answers)
+        .with_session(common::open_session(dir.path()));
+    wait_for("restore", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    scan(&core);
+    let restored = report(&core);
+    assert_eq!(reviewed(&restored, "a.dll"), Some(true), "from the store");
+    assert_eq!(reviewed(&restored, "b.dll"), Some(false));
+    let state: StoreState = value(call(&core, Call::LockSession {}));
+    assert_eq!(state, StoreState::RestartRequired);
+}

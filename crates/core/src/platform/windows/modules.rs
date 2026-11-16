@@ -317,7 +317,9 @@ fn list_modules(pid: u32) -> Listed {
             K32GetModuleFileNameExW(handle, module, buffer.as_mut_ptr(), PATH_CHARS as u32)
         } as usize;
         if length == 0 {
-            // The module was unloaded after the list was read.
+            // Unloaded after the list was read, or not readable: the two
+            // cannot be told apart, so the result is not complete.
+            complete = false;
             continue;
         }
         if length >= PATH_CHARS {

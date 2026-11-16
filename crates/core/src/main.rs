@@ -454,10 +454,12 @@ fn scan_modules(
                 process: ModuleProcess::Ui,
             },
         ];
-        // When the tree cannot list its processes, the core and the UI are
-        // still scanned, and the report says it is incomplete.
+        // When the tree cannot list all its processes, the core, the UI and
+        // the listed ones are still scanned, and the report says it is
+        // incomplete.
         let web_views = tree.process_ids();
-        for &pid in web_views.as_deref().unwrap_or_default() {
+        let listed = web_views.as_ref().map_or(&[][..], |list| &list.ids[..]);
+        for &pid in listed {
             if pid != core_pid && pid != ui_pid {
                 targets.push(ScanTarget {
                     pid,
@@ -468,7 +470,7 @@ fn scan_modules(
         let result = scanner.scan(&targets);
         core.update_modules(
             result.modules.into_iter().map(Into::into).collect(),
-            result.incomplete || web_views.is_err(),
+            result.incomplete || !web_views.as_ref().is_ok_and(|list| list.complete),
             persephone_core::views::now_millis(),
         );
         if finished_within(finished, MODULE_SCAN_PERIOD) {

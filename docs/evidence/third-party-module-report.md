@@ -172,6 +172,41 @@ the new field and the UI host refused it. The fixture was fixed and the IPC
 tests rerun. The Linux and macOS fix was not run locally: only CI runs
 those hosts.
 
+Second round, after the review of `1e03d88`:
+
+* A Job process list that did not fit (`ERROR_MORE_DATA`, more than 256
+  processes) now marks the scan incomplete. `UiTree::process_ids` returns the
+  listed IDs and whether they are all of them.
+* A module whose path cannot be read now marks the scan incomplete, because
+  an unloaded module and an unreadable one cannot be told apart.
+* A sign-out or lock leaves the store `RestartRequired`, and a profile switch
+  starts a new core process, so a second profile never opens in the same
+  core. The new test checks the path that can happen: a lock clears the
+  reviews from memory, and a restart on the same profile reads them back from
+  its encrypted store.
+
+New tests: `given_more_processes_than_room_then_the_list_is_incomplete` (a
+Job with `cmd` and its `ping` child, listed with room for one; the full list
+is the control) and
+`given_a_lock_then_module_reviews_leave_memory_and_return_from_the_store`
+(mock homeserver, `dev-disposable-servers`). Negative control: with the
+clear-on-lock line removed, the second test failed at its "locked" check;
+the line was then restored unchanged.
+
+Checks run on `1e03d88` plus these fixes, all exited with status 0:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | passed |
+| `cargo test --locked --offline -p persephone-core` | lib 286 passed, 1 ignored; integration binaries 13, 5, 5, 2, 12, 15, 20 and 4 passed |
+| `cargo test --locked --offline -p persephone-core --features dev-disposable-servers --test account_settings` | 14 passed |
+| `cargo test --locked --offline -p persephone-desktop` | 15 passed, 1 ignored; IPC 35 passed |
+| `cargo clippy --locked --offline -p persephone-contracts -p persephone-core-protocol -p persephone-core -p persephone-desktop --all-targets -- -D warnings` | passed |
+| `cargo clippy --locked --offline -p persephone-core --features dev-disposable-servers --all-targets -- -D warnings` | passed |
+
+The frontend and contract checks were not rerun: this round changed no
+contract or page file.
+
 ## Live run
 
 `persephone.exe --demo` from this build, with `WEBVIEW2_USER_DATA_FOLDER` set
@@ -192,8 +227,9 @@ to a disposable folder under `.local`:
 * Not seen live: the Security list, the notice, an acknowledgement, the saved
   reviews in a real profile, and the `ModulesChanged` event from the real scan
   thread.
-* The store read and write of the reviewed keys has no test against a real
-  profile store, and no test signs out of one profile and into another.
+* The reviewed keys are tested against a real profile store only through a
+  lock and restart of one profile. A second profile in one core process is
+  not tested, because the store then needs a restart.
 * Not run: `python tools/dev.py check`, the native containment gate
   (`python tools/dev.py sandbox --offline`) and the dependency audit
   (`python tools/dev.py audit`).
