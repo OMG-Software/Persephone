@@ -2,29 +2,41 @@
 //!
 //! Third-party software can load a DLL into any process of the user, for
 //! example through a global window hook. The core holds the keys, so it
-//! refuses such images. [`block_injected_dlls`] sets two process mitigation
+//! refuses such images. [`block_injected_dlls`] sets three process mitigation
 //! policies. Windows never lets a process undo them.
 
 use std::{ffi::c_void, io};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetProcessMitigationPolicy, ProcessExtensionPointDisablePolicy,
-    ProcessSignaturePolicy, SetProcessMitigationPolicy,
+    GetCurrentProcess, GetProcessMitigationPolicy, PROCESS_MITIGATION_POLICY,
+    ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy, ProcessSignaturePolicy,
+    SetProcessMitigationPolicy,
 };
 
-/// Bit 0 of both policy structures: `MicrosoftSignedOnly` for the signature
-/// policy, `DisableExtensionPoints` for the extension-point policy.
-const ENABLE: u32 = 1;
+/// Each policy and the flags it must have. Every structure is one 32-bit
+/// flags field.
+const POLICIES: [(PROCESS_MITIGATION_POLICY, u32); 3] = [
+    // Bit 0, `DisableExtensionPoints`: no global window hook, AppInit,
+    // legacy IME or Winsock LSP DLLs, whoever signed them.
+    (ProcessExtensionPointDisablePolicy, 0b1),
+    // Bits 0 to 2: `NoRemoteImages` (no image from a network share),
+    // `NoLowMandatoryLabel` (no image file labelled low integrity, such as
+    // one a sandboxed process wrote) and `PreferSystem32Images` (System32
+    // first, so a signed DLL planted next to the executable is not loaded
+    // in its place).
+    (ProcessImageLoadPolicy, 0b111),
+    // Bit 0, `MicrosoftSignedOnly`: images must be signed through Microsoft.
+    (ProcessSignaturePolicy, 0b1),
+];
 
-/// Blocks, for the rest of this process's life, images not signed by
-/// Microsoft and the legacy extension points (global window hooks,
-/// AppInit DLLs, legacy IMEs, Winsock LSPs). Modules loaded before the call
-/// stay loaded. Returns an error if either policy cannot be set or is not
-/// reported on afterwards.
+/// Blocks, for the rest of this process's life, the legacy extension points
+/// (global window hooks, AppInit DLLs, legacy IMEs, Winsock LSPs), images
+/// from network shares or labelled low integrity, and images not signed by
+/// Microsoft, and makes DLL searches prefer System32. Modules loaded before
+/// the call stay loaded. Returns an error if any policy cannot be set or is
+/// not fully reported on afterwards.
 pub fn block_injected_dlls() -> io::Result<()> {
-    let policies = [ProcessExtensionPointDisablePolicy, ProcessSignaturePolicy];
-    for policy in policies {
-        let flags = ENABLE;
-        // SAFETY: the buffer is a live u32, the size of both policy structures.
+    for (policy, flags) in POLICIES {
+        // SAFETY: the buffer is a live u32, the size of each policy structure.
         let ok = unsafe {
             SetProcessMitigationPolicy(
                 policy,
@@ -36,10 +48,10 @@ pub fn block_injected_dlls() -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    for policy in policies {
+    for (policy, wanted) in POLICIES {
         let mut flags = 0u32;
         // SAFETY: the pseudo handle needs no release; the buffer is a live
-        // u32, the size of both policy structures.
+        // u32, the size of each policy structure.
         let ok = unsafe {
             GetProcessMitigationPolicy(
                 GetCurrentProcess(),
@@ -51,7 +63,7 @@ pub fn block_injected_dlls() -> io::Result<()> {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
-        if flags & ENABLE == 0 {
+        if flags & wanted != wanted {
             return Err(io::Error::other("a mitigation policy is not in effect"));
         }
     }
@@ -72,6 +84,7 @@ mod tests {
     const PROBE_ENV: &str = "PERSEPHONE_HARDEN_PROBE_DIR";
     const HELPER: &str = "platform::windows::harden::tests::probe_child";
     const ERROR_INVALID_IMAGE_HASH: u32 = 577;
+    const ERROR_ACCESS_DENIED: u32 = 5;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -114,10 +127,12 @@ mod tests {
     /// Runs in the child process only. The policy is one-way, so the shared
     /// test process must never apply it.
     ///
-    /// GIVEN two altered copies of a Microsoft DLL and a genuine one
+    /// GIVEN altered copies of a Microsoft DLL, intact copies of it with and
+    /// without a low integrity label, and a genuine one
     /// WHEN the process blocks injected DLLs
-    /// THEN the first copy loaded before, the second fails with
-    /// ERROR_INVALID_IMAGE_HASH and the genuine DLL still loads
+    /// THEN an altered and a low-labelled copy loaded before; afterwards the
+    /// altered copy fails with ERROR_INVALID_IMAGE_HASH, the low-labelled
+    /// copy is refused, and the unlabelled copy and the genuine DLL load
     #[test]
     #[ignore = "runs in a child process of hardening_blocks_unsigned_images"]
     fn probe_child() {
@@ -127,16 +142,24 @@ mod tests {
         let dir = PathBuf::from(dir);
         let before = load(&dir.join("probe-a.dll")).expect("altered DLL loads before hardening");
         free(before);
+        let low = load(&dir.join("low-a.dll")).expect("low-labelled DLL loads before hardening");
+        free(low);
         block_injected_dlls().expect("policies set");
         let after = load(&dir.join("probe-b.dll"));
         assert_eq!(after.err(), Some(ERROR_INVALID_IMAGE_HASH));
+        let low = load(&dir.join("low-b.dll"));
+        assert_eq!(low.err(), Some(ERROR_ACCESS_DENIED), "low-labelled image");
+        let plain = load(&dir.join("plain-b.dll")).expect("an unlabelled intact copy loads");
+        free(plain);
         let genuine = load(&system_dll("msimg32.dll")).expect("Microsoft-signed DLL still loads");
         free(genuine);
     }
 
-    /// GIVEN altered copies of a Microsoft DLL with an invalid signature
-    /// WHEN a child process hardens itself and then loads one of them
-    /// THEN the load is refused, while the same kind of load worked before
+    /// GIVEN altered copies of a Microsoft DLL with an invalid signature, and
+    /// intact copies with and without a low integrity label
+    /// WHEN a child process hardens itself and then loads them
+    /// THEN the altered and low-labelled loads are refused, while the same
+    /// kinds of load worked before
     #[test]
     fn hardening_blocks_unsigned_images() {
         let dir = std::env::temp_dir().join(format!("persephone-harden-{}", std::process::id()));
@@ -148,6 +171,17 @@ mod tests {
             .windows(marker.len())
             .position(|window| window == marker)
             .expect("DOS stub text");
+        for name in ["low-a.dll", "low-b.dll", "plain-b.dll"] {
+            fs::write(dir.join(name), &original).expect("write intact copy");
+        }
+        for name in ["low-a.dll", "low-b.dll"] {
+            let labelled = Command::new("icacls")
+                .arg(dir.join(name))
+                .args(["/setintegritylevel", "low"])
+                .output()
+                .expect("start icacls");
+            assert!(labelled.status.success(), "icacls failed for {name}");
+        }
         let mut altered = original;
         altered[at] = b't';
         for name in ["probe-a.dll", "probe-b.dll"] {

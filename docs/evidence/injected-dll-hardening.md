@@ -51,6 +51,9 @@ Owner decisions (16 November 2026):
 * The UI crate does not depend on the core, so the 30-line function exists
   twice. No manifest or lockfile changed: `Win32_System_Threading` was already
   enabled in both crates.
+* A third policy, `ProcessImageLoadPolicy`, was added later. See
+  [Image-load policy](#image-load-policy). The records above and below it
+  describe the two-policy run.
 
 ## What the signature policy admits on this host
 
@@ -166,6 +169,51 @@ instead of a fixed `C:\Windows\System32`. The live run below was not repeated.
 * modules outside Windows folders: the executables, `hmpalert.dll` in both, and
   the Microsoft-signed `EmbeddedBrowserWebView.dll` in the UI;
 * stopping the core left no process of the run.
+
+## Image-load policy
+
+Added on 16 November 2026, on branch `claude/image-load-and-capture`, stacked
+on the [third-party module report](third-party-module-report.md). This is a
+later change and a separate run.
+
+* Both `block_injected_dlls` functions now set and read back a third policy,
+  `ProcessImageLoadPolicy`, between the other two, with three flags:
+  * `NoRemoteImages`: no image from a network share;
+  * `NoLowMandatoryLabel`: no image file labelled low integrity, such as one
+    a sandboxed or low-integrity process wrote;
+  * `PreferSystem32Images`: DLL searches look in System32 first, so a
+    Microsoft-signed DLL planted next to the executable is not loaded in place
+    of the system copy.
+* The read-back requires all three bits, not only one. A failure still exits
+  with status 2.
+* No manifest or lockfile changed. `ProcessImageLoadPolicy` is in the already
+  enabled `Win32_System_Threading` feature.
+
+The two child-process tests now also check the new policy:
+
+* Before hardening, the child loads an intact copy of `version.dll` labelled
+  low integrity with `icacls /setintegritylevel low` (negative control: it
+  loads).
+* After hardening, a second low-labelled copy fails with
+  `ERROR_ACCESS_DENIED` (5), and an unlabelled intact copy still loads. The
+  unlabelled copy shows that the refusal comes from the label, not the copy.
+* The copies are written under the system temporary folder. `icacls` could not
+  set the label on the `O:` drive used for the worktree (exit 5), so a probe
+  folder on a drive without label support would fail the test, not pass it.
+
+`NoRemoteImages` and `PreferSystem32Images` have no test. A remote image needs
+a network share, and a planted-DLL test needs a writable application folder
+with a name that the process loads by search.
+
+Checks: `cargo test --locked --offline -p persephone-core --lib harden` and
+`cargo test --locked --offline -p persephone-desktop --lib harden` (each 1
+passed, 1 ignored), `cargo fmt --all -- --check` and core Clippy passed
+first; the full list of the branch is recorded under
+[capture protection](capture-protection.md#checks-run), and includes both
+tests. In the live demo run of that branch, the core and the UI kept
+running. Because a policy that is not in effect exits with status 2, both
+processes set and read back all three policies. This is inferred from that
+exit rule; the policies were not read from outside the processes.
 
 ## Limits
 
