@@ -264,7 +264,7 @@ async fn assert_compares(this: &Client, other: &Client, flow: &mut Flow, theirs:
 fn given_the_other_device_starts_the_comparison_then_the_flow_accepts_it() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let (this, other, mut flow, request) = requested(&server).await;
         request.accept().await.unwrap();
         let theirs = request
@@ -286,7 +286,7 @@ fn given_the_other_device_starts_the_comparison_then_the_flow_accepts_it() {
 fn given_both_devices_start_a_comparison_then_the_flow_follows_the_one_kept() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let (this, other, mut flow, request) = requested(&server).await;
         request.accept().await.unwrap();
         sync(&this).await;
@@ -334,7 +334,7 @@ async fn two_devices(server: &MockServer) -> (Client, Client) {
 fn given_a_verified_device_then_it_verifies_another_device_by_id() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let (this, other) = two_devices(&server).await;
         let mut flow = verification::start_device(&this, &user(), OTHER)
             .await
@@ -385,7 +385,7 @@ fn given_a_verified_device_then_it_verifies_another_device_by_id() {
 fn given_a_device_this_device_cannot_verify_then_it_is_refused() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let (this, other) = two_devices(&server).await;
         for (device, expected) in [
             (THIS, persephone_contracts::SecurityError::DeviceNotFound),

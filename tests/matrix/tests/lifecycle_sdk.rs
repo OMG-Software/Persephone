@@ -62,7 +62,7 @@ fn event() -> Value {
 }
 
 async fn server(native: bool) -> MockServer {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     Mock::given(method("GET")).and(path("/_matrix/client/versions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"versions":["v1.19"],"unstable_features":{"org.matrix.simplified_msc3575":true}}))).mount(&server).await;
     for (p, body) in [
         (

@@ -1091,7 +1091,7 @@ impl wiremock::Respond for KeyServer {
 fn given_recovery_then_the_key_changes_only_after_a_yes_and_is_saved_by_the_core() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let server = runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(any())
             .respond_with(KeyServer::default())
             .mount(&server)
@@ -1189,7 +1189,7 @@ fn given_an_unusable_backup_then_a_new_one_starts_only_after_a_yes() {
         "version": "7", "count": 12, "etag": "3"
     }));
     let server = runtime.block_on(async {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(any())
             .respond_with(keys.clone())
             .mount(&server)

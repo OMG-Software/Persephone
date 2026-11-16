@@ -55,7 +55,7 @@ struct SyntheticContext(u32);
 /// matrix-sdk API the application would use, without any homeserver request.
 #[tokio::test]
 async fn given_offline_client_when_event_handler_contexts_are_added_then_sdk_map_accepts_them() {
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let client = client(&server.uri()).await.unwrap();
 
     client.add_event_handler_context(SyntheticContext(1));
