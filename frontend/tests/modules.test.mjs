@@ -13,7 +13,13 @@ const found = (fileName, overrides = {}) => ({
   acknowledged: false,
   ...overrides
 });
-const report = (list, state = 'ready') => ({ state, scannedAt: 1, modules: list, truncated: false });
+const report = (list, state = 'ready', incomplete = false) => ({
+  state,
+  scannedAt: 1,
+  modules: list,
+  truncated: false,
+  incomplete
+});
 
 test('GIVEN signatures WHEN labelled THEN a missing signer says why', () => {
   assert.equal(modules.signerLabel(found('a.dll')), 'Unsigned');
@@ -57,6 +63,8 @@ test('GIVEN scan states WHEN their text is made THEN only a list-less state has 
   assert.equal(modules.stateText(report([], 'unsupported')), 'Not available on this system.');
   assert.equal(modules.stateText(report([])), 'No other code is loaded.');
   assert.equal(modules.stateText(report([found('a.dll')])), null);
+  assert.match(modules.stateText(report([], 'ready', true)), /could not be checked/);
+  assert.equal(modules.stateText(report([found('a.dll')], 'ready', true)), null);
 });
 
 test('GIVEN unreviewed modules WHEN ids are chosen THEN reviewed and out-of-limit ids are left out', () => {

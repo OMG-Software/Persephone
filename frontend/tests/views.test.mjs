@@ -1405,7 +1405,13 @@ test('GIVEN a module report WHEN the section renders THEN hostile names stay ine
     acknowledged: false,
     ...overrides
   });
-  const ready = (modules, truncated = false) => ({ state: 'ready', scannedAt: 1, modules, truncated });
+  const ready = (modules, truncated = false, incomplete = false) => ({
+    state: 'ready',
+    scannedAt: 1,
+    modules,
+    truncated,
+    incomplete
+  });
 
   const html = show(
     ready(
@@ -1431,7 +1437,15 @@ test('GIVEN a module report WHEN the section renders THEN hostile names stay ine
   const reviewed = show(ready([row('a.dll', { acknowledged: true })]));
   assert.doesNotMatch(reviewed, /Mark all as reviewed/);
   assert.doesNotMatch(reviewed, />New</);
+  assert.doesNotMatch(html, /could not be checked/);
   assert.match(show(ready([])), /No other code is loaded\./);
-  assert.match(show({ state: 'unsupported', scannedAt: null, modules: [], truncated: false }), /Not available on this system\./);
+  const partial = show(ready([], false, true));
+  assert.match(partial, /Some Persephone processes could not be checked\./);
+  assert.doesNotMatch(partial, /No other code is loaded/);
+  assert.match(show(ready([row('a.dll')], false, true)), /Code loaded into them is not listed\./);
+  assert.match(
+    show({ state: 'unsupported', scannedAt: null, modules: [], truncated: false, incomplete: false }),
+    /Not available on this system\./
+  );
   assert.match(show(null), /Checking…/);
 });

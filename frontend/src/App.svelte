@@ -743,6 +743,8 @@
     roomSettingsOf = null;
     invites = null;
     inviteBusy = null;
+    modules = null;
+    modulesFailure = null;
     dismissedFlow = null;
     draft = '';
     // Nothing from the old session stays in the header while the new status loads.
@@ -847,9 +849,10 @@
     checkSessions();
   }
 
-  // The report of code loaded into Persephone. It belongs to the core
-  // process, not to an account, so a session change keeps it. A failed fetch
-  // keeps the last report; the next event or opening of Settings tries again.
+  // The report of code loaded into Persephone. Its reviewed marks belong to
+  // the open profile, so a session change clears it until the new report
+  // arrives. A failed fetch keeps the last report of the same session; the
+  // next event or opening of Settings tries again.
   let modules = $state<ThirdPartyModules | null>(null);
   let modulesBusy = $state(false);
   let modulesFailure = $state<string | null>(null);
@@ -876,13 +879,16 @@
     const ids = acknowledgeIds(unreviewed(modules));
     if (ids.length === 0 || modulesBusy) return;
     const generation = sessionGeneration;
+    // Numbered at the start, like a refresh, so a refresh that starts while
+    // this waits and carries a newer scan is not dropped.
+    const request = ++modulesRequest;
     modulesBusy = true;
     modulesFailure = null;
     try {
       const reply = await acknowledgeModules(ids);
-      if (generation === sessionGeneration) {
+      if (generation === sessionGeneration && request > modulesShown) {
         modules = reply;
-        modulesShown = ++modulesRequest;
+        modulesShown = request;
       }
     } catch (reason) {
       if (generation === sessionGeneration) modulesFailure = describe(reason);

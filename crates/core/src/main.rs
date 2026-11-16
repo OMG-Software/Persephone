@@ -324,11 +324,15 @@ fn run_ui(
         }
         let watcher = scope.spawn(|| watch(core, host, &*tree, &finished, retries));
         #[cfg(windows)]
-        scope.spawn(|| scan_modules(core, &*tree, ui_pid, scanner, &finished));
+        let scan = scope.spawn(|| scan_modules(core, &*tree, ui_pid, scanner, &finished));
         let end = serve(core, from_ui, to_ui);
         *finished.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
         finished.1.notify_all();
         let verdict = watcher.join().unwrap_or(Verdict::None);
+        // The report is a transparency aid: a panic in its thread must not
+        // reach the scope, which would skip the shutdown below.
+        #[cfg(windows)]
+        let _ = scan.join();
         (end, verdict)
     });
     if end != ServeEnd::UiClosed && verdict == Verdict::None {
@@ -451,8 +455,9 @@ fn scan_modules(
             },
         ];
         // When the tree cannot list its processes, the core and the UI are
-        // still scanned.
-        for pid in tree.process_ids().unwrap_or_default() {
+        // still scanned, and the report says it is incomplete.
+        let web_views = tree.process_ids();
+        for &pid in web_views.as_deref().unwrap_or_default() {
             if pid != core_pid && pid != ui_pid {
                 targets.push(ScanTarget {
                     pid,
@@ -460,9 +465,10 @@ fn scan_modules(
                 });
             }
         }
-        let found = scanner.scan(&targets);
+        let result = scanner.scan(&targets);
         core.update_modules(
-            found.into_iter().map(Into::into).collect(),
+            result.modules.into_iter().map(Into::into).collect(),
+            result.incomplete || web_views.is_err(),
             persephone_core::views::now_millis(),
         );
         if finished_within(finished, MODULE_SCAN_PERIOD) {

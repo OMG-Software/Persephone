@@ -1255,6 +1255,8 @@ impl<'de> Deserialize<'de> for ThirdPartyModule {
 /// Reply of `third_party_modules` and `acknowledge_modules`: the modules in
 /// the report, at most `MAX_THIRD_PARTY_MODULES`: unacknowledged first, then
 /// by lowercase file name, then by path. `truncated` says more exist.
+/// `incomplete` says the last scan could not read every process, or every
+/// module of one, so code can be loaded that the list does not show.
 #[derive(Clone, Debug, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ThirdPartyModules {
@@ -1264,6 +1266,7 @@ pub struct ThirdPartyModules {
     pub scanned_at: Option<UnixMillis>,
     pub modules: Vec<ThirdPartyModule>,
     pub truncated: bool,
+    pub incomplete: bool,
 }
 
 impl<'de> Deserialize<'de> for ThirdPartyModules {
@@ -1276,6 +1279,7 @@ impl<'de> Deserialize<'de> for ThirdPartyModules {
             scanned_at: RequiredNullable<UnixMillis>,
             modules: Vec<ThirdPartyModule>,
             truncated: bool,
+            incomplete: bool,
         }
         let input = Input::deserialize(deserializer)?;
         Ok(Self {
@@ -1283,6 +1287,7 @@ impl<'de> Deserialize<'de> for ThirdPartyModules {
             scanned_at: input.scanned_at.into_option(),
             modules: input.modules,
             truncated: input.truncated,
+            incomplete: input.incomplete,
         })
     }
 }
@@ -2400,13 +2405,13 @@ mod personal_contract_tests {
     #[test]
     fn module_report_round_trips_and_requires_explicit_nulls() {
         let module = serde_json::json!({"id":"a.dll\u{1f}unsigned","fileName":"a.dll","path":"C:\\x\\a.dll","signer":null,"signature":"unsigned","processes":["core","web_view"],"firstSeen":1,"acknowledged":false});
-        let report = serde_json::json!({"state":"ready","scannedAt":null,"modules":[module],"truncated":false});
+        let report = serde_json::json!({"state":"ready","scannedAt":null,"modules":[module],"truncated":false,"incomplete":true});
         let decoded: ThirdPartyModules = serde_json::from_value(report.clone()).unwrap();
         assert_eq!(serde_json::to_value(&decoded).unwrap(), report);
         assert_eq!(decoded.modules[0].processes[1], ModuleProcess::WebView);
         strict_round_trip(decoded.modules[0].clone());
         strict_round_trip(decoded);
-        for field in ["scannedAt", "modules", "truncated", "state"] {
+        for field in ["scannedAt", "modules", "truncated", "incomplete", "state"] {
             let mut missing = report.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<ThirdPartyModules>(missing).is_err());

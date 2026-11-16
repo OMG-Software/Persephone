@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ThirdPartyModules } from './bridge';
-  import { processesLabel, signerLabel, stateText, unreviewed } from './modules';
+  import { INCOMPLETE_TEXT, processesLabel, signerLabel, stateText, unreviewed } from './modules';
   import { fullTime, toDate } from './time';
 
   // The code loaded into Persephone that Microsoft and Persephone did not
@@ -19,7 +19,7 @@
     onacknowledge: () => void;
   } = $props();
 
-  const text = $derived(stateText(report ?? { state: 'pending', modules: [] }));
+  const text = $derived(stateText(report ?? { state: 'pending', modules: [], incomplete: false }));
   const anyNew = $derived(unreviewed(report).length > 0);
 
   function seen(millis: number): string {
@@ -54,6 +54,9 @@
     </ul>
     {#if report.truncated}
       <p class="note">More modules are loaded than this list shows.</p>
+    {/if}
+    {#if report.incomplete}
+      <p class="note">{INCOMPLETE_TEXT}</p>
     {/if}
   {/if}
   {#if failure}

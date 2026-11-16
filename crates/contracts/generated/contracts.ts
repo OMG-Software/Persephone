@@ -331,7 +331,7 @@ export type ThirdPartyModules = { state: ModuleScanState,
 /**
  * Null until the first scan finishes.
  */
-scannedAt: number | null, modules: Array<ThirdPartyModule>, truncated: boolean, };
+scannedAt: number | null, modules: Array<ThirdPartyModule>, truncated: boolean, incomplete: boolean, };
 
 export type TimelineEvents = { joins: boolean, leaves: boolean, 
 /**

@@ -10,12 +10,15 @@
 //!   signer, or `unsigned` or `invalid`. A reviewed file therefore stays
 //!   reviewed after an update, and a changed signer is new again.
 //! * `first_seen` is kept for the life of the core process.
-//! * The reviewed ids are kept in memory, and in the encrypted crypto store
-//!   of the open profile as one JSON list, at most [`MAX_REVIEWED`] (the
-//!   oldest dropped first), so each profile has its own and signing out
-//!   wipes it. With no store open (demo, signed out, locked) they live only
-//!   in memory. A record that cannot be read means none were reviewed:
+//! * The reviewed ids are kept in the encrypted crypto store of the open
+//!   profile as one JSON list, at most [`MAX_REVIEWED`] (the oldest dropped
+//!   first), so each profile has its own and signing out wipes it. While a
+//!   store is open, the ids in memory are the store's. A lock or sign-out
+//!   clears them. With no store open (demo, signed out, locked) they live
+//!   only in memory. A record that cannot be read means none were reviewed:
 //!   showing more is the safe side.
+//! * A scan that could not read every target process, or every module of
+//!   one, is reported as incomplete, so an empty list is not read as clean.
 //! * File names, signers and paths are the files' word, projected like
 //!   names. A report never lists more than [`MAX_THIRD_PARTY_MODULES`]
 //!   modules or [`MAX_REPORT_BYTES`] bytes, and says when it is cut.
@@ -81,6 +84,7 @@ struct Entry {
 struct Scan {
     at: UnixMillis,
     entries: Vec<Entry>,
+    incomplete: bool,
 }
 
 /// The merged scans and the reviews.
@@ -110,9 +114,10 @@ impl Modules {
         }
     }
 
-    /// Takes a finished scan. Returns whether the report changed: a rescan
-    /// with the same files in the same processes is not a change.
-    pub fn update(&mut self, found: Vec<Found>, now: UnixMillis) -> bool {
+    /// Takes a finished scan; `incomplete` when a target process or some of
+    /// its modules could not be read. Returns whether the report changed: a
+    /// rescan with the same result is not a change.
+    pub fn update(&mut self, found: Vec<Found>, incomplete: bool, now: UnixMillis) -> bool {
         let before = self.report();
         let entries = merge(found);
         for entry in &entries {
@@ -133,7 +138,11 @@ impl Modules {
                 entry
             })
             .collect();
-        self.scan = Some(Scan { at: now, entries });
+        self.scan = Some(Scan {
+            at: now,
+            entries,
+            incomplete,
+        });
         changed(&before, &self.report())
     }
 
@@ -150,10 +159,19 @@ impl Modules {
         self.add_reviewed(wanted)
     }
 
-    /// Takes the ids the open profile's store holds. Returns whether the
+    /// Makes the reviewed ids those the open profile's store holds, so no id
+    /// from another profile or from before sign-in stays. Returns whether the
     /// report changed.
-    pub fn apply_reviewed(&mut self, stored: &[String]) -> bool {
-        self.add_reviewed(stored.to_vec())
+    pub fn replace_reviewed(&mut self, stored: &[String]) -> bool {
+        let before = self.report();
+        self.reviewed.clear();
+        self.add_reviewed(stored.to_vec());
+        changed(&before, &self.report())
+    }
+
+    /// Forgets every reviewed id, when a lock or sign-out closes the store.
+    pub fn clear_reviewed(&mut self) {
+        self.reviewed.clear();
     }
 
     /// The reviewed ids, oldest first, at most [`MAX_REVIEWED`].
@@ -199,6 +217,7 @@ impl Modules {
                 scanned_at: None,
                 modules: Vec::new(),
                 truncated: false,
+                incomplete: false,
             };
         };
         let mut all: Vec<(&Entry, bool)> = scan
@@ -226,6 +245,7 @@ impl Modules {
             scanned_at: Some(scan.at),
             modules,
             truncated,
+            incomplete: scan.incomplete,
         }
     }
 }
@@ -265,12 +285,11 @@ fn merge(found: Vec<Found>) -> Vec<Entry> {
 }
 
 fn project(item: &Found, processes: Vec<ModuleProcess>) -> Entry {
-    let raw_name = item
-        .path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let file_name = match project_name(&raw_name) {
+    // The paths are Windows paths, also in tests on other hosts, so both
+    // separators end the name, not only the host's.
+    let path_text = item.path.to_string_lossy();
+    let raw_name = path_text.rsplit(['\\', '/']).next().unwrap_or_default();
+    let file_name = match project_name(raw_name) {
         name if name.is_empty() => "?".to_owned(),
         name => name,
     };
@@ -418,7 +437,7 @@ mod tests {
 
     fn ready(items: Vec<Found>) -> Modules {
         let mut modules = Modules::with_support(true);
-        modules.update(items, at(1_000));
+        modules.update(items, false, at(1_000));
         modules
     }
 
@@ -596,13 +615,14 @@ mod tests {
     fn given_stored_ids_then_they_are_applied() {
         let mut modules = ready(vec![found(r"C:\x\a.dll", ModuleProcess::Core, None)]);
         let stored = vec![id("old.dll", "unsigned"), id("a.dll", "unsigned")];
-        assert!(modules.apply_reviewed(&stored));
+        assert!(modules.replace_reviewed(&stored));
         assert!(modules.report().modules[0].acknowledged);
         assert_eq!(modules.reviewed(), stored);
-        assert!(!modules.apply_reviewed(&stored));
+        assert!(!modules.replace_reviewed(&stored));
         // A file that appears later is already reviewed.
         let changed = modules.update(
             vec![found(r"C:\x\old.dll", ModuleProcess::Core, None)],
+            false,
             at(2_000),
         );
         assert!(changed);
@@ -615,7 +635,7 @@ mod tests {
     fn given_too_many_reviewed_ids_then_the_oldest_are_dropped() {
         let mut modules = Modules::with_support(true);
         let ids: Vec<String> = (0..MAX_REVIEWED + 5).map(|n| format!("n{n}")).collect();
-        modules.apply_reviewed(&ids);
+        modules.replace_reviewed(&ids);
         assert_eq!(modules.reviewed().len(), MAX_REVIEWED);
         assert_eq!(modules.reviewed()[0], "n5");
     }
@@ -628,17 +648,17 @@ mod tests {
     fn given_a_rescan_then_only_a_different_result_is_a_change() {
         let mut modules = Modules::with_support(true);
         let one = || vec![found(r"C:\x\a.dll", ModuleProcess::Core, None)];
-        assert!(modules.update(one(), at(1_000)));
-        assert!(!modules.update(one(), at(2_000)));
+        assert!(modules.update(one(), false, at(1_000)));
+        assert!(!modules.update(one(), false, at(2_000)));
         assert_eq!(modules.report().modules[0].first_seen, at(1_000));
         assert_eq!(modules.report().scanned_at, Some(at(2_000)));
         let two = vec![
             found(r"C:\x\a.dll", ModuleProcess::Core, None),
             found(r"C:\x\a.dll", ModuleProcess::Ui, None),
         ];
-        assert!(modules.update(two, at(3_000)));
-        assert!(modules.update(Vec::new(), at(4_000)));
-        assert!(modules.update(one(), at(5_000)));
+        assert!(modules.update(two, false, at(3_000)));
+        assert!(modules.update(Vec::new(), false, at(4_000)));
+        assert!(modules.update(one(), false, at(5_000)));
         assert_eq!(modules.report().modules[0].first_seen, at(1_000));
     }
 
@@ -651,15 +671,76 @@ mod tests {
         let pending = modules.report();
         assert_eq!(pending.state, ModuleScanState::Pending);
         assert_eq!(pending.scanned_at, None);
-        assert!(modules.update(Vec::new(), at(1)));
+        assert!(modules.update(Vec::new(), false, at(1)));
         assert_eq!(modules.report().state, ModuleScanState::Ready);
 
         let mut other = Modules::with_support(false);
         assert_eq!(other.report().state, ModuleScanState::Unsupported);
-        other.update(vec![found(r"C:\x\a.dll", ModuleProcess::Core, None)], at(1));
+        other.update(
+            vec![found(r"C:\x\a.dll", ModuleProcess::Core, None)],
+            false,
+            at(1),
+        );
         let report = other.report();
         assert_eq!(report.state, ModuleScanState::Unsupported);
         assert!(report.modules.is_empty());
+    }
+
+    /// GIVEN ids reviewed in memory, as before sign-in or by another profile
+    /// WHEN the open profile's stored ids replace them THEN only the stored
+    /// ids are reviewed; WHEN a lock clears them THEN nothing is reviewed.
+    #[test]
+    fn given_other_reviews_then_the_stored_ids_replace_them() {
+        let mut modules = ready(vec![
+            found(r"C:\x\a.dll", ModuleProcess::Core, None),
+            found(r"C:\x\b.dll", ModuleProcess::Core, None),
+        ]);
+        assert!(modules.acknowledge(&[id("a.dll", "unsigned")]));
+        assert!(modules.replace_reviewed(&[id("b.dll", "unsigned")]));
+        assert_eq!(modules.reviewed(), [id("b.dll", "unsigned")]);
+        let report = modules.report();
+        let flags: Vec<(&str, bool)> = report
+            .modules
+            .iter()
+            .map(|m| (m.file_name.as_str(), m.acknowledged))
+            .collect();
+        assert_eq!(flags, [("a.dll", false), ("b.dll", true)]);
+        modules.clear_reviewed();
+        assert!(modules.reviewed().is_empty());
+        assert!(modules.report().modules.iter().all(|m| !m.acknowledged));
+    }
+
+    /// GIVEN a scan that could not read every process WHEN reported THEN the
+    /// report says it is incomplete, also when it lists nothing; the next
+    /// complete scan clears that and is a change.
+    #[test]
+    fn given_an_incomplete_scan_then_the_report_says_so() {
+        let mut modules = Modules::with_support(true);
+        assert!(!modules.report().incomplete);
+        assert!(modules.update(Vec::new(), true, at(1)));
+        let report = modules.report();
+        assert_eq!(report.state, ModuleScanState::Ready);
+        assert!(report.modules.is_empty());
+        assert!(report.incomplete);
+        assert!(modules.update(Vec::new(), false, at(2)));
+        assert!(!modules.report().incomplete);
+    }
+
+    /// GIVEN Windows paths with either separator WHEN listed on any host
+    /// THEN the file name is the last part.
+    #[test]
+    fn given_either_separator_then_the_file_name_is_the_last_part() {
+        let modules = ready(vec![
+            found(r"C:\x\One.dll", ModuleProcess::Core, None),
+            found("C:/y/Two.dll", ModuleProcess::Core, None),
+        ]);
+        let names: Vec<String> = modules
+            .report()
+            .modules
+            .into_iter()
+            .map(|m| m.file_name)
+            .collect();
+        assert_eq!(names, ["One.dll", "Two.dll"]);
     }
 
     /// GIVEN damaged, oversized or wrongly typed records WHEN decoded THEN

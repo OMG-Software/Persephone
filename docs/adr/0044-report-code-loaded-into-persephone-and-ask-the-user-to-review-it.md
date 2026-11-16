@@ -63,9 +63,15 @@ user informed.
   reviewed. A changed signer, or a file that is no longer signed, shows as new
   again.
 * Reviewed keys are kept in the open profile's encrypted store (at most 200
-  keys, 64 KiB). An unreadable record means nothing is reviewed. Without an
-  open profile, reviews last only for the core process. Signing out deletes
-  the profile store.
+  keys, 64 KiB). An unreadable record means nothing is reviewed. While a
+  profile is open, the keys in memory are the store's. A lock or sign-out
+  clears them. Without an open profile, reviews last only for the core
+  process. Signing out deletes the profile store.
+* A scan is reported as incomplete when the UI Job's process list cannot be
+  read, a target process that has not exited cannot be opened or listed, a
+  process has more than 8192 modules, or a module path does not fit. Settings
+  then says that some processes could not be checked, never "No other code is
+  loaded".
 * Settings > Security lists the modules as inert text. The main window shows a
   notice while any module is unreviewed and the user is signed in.
 

@@ -30,12 +30,20 @@ export function signerLabel(module: Pick<ThirdPartyModule, 'signature' | 'signer
   return module.signer ?? 'Signed';
 }
 
+/** Shown when the last scan could not read every process or module. */
+export const INCOMPLETE_TEXT =
+  'Some Persephone processes could not be checked. Code loaded into them is not listed.';
+
 /** The text of a scan state that has no list to show, or null when there is one. */
-export function stateText(report: Pick<ThirdPartyModules, 'state' | 'modules'>): string | null {
+export function stateText(
+  report: Pick<ThirdPartyModules, 'state' | 'modules' | 'incomplete'>
+): string | null {
   const state: ModuleScanState = report.state;
   if (state === 'pending') return 'Checking…';
   if (state === 'unsupported') return 'Not available on this system.';
-  return report.modules.length === 0 ? 'No other code is loaded.' : null;
+  if (report.modules.length > 0) return null;
+  // An empty list from a partial scan is not a clean result.
+  return report.incomplete ? INCOMPLETE_TEXT : 'No other code is loaded.';
 }
 
 /** The modules the user has not reviewed, in the report's order. */

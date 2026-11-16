@@ -2,9 +2,14 @@
 
 Checked 16 November 2026 on Windows 11 Pro x64 (build 26300), debug builds,
 rustc 1.99.1, Node from the locked frontend dependencies. Source: branch
-`claude/injected-dll-report` on `7b3e00d` plus this change, worktree
-`.local/wt-report`, `CARGO_TARGET_DIR=.local/build/rust-wt`, `--locked --offline`.
-`Cargo.lock` is unchanged. **Result: all automated checks pass. The demo app
+`claude/injected-dll-report` on `7b3e00d` plus this change, uncommitted during
+the first checks, worktree `.local/wt-report`,
+`CARGO_TARGET_DIR=.local/build/rust-wt`, `--locked --offline`. After the
+rebase described under [Checks run](#checks-run), the change was committed as
+`cfe450f`. The [review fixes](#review-fixes) were checked on `cfe450f` plus
+those fixes, and committed after the checks. `Cargo.lock` is unchanged.
+**Result: every check that was run passed. `python tools/dev.py check`, the
+native containment gate and the dependency audit were not run. The demo app
 ran for several minutes with no window failure. The report and the notice
 were not seen in the running app, and the scan thread was not observed.**
 
@@ -113,6 +118,60 @@ persephone-desktop` (15 passed, 1 ignored; IPC 35 passed); `cargo clippy
 The worktree's `frontend/node_modules` is a junction to the main checkout's
 locked install. No package was installed.
 
+## Review fixes
+
+Made on 16 November 2026 after the pull request review and the first CI run.
+This is a later change and a separate run.
+
+* **CI:** five `modules.rs` tests failed on Linux and macOS, because
+  `Path::file_name` does not split a Windows path there. The file name now
+  comes from the last part after `\` or `/` on every host.
+* **Incomplete scans:** the report has a new `incomplete` field. It is set
+  when the UI Job's process list cannot be read, when a target process cannot
+  be opened or listed and has not exited, when a process has more than 8192
+  modules, or when a module path does not fit. The module list call now grows
+  its buffer from the size it reports, up to 8192 handles in three tries.
+  Settings shows "Some Persephone processes could not be checked" instead of
+  "No other code is loaded".
+* **Reviews per profile:** while a profile store is open, the reviewed keys
+  in memory are replaced by the store's on each read, and a lock or sign-out
+  clears them. Reviews of one profile, or from before sign-in, no longer show
+  for another profile or reach its store.
+* **Scan thread:** it is joined at the end of the run, so a panic in it cannot
+  reach the core's shutdown path.
+* **Page:** a session change clears the report until the new one arrives. A
+  review takes its request number before it waits, so a newer refresh is not
+  dropped.
+
+New tests: `given_other_reviews_then_the_stored_ids_replace_them`,
+`given_an_incomplete_scan_then_the_report_says_so`,
+`given_either_separator_then_the_file_name_is_the_last_part`,
+`a_process_that_has_gone_is_skipped` (renamed from
+`an_unreadable_process_is_skipped`, now also checking completeness) and
+`an_unreadable_process_makes_the_scan_incomplete`. The second scanner test
+uses the System process (pid 4), which a user process cannot open for
+reading, with the test process alone as its control. Updated: the
+end-to-end module test also locks and checks the reviews are cleared and the
+flag passes through; the contract, TypeScript contract, IPC fixture and page
+tests carry the flag.
+
+Checks run, all exited with status 0:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | passed |
+| `cargo test --locked --offline -p persephone-contracts -p persephone-core-protocol` | 7, 16 and 25 passed |
+| `cargo test --locked --offline -p persephone-core` | lib 285 passed, 1 ignored; integration binaries 13, 5, 5, 2, 12, 15, 20 and 4 passed |
+| `cargo clippy --locked --offline -p persephone-contracts -p persephone-core-protocol -p persephone-core -p persephone-desktop --all-targets -- -D warnings` | passed |
+| `cargo run --locked --offline -p persephone-contracts --bin export-contracts -- --check` | bindings current |
+| `cargo test --locked --offline -p persephone-desktop` | 15 passed, 1 ignored; IPC 35 passed |
+| `python tools/dev.py frontend --offline` | svelte-check 176 files, 0 errors, 0 warnings; 313 Node tests passed |
+
+The first desktop run failed one IPC test, because its fake core reply lacked
+the new field and the UI host refused it. The fixture was fixed and the IPC
+tests rerun. The Linux and macOS fix was not run locally: only CI runs
+those hosts.
+
 ## Live run
 
 `persephone.exe --demo` from this build, with `WEBVIEW2_USER_DATA_FOLDER` set
@@ -134,7 +193,13 @@ to a disposable folder under `.local`:
   reviews in a real profile, and the `ModulesChanged` event from the real scan
   thread.
 * The store read and write of the reviewed keys has no test against a real
-  profile store.
+  profile store, and no test signs out of one profile and into another.
+* Not run: `python tools/dev.py check`, the native containment gate
+  (`python tools/dev.py sandbox --offline`) and the dependency audit
+  (`python tools/dev.py audit`).
+* The incomplete flag was not seen for a real WebView2 process. Whether
+  WebView2's sandboxed processes can be opened for reading was not checked
+  live.
 * The scan thread has no unit test. The scanner, the state and the answers
   are tested separately.
 * The report shows what the core can see. Code that is already loaded can hide

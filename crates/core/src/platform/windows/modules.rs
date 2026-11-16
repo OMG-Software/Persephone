@@ -22,8 +22,8 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            HANDLE, HMODULE, TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN,
-            TRUST_E_SUBJECT_FORM_UNKNOWN,
+            ERROR_INVALID_PARAMETER, GetLastError, HANDLE, HMODULE, STILL_ACTIVE,
+            TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN, TRUST_E_SUBJECT_FORM_UNKNOWN,
         },
         Security::{
             Cryptography::{
@@ -47,14 +47,21 @@ use windows_sys::{
         System::{
             ProcessStatus::{K32EnumProcessModulesEx, K32GetModuleFileNameExW, LIST_MODULES_ALL},
             SystemInformation::GetSystemWindowsDirectoryW,
-            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ},
+            Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+            },
         },
     },
     core::GUID,
 };
 
-/// The most modules read from one process.
-const MAX_MODULES: usize = 1024;
+/// Module handles asked for first in one process.
+const FIRST_MODULES: usize = 1024;
+/// The most modules read from one process. A process with more is reported
+/// as incomplete.
+const MAX_MODULES: usize = 8192;
+/// Tries at listing one process's modules while it keeps loading more.
+const LIST_ATTEMPTS: usize = 3;
 /// Characters in a module path buffer: the longest Windows path.
 const PATH_CHARS: usize = 32_768;
 /// Characters in a signer name buffer, with the NUL.
@@ -82,6 +89,37 @@ pub struct FoundModule {
     pub signer: Option<String>,
 }
 
+/// The result of one scan.
+pub struct ScanResult {
+    pub modules: Vec<FoundModule>,
+    /// A target process, or some of its modules, could not be read. A
+    /// process that has exited is not counted.
+    pub incomplete: bool,
+}
+
+/// The modules read from one process.
+struct Listed {
+    paths: Vec<PathBuf>,
+    /// Every module of a running process was read, or the process has gone.
+    complete: bool,
+}
+
+impl Listed {
+    fn gone() -> Self {
+        Self {
+            paths: Vec::new(),
+            complete: true,
+        }
+    }
+
+    fn unreadable() -> Self {
+        Self {
+            paths: Vec::new(),
+            complete: false,
+        }
+    }
+}
+
 type Cache = HashMap<(String, u64, Option<SystemTime>), (ModuleSignature, Option<String>)>;
 
 /// Lists third-party modules. It keeps signature results between scans.
@@ -103,11 +141,17 @@ impl Scanner {
     }
 
     /// Lists third-party modules in the targets. Expected modules are left
-    /// out. A process that cannot be opened or read is skipped. Never panics.
-    pub fn scan(&mut self, targets: &[ScanTarget]) -> Vec<FoundModule> {
+    /// out. A process that cannot be opened or fully read makes the result
+    /// incomplete; one that has exited does not. Never panics.
+    pub fn scan(&mut self, targets: &[ScanTarget]) -> ScanResult {
+        let mut incomplete = false;
         let listed: Vec<(ModuleProcess, Vec<PathBuf>)> = targets
             .iter()
-            .filter_map(|target| Some((target.process, list_modules(target.pid)?)))
+            .map(|target| {
+                let listed = list_modules(target.pid);
+                incomplete |= !listed.complete;
+                (target.process, listed.paths)
+            })
             .collect();
         let webview_dir = listed
             .iter()
@@ -150,7 +194,10 @@ impl Scanner {
                 });
             }
         }
-        found
+        ScanResult {
+            modules: found,
+            incomplete,
+        }
     }
 
     /// The signature result for the file, from the cache when the file is the
@@ -236,46 +283,96 @@ pub fn is_expected(
     own_name && is_under(&norm, &own) && norm.rfind('\\').is_some_and(|at| norm[..at] == own)
 }
 
-/// The paths of the modules in the process, or `None` when it cannot be read.
-fn list_modules(pid: u32) -> Option<Vec<PathBuf>> {
+/// The paths of the modules in the process. A process that cannot be
+/// opened or listed, has more than [`MAX_MODULES`] modules, or has a module
+/// path that does not fit gives an incomplete result, unless it has exited.
+fn list_modules(pid: u32) -> Listed {
     // SAFETY: plain call; the result is checked and owned below.
     let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid) };
     if raw.is_null() {
-        return None;
+        // SAFETY: reads the calling thread's last error.
+        let error = unsafe { GetLastError() };
+        // No such process: it exited after the process list was read.
+        return if error == ERROR_INVALID_PARAMETER {
+            Listed::gone()
+        } else {
+            Listed::unreadable()
+        };
     }
     // SAFETY: `raw` is a new handle that only this value owns.
     let process = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
     let handle = process.as_raw_handle() as HANDLE;
-    let mut modules: Vec<HMODULE> = vec![null_mut(); MAX_MODULES];
-    let mut needed = 0u32;
-    // SAFETY: the buffer holds `MAX_MODULES` entries, and its byte size is
-    // passed; `needed` lives for the call.
-    let ok = unsafe {
-        K32EnumProcessModulesEx(
-            handle,
-            modules.as_mut_ptr(),
-            (MAX_MODULES * size_of::<HMODULE>()) as u32,
-            &mut needed,
-            LIST_MODULES_ALL,
-        )
+    let Some((modules, mut complete)) = module_handles(handle) else {
+        return if has_exited(handle) {
+            Listed::gone()
+        } else {
+            Listed::unreadable()
+        };
     };
-    if ok == 0 {
-        return None;
-    }
-    let count = (needed as usize / size_of::<HMODULE>()).min(MAX_MODULES);
     let mut buffer = vec![0u16; PATH_CHARS];
-    let mut paths = Vec::with_capacity(count);
-    for module in &modules[..count] {
+    let mut paths = Vec::with_capacity(modules.len());
+    for module in modules {
         // SAFETY: the buffer holds `PATH_CHARS` characters, as passed.
         let length = unsafe {
-            K32GetModuleFileNameExW(handle, *module, buffer.as_mut_ptr(), PATH_CHARS as u32)
+            K32GetModuleFileNameExW(handle, module, buffer.as_mut_ptr(), PATH_CHARS as u32)
         } as usize;
-        // A full buffer means the path was cut: skip it.
-        if length > 0 && length < PATH_CHARS {
-            paths.push(PathBuf::from(OsString::from_wide(&buffer[..length])));
+        if length == 0 {
+            // The module was unloaded after the list was read.
+            continue;
         }
+        if length >= PATH_CHARS {
+            // A full buffer means the path was cut: it is not shown.
+            complete = false;
+            continue;
+        }
+        paths.push(PathBuf::from(OsString::from_wide(&buffer[..length])));
     }
-    Some(paths)
+    Listed { paths, complete }
+}
+
+/// The process's module handles, and whether they are all of them. The
+/// buffer grows from what the call says it needs, up to [`MAX_MODULES`] and
+/// [`LIST_ATTEMPTS`] tries. `None` when the call fails.
+fn module_handles(handle: HANDLE) -> Option<(Vec<HMODULE>, bool)> {
+    let mut capacity = FIRST_MODULES;
+    for attempt in 1..=LIST_ATTEMPTS {
+        let mut modules: Vec<HMODULE> = vec![null_mut(); capacity];
+        let mut needed = 0u32;
+        // SAFETY: the buffer holds `capacity` entries, and its byte size is
+        // passed; `needed` lives for the call.
+        let ok = unsafe {
+            K32EnumProcessModulesEx(
+                handle,
+                modules.as_mut_ptr(),
+                u32::try_from(capacity * size_of::<HMODULE>()).ok()?,
+                &mut needed,
+                LIST_MODULES_ALL,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let wanted = needed as usize / size_of::<HMODULE>();
+        if wanted <= capacity {
+            modules.truncate(wanted);
+            return Some((modules, true));
+        }
+        if capacity == MAX_MODULES || attempt == LIST_ATTEMPTS {
+            // The buffer is full: list what was read, as incomplete.
+            return Some((modules, false));
+        }
+        // Room for a few more, in case it loads more before the next call.
+        capacity = (wanted + 64).min(MAX_MODULES);
+    }
+    None
+}
+
+/// Whether the process has exited.
+fn has_exited(handle: HANDLE) -> bool {
+    let mut code = 0u32;
+    // SAFETY: `handle` is open with query rights; `code` lives for the call.
+    let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+    ok != 0 && code != STILL_ACTIVE as u32
 }
 
 /// A WinVerifyTrust state, closed on drop so no path leaks it.
@@ -665,8 +762,9 @@ mod tests {
     /// THEN kernel32.dll and ntdll.dll are not reported
     #[test]
     fn a_self_scan_omits_microsoft_system_modules() {
-        let found = Scanner::new().scan(&self_target());
-        for module in &found {
+        let result = Scanner::new().scan(&self_target());
+        assert!(!result.incomplete, "the test process was not fully read");
+        for module in &result.modules {
             let name = module.path.file_name().expect("file name");
             assert!(
                 !name.eq_ignore_ascii_case("kernel32.dll")
@@ -677,16 +775,47 @@ mod tests {
         }
     }
 
-    /// GIVEN a process that does not exist
+    /// GIVEN a process that does not exist, as one that exited after the
+    /// list was read
     /// WHEN it is scanned
-    /// THEN nothing is reported and nothing fails
+    /// THEN nothing is reported, nothing fails and the scan is complete
     #[test]
-    fn an_unreadable_process_is_skipped() {
+    fn a_process_that_has_gone_is_skipped() {
         let target = ScanTarget {
             pid: u32::MAX - 1,
             process: ModuleProcess::Ui,
         };
-        assert!(Scanner::new().scan(&[target]).is_empty());
+        let result = Scanner::new().scan(&[target]);
+        assert!(result.modules.is_empty());
+        assert!(!result.incomplete);
+    }
+
+    /// GIVEN the System process (pid 4), which a user process cannot open
+    /// for reading, and the test process
+    /// WHEN both are scanned
+    /// THEN the scan is incomplete, and the readable process is still listed
+    #[test]
+    fn an_unreadable_process_makes_the_scan_incomplete() {
+        let targets = [
+            ScanTarget {
+                pid: 4,
+                process: ModuleProcess::WebView,
+            },
+            ScanTarget {
+                pid: std::process::id(),
+                process: ModuleProcess::Core,
+            },
+        ];
+        let result = Scanner::new().scan(&targets);
+        assert!(result.incomplete);
+        assert!(
+            result
+                .modules
+                .iter()
+                .all(|module| module.process == ModuleProcess::Core)
+        );
+        // The control: the same process alone reads fully.
+        assert!(!Scanner::new().scan(&targets[1..]).incomplete);
     }
 
     /// GIVEN Microsoft's kernel32.dll, signed through a catalog
@@ -722,7 +851,7 @@ mod tests {
         // handle is reserved and must be null.
         let module = unsafe { LoadLibraryExW(wide.as_ptr(), null_mut(), 0) };
         assert!(!module.is_null(), "copy did not load");
-        let found = Scanner::new().scan(&self_target());
+        let found = Scanner::new().scan(&self_target()).modules;
         // SAFETY: `module` came from the successful load above.
         unsafe { FreeLibrary(module) };
         let _ = fs::remove_dir_all(&dir);

@@ -1925,9 +1925,11 @@ impl Core {
     }
 
     /// Runs when a lock or sign-out has closed admission and advanced the
-    /// generation: drops every image and draft, then tells the UI.
+    /// generation: drops every image and draft and the closed profile's
+    /// module reviews, then tells the UI.
     fn announce_lock(&self) {
         self.media.purge();
+        lock(&self.modules).clear_reviewed();
         self.hub.announce_session_change();
     }
 
@@ -2566,22 +2568,24 @@ impl Core {
         true
     }
 
-    /// Takes a finished module scan from the scan thread. It never touches
-    /// the store. Raises one `modules_changed` event when the report changed.
-    pub fn update_modules(&self, found: Vec<modules::Found>, now: UnixMillis) {
-        if lock(&self.modules).update(found, now) {
+    /// Takes a finished module scan from the scan thread; `incomplete` when
+    /// it could not read every process or module. It never touches the
+    /// store. Raises one `modules_changed` event when the report changed.
+    pub fn update_modules(&self, found: Vec<modules::Found>, incomplete: bool, now: UnixMillis) {
+        if lock(&self.modules).update(found, incomplete, now) {
             self.hub.modules_changed();
         }
     }
 
-    /// The module report, with the reviewed ids of the open profile applied.
+    /// The module report, with the reviewed ids of the open profile, and
+    /// only those, applied.
     fn module_report(&self) -> ThirdPartyModules {
         let stored = self.stored_reviews();
         let (changed, report) = {
             let mut state = lock(&self.modules);
             let changed = stored
                 .as_deref()
-                .is_some_and(|stored| state.apply_reviewed(stored));
+                .is_some_and(|stored| state.replace_reviewed(stored));
             (changed, state.report())
         };
         if changed {
@@ -2606,7 +2610,8 @@ impl Core {
     }
 
     /// Marks listed modules as reviewed, in memory and in the open profile's
-    /// store. A failed write is `internal`, with memory kept as updated.
+    /// store. A failed write is `internal`; the next report reads the store
+    /// again, so the modules then show as new again.
     fn acknowledge_modules(&self, ids: &[String]) -> Outcome {
         let _store = lock(&self.modules_store);
         let source = self.source();
@@ -2623,7 +2628,7 @@ impl Core {
             let mut state = lock(&self.modules);
             let mut changed = stored
                 .as_deref()
-                .is_some_and(|stored| state.apply_reviewed(stored));
+                .is_some_and(|stored| state.replace_reviewed(stored));
             changed |= state.acknowledge(ids);
             (changed, state.reviewed().to_vec(), state.report())
         };
@@ -3086,9 +3091,9 @@ mod tests {
                 signer: None,
             }]
         };
-        core.update_modules(found(), UnixMillis::saturating(1));
+        core.update_modules(found(), false, UnixMillis::saturating(1));
         assert_eq!(core.take_events(), Some(vec![Event::ModulesChanged {}]));
-        core.update_modules(found(), UnixMillis::saturating(2));
+        core.update_modules(found(), false, UnixMillis::saturating(2));
         assert!(!lock(&core.hub.notifications).modules_changed);
 
         let listed = report(&core);
@@ -3106,6 +3111,13 @@ mod tests {
         ));
         assert!(report(&core).modules[0].acknowledged);
         assert_eq!(core.take_events(), Some(vec![Event::ModulesChanged {}]));
+
+        // A lock or sign-out forgets the closed profile's reviews.
+        core.announce_lock();
+        assert!(!report(&core).modules[0].acknowledged);
+        // An incomplete scan is reported as such.
+        core.update_modules(found(), true, UnixMillis::saturating(3));
+        assert!(report(&core).incomplete);
     }
 
     fn request(id: u32, call: Call) -> Vec<u8> {

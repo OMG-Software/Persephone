@@ -439,7 +439,8 @@ impl CoreTransport for FakeCore {
                     "firstSeen": 1_700_000_000_000_u64,
                     "acknowledged": false
                 }],
-                "truncated": false
+                "truncated": false,
+                "incomplete": false
             })),
             Call::RemoveDevice { device_id } => match device_id.as_str() {
                 "NEWDEV" => Ok(serde_json::json!("done")),
