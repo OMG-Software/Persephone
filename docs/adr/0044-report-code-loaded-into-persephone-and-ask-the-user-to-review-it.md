@@ -69,10 +69,14 @@ user informed.
   process. Signing out deletes the profile store.
 * A scan is reported as incomplete when the UI Job's process list cannot be
   read or does not fit, a target process that has not exited cannot be opened
-  or listed, a process has more than 8192 modules, or a module path cannot be
-  read or does not fit. Settings
+  or listed, a process has more than 8192 modules, a module path does not fit,
+  or a module path cannot be read and the module is still loaded. A module
+  that is gone from a fresh list was unloaded and does not count. Settings
   then says that some processes could not be checked, never "No other code is
   loaded".
+* The scan stops between processes and between signature checks when the
+  core shuts down, and its partial result is dropped. The core stops the UI
+  before it waits for the scan thread.
 * Settings > Security lists the modules as inert text. The main window shows a
   notice while any module is unreviewed and the user is signed in.
 

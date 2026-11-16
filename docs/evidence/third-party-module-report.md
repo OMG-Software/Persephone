@@ -217,6 +217,39 @@ binaries 13, 5, 5, 2, 12, 15, 20 and 4 passed); `cargo clippy --locked
 --offline -p persephone-core --all-targets -- -D warnings`, also with
 `--features dev-disposable-servers`.
 
+Fourth round, after CI on `d9c1b76` and the review of it:
+
+* **Windows CI:** the control in
+  `an_unreadable_process_makes_the_scan_incomplete` found its own scan
+  incomplete. The test process loads and unloads DLLs while other tests run,
+  so a module can go between the list and the path read. A failed path read
+  now lists the modules again. The scan is incomplete only if the module is
+  still listed or the second list fails. A cut path is still incomplete.
+* **Linux and openSUSE CI:**
+  `given_a_lock_then_module_reviews_leave_memory_and_return_from_the_store`
+  expected a module row, but other platforms report modules as unsupported.
+  The test now runs on Windows only.
+* **Shutdown order:** the core stopped the UI only after the scan thread
+  ended. It now stops the UI after the watcher and before it waits for the
+  scan. `Scanner::scan_until` checks a stop flag before each process and each
+  signature check and drops a partial result; the scan thread passes the
+  core's finished flag.
+
+The path read test became `a_failed_or_cut_path_read_is_left_out` (a failed
+read is returned for the check and does not by itself make the result
+incomplete). New: `a_failed_read_counts_as_unloaded_only_when_the_module_is_gone`
+(gone; still listed; no second list) and `a_stopped_scan_returns_nothing`
+(an unstopped scan is the control). The race itself was not reproduced
+locally: these tests passed before the change on this host.
+
+Rerun, all exited with status 0: `cargo fmt --all -- --check`; `cargo test
+--locked --offline -p persephone-core --no-fail-fast` (lib 289 passed, 1
+ignored; integration binaries 13, 5, 5, 2, 12, 15, 20 and 4 passed); the same
+with `--features dev-disposable-servers --test account_settings` (14
+passed); `cargo test --locked --offline -p persephone-desktop` (15 passed, 1
+ignored; IPC 35 passed); both Clippy runs above. The Linux and macOS results
+come from CI only.
+
 ## Live run
 
 `persephone.exe --demo` from this build, with `WEBVIEW2_USER_DATA_FOLDER` set

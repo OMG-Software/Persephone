@@ -335,16 +335,18 @@ fn run_ui(
         *finished.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
         finished.1.notify_all();
         let verdict = watcher.join().unwrap_or(Verdict::None);
+        // Stop the UI before waiting for the scan thread, which may be in
+        // the middle of a scan.
+        if end != ServeEnd::UiClosed && verdict == Verdict::None {
+            eprintln!("persephone: stopping the UI: {end:?}");
+            let _ = child.kill();
+        }
         // The report is a transparency aid: a panic in its thread must not
         // reach the scope, which would skip the shutdown below.
         #[cfg(windows)]
         let _ = scan.join();
         (end, verdict)
     });
-    if end != ServeEnd::UiClosed && verdict == Verdict::None {
-        eprintln!("persephone: stopping the UI: {end:?}");
-        let _ = child.kill();
-    }
     let status = child.wait();
     // Closing the tree after the wait ends anything left in it.
     drop(tree);
@@ -473,7 +475,10 @@ fn scan_modules(
                 });
             }
         }
-        let result = scanner.scan(&targets);
+        let stopped = || *finished.0.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(result) = scanner.scan_until(&targets, &stopped) else {
+            return;
+        };
         core.update_modules(
             result.modules.into_iter().map(Into::into).collect(),
             result.incomplete || !web_views.as_ref().is_ok_and(|list| list.complete),

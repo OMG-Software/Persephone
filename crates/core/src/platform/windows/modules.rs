@@ -144,15 +144,28 @@ impl Scanner {
     /// out. A process that cannot be opened or fully read makes the result
     /// incomplete; one that has exited does not. Never panics.
     pub fn scan(&mut self, targets: &[ScanTarget]) -> ScanResult {
+        self.scan_until(targets, &|| false)
+            .expect("a scan that is never stopped finishes")
+    }
+
+    /// [`Self::scan`], checking `stop` before each process and each
+    /// signature check. `None` when it stopped: the partial result is
+    /// dropped.
+    pub fn scan_until(
+        &mut self,
+        targets: &[ScanTarget],
+        stop: &dyn Fn() -> bool,
+    ) -> Option<ScanResult> {
         let mut incomplete = false;
-        let listed: Vec<(ModuleProcess, Vec<PathBuf>)> = targets
-            .iter()
-            .map(|target| {
-                let listed = list_modules(target.pid);
-                incomplete |= !listed.complete;
-                (target.process, listed.paths)
-            })
-            .collect();
+        let mut listed: Vec<(ModuleProcess, Vec<PathBuf>)> = Vec::with_capacity(targets.len());
+        for target in targets {
+            if stop() {
+                return None;
+            }
+            let modules = list_modules(target.pid);
+            incomplete |= !modules.complete;
+            listed.push((target.process, modules.paths));
+        }
         let webview_dir = listed
             .iter()
             .filter(|(process, _)| *process == ModuleProcess::WebView)
@@ -175,6 +188,9 @@ impl Scanner {
                 if !seen.insert((normalize(&path), process)) {
                     continue;
                 }
+                if stop() {
+                    return None;
+                }
                 let (signature, signer) = self.signature_of(&path);
                 if is_expected(
                     &path,
@@ -194,10 +210,10 @@ impl Scanner {
                 });
             }
         }
-        ScanResult {
+        Some(ScanResult {
             modules: found,
             incomplete,
-        }
+        })
     }
 
     /// The signature result for the file, from the cache when the file is the
@@ -309,33 +325,68 @@ fn list_modules(pid: u32) -> Listed {
             Listed::unreadable()
         };
     };
-    let mut listed = read_paths(&modules, |module, buffer| {
+    let read = read_paths(&modules, |module, buffer| {
         // SAFETY: the buffer holds `buffer.len()` characters, as passed.
         unsafe { K32GetModuleFileNameExW(handle, module, buffer.as_mut_ptr(), buffer.len() as u32) }
     });
-    listed.complete &= all_listed;
-    listed
+    // A failed read is an unload only if the module is no longer listed.
+    let relisted = if read.failed.is_empty() {
+        None
+    } else {
+        module_handles(handle).map(|(now, _)| now)
+    };
+    let failures_unloaded = all_unloaded(&read.failed, relisted.as_deref());
+    Listed {
+        paths: read.paths,
+        complete: all_listed && read.complete && failures_unloaded,
+    }
+}
+
+/// The paths read from a module list.
+struct ReadPaths {
+    paths: Vec<PathBuf>,
+    /// No path was cut.
+    complete: bool,
+    /// The modules whose read failed.
+    failed: Vec<HMODULE>,
 }
 
 /// Reads each module's path with `read`, which fills the buffer and returns
-/// the length, 0 on failure, like `K32GetModuleFileNameExW`. A failed or
-/// full read leaves that path out and makes the result incomplete.
-fn read_paths(modules: &[HMODULE], mut read: impl FnMut(HMODULE, &mut [u16]) -> u32) -> Listed {
+/// the length, 0 on failure, like `K32GetModuleFileNameExW`. A cut path makes
+/// the result incomplete; a failed read is returned for a check.
+fn read_paths(modules: &[HMODULE], mut read: impl FnMut(HMODULE, &mut [u16]) -> u32) -> ReadPaths {
     let mut buffer = vec![0u16; PATH_CHARS];
     let mut paths = Vec::with_capacity(modules.len());
     let mut complete = true;
+    let mut failed = Vec::new();
     for &module in modules {
         let length = read(module, &mut buffer) as usize;
-        if length == 0 || length >= PATH_CHARS {
-            // Zero: unloaded after the list was read, or not readable; the
-            // two cannot be told apart. Full: the path was cut. Neither path
-            // is shown, so the result is not complete.
+        if length == 0 {
+            // Unloaded after the list was read, or not readable.
+            failed.push(module);
+        } else if length >= PATH_CHARS {
+            // A full buffer means the path was cut: it is not shown.
             complete = false;
-            continue;
+        } else {
+            paths.push(PathBuf::from(OsString::from_wide(&buffer[..length])));
         }
-        paths.push(PathBuf::from(OsString::from_wide(&buffer[..length])));
     }
-    Listed { paths, complete }
+    ReadPaths {
+        paths,
+        complete,
+        failed,
+    }
+}
+
+/// Whether every module whose read failed has since been unloaded: none of
+/// them is in `now`, a fresh list. With no fresh list, that is unknown, so
+/// false.
+fn all_unloaded(failed: &[HMODULE], now: Option<&[HMODULE]>) -> bool {
+    match now {
+        _ if failed.is_empty() => true,
+        Some(now) => failed.iter().all(|module| !now.contains(module)),
+        None => false,
+    }
 }
 
 /// The process's module handles, and whether they are all of them. The
@@ -798,11 +849,12 @@ mod tests {
         assert!(!result.incomplete);
     }
 
-    /// GIVEN three modules WHEN one path read fails, or one fills the buffer
-    /// THEN that path is left out and the result is incomplete; WHEN every
-    /// read works THEN all paths are listed and it is complete (the control)
+    /// GIVEN three modules WHEN one path read fails THEN that path is left
+    /// out and returned for a check; WHEN one fills the buffer THEN it is left
+    /// out and the result is incomplete; WHEN every read works THEN all paths
+    /// are listed and it is complete (the control)
     #[test]
-    fn a_failed_or_cut_path_read_makes_the_result_incomplete() {
+    fn a_failed_or_cut_path_read_is_left_out() {
         let modules: Vec<HMODULE> = (1..=3usize).map(|n| n as HMODULE).collect();
         let reader = |bad: Option<(usize, u32)>| {
             move |module: HMODULE, buffer: &mut [u16]| -> u32 {
@@ -818,17 +870,37 @@ mod tests {
             }
         };
         let all = read_paths(&modules, reader(None));
-        assert!(all.complete);
+        assert!(all.complete && all.failed.is_empty());
         assert_eq!(all.paths.len(), 3);
-        for (length, case) in [(0, "failed"), (PATH_CHARS as u32, "cut")] {
-            let listed = read_paths(&modules, reader(Some((2, length))));
-            assert!(!listed.complete, "{case}");
-            assert_eq!(
-                listed.paths,
-                [PathBuf::from(r"C:\x\m1.dll"), PathBuf::from(r"C:\x\m3.dll")],
-                "{case}"
-            );
-        }
+        let rest = [PathBuf::from(r"C:\x\m1.dll"), PathBuf::from(r"C:\x\m3.dll")];
+        let failed = read_paths(&modules, reader(Some((2, 0))));
+        assert!(failed.complete);
+        assert_eq!(failed.failed, [modules[1]]);
+        assert_eq!(failed.paths, rest);
+        let cut = read_paths(&modules, reader(Some((2, PATH_CHARS as u32))));
+        assert!(!cut.complete && cut.failed.is_empty());
+        assert_eq!(cut.paths, rest);
+    }
+
+    /// GIVEN a module whose read failed WHEN a fresh list no longer has it
+    /// THEN it was unloaded; WHEN the list still has it, or no fresh list
+    /// could be read THEN the result is not complete
+    #[test]
+    fn a_failed_read_counts_as_unloaded_only_when_the_module_is_gone() {
+        let (one, two) = (1usize as HMODULE, 2usize as HMODULE);
+        assert!(all_unloaded(&[], None));
+        assert!(all_unloaded(&[two], Some(&[one])));
+        assert!(!all_unloaded(&[two], Some(&[one, two])));
+        assert!(!all_unloaded(&[two], None));
+    }
+
+    /// GIVEN a scan of the test process WHEN it is stopped at once THEN it
+    /// returns nothing; WHEN it is not stopped THEN it finishes (the control)
+    #[test]
+    fn a_stopped_scan_returns_nothing() {
+        let mut scanner = Scanner::new();
+        assert!(scanner.scan_until(&self_target(), &|| true).is_none());
+        assert!(scanner.scan_until(&self_target(), &|| false).is_some());
     }
 
     /// GIVEN the System process (pid 4), which a user process cannot open

@@ -1288,7 +1288,9 @@ fn given_an_unusable_backup_then_a_new_one_starts_only_after_a_yes() {
 /// reviews leave memory) and the store needs a restart, so no other profile
 /// can open in this core process
 /// WHEN the core starts again on the same profile THEN the review comes back
-/// from the profile's encrypted store, and only that one
+/// from the profile's encrypted store, and only that one. Windows only: other
+/// platforms report modules as unsupported.
+#[cfg(windows)]
 #[test]
 fn given_a_lock_then_module_reviews_leave_memory_and_return_from_the_store() {
     use persephone_contracts::{
