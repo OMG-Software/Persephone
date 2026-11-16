@@ -76,8 +76,9 @@ a draft, and a send only on confirm.
 * Tauri allocates the whole request body in the UI process before the host
   command can check its length. The page checks the size before it reads the
   file, but a compromised page could still make the UI process allocate a
-  large body. The UI process has its own memory limit (ADR-0004), and the
-  core's budgets are unchanged.
+  large body. The one-paste slot applies only after collection, so concurrent
+  requests each allocate their body first. The UI process has its own memory
+  limit (ADR-0004), and the core's budgets are unchanged.
 * The UI process holds a second copy of the image while it writes the frames.
 * Clipboard images that are not PNG or JPEG, such as GIF or WebP, cannot be
   pasted.

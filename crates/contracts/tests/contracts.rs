@@ -557,6 +557,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         "1",
         r#""Orange""#,
         r#"{"orange":true}"#,
+        r#"{"red":null}"#,
     ] {
         let sent = complete.replace(r#""theme":"orange""#, &format!(r#""theme":{theme}"#));
         assert!(

@@ -234,6 +234,7 @@ mod tests {
             "7",
             r#"["red"]"#,
             r#"{"red":true}"#,
+            r#"{"red":null}"#,
         ] {
             let record =
                 format!(r#"{{"enter_sends":false,"chat_text_percent":125,"theme":{value}}}"#);
