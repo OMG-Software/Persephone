@@ -72,8 +72,14 @@ mod ui_watch;
 #[cfg(windows)]
 type Scanner = persephone_core::platform::windows::modules::Scanner;
 #[cfg(not(windows))]
-#[derive(Default)]
 struct Scanner;
+
+#[cfg(not(windows))]
+impl Scanner {
+    fn new() -> Self {
+        Self
+    }
+}
 
 const DEMO_ROOM: &str = "!planning:example.invalid";
 /// The demo stops after this many messages so memory stays bounded.
@@ -245,7 +251,7 @@ fn run(options: Options) -> ExitCode {
     let host = ui_host::platform();
     let mut retries = ui_watch::Retries::default();
     // Its signature results are kept between window runs.
-    let mut scanner = Scanner::default();
+    let mut scanner = Scanner::new();
     let mut switch = None;
     let code = loop {
         match run_ui(&core, &*host, &mut retries, &mut scanner, options.demo_live) {
