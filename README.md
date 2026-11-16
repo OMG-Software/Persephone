@@ -27,10 +27,11 @@ room's encryption and unread count, and the members are on the right.
 planning room is open in the middle with a conversation between Alice and Bob
 and an image of a beta schedule, and the two members are on the right](site/screenshots/room-history.png)
 
-Hostile room names and messages stay inert text. The markup and the
-`javascript:` link below do not run. The right-to-left override still
-reverses its own line, but bidirectional isolation keeps it out of the text
-around it.
+Hostile room names and messages show as text. The markup and the
+`javascript:` link below do not run. A web link (`http` or `https`) becomes a
+link, and Persephone asks in its own window before it opens one. The
+right-to-left override still reverses its own line, but bidirectional
+isolation keeps it out of the text around it.
 
 ![A room whose name is an HTML image tag, with messages that contain a script
 tag, a javascript: link, a right-to-left override and control characters, each
