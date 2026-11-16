@@ -49,6 +49,7 @@
 * [0036 - Bound room navigation and inspection in the core](0036-bound-room-navigation-and-inspection-in-the-core.md)
 * [0037 - Browse public room directories and join only listed rooms](0037-browse-public-room-directories-and-join-only-listed-rooms.md)
 * [0041 - Load room pictures in the core, on request or when turned on](0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md)
+* [0043 - Make audio calls through MatrixRTC in a contained call worker](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)
 
 ## Superseded Records
 
