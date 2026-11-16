@@ -66,7 +66,9 @@ fn set_and_check(policy: i32) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::{
+        ffi::OsString,
         fs,
+        os::windows::ffi::OsStringExt,
         path::{Path, PathBuf},
         process::Command,
     };
@@ -76,6 +78,18 @@ mod tests {
         fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
         fn FreeLibrary(module: *mut c_void) -> i32;
         fn GetLastError() -> u32;
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+
+    /// The path of `name` in the installed Windows system directory, which
+    /// need not be on drive C.
+    fn system_dll(name: &str) -> PathBuf {
+        let mut buffer = [0u16; 260];
+        // SAFETY: the buffer is writable for the stated number of UTF-16 units.
+        let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        let len = usize::try_from(len).expect("u32 fits usize");
+        assert!(len > 0 && len < buffer.len(), "system directory not read");
+        PathBuf::from(OsString::from_wide(&buffer[..len])).join(name)
     }
 
     const ERROR_INVALID_IMAGE_HASH: u32 = 577;
@@ -119,7 +133,7 @@ mod tests {
             "tampered DLL after hardening"
         );
         assert_eq!(
-            load(Path::new(r"C:\Windows\System32\msimg32.dll")),
+            load(&system_dll("msimg32.dll")),
             Ok(()),
             "Microsoft DLL after hardening"
         );
@@ -128,7 +142,7 @@ mod tests {
     /// Copies `version.dll` and changes one byte of its DOS stub text, so
     /// no signature or catalog matches the copy.
     fn tampered_copy(to: &Path) {
-        let mut bytes = fs::read(r"C:\Windows\System32\version.dll").expect("read version.dll");
+        let mut bytes = fs::read(system_dll("version.dll")).expect("read version.dll");
         let text = b"This program cannot be run";
         let at = bytes
             .windows(text.len())

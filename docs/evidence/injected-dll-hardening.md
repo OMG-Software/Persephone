@@ -2,7 +2,10 @@
 
 Checked 16 November 2026 on Windows 11 Pro x64 (build 26300), debug builds,
 rustc 1.99.1, WebView2 runtime 157.0.4341.46. Source: commit `f6b84b8` plus
-the hardening change only, built in a separate worktree. **Result: the core
+the hardening change only, built in a separate worktree. That tree was then
+committed unchanged as `e3cb522`; its `Cargo.lock` is blob `f1d06a4`, the same
+as in `f6b84b8`. The pull request branch carries the same change as `7b3e00d`
+on a later `main`. **Result: the core
 and the UI now refuse images not signed through Microsoft and all
 extension-point DLLs, including global window hooks, from the first statement
 of `main`. The demo app started and ran with both policies on. The live block
@@ -50,6 +53,26 @@ Owner decisions (16 November 2026):
 A probe set `MicrosoftSignedOnly` and then mapped each DLL without running it
 (`LoadLibraryExW` with `DONT_RESOLVE_DLL_REFERENCES`). A control run without the
 policy loaded all five.
+
+Provenance (recorded on 16 November 2026 from the session record; not rerun):
+
+* The probe is the standalone script in [the appendix](#appendix-signer-probe).
+  It uses no Persephone source or build, only Python 3.14.4 `ctypes` and
+  `kernel32`.
+* It ran twice, as `python -I signed_probe.py control <dll>...` and
+  `python -I signed_probe.py block <dll>...`, with these five paths:
+  * `C:\Program Files\Sophos\Sophos AMSI Protection\SophosAmsiProvider.dll`
+  * `C:\Windows\System32\hmpalert.dll`
+  * `C:\Program Files (x86)\RivaTuner Statistics Server\RTSSHooks64.dll`
+  * `C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.25110.6-0\MpOAV.dll`
+  * `C:\Windows\System32\msimg32.dll`
+* Both runs completed and printed one line for each DLL. The `block` run did
+  not stop at its `policy not set` exit, so the policy was in effect. The
+  numeric exit status was not captured separately.
+* The signers came from each file's Authenticode signer chain, read on the same
+  host after the probe.
+* The raw output was not kept. The table below is the sanitized result; it
+  contains no user paths or identifiers.
 
 | DLL | Signer (issuing CA) | With the policy |
 | --- | --- | --- |
@@ -122,3 +145,40 @@ packages, all passing.
 * Not checked under the policies: the native file and credential dialogs, the
   passkey prompt, a real sign-in, and an RTSS injection attempt.
 * Debug builds on one Windows host only.
+
+## Appendix: signer probe
+
+The script as run (`signed_probe.py`):
+
+```python
+"""Tries to map each DLL given as an image, with or without the
+MicrosoftSignedOnly binary signature policy, without running its code
+(DONT_RESOLVE_DLL_REFERENCES: no DllMain, no imports resolved).
+
+Usage: python -I signed_probe.py control|block <dll> [<dll> ...]
+Prints one line per DLL: loaded, or the Windows error code.
+"""
+import ctypes
+import sys
+from ctypes import wintypes
+
+mode, paths = sys.argv[1], sys.argv[2:]
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.LoadLibraryExW.restype = wintypes.HMODULE
+k32.LoadLibraryExW.argtypes = [wintypes.LPCWSTR, wintypes.HANDLE, wintypes.DWORD]
+k32.FreeLibrary.argtypes = [wintypes.HMODULE]
+DONT_RESOLVE_DLL_REFERENCES = 0x1
+
+if mode == "block":
+    flags = wintypes.DWORD(1)  # MicrosoftSignedOnly
+    if not k32.SetProcessMitigationPolicy(8, ctypes.byref(flags), 4):
+        sys.exit(f"policy not set: {ctypes.get_last_error()}")
+
+for path in paths:
+    handle = k32.LoadLibraryExW(path, None, DONT_RESOLVE_DLL_REFERENCES)
+    if handle:
+        print(f"{mode:7} loaded   {path}")
+        k32.FreeLibrary(handle)
+    else:
+        print(f"{mode:7} refused  {path}  (error {ctypes.get_last_error()})")
+```

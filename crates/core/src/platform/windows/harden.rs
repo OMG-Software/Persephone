@@ -62,9 +62,9 @@ pub fn block_injected_dlls() -> io::Result<()> {
 mod tests {
     use super::block_injected_dlls;
     use std::{
-        ffi::c_void,
+        ffi::{OsString, c_void},
         fs,
-        os::windows::ffi::OsStrExt,
+        os::windows::ffi::{OsStrExt, OsStringExt},
         path::{Path, PathBuf},
         process::Command,
     };
@@ -78,6 +78,18 @@ mod tests {
         fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
         fn FreeLibrary(module: *mut c_void) -> i32;
         fn GetLastError() -> u32;
+        fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    }
+
+    /// The path of `name` in the installed Windows system directory, which
+    /// need not be on drive C.
+    fn system_dll(name: &str) -> PathBuf {
+        let mut buffer = [0u16; 260];
+        // SAFETY: the buffer is writable for the stated number of UTF-16 units.
+        let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        let len = usize::try_from(len).expect("u32 fits usize");
+        assert!(len > 0 && len < buffer.len(), "system directory not read");
+        PathBuf::from(OsString::from_wide(&buffer[..len])).join(name)
     }
 
     /// Loads the DLL at `path`; `Err` carries the Win32 error code.
@@ -118,8 +130,7 @@ mod tests {
         block_injected_dlls().expect("policies set");
         let after = load(&dir.join("probe-b.dll"));
         assert_eq!(after.err(), Some(ERROR_INVALID_IMAGE_HASH));
-        let genuine = load(Path::new(r"C:\Windows\System32\msimg32.dll"))
-            .expect("Microsoft-signed DLL still loads");
+        let genuine = load(&system_dll("msimg32.dll")).expect("Microsoft-signed DLL still loads");
         free(genuine);
     }
 
@@ -131,7 +142,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("persephone-harden-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp dir");
-        let original = fs::read(r"C:\Windows\System32\version.dll").expect("read version.dll");
+        let original = fs::read(system_dll("version.dll")).expect("read version.dll");
         let marker = b"This program cannot be run";
         let at = original
             .windows(marker.len())
