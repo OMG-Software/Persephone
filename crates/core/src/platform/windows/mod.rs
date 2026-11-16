@@ -3,6 +3,7 @@
 //! directory.
 
 pub mod credentials;
+pub mod harden;
 pub mod media;
 pub mod pick;
 pub mod profile;
