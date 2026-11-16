@@ -411,6 +411,12 @@ notificationNames: boolean,
  */
 loadRoomPictures: boolean, 
 /**
+ * Hide the main window from screenshots, screen recording and screen
+ * sharing that use the Windows capture APIs. On by default. Windows only;
+ * before Windows 10 version 2004 a capture shows it black (ADR-0045).
+ */
+captureProtection: boolean, 
+/**
  * Which kinds of room changes the timeline shows. All on by default.
  */
 timelineEvents: TimelineEvents, 

@@ -24,6 +24,7 @@ let RoomSettings;
 let LevelPicker;
 let AccountText;
 let Preferences;
+let CaptureProtection;
 let AccountPage;
 let Devices;
 let render;
@@ -57,6 +58,7 @@ before(async () => {
   ({ default: LevelPicker } = await vite.ssrLoadModule('/src/LevelPicker.svelte'));
   ({ default: AccountText } = await vite.ssrLoadModule('/src/AccountText.svelte'));
   ({ default: Preferences } = await vite.ssrLoadModule('/src/Preferences.svelte'));
+  ({ default: CaptureProtection } = await vite.ssrLoadModule('/src/CaptureProtection.svelte'));
   ({ default: AccountPage } = await vite.ssrLoadModule('/src/AccountPage.svelte'));
   ({ default: Devices } = await vite.ssrLoadModule('/src/Devices.svelte'));
   ({ render } = await vite.ssrLoadModule('svelte/server'));
@@ -1162,6 +1164,7 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     idleLockMinutes: 0,
     notificationNames: true,
     loadRoomPictures: false,
+    captureProtection: true,
     timelineEvents: Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves'])),
     theme: 'orange'
   };
@@ -1192,6 +1195,23 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
   assert.match(html, /tells your homeserver, and the server that holds the picture/);
   // The level is read from the homeserver; until then nothing can be chosen.
   assert.match(html, /<fieldset class="choices" disabled/);
+});
+
+test('GIVEN the capture setting WHEN it shows THEN the switch is labelled, follows the setting and shows inert text', () => {
+  const page = (captureProtection) =>
+    render(CaptureProtection, {
+      props: {
+        settings: { ...DEFAULT_PREFERENCES, captureProtection },
+        failure: null,
+        onchange: () => {}
+      }
+    }).body;
+  assert.match(page(true), /<span>Hide Persephone from screenshots and screen sharing<\/span>/);
+  assert.match(page(true), /checked/);
+  assert.doesNotMatch(page(false), /checked/);
+  assert.match(page(true), /screen sharing show the window blank/);
+  assert.doesNotMatch(page(true), /Recall/);
+  assert.doesNotMatch(page(true), /<script|<img|href=/);
 });
 
 test('GIVEN the preferences WHEN they show THEN a theme drop-down offers the three dark themes with the saved one chosen', () => {

@@ -47,6 +47,7 @@
   import NewConversation from './NewConversation.svelte';
   import NewRoom from './NewRoom.svelte';
   import Preferences from './Preferences.svelte';
+  import CaptureProtection from './CaptureProtection.svelte';
   import ProfileSettings from './ProfileSettings.svelte';
   import RoomSettings from './RoomSettings.svelte';
   import Security from './Security.svelte';
@@ -2215,6 +2216,13 @@
         {/if}
         {#if securityFailure}
           <p role="alert" class="error">{securityFailure}</p>
+        {/if}
+        {#if signedIn}
+          <CaptureProtection
+            {settings}
+            failure={settingsFailure}
+            onchange={(patch) => settingsKeeper.change(patch)}
+          />
         {/if}
         <LoadedCode
           report={modules}

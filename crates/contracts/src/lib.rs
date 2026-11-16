@@ -1331,6 +1331,10 @@ pub struct AccountSettings {
     /// server that holds the picture, that this account looked at it. Off by
     /// default (ADR-0041).
     pub load_room_pictures: bool,
+    /// Hide the main window from screenshots, screen recording and screen
+    /// sharing that use the Windows capture APIs. On by default. Windows only;
+    /// before Windows 10 version 2004 a capture shows it black (ADR-0045).
+    pub capture_protection: bool,
     /// Which kinds of room changes the timeline shows. All on by default.
     pub timeline_events: TimelineEvents,
     /// The colours of the interface. Grey and orange by default.
@@ -1459,6 +1463,7 @@ impl Default for AccountSettings {
             idle_lock_minutes: 0,
             notification_names: true,
             load_room_pictures: false,
+            capture_protection: true,
             timeline_events: TimelineEvents::default(),
             theme: Theme::Orange,
         }

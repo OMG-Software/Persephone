@@ -529,7 +529,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"orange"}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"captureProtection":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"orange"}"#
     );
     // Every kind of room change shows by default.
     assert_eq!(defaults.timeline_events, TimelineEvents::default());

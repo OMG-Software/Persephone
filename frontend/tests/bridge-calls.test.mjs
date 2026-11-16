@@ -132,6 +132,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           idleLockMinutes: 15,
           notificationNames: false,
           loadRoomPictures: true,
+          captureProtection: false,
           timelineEvents: { ...ALL_SHOWN, leaves: false },
           theme: 'red'
         }),
@@ -147,6 +148,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           idleLockMinutes: 15,
           notificationNames: false,
           loadRoomPictures: true,
+          captureProtection: false,
           timelineEvents: { ...ALL_SHOWN, leaves: false },
           theme: 'red'
         }
@@ -219,6 +221,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       idleLockMinutes: 0,
       notificationNames: true,
       loadRoomPictures: false,
+      captureProtection: true,
       timelineEvents: { ...ALL_SHOWN, polls: false },
       theme: 'blue',
       accent: 'green'
@@ -235,6 +238,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       idleLockMinutes: 0,
       notificationNames: true,
       loadRoomPictures: false,
+      captureProtection: true,
       timelineEvents: ALL_SHOWN,
       theme: 'blue'
     }
