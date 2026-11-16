@@ -73,12 +73,14 @@ a draft, and a send only on confirm.
 
 * The UI-to-core channel now carries up to 20 MiB of image bytes in one frame,
   not only control frames. The core's reader handles one more frame kind.
-* Tauri allocates the whole request body in the UI process before the host
-  command can check its length. The page checks the size before it reads the
-  file, but a compromised page could still make the UI process allocate a
-  large body. The one-paste slot applies only after collection, so concurrent
-  requests each allocate their body first. The UI process has its own memory
-  limit (ADR-0004), and the core's budgets are unchanged.
+* The UI process reads the whole request body before the host command can
+  check its length or take the one-paste slot. The page checks the size
+  before it reads the file, but a compromised page could still make the UI
+  process allocate large bodies, one for each concurrent request. This adds
+  no new exposure: wry reads the body of every IPC request, for any command,
+  without a limit on Windows, macOS and Linux. ADR-0004 accepts that for the
+  keyless UI process, which has its own memory limit on Windows, and rejects
+  a patched wry. The core's budgets are unchanged.
 * The UI process holds a second copy of the image while it writes the frames.
 * Clipboard images that are not PNG or JPEG, such as GIF or WebP, cannot be
   pasted.

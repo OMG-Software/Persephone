@@ -192,7 +192,7 @@ worker slot.
 
 | Item | Limit |
 | --- | --- |
-| Encoded file, download, selection or paste | 20 MiB. The core checks it before it allocates. For a paste, the UI process checks it only after Tauri has collected the whole request body |
+| Encoded file, download, selection or paste | 20 MiB. The core checks it before it allocates. For a paste, the UI process checks it only after wry has read the whole request body |
 | Image or file sent | 20 MiB after stripping; the SDK's copies of one send (input, upload buffer, request clone, HTTP body) are reserved in a 100 MiB `OutgoingSend` budget ([ADR-0031](../adr/0031-reserve-the-sdks-copies-of-a-send-in-a-budget-of-their-own.md)) |
 | Decoded image | 8192 per side, 16 megapixels, 64 MiB RGBA |
 | Displayed image | Scaled to fit 2048 × 2048 |
@@ -238,11 +238,15 @@ Known limits of this implementation:
 * Decoded pixel frames and the SDK's copy of an upload are not zeroed when they
   are dropped.
 * An open file dialog keeps the core from ending until the dialog closes.
-* Tauri allocates a pasted image's whole request body in the UI process
-  before `paste_image` checks its length (ADR-0042). The one-paste slot also
-  applies only after that, so concurrent requests from a compromised page each
-  allocate their body first. No Tauri setting that limits an IPC body before
-  collection was found.
+* The UI process reads a pasted image's whole request body before
+  `paste_image` checks its length or takes the one-paste slot, so concurrent
+  requests from a compromised page each allocate their body first. This is
+  not specific to paste. wry 0.57.0 reads the body of every IPC request into
+  memory without a limit, before Tauri looks up the command or checks its
+  permission: `prepare_request` in `src/webview2/mod.rs` on Windows, the
+  URL scheme handler on macOS, and `web_context.rs` with the `linux-body`
+  feature on Linux. ADR-0004 accepts this for the keyless UI process and
+  rejects a patched wry (ADR-0042).
 * The UI process limits concurrent `image_band` calls to the core (four), but
   it does not count band responses that wait for delivery to the web view. A
   page that asks for bands faster than it reads them can make the UI process
