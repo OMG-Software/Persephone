@@ -120,6 +120,26 @@ persephone-core --bin persephone` (13 passed), `cargo test -p
 persephone-desktop` (15 lib, 34 IPC) and default-feature Clippy for both
 packages, all passing.
 
+Source comparison record, taken on 16 November 2026 with `git rev-parse
+<commit>:<path>`. The tested commit `e3cb522` is local and unpublished; the
+published column can be checked against `7b3e00d`:
+
+| Path | Blob at `e3cb522` (tested) | Blob at `7b3e00d` (published) |
+| --- | --- | --- |
+| `crates/core/src/platform/windows/harden.rs` | `63958ff64e59ee144040693097afe942fb4c8668` | same |
+| `src-tauri/src/harden.rs` | `2c39cda3ae355fbfdea6e3b1f2f0e3aa2e81a170` | same |
+| `crates/core/src/main.rs` | `da6dfa8d3e5bd3a17c6f89e607db832b9eef9614` | same |
+| `src-tauri/src/lib.rs` | `557a16706a2c66287661936f6101760532b01c6d` | same |
+| `crates/core/src/platform/windows/mod.rs` | `7778a54bfcdaca413da97d18a37ad2e08e140b01` | `2ed80f9f7f96614a4db8ab5297d708fa3351482a` |
+| `docs/README.md` | `41efe79c193e014460d308ba2da8aef665d739d3` | `709cb5233233d4ec6ad33c3c93c77955c10ead3a` |
+| `Cargo.lock` | `f1d06a4e105381d64ca35f31bed414cca8f3cf14` | `adf1bca4c816be8111958b8b1bc2813086114524` |
+
+The last three differ because the bases differ: in each, the hardening change
+adds the same lines (one `pub mod harden;` line, one index line). The tested
+lockfile is not published, so its identity cannot be checked independently.
+The signer probe does not depend on it: the probe uses no Persephone source,
+build or lockfile, only Python and the host's DLLs.
+
 Rerun on 16 November 2026 on the published pull request branch at `bfd71ef`
 (`7b3e00d` plus the test-path fix below; `Cargo.lock` blob `adf1bca`), same
 host, debug, `--locked --offline`, worktree `.local/wt-pr`,
