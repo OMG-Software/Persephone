@@ -27,3 +27,7 @@ and `tokio-rustls`). The call worker enables it.
 - `NativeTransport::new` builds its `reqwest` client with `.no_proxy()` and
   `.use_preconfigured_tls(tls13_client_config())`, so HTTP requests (region and
   validate calls) are also TLS 1.3 only and ignore proxy variables.
+- When the TLS 1.3 client cannot be built (for example, no usable root in the
+  system store), `NativeTransport::new` keeps no client instead of panicking.
+  Each HTTP request then returns `TransportError::Connection`. The signalling
+  socket fails the same way through `connect_ws`.

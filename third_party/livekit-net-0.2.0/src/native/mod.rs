@@ -37,21 +37,24 @@ fn error_chain(e: &dyn std::error::Error) -> String {
 pub struct NativeTransport {
     // reqwest pools connections per client, so a per-request client would redo
     // TCP/TLS setup (and root-store loading) on every call.
-    http: reqwest::Client,
+    // Persephone (ADR-0043): `None` when the TLS 1.3 client could not be
+    // built (for example, no usable system root). Every request then fails
+    // with an error instead of the process panicking.
+    http: Option<reqwest::Client>,
 }
 
 impl NativeTransport {
     pub(crate) fn new() -> Self {
         // Persephone (ADR-0043): no proxy from the environment, and the TLS 1.3
         // only configuration of `proxy::tls13_client_config`.
-        let tls = self::proxy::tls13_client_config().expect("the system root store loads");
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .use_preconfigured_tls((*tls).clone())
-            .redirect(redirect_policy())
-            .build()
-            // `reqwest::Client::new` panics the same way.
-            .expect("the TLS backend initializes");
+        let http = self::proxy::tls13_client_config().ok().and_then(|tls| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .use_preconfigured_tls((*tls).clone())
+                .redirect(redirect_policy())
+                .build()
+                .ok()
+        });
         Self { http }
     }
 }
@@ -178,9 +181,14 @@ impl NativeTransport {
         body: Option<Vec<u8>>,
         limit: Option<u64>,
     ) -> Result<HttpResponse, TransportError> {
+        // Persephone (ADR-0043): no client means TLS could not be set up.
+        let http = self
+            .http
+            .as_ref()
+            .ok_or_else(|| TransportError::Connection("TLS 1.3 client unavailable".into()))?;
         let mut req = match method {
-            HttpMethod::Get => self.http.get(url),
-            HttpMethod::Post => self.http.post(url),
+            HttpMethod::Get => http.get(url),
+            HttpMethod::Post => http.post(url),
         };
         for h in headers {
             req = req.header(&h.name, &h.value);
