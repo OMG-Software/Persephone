@@ -20,6 +20,7 @@ use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
 use serde_json::{Value, json};
 use std::{
     fs,
+    net::{SocketAddr, TcpStream},
     path::Path,
     sync::{
         Arc,
@@ -468,7 +469,10 @@ impl Homeserver {
     fn start(login: (u16, Value), sliding: bool, versions_ok: bool) -> Self {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let server = runtime.block_on(async {
-            let server = MockServer::start().await;
+            // Its own listener, closed when the test ends. `MockServer::start`
+            // lends a pooled server, and its address, to the next test, so a
+            // core a test leaves running would sync against that test's mocks.
+            let server = MockServer::builder().start().await;
             // A Matrix v1.19 homeserver; Sliding Sync is an unstable feature.
             let versions = if sliding {
                 json!({"versions":["v1.19"],"unstable_features":{"org.matrix.simplified_msc3575":true}})
@@ -958,6 +962,10 @@ impl Homeserver {
 
     fn uri(&self) -> String {
         self.server.uri()
+    }
+
+    fn address(&self) -> SocketAddr {
+        *self.server.address()
     }
 
     fn requests_to(&self, endpoint: &str) -> usize {
@@ -1482,6 +1490,32 @@ fn given_native_sliding_sync_then_it_is_used_and_rooms_arrive() {
     );
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
+}
+
+/// GIVEN a core that a test left signed in and syncing, never locked WHEN that
+/// test's homeserver is dropped THEN its address refuses connections and the
+/// core's next round fails: what the core sends reaches no later test's
+/// homeserver. With a pooled mock server, the next test that took it received
+/// the rounds, and the Sliding Sync test counted them as classic fallback.
+#[test]
+fn given_a_core_left_syncing_when_its_homeserver_is_dropped_then_its_rounds_reach_nothing() {
+    let homeserver = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let left = signed_in_core(&homeserver, dir.path());
+    // Stopped only when this test ends, as a test that never locks leaves it.
+    let _locked = LockOnDrop(&left);
+    wait_for("a classic sync", || {
+        homeserver.requests_to("/_matrix/client/v3/sync") > 0
+    });
+    let address = homeserver.address();
+    drop(homeserver);
+    wait_for("the address to refuse connections", || {
+        TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+    });
+    wait_for("a failed round", || {
+        left.session().account_status().error == Some(SignInError::SyncFailed)
+    });
 }
 
 /// GIVEN `ROOM`'s state from Sliding Sync (`sliding`) or classic sync WHEN
