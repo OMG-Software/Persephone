@@ -4,8 +4,11 @@ Checked 16 November 2026 on Windows 11 Pro x64 (build 26300), debug builds,
 rustc 1.99.1, WebView2 runtime 157.0.4341.46. Source: commit `f6b84b8` plus
 the hardening change only, built in a separate worktree. That tree was then
 committed unchanged as `e3cb522`; its `Cargo.lock` is blob `f1d06a4`, the same
-as in `f6b84b8`. The pull request branch carries the same change as `7b3e00d`
-on a later `main`. **Result: the core
+as in `f6b84b8`. Both commits are local and unpublished: `f6b84b8` belongs to
+other, unmerged work. The published equivalent is `7b3e00d` on the pull
+request branch, on a later `main`. Its `harden.rs` files, `crates/core/src/main.rs`
+and `src-tauri/src/lib.rs` are byte-identical to `e3cb522`. A labelled rerun on
+the published branch is under [Tests](#tests). **Result: the core
 and the UI now refuse images not signed through Microsoft and all
 extension-point DLLs, including global window hooks, from the first statement
 of `main`. The demo app started and ran with both policies on. The live block
@@ -116,6 +119,19 @@ broke its build: `cargo fmt` checks for both packages, `cargo test -p
 persephone-core --bin persephone` (13 passed), `cargo test -p
 persephone-desktop` (15 lib, 34 IPC) and default-feature Clippy for both
 packages, all passing.
+
+Rerun on 16 November 2026 on the published pull request branch at `bfd71ef`
+(`7b3e00d` plus the test-path fix below; `Cargo.lock` blob `adf1bca`), same
+host, debug, `--locked --offline`, worktree `.local/wt-pr`,
+`CARGO_TARGET_DIR=.local/build/rust-pr`. The whole run exited with status 0:
+
+* `cargo fmt -p persephone-core -p persephone-desktop -- --check`: passed.
+* `cargo test --locked --offline -p persephone-core harden`: 1 passed, 1 ignored.
+* `cargo test --locked --offline -p persephone-desktop --lib harden`: 1 passed, 1 ignored.
+* `cargo clippy --locked --offline -p persephone-core -p persephone-desktop --all-targets -- -D warnings`: passed.
+
+The fix in `bfd71ef` builds the test DLL paths from `GetSystemDirectoryW`
+instead of a fixed `C:\Windows\System32`. The live run below was not repeated.
 
 ## Live run
 
