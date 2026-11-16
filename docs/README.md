@@ -99,3 +99,4 @@ Earlier P0 probes (19 and 20 October 2026; historical run records with pre-restr
 
 - [Slint and iced security research](research/slint-iced-security-research.md): dependency and feature investigation retained after the Tauri decision.
 - [GTK and Tauri security-model comparison](research/gtk-tauri-security-model.md): rendering and containment considerations.
+- [MatrixRTC call standards](research/matrixrtc-call-standards.md): status on 16 November 2026 of the MatrixRTC, LiveKit transport, sticky events and delayed events proposals; server requirements; pinned SDK support. Desk research only; calls are out of scope.
