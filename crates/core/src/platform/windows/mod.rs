@@ -5,6 +5,7 @@
 pub mod credentials;
 pub mod harden;
 pub mod media;
+pub mod modules;
 pub mod pick;
 pub mod profile;
 pub mod save;

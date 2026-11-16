@@ -46,6 +46,7 @@ pub mod links;
 pub mod local_search;
 pub mod matrix_views;
 pub mod media;
+pub mod modules;
 pub mod notifications;
 pub mod oauth_login;
 pub mod outbox;
@@ -80,6 +81,7 @@ use matrix_views::MatrixViews;
 use media::{Encoded, ImageWorker, MediaService};
 use persephone_contracts::{
     AccountStatus, AppStatus, ImagePick, ImageView, RoomList, RoomPicture, StoreState,
+    ThirdPartyModules, UnixMillis,
 };
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_EVENT_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
@@ -139,6 +141,8 @@ struct Notifications {
     room_list_changed: bool,
     /// The account's encryption state changed since the last notification.
     security_changed: bool,
+    /// The report of third-party modules changed since the last notification.
+    modules_changed: bool,
     /// The latest desktop notification waiting to be sent (ADR-0022): room
     /// and sender names. A newer one replaces it.
     toast: Option<(String, String)>,
@@ -163,6 +167,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Hub {
+    /// Queues one content-free `modules_changed` event.
+    fn modules_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.modules_changed {
+            notifications.modules_changed = true;
+            self.changed.notify_all();
+        }
+    }
+
     /// Drops every subscription and pending room event, and queues a
     /// `session_changed` event, so the UI clears what it shows.
     fn announce_session_change(&self) {
@@ -323,6 +336,13 @@ pub struct Core {
     /// none starts once a switch is waiting, so the old core exits without
     /// waiting on a request that could take until its timeout.
     long_calls: AtomicUsize,
+    /// The third-party modules and the user's reviews of them. The scan
+    /// thread takes this lock only to merge a result; store access never
+    /// holds it.
+    modules: Mutex<modules::Modules>,
+    /// Serializes reading and writing the reviewed ids in the store, so two
+    /// acknowledgements do not overwrite each other. The scan never takes it.
+    modules_store: Mutex<()>,
 }
 
 /// Counts one running long call until it is dropped, with its thread or with
@@ -507,6 +527,8 @@ impl Core {
             three_pid: Mutex::new(None),
             profiles: None,
             long_calls: AtomicUsize::new(0),
+            modules: Mutex::new(modules::Modules::default()),
+            modules_store: Mutex::new(()),
         }
     }
 
@@ -743,6 +765,14 @@ impl Core {
                 account: self.account(),
             }),
             Call::ConnectionHealth {} => ok(&self.session.connection_health()),
+            Call::ThirdPartyModules {} => ok(&self.module_report()),
+            Call::AcknowledgeModules { ids } => {
+                if persephone_core_protocol::personal_call_within_limits(call) {
+                    self.acknowledge_modules(ids)
+                } else {
+                    Outcome::Error(ErrorCode::InvalidArgument)
+                }
+            }
             Call::RoomList {} => match self.source() {
                 Source::Fixtures => ok(&lock(&self.fixtures).room_list()),
                 Source::Locked => Outcome::Error(ErrorCode::Locked),
@@ -2536,6 +2566,81 @@ impl Core {
         true
     }
 
+    /// Takes a finished module scan from the scan thread. It never touches
+    /// the store. Raises one `modules_changed` event when the report changed.
+    pub fn update_modules(&self, found: Vec<modules::Found>, now: UnixMillis) {
+        if lock(&self.modules).update(found, now) {
+            self.hub.modules_changed();
+        }
+    }
+
+    /// The module report, with the reviewed ids of the open profile applied.
+    fn module_report(&self) -> ThirdPartyModules {
+        let stored = self.stored_reviews();
+        let (changed, report) = {
+            let mut state = lock(&self.modules);
+            let changed = stored
+                .as_deref()
+                .is_some_and(|stored| state.apply_reviewed(stored));
+            (changed, state.report())
+        };
+        if changed {
+            self.hub.modules_changed();
+        }
+        report
+    }
+
+    /// The reviewed ids the open profile's store holds. `None` with no store
+    /// open (demo, signed out, locked). A record that cannot be read gives an
+    /// empty list: it is never read as reviewed.
+    fn stored_reviews(&self) -> Option<Vec<String>> {
+        match self.source() {
+            Source::Matrix(lease, _) => Some(
+                lease
+                    .stores()
+                    .block_on(modules::load(lease.stores()))
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// Marks listed modules as reviewed, in memory and in the open profile's
+    /// store. A failed write is `internal`, with memory kept as updated.
+    fn acknowledge_modules(&self, ids: &[String]) -> Outcome {
+        let _store = lock(&self.modules_store);
+        let source = self.source();
+        let stored = match &source {
+            Source::Matrix(lease, _) => Some(
+                lease
+                    .stores()
+                    .block_on(modules::load(lease.stores()))
+                    .unwrap_or_default(),
+            ),
+            _ => None,
+        };
+        let (changed, reviewed, report) = {
+            let mut state = lock(&self.modules);
+            let mut changed = stored
+                .as_deref()
+                .is_some_and(|stored| state.apply_reviewed(stored));
+            changed |= state.acknowledge(ids);
+            (changed, state.reviewed().to_vec(), state.report())
+        };
+        if changed {
+            self.hub.modules_changed();
+        }
+        if let Source::Matrix(lease, _) = &source
+            && lease
+                .stores()
+                .block_on(modules::save(lease.stores(), &reviewed))
+                .is_err()
+        {
+            return Outcome::Error(ErrorCode::Internal);
+        }
+        ok(&report)
+    }
+
     /// Number of rooms with a pending notification (for tests).
     pub fn pending_notifications(&self) -> usize {
         lock(&self.hub.notifications).pending.len()
@@ -2555,6 +2660,7 @@ impl Core {
             && !notifications.session_changed
             && !notifications.room_list_changed
             && !notifications.security_changed
+            && !notifications.modules_changed
             && notifications.toast.is_none()
             && !notifications.closed
         {
@@ -2573,6 +2679,8 @@ impl Core {
             .then_some(Event::RoomListChanged {});
         let security = std::mem::take(&mut notifications.security_changed)
             .then_some(Event::SecurityChanged {});
+        let modules =
+            std::mem::take(&mut notifications.modules_changed).then_some(Event::ModulesChanged {});
         let toast = notifications
             .toast
             .take()
@@ -2583,6 +2691,7 @@ impl Core {
                 .into_iter()
                 .chain(list)
                 .chain(security)
+                .chain(modules)
                 .chain(toast)
                 .chain(
                     rooms
@@ -2936,6 +3045,67 @@ mod tests {
             "!{}",
             "r".repeat(MAX_ROOM_ID_BYTES)
         )));
+    }
+
+    /// GIVEN a scan result WHEN it arrives THEN one `modules_changed` event
+    /// is queued, and the same result again queues none; WHEN the UI
+    /// acknowledges an unknown id and a listed id THEN only the listed one is
+    /// reviewed and the report changes once; WHEN the call is out of limits
+    /// THEN it is refused and nothing is reviewed.
+    #[test]
+    fn given_a_module_scan_then_events_reports_and_reviews_follow() {
+        use persephone_contracts::{ModuleProcess, ModuleSignature, UnixMillis};
+        let core = Core::default();
+        *lock(&core.modules) = modules::Modules::with_support(true);
+        let report = |core: &Core| match core.handle(&Request {
+            id: 1,
+            call: Call::ThirdPartyModules {},
+        }) {
+            Reply {
+                outcome: Outcome::Ok(value),
+                ..
+            } => serde_json::from_value::<ThirdPartyModules>(value).unwrap(),
+            other => panic!("unexpected reply {:?}", other.outcome),
+        };
+        let ack = |core: &Core, ids: Vec<String>| {
+            core.handle(&Request {
+                id: 2,
+                call: Call::AcknowledgeModules { ids },
+            })
+            .outcome
+        };
+        assert_eq!(
+            report(&core).state,
+            persephone_contracts::ModuleScanState::Pending
+        );
+        let found = || {
+            vec![modules::Found {
+                path: r"C:\x\Hook.dll".into(),
+                process: ModuleProcess::Core,
+                signature: ModuleSignature::Unsigned,
+                signer: None,
+            }]
+        };
+        core.update_modules(found(), UnixMillis::saturating(1));
+        assert_eq!(core.take_events(), Some(vec![Event::ModulesChanged {}]));
+        core.update_modules(found(), UnixMillis::saturating(2));
+        assert!(!lock(&core.hub.notifications).modules_changed);
+
+        let listed = report(&core);
+        assert_eq!(listed.modules.len(), 1);
+        assert!(!listed.modules[0].acknowledged);
+        let id = listed.modules[0].id.clone();
+        assert!(matches!(
+            ack(&core, Vec::new()),
+            Outcome::Error(ErrorCode::InvalidArgument)
+        ));
+        assert!(!report(&core).modules[0].acknowledged);
+        assert!(matches!(
+            ack(&core, vec!["unknown".into(), id]),
+            Outcome::Ok(_)
+        ));
+        assert!(report(&core).modules[0].acknowledged);
+        assert_eq!(core.take_events(), Some(vec![Event::ModulesChanged {}]));
     }
 
     fn request(id: u32, call: Call) -> Vec<u8> {

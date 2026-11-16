@@ -29,7 +29,8 @@ Owner decisions (16 November 2026):
 * Keep refusing DLLs not signed through Microsoft.
 * Do not stop Persephone from running beside anti-malware software. Report
   every other DLL that loads, in an in-app panel with a notice for new ones.
-  The report is not built yet.
+  The report is recorded separately in
+  [third-party module report](third-party-module-report.md).
 
 ## Design
 

@@ -295,6 +295,44 @@ export type NewSession = { deviceId: string, displayName: string | null, };
 
 export type NewSessions = { sessions: Array<NewSession>, truncated: boolean, };
 
+export type ModuleSignature = "valid" | "unsigned" | "invalid";
+
+export type ModuleProcess = "core" | "ui" | "web_view";
+
+export type ModuleScanState = "pending" | "ready" | "unsupported";
+
+export type ThirdPartyModule = { 
+/**
+ * Opaque acknowledgement key, at most `MAX_MODULE_ID_BYTES`.
+ */
+id: string, fileName: string, 
+/**
+ * The full path, at most `MAX_MODULE_PATH_BYTES`, cut with "…".
+ */
+path: string, 
+/**
+ * The verified signer's simple name. Only for `Valid`; otherwise null.
+ */
+signer: string | null, signature: ModuleSignature, 
+/**
+ * The processes it is loaded in: sorted, unique, one to three.
+ */
+processes: Array<ModuleProcess>, 
+/**
+ * When this core process first saw it.
+ */
+firstSeen: number, 
+/**
+ * The user marked it as reviewed.
+ */
+acknowledged: boolean, };
+
+export type ThirdPartyModules = { state: ModuleScanState, 
+/**
+ * Null until the first scan finishes.
+ */
+scannedAt: number | null, modules: Array<ThirdPartyModule>, truncated: boolean, };
+
 export type TimelineEvents = { joins: boolean, leaves: boolean, 
 /**
  * Invitations, declined invitations and withdrawn invitations.

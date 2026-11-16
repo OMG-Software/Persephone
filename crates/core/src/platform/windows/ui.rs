@@ -20,14 +20,14 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::HANDLE,
+    Foundation::{ERROR_MORE_DATA, HANDLE},
     System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
         JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
-        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-        TerminateJobObject,
+        JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+        SetInformationJobObject, TerminateJobObject,
     },
     UI::WindowsAndMessaging::{
         IDRETRY, MB_ICONWARNING, MB_RETRYCANCEL, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
@@ -79,6 +79,10 @@ impl UiTree for UiJob {
 
     fn terminate(&self, timeout: Duration) -> bool {
         terminate(&self.0, timeout)
+    }
+
+    fn process_ids(&self) -> io::Result<Vec<u32>> {
+        process_ids(&self.0)
     }
 }
 
@@ -142,6 +146,47 @@ pub fn active_processes(job: &OwnedHandle) -> io::Result<u32> {
     Ok(info.ActiveProcesses)
 }
 
+/// The most process IDs read from the Job.
+const MAX_PROCESS_IDS: usize = 256;
+
+/// The documented `JOBOBJECT_BASIC_PROCESS_ID_LIST` with room for
+/// [`MAX_PROCESS_IDS`] entries.
+#[repr(C)]
+struct ProcessIdList {
+    assigned: u32,
+    listed: u32,
+    ids: [usize; MAX_PROCESS_IDS],
+}
+
+/// The IDs of the processes running in the Job, at most [`MAX_PROCESS_IDS`].
+pub fn process_ids(job: &OwnedHandle) -> io::Result<Vec<u32>> {
+    let mut list = ProcessIdList {
+        assigned: 0,
+        listed: 0,
+        ids: [0; MAX_PROCESS_IDS],
+    };
+    // SAFETY: `list` has the documented layout with room for its length and
+    // lives for the call; the returned length is not needed.
+    let ok = unsafe {
+        QueryInformationJobObject(
+            job.as_raw_handle() as HANDLE,
+            JobObjectBasicProcessIdList,
+            (&raw mut list).cast(),
+            size_of::<ProcessIdList>() as u32,
+            null_mut(),
+        )
+    };
+    // ERROR_MORE_DATA still fills the buffer with the IDs that fit.
+    if ok == 0 && io::Error::last_os_error().raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+        return Err(io::Error::last_os_error());
+    }
+    let count = (list.listed as usize).min(MAX_PROCESS_IDS);
+    Ok(list.ids[..count]
+        .iter()
+        .filter_map(|id| u32::try_from(*id).ok())
+        .collect())
+}
+
 /// Ends every process in the Job, then waits up to `timeout` for them to
 /// exit, so a new web view does not start while the old one still holds its
 /// data folder. Returns whether the Job emptied in time.
@@ -183,4 +228,29 @@ pub fn ask_to_retry() -> bool {
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// GIVEN a Job holding a running child process
+    /// WHEN the process IDs are listed
+    /// THEN the child's ID is in the list, and none is left after it ends
+    #[test]
+    fn given_a_job_with_a_child_then_its_pid_is_listed() {
+        let mut child = Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("start child");
+        let job = contain(&child).expect("contain child");
+        let ids = process_ids(&job).expect("list ids");
+        assert!(ids.contains(&child.id()), "child missing from {ids:?}");
+        assert!(terminate(&job, Duration::from_secs(10)));
+        assert!(process_ids(&job).expect("list ids").is_empty());
+        let _ = child.wait();
+    }
 }

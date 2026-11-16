@@ -103,6 +103,12 @@ pub trait UiTree: Send + Sync {
     /// to exit, so a new web view does not start while the old one still
     /// holds its data folder. Returns whether the tree emptied in time.
     fn terminate(&self, timeout: Duration) -> bool;
+
+    /// The process IDs in the tree. The default says the platform cannot list
+    /// them.
+    fn process_ids(&self) -> io::Result<Vec<u32>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// The platform's UI host ([`crate::platform`]); [`Unsupported`] where UI

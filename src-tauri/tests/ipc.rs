@@ -426,6 +426,21 @@ impl CoreTransport for FakeCore {
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
             })),
             Call::AcknowledgeSessions { .. } => Ok(serde_json::Value::Null),
+            Call::ThirdPartyModules {} | Call::AcknowledgeModules { .. } => Ok(serde_json::json!({
+                "state": "ready",
+                "scannedAt": 1_700_000_000_000_u64,
+                "modules": [{
+                    "id": "hook.dll\u{1f}unsigned",
+                    "fileName": "<b>hook.dll</b>",
+                    "path": "C:\\Tools\\hook.dll",
+                    "signer": null,
+                    "signature": "unsigned",
+                    "processes": ["core", "web_view"],
+                    "firstSeen": 1_700_000_000_000_u64,
+                    "acknowledged": false
+                }],
+                "truncated": false
+            })),
             Call::RemoveDevice { device_id } => match device_id.as_str() {
                 "NEWDEV" => Ok(serde_json::json!("done")),
                 _ => Ok(serde_json::json!("invalid_password")),
@@ -817,6 +832,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-room-readers",
             "allow-new-sessions",
             "allow-acknowledge-sessions",
+            "allow-third-party-modules",
+            "allow-acknowledge-modules",
             "allow-remove-device",
             "allow-pending-messages",
             "allow-retry-message",
@@ -1082,9 +1099,14 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     });
     subscriptions.dispatch(Event::RoomListChanged {});
     subscriptions.dispatch(Event::SecurityChanged {});
+    subscriptions.dispatch(Event::ModulesChanged {});
     let delivered = delivered.lock().unwrap().clone();
     assert!(
         delivered.contains(&(3, r#""security""#.into())),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&(3, r#""modules""#.into())),
         "{delivered:?}"
     );
     assert!(
@@ -2801,6 +2823,63 @@ fn personal_commands_cross_only_with_bounded_input_and_typed_replies() {
             serde_json::json!({"roomId":"!bad:example.invalid"})
         ),
         Err(serde_json::json!("core_unavailable"))
+    );
+}
+
+/// GIVEN the module report commands WHEN they run from the app origin and from
+/// a foreign origin THEN only the app origin reaches the core, the report keeps
+/// its typed shape, and out-of-limit ids are refused before the core.
+#[test]
+fn module_commands_work_from_the_app_origin_and_refuse_bad_ids_before_relay() {
+    let fake = FakeCore::new(true);
+    let app = app_with(fake.clone());
+    let window = create_main_window(&app).unwrap();
+    for (cmd, body) in [
+        ("third_party_modules", serde_json::json!({})),
+        (
+            "acknowledge_modules",
+            serde_json::json!({"ids": ["hook.dll\u{1f}unsigned"]}),
+        ),
+    ] {
+        let reply = invoke_on(&window, cmd, app_origin(), body.clone()).unwrap();
+        assert_eq!(reply["state"], "ready", "{cmd}");
+        assert_eq!(reply["modules"][0]["processes"][1], "web_view", "{cmd}");
+        let calls = fake.calls.load(Ordering::SeqCst);
+        assert!(
+            invoke_on(&window, cmd, "https://evil.invalid", body).is_err(),
+            "{cmd}"
+        );
+        assert_eq!(fake.calls.load(Ordering::SeqCst), calls, "{cmd}");
+    }
+    let calls = fake.calls.load(Ordering::SeqCst);
+    let too_many: Vec<String> = (0..129).map(|n| format!("id{n}")).collect();
+    for ids in [
+        Vec::new(),
+        too_many,
+        vec!["x".repeat(513)],
+        vec![String::new()],
+    ] {
+        assert_eq!(
+            invoke_on(
+                &window,
+                "acknowledge_modules",
+                app_origin(),
+                serde_json::json!({ "ids": ids })
+            )
+            .unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+    let largest = vec!["x".repeat(512); 128];
+    assert!(
+        invoke_on(
+            &window,
+            "acknowledge_modules",
+            app_origin(),
+            serde_json::json!({ "ids": largest })
+        )
+        .is_ok()
     );
 }
 

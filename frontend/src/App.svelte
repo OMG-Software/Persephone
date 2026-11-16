@@ -55,6 +55,8 @@
   import SignIn, { type SignInForm } from './SignIn.svelte';
   import Timeline from './Timeline.svelte';
   import NewSessionsAlert from './NewSessions.svelte';
+  import LoadedCode from './LoadedCode.svelte';
+  import { acknowledgeIds, noticeText, unreviewed } from './modules';
   import { changeText } from './accountChanges';
   import TipButton from './TipButton.svelte';
   import Verification from './Verification.svelte';
@@ -95,6 +97,8 @@
     markRead,
     newSessions,
     acknowledgeSessions,
+    thirdPartyModules,
+    acknowledgeModules,
     removeDevice,
     roomActivity,
     setTyping,
@@ -147,6 +151,7 @@
     type PendingMessage,
     type RoomActivity,
     type NewSessions,
+    type ThirdPartyModules,
     type RoomList as Rooms,
     type SecurityStatus,
     type StoreState,
@@ -533,6 +538,7 @@
     paletteOpen = false;
     settingsTab = tab;
     view = 'settings';
+    refreshModules();
   }
 
   function closeSettings() {
@@ -776,6 +782,7 @@
     opening = false;
     changedAgain = false;
     load();
+    refreshModules();
   }
 
   // New sessions of this account not yet shown (ADR-0026), and whether the
@@ -838,6 +845,50 @@
       sessionsBusy = false;
     }
     checkSessions();
+  }
+
+  // The report of code loaded into Persephone. It belongs to the core
+  // process, not to an account, so a session change keeps it. A failed fetch
+  // keeps the last report; the next event or opening of Settings tries again.
+  let modules = $state<ThirdPartyModules | null>(null);
+  let modulesBusy = $state(false);
+  let modulesFailure = $state<string | null>(null);
+  let modulesRequest = 0;
+  let modulesShown = 0;
+  const modulesNotice = $derived(noticeText(modules));
+
+  async function refreshModules() {
+    const generation = sessionGeneration;
+    const request = ++modulesRequest;
+    try {
+      const reply = await thirdPartyModules();
+      if (generation === sessionGeneration && request > modulesShown) {
+        modules = reply;
+        modulesShown = request;
+      }
+    } catch {
+      // The report stays as it was.
+    }
+  }
+
+  // Marks the unreviewed modules in the report as reviewed.
+  async function reviewModules() {
+    const ids = acknowledgeIds(unreviewed(modules));
+    if (ids.length === 0 || modulesBusy) return;
+    const generation = sessionGeneration;
+    modulesBusy = true;
+    modulesFailure = null;
+    try {
+      const reply = await acknowledgeModules(ids);
+      if (generation === sessionGeneration) {
+        modules = reply;
+        modulesShown = ++modulesRequest;
+      }
+    } catch (reason) {
+      if (generation === sessionGeneration) modulesFailure = describe(reason);
+    } finally {
+      modulesBusy = false;
+    }
   }
 
   // The account's encryption state changed: fetch it again. Nothing else
@@ -1103,12 +1154,13 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity);
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules);
     } catch {
       unavailable = true;
       return;
     }
     load();
+    refreshModules();
   });
 
   // A room operation's results apply only to the same room in the same
@@ -2158,6 +2210,12 @@
         {#if securityFailure}
           <p role="alert" class="error">{securityFailure}</p>
         {/if}
+        <LoadedCode
+          report={modules}
+          busy={modulesBusy}
+          failure={modulesFailure}
+          onacknowledge={reviewModules}
+        />
       {:else}
         <section class="settings-page" aria-labelledby="session-heading">
           <h2 id="session-heading">This session</h2>
@@ -2297,6 +2355,13 @@
             onknown={sessionsKnown}
             onremove={removeNewSession}
           />
+        {/if}
+        {#if signedIn && modulesNotice}
+          <div class="module-notice" role="status">
+            <p>{modulesNotice}</p>
+            <button type="button" class="secondary" onclick={() => openSettings('security')}>Review</button>
+            <button type="button" class="secondary" disabled={modulesBusy} onclick={reviewModules}>{unreviewed(modules).length > 1 ? 'Mark all as reviewed' : 'Mark as reviewed'}</button>
+          </div>
         {/if}
         {#if selectedRoom}
           <div class="room-view" style:--members-width="{shownMembers}px">

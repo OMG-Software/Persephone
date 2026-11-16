@@ -25,6 +25,11 @@ import type {
   HomeserverFound,
   ProxySetting,
   NewSessions,
+  ThirdPartyModules,
+  ModuleProcess,
+  ModuleSignature,
+  ModuleScanState,
+  ThirdPartyModule,
   NotificationLevel,
   NotificationSettings,
   PendingMessage,
@@ -97,6 +102,11 @@ export type {
   HomeserverFound,
   ProxySetting,
   NewSessions,
+  ThirdPartyModules,
+  ModuleProcess,
+  ModuleSignature,
+  ModuleScanState,
+  ThirdPartyModule,
   NotificationLevel,
   NotificationSettings,
   ProfileList,
@@ -255,15 +265,24 @@ export async function subscribeRoom(
  * has already ended every room subscription. Calls `onRooms` when rooms were
  * added or changed, so the room list should be fetched again, and
  * `onSecurity` when the account's encryption state changed (it clears
- * nothing). Anything else counts as a session change, which clears the page.
+ * nothing), and `onModules` when the report of loaded code changed (it clears
+ * nothing either). Anything else counts as a session change, which clears the
+ * page.
  */
 export async function watchSession(
   onSession: () => void,
   onRooms: () => void,
-  onSecurity: () => void
+  onSecurity: () => void,
+  onModules: () => void
 ): Promise<void> {
   const channel = new Channel<string>((message) =>
-    message === 'rooms' ? onRooms() : message === 'security' ? onSecurity() : onSession()
+    message === 'rooms'
+      ? onRooms()
+      : message === 'security'
+        ? onSecurity()
+        : message === 'modules'
+          ? onModules()
+          : onSession()
   );
   await invoke<null>('watch_session', { onChange: channel });
 }
@@ -799,6 +818,22 @@ export function newSessions(): Promise<NewSessions> {
 /** Records that the user has seen these sessions (at most ten device IDs). */
 export function acknowledgeSessions(deviceIds: string[]): Promise<void> {
   return invoke<void>('acknowledge_sessions', { deviceIds });
+}
+
+/**
+ * The code loaded into Persephone that is not Microsoft's or Persephone's own
+ * (at most 128 entries). The core lists it; the page only shows it.
+ */
+export function thirdPartyModules(): Promise<ThirdPartyModules> {
+  return invoke<ThirdPartyModules>('third_party_modules');
+}
+
+/**
+ * Marks these modules as reviewed (1 to 128 IDs from the report, each at most
+ * 512 bytes). Replies with the updated report.
+ */
+export function acknowledgeModules(ids: string[]): Promise<ThirdPartyModules> {
+  return invoke<ThirdPartyModules>('acknowledge_modules', { ids });
 }
 
 /**

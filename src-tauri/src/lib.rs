@@ -406,6 +406,11 @@ impl Subscriptions {
                     let _ = channel.send("security");
                 }
             }
+            Event::ModulesChanged {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("modules");
+                }
+            }
             // Names only; the core bounds them, and so does this check.
             Event::Notification { room, sender } => {
                 if room.len() > MAX_NOTIFICATION_NAME_BYTES
@@ -1402,6 +1407,25 @@ async fn acknowledge_sessions(
     relay(core.inner(), Call::AcknowledgeSessions { device_ids }).await
 }
 
+/// The code loaded into Persephone that is not Microsoft's or Persephone's
+/// own. The core scans; the page only reads the report.
+#[tauri::command]
+async fn third_party_modules(
+    core: State<'_, CoreLink>,
+) -> Result<persephone_contracts::ThirdPartyModules, String> {
+    personal_relay(core.inner(), Call::ThirdPartyModules {}).await
+}
+
+/// Marks these modules as reviewed. The core ignores unknown ids; the
+/// bounds are checked here before the relay and again in the core.
+#[tauri::command]
+async fn acknowledge_modules(
+    core: State<'_, CoreLink>,
+    ids: Vec<String>,
+) -> Result<persephone_contracts::ThirdPartyModules, String> {
+    personal_relay(core.inner(), Call::AcknowledgeModules { ids }).await
+}
+
 /// Signs out another session of this account. Nothing secret crosses: the
 /// core asks for the password in its own window (ADR-0026).
 #[tauri::command]
@@ -1629,6 +1653,8 @@ pub fn configure<R: Runtime>(
             proxy_setting,
             set_proxy_setting,
             acknowledge_sessions,
+            third_party_modules,
+            acknowledge_modules,
             remove_device,
             pending_messages,
             retry_message,

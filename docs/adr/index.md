@@ -20,6 +20,7 @@
 * [0039 - Obtain SDK stop-and-join upstream instead of forking or gating on task counts](0039-obtain-sdk-stop-and-join-upstream-instead-of-forking.md)
 * [0040 - Use an existing key backup, or start a new one after a confirmation](0040-use-an-existing-key-backup-or-start-a-new-one-after-a-confirmation.md)
 * [0042 - Accept a pasted image from the page as hostile bytes](0042-accept-a-pasted-image-from-the-page-as-hostile-bytes.md)
+* [0044 - Report code loaded into Persephone and ask the user to review it](0044-report-code-loaded-into-persephone-and-ask-the-user-to-review-it.md)
 
 ## Proposed Records
 

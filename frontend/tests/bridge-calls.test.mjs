@@ -155,6 +155,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.loadRoomPicture('!r:s'), 'load_room_picture', { roomId: '!r:s' }],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
     [() => bridge.newSessions(), 'new_sessions', {}],
+    [() => bridge.thirdPartyModules(), 'third_party_modules', {}],
+    [() => bridge.acknowledgeModules(['a.dllunsigned']), 'acknowledge_modules', { ids: ['a.dllunsigned'] }],
     [() => bridge.signInWithOidc('https://e.org'), 'sign_in_with_oidc', { homeserver: 'https://e.org' }],
     [() => bridge.proxySetting(), 'proxy_setting', {}],
     [() => bridge.setProxySetting('127.0.0.1:9050'), 'set_proxy_setting', { proxy: '127.0.0.1:9050' }],
@@ -318,4 +320,23 @@ test('GIVEN a paste that is not one PNG or JPEG of 1 byte to 20 MiB WHEN attache
     await assert.rejects(bridge.pasteImage('!r:s', blob), (reason) => reason === 'rejected', `${blob.type} ${blob.size}`);
   }
   assert.deepEqual(sent, []);
+});
+
+test('GIVEN a session watch WHEN the host sends each message THEN only an unknown one counts as a session change', async () => {
+  let channel;
+  mockIPC((command, args) => {
+    if (command === 'watch_session') channel = args.onChange;
+    return null;
+  });
+  const seen = [];
+  await bridge.watchSession(
+    () => seen.push('session'),
+    () => seen.push('rooms'),
+    () => seen.push('security'),
+    () => seen.push('modules')
+  );
+  for (const message of ['modules', 'rooms', 'security', 'session', 'something-new']) {
+    channel.onmessage(message);
+  }
+  assert.deepEqual(seen, ['modules', 'rooms', 'security', 'session', 'session']);
 });

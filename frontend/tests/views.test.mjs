@@ -1389,3 +1389,49 @@ test('GIVEN sessions WHEN this device cannot vouch THEN no Verify shows, and WHE
   const html = render(Devices, { props: { canVerify: true } }).body;
   assert.doesNotMatch(html, />Verify</, 'nothing listed yet');
 });
+
+test('GIVEN a module report WHEN the section renders THEN hostile names stay inert and each state has its text', async () => {
+  const { default: LoadedCode } = await vite.ssrLoadModule('/src/LoadedCode.svelte');
+  const show = (report) =>
+    render(LoadedCode, { props: { report, onacknowledge: () => {} } }).body.replace(/<!--.*?-->/g, '');
+  const row = (fileName, overrides = {}) => ({
+    id: fileName,
+    fileName,
+    path: `C:\Tools\${fileName}`,
+    signer: null,
+    signature: 'unsigned',
+    processes: ['core', 'web_view'],
+    firstSeen: 1_700_000_000_000,
+    acknowledged: false,
+    ...overrides
+  });
+  const ready = (modules, truncated = false) => ({ state: 'ready', scannedAt: 1, modules, truncated });
+
+  const html = show(
+    ready(
+      [
+        row(hostileName),
+        row('bad.dll', { signature: 'invalid' }),
+        row('ok.dll', { signature: 'valid', signer: 'Sophos Ltd', acknowledged: true, processes: ['ui'] })
+      ],
+      true
+    )
+  );
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /Code loaded into Persephone/);
+  assert.match(html, /<bdi>&lt;img src=x onerror=alert\(1\)><\/bdi>/);
+  assert.match(html, /Signature not valid/);
+  assert.match(html, /Sophos Ltd/);
+  assert.match(html, /Persephone core, Web view/);
+  assert.match(html, />Window</);
+  assert.equal((html.match(/>New</g) ?? []).length, 2);
+  assert.match(html, />\s*Mark all as reviewed\s*</);
+  assert.match(html, /More modules are loaded than this list shows\./);
+
+  const reviewed = show(ready([row('a.dll', { acknowledged: true })]));
+  assert.doesNotMatch(reviewed, /Mark all as reviewed/);
+  assert.doesNotMatch(reviewed, />New</);
+  assert.match(show(ready([])), /No other code is loaded\./);
+  assert.match(show({ state: 'unsupported', scannedAt: null, modules: [], truncated: false }), /Not available on this system\./);
+  assert.match(show(null), /Checking…/);
+});
