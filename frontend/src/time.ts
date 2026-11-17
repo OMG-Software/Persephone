@@ -30,6 +30,14 @@ export function fullTime(date: Date, options: TimeOptions = {}): string {
   }).format(date);
 }
 
+/** The date alone, such as "17 Nov 2026", for a narrow column. */
+export function shortDate(date: Date, options: TimeOptions = {}): string {
+  return new Intl.DateTimeFormat(options.locale, {
+    dateStyle: 'medium',
+    timeZone: options.timeZone
+  }).format(date);
+}
+
 /** The calendar day of `date` where it is read, as "YYYY-MM-DD". */
 export function dayKey(date: Date, options: TimeOptions = {}): string {
   const parts = new Intl.DateTimeFormat('en-CA', {

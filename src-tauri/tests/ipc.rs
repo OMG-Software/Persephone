@@ -480,6 +480,7 @@ impl CoreTransport for FakeCore {
                     "path": "C:\\Tools\\hook.dll",
                     "signer": null,
                     "signature": "unsigned",
+                    "reason": "signer",
                     "processes": ["core", "web_view"],
                     "firstSeen": 1_700_000_000_000_u64,
                     "acknowledged": false
@@ -892,6 +893,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-acknowledge-sessions",
             "allow-third-party-modules",
             "allow-acknowledge-modules",
+            "allow-display-session",
             "allow-remove-device",
             "allow-pending-messages",
             "allow-retry-message",
@@ -3030,6 +3032,41 @@ fn module_commands_work_from_the_app_origin_and_refuse_bad_ids_before_relay() {
         )
         .is_ok()
     );
+}
+
+/// GIVEN the display session command WHEN it runs from the app origin THEN
+/// the host answers one of the three sessions without calling the core;
+/// WHEN it runs from a foreign origin THEN it is refused.
+#[test]
+fn display_session_is_answered_by_the_host_from_the_app_origin_only() {
+    let fake = FakeCore::new(true);
+    let app = app_with(fake.clone());
+    let window = create_main_window(&app).unwrap();
+    let calls = fake.calls.load(Ordering::SeqCst);
+    let reply = invoke_on(
+        &window,
+        "display_session",
+        app_origin(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert!(
+        ["wayland", "x11", "unknown"].contains(&reply.as_str().unwrap()),
+        "{reply}"
+    );
+    if !cfg!(target_os = "linux") {
+        assert_eq!(reply, "unknown");
+    }
+    assert!(
+        invoke_on(
+            &window,
+            "display_session",
+            "https://evil.invalid",
+            serde_json::json!({})
+        )
+        .is_err()
+    );
+    assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
 }
 
 /// Reject invalid personal arguments before they reach the core transport.

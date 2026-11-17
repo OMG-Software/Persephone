@@ -66,7 +66,8 @@
   import Timeline from './Timeline.svelte';
   import NewSessionsAlert from './NewSessions.svelte';
   import LoadedCode from './LoadedCode.svelte';
-  import { acknowledgeIds, noticeText, unreviewed } from './modules';
+  import { acknowledgeIds, noticeText, platformOf, unreviewed } from './modules';
+  import type { DisplaySession } from './bridge';
   import { changeText } from './accountChanges';
   import TipButton from './TipButton.svelte';
   import Verification from './Verification.svelte';
@@ -109,6 +110,7 @@
     acknowledgeSessions,
     thirdPartyModules,
     acknowledgeModules,
+    displaySession,
     removeDevice,
     roomActivity,
     setTyping,
@@ -523,6 +525,10 @@
 
   // The jump shortcut as this system writes it.
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+  // The desktop system, for the Security page text, and the display server
+  // on Linux for the capture note (null until the host answers).
+  const platform = platformOf(typeof navigator !== 'undefined' ? navigator.platform : '');
+  let displayServer = $state<DisplaySession | null>(null);
   const shortcut = mac ? '⌘K' : 'Ctrl K';
 
   // Ctrl K (⌘K on macOS) opens the jump palette from the room view.
@@ -1326,6 +1332,14 @@
     callRefresher.request();
     load();
     refreshModules();
+    if (platform === 'linux') {
+      displaySession().then(
+        (reply) => (displayServer = reply),
+        () => {
+          // The note says the session is not known.
+        }
+      );
+    }
   });
 
   // A room operation's results apply only to the same room in the same
@@ -2351,43 +2365,49 @@
           </section>
         {/if}
       {:else if settingsTab === 'security'}
-        {#if signedIn && security}
-          <Security
-            {security}
-            busy={securityBusy}
-            onsetup={() => startSecurity(setUpEncryption)}
-            onrecover={() => startSecurity(recoverWithKey)}
-            onsetuprecovery={() => startSecurity(setUpRecovery)}
-            onverify={() => startSecurity(verifyThisDevice)}
-            onchangekey={() => startSecurity(changeRecoveryKey)}
-            onnewbackup={() => startSecurity(startNewBackup)}
+        <!-- One column for the whole tab, so every card has the page's spacing. -->
+        <div class="settings-page">
+          {#if signedIn && security}
+            <Security
+              {security}
+              busy={securityBusy}
+              onsetup={() => startSecurity(setUpEncryption)}
+              onrecover={() => startSecurity(recoverWithKey)}
+              onsetuprecovery={() => startSecurity(setUpRecovery)}
+              onverify={() => startSecurity(verifyThisDevice)}
+              onchangekey={() => startSecurity(changeRecoveryKey)}
+              onnewbackup={() => startSecurity(startNewBackup)}
+            />
+          {:else}
+            <section class="settings-page" aria-labelledby="security-heading">
+              <h2 id="security-heading">Security &amp; encryption</h2>
+              <p class="lede">
+                {signedIn
+                  ? "Checking this account's encryption…"
+                  : 'No account is signed in. All rooms and messages here are synthetic test data.'}
+              </p>
+            </section>
+          {/if}
+          {#if securityFailure}
+            <p role="alert" class="security-notice error">{securityFailure}</p>
+          {/if}
+          {#if signedIn}
+            <CaptureProtection
+              {settings}
+              {platform}
+              session={displayServer}
+              failure={settingsFailure}
+              onchange={(patch) => settingsKeeper.change(patch)}
+            />
+          {/if}
+          <LoadedCode
+            report={modules}
+            {platform}
+            busy={modulesBusy}
+            failure={modulesFailure}
+            onacknowledge={reviewModules}
           />
-        {:else}
-          <section class="settings-page" aria-labelledby="security-heading">
-            <h2 id="security-heading">Security &amp; encryption</h2>
-            <p class="lede">
-              {signedIn
-                ? "Checking this account's encryption…"
-                : 'No account is signed in. All rooms and messages here are synthetic test data.'}
-            </p>
-          </section>
-        {/if}
-        {#if securityFailure}
-          <p role="alert" class="error">{securityFailure}</p>
-        {/if}
-        {#if signedIn}
-          <CaptureProtection
-            {settings}
-            failure={settingsFailure}
-            onchange={(patch) => settingsKeeper.change(patch)}
-          />
-        {/if}
-        <LoadedCode
-          report={modules}
-          busy={modulesBusy}
-          failure={modulesFailure}
-          onacknowledge={reviewModules}
-        />
+        </div>
       {:else}
         <section class="settings-page" aria-labelledby="session-heading">
           <h2 id="session-heading">This session</h2>

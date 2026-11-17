@@ -3446,6 +3446,7 @@ mod tests {
                 process: ModuleProcess::Core,
                 signature: ModuleSignature::Unsigned,
                 signer: None,
+                reason: persephone_contracts::ModuleReason::Signer,
             }]
         };
         core.update_modules(found(), false, UnixMillis::saturating(1));

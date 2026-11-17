@@ -3,7 +3,8 @@
 //! `core-gtk` thread ([`credentials`], [`pick`]), links opened through the
 //! OpenURI portal ([`portal`]), the UI in its own process group and a
 //! memory-capped systemd user scope ([`ui`]), the shared Unix read rules for
-//! a picked file, and the media worker under its seccomp allowlist.
+//! a picked file, the media worker under its seccomp allowlist, and the
+//! report of code loaded into Persephone ([`modules`], ADR-0047).
 //!
 //! Every service the layer needs fails closed when it is missing: no Secret
 //! Service keeps the profile locked, no display refuses the prompts and
@@ -14,6 +15,7 @@
 pub mod bus;
 pub mod credentials;
 pub mod gtk_thread;
+pub mod modules;
 pub mod pick;
 pub mod portal;
 pub mod ui;

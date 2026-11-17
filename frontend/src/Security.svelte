@@ -71,6 +71,21 @@
   ]);
 
   const waiting = $derived(busy || security.operation !== 'idle');
+
+  // Fixed text per step the core is waiting on; none while idle.
+  const operationText: Partial<Record<SecurityStatus['operation'], string>> = {
+    waiting_for_password: 'Enter your password in the Windows window Persephone opened.',
+    waiting_for_recovery_key: 'Enter your recovery key in the Windows window Persephone opened.',
+    waiting_for_confirmation: 'Answer in the Windows window Persephone opened.',
+    working: 'Working…'
+  };
+
+  // The recovery panel shows once the core knows the recovery state, or when a
+  // verified device is offered a new backup.
+  const showRecovery = $derived(
+    security.recovery !== 'unknown' ||
+      (security.identity === 'verified' && security.canStartNewBackup)
+  );
 </script>
 
 <section class="settings-page security" aria-labelledby="security-heading">
@@ -87,16 +102,14 @@
       </li>
     {/each}
   </ul>
-  <div class="panel">
-    {#if security.operation === 'waiting_for_password'}
-      <p role="status">Enter your password in the Windows window Persephone opened.</p>
-    {:else if security.operation === 'waiting_for_recovery_key'}
-      <p role="status">Enter your recovery key in the Windows window Persephone opened.</p>
-    {:else if security.operation === 'waiting_for_confirmation'}
-      <p role="status">Answer in the Windows window Persephone opened.</p>
-    {:else if security.operation === 'working'}
-      <p role="status">Working…</p>
-    {/if}
+  {#if operationText[security.operation]}
+    <p role="status" class="security-notice">{operationText[security.operation]}</p>
+  {/if}
+  {#if security.error}
+    <p role="alert" class="security-notice error">{errorText[security.error] ?? errorText.failed}</p>
+  {/if}
+  <div class="panel" role="group" aria-labelledby="device-heading">
+    <h3 id="device-heading">This device</h3>
     {#if security.identity === 'unknown'}
       <p>Checking this account's encryption…</p>
     {:else if security.identity === 'none'}
@@ -121,54 +134,58 @@
       {/if}
     {:else}
       <p>This device is verified.</p>
-      {#if security.recovery === 'disabled' && security.canSetUpRecovery}
-        <p>
-          Without recovery, your encrypted messages cannot be read on a new device if this one is
-          lost.
-        </p>
-        <div class="actions">
-          <button type="button" disabled={waiting} class="primary" onclick={onsetuprecovery}
-            >Set up recovery</button
-          >
-        </div>
-      {/if}
-      {#if security.canStartNewBackup}
-        <p>
-          {security.recovery === 'incomplete'
-            ? 'This device cannot use the key backup yet. Your recovery key may give it the key.'
-            : 'The homeserver has a key backup this device cannot use.'}
-          If you no longer have the key, start a new backup. Messages kept only in the old backup can
-          then not be read.
-        </p>
-        <div class="actions">
-          {#if security.recovery === 'incomplete'}
-            <button type="button" disabled={waiting} class="primary" onclick={onrecover}
-              >Use recovery key</button
-            >
-          {/if}
-          <button type="button" disabled={waiting} class="secondary" onclick={onnewbackup}
-            >Start a new backup…</button
-          >
-        </div>
-      {/if}
-    {/if}
-    {#if recoveryText[security.recovery]}
-      <p>{recoveryText[security.recovery]}</p>
-    {/if}
-    {#if security.identity === 'verified' && security.recovery === 'enabled'}
-      <p>
-        Persephone does not keep your recovery key, so it cannot show it again. To get a key you can
-        save, make a new one: Persephone shows it in its own window and offers to save it to a file.
-        The old key stops working.
-      </p>
-      <div class="actions">
-        <button type="button" disabled={waiting} class="secondary" onclick={onchangekey}
-          >Change recovery key…</button
-        >
-      </div>
-    {/if}
-    {#if security.error}
-      <p role="alert" class="error">{errorText[security.error] ?? errorText.failed}</p>
     {/if}
   </div>
+  {#if showRecovery}
+    <div class="panel" role="group" aria-labelledby="recovery-heading">
+      <h3 id="recovery-heading">Recovery</h3>
+      {#if recoveryText[security.recovery]}
+        <p>{recoveryText[security.recovery]}</p>
+      {/if}
+      {#if security.identity === 'verified'}
+        {#if security.recovery === 'disabled' && security.canSetUpRecovery}
+          <p>
+            Without recovery, your encrypted messages cannot be read on a new device if this one is
+            lost.
+          </p>
+          <div class="actions">
+            <button type="button" disabled={waiting} class="primary" onclick={onsetuprecovery}
+              >Set up recovery</button
+            >
+          </div>
+        {/if}
+        {#if security.canStartNewBackup}
+          <p>
+            {security.recovery === 'incomplete'
+              ? 'This device cannot use the key backup yet. Your recovery key may give it the key.'
+              : 'The homeserver has a key backup this device cannot use.'}
+            If you no longer have the key, start a new backup.
+            Messages kept only in the old backup can then not be read.
+          </p>
+          <div class="actions">
+            {#if security.recovery === 'incomplete'}
+              <button type="button" disabled={waiting} class="primary" onclick={onrecover}
+                >Use recovery key</button
+              >
+            {/if}
+            <button type="button" disabled={waiting} class="secondary" onclick={onnewbackup}
+              >Start a new backup…</button
+            >
+          </div>
+        {/if}
+        {#if security.recovery === 'enabled'}
+          <p>
+            Persephone does not keep your recovery key, so it cannot show it again. To get a key you
+            can save, make a new one: Persephone shows it in its own window and offers to save it to
+            a file. The old key stops working.
+          </p>
+          <div class="actions">
+            <button type="button" disabled={waiting} class="secondary" onclick={onchangekey}
+              >Change recovery key…</button
+            >
+          </div>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 </section>

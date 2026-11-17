@@ -11,6 +11,7 @@ const found = (fileName, overrides = {}) => ({
   processes: ['core'],
   firstSeen: 1_700_000_000_000,
   acknowledged: false,
+  reason: 'signer',
   ...overrides
 });
 const report = (list, state = 'ready', incomplete = false) => ({
@@ -29,6 +30,36 @@ test('GIVEN signatures WHEN labelled THEN a missing signer says why', () => {
     'Sophos Ltd'
   );
   assert.equal(modules.signerLabel(found('a.dll', { signature: 'valid' })), 'Signed');
+  assert.equal(modules.signerLabel(found('a.so', { signature: 'not_checked' })), 'Not checked');
+});
+
+test('GIVEN Linux reasons WHEN labelled THEN each says why the file is listed, and a signer reason shows the signer', () => {
+  const linux = (reason) => found('a.so', { signature: 'not_checked', reason });
+  assert.equal(modules.reasonLabel(linux('preloaded')), 'Forced in by LD_PRELOAD');
+  assert.equal(modules.reasonLabel(linux('no_file')), 'No file on disk');
+  assert.equal(modules.reasonLabel(linux('user_writable')), 'Can be changed without admin rights');
+  assert.equal(modules.reasonLabel(linux('outside_system')), 'Not a system file');
+  assert.equal(
+    modules.reasonLabel(found('a.dylib', { signature: 'valid', signer: 'Example Ltd' })),
+    'Example Ltd'
+  );
+  assert.equal(modules.listsReasons([found('a.dll')]), false);
+  assert.equal(modules.listsReasons([found('a.dll'), linux('no_file')]), true);
+  assert.equal(modules.listsReasons([]), false);
+  const notice = modules.noticeText(report([linux('preloaded')]));
+  assert.equal(notice, 'Other code is loaded into Persephone: a.so (Forced in by LD_PRELOAD)');
+});
+
+test('GIVEN navigator platforms WHEN classified THEN each desktop system has its own lede', () => {
+  assert.equal(modules.platformOf('Win32'), 'windows');
+  assert.equal(modules.platformOf('MacIntel'), 'mac');
+  assert.equal(modules.platformOf('Linux x86_64'), 'linux');
+  assert.equal(modules.platformOf('Linux aarch64'), 'linux');
+  assert.equal(modules.platformOf('FreeBSD amd64'), 'other');
+  assert.equal(modules.platformOf(''), 'other');
+  assert.match(modules.LEDE_TEXT.windows, /Microsoft did not sign/);
+  assert.match(modules.LEDE_TEXT.linux, /LD_PRELOAD/);
+  assert.match(modules.LEDE_TEXT.mac, /does not let Persephone check its window and web view/);
 });
 
 test('GIVEN processes WHEN labelled THEN each has the name the user sees', () => {

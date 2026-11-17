@@ -96,7 +96,8 @@ user informed.
 * The core opens its own child processes with `PROCESS_VM_READ` to list their
   modules.
 * A review in a demo or signed-out run is not saved.
-* Only Windows is implemented. Other platforms report "unsupported".
+* This record covers Windows. [ADR-0047](0047-report-loaded-code-on-linux-and-macos.md)
+  adds Linux and macOS. Other platforms report "unsupported".
 
 ## Pros and Cons of the Options
 
@@ -121,3 +122,4 @@ user informed.
 
 * Refines [ADR-0004](0004-separate-the-key-holding-core-from-the-web-view-process.md)
 * Evidence: [third-party module report](../evidence/third-party-module-report.md)
+* Refined by [ADR-0047](0047-report-loaded-code-on-linux-and-macos.md)

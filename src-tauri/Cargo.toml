@@ -38,6 +38,12 @@ tauri-plugin-notification = { version = "=2.7.0", default-features = false }
 # Linux and macOS: moving the core channel off descriptors 0 and 1.
 libc = "=0.2.191"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux: reads which GDK display (Wayland or X11) the window opened on, for
+# the capture note (ADR-0047). The same version Tauri already links; no
+# features of its own.
+gtk = { version = "=0.18.2", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",

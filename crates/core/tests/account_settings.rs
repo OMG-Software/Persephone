@@ -1313,6 +1313,7 @@ fn given_a_lock_then_module_reviews_leave_memory_and_return_from_the_store() {
             process: ModuleProcess::Core,
             signature: ModuleSignature::Unsigned,
             signer: None,
+            reason: persephone_contracts::ModuleReason::Signer,
         };
         core.update_modules(
             vec![found("a.dll"), found("b.dll")],

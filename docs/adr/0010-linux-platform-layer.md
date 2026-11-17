@@ -137,3 +137,4 @@ Owner decisions recorded with the implementation in
   [ADR-0005](0005-share-room-keys-only-with-cross-signed-devices.md),
   [ADR-0006](0006-require-an-unlock-secret-for-the-local-profile.md)
 * [ADR-0011](0011-macos-platform-layer.md) (macOS), [ADR-0012](0012-sign-and-publish-releases-as-drafts.md) (release)
+* Refined by [ADR-0046](0046-do-not-block-same-user-attach-to-the-linux-core.md) (the core stays dumpable)

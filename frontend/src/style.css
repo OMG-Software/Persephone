@@ -2368,6 +2368,36 @@ mark {
   box-shadow: none;
 }
 
+/* A card's heading with its action on the right. */
+.panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+/* A switch's explanation, aligned with its label text. */
+.switch-note {
+  margin-top: -4px;
+  margin-inline-start: 24px;
+  line-height: 1.5;
+}
+
+/* What the security page is waiting on, or why a step failed. */
+.security-notice {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 13.5px;
+}
+
+.security-notice.error {
+  color: var(--danger-text);
+}
+
 /* New room and invite dialogs */
 .new-room label[for],
 .invite-person label[for],
@@ -3300,28 +3330,136 @@ mark {
   box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
-/* The report of code loaded into Persephone, and its notice above the rooms. */
-.module-list li {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1.5fr);
-  gap: 2px 12px;
-  padding: 8px 0;
+/* The report of code loaded into Persephone (Settings, Security), and its
+   notice above the rooms. Names, signers and paths are the machine's word:
+   any length, so every cell wraps. */
+.module-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.module-table th {
+  padding: 0 12px 8px 0;
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--ink3);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: start;
+}
+
+.module-table td {
+  padding: 10px 12px 10px 0;
   border-bottom: 1px solid var(--line);
+  vertical-align: top;
   overflow-wrap: anywhere;
 }
 
-.module-list .module-seen,
-.module-list .module-path {
-  grid-column: 1 / -1;
+.module-table th:last-child,
+.module-table td:last-child {
+  padding-right: 0;
+}
+
+.module-table tbody tr:last-child td {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.module-table .col-file {
+  width: 42%;
+}
+
+.module-table .col-signer {
+  width: 22%;
+}
+
+.module-table .col-where {
+  width: 20%;
+}
+
+.module-table .col-seen {
+  width: 16%;
+}
+
+.module-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.module-path {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink3);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+/* Unsigned or not validly signed. */
+.module-signer.warn {
+  color: var(--warn-ink);
+}
+
+.module-seen time {
+  white-space: nowrap;
 }
 
 .module-new {
-  margin-left: 6px;
+  flex: none;
   padding: 1px 6px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--warn-bg);
   color: var(--warn-ink);
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Too narrow for four columns: each module stacks, its cells labelled. */
+@media (max-width: 900px) {
+  .module-table,
+  .module-table tbody,
+  .module-table tr,
+  .module-table td {
+    display: block;
+  }
+
+  .module-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .module-table tr {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .module-table tbody tr:first-child {
+    padding-top: 0;
+  }
+
+  .module-table tbody tr:last-child {
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+
+  .module-table td,
+  .module-table tbody tr:last-child td {
+    padding: 2px 0 0;
+    border: none;
+  }
+
+  .module-table td[data-label]::before {
+    content: attr(data-label) ': ';
+    color: var(--ink3);
+  }
 }
 
 .module-notice {

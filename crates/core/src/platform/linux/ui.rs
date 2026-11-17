@@ -43,7 +43,7 @@
 
 use super::bus::{self, BusError};
 use super::credentials;
-use crate::ui_host::{StartError, StartedUi, UiHost, UiTree, ui_command, ui_exe};
+use crate::ui_host::{ProcessIds, StartError, StartedUi, UiHost, UiTree, ui_command, ui_exe};
 use std::{
     fs, io,
     io::{Read, Write},
@@ -496,6 +496,33 @@ fn read_bounded(path: &Path) -> io::Result<String> {
     Ok(text)
 }
 
+/// Reads at most [`MAX_FILE_BYTES`] of a kernel text file, and whether it
+/// was longer: then the text is cut there.
+fn read_cut(path: &Path) -> io::Result<(String, bool)> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    let cut = bytes.len() as u64 > MAX_FILE_BYTES;
+    bytes.truncate(MAX_FILE_BYTES as usize);
+    let text = String::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not text"))?;
+    Ok((text, cut))
+}
+
+/// The process IDs in a `cgroup.procs` text, one per line. When the text
+/// was cut, its last line can be part of an ID, so it is left out.
+pub fn pids_from(text: &str, cut: bool) -> Vec<libc::pid_t> {
+    let mut lines: Vec<&str> = text.lines().collect();
+    if cut {
+        lines.pop();
+    }
+    lines
+        .into_iter()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
 /// The scope's cgroup directory.
 pub struct Cgroup {
     dir: PathBuf,
@@ -532,14 +559,17 @@ impl Cgroup {
     }
 
     /// Processes in the cgroup. Zombies are not listed (cgroup v2), and a
-    /// cgroup that systemd has removed, because it emptied, has none.
+    /// cgroup that systemd has removed, because it emptied, has none. A list
+    /// longer than [`MAX_FILE_BYTES`] gives only its first processes.
     pub fn processes(&self) -> io::Result<Vec<libc::pid_t>> {
-        match read_bounded(&self.dir.join("cgroup.procs")) {
-            Ok(text) => Ok(text
-                .lines()
-                .filter_map(|line| line.trim().parse().ok())
-                .collect()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        self.process_list().map(|(ids, _)| ids)
+    }
+
+    /// [`Self::processes`], and whether the whole list was read.
+    pub fn process_list(&self) -> io::Result<(Vec<libc::pid_t>, bool)> {
+        match read_cut(&self.dir.join("cgroup.procs")) {
+            Ok((text, cut)) => Ok((pids_from(&text, cut), !cut)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((Vec::new(), true)),
             Err(error) => Err(error),
         }
     }
@@ -585,7 +615,12 @@ impl ProcessGroup {
     /// Processes still running in the group; an exited but unreaped UI
     /// counts as ended.
     pub fn running(&self) -> io::Result<usize> {
-        let mut running = 0;
+        self.members().map(|members| members.len())
+    }
+
+    /// The IDs of the processes still running in the group.
+    pub fn members(&self) -> io::Result<Vec<u32>> {
+        let mut running = Vec::new();
         for entry in fs::read_dir("/proc")? {
             let Ok(entry) = entry else { continue };
             let Some(pid) = entry
@@ -604,7 +639,7 @@ impl ProcessGroup {
                 && state != 'Z'
                 && state != 'X'
             {
-                running += 1;
+                running.push(pid);
             }
         }
         Ok(running)
@@ -669,6 +704,28 @@ impl UiTree for UiRun {
                 io::ErrorKind::Unsupported,
                 "the window has no scope to count its processes in",
             )),
+        }
+    }
+
+    /// The processes in the scope, for the code report (ADR-0047). Without a
+    /// scope, the UI's process group: a process can leave the group, so the
+    /// list is then not complete.
+    fn process_ids(&self) -> io::Result<ProcessIds> {
+        match &self.cgroup {
+            Some(cgroup) => {
+                let (ids, complete) = cgroup.process_list()?;
+                Ok(ProcessIds {
+                    ids: ids
+                        .into_iter()
+                        .filter_map(|pid| u32::try_from(pid).ok())
+                        .collect(),
+                    complete,
+                })
+            }
+            None => Ok(ProcessIds {
+                ids: self.group.members()?,
+                complete: false,
+            }),
         }
     }
 
@@ -782,6 +839,18 @@ mod tests {
         fs::write(dir.join("memory.max"), "2147483648\n").unwrap();
         let cgroup = Cgroup::at(root.path(), "/app.slice/persephone-ui-1-0.scope").unwrap();
         assert_eq!(cgroup.processes().unwrap(), [101, 102, 103]);
+        assert_eq!(cgroup.process_list().unwrap(), (vec![101, 102, 103], true));
+        // A list longer than the read limit is cut: only whole IDs before
+        // the cut are kept, and the list says it is not complete.
+        let long: String = (0..20_000).map(|n| format!("{}\n", 100_000 + n)).collect();
+        fs::write(dir.join("cgroup.procs"), &long).unwrap();
+        let (ids, complete) = cgroup.process_list().unwrap();
+        assert!(!complete);
+        assert!(!ids.is_empty() && ids.iter().all(|id| (100_000..120_000).contains(id)));
+        assert_eq!(ids.len(), MAX_FILE_BYTES as usize / 7);
+        assert_eq!(pids_from("5\n6\n12", true), [5, 6], "a cut last line");
+        assert_eq!(pids_from("5\n6\n12", false), [5, 6, 12]);
+        fs::write(dir.join("cgroup.procs"), "101\n102\n103\n").unwrap();
         assert_eq!(cgroup.memory_max().unwrap(), UI_MEMORY_MAX);
         assert!(cgroup.swap_max().is_err(), "no swap accounting");
         fs::write(dir.join("memory.swap.max"), "max\n").unwrap();
