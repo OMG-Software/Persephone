@@ -23,6 +23,8 @@ test('times show as the time of day, with the full date for a tooltip', () => {
   const date = time.toDate(start + 5 * 60 * 1000 + 7);
   assert.equal(time.clockTime(date, utc), '09:05');
   assert.match(time.fullTime(date, utc), /Thursday,? 1 January 2026.*09:05:00/);
+  assert.equal(time.shortDate(date, utc), '1 Jan 2026');
+  assert.equal(time.shortDate(time.toDate(start + 16 * hour), { locale: 'en-GB', timeZone: 'Asia/Tokyo' }), '2 Jan 2026');
   // The reader's time zone decides the day and the time.
   assert.equal(time.clockTime(date, { locale: 'en-GB', timeZone: 'Asia/Tokyo' }), '18:05');
   assert.equal(time.dayKey(time.toDate(start + 16 * hour), utc), '2026-01-02');

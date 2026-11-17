@@ -2351,43 +2351,46 @@
           </section>
         {/if}
       {:else if settingsTab === 'security'}
-        {#if signedIn && security}
-          <Security
-            {security}
-            busy={securityBusy}
-            onsetup={() => startSecurity(setUpEncryption)}
-            onrecover={() => startSecurity(recoverWithKey)}
-            onsetuprecovery={() => startSecurity(setUpRecovery)}
-            onverify={() => startSecurity(verifyThisDevice)}
-            onchangekey={() => startSecurity(changeRecoveryKey)}
-            onnewbackup={() => startSecurity(startNewBackup)}
+        <!-- One column for the whole tab, so every card has the page's spacing. -->
+        <div class="settings-page">
+          {#if signedIn && security}
+            <Security
+              {security}
+              busy={securityBusy}
+              onsetup={() => startSecurity(setUpEncryption)}
+              onrecover={() => startSecurity(recoverWithKey)}
+              onsetuprecovery={() => startSecurity(setUpRecovery)}
+              onverify={() => startSecurity(verifyThisDevice)}
+              onchangekey={() => startSecurity(changeRecoveryKey)}
+              onnewbackup={() => startSecurity(startNewBackup)}
+            />
+          {:else}
+            <section class="settings-page" aria-labelledby="security-heading">
+              <h2 id="security-heading">Security &amp; encryption</h2>
+              <p class="lede">
+                {signedIn
+                  ? "Checking this account's encryption…"
+                  : 'No account is signed in. All rooms and messages here are synthetic test data.'}
+              </p>
+            </section>
+          {/if}
+          {#if securityFailure}
+            <p role="alert" class="security-notice error">{securityFailure}</p>
+          {/if}
+          {#if signedIn}
+            <CaptureProtection
+              {settings}
+              failure={settingsFailure}
+              onchange={(patch) => settingsKeeper.change(patch)}
+            />
+          {/if}
+          <LoadedCode
+            report={modules}
+            busy={modulesBusy}
+            failure={modulesFailure}
+            onacknowledge={reviewModules}
           />
-        {:else}
-          <section class="settings-page" aria-labelledby="security-heading">
-            <h2 id="security-heading">Security &amp; encryption</h2>
-            <p class="lede">
-              {signedIn
-                ? "Checking this account's encryption…"
-                : 'No account is signed in. All rooms and messages here are synthetic test data.'}
-            </p>
-          </section>
-        {/if}
-        {#if securityFailure}
-          <p role="alert" class="error">{securityFailure}</p>
-        {/if}
-        {#if signedIn}
-          <CaptureProtection
-            {settings}
-            failure={settingsFailure}
-            onchange={(patch) => settingsKeeper.change(patch)}
-          />
-        {/if}
-        <LoadedCode
-          report={modules}
-          busy={modulesBusy}
-          failure={modulesFailure}
-          onacknowledge={reviewModules}
-        />
+        </div>
       {:else}
         <section class="settings-page" aria-labelledby="session-heading">
           <h2 id="session-heading">This session</h2>
