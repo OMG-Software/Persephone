@@ -139,7 +139,16 @@ def coverage(*arguments, platform="linux", skip=None):
         commands.append(([str(part) for part in command], environment))
 
     with (
-        mock.patch.dict(dev.os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"}),
+        # Without CI's PERSEPHONE_CALL_WORKER=required, which check.yml sets
+        # for all jobs, so that `skip` decides.
+        mock.patch.dict(
+            dev.os.environ,
+            {
+                **{name: value for name, value in dev.os.environ.items() if name != "PERSEPHONE_CALL_WORKER"},
+                "XDG_RUNTIME_DIR": "/run/user/1000",
+            },
+            clear=True,
+        ),
         mock.patch.object(sys, "argv", ["dev.py", "coverage", *arguments]),
         mock.patch.object(sys, "platform", platform),
         mock.patch.object(dev, "run", record),

@@ -1,6 +1,7 @@
 """The cargo and npm commands that `python tools/dev.py build` runs."""
 
 import io
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -14,13 +15,31 @@ sys.path.insert(0, str(ROOT / "tools"))
 import dev  # noqa: E402
 
 
-def build(*arguments, commands=None, fails=lambda command: False, environments=None, library=Path("webrtc-root"), skip=None):
+def call_worker_environment(required):
+    """`os.environ` with PERSEPHONE_CALL_WORKER set only when `required`, so
+    that the tests do not take CI's value, which check.yml sets for all jobs."""
+    environment = {name: value for name, value in os.environ.items() if name != "PERSEPHONE_CALL_WORKER"}
+    if required:
+        environment["PERSEPHONE_CALL_WORKER"] = "required"
+    return environment
+
+
+def build(
+    *arguments,
+    commands=None,
+    fails=lambda command: False,
+    environments=None,
+    library=Path("webrtc-root"),
+    skip=None,
+    required=False,
+):
     """Runs `dev.py` with these arguments and npm found, recording each
     command in `commands` (and its environment in `environments`) instead of
     starting it. A command for which `fails` is true exits with an error, as
     cargo would. The pinned libwebrtc is a stand-in at `library`, so no test
     downloads anything. `skip` is the reason the call worker is skipped, or
-    None, so that no test depends on the clang of the machine it runs on."""
+    None, so that no test depends on the clang of the machine it runs on.
+    `required` sets PERSEPHONE_CALL_WORKER=required."""
     commands = [] if commands is None else commands
     environments = [] if environments is None else environments
 
@@ -31,7 +50,11 @@ def build(*arguments, commands=None, fails=lambda command: False, environments=N
         if fails(command):
             raise subprocess.CalledProcessError(101, command)
 
-    with mock.patch.object(sys, "argv", ["dev.py", *arguments]), mock.patch.object(dev, "run", record):
+    with (
+        mock.patch.dict(dev.os.environ, call_worker_environment(required), clear=True),
+        mock.patch.object(sys, "argv", ["dev.py", *arguments]),
+        mock.patch.object(dev, "run", record),
+    ):
         with mock.patch.object(dev.shutil, "which", return_value="npm"):
             with mock.patch.object(dev.webrtc, "ensure", return_value=library):
                 with mock.patch.object(dev, "call_worker_skip", return_value=skip):
@@ -131,8 +154,7 @@ class BuildTest(unittest.TestCase):
         self.assertIn("PERSEPHONE_CALL_WORKER is required", stderr.getvalue())
 
     def test_given_the_call_worker_is_required_and_buildable_then_it_is_built(self):
-        with mock.patch.dict(dev.os.environ, {"PERSEPHONE_CALL_WORKER": "required"}):
-            commands = build("rust")
+        commands = build("rust", required=True)
         self.assertEqual([c[1] for c in commands if packages(c) == ["persephone-call-worker"]], ["build", "test", "clippy"])
 
 
