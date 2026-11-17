@@ -190,10 +190,13 @@ jobs:
             install: >-
               dnf install -y git curl tar gzip xz gcc gcc-c++ clang make pkgconf-pkg-config python3
               'pkgconfig(webkit2gtk-4.1)'
+          # No `clang` here: Leap's clang 19 brings libclang13 19, which
+          # conflicts with the libclang13 of the clang 21 the clang step
+          # installs from devel:tools:compiler.
           - name: opensuse-leap-16.0
             image: opensuse/leap:16.0@sha256:0c459bfe558e59b44b484e0e02dad66a28cdba92d24c8121d3901177938a3175 # 16.0
             install: >-
-              zypper --non-interactive install git curl tar gzip xz gcc gcc-c++ clang make pkg-config python3
+              zypper --non-interactive install git curl tar gzip xz gcc gcc-c++ make pkg-config python3
               'pkgconfig(webkit2gtk-4.1)'
     steps:
       # Before checkout, so that it clones with git.

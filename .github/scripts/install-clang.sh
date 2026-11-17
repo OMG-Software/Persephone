@@ -44,6 +44,8 @@ case "$ID" in
         $sudo zypper --non-interactive addrepo --gpgcheck --priority 120 \
             "https://download.opensuse.org/repositories/devel:/tools:/compiler/$VERSION_ID/" devel-tools-compiler
         $sudo zypper --non-interactive refresh devel-tools-compiler
+        # Fails if Leap's own clang is installed: its libclang13 conflicts
+        # with clang 21's, so the job must not install the `clang` package.
         $sudo zypper --non-interactive install "clang$NEEDED"
         cxx="$(rpm -ql "clang$NEEDED" | grep -E "/bin/clang\+\+(-$NEEDED)?$" | head -n 1)"
         ;;

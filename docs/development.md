@@ -136,7 +136,7 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 | `debian-13` | `debian:trixie` container | `apt-get`: build tools, `clang`, `libwebkit2gtk-4.1-dev`. Clang 21 from apt.llvm.org, because Debian has clang 19 | Distribution `python3` |
 | `arch` | `archlinux:base-devel` container | `pacman -Syu`: `clang`, `webkit2gtk-4.1` | Distribution `python` |
 | `fedora-44` | `fedora:44` container | `dnf`: build tools, `clang`, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
-| `opensuse-leap-16.0` | `opensuse/leap:16.0` container | `zypper`: build tools, `clang`, `pkgconfig(webkit2gtk-4.1)`. Clang 21 from `devel:tools:compiler`, because Leap has clang 19 | Distribution `python3` |
+| `opensuse-leap-16.0` | `opensuse/leap:16.0` container | `zypper`: build tools, `pkgconfig(webkit2gtk-4.1)`. Clang 21 only, from `devel:tools:compiler`: Leap has clang 19, whose `libclang13` conflicts with clang 21's | Distribution `python3` |
 
 - **Containers.** Container images are pinned by digest in the workflow. Containers install Rust with rustup from `sh.rustup.rs` and Node.js with setup-node.
 - **Packages are not pinned.** Packages come from each distribution's current repositories, so only the base image is fixed. Arch supports only full upgrades, so its job always builds against the current rolling release.
