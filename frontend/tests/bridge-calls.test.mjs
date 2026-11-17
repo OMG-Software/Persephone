@@ -158,6 +158,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
     [() => bridge.newSessions(), 'new_sessions', {}],
     [() => bridge.thirdPartyModules(), 'third_party_modules', {}],
+    [() => bridge.displaySession(), 'display_session', {}],
     [() => bridge.acknowledgeModules(['a.dllunsigned']), 'acknowledge_modules', { ids: ['a.dllunsigned'] }],
     [() => bridge.signInWithOidc('https://e.org'), 'sign_in_with_oidc', { homeserver: 'https://e.org' }],
     [() => bridge.proxySetting(), 'proxy_setting', {}],

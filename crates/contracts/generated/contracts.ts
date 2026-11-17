@@ -343,7 +343,11 @@ export type NewSession = { deviceId: string, displayName: string | null, };
 
 export type NewSessions = { sessions: Array<NewSession>, truncated: boolean, };
 
-export type ModuleSignature = "valid" | "unsigned" | "invalid";
+export type ModuleSignature = "valid" | "unsigned" | "invalid" | "not_checked";
+
+export type ModuleReason = "signer" | "preloaded" | "user_writable" | "outside_system" | "no_file";
+
+export type DisplaySession = "wayland" | "x11" | "unknown";
 
 export type ModuleProcess = "core" | "ui" | "web_view";
 
@@ -361,7 +365,7 @@ path: string,
 /**
  * The verified signer's simple name. Only for `Valid`; otherwise null.
  */
-signer: string | null, signature: ModuleSignature, 
+signer: string | null, signature: ModuleSignature, reason: ModuleReason, 
 /**
  * The processes it is loaded in: sorted, unique, one to three.
  */

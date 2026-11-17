@@ -27,8 +27,8 @@ use crate::store::Stores;
 use crate::views::{is_bidi_control, project_name};
 use matrix_sdk_crypto::store::CryptoStore;
 use persephone_contracts::{
-    ModuleProcess, ModuleScanState, ModuleSignature, ThirdPartyModule, ThirdPartyModules,
-    UnixMillis,
+    ModuleProcess, ModuleReason, ModuleScanState, ModuleSignature, ThirdPartyModule,
+    ThirdPartyModules, UnixMillis,
 };
 use persephone_core_protocol::{
     ErrorCode, MAX_MODULE_ID_BYTES, MAX_MODULE_PATH_BYTES, MAX_THIRD_PARTY_MODULES,
@@ -60,6 +60,8 @@ pub struct Found {
     pub signature: ModuleSignature,
     /// The signer's simple name. Only used for a valid signature.
     pub signer: Option<String>,
+    /// Why it is listed. `Signer` where signatures are checked.
+    pub reason: ModuleReason,
 }
 
 #[cfg(windows)]
@@ -70,7 +72,20 @@ impl From<crate::platform::windows::modules::FoundModule> for Found {
             process: found.process,
             signature: found.signature,
             signer: found.signer,
+            reason: ModuleReason::Signer,
         }
+    }
+}
+
+/// How serious a reason is, for a file listed for different reasons in
+/// different processes: the most serious one is shown.
+fn severity(reason: ModuleReason) -> u8 {
+    match reason {
+        ModuleReason::Signer => 0,
+        ModuleReason::OutsideSystem => 1,
+        ModuleReason::UserWritable => 2,
+        ModuleReason::NoFile => 3,
+        ModuleReason::Preloaded => 4,
     }
 }
 
@@ -97,9 +112,9 @@ pub struct Modules {
 }
 
 impl Default for Modules {
-    /// Supported where the core can list modules: on Windows.
+    /// Supported where the core can list modules: Windows, Linux and macOS.
     fn default() -> Self {
-        Self::with_support(cfg!(windows))
+        Self::with_support(cfg!(any(windows, target_os = "linux", target_os = "macos")))
     }
 }
 
@@ -265,7 +280,13 @@ fn merge(found: Vec<Found>) -> Vec<Entry> {
         let key = path_key(&item.path);
         let tracked = files.len();
         match files.entry(key) {
-            Entry2::Occupied(mut known) => known.get_mut().1.push(item.process),
+            Entry2::Occupied(mut known) => {
+                let (first, processes) = known.get_mut();
+                processes.push(item.process);
+                if severity(item.reason) > severity(first.reason) {
+                    first.reason = item.reason;
+                }
+            }
             Entry2::Vacant(slot) if tracked < MAX_TRACKED => {
                 slot.insert((item.clone(), vec![item.process]));
             }
@@ -298,7 +319,7 @@ fn project(item: &Found, processes: Vec<ModuleProcess>) -> Entry {
         .flatten()
         .filter(|signer| !signer.is_empty());
     let path = display_path(&item.path);
-    let id = module_id(&file_name, item.signature, signer.as_deref());
+    let id = module_id(&file_name, item.signature, signer.as_deref(), item.reason);
     Entry {
         sort_key: (file_name.to_lowercase(), path.clone()),
         module: ThirdPartyModule {
@@ -307,6 +328,7 @@ fn project(item: &Found, processes: Vec<ModuleProcess>) -> Entry {
             path,
             signer,
             signature: item.signature,
+            reason: item.reason,
             processes,
             first_seen: UnixMillis::saturating(0),
             acknowledged: false,
@@ -315,14 +337,27 @@ fn project(item: &Found, processes: Vec<ModuleProcess>) -> Entry {
 }
 
 /// The review key: lowercase file name, a separator and the signer, or
-/// `unsigned` or `invalid`. The name is cut, not the signature part, when the
-/// key is too long.
-fn module_id(file_name: &str, signature: ModuleSignature, signer: Option<&str>) -> String {
+/// `unsigned` or `invalid`. Where no signature is checked (Linux), the
+/// reason takes the signer's place, so a file listed for a new reason is new
+/// again. The name is cut, not the suffix, when the key is too long.
+fn module_id(
+    file_name: &str,
+    signature: ModuleSignature,
+    signer: Option<&str>,
+    reason: ModuleReason,
+) -> String {
     let suffix = match (signature, signer) {
         (ModuleSignature::Valid, Some(signer)) => signer,
         (ModuleSignature::Valid, None) => "valid",
         (ModuleSignature::Unsigned, _) => "unsigned",
         (ModuleSignature::Invalid, _) => "invalid",
+        (ModuleSignature::NotChecked, _) => match reason {
+            ModuleReason::Signer => "not_checked",
+            ModuleReason::Preloaded => "preloaded",
+            ModuleReason::UserWritable => "user_writable",
+            ModuleReason::OutsideSystem => "outside_system",
+            ModuleReason::NoFile => "no_file",
+        },
     };
     let suffix = cut_bytes(suffix, MAX_ID_SUFFIX_BYTES);
     let lower = file_name.to_lowercase();
@@ -432,7 +467,104 @@ mod tests {
                 ModuleSignature::Unsigned
             },
             signer: signer.map(ToOwned::to_owned),
+            reason: ModuleReason::Signer,
         }
+    }
+
+    fn linux(path: &str, process: ModuleProcess, reason: ModuleReason) -> Found {
+        Found {
+            path: PathBuf::from(path),
+            process,
+            signature: ModuleSignature::NotChecked,
+            signer: None,
+            reason,
+        }
+    }
+
+    /// GIVEN Linux rows, which have no signature to check, WHEN listed THEN
+    /// the reason takes the signer's place in the id, the row has no signer,
+    /// and a file listed for different reasons in different processes shows
+    /// the most serious one.
+    #[test]
+    fn given_linux_rows_then_the_reason_keys_the_review_and_the_worst_reason_shows() {
+        let modules = ready(vec![
+            linux(
+                "/home/a/.local/lib/hook.so",
+                ModuleProcess::Ui,
+                ModuleReason::UserWritable,
+            ),
+            linux(
+                "/home/a/.local/lib/hook.so",
+                ModuleProcess::Core,
+                ModuleReason::Preloaded,
+            ),
+            linux(
+                "/opt/vendor/lib/plugin.so",
+                ModuleProcess::WebView,
+                ModuleReason::OutsideSystem,
+            ),
+            linux("[anonymous]", ModuleProcess::Core, ModuleReason::NoFile),
+        ]);
+        let report = modules.report();
+        let rows: Vec<(&str, String, ModuleReason, Vec<ModuleProcess>)> = report
+            .modules
+            .iter()
+            .map(|m| {
+                (
+                    m.file_name.as_str(),
+                    m.id.clone(),
+                    m.reason,
+                    m.processes.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "[anonymous]",
+                    id("[anonymous]", "no_file"),
+                    ModuleReason::NoFile,
+                    vec![ModuleProcess::Core]
+                ),
+                (
+                    "hook.so",
+                    id("hook.so", "preloaded"),
+                    ModuleReason::Preloaded,
+                    vec![ModuleProcess::Core, ModuleProcess::Ui]
+                ),
+                (
+                    "plugin.so",
+                    id("plugin.so", "outside_system"),
+                    ModuleReason::OutsideSystem,
+                    vec![ModuleProcess::WebView]
+                ),
+            ]
+        );
+        assert!(
+            report
+                .modules
+                .iter()
+                .all(|m| m.signer.is_none() && m.signature == ModuleSignature::NotChecked)
+        );
+        // A reviewed file listed later for another reason is new again.
+        let mut later = ready(vec![linux(
+            "/opt/vendor/lib/plugin.so",
+            ModuleProcess::Ui,
+            ModuleReason::OutsideSystem,
+        )]);
+        later.acknowledge(&[id("plugin.so", "outside_system")]);
+        assert!(later.report().modules[0].acknowledged);
+        later.update(
+            vec![linux(
+                "/opt/vendor/lib/plugin.so",
+                ModuleProcess::Ui,
+                ModuleReason::UserWritable,
+            )],
+            false,
+            at(2_000),
+        );
+        assert!(!later.report().modules[0].acknowledged);
     }
 
     fn ready(items: Vec<Found>) -> Modules {

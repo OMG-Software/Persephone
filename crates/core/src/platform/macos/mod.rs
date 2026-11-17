@@ -2,8 +2,9 @@
 //! secret, `NSAlert` prompts, open and save panels and `NSWorkspace` for a
 //! confirmed link on the main thread, the UI in its own process group,
 //! killed with the core, the shared Unix read rules for a picked image or
-//! file and the owner-only save, the system idle time from CoreGraphics, and
-//! the media worker in its Seatbelt sandbox. Nothing here has been seen to
+//! file and the owner-only save, the system idle time from CoreGraphics,
+//! the media worker in its Seatbelt sandbox, and the report of code loaded
+//! into the core ([`modules`], ADR-0047). Nothing here has been seen to
 //! work with a real user, display or Keychain prompt; macOS is built and
 //! tested on CI only.
 //!
@@ -14,6 +15,7 @@
 
 pub mod credentials;
 pub mod main_loop;
+pub mod modules;
 pub mod pick;
 pub mod ui;
 pub mod vault;

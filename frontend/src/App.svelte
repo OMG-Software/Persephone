@@ -66,7 +66,8 @@
   import Timeline from './Timeline.svelte';
   import NewSessionsAlert from './NewSessions.svelte';
   import LoadedCode from './LoadedCode.svelte';
-  import { acknowledgeIds, noticeText, unreviewed } from './modules';
+  import { acknowledgeIds, noticeText, platformOf, unreviewed } from './modules';
+  import type { DisplaySession } from './bridge';
   import { changeText } from './accountChanges';
   import TipButton from './TipButton.svelte';
   import Verification from './Verification.svelte';
@@ -109,6 +110,7 @@
     acknowledgeSessions,
     thirdPartyModules,
     acknowledgeModules,
+    displaySession,
     removeDevice,
     roomActivity,
     setTyping,
@@ -523,6 +525,10 @@
 
   // The jump shortcut as this system writes it.
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+  // The desktop system, for the Security page text, and the display server
+  // on Linux for the capture note (null until the host answers).
+  const platform = platformOf(typeof navigator !== 'undefined' ? navigator.platform : '');
+  let displayServer = $state<DisplaySession | null>(null);
   const shortcut = mac ? '⌘K' : 'Ctrl K';
 
   // Ctrl K (⌘K on macOS) opens the jump palette from the room view.
@@ -1326,6 +1332,14 @@
     callRefresher.request();
     load();
     refreshModules();
+    if (platform === 'linux') {
+      displaySession().then(
+        (reply) => (displayServer = reply),
+        () => {
+          // The note says the session is not known.
+        }
+      );
+    }
   });
 
   // A room operation's results apply only to the same room in the same
@@ -2380,12 +2394,15 @@
           {#if signedIn}
             <CaptureProtection
               {settings}
+              {platform}
+              session={displayServer}
               failure={settingsFailure}
               onchange={(patch) => settingsKeeper.change(patch)}
             />
           {/if}
           <LoadedCode
             report={modules}
+            {platform}
             busy={modulesBusy}
             failure={modulesFailure}
             onacknowledge={reviewModules}

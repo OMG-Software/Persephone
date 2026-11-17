@@ -55,7 +55,9 @@ protects the message view.
   and some accessibility tools then see the window as blank.
 * Child windows and other processes' windows are not changed. The WebView2
   content is drawn into the protected top-level window.
-* Other platforms do nothing. The setting has no effect there.
+* Other platforms do nothing. The setting has no effect there. On Linux,
+  Settings says whether the window uses Wayland or X11
+  ([ADR-0047](0047-report-loaded-code-on-linux-and-macos.md)).
 
 ### Positive Consequences
 
@@ -103,4 +105,5 @@ protects the message view.
 
 * Refines [ADR-0004](0004-separate-the-key-holding-core-from-the-web-view-process.md)
 * Related: [ADR-0044](0044-report-code-loaded-into-persephone-and-ask-the-user-to-review-it.md)
+* Related: [ADR-0047](0047-report-loaded-code-on-linux-and-macos.md)
 * Evidence: [capture protection](../evidence/capture-protection.md)

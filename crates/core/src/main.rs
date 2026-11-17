@@ -72,13 +72,19 @@ use std::{
 
 mod ui_watch;
 
-/// Lists the modules loaded into Persephone's processes. Only Windows can.
+#[cfg(target_os = "linux")]
+use persephone_core::platform::linux::modules as scan;
+#[cfg(target_os = "macos")]
+use persephone_core::platform::macos::modules as scan;
+/// Lists the code loaded into Persephone's processes (ADR-0044, ADR-0047).
 #[cfg(windows)]
-type Scanner = persephone_core::platform::windows::modules::Scanner;
-#[cfg(not(windows))]
+use persephone_core::platform::windows::modules as scan;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+type Scanner = scan::Scanner;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 struct Scanner;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 impl Scanner {
     fn new() -> Self {
         Self
@@ -95,10 +101,10 @@ const WATCH_PERIOD: Duration = Duration::from_millis(500);
 /// How long a replaced UI tree may take to exit before a new UI starts.
 const REPLACE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the first module scan waits for the page to reach the core.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 const MODULE_READY_WAIT: Duration = Duration::from_secs(10);
 /// How often the modules are listed again.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 const MODULE_SCAN_PERIOD: Duration = Duration::from_secs(30);
 
 /// How one UI run ended.
@@ -327,16 +333,16 @@ fn run_ui(
         return Run::Exit(ExitCode::from(2));
     };
     let finished = (Mutex::new(false), Condvar::new());
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     let _ = &scanner;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     let ui_pid = child.id();
     let (end, verdict) = thread::scope(|scope| {
         if demo_live {
             scope.spawn(|| demo(core));
         }
         let watcher = scope.spawn(|| watch(core, host, &*tree, &finished, retries));
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         let scan = scope.spawn(|| scan_modules(core, &*tree, ui_pid, scanner, &finished));
         let end = serve(core, from_ui, to_ui);
         *finished.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
@@ -350,7 +356,7 @@ fn run_ui(
         }
         // The report is a transparency aid: a panic in its thread must not
         // reach the scope, which would skip the shutdown below.
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         let _ = scan.join();
         (end, verdict)
     });
@@ -425,7 +431,7 @@ fn watch(
 
 /// Waits for `period`, or until the run has finished. Returns `true` once it
 /// has.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn finished_within(finished: &(Mutex<bool>, Condvar), period: Duration) -> bool {
     let (done, wake) = finished;
     let done = done.lock().unwrap_or_else(|p| p.into_inner());
@@ -440,7 +446,7 @@ fn finished_within(finished: &(Mutex<bool>, Condvar), period: Duration) -> bool 
 /// then every [`MODULE_SCAN_PERIOD`] until the run has finished. Only this
 /// thread scans, and it never blocks on the stores. Nothing it finds is
 /// printed or logged: paths can contain the user name.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn scan_modules(
     core: &Core,
     tree: &dyn UiTree,
@@ -449,7 +455,7 @@ fn scan_modules(
     finished: &(Mutex<bool>, Condvar),
 ) {
     use persephone_contracts::ModuleProcess;
-    use persephone_core::platform::windows::modules::ScanTarget;
+    use scan::ScanTarget;
 
     let start = Instant::now();
     while !core.ui_ready() && start.elapsed() < MODULE_READY_WAIT {
@@ -486,8 +492,11 @@ fn scan_modules(
         let Some(result) = scanner.scan_until(&targets, &stopped) else {
             return;
         };
+        // Windows rows are converted; Linux and macOS give `Found` already.
+        #[cfg_attr(not(windows), allow(clippy::useless_conversion))]
+        let modules = result.modules.into_iter().map(Into::into).collect();
         core.update_modules(
-            result.modules.into_iter().map(Into::into).collect(),
+            modules,
             result.incomplete || !web_views.as_ref().is_ok_and(|list| list.complete),
             persephone_core::views::now_millis(),
         );

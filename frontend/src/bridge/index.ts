@@ -37,7 +37,9 @@ import type {
   ModuleProcess,
   ModuleSignature,
   ModuleScanState,
+  ModuleReason,
   ThirdPartyModule,
+  DisplaySession,
   NotificationLevel,
   NotificationSettings,
   PendingMessage,
@@ -121,7 +123,9 @@ export type {
   ModuleProcess,
   ModuleSignature,
   ModuleScanState,
+  ModuleReason,
   ThirdPartyModule,
+  DisplaySession,
   NotificationLevel,
   NotificationSettings,
   ProfileList,
@@ -898,11 +902,19 @@ export function acknowledgeSessions(deviceIds: string[]): Promise<void> {
 }
 
 /**
- * The code loaded into Persephone that is not Microsoft's or Persephone's own
+ * The code loaded into Persephone that the system and Persephone did not ship
  * (at most 128 entries). The core lists it; the page only shows it.
  */
 export function thirdPartyModules(): Promise<ThirdPartyModules> {
   return invoke<ThirdPartyModules>('third_party_modules');
+}
+
+/**
+ * The display server that draws the window: Wayland or X11 on Linux, and
+ * "unknown" elsewhere. The desktop host answers; the core is not asked.
+ */
+export function displaySession(): Promise<DisplaySession> {
+  return invoke<DisplaySession>('display_session');
 }
 
 /**

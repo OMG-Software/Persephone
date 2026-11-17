@@ -24,6 +24,7 @@
 * [0044 - Report code loaded into Persephone and ask the user to review it](0044-report-code-loaded-into-persephone-and-ask-the-user-to-review-it.md)
 * [0045 - Exclude the main window from screen capture by default](0045-exclude-the-main-window-from-screen-capture-by-default.md)
 * [0046 - Do not block same-user attach to the Linux core](0046-do-not-block-same-user-attach-to-the-linux-core.md)
+* [0047 - Report loaded code on Linux and macOS](0047-report-loaded-code-on-linux-and-macos.md)
 
 ## Proposed Records
 

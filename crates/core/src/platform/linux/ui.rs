@@ -43,7 +43,7 @@
 
 use super::bus::{self, BusError};
 use super::credentials;
-use crate::ui_host::{StartError, StartedUi, UiHost, UiTree, ui_command, ui_exe};
+use crate::ui_host::{ProcessIds, StartError, StartedUi, UiHost, UiTree, ui_command, ui_exe};
 use std::{
     fs, io,
     io::{Read, Write},
@@ -585,7 +585,12 @@ impl ProcessGroup {
     /// Processes still running in the group; an exited but unreaped UI
     /// counts as ended.
     pub fn running(&self) -> io::Result<usize> {
-        let mut running = 0;
+        self.members().map(|members| members.len())
+    }
+
+    /// The IDs of the processes still running in the group.
+    pub fn members(&self) -> io::Result<Vec<u32>> {
+        let mut running = Vec::new();
         for entry in fs::read_dir("/proc")? {
             let Ok(entry) = entry else { continue };
             let Some(pid) = entry
@@ -604,7 +609,7 @@ impl ProcessGroup {
                 && state != 'Z'
                 && state != 'X'
             {
-                running += 1;
+                running.push(pid);
             }
         }
         Ok(running)
@@ -669,6 +674,26 @@ impl UiTree for UiRun {
                 io::ErrorKind::Unsupported,
                 "the window has no scope to count its processes in",
             )),
+        }
+    }
+
+    /// The processes in the scope, for the code report (ADR-0047). Without a
+    /// scope, the UI's process group: a process can leave the group, so the
+    /// list is then not complete.
+    fn process_ids(&self) -> io::Result<ProcessIds> {
+        match &self.cgroup {
+            Some(cgroup) => Ok(ProcessIds {
+                ids: cgroup
+                    .processes()?
+                    .into_iter()
+                    .filter_map(|pid| u32::try_from(pid).ok())
+                    .collect(),
+                complete: true,
+            }),
+            None => Ok(ProcessIds {
+                ids: self.group.members()?,
+                complete: false,
+            }),
         }
     }
 

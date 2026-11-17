@@ -68,6 +68,7 @@ fn main() {
             "acknowledge_sessions",
             "third_party_modules",
             "acknowledge_modules",
+            "display_session",
             "remove_device",
             "pending_messages",
             "retry_message",

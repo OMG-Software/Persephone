@@ -1174,6 +1174,42 @@ pub enum ModuleSignature {
     Unsigned,
     /// Signed, but the signature does not verify.
     Invalid,
+    /// The platform has no signature to check (Linux).
+    NotChecked,
+}
+
+/// Why a module is in the report (ADR-0047).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleReason {
+    /// Its signature is not an expected one (Windows, macOS).
+    Signer,
+    /// Named in `LD_PRELOAD` or `/etc/ld.so.preload` (Linux).
+    Preloaded,
+    /// A user other than root can change the file, or a folder above it
+    /// (Linux).
+    UserWritable,
+    /// Owned by root, but not in a system folder or in Persephone's own
+    /// read-only image (Linux).
+    OutsideSystem,
+    /// Executable memory of the core with no file on disk, or a file deleted
+    /// since it was loaded (Linux).
+    NoFile,
+}
+
+/// The display server the window is drawn through on Linux, for the capture
+/// note in Settings (ADR-0047). It is information only: Persephone cannot
+/// hide its window from capture on Linux.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplaySession {
+    /// A Wayland compositor: other apps capture the screen only through the
+    /// compositor or the screen-cast portal, which asks the user.
+    Wayland,
+    /// An X11 server, or XWayland: any X11 client can read the window.
+    X11,
+    /// Not Linux, or neither could be found.
+    Unknown,
 }
 
 /// A Persephone process a module is loaded in. The order is the display
@@ -1185,7 +1221,7 @@ pub enum ModuleProcess {
     Core,
     /// The keyless UI host.
     Ui,
-    /// A WebView2 process of the UI.
+    /// A web view process of the UI (WebView2, WebKitGTK).
     WebView,
 }
 
@@ -1214,6 +1250,7 @@ pub struct ThirdPartyModule {
     /// The verified signer's simple name. Only for `Valid`; otherwise null.
     pub signer: Option<String>,
     pub signature: ModuleSignature,
+    pub reason: ModuleReason,
     /// The processes it is loaded in: sorted, unique, one to three.
     pub processes: Vec<ModuleProcess>,
     /// When this core process first saw it.
@@ -1234,6 +1271,7 @@ impl<'de> Deserialize<'de> for ThirdPartyModule {
             path: String,
             signer: RequiredNullableString,
             signature: ModuleSignature,
+            reason: ModuleReason,
             processes: Vec<ModuleProcess>,
             first_seen: UnixMillis,
             acknowledged: bool,
@@ -1245,6 +1283,7 @@ impl<'de> Deserialize<'de> for ThirdPartyModule {
             path: input.path,
             signer: input.signer.into_option(),
             signature: input.signature,
+            reason: input.reason,
             processes: input.processes,
             first_seen: input.first_seen,
             acknowledged: input.acknowledged,
@@ -2388,6 +2427,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),
         format!("export {}", ModuleSignature::decl(&config)),
+        format!("export {}", ModuleReason::decl(&config)),
+        format!("export {}", DisplaySession::decl(&config)),
         format!("export {}", ModuleProcess::decl(&config)),
         format!("export {}", ModuleScanState::decl(&config)),
         format!("export {}", ThirdPartyModule::decl(&config)),
@@ -2602,7 +2643,7 @@ mod personal_contract_tests {
     /// refuses extra fields, and a missing or wrong nullable field fails.
     #[test]
     fn module_report_round_trips_and_requires_explicit_nulls() {
-        let module = serde_json::json!({"id":"a.dll\u{1f}unsigned","fileName":"a.dll","path":"C:\\x\\a.dll","signer":null,"signature":"unsigned","processes":["core","web_view"],"firstSeen":1,"acknowledged":false});
+        let module = serde_json::json!({"id":"a.dll\u{1f}unsigned","fileName":"a.dll","path":"C:\\x\\a.dll","signer":null,"signature":"unsigned","reason":"signer","processes":["core","web_view"],"firstSeen":1,"acknowledged":false});
         let report = serde_json::json!({"state":"ready","scannedAt":null,"modules":[module],"truncated":false,"incomplete":true});
         let decoded: ThirdPartyModules = serde_json::from_value(report.clone()).unwrap();
         assert_eq!(serde_json::to_value(&decoded).unwrap(), report);
@@ -2629,7 +2670,7 @@ mod personal_contract_tests {
         let wire = serde_json::to_string(&report).unwrap();
         let duplicate = format!("{},\"scannedAt\":null}}", &wire[..wire.len() - 1]);
         assert!(serde_json::from_str::<ThirdPartyModules>(&duplicate).is_err());
-        for field in ["signer", "id", "firstSeen", "acknowledged"] {
+        for field in ["signer", "id", "firstSeen", "acknowledged", "reason"] {
             let mut input = report.clone();
             input["modules"][0].as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<ThirdPartyModules>(input).is_err());
@@ -2646,6 +2687,39 @@ mod personal_contract_tests {
         }
         assert!(serde_json::from_str::<ModuleProcess>("\"webview\"").is_err());
         assert!(serde_json::from_str::<ModuleSignature>("\"signed\"").is_err());
+        // Linux rows: no signature to check, and a reason other than the signer.
+        let mut linux = report.clone();
+        linux["modules"][0]["signature"] = "not_checked".into();
+        for reason in ["preloaded", "user_writable", "outside_system", "no_file"] {
+            linux["modules"][0]["reason"] = reason.into();
+            let decoded: ThirdPartyModules = serde_json::from_value(linux.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), linux);
+        }
+        assert!(serde_json::from_str::<ModuleReason>("\"writable\"").is_err());
+        assert!(serde_json::from_str::<ModuleSignature>("\"notChecked\"").is_err());
+    }
+
+    /// GIVEN each display session THEN it round-trips as its snake_case
+    /// name; GIVEN another spelling THEN it is refused.
+    #[test]
+    fn display_session_round_trips_and_refuses_other_spellings() {
+        for (session, wire) in [
+            (DisplaySession::Wayland, "\"wayland\""),
+            (DisplaySession::X11, "\"x11\""),
+            (DisplaySession::Unknown, "\"unknown\""),
+        ] {
+            assert_eq!(serde_json::to_string(&session).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<DisplaySession>(wire).unwrap(),
+                session
+            );
+        }
+        for bad in ["\"X11\"", "\"x_11\"", "\"xwayland\"", "null"] {
+            assert!(
+                serde_json::from_str::<DisplaySession>(bad).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -1212,6 +1212,23 @@ test('GIVEN the capture setting WHEN it shows THEN the switch is labelled, follo
   assert.match(page(true), /screen sharing show the window blank/);
   assert.doesNotMatch(page(true), /Recall/);
   assert.doesNotMatch(page(true), /<script|<img|href=/);
+  assert.doesNotMatch(page(true), /Linux does not let apps hide/);
+
+  // On Linux a note says who can read the window, by display server.
+  const linux = (session) =>
+    render(CaptureProtection, {
+      props: {
+        settings: { ...DEFAULT_PREFERENCES, captureProtection: true },
+        failure: null,
+        platform: 'linux',
+        session,
+        onchange: () => {}
+      }
+    }).body;
+  assert.match(linux('x11'), /uses X11: any app on this desktop can read it/);
+  assert.match(linux('wayland'), /uses Wayland: apps capture the screen through your desktop/);
+  assert.match(linux(null), /cannot tell whether this window uses Wayland or X11/);
+  assert.match(linux('unknown'), /cannot tell whether/);
 });
 
 test('GIVEN the preferences WHEN they show THEN a theme drop-down offers the three dark themes with the saved one chosen', () => {
@@ -1423,6 +1440,7 @@ test('GIVEN a module report WHEN the section renders THEN hostile names stay ine
     processes: ['core', 'web_view'],
     firstSeen: 1_700_000_000_000,
     acknowledged: false,
+    reason: 'signer',
     ...overrides
   });
   const ready = (modules, truncated = false, incomplete = false) => ({
@@ -1468,4 +1486,22 @@ test('GIVEN a module report WHEN the section renders THEN hostile names stay ine
     /Not available on this system\./
   );
   assert.match(show(null), /Checking…/);
+  assert.match(html, />Signed by</);
+  assert.match(html, /Microsoft did not sign/);
+
+  // Linux rows say why they are listed, under a heading that says so.
+  const linux = render(LoadedCode, {
+    props: {
+      report: ready([
+        row('hook.so', { signature: 'not_checked', reason: 'preloaded', path: '/tmp/hook.so' })
+      ]),
+      platform: 'linux',
+      onacknowledge: () => {}
+    }
+  }).body;
+  assert.match(linux, />Why listed</);
+  assert.doesNotMatch(linux, />Signed by</);
+  assert.match(linux, /Forced in by LD_PRELOAD/);
+  assert.match(linux, /LD_PRELOAD\. This list shows code in Persephone/);
+  assert.doesNotMatch(linux, /Microsoft/);
 });

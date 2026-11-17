@@ -1502,13 +1502,20 @@ async fn acknowledge_sessions(
     relay(core.inner(), Call::AcknowledgeSessions { device_ids }).await
 }
 
-/// The code loaded into Persephone that is not Microsoft's or Persephone's
-/// own. The core scans; the page only reads the report.
+/// The code loaded into Persephone that the system and Persephone did not
+/// ship. The core scans; the page only reads the report.
 #[tauri::command]
 async fn third_party_modules(
     core: State<'_, CoreLink>,
 ) -> Result<persephone_contracts::ThirdPartyModules, String> {
     personal_relay(core.inner(), Call::ThirdPartyModules {}).await
+}
+
+/// The display server that draws this window, for the capture note on
+/// Linux. The host answers it: the core has no window.
+#[tauri::command]
+async fn display_session() -> persephone_contracts::DisplaySession {
+    capture::display_session()
 }
 
 /// Marks these modules as reviewed. The core ignores unknown ids; the
@@ -1758,6 +1765,7 @@ pub fn configure<R: Runtime>(
             acknowledge_sessions,
             third_party_modules,
             acknowledge_modules,
+            display_session,
             remove_device,
             pending_messages,
             retry_message,

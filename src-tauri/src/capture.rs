@@ -10,8 +10,16 @@
 //! Only the top-level window is covered. Windows does not let a process set
 //! the affinity of another process's windows, and the web view's child
 //! windows belong to the web view process.
+//!
+//! Linux has no way for an app to hide a window from capture. The page only
+//! says which display server draws the window ([`display_session`]), because
+//! that decides who can read it (ADR-0047).
 
-use std::sync::{Mutex, MutexGuard};
+use persephone_contracts::DisplaySession;
+use std::{
+    ffi::OsStr,
+    sync::{Mutex, MutexGuard},
+};
 
 /// Applies the wanted state to the window. Called with the state locked, so
 /// calls never overlap or reorder.
@@ -116,10 +124,112 @@ pub fn apply_to_window(hwnd: isize, on: bool) {
     }
 }
 
+/// The display server that draws this window: on Linux, from the same
+/// environment GTK reads when it opens its display; elsewhere `Unknown`.
+pub fn display_session() -> DisplaySession {
+    #[cfg(target_os = "linux")]
+    {
+        let var = std::env::var_os;
+        session_from(
+            var("GDK_BACKEND").as_deref(),
+            var("WAYLAND_DISPLAY").as_deref(),
+            var("DISPLAY").as_deref(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        DisplaySession::Unknown
+    }
+}
+
+/// GTK 3's choice of display. `GDK_BACKEND` is a comma-separated list tried
+/// in order, where `*` (the default) means Wayland, then X11; a backend is
+/// used when its display is named. An empty value counts as unset. GTK can
+/// also find a Wayland socket that `WAYLAND_DISPLAY` does not name; that
+/// case reads as X11, the answer that claims less protection.
+pub fn session_from(
+    backend: Option<&OsStr>,
+    wayland: Option<&OsStr>,
+    x11: Option<&OsStr>,
+) -> DisplaySession {
+    let named = |value: Option<&OsStr>| value.is_some_and(|value| !value.is_empty());
+    let backends = backend.filter(|value| !value.is_empty()).map_or_else(
+        || "*".to_owned(),
+        |value| value.to_string_lossy().into_owned(),
+    );
+    for entry in backends.split(',').map(str::trim) {
+        let order: &[DisplaySession] = match entry {
+            "*" => &[DisplaySession::Wayland, DisplaySession::X11],
+            "wayland" => &[DisplaySession::Wayland],
+            "x11" => &[DisplaySession::X11],
+            _ => &[],
+        };
+        for &session in order {
+            let display = match session {
+                DisplaySession::Wayland => wayland,
+                _ => x11,
+            };
+            if named(display) {
+                return session;
+            }
+        }
+    }
+    DisplaySession::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    fn session(backend: Option<&str>, wayland: Option<&str>, x11: Option<&str>) -> DisplaySession {
+        session_from(
+            backend.map(OsStr::new),
+            wayland.map(OsStr::new),
+            x11.map(OsStr::new),
+        )
+    }
+
+    /// GIVEN the environment GTK reads THEN the session follows GTK's order:
+    /// Wayland first by default, `GDK_BACKEND` in its own order, a backend
+    /// only when its display is named, and unknown when none is.
+    #[test]
+    fn given_the_display_environment_then_the_session_follows_gtk() {
+        let cases = [
+            (None, Some("wayland-0"), Some(":0"), DisplaySession::Wayland),
+            (None, None, Some(":0"), DisplaySession::X11),
+            (None, Some(""), Some(":0"), DisplaySession::X11),
+            (Some(""), Some("wayland-0"), None, DisplaySession::Wayland),
+            (
+                Some("x11"),
+                Some("wayland-0"),
+                Some(":0"),
+                DisplaySession::X11,
+            ),
+            (
+                Some("x11,wayland"),
+                Some("wayland-0"),
+                None,
+                DisplaySession::Wayland,
+            ),
+            (
+                Some("broadway, x11"),
+                Some("wayland-0"),
+                Some(":1"),
+                DisplaySession::X11,
+            ),
+            (Some("wayland"), None, Some(":0"), DisplaySession::Unknown),
+            (Some("*"), None, None, DisplaySession::Unknown),
+            (None, None, None, DisplaySession::Unknown),
+        ];
+        for (backend, wayland, x11, expected) in cases {
+            assert_eq!(
+                session(backend, wayland, x11),
+                expected,
+                "{backend:?} {wayland:?} {x11:?}"
+            );
+        }
+    }
 
     fn recording(state: &CaptureState) -> Arc<Mutex<Vec<bool>>> {
         let calls = Arc::new(Mutex::new(Vec::new()));
