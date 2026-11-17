@@ -740,3 +740,48 @@ fn given_account_change_replies_then_only_fixed_shapes_are_accepted() {
         );
     }
 }
+
+/// GIVEN the call device reply
+/// WHEN it is serialized and read back
+/// THEN it uses camelCase names, keeps the new codes, and rejects extra fields.
+#[test]
+fn call_devices_use_camel_case_and_reject_unknown_fields() {
+    let devices = persephone_contracts::CallDevices {
+        supported: true,
+        recording: vec![persephone_contracts::CallDevice {
+            id: "{0.0.1}.{a}".into(),
+            name: "Headset".into(),
+        }],
+        playout: Vec::new(),
+        selected_recording: Some("{0.0.1}.{a}".into()),
+        selected_playout: None,
+        unreadable: false,
+    };
+    let json = serde_json::to_value(&devices).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "supported": true,
+            "recording": [{"id": "{0.0.1}.{a}", "name": "Headset"}],
+            "playout": [],
+            "selectedRecording": "{0.0.1}.{a}",
+            "selectedPlayout": null,
+            "unreadable": false
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<persephone_contracts::CallDevices>(json.clone()).unwrap(),
+        devices
+    );
+    let mut extra = json;
+    extra["path"] = "C:/x".into();
+    assert!(serde_json::from_value::<persephone_contracts::CallDevices>(extra).is_err());
+    assert_eq!(
+        serde_json::to_value(persephone_contracts::CallEnd::DeviceNotFound).unwrap(),
+        "device_not_found"
+    );
+    assert_eq!(
+        serde_json::to_value(persephone_contracts::CallJoinError::DeviceSettingUnreadable).unwrap(),
+        "device_setting_unreadable"
+    );
+}

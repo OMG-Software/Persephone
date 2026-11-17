@@ -70,6 +70,15 @@ Proposed option: "a setting of the profile, applied by the core".
 * Tested with unit tests of the address rules and the client builder; no
   connection through a real proxy is recorded.
 
+## Addition, 16 November 2026: calls
+
+WebRTC media and LiveKit signalling cannot use a SOCKS5 proxy. Proposed
+[ADR-0043](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)
+makes one exception: when the profile has a proxy, a call connects directly
+only after the core asks in its own window and the user confirms. The core's
+HTTP requests for a call (transport discovery, TURN credentials, the OpenID
+token and the SFU token) still go through the proxy.
+
 ## Links
 
 * Extends the connection policy of `crates/core/src/homeserver.rs` and

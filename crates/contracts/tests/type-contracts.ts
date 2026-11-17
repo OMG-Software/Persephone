@@ -1,5 +1,11 @@
 import type {
   AppStatus,
+  CallDevices,
+  CallEnd,
+  CallJoinError,
+  CallReadiness,
+  CallStatus,
+  CallUnavailable,
   LocalSearchFilters,
   ConnectionHealth,
   AttachmentKind,
@@ -198,3 +204,27 @@ void bigintFilter;
 void unknownAttachment;
 void unknownSync;
 void missingHealth;
+const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null };
+const readyCall: CallReadiness = { available: false, reason: "no_call_server", activeMembers: 0 };
+// @ts-expect-error a status carries codes, never a token or URL
+const callWithToken: CallStatus = { ...idleCall, token: "secret" };
+// @ts-expect-error only the defined unavailable reasons are accepted
+const unknownReason: CallUnavailable = "no_microphone";
+// @ts-expect-error only the defined end codes are accepted
+const unknownEnd: CallEnd = "crashed";
+// @ts-expect-error only the defined join errors are accepted
+const unknownJoin: CallJoinError = "busy";
+const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "Microphone" }], playout: [], selectedRecording: null, selectedPlayout: null, unreadable: false };
+// @ts-expect-error a device list carries IDs and names, nothing else
+const deviceWithPath: CallDevices = { ...noDevices, recording: [{ id: "a", name: "b", path: "c" }] };
+// @ts-expect-error the saved choice must be explicit null, not missing
+const missingChoice: CallDevices = { supported: true, recording: [], playout: [], selectedRecording: null, unreadable: false };
+void noDevices;
+void deviceWithPath;
+void missingChoice;
+void idleCall;
+void readyCall;
+void callWithToken;
+void unknownReason;
+void unknownEnd;
+void unknownJoin;

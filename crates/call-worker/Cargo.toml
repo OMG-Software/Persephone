@@ -1,0 +1,34 @@
+[package]
+name = "persephone-call-worker"
+version = "0.0.1"
+description = "Contained call worker process: joins one LiveKit room with frame encryption and platform audio (ADR-0043)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+persephone-call-protocol = { path = "../call-protocol" }
+persephone-media-protocol = { path = "../media-protocol" }
+livekit = { version = "=0.11.0", default-features = false, features = ["native", "rustls-tls-native-roots"] }
+livekit-signaling = { version = "=0.2.0", default-features = false }
+tokio = { version = "=1.53.3", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+zeroize = "=1.9.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
+
+[features]
+# Development only: run without the contained launcher and report the
+# containment check's result without exiting. Never enabled in a build that
+# ships.
+dev-uncontained = []
+# Development only, for disposable loopback servers: accept a `ws://127.0.0.1`
+# or `ws://[::1]` SFU URL. Never enabled in a build that ships. The core must be
+# built with its own `dev-disposable-servers` feature to send one.
+dev-disposable-servers = ["persephone-call-protocol/dev-disposable-servers"]

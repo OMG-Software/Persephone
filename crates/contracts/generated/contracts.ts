@@ -66,6 +66,54 @@ canSetUpRecovery: boolean,
  */
 canStartNewBackup: boolean, };
 
+export type CallUnavailable = "unsupported_platform" | "not_joined" | "not_encrypted" | "no_call_server" | "server_unreachable";
+
+export type CallReadiness = { available: boolean, 
+/**
+ * Why not, when `available` is false.
+ */
+reason: CallUnavailable | null, 
+/**
+ * Other devices in this room's call, at most [`CALL_PARTICIPANTS_MAX`].
+ * Reported also when the call is unavailable.
+ */
+activeMembers: number, };
+
+export type CallPhase = "idle" | "joining" | "active" | "ended";
+
+export type CallParticipant = { userId: string, deviceId: string, speaking: boolean, 
+/**
+ * It publishes to the call server this call uses. Others cannot be
+ * heard in this version.
+ */
+reachable: boolean, 
+/**
+ * This device holds a key for it. Without one it cannot be heard.
+ */
+keyed: boolean, };
+
+export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found";
+
+export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
+
+export type CallStatus = { phase: CallPhase, roomId: string | null, muted: boolean, 
+/**
+ * At most [`CALL_PARTICIPANTS_MAX`], other devices only.
+ */
+participants: Array<CallParticipant>, 
+/**
+ * Set while `phase` is `ended`.
+ */
+ended: CallEnd | null, 
+/**
+ * Set when this reply refuses a join.
+ */
+joinError: CallJoinError | null, };
+
+export type CallDevice = { id: string, name: string, };
+
+export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, unreadable: boolean, };
+
 export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
 
 export type ContactStatus = { roomId: string, 

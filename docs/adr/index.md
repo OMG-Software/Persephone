@@ -17,6 +17,7 @@
 * [0012 - Sign releases and publish them as drafts](0012-sign-and-publish-releases-as-drafts.md)
 * [0014 - Start encrypted direct conversations by Matrix ID](0014-start-encrypted-direct-conversations-by-matrix-id.md)
 * [0015 - Keep accounts in separate profiles and switch by restart](0015-keep-accounts-in-separate-profiles-and-switch-by-restart.md)
+* [0038 - Unlock the profile with a passkey through the PRF extension](0038-unlock-the-profile-with-a-passkey-through-prf.md)
 * [0039 - Obtain SDK stop-and-join upstream instead of forking or gating on task counts](0039-obtain-sdk-stop-and-join-upstream-instead-of-forking.md)
 * [0040 - Use an existing key backup, or start a new one after a confirmation](0040-use-an-existing-key-backup-or-start-a-new-one-after-a-confirmation.md)
 * [0042 - Accept a pasted image from the page as hostile bytes](0042-accept-a-pasted-image-from-the-page-as-hostile-bytes.md)
@@ -50,6 +51,7 @@
 * [0036 - Bound room navigation and inspection in the core](0036-bound-room-navigation-and-inspection-in-the-core.md)
 * [0037 - Browse public room directories and join only listed rooms](0037-browse-public-room-directories-and-join-only-listed-rooms.md)
 * [0041 - Load room pictures in the core, on request or when turned on](0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md)
+* [0043 - Make audio calls through MatrixRTC in a contained call worker](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)
 
 ## Superseded Records
 

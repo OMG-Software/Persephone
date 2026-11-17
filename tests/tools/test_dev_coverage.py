@@ -1,6 +1,7 @@
 """The frontend and Rust coverage reports' paths, as tools/dev.py rewrites
 them for SonarQube, and the cargo-llvm-cov environment it reads."""
 
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -127,26 +128,54 @@ class CoverageEnvironmentTest(unittest.TestCase):
                         dev.coverage_environment({})
 
 
-def coverage(*arguments, platform="linux"):
+def coverage(*arguments, platform="linux", skip=None):
     """Runs `dev.py coverage` with these arguments on `platform`, recording
-    each command and its environment instead of starting it."""
+    each command and its environment instead of starting it. `skip` is the
+    reason the call worker is skipped, or None, so that no test depends on
+    the clang of the machine it runs on."""
     commands = []
 
     def record(command, environment, *, cwd=dev.ROOT):
         commands.append(([str(part) for part in command], environment))
 
     with (
-        mock.patch.dict(dev.os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"}),
+        # Without CI's PERSEPHONE_CALL_WORKER=required, which check.yml sets
+        # for all jobs, so that `skip` decides.
+        mock.patch.dict(
+            dev.os.environ,
+            {
+                **{name: value for name, value in dev.os.environ.items() if name != "PERSEPHONE_CALL_WORKER"},
+                "XDG_RUNTIME_DIR": "/run/user/1000",
+            },
+            clear=True,
+        ),
         mock.patch.object(sys, "argv", ["dev.py", "coverage", *arguments]),
         mock.patch.object(sys, "platform", platform),
         mock.patch.object(dev, "run", record),
         mock.patch.object(dev, "coverage_environment", lambda environment: {**environment, "CARGO_LLVM_COV": "1"}),
         mock.patch.object(dev, "repository_paths"),
+        mock.patch.object(dev.webrtc, "ensure", return_value=Path("webrtc-root")),
+        mock.patch.object(dev, "call_worker_skip", return_value=skip),
         mock.patch.object(dev.shutil, "which", return_value="npm"),
         mock.patch.object(dev.shutil, "copy2"),
     ):
         dev.main()
     return commands
+
+
+class CallWorkerTest(unittest.TestCase):
+    def test_given_a_usable_clang_then_coverage_builds_the_call_worker(self):
+        commands = coverage()
+        self.assertTrue([c for c, _ in commands if "persephone-call-worker" in c and c[1] == "build"])
+
+    def test_given_a_clang_too_old_then_coverage_skips_only_the_call_worker(self):
+        # GIVEN a reason to skip the call worker WHEN coverage runs
+        with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+            commands = coverage(skip="clang 18 is older than the clang 21 libwebrtc needs")
+        # THEN it is not built, the reason is printed, and the instrumented tests still run
+        self.assertFalse([c for c, _ in commands if c[1] == "build" and "persephone-call-worker" in c])
+        self.assertIn("call worker skipped: clang 18 is older", stderr.getvalue())
+        self.assertTrue([c for c, _ in commands if c[:2] == ["cargo", "test"]])
 
 
 class LinuxLiveTest(unittest.TestCase):

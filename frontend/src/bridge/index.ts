@@ -8,6 +8,14 @@ import type {
   AccountSettings,
   AccountStatus,
   AppStatus,
+  CallDevices,
+  CallEnd,
+  CallJoinError,
+  CallParticipant,
+  CallPhase,
+  CallReadiness,
+  CallStatus,
+  CallUnavailable,
   ContactStatus,
   ConversationStart,
   DeviceList,
@@ -85,6 +93,13 @@ export type {
   AccountSettings,
   AccountStatus,
   AppStatus,
+  CallEnd,
+  CallJoinError,
+  CallParticipant,
+  CallPhase,
+  CallReadiness,
+  CallStatus,
+  CallUnavailable,
   ContactStatus,
   ConversationStart,
   DeviceList,
@@ -265,15 +280,17 @@ export async function subscribeRoom(
  * has already ended every room subscription. Calls `onRooms` when rooms were
  * added or changed, so the room list should be fetched again, and
  * `onSecurity` when the account's encryption state changed (it clears
- * nothing), and `onModules` when the report of loaded code changed (it clears
- * nothing either). Anything else counts as a session change, which clears the
- * page.
+ * nothing), `onModules` when the report of loaded code changed (it clears
+ * nothing either), and `onCalls` when the call changed state or participants
+ * (ask `callStatus`; it clears nothing). Anything else counts as a session
+ * change, which clears the page.
  */
 export async function watchSession(
   onSession: () => void,
   onRooms: () => void,
   onSecurity: () => void,
-  onModules: () => void
+  onModules: () => void,
+  onCalls: () => void
 ): Promise<void> {
   const channel = new Channel<string>((message) =>
     message === 'rooms'
@@ -282,6 +299,8 @@ export async function watchSession(
         ? onSecurity()
         : message === 'modules'
           ? onModules()
+          : message === 'calls'
+            ? onCalls()
           : onSession()
   );
   await invoke<null>('watch_session', { onChange: channel });
@@ -351,6 +370,63 @@ export function signOut(): Promise<StoreState> {
 /** The account's encryption state. Codes only. */
 export function securityStatus(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('security_status');
+}
+
+/**
+ * Whether an audio call can start in this room, and how many other devices
+ * are in its call. A code and a count only. The count is also given when the
+ * call is unavailable.
+ */
+export function callReadiness(roomId: string): Promise<CallReadiness> {
+  return invoke<CallReadiness>('call_readiness', { roomId });
+}
+
+/**
+ * Joins the audio call in this room. With a profile proxy the core first
+ * asks, in its own window, whether the call may connect around the proxy: the
+ * call joins only after that window confirms it, and never otherwise. The
+ * reply carries codes only, never a key, token or URL. A refused join is a
+ * status with `joinError` set, not a rejection. Progress arrives as call
+ * changes (`watchSession`'s `onCalls`).
+ */
+export function callJoin(roomId: string): Promise<CallStatus> {
+  return invoke<CallStatus>('call_join', { roomId });
+}
+
+/** Leaves the call, or cancels a join in progress. Codes only. */
+export function callLeave(): Promise<CallStatus> {
+  return invoke<CallStatus>('call_leave');
+}
+
+/**
+ * Mutes or unmutes the microphone. The reply is the call as it is now; the
+ * worker's answer arrives as a call change. Codes only.
+ */
+export function callMute(muted: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_mute', { muted });
+}
+
+/**
+ * The call microphones and speakers now connected, and the saved choice
+ * (ADR-0043). The core lists them through a contained worker, so it can take
+ * a few seconds. Names are untrusted text: render them as plain text only.
+ */
+export function callDevices(): Promise<CallDevices> {
+  return invoke<CallDevices>('call_devices');
+}
+
+/**
+ * Saves the call microphone and speaker as device IDs from `callDevices`;
+ * `null` is the system default. A device need not be connected now. It
+ * applies to calls joined afterwards.
+ */
+export function setCallDevices(recording: string | null, playout: string | null): Promise<void> {
+  return invoke<void>('set_call_devices', { recording, playout });
+}
+
+/** The call as the core shows it: codes, flags and bounded IDs only. */
+export function callStatus(): Promise<CallStatus> {
+  return invoke<CallStatus>('call_status');
 }
 
 /**

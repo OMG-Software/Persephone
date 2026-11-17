@@ -1,0 +1,16 @@
+{
+  "phase": "active",
+  "roomId": "!example:server.invalid",
+  "muted": true,
+  "participants": [
+    {
+      "userId": "@alice:server.invalid",
+      "deviceId": "ALICEDEVICE",
+      "speaking": true,
+      "reachable": true,
+      "keyed": false
+    }
+  ],
+  "ended": null,
+  "joinError": null
+}

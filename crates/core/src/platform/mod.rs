@@ -99,6 +99,10 @@ mod other {
     pub(crate) fn start_detached(_: &mut std::process::Command) -> std::io::Result<()> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
+
+    pub(crate) fn call_host() -> Arc<dyn crate::calls::worker::CallHost> {
+        Arc::new(crate::calls::worker::Unsupported)
+    }
 }
 
 /// An idle time an OS reports in seconds (macOS, ADR-0025), as a duration.

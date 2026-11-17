@@ -25,6 +25,9 @@ concurrency:
 env:
   RUST_TOOLCHAIN: "1.99.1"
   CARGO_TERM_COLOR: always
+  # Every job has a clang new enough for the call worker, so tools/dev.py
+  # fails instead of skipping it.
+  PERSEPHONE_CALL_WORKER: required
 
 jobs:
   windows:
@@ -61,6 +64,13 @@ jobs:
           key: deps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: deps-${{ runner.os }}-
 
+      # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
+      # copy by its SHA-256 marker file and does not hash the files again.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: webrtc-${{ runner.os }}-${{ hashFiles('tools/webrtc.json') }}
+
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
 
@@ -95,7 +105,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config clang
+
+      # Ubuntu 24.04's clang is older than libwebrtc's libc++ needs; the
+      # script installs clang 21 from apt.llvm.org then, and does nothing
+      # where the runner's clang is new enough.
+      - name: Install clang 21 if needed
+        if: runner.os == 'Linux'
+        run: sh .github/scripts/install-clang.sh
 
       - name: Install Rust
         run: |
@@ -119,6 +136,13 @@ jobs:
           key: deps-${{ matrix.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: deps-${{ matrix.os }}-
 
+      # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
+      # copy by its SHA-256 marker file and does not hash the files again.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: webrtc-${{ matrix.os }}-${{ hashFiles('tools/webrtc.json') }}
+
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
 
@@ -126,7 +150,9 @@ jobs:
         run: python tools/dev.py check
 
   # Other Linux distributions in containers on an Ubuntu runner. Each installs
-  # its own build tools and WebKitGTK 4.1 from its package manager; Python is
+  # its own build tools and WebKitGTK 4.1 from its package manager. Clang
+  # builds the call worker: webrtc-sys compiles against libwebrtc's hermetic
+  # libc++, which needs clang 21 or later (see the clang step). Python is
   # the distribution's own (setup-python's builds target Ubuntu). Packages
   # come from each distribution's current repositories, so only the base image
   # is fixed by its digest.
@@ -152,18 +178,21 @@ jobs:
             install: >-
               apt-get update &&
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
-              git ca-certificates curl xz-utils build-essential pkg-config python3 libwebkit2gtk-4.1-dev
+              git ca-certificates curl xz-utils build-essential clang pkg-config python3 libwebkit2gtk-4.1-dev
           # Arch supports only full upgrades, so this installs the current
           # rolling release on top of the image.
           - name: arch
             image: archlinux:base-devel@sha256:3cbf69d2d5958d6a294f3722c5668e6187c4df8e00fa27f72352f0bf83e495e1 # base-devel
             install: >-
-              pacman -Syu --noconfirm --needed git curl python webkit2gtk-4.1
+              pacman -Syu --noconfirm --needed git curl python clang webkit2gtk-4.1
           - name: fedora-44
             image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80 # 44
             install: >-
-              dnf install -y git curl tar gzip xz gcc gcc-c++ make pkgconf-pkg-config python3
+              dnf install -y git curl tar gzip xz gcc gcc-c++ clang make pkgconf-pkg-config python3
               'pkgconfig(webkit2gtk-4.1)'
+          # No `clang` here: Leap's clang 19 brings libclang13 19, which
+          # conflicts with the libclang13 of the clang 21 the clang step
+          # installs from devel:tools:compiler.
           - name: opensuse-leap-16.0
             image: opensuse/leap:16.0@sha256:0c459bfe558e59b44b484e0e02dad66a28cdba92d24c8121d3901177938a3175 # 16.0
             install: >-
@@ -177,6 +206,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Debian 13 and openSUSE Leap 16 have clang 19; the script installs
+      # clang 21 from apt.llvm.org or devel:tools:compiler there, and does
+      # nothing where the distribution's clang is new enough.
+      - name: Install clang 21 if needed
+        run: sh .github/scripts/install-clang.sh
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -200,6 +235,13 @@ jobs:
             .local/cache/npm
           key: deps-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: deps-${{ matrix.name }}-
+
+      # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
+      # copy by its SHA-256 marker file and does not hash the files again.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: webrtc-${{ matrix.name }}-${{ hashFiles('tools/webrtc.json') }}
 
       - name: Install frontend dependencies
         run: python3 tools/dev.py bootstrap

@@ -253,6 +253,21 @@ pub enum Call {
         #[serde(deserialize_with = "Option::deserialize")]
         proxy: Option<String>,
     },
+    /// The call microphones and speakers, and the saved choice (ADR-0043).
+    /// Lists the devices through a contained call worker, so it can take
+    /// seconds. Available whenever the profile is unlocked.
+    CallDevices {},
+    /// Save the chosen call microphone and speaker as platform device IDs,
+    /// each at most [`MAX_CALL_DEVICE_ID_BYTES`]; null is the system default.
+    /// They apply to calls joined afterwards.
+    SetCallDevices {
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        recording: Option<String>,
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        playout: Option<String>,
+    },
     /// Find the homeserver of a server name such as `example.org`, through
     /// its `.well-known/matrix/client` file, and confirm it speaks Matrix
     /// (ADR-0027). Answered when done; `not_found` when no Matrix server is
@@ -621,6 +636,27 @@ pub enum Call {
     SwitchProfile {
         slot: u32,
     },
+    /// Whether an audio call can start in this joined room (ADR-0043), and
+    /// how many other devices are in its call. Replies `CallReadiness`.
+    CallReadiness {
+        room_id: String,
+    },
+    /// Join the audio call in this joined, encrypted room. With a profile
+    /// proxy the core first asks, in its own window, whether the call may
+    /// connect directly. Replies `CallStatus`; a refusal is a `joinError` in
+    /// it, not an error code. Progress arrives as [`Event::CallChanged`].
+    CallJoin {
+        room_id: String,
+    },
+    /// Leave the call, or cancel a join in progress. Replies `CallStatus`.
+    CallLeave {},
+    /// Mute or unmute the microphone. Replies `CallStatus`; the worker's
+    /// answer arrives as [`Event::CallChanged`].
+    CallMute {
+        muted: bool,
+    },
+    /// The call as the page shows it. Replies `CallStatus`.
+    CallStatus {},
     /// Open a direct-message conversation with this user: an existing room
     /// with just them, or a new encrypted room they are invited to. Refused
     /// when they have no cross-signing identity (ADR-0005).
@@ -822,6 +858,9 @@ pub const MAX_USERNAME_BYTES: usize = 255;
 /// Longest proxy address either side accepts, in bytes.
 pub const MAX_PROXY_BYTES: usize = 300;
 
+/// Longest call device ID either side accepts, in bytes.
+pub const MAX_CALL_DEVICE_ID_BYTES: usize = 512;
+
 /// Longest server name either side accepts in `discover_homeserver`, in
 /// bytes (a DNS name and a port).
 pub const MAX_SERVER_NAME_BYTES: usize = 261;
@@ -852,6 +891,9 @@ pub enum Event {
     /// The account's encryption state changed: ask for `security_status`.
     /// Coalesced; it does not clear what the UI shows.
     SecurityChanged {},
+    /// The call changed state, or its participants did: ask for
+    /// `call_status`. Coalesced; it carries no call data.
+    CallChanged {},
     /// The list of third-party modules changed: ask for `third_party_modules`.
     /// Content-free and coalesced like `SecurityChanged`.
     ModulesChanged {},
@@ -1247,6 +1289,7 @@ mod tests {
         let session = CoreMessage::Event(Event::SessionChanged {});
         let list = CoreMessage::Event(Event::RoomListChanged {});
         let security = CoreMessage::Event(Event::SecurityChanged {});
+        let calls = CoreMessage::Event(Event::CallChanged {});
         let modules = CoreMessage::Event(Event::ModulesChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
@@ -1261,14 +1304,19 @@ mod tests {
             String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"security_changed":{}}}"#),
             "wire form of the security event"
         );
+        send(&mut wire, &calls).unwrap();
         send(&mut wire, &modules).unwrap();
+        assert!(
+            String::from_utf8_lossy(&wire).contains(r#"{"event":{"call_changed":{}}}"#),
+            "wire form of the call event"
+        );
         assert!(
             String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"modules_changed":{}}}"#),
             "wire form of the modules event"
         );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session, list, security, modules] {
+        for expected in [reply, event, session, list, security, calls, modules] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -1283,6 +1331,9 @@ mod tests {
             br#"{"event":{"room_list_changed":{"rooms":[]}}}"#,
             br#"{"event":{"security_changed":{"identity":"verified"}}}"#,
             br#"{"event":{"security_changed":{"recovery_key":"x"}}}"#,
+            br#"{"event":{"call_changed":{"room_id":"!r:s"}}}"#,
+            br#"{"event":{"call_changed":{"participants":[]}}}"#,
+            br#"{"event":"call_changed"}"#,
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));
             assert!(
@@ -1566,6 +1617,17 @@ mod tests {
                 r#"{"id":1,"call":{"command":"set_proxy_setting","proxy":null}}"#,
             ),
             (
+                Call::CallDevices {},
+                r#"{"id":1,"call":{"command":"call_devices"}}"#,
+            ),
+            (
+                Call::SetCallDevices {
+                    recording: Some("{0.0.1}.{a}".into()),
+                    playout: None,
+                },
+                r#"{"id":1,"call":{"command":"set_call_devices","recording":"{0.0.1}.{a}","playout":null}}"#,
+            ),
+            (
                 Call::DiscoverHomeserver {
                     server_name: "example.org".into(),
                 },
@@ -1634,6 +1696,30 @@ mod tests {
             (
                 Call::SwitchProfile { slot: 2 },
                 r#"{"id":1,"call":{"command":"switch_profile","slot":2}}"#,
+            ),
+            (
+                Call::CallReadiness {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"call_readiness","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::CallJoin {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"call_join","room_id":"!r:s"}}"#,
+            ),
+            (
+                Call::CallLeave {},
+                r#"{"id":1,"call":{"command":"call_leave"}}"#,
+            ),
+            (
+                Call::CallMute { muted: true },
+                r#"{"id":1,"call":{"command":"call_mute","muted":true}}"#,
+            ),
+            (
+                Call::CallStatus {},
+                r#"{"id":1,"call":{"command":"call_status"}}"#,
             ),
         ] {
             let request = Request { id: 1, call };
@@ -2024,6 +2110,16 @@ mod tests {
             br#"{"id":1,"call":{"command":"register","username":"al"}}"#,
             br#"{"id":1,"call":{"command":"sign_out","keep_data":true}}"#,
             br#"{"id":1,"call":{"command":"security_status","user":"@a:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_readiness"}}"#,
+            br#"{"id":1,"call":{"command":"call_readiness","room_id":"!r:s","video":true}}"#,
+            br#"{"id":1,"call":{"command":"call_join"}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","proxy_ok":true}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":null}}"#,
+            br#"{"id":1,"call":{"command":"call_leave","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_mute"}}"#,
+            br#"{"id":1,"call":{"command":"call_mute","muted":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"call_mute","muted":true,"user":"@a:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_status","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"recover_with_key","recovery_key":"x"}}"#,
             br#"{"id":1,"call":{"command":"export_room_keys"}}"#,
@@ -2048,6 +2144,12 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_proxy_setting"}}"#,
             br#"{"id":1,"call":{"command":"set_proxy_setting","proxy":"h:1","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"proxy_setting","proxy":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices"}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","playout":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":1,"playout":null}}"#,
+            br#"{"id":1,"call":{"command":"call_devices","recording":null}}"#,
             br#"{"id":1,"call":{"command":"discover_homeserver","server_name":"e.org","url":"x"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":"DEV"}}"#,

@@ -111,6 +111,11 @@ pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Re
     command.spawn().map(drop)
 }
 
+/// No call containment is reviewed for this OS (ADR-0043): calls are refused.
+pub(crate) fn call_host() -> std::sync::Arc<dyn crate::calls::worker::CallHost> {
+    std::sync::Arc::new(crate::calls::worker::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -577,3 +577,138 @@ fn given_a_replaced_ui_then_the_reopened_core_serves_the_new_one_from_a_clean_st
     );
     assert_eq!(replies(output)[0].id, 7, "the new UI is answered");
 }
+
+/// The reply to `call` as its typed value, or its error code.
+fn answer<T: serde::de::DeserializeOwned>(core: &Core, call: Call) -> Result<T, ErrorCode> {
+    match core.handle(&Request { id: 1, call }).outcome {
+        Outcome::Ok(value) => Ok(serde_json::from_value(value).unwrap()),
+        Outcome::Error(code) => Err(code),
+    }
+}
+
+/// GIVEN a core with no call WHEN the page asks for the call status, leaves
+/// or mutes THEN each is answered with an idle status and no error, and
+/// nothing crosses but codes.
+#[test]
+fn given_no_call_then_status_leave_and_mute_answer_idle() {
+    use persephone_contracts::CallStatus;
+    let core = Core::default();
+    for call in [
+        Call::CallStatus {},
+        Call::CallLeave {},
+        Call::CallMute { muted: true },
+        Call::CallMute { muted: false },
+    ] {
+        assert_eq!(
+            answer::<CallStatus>(&core, call.clone()),
+            Ok(CallStatus::idle()),
+            "{call:?}"
+        );
+    }
+}
+
+/// GIVEN a malformed room ID WHEN the page asks for readiness or a join THEN
+/// the core refuses it before any other work; a valid ID without a homeserver
+/// is not found.
+#[test]
+fn given_call_commands_then_room_ids_are_checked_and_synthetic_data_has_no_call() {
+    use persephone_contracts::CallReadiness;
+    let core = Core::default();
+    for room_id in ["", "not-a-room", &format!("!{}:s", "r".repeat(300))] {
+        for call in [
+            Call::CallReadiness {
+                room_id: room_id.into(),
+            },
+            Call::CallJoin {
+                room_id: room_id.into(),
+            },
+        ] {
+            assert_eq!(
+                answer::<serde_json::Value>(&core, call),
+                Err(ErrorCode::InvalidArgument),
+                "{room_id:?}"
+            );
+        }
+    }
+    for call in [
+        Call::CallReadiness {
+            room_id: "!r:example.invalid".into(),
+        },
+        Call::CallJoin {
+            room_id: "!r:example.invalid".into(),
+        },
+    ] {
+        assert_eq!(
+            answer::<CallReadiness>(&core, call),
+            Err(ErrorCode::NotFound)
+        );
+    }
+}
+
+/// GIVEN a profile WHEN it is locked THEN every call command is refused as
+/// `locked`; WHEN it is open and has no account THEN status, leave and mute
+/// answer idle, and readiness has no homeserver to ask.
+#[test]
+fn given_a_profile_then_call_commands_follow_the_session() {
+    use persephone_contracts::{CallReadiness, CallStatus};
+    let dir = tempfile::TempDir::new().unwrap();
+    let core = Core::default().with_session(common::open_session(dir.path()));
+    let room = "!r:example.invalid";
+    assert_eq!(
+        answer::<CallStatus>(&core, Call::CallStatus {}),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        answer::<CallStatus>(&core, Call::CallLeave {}),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        answer::<CallStatus>(&core, Call::CallMute { muted: true }),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(
+        answer::<CallReadiness>(
+            &core,
+            Call::CallReadiness {
+                room_id: room.into()
+            }
+        ),
+        Err(ErrorCode::NotFound),
+        "no account, no homeserver"
+    );
+    match answer::<CallStatus>(
+        &core,
+        Call::CallJoin {
+            room_id: room.into(),
+        },
+    ) {
+        // Where call containment is not implemented, the refusal comes first.
+        Ok(status) => assert_eq!(
+            status.join_error,
+            Some(persephone_contracts::CallJoinError::UnsupportedPlatform)
+        ),
+        Err(code) => assert_eq!(code, ErrorCode::NotFound),
+    }
+
+    let (state, _) = core
+        .session()
+        .lock(std::time::Duration::from_secs(30), || {});
+    assert_eq!(state, persephone_contracts::StoreState::Locked);
+    for call in [
+        Call::CallStatus {},
+        Call::CallLeave {},
+        Call::CallMute { muted: true },
+        Call::CallReadiness {
+            room_id: room.into(),
+        },
+        Call::CallJoin {
+            room_id: room.into(),
+        },
+    ] {
+        assert_eq!(
+            answer::<serde_json::Value>(&core, call.clone()),
+            Err(ErrorCode::Locked),
+            "{call:?}"
+        );
+    }
+}

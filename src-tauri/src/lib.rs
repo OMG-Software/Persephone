@@ -34,16 +34,17 @@ pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
-    AccountChange, AccountSettings, AccountStatus, AppStatus, ContactStatus, ConversationStart,
-    DeviceList, DisplayName, HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom,
-    NewSessions, NotificationLevel, NotificationSettings, PendingMessage, ProfileList,
-    ProxySetting, PublicRoomPage, RoomActivity, RoomChange, RoomCreation, RoomIdentityChanges,
-    RoomInvite, RoomList, RoomMembers, RoomPicture, RoomReaders, RoomServers, RoomSettings,
-    SecurityStatus, StoreState, ThreePidList, ThreePidMedium, TimelinePage, UserSearch,
+    AccountChange, AccountSettings, AccountStatus, AppStatus, CallDevices, CallReadiness,
+    CallStatus, ContactStatus, ConversationStart, DeviceList, DisplayName, HomeserverFound,
+    ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
+    NotificationSettings, PendingMessage, ProfileList, ProxySetting, PublicRoomPage, RoomActivity,
+    RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomPicture,
+    RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
+    ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
-    COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
-    MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
+    COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CALL_DEVICE_ID_BYTES,
+    MAX_CURSOR_BYTES, MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
     MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES,
     MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES, MAX_MEMBER_FILTER_BYTES,
     MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PASTED_IMAGE_BYTES,
@@ -416,6 +417,11 @@ impl Subscriptions {
                     let _ = channel.send("security");
                 }
             }
+            Event::CallChanged {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("calls");
+                }
+            }
             Event::ModulesChanged {} => {
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("modules");
@@ -568,6 +574,49 @@ async fn sign_out(core: State<'_, CoreLink>) -> Result<StoreState, String> {
 #[tauri::command]
 async fn security_status(core: State<'_, CoreLink>) -> Result<SecurityStatus, String> {
     relay(core.inner(), Call::SecurityStatus {}).await
+}
+
+/// Whether an audio call can start in this room, and how many other devices
+/// are in it. A code and a count only.
+#[tauri::command]
+async fn call_readiness(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<CallReadiness, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::CallReadiness { room_id }).await
+}
+
+/// Joins the audio call in this room. With a profile proxy the core asks in
+/// its own window first; the call never connects around the proxy without
+/// that yes. The reply carries codes only; a refusal is a `joinError` in it.
+#[tauri::command]
+async fn call_join(core: State<'_, CoreLink>, room_id: String) -> Result<CallStatus, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::CallJoin { room_id }).await
+}
+
+/// Leaves the call, or cancels a join in progress.
+#[tauri::command]
+async fn call_leave(core: State<'_, CoreLink>) -> Result<CallStatus, String> {
+    relay(core.inner(), Call::CallLeave {}).await
+}
+
+/// Mutes or unmutes the microphone. The worker's answer arrives as a call
+/// change.
+#[tauri::command]
+async fn call_mute(core: State<'_, CoreLink>, muted: bool) -> Result<CallStatus, String> {
+    relay(core.inner(), Call::CallMute { muted }).await
+}
+
+/// The call as the page shows it. Codes, flags and bounded IDs only.
+#[tauri::command]
+async fn call_status(core: State<'_, CoreLink>) -> Result<CallStatus, String> {
+    relay(core.inner(), Call::CallStatus {}).await
 }
 
 /// Starts setting up encryption. Nothing crosses: the core asks for the
@@ -1395,6 +1444,31 @@ async fn set_proxy_setting(core: State<'_, CoreLink>, proxy: Option<String>) -> 
     relay(core.inner(), Call::SetProxySetting { proxy }).await
 }
 
+/// The call microphones and speakers now connected, and the saved choice
+/// (ADR-0043). The core lists them through a contained worker.
+#[tauri::command]
+async fn call_devices(core: State<'_, CoreLink>) -> Result<CallDevices, String> {
+    relay(core.inner(), Call::CallDevices {}).await
+}
+
+/// Saves the call microphone and speaker as device IDs; null is the system
+/// default. The core checks the IDs again.
+#[tauri::command]
+async fn set_call_devices(
+    core: State<'_, CoreLink>,
+    recording: Option<String>,
+    playout: Option<String>,
+) -> Result<(), String> {
+    if [&recording, &playout]
+        .into_iter()
+        .flatten()
+        .any(|id| id.is_empty() || id.len() > MAX_CALL_DEVICE_ID_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SetCallDevices { recording, playout }).await
+}
+
 /// Finds the homeserver of a server name through its `.well-known` file
 /// and confirms it speaks Matrix (ADR-0027).
 #[tauri::command]
@@ -1658,6 +1732,11 @@ pub fn configure<R: Runtime>(
             register,
             sign_out,
             security_status,
+            call_readiness,
+            call_join,
+            call_leave,
+            call_mute,
+            call_status,
             set_up_encryption,
             recover_with_key,
             send_message,
@@ -1674,6 +1753,8 @@ pub fn configure<R: Runtime>(
             discover_homeserver,
             proxy_setting,
             set_proxy_setting,
+            call_devices,
+            set_call_devices,
             acknowledge_sessions,
             third_party_modules,
             acknowledge_modules,

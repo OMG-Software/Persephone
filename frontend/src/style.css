@@ -1183,7 +1183,8 @@ kbd {
   font-weight: 600;
 }
 
-.proxy-settings {
+.proxy-settings,
+.call-devices {
   display: grid;
   gap: 6px;
   margin-top: 8px;
@@ -3207,6 +3208,96 @@ mark {
 .member-ask .secondary {
   height: 30px;
   font-size: 13px;
+}
+
+/* Audio calls: the header button, the notice under it and the call bar. */
+.chat-header .header-action {
+  display: flex;
+  flex: none;
+  margin-left: auto;
+}
+
+.chat-header .header-action + .header-end {
+  margin-left: 0;
+}
+
+.call-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.call-bar {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.call-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.call-room {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-controls {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.call-mute {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-mute[aria-pressed='true'] {
+  border-color: var(--danger);
+}
+
+.call-people {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.call-people li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.speaking-mark {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--presence);
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--presence);
+}
+
+.speaking-mark.idle {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 /* The report of code loaded into Persephone, and its notice above the rooms. */

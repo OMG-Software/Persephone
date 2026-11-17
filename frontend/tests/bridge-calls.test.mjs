@@ -163,6 +163,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.proxySetting(), 'proxy_setting', {}],
     [() => bridge.setProxySetting('127.0.0.1:9050'), 'set_proxy_setting', { proxy: '127.0.0.1:9050' }],
     [() => bridge.setProxySetting(null), 'set_proxy_setting', { proxy: null }],
+    [() => bridge.callDevices(), 'call_devices', {}],
+    [() => bridge.setCallDevices('mic', null), 'set_call_devices', { recording: 'mic', playout: null }],
     [() => bridge.discoverHomeserver('example.org'), 'discover_homeserver', { serverName: 'example.org' }],
     [() => bridge.publicRooms(null, null, null), 'public_rooms', { server: null, filter: null, since: null }],
     [() => bridge.publicRooms('example.org', 'rust', 'p30'), 'public_rooms', { server: 'example.org', filter: 'rust', since: 'p30' }],
@@ -184,6 +186,12 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     ],
     [() => bridge.verifyDevice('OTHER'), 'verify_device', { deviceId: 'OTHER' }],
     [() => bridge.verifyMember('!r:s', '@b:s'), 'verify_member', { roomId: '!r:s', userId: '@b:s' }],
+    [() => bridge.callReadiness('!r:s'), 'call_readiness', { roomId: '!r:s' }],
+    [() => bridge.callJoin('!r:s'), 'call_join', { roomId: '!r:s' }],
+    [() => bridge.callLeave(), 'call_leave', {}],
+    [() => bridge.callMute(true), 'call_mute', { muted: true }],
+    [() => bridge.callMute(false), 'call_mute', { muted: false }],
+    [() => bridge.callStatus(), 'call_status', {}],
     [() => bridge.changeRecoveryKey(), 'change_recovery_key', {}],
     [() => bridge.startNewBackup(), 'start_new_backup', {}],
     [() => bridge.notificationLevel(), 'notification_level', {}],
@@ -326,10 +334,11 @@ test('GIVEN a paste that is not one PNG or JPEG of 1 byte to 20 MiB WHEN attache
   assert.deepEqual(sent, []);
 });
 
-test('GIVEN a session watch WHEN the host sends each message THEN only an unknown one counts as a session change', async () => {
+test('GIVEN session channel messages WHEN delivered THEN each reaches its own callback and only an unknown message counts as a session change', async () => {
   let channel;
   mockIPC((command, args) => {
-    if (command === 'watch_session') channel = args.onChange;
+    assert.equal(command, 'watch_session');
+    channel = args.onChange;
     return null;
   });
   const seen = [];
@@ -337,10 +346,11 @@ test('GIVEN a session watch WHEN the host sends each message THEN only an unknow
     () => seen.push('session'),
     () => seen.push('rooms'),
     () => seen.push('security'),
-    () => seen.push('modules')
+    () => seen.push('modules'),
+    () => seen.push('calls')
   );
-  for (const message of ['modules', 'rooms', 'security', 'session', 'something-new']) {
+  for (const message of ['calls', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls']) {
     channel.onmessage(message);
   }
-  assert.deepEqual(seen, ['modules', 'rooms', 'security', 'session', 'session']);
+  assert.deepEqual(seen, ['calls', 'modules', 'rooms', 'security', 'session', 'session', 'calls']);
 });

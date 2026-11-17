@@ -1,0 +1,2047 @@
+//! The call controller: one MatrixRTC audio call at a time (ADR-0043).
+//!
+//! The controller does the Matrix side of a call and drives the contained
+//! call worker. Joining fails closed at every step and undoes the earlier
+//! steps; see [`CallController::join`] for the order. While a call runs, one
+//! task owns the worker link, the frame keys and the call state. The page
+//! gets only [`CallState`]: no key, token, URL or peer text.
+//!
+//! Session lifecycle (docs/architecture/sdk-lifecycle.md): the join runs
+//! under the one lease its caller holds. A running call holds no client. Each
+//! of its SDK operations (a membership read, a key send, a delayed-event
+//! restart, the leave) takes a lease and a client from the session's
+//! [`Admission`] and releases both when it ends. When admission fails the call
+//! ends at once: the worker is killed and no Matrix leave is sent, so the
+//! delayed leave ends the membership. [`CallController::stop_for_session_end`]
+//! does the same for a lock, a sign-out or any other end of the session.
+
+use super::delayed::{DelayedLeave, RestartHealth};
+use super::encryption_keys::{self, IncomingKey};
+use super::incoming::{self, Candidate};
+use super::keys::{KeyError, Outgoing, OwnKeys, Recipients, RemoteKeys};
+use super::membership::{
+    ActiveMember, DELAYED_LEAVE_RESTART, EVENT_TYPE, MEMBERSHIP_REFRESH, leave_content,
+    own_membership, own_state_key, participant_identity, read_members,
+};
+use super::readiness::{TurnServers, sfu_transport, turn_servers};
+use super::sfu::{self, OpenIdToken, SfuError};
+use super::worker::{CallHost, CallWorkerLink, StartError, WorkerProcess};
+use super::{MAX_CALL_MEMBERS, keys::FrameKey};
+use crate::session::Admission;
+use matrix_sdk::{
+    Client, RoomState,
+    event_handler::EventHandlerHandle,
+    ruma::{
+        OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId,
+        api::client::account::request_openid_token, events::AnySyncStateEvent, serde::Raw,
+    },
+};
+use persephone_call_protocol::{FailureCode, FrameKeyMsg, FromWorker, ToWorker, TurnServer};
+use std::{
+    collections::{BTreeSet, HashSet},
+    future::Future,
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    runtime::Handle,
+    sync::{mpsc, oneshot, watch},
+    task::{JoinHandle, JoinSet},
+    time,
+};
+use url::Url;
+use zeroize::Zeroizing;
+
+/// How long the worker has to leave on its own before it is ended.
+const WORKER_EXIT: Duration = Duration::from_secs(5);
+
+/// Longest wait for one delayed-event restart. It is shorter than the
+/// restart interval.
+const RESTART_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Longest wait for one key send or membership write.
+const SEND_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Most keys held back for a sender whose membership event is not here yet.
+const MAX_PARKED: usize = 8;
+
+/// How long such a key is held back.
+const PARK_TIME: Duration = Duration::from_secs(30);
+
+/// Waiting commands for the running call.
+const COMMAND_QUEUE: usize = 8;
+
+/// Why the controller refused or stopped a join. A closed set with no text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallError {
+    AlreadyInCall,
+    /// The room is unknown or not joined.
+    NotJoined,
+    /// The room is not encrypted, or its state is unknown. A call never
+    /// runs without frame encryption.
+    NotEncrypted,
+    /// The homeserver offers no usable SFU, or could not be asked.
+    NoSfu,
+    /// The profile has a proxy and the user did not allow a direct call.
+    Declined,
+    /// The profile's proxy setting could not be read.
+    ProxyUnreadable,
+    /// The saved call devices could not be read. The call never uses the
+    /// defaults instead.
+    DeviceSettingUnreadable,
+    Worker(StartError),
+    /// The homeserver does not accept delayed events (MSC4140).
+    NoDelayedEvents,
+    /// Own membership could not be written or read.
+    Membership,
+    OpenId,
+    Sfu(SfuError),
+    /// No random key, or the worker queue refused it.
+    Keys,
+    NotInCall,
+    /// `leave` ended this join before the call started.
+    Cancelled,
+    /// The session stopped admitting work during the join.
+    SessionEnded,
+}
+
+/// Why a call ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndReason {
+    /// This user left.
+    Left,
+    WorkerFailed(FailureCode),
+    /// The worker exited or its channel closed.
+    WorkerStopped,
+    /// The delayed leave could not be kept alive, or this device's
+    /// membership disappeared.
+    MembershipLost,
+    /// No random key could be made.
+    KeysUnavailable,
+    /// The session locked, signed out or otherwise stopped admitting work.
+    SessionEnded,
+    Internal,
+}
+
+/// A device in the call, as the page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Participant {
+    pub user_id: OwnedUserId,
+    pub device_id: OwnedDeviceId,
+    pub speaking: bool,
+    /// It publishes to the SFU this call uses. Other members cannot be
+    /// heard in this version.
+    pub reachable: bool,
+    /// This device holds a key for it. Without one it cannot be heard.
+    pub keyed: bool,
+}
+
+/// The call as the page sees it. It holds no secret and no peer text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallState {
+    Idle,
+    Joining {
+        room_id: OwnedRoomId,
+    },
+    Active {
+        room_id: OwnedRoomId,
+        muted: bool,
+        /// At most [`MAX_CALL_MEMBERS`], other devices only.
+        participants: Vec<Participant>,
+    },
+    Ended {
+        room_id: OwnedRoomId,
+        reason: EndReason,
+    },
+}
+
+/// The saved call devices. A record that cannot be read refuses the call.
+pub async fn device_selection(
+    stores: &crate::store::Stores,
+) -> Result<super::devices::Selection, CallError> {
+    super::devices::load(stores)
+        .await
+        .map_err(|_| CallError::DeviceSettingUnreadable)
+}
+
+/// Whether the profile has a SOCKS5 proxy: the `proxy_configured` argument of
+/// [`CallController::join`]. A record that cannot be read refuses the call.
+pub async fn proxy_configured(stores: &crate::store::Stores) -> Result<bool, CallError> {
+    crate::proxy::load(stores)
+        .await
+        .map(|proxy| proxy.is_some())
+        .map_err(|_| CallError::ProxyUnreadable)
+}
+
+// ---------------------------------------------------------------------
+// Pure parts.
+
+/// Who joined and left since the last look, by participant identity.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MemberDiff {
+    joined: Vec<String>,
+    left: Vec<String>,
+}
+
+/// The change from `known` to `current`.
+fn diff_members(known: &BTreeSet<String>, current: &[ActiveMember]) -> MemberDiff {
+    let now: BTreeSet<&str> = current.iter().map(|m| m.identity.as_str()).collect();
+    MemberDiff {
+        joined: current
+            .iter()
+            .filter(|m| !known.contains(&m.identity))
+            .map(|m| m.identity.clone())
+            .collect(),
+        left: known
+            .iter()
+            .filter(|id| !now.contains(id.as_str()))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// The key action for `diff`: a leave always rotates (the member may hold the
+/// key; the new key also reaches new members); else a join shares the
+/// current key when it is young, or rotates. `None` when nothing changed.
+fn key_action(
+    diff: &MemberDiff,
+    own: &mut OwnKeys,
+    now: Instant,
+) -> Result<Option<Outgoing>, KeyError> {
+    if !diff.left.is_empty() {
+        own.member_left(now).map(Some)
+    } else if !diff.joined.is_empty() {
+        own.member_joined(now).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// The devices to send `outgoing` to. `members` are the other devices.
+fn recipients(
+    outgoing: &Outgoing,
+    members: &[ActiveMember],
+    joined: &[String],
+) -> Vec<(OwnedUserId, OwnedDeviceId)> {
+    members
+        .iter()
+        .filter(|m| match outgoing.recipients {
+            Recipients::AllMembers => true,
+            Recipients::NewMembersOnly => joined.contains(&m.identity),
+        })
+        .take(MAX_CALL_MEMBERS)
+        .map(|m| (m.user_id.clone(), m.device_id.clone()))
+        .collect()
+}
+
+fn worker_key(key: &FrameKey) -> FrameKeyMsg {
+    FrameKeyMsg {
+        index: key.index,
+        bytes: Zeroizing::new(key.bytes.to_vec()),
+    }
+}
+
+/// What a worker event did to the view.
+#[derive(Debug, PartialEq, Eq)]
+enum Applied {
+    Same,
+    Changed,
+    End(EndReason),
+}
+
+/// The facts the page's [`CallState`] comes from.
+struct View {
+    room_id: OwnedRoomId,
+    own_sfu: Url,
+    connected: bool,
+    muted: bool,
+    /// Other devices only.
+    members: Vec<ActiveMember>,
+    speaking: HashSet<String>,
+    keyed: HashSet<String>,
+}
+
+impl View {
+    fn new(room_id: OwnedRoomId, own_sfu: Url) -> Self {
+        Self {
+            room_id,
+            own_sfu,
+            connected: false,
+            muted: false,
+            members: Vec::new(),
+            speaking: HashSet::new(),
+            keyed: HashSet::new(),
+        }
+    }
+
+    fn is_member(&self, identity: &str) -> bool {
+        self.members.iter().any(|m| m.identity == identity)
+    }
+
+    fn set_members(&mut self, members: Vec<ActiveMember>) {
+        self.members = members;
+        let present: HashSet<&str> = self.members.iter().map(|m| m.identity.as_str()).collect();
+        self.speaking.retain(|id| present.contains(id.as_str()));
+        self.keyed.retain(|id| present.contains(id.as_str()));
+    }
+
+    fn apply(&mut self, event: &FromWorker) -> Applied {
+        match event {
+            FromWorker::Ready { .. } | FromWorker::ParticipantJoined { .. } => Applied::Same,
+            FromWorker::Connected => {
+                let changed = !self.connected;
+                self.connected = true;
+                if changed {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
+            FromWorker::ParticipantLeft { identity } => {
+                if self.speaking.remove(identity) {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
+            FromWorker::Speaking { identity, speaking } => {
+                // Only a current member can be shown as speaking.
+                if !self.is_member(identity) {
+                    return Applied::Same;
+                }
+                let changed = if *speaking {
+                    self.speaking.insert(identity.clone())
+                } else {
+                    self.speaking.remove(identity)
+                };
+                if changed {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
+            FromWorker::Muted { muted } => {
+                let changed = self.muted != *muted;
+                self.muted = *muted;
+                if changed {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
+            FromWorker::Failed { code } => Applied::End(EndReason::WorkerFailed(*code)),
+            // The device list answers `ListDevices` only; in a call it is a
+            // protocol violation.
+            FromWorker::Devices { .. } => {
+                Applied::End(EndReason::WorkerFailed(FailureCode::Protocol))
+            }
+            FromWorker::Left => Applied::End(EndReason::WorkerStopped),
+        }
+    }
+
+    fn state(&self) -> CallState {
+        if !self.connected {
+            return CallState::Joining {
+                room_id: self.room_id.clone(),
+            };
+        }
+        CallState::Active {
+            room_id: self.room_id.clone(),
+            muted: self.muted,
+            participants: self
+                .members
+                .iter()
+                .take(MAX_CALL_MEMBERS)
+                .map(|m| Participant {
+                    user_id: m.user_id.clone(),
+                    device_id: m.device_id.clone(),
+                    speaking: self.speaking.contains(&m.identity),
+                    reachable: m.service_url == self.own_sfu,
+                    keyed: self.keyed.contains(&m.identity),
+                })
+                .collect(),
+        }
+    }
+}
+
+pub(super) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn turn_for_worker(turn: Option<TurnServers>) -> Vec<TurnServer> {
+    turn.map(|turn| {
+        turn.uris
+            .iter()
+            .map(|uri| TurnServer {
+                uri: uri.clone(),
+                username: turn.username.clone(),
+                credential: turn.password.clone(),
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Starts the contained worker. It runs before any Matrix side effect.
+async fn start_worker(host: &Arc<dyn CallHost>) -> Result<CallWorkerLink, CallError> {
+    let host = host.clone();
+    match tokio::task::spawn_blocking(move || host.start()).await {
+        Ok(Ok(link)) => Ok(link),
+        Ok(Err(error)) => Err(CallError::Worker(error)),
+        Err(_) => Err(CallError::Worker(StartError::Launch)),
+    }
+}
+
+/// Ends the worker; blocks in a blocking task.
+async fn finish_worker(link: CallWorkerLink) {
+    let _ = tokio::task::spawn_blocking(move || link.finish(WORKER_EXIT)).await;
+}
+
+/// Writes the leave now: through the delayed event, else directly.
+async fn end_membership(
+    client: &Client,
+    room_id: &RoomId,
+    delayed: &DelayedLeave,
+    state_key: &str,
+) {
+    if matches!(
+        time::timeout(SEND_TIMEOUT, delayed.send_now(client)).await,
+        Ok(Ok(()))
+    ) {
+        return;
+    }
+    if let Some(room) = client.get_room(room_id) {
+        let _ = time::timeout(
+            SEND_TIMEOUT,
+            room.send_state_event_raw(EVENT_TYPE, state_key, leave_content()),
+        )
+        .await;
+    }
+}
+
+fn plain<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // A poisoned lock only means a task panicked; the data stays plain.
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// ---------------------------------------------------------------------
+// Stopping and SDK access.
+
+/// What stops the SDK work of one call or join.
+#[derive(Default)]
+struct Flags {
+    /// `leave` asked to end a join in progress.
+    cancelled: AtomicBool,
+    /// The session stopped admitting work.
+    ended: AtomicBool,
+}
+
+impl Flags {
+    fn ended(&self) -> bool {
+        self.ended.load(Ordering::SeqCst)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// `Err` once the join must stop.
+    fn halt(&self) -> Result<(), CallError> {
+        if self.ended() {
+            Err(CallError::SessionEnded)
+        } else if self.cancelled() {
+            Err(CallError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// No lease can be taken: the call must end.
+struct Gone;
+
+/// How a running call reaches the SDK: one lease and client per complete
+/// operation, never longer.
+#[derive(Clone)]
+struct Access {
+    admit: Admission,
+    /// The session generation the call started in.
+    generation: u64,
+    flags: Arc<Flags>,
+}
+
+impl Access {
+    /// Runs one complete SDK operation under a fresh lease. `work` gets its
+    /// own client clone and drops it, and every `Room` it took, before it
+    /// ends. Refused, without running `work`, once the call is stopped, the
+    /// session stops admitting work or it is no longer the session the call
+    /// started in.
+    async fn run<T, Fut, F>(&self, work: F) -> Result<T, Gone>
+    where
+        F: FnOnce(Client) -> Fut + Send,
+        Fut: Future<Output = T> + Send,
+    {
+        if self.flags.ended() {
+            return Err(Gone);
+        }
+        let Some((lease, client)) = (self.admit)() else {
+            return Err(Gone);
+        };
+        let result = if lease.generation() == self.generation && !self.flags.ended() {
+            Some(work(client.clone()).await)
+        } else {
+            None
+        };
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        result.ok_or(Gone)
+    }
+}
+
+/// The user's yes to a direct connection around the profile's proxy, or the
+/// fact that the profile has no proxy. Only [`CallController::confirm_direct`]
+/// makes one, so a join cannot skip the question.
+#[derive(Debug)]
+pub struct DirectConsent(());
+
+/// The session a join runs in: the generation and the runtime of the lease
+/// its caller holds. The call's tasks run on that runtime.
+pub struct JoinScope {
+    pub generation: u64,
+    pub runtime: Handle,
+    /// The saved microphone and speaker, read with the proxy setting.
+    pub devices: super::devices::Selection,
+}
+
+// ---------------------------------------------------------------------
+// The controller.
+
+enum Slot {
+    Idle,
+    /// A join is in progress.
+    Joining(Joining),
+    Running(RunHandle),
+}
+
+struct Joining {
+    id: u64,
+    room_id: OwnedRoomId,
+    flags: Arc<Flags>,
+    /// The worker, once it runs, so the end of the session can kill it.
+    kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
+}
+
+struct RunHandle {
+    id: u64,
+    room_id: OwnedRoomId,
+    flags: Arc<Flags>,
+    /// Ends the worker from outside the call task.
+    kill: Arc<dyn WorkerProcess>,
+    stop: Option<oneshot::Sender<()>>,
+    commands: mpsc::Sender<bool>,
+    task: Option<JoinHandle<()>>,
+}
+
+/// Tells the owner of the controller that the state changed.
+type Listener = Arc<dyn Fn() + Send + Sync>;
+
+struct Inner {
+    host: Arc<dyn CallHost>,
+    state: watch::Sender<CallState>,
+    slot: Mutex<Slot>,
+    admission: Mutex<Admission>,
+    listener: Mutex<Option<Listener>>,
+    next_id: AtomicU64,
+}
+
+impl Inner {
+    fn slot(&self) -> MutexGuard<'_, Slot> {
+        plain(&self.slot)
+    }
+
+    fn admission(&self) -> Admission {
+        plain(&self.admission).clone()
+    }
+
+    fn publish(&self, state: CallState) {
+        let changed = self.state.send_if_modified(|current| {
+            if *current == state {
+                false
+            } else {
+                *current = state;
+                true
+            }
+        });
+        if changed {
+            let listener = plain(&self.listener).clone();
+            if let Some(listener) = listener {
+                listener();
+            }
+        }
+    }
+
+    /// Frees the slot if call or join `id` still holds it. `false` when the
+    /// end of the session already took it.
+    fn release(&self, id: u64) -> bool {
+        let mut slot = self.slot();
+        let mine = match &*slot {
+            Slot::Idle => false,
+            Slot::Joining(join) => join.id == id,
+            Slot::Running(run) => run.id == id,
+        };
+        if mine {
+            *slot = Slot::Idle;
+        }
+        mine
+    }
+}
+
+/// Frees the slot when a join ends without a running call, also when the
+/// join future is dropped. A dropped worker link is killed; a scheduled
+/// delayed leave then fires on its own.
+struct JoinGuard {
+    inner: Arc<Inner>,
+    id: u64,
+    room_id: OwnedRoomId,
+    flags: Arc<Flags>,
+    kill: Arc<Mutex<Option<Arc<dyn WorkerProcess>>>>,
+    armed: bool,
+}
+
+impl Drop for JoinGuard {
+    fn drop(&mut self) {
+        if !self.armed || !self.inner.release(self.id) {
+            return;
+        }
+        if self.flags.ended() {
+            // The end of the session already published the state.
+        } else if self.flags.cancelled() {
+            self.inner.publish(CallState::Ended {
+                room_id: self.room_id.clone(),
+                reason: EndReason::Left,
+            });
+        } else {
+            self.inner.publish(CallState::Idle);
+        }
+    }
+}
+
+/// The one call of this core.
+pub struct CallController {
+    inner: Arc<Inner>,
+}
+
+impl Drop for CallController {
+    fn drop(&mut self) {
+        self.stop_for_session_end();
+    }
+}
+
+impl CallController {
+    /// A controller whose call tasks take their SDK access from `admission`.
+    pub fn new(host: Arc<dyn CallHost>, admission: Admission) -> Self {
+        let (state, _) = watch::channel(CallState::Idle);
+        Self {
+            inner: Arc::new(Inner {
+                host,
+                state,
+                slot: Mutex::new(Slot::Idle),
+                admission: Mutex::new(admission),
+                listener: Mutex::new(None),
+                next_id: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Replaces the admission, when the core gets its session.
+    pub fn set_admission(&self, admission: Admission) {
+        *plain(&self.inner.admission) = admission;
+    }
+
+    /// Calls `listener` after every change of the state, on the thread that
+    /// changed it. It must not block and must not call the controller.
+    pub fn set_listener(&self, listener: Listener) {
+        *plain(&self.inner.listener) = Some(listener);
+    }
+
+    /// The content-free call state.
+    pub fn subscribe(&self) -> watch::Receiver<CallState> {
+        self.inner.state.subscribe()
+    }
+
+    /// The call state now.
+    pub fn state(&self) -> CallState {
+        self.inner.state.borrow().clone()
+    }
+
+    /// Whether this platform has reviewed call containment.
+    pub fn supported(&self) -> bool {
+        self.inner.host.supported()
+    }
+
+    /// The platform's call host, for the device list.
+    pub fn host(&self) -> Arc<dyn CallHost> {
+        self.inner.host.clone()
+    }
+
+    /// Asks, when the profile has a proxy, whether the call may connect
+    /// directly (ADR-0043, ADR-0028). Anything but an explicit yes declines.
+    /// Blocks until answered, so call it from a thread that holds no lease:
+    /// a lock must not wait for a dialog. Refused first while a call or
+    /// join holds the controller.
+    pub fn confirm_direct(&self, proxy_configured: bool) -> Result<DirectConsent, CallError> {
+        if !matches!(*self.inner.slot(), Slot::Idle) {
+            return Err(CallError::AlreadyInCall);
+        }
+        if !proxy_configured || self.inner.host.confirm_direct_connection() {
+            Ok(DirectConsent(()))
+        } else {
+            Err(CallError::Declined)
+        }
+    }
+
+    fn claim(&self, room_id: &RoomId) -> Result<JoinGuard, CallError> {
+        let mut slot = self.inner.slot();
+        if !matches!(*slot, Slot::Idle) {
+            return Err(CallError::AlreadyInCall);
+        }
+        let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let flags = Arc::new(Flags::default());
+        let kill = Arc::new(Mutex::new(None));
+        *slot = Slot::Joining(Joining {
+            id,
+            room_id: room_id.to_owned(),
+            flags: flags.clone(),
+            kill: kill.clone(),
+        });
+        drop(slot);
+        self.inner.publish(CallState::Joining {
+            room_id: room_id.to_owned(),
+        });
+        Ok(JoinGuard {
+            inner: self.inner.clone(),
+            id,
+            room_id: room_id.to_owned(),
+            flags,
+            kill,
+            armed: true,
+        })
+    }
+
+    /// Joins the call in `room_id`. `client` and `scope` come from the one
+    /// lease the caller holds for the whole join. `consent` is from
+    /// [`CallController::confirm_direct`].
+    ///
+    /// Each step fails closed and undoes the earlier ones. [`leave`] or the
+    /// end of the session stops the join between steps:
+    /// 1. one call at a time;
+    /// 2. the room is joined and encrypted;
+    /// 3. the homeserver offers an SFU (TURN servers are optional);
+    /// 4. the contained worker starts, before any Matrix side effect;
+    /// 5. the delayed leave is scheduled (MSC4140) and restarted from now;
+    /// 6. own membership is written;
+    /// 7. an OpenID token buys an SFU grant;
+    /// 8. frame keys are made and the worker joins. The task then sends the
+    ///    key to the members that are there.
+    ///
+    /// [`leave`]: CallController::leave
+    pub async fn join(
+        &self,
+        scope: JoinScope,
+        client: &Client,
+        room_id: &RoomId,
+        consent: DirectConsent,
+    ) -> Result<(), CallError> {
+        let DirectConsent(()) = consent;
+        let mut guard = self.claim(room_id)?;
+        let access = Access {
+            admit: self.inner.admission(),
+            generation: scope.generation,
+            flags: guard.flags.clone(),
+        };
+        let mut setup = Setup::new(client.clone(), guard.flags.clone());
+        let prepared = self
+            .prepare(&scope, client, room_id, &access, &mut setup, &guard.kill)
+            .await;
+        let call = match prepared {
+            Ok(call) => call,
+            Err(error) => {
+                setup.undo().await;
+                return Err(error);
+            }
+        };
+        let (stop, stop_rx) = oneshot::channel();
+        let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE);
+        let kill = call.link.kill_handle();
+        let mut call = Some(call);
+        let halted = {
+            // `leave` and the end of the session set their flag under this
+            // lock, so a stop is either seen here or sees the running call.
+            let mut slot = self.inner.slot();
+            match guard.flags.halt() {
+                Ok(()) => {
+                    let call = call.take().expect("the call is started once");
+                    let task = scope.runtime.spawn(run_call(
+                        self.inner.clone(),
+                        guard.id,
+                        guard.flags.clone(),
+                        call,
+                        stop_rx,
+                        command_rx,
+                    ));
+                    *slot = Slot::Running(RunHandle {
+                        id: guard.id,
+                        room_id: room_id.to_owned(),
+                        flags: guard.flags.clone(),
+                        kill,
+                        stop: Some(stop),
+                        commands,
+                        task: Some(task),
+                    });
+                    guard.armed = false;
+                    None
+                }
+                Err(error) => Some(error),
+            }
+        };
+        if let (Some(error), Some(call)) = (halted, call) {
+            let ended = guard.flags.ended();
+            call.finish(ended).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn prepare(
+        &self,
+        scope: &JoinScope,
+        client: &Client,
+        room_id: &RoomId,
+        access: &Access,
+        setup: &mut Setup,
+        kill: &Mutex<Option<Arc<dyn WorkerProcess>>>,
+    ) -> Result<Call, CallError> {
+        let flags = &access.flags;
+        flags.halt()?;
+        // 2. A joined, encrypted room.
+        let room = client.get_room(room_id).ok_or(CallError::NotJoined)?;
+        if room.state() != RoomState::Joined {
+            return Err(CallError::NotJoined);
+        }
+        match room.latest_encryption_state().await {
+            Ok(state) if state.is_encrypted() => {}
+            _ => return Err(CallError::NotEncrypted),
+        }
+        let user_id = client.user_id().ok_or(CallError::NotJoined)?.to_owned();
+        let device_id = client.device_id().ok_or(CallError::NotJoined)?.to_owned();
+        flags.halt()?;
+
+        // 3. An SFU; TURN is optional.
+        let sfu = match sfu_transport(client).await {
+            Ok(Some(service)) => service,
+            _ => return Err(CallError::NoSfu),
+        };
+        let turn = turn_servers(client).await.ok().flatten();
+        flags.halt()?;
+
+        // 4. The worker, before any Matrix side effect.
+        let link = start_worker(&self.inner.host).await?;
+        *plain(kill) = Some(link.kill_handle());
+        setup.link = Some(link);
+        flags.halt()?;
+
+        let (change_tx, changes) = mpsc::channel(1);
+        let (key_tx, incoming) = mpsc::channel(incoming::QUEUE);
+        let (failed_tx, failed) = mpsc::channel(1);
+        setup
+            .handles
+            .push(room.add_event_handler(move |raw: Raw<AnySyncStateEvent>| {
+                let change_tx = change_tx.clone();
+                async move {
+                    #[derive(serde::Deserialize)]
+                    struct Kind {
+                        #[serde(rename = "type")]
+                        kind: String,
+                    }
+                    if serde_json::from_str::<Kind>(raw.json().get())
+                        .is_ok_and(|k| k.kind == EVENT_TYPE)
+                    {
+                        // A full queue already holds a pending change.
+                        let _ = change_tx.try_send(());
+                    }
+                }
+            }));
+        setup
+            .handles
+            .push(incoming::register(client, room_id.to_owned(), key_tx));
+
+        // 5. The delayed leave, restarted from now on.
+        let state_key = own_state_key(&user_id, &device_id);
+        let delayed = DelayedLeave::schedule(client, room_id, &state_key)
+            .await
+            .map_err(|_| CallError::NoDelayedEvents)?;
+        setup.delayed = Some(delayed.clone());
+        flags.halt()?;
+        let created_ts = now_ms();
+        setup.tasks.spawn_on(
+            keeper(
+                access.clone(),
+                delayed.clone(),
+                KeeperMembership {
+                    room_id: room_id.to_owned(),
+                    state_key: state_key.clone(),
+                    user_id: user_id.clone(),
+                    device_id: device_id.clone(),
+                    sfu_url: sfu.advertised.clone(),
+                    created_ts,
+                },
+                failed_tx,
+            ),
+            &scope.runtime,
+        );
+
+        // 6. Own membership.
+        let content = own_membership(
+            room_id.as_str(),
+            &device_id,
+            &user_id,
+            &sfu.advertised,
+            Some(created_ts),
+        );
+        setup.membership_sent = true;
+        time::timeout(
+            SEND_TIMEOUT,
+            room.send_state_event_raw(EVENT_TYPE, &state_key, content),
+        )
+        .await
+        .map_err(|_| CallError::Membership)?
+        .map_err(|_| CallError::Membership)?;
+        flags.halt()?;
+
+        // 7. The SFU grant.
+        let openid = client
+            .send(request_openid_token::v3::Request::new(user_id.clone()))
+            .await
+            .map_err(|_| CallError::OpenId)?;
+        let body = sfu::request_body(room_id, &device_id, &OpenIdToken::from(openid));
+        let grant = sfu::get_grant(client.http_client(), &sfu.url, &body)
+            .await
+            .map_err(CallError::Sfu)?;
+        flags.halt()?;
+
+        // 8. Keys, then the worker joins.
+        let own_keys = OwnKeys::new(Instant::now()).map_err(|_| CallError::Keys)?;
+        let own_identity = participant_identity(&user_id, &device_id);
+        let link = setup.link.take().ok_or(CallError::Keys)?;
+        let join = ToWorker::Join {
+            sfu_url: grant.url.to_string(),
+            jwt: grant.jwt.clone(),
+            turn: turn_for_worker(turn),
+            relay_only: false,
+            own_identity: own_identity.clone(),
+            own_key: worker_key(own_keys.current()),
+            recording_device: scope.devices.recording.clone(),
+            playout_device: scope.devices.playout.clone(),
+        };
+        if link.send(join).is_err() {
+            setup.link = Some(link);
+            return Err(CallError::Worker(StartError::NotReady));
+        }
+        Ok(Call {
+            access: access.clone(),
+            link,
+            delayed,
+            state_key,
+            own_identity,
+            own_device: device_id,
+            own_keys,
+            remote: RemoteKeys::new(),
+            view: View::new(room_id.to_owned(), sfu.url),
+            changes,
+            incoming,
+            failed,
+            handles: std::mem::take(&mut setup.handles),
+            tasks: std::mem::take(&mut setup.tasks),
+        })
+    }
+
+    /// Leaves the call: the worker ends, the leave is written, the handlers
+    /// go. Returns when the call is over. During a join it cancels the join,
+    /// which then undoes its steps; the call state shows the end.
+    pub async fn leave(&self) -> Result<(), CallError> {
+        let (stop, task) = {
+            let mut slot = self.inner.slot();
+            match &mut *slot {
+                Slot::Joining(join) => {
+                    join.flags.cancelled.store(true, Ordering::SeqCst);
+                    return Ok(());
+                }
+                Slot::Running(run) if run.stop.is_some() => (run.stop.take(), run.task.take()),
+                _ => return Err(CallError::NotInCall),
+            }
+        };
+        if let Some(stop) = stop {
+            let _ = stop.send(());
+        }
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        Ok(())
+    }
+
+    /// Mutes or unmutes the microphone. The state shows the worker's answer.
+    pub fn set_muted(&self, muted: bool) -> Result<(), CallError> {
+        match &*self.inner.slot() {
+            Slot::Running(run) => run
+                .commands
+                .try_send(muted)
+                .map_err(|_| CallError::NotInCall),
+            _ => Err(CallError::NotInCall),
+        }
+    }
+
+    /// The session stops admitting work (lock, sign-out, an ended session,
+    /// exit). Call it first in every such path. It does not block: the worker
+    /// is killed now, so audio stops; every call task stops after the
+    /// operation it is in and starts no new SDK work; a join stops at its
+    /// next step; and the state becomes `Ended { SessionEnded }`. No Matrix
+    /// leave is sent. The call's event handlers do nothing once its task
+    /// ends, and the session's client goes with them; the delayed leave ends
+    /// the membership within seconds.
+    pub fn stop_for_session_end(&self) {
+        let (room_id, kill) = {
+            let mut slot = self.inner.slot();
+            match std::mem::replace(&mut *slot, Slot::Idle) {
+                Slot::Idle => return,
+                Slot::Joining(join) => {
+                    // The flag is set under the lock a join takes to start
+                    // its call, so the join sees it or this sees its call.
+                    join.flags.ended.store(true, Ordering::SeqCst);
+                    let kill = plain(&join.kill).clone();
+                    let room_id = join.room_id.clone();
+                    *slot = Slot::Joining(join);
+                    (room_id, kill)
+                }
+                Slot::Running(run) => {
+                    run.flags.ended.store(true, Ordering::SeqCst);
+                    if let Some(stop) = run.stop {
+                        let _ = stop.send(());
+                    }
+                    (run.room_id, Some(run.kill))
+                }
+            }
+        };
+        if let Some(kill) = kill {
+            kill.kill();
+        }
+        self.inner.publish(CallState::Ended {
+            room_id,
+            reason: EndReason::SessionEnded,
+        });
+    }
+}
+
+/// What a join has made so far, so a failure can undo it.
+struct Setup {
+    client: Client,
+    flags: Arc<Flags>,
+    link: Option<CallWorkerLink>,
+    delayed: Option<DelayedLeave>,
+    membership_sent: bool,
+    handles: Vec<EventHandlerHandle>,
+    tasks: JoinSet<()>,
+}
+
+impl Setup {
+    fn new(client: Client, flags: Arc<Flags>) -> Self {
+        Self {
+            client,
+            flags,
+            link: None,
+            delayed: None,
+            membership_sent: false,
+            handles: Vec::new(),
+            tasks: JoinSet::new(),
+        }
+    }
+
+    /// Runs under the join's own lease. At the end of the session the worker
+    /// is killed and no Matrix request is sent: the delayed leave, if it was
+    /// scheduled, ends the membership.
+    async fn undo(mut self) {
+        let ended = self.flags.ended();
+        self.tasks.abort_all();
+        for handle in self.handles.drain(..) {
+            self.client.remove_event_handler(handle);
+        }
+        if let Some(link) = self.link.take() {
+            if ended {
+                drop(link);
+            } else {
+                finish_worker(link).await;
+            }
+        }
+        if ended {
+            return;
+        }
+        if let Some(delayed) = self.delayed.take() {
+            // Nothing was written when the membership was not sent.
+            if self.membership_sent {
+                // Write the leave now; if that fails, the delay still fires.
+                let _ = delayed.send_now(&self.client).await;
+            } else {
+                let _ = delayed.cancel(&self.client).await;
+            }
+        }
+    }
+}
+
+struct KeeperMembership {
+    room_id: OwnedRoomId,
+    state_key: String,
+    user_id: OwnedUserId,
+    device_id: OwnedDeviceId,
+    /// As advertised (`SfuService::advertised`).
+    sfu_url: String,
+    created_ts: u64,
+}
+
+/// Restarts the delayed leave and refreshes the membership while the call
+/// runs, one lease per operation. It sends on `failed` when the restart
+/// failed twice in a row, or when no lease can be had.
+async fn keeper(
+    access: Access,
+    delayed: DelayedLeave,
+    membership: KeeperMembership,
+    failed: mpsc::Sender<EndReason>,
+) {
+    let mut beat = time::interval(DELAYED_LEAVE_RESTART);
+    beat.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut refresh = time::interval_at(
+        time::Instant::now() + MEMBERSHIP_REFRESH,
+        MEMBERSHIP_REFRESH,
+    );
+    refresh.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut health = RestartHealth::default();
+    let membership = Arc::new(membership);
+    loop {
+        tokio::select! {
+            _ = beat.tick() => {
+                let delayed = delayed.clone();
+                let restarted = access
+                    .run(|client| async move {
+                        matches!(
+                            time::timeout(RESTART_TIMEOUT, delayed.restart(&client)).await,
+                            Ok(Ok(()))
+                        )
+                    })
+                    .await;
+                let Ok(ok) = restarted else {
+                    let _ = failed.send(EndReason::SessionEnded).await;
+                    return;
+                };
+                if health.record(ok) {
+                    let _ = failed.send(EndReason::MembershipLost).await;
+                    return;
+                }
+            }
+            _ = refresh.tick() => {
+                let membership = membership.clone();
+                let sent = access
+                    .run(|client| async move {
+                        let Some(room) = client.get_room(&membership.room_id) else {
+                            return;
+                        };
+                        let content = own_membership(
+                            membership.room_id.as_str(),
+                            &membership.device_id,
+                            &membership.user_id,
+                            &membership.sfu_url,
+                            Some(membership.created_ts),
+                        );
+                        let _ = time::timeout(
+                            SEND_TIMEOUT,
+                            room.send_state_event_raw(EVENT_TYPE, &membership.state_key, content),
+                        )
+                        .await;
+                    })
+                    .await;
+                if sent.is_err() {
+                    let _ = failed.send(EndReason::SessionEnded).await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Everything one running call owns. It holds no client.
+struct Call {
+    access: Access,
+    link: CallWorkerLink,
+    delayed: DelayedLeave,
+    state_key: String,
+    own_identity: String,
+    own_device: OwnedDeviceId,
+    own_keys: OwnKeys,
+    remote: RemoteKeys,
+    view: View,
+    changes: mpsc::Receiver<()>,
+    incoming: mpsc::Receiver<Candidate>,
+    failed: mpsc::Receiver<EndReason>,
+    handles: Vec<EventHandlerHandle>,
+    tasks: JoinSet<()>,
+}
+
+/// Frees the slot when the task ends, also after a panic.
+struct EndGuard {
+    inner: Arc<Inner>,
+    id: u64,
+    room_id: OwnedRoomId,
+    armed: bool,
+}
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        if !self.armed || !self.inner.release(self.id) {
+            return;
+        }
+        let ended = matches!(*self.inner.state.borrow(), CallState::Ended { .. });
+        if !ended {
+            self.inner.publish(CallState::Ended {
+                room_id: self.room_id.clone(),
+                reason: EndReason::Internal,
+            });
+        }
+    }
+}
+
+async fn run_call(
+    inner: Arc<Inner>,
+    id: u64,
+    flags: Arc<Flags>,
+    mut call: Call,
+    mut stop: oneshot::Receiver<()>,
+    mut commands: mpsc::Receiver<bool>,
+) {
+    let room_id = call.view.room_id.clone();
+    let mut guard = EndGuard {
+        inner: inner.clone(),
+        id,
+        room_id: room_id.clone(),
+        armed: true,
+    };
+    let reason = match call.run(&inner, &mut stop, &mut commands).await {
+        Ok(()) => EndReason::Left,
+        Err(reason) => reason,
+    };
+    if reason == EndReason::SessionEnded {
+        flags.ended.store(true, Ordering::SeqCst);
+    }
+    call.finish(flags.ended()).await;
+    guard.armed = false;
+    // After the end of the session the slot is free and the state shows it.
+    if inner.release(id) {
+        inner.publish(CallState::Ended { room_id, reason });
+    }
+}
+
+impl Call {
+    fn send_worker(&self, message: ToWorker) -> Result<(), EndReason> {
+        self.link
+            .send(message)
+            .map_err(|_| EndReason::WorkerStopped)
+    }
+
+    fn publish(&self, inner: &Inner) {
+        inner.publish(self.view.state());
+    }
+
+    /// The call members now, from the room's stored state. `None` when they
+    /// cannot be read.
+    async fn read_members(&self) -> Result<Option<Vec<ActiveMember>>, EndReason> {
+        let room_id = self.view.room_id.clone();
+        self.access
+            .run(|client| async move {
+                let room = client.get_room(&room_id)?;
+                read_members(&room, now_ms()).await.ok()
+            })
+            .await
+            .map_err(|_| EndReason::SessionEnded)
+    }
+
+    /// Sends `outgoing` to `recipients`. A failure is not fatal: a device
+    /// that did not get the key cannot hear this user.
+    async fn send_keys(
+        &self,
+        outgoing: &Outgoing,
+        recipients: Vec<(OwnedUserId, OwnedDeviceId)>,
+    ) -> Result<(), EndReason> {
+        if recipients.is_empty() {
+            return Ok(());
+        }
+        let room_id = self.view.room_id.clone();
+        let content = encryption_keys::outgoing_content(
+            &room_id,
+            &self.own_identity,
+            &self.own_device,
+            &outgoing.key,
+        );
+        self.access
+            .run(|client| async move {
+                if let Some(room) = client.get_room(&room_id) {
+                    let _ = time::timeout(
+                        SEND_TIMEOUT,
+                        encryption_keys::send_key(&room, &recipients, content),
+                    )
+                    .await;
+                }
+            })
+            .await
+            .map_err(|_| EndReason::SessionEnded)
+    }
+
+    /// Reads the members and gives the current key to all of them.
+    async fn start_keys(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        if let Some(members) = self.read_members().await? {
+            self.view.set_members(others(members, &self.own_identity));
+        }
+        let outgoing = Outgoing {
+            key: self.own_keys.current().clone(),
+            use_at: Instant::now(),
+            recipients: Recipients::AllMembers,
+        };
+        let all = recipients(&outgoing, &self.view.members, &[]);
+        self.send_keys(&outgoing, all).await?;
+        self.publish(inner);
+        Ok(())
+    }
+
+    async fn run(
+        &mut self,
+        inner: &Inner,
+        stop: &mut oneshot::Receiver<()>,
+        commands: &mut mpsc::Receiver<bool>,
+    ) -> Result<(), EndReason> {
+        let mut parked: Vec<Candidate> = Vec::new();
+        let mut pending_own: Option<(Instant, FrameKeyMsg)> = None;
+        let mut seen_self = false;
+        self.start_keys(inner).await?;
+        loop {
+            let due = pending_own.as_ref().map(|(at, _)| *at);
+            tokio::select! {
+                _ = &mut *stop => return Ok(()),
+                command = commands.recv() => match command {
+                    Some(muted) => self.send_worker(ToWorker::SetMuted { muted })?,
+                    None => return Ok(()),
+                },
+                event = self.link.events.recv() => {
+                    let Some(event) = event else {
+                        return Err(EndReason::WorkerStopped);
+                    };
+                    match self.view.apply(&event) {
+                        Applied::Same => {}
+                        Applied::Changed => self.publish(inner),
+                        Applied::End(reason) => return Err(reason),
+                    }
+                }
+                Some(()) = self.changes.recv() => {
+                    self.members_changed(inner, &mut parked, &mut pending_own, &mut seen_self)
+                        .await?;
+                }
+                Some(candidate) = self.incoming.recv() => {
+                    self.key_received(inner, candidate, &mut parked)?;
+                }
+                Some(reason) = self.failed.recv() => return Err(reason),
+                () = async {
+                    match due {
+                        Some(at) => time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some((_, key)) = pending_own.take() {
+                        self.send_worker(ToWorker::SetOwnKey { key })?;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn members_changed(
+        &mut self,
+        inner: &Inner,
+        parked: &mut Vec<Candidate>,
+        pending_own: &mut Option<(Instant, FrameKeyMsg)>,
+        seen_self: &mut bool,
+    ) -> Result<(), EndReason> {
+        let Some(all) = self.read_members().await? else {
+            return Ok(());
+        };
+        let has_self = all.iter().any(|m| m.identity == self.own_identity);
+        if has_self {
+            *seen_self = true;
+        } else if *seen_self {
+            return Err(EndReason::MembershipLost);
+        }
+        let current = others(all, &self.own_identity);
+        let known: BTreeSet<String> = self
+            .view
+            .members
+            .iter()
+            .map(|m| m.identity.clone())
+            .collect();
+        let diff = diff_members(&known, &current);
+        self.view.set_members(current);
+        if !diff.left.is_empty() {
+            let view = &self.view;
+            self.remote.retain_members(|id| view.is_member(id));
+            for identity in &diff.left {
+                self.send_worker(ToWorker::RemoveParticipant {
+                    identity: identity.clone(),
+                })?;
+            }
+        }
+        if let Some(outgoing) = key_action(&diff, &mut self.own_keys, Instant::now())
+            .map_err(|_| EndReason::KeysUnavailable)?
+        {
+            let to = recipients(&outgoing, &self.view.members, &diff.joined);
+            self.send_keys(&outgoing, to).await?;
+            // A key already in use is not set again.
+            if outgoing.recipients == Recipients::AllMembers {
+                *pending_own = Some((outgoing.use_at, worker_key(&outgoing.key)));
+            }
+        }
+        // Keys that came before their sender's membership may fit now.
+        for candidate in std::mem::take(parked) {
+            self.key_received(inner, candidate, parked)?;
+        }
+        self.publish(inner);
+        Ok(())
+    }
+
+    fn key_received(
+        &mut self,
+        inner: &Inner,
+        candidate: Candidate,
+        parked: &mut Vec<Candidate>,
+    ) -> Result<(), EndReason> {
+        let view = &self.view;
+        let result = incoming::accept(
+            &candidate,
+            &view.room_id,
+            &|id| view.is_member(id),
+            &mut self.remote,
+        );
+        match result {
+            Ok(IncomingKey {
+                identity,
+                index,
+                bytes,
+            }) => {
+                self.view.keyed.insert(identity.clone());
+                self.send_worker(ToWorker::SetKey {
+                    identity,
+                    key: FrameKeyMsg { index, bytes },
+                })?;
+                self.publish(inner);
+            }
+            Err(refusal) if refusal.is_early() => {
+                parked.retain(|c| c.received.elapsed() < PARK_TIME);
+                if parked.len() >= MAX_PARKED {
+                    parked.remove(0);
+                }
+                parked.push(candidate);
+            }
+            Err(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Ends the call: the keeper, the worker, then (unless the session
+    /// ended) the membership and the handlers in one operation. After the end
+    /// of the session the worker is killed at once, and no request is sent.
+    async fn finish(self, session_ended: bool) {
+        let Call {
+            access,
+            link,
+            delayed,
+            state_key,
+            view,
+            handles,
+            mut tasks,
+            ..
+        } = self;
+        // No more restarts, so the leave cannot be pushed back.
+        tasks.abort_all();
+        if session_ended {
+            drop(link);
+            return;
+        }
+        finish_worker(link).await;
+        let room_id = view.room_id;
+        let _ = access
+            .run(|client| async move {
+                end_membership(&client, &room_id, &delayed, &state_key).await;
+                for handle in handles {
+                    client.remove_event_handler(handle);
+                }
+            })
+            .await;
+    }
+}
+
+/// The other devices of `members`.
+fn others(members: Vec<ActiveMember>, own_identity: &str) -> Vec<ActiveMember> {
+    members
+        .into_iter()
+        .filter(|m| m.identity != own_identity)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::calls::worker::{CallWorkerLink, WorkerProcess};
+    use matrix_sdk::ruma::{owned_device_id, owned_user_id, room_id};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn member(user: &str, device: &str, sfu: &str) -> ActiveMember {
+        let user_id = OwnedUserId::try_from(user).unwrap();
+        let device_id = OwnedDeviceId::from(device);
+        ActiveMember {
+            identity: participant_identity(&user_id, &device_id),
+            user_id,
+            device_id,
+            service_url: Url::parse(sfu).unwrap(),
+            joined_ts: 1,
+            expires_ts: u64::MAX,
+        }
+    }
+
+    fn known(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// GIVEN known members and a new list WHEN diffed THEN joined and left
+    /// are named by identity.
+    #[test]
+    fn given_a_changed_member_list_then_the_diff_names_joined_and_left() {
+        let current = [
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@c:example.org", "C", "https://sfu.example.org"),
+        ];
+        let diff = diff_members(&known(&["@a:example.org:A", "@b:example.org:B"]), &current);
+        assert_eq!(diff.joined, ["@c:example.org:C"]);
+        assert_eq!(diff.left, ["@b:example.org:B"]);
+        assert_eq!(
+            diff_members(&known(&["@a:example.org:A"]), &current[..1]),
+            MemberDiff::default()
+        );
+    }
+
+    /// GIVEN a young key WHEN one member joins THEN the key goes only to the
+    /// new member and is not set again; WHEN one leaves THEN a new key goes
+    /// to everyone.
+    #[test]
+    fn given_joins_and_leaves_then_key_actions_and_recipients_follow() {
+        let now = Instant::now();
+        let mut own = OwnKeys::new(now).unwrap();
+        let members = [
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@b:example.org", "B", "https://sfu.example.org"),
+        ];
+        let joined = MemberDiff {
+            joined: vec!["@b:example.org:B".to_owned()],
+            left: vec![],
+        };
+        let first = key_action(&joined, &mut own, now).unwrap().unwrap();
+        assert_eq!(first.recipients, Recipients::NewMembersOnly);
+        assert_eq!(first.key.index, 0);
+        let to = recipients(&first, &members, &joined.joined);
+        assert_eq!(
+            to,
+            [(owned_user_id!("@b:example.org"), owned_device_id!("B"))]
+        );
+
+        let left = MemberDiff {
+            joined: vec!["@b:example.org:B".to_owned()],
+            left: vec!["@x:example.org:X".to_owned()],
+        };
+        let second = key_action(&left, &mut own, now).unwrap().unwrap();
+        assert_eq!(second.recipients, Recipients::AllMembers);
+        assert_eq!(second.key.index, 1);
+        assert_eq!(recipients(&second, &members, &left.joined).len(), 2);
+
+        assert!(
+            key_action(&MemberDiff::default(), &mut own, now)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// GIVEN an old key WHEN a member joins THEN the key rotates for all.
+    #[test]
+    fn given_an_old_key_when_a_member_joins_then_it_rotates() {
+        let start = Instant::now();
+        let mut own = OwnKeys::new(start).unwrap();
+        let diff = MemberDiff {
+            joined: vec!["@b:example.org:B".to_owned()],
+            left: vec![],
+        };
+        let later = start + Duration::from_secs(60);
+        let outgoing = key_action(&diff, &mut own, later).unwrap().unwrap();
+        assert_eq!(outgoing.recipients, Recipients::AllMembers);
+    }
+
+    fn view() -> View {
+        let mut view = View::new(
+            room_id!("!r:example.org").to_owned(),
+            Url::parse("https://sfu.example.org").unwrap(),
+        );
+        view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@b:example.org", "B", "https://other.example.org"),
+        ]);
+        view
+    }
+
+    /// GIVEN a joining call WHEN the worker connects THEN the state is
+    /// active, with reachability from each member's SFU.
+    #[test]
+    fn given_the_worker_connects_then_the_state_is_active() {
+        let mut view = view();
+        assert!(matches!(view.state(), CallState::Joining { .. }));
+        assert_eq!(view.apply(&FromWorker::Connected), Applied::Changed);
+        assert_eq!(view.apply(&FromWorker::Connected), Applied::Same);
+        let CallState::Active {
+            participants,
+            muted,
+            ..
+        } = view.state()
+        else {
+            panic!("active");
+        };
+        assert!(!muted);
+        assert!(participants[0].reachable && !participants[1].reachable);
+        assert!(participants.iter().all(|p| !p.keyed && !p.speaking));
+    }
+
+    /// GIVEN speaking reports WHEN they name a member or a stranger THEN only
+    /// a member is shown, and a member who leaves stops speaking.
+    #[test]
+    fn given_speaking_reports_then_only_members_speak() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        let speak = |id: &str, on| FromWorker::Speaking {
+            identity: id.to_owned(),
+            speaking: on,
+        };
+        assert_eq!(
+            view.apply(&speak("@evil:example.org:E", true)),
+            Applied::Same
+        );
+        assert_eq!(
+            view.apply(&speak("@a:example.org:A", true)),
+            Applied::Changed
+        );
+        let CallState::Active { participants, .. } = view.state() else {
+            panic!("active");
+        };
+        assert!(participants[0].speaking);
+        view.set_members(vec![member("@b:example.org", "B", "https://x.example.org")]);
+        assert!(view.speaking.is_empty());
+    }
+
+    /// GIVEN a worker failure, close or mute report WHEN applied THEN they end
+    /// the call or change the mute flag.
+    #[test]
+    fn given_worker_end_events_then_the_call_ends() {
+        let mut view = view();
+        assert_eq!(
+            view.apply(&FromWorker::Muted { muted: true }),
+            Applied::Changed
+        );
+        assert!(view.muted);
+        assert_eq!(
+            view.apply(&FromWorker::Failed {
+                code: FailureCode::Tls
+            }),
+            Applied::End(EndReason::WorkerFailed(FailureCode::Tls))
+        );
+        assert_eq!(
+            view.apply(&FromWorker::Left),
+            Applied::End(EndReason::WorkerStopped)
+        );
+        assert_eq!(
+            view.apply(&FromWorker::Devices {
+                recording: Vec::new(),
+                playout: Vec::new()
+            }),
+            Applied::End(EndReason::WorkerFailed(FailureCode::Protocol))
+        );
+    }
+
+    struct FakeProcess(Arc<AtomicBool>);
+
+    impl WorkerProcess for FakeProcess {
+        fn kill(&self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wait_exit(&self, _: Duration) -> bool {
+            true
+        }
+    }
+
+    struct FakeHost {
+        confirm: bool,
+        start_error: Option<StartError>,
+        confirms: AtomicUsize,
+        starts: AtomicUsize,
+    }
+
+    impl FakeHost {
+        fn new(confirm: bool, start_error: Option<StartError>) -> Arc<Self> {
+            Arc::new(Self {
+                confirm,
+                start_error,
+                confirms: AtomicUsize::new(0),
+                starts: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl CallHost for FakeHost {
+        fn start(&self) -> Result<CallWorkerLink, StartError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = self.start_error {
+                return Err(error);
+            }
+            let (commands, _) = mpsc::channel(4);
+            let (_, events) = mpsc::channel(4);
+            Ok(CallWorkerLink::from_parts(
+                commands,
+                events,
+                Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+            ))
+        }
+
+        fn confirm_direct_connection(&self) -> bool {
+            self.confirms.fetch_add(1, Ordering::SeqCst);
+            self.confirm
+        }
+    }
+
+    fn no_admission() -> Admission {
+        Arc::new(|| None)
+    }
+
+    fn controller(host: Arc<dyn CallHost>) -> CallController {
+        CallController::new(host, no_admission())
+    }
+
+    /// GIVEN a profile proxy WHEN the user does not confirm THEN the call is
+    /// declined; WHEN there is no proxy THEN nobody is asked.
+    #[test]
+    fn given_a_proxy_without_confirmation_then_the_call_is_declined() {
+        let host = FakeHost::new(false, None);
+        let calls = controller(host.clone());
+        assert_eq!(calls.confirm_direct(true).err(), Some(CallError::Declined));
+        assert_eq!(host.confirms.load(Ordering::SeqCst), 1);
+        assert!(calls.confirm_direct(false).is_ok());
+        assert_eq!(host.confirms.load(Ordering::SeqCst), 1);
+
+        let yes = controller(FakeHost::new(true, None));
+        assert!(yes.confirm_direct(true).is_ok());
+    }
+
+    /// GIVEN a call in progress WHEN the user is asked about a direct
+    /// connection THEN nobody is asked and the join is refused.
+    #[tokio::test]
+    async fn given_a_call_in_progress_then_nobody_is_asked_about_a_proxy() {
+        let host = FakeHost::new(true, None);
+        let calls = controller(host.clone());
+        let _guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        assert_eq!(
+            calls.confirm_direct(true).err(),
+            Some(CallError::AlreadyInCall)
+        );
+        assert_eq!(host.confirms.load(Ordering::SeqCst), 0);
+    }
+
+    /// GIVEN a host whose containment fails WHEN the worker starts THEN the
+    /// error names the code and no link exists.
+    #[tokio::test]
+    async fn given_failed_containment_then_no_worker_runs() {
+        let host: Arc<dyn CallHost> = FakeHost::new(true, Some(StartError::Containment(4)));
+        assert!(matches!(
+            start_worker(&host).await,
+            Err(CallError::Worker(StartError::Containment(4)))
+        ));
+        let host: Arc<dyn CallHost> = FakeHost::new(true, None);
+        assert!(start_worker(&host).await.is_ok());
+    }
+
+    /// GIVEN a call in progress WHEN another join is claimed THEN it is
+    /// refused; WHEN the first join fails THEN the slot is free again.
+    #[tokio::test]
+    async fn given_a_call_in_progress_then_a_second_is_refused() {
+        let controller = controller(FakeHost::new(true, None));
+        let room = room_id!("!r:example.org");
+        let guard = controller.claim(room).expect("first claim");
+        assert!(matches!(
+            *controller.subscribe().borrow(),
+            CallState::Joining { .. }
+        ));
+        assert_eq!(controller.claim(room).err(), Some(CallError::AlreadyInCall));
+        drop(guard);
+        assert_eq!(*controller.subscribe().borrow(), CallState::Idle);
+        assert!(controller.claim(room).is_ok());
+    }
+
+    /// GIVEN no call WHEN leaving or muting THEN the controller answers
+    /// NotInCall.
+    #[tokio::test]
+    async fn given_no_call_then_leave_and_mute_are_refused() {
+        let controller = controller(FakeHost::new(true, None));
+        assert_eq!(controller.leave().await, Err(CallError::NotInCall));
+        assert_eq!(controller.set_muted(true), Err(CallError::NotInCall));
+    }
+
+    fn killer() -> (Arc<AtomicBool>, Arc<dyn WorkerProcess>) {
+        let killed = Arc::new(AtomicBool::new(false));
+        (killed.clone(), Arc::new(FakeProcess(killed)))
+    }
+
+    /// GIVEN a running call WHEN the session ends THEN the worker is killed
+    /// at once, the task is told to stop, its flag forbids new SDK work, the
+    /// slot is free and the state is `Ended { SessionEnded }`.
+    #[tokio::test]
+    async fn given_a_running_call_when_the_session_ends_then_the_worker_is_killed() {
+        let calls = controller(FakeHost::new(true, None));
+        let room = room_id!("!r:example.org");
+        let (killed, kill) = killer();
+        let flags = Arc::new(Flags::default());
+        let (stop, mut stop_rx) = oneshot::channel();
+        let (commands, _commands_rx) = mpsc::channel(1);
+        *calls.inner.slot() = Slot::Running(RunHandle {
+            id: 7,
+            room_id: room.to_owned(),
+            flags: flags.clone(),
+            kill,
+            stop: Some(stop),
+            commands,
+            task: None,
+        });
+        calls.stop_for_session_end();
+        assert!(killed.load(Ordering::SeqCst), "audio stops at once");
+        assert!(flags.ended());
+        assert!(stop_rx.try_recv().is_ok(), "the task is told to stop");
+        assert!(matches!(*calls.inner.slot(), Slot::Idle));
+        assert_eq!(
+            calls.state(),
+            CallState::Ended {
+                room_id: room.to_owned(),
+                reason: EndReason::SessionEnded
+            }
+        );
+        assert_eq!(calls.set_muted(true), Err(CallError::NotInCall));
+        // The task's own end finds the slot taken and publishes nothing.
+        assert!(!calls.inner.release(7));
+        // A second stop does nothing.
+        calls.stop_for_session_end();
+    }
+
+    /// GIVEN a join with a running worker WHEN the session ends THEN the
+    /// worker is killed, the join must stop at its next step, and the state
+    /// stays `Ended { SessionEnded }` after the join lets go.
+    #[tokio::test]
+    async fn given_a_join_when_the_session_ends_then_the_join_stops_and_the_worker_dies() {
+        let calls = controller(FakeHost::new(true, None));
+        let room = room_id!("!r:example.org");
+        let guard = calls.claim(room).unwrap();
+        let (killed, kill) = killer();
+        *plain(&guard.kill) = Some(kill);
+        calls.stop_for_session_end();
+        assert!(killed.load(Ordering::SeqCst));
+        assert_eq!(guard.flags.halt(), Err(CallError::SessionEnded));
+        assert_eq!(
+            calls.confirm_direct(false).err(),
+            Some(CallError::AlreadyInCall)
+        );
+        drop(guard);
+        assert!(matches!(*calls.inner.slot(), Slot::Idle));
+        assert_eq!(
+            calls.state(),
+            CallState::Ended {
+                room_id: room.to_owned(),
+                reason: EndReason::SessionEnded
+            }
+        );
+    }
+
+    /// GIVEN no call WHEN the session ends THEN nothing changes.
+    #[test]
+    fn given_no_call_when_the_session_ends_then_the_state_stays_idle() {
+        let calls = controller(FakeHost::new(true, None));
+        calls.stop_for_session_end();
+        assert_eq!(calls.state(), CallState::Idle);
+    }
+
+    /// GIVEN a join in progress WHEN the user leaves THEN the join is
+    /// cancelled at its next step, and its end shows `Ended { Left }`.
+    #[tokio::test]
+    async fn given_a_join_in_progress_when_leave_is_called_then_the_join_is_cancelled() {
+        let calls = controller(FakeHost::new(true, None));
+        let room = room_id!("!r:example.org");
+        let guard = calls.claim(room).unwrap();
+        assert_eq!(guard.flags.halt(), Ok(()));
+        assert_eq!(calls.leave().await, Ok(()));
+        assert_eq!(guard.flags.halt(), Err(CallError::Cancelled));
+        assert!(
+            matches!(calls.state(), CallState::Joining { .. }),
+            "the join undoes its steps first"
+        );
+        drop(guard);
+        assert_eq!(
+            calls.state(),
+            CallState::Ended {
+                room_id: room.to_owned(),
+                reason: EndReason::Left
+            }
+        );
+        assert!(calls.claim(room).is_ok(), "the slot is free again");
+    }
+
+    /// GIVEN a state listener WHEN the state changes THEN it is told once per
+    /// change, and not when the state stays the same.
+    #[tokio::test]
+    async fn given_a_listener_then_each_change_is_reported_once() {
+        let calls = controller(FakeHost::new(true, None));
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = count.clone();
+        calls.set_listener(Arc::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }));
+        let room = room_id!("!r:example.org");
+        let guard = calls.claim(room).unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        drop(guard);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        calls.stop_for_session_end();
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    /// GIVEN no admission, or a stopped call WHEN an SDK operation is asked
+    /// for THEN it does not run.
+    #[tokio::test]
+    async fn given_no_admission_or_a_stopped_call_then_no_sdk_operation_runs() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flags = Arc::new(Flags::default());
+        let access = Access {
+            admit: no_admission(),
+            generation: 0,
+            flags: flags.clone(),
+        };
+        let marker = ran.clone();
+        assert!(
+            access
+                .run(|_client| async move { marker.store(true, Ordering::SeqCst) })
+                .await
+                .is_err()
+        );
+        flags.ended.store(true, Ordering::SeqCst);
+        let marker = ran.clone();
+        assert!(
+            access
+                .run(|_client| async move { marker.store(true, Ordering::SeqCst) })
+                .await
+                .is_err()
+        );
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    /// GIVEN a running call WHEN the session stops admitting work THEN the
+    /// call ends at once: the worker is killed, nothing is sent to Matrix
+    /// (the only admission asked for is the one that failed), the state is
+    /// `Ended { SessionEnded }` and the slot is free.
+    #[tokio::test]
+    async fn given_a_refused_admission_when_a_call_runs_then_it_ends_without_a_leave() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counted = asked.clone();
+        let admission: Admission = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+        let calls = CallController::new(FakeHost::new(true, None), admission.clone());
+        let room = room_id!("!r:example.org").to_owned();
+        let killed = Arc::new(AtomicBool::new(false));
+        let flags = Arc::new(Flags::default());
+        let (command_tx, _worker_commands) = mpsc::channel(4);
+        let (_worker_events, event_rx) = mpsc::channel(4);
+        let link =
+            CallWorkerLink::from_parts(command_tx, event_rx, Box::new(FakeProcess(killed.clone())));
+        let (_changes_tx, changes) = mpsc::channel(1);
+        let (_incoming_tx, incoming) = mpsc::channel(1);
+        let (_failed_tx, failed) = mpsc::channel(1);
+        let call = Call {
+            access: Access {
+                admit: admission,
+                generation: 0,
+                flags: flags.clone(),
+            },
+            link,
+            delayed: DelayedLeave::for_test(),
+            state_key: "key".to_owned(),
+            own_identity: "@a:example.org:A".to_owned(),
+            own_device: owned_device_id!("A"),
+            own_keys: OwnKeys::new(Instant::now()).unwrap(),
+            remote: RemoteKeys::new(),
+            view: View::new(room.clone(), Url::parse("https://sfu.example.org").unwrap()),
+            changes,
+            incoming,
+            failed,
+            handles: Vec::new(),
+            tasks: JoinSet::new(),
+        };
+        let (stop, stop_rx) = oneshot::channel();
+        let (commands, command_rx) = mpsc::channel(1);
+        *calls.inner.slot() = Slot::Running(RunHandle {
+            id: 3,
+            room_id: room.clone(),
+            flags: flags.clone(),
+            kill: Arc::new(FakeProcess(killed.clone())),
+            stop: Some(stop),
+            commands,
+            task: None,
+        });
+        run_call(
+            calls.inner.clone(),
+            3,
+            flags.clone(),
+            call,
+            stop_rx,
+            command_rx,
+        )
+        .await;
+        assert!(killed.load(Ordering::SeqCst));
+        assert!(flags.ended());
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "no leave was tried");
+        assert!(matches!(*calls.inner.slot(), Slot::Idle));
+        assert_eq!(
+            calls.state(),
+            CallState::Ended {
+                room_id: room,
+                reason: EndReason::SessionEnded
+            }
+        );
+    }
+}

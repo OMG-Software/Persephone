@@ -4,6 +4,7 @@
 
 - [Project plan](planning/project-plan.md): approved scope, open decisions, and milestones.
 - [Feasibility workbench](planning/feasibility.md): current status, recorded results, and P0 acceptance blockers.
+- [Live call test plan](planning/live-call-test.md): the interop run that gates any claim that calls work; run on Synapse, Merovingian and TLS still open.
 - [Architecture and development plan](architecture/development-plan.md): current component layout, planned application structure, and implementation sequence.
 - [SDK lifecycle completion contract](architecture/sdk-lifecycle.md): required stop-and-join ownership before lock, logout or store handoff can be approved.
 - [Image messaging design](architecture/image-messaging.md): P5 design for sending and receiving images, pixel transport and limits; built on Windows.
@@ -36,6 +37,7 @@
 - [ADR-0034](adr/0034-ignore-users-and-report-events-through-the-homeserver.md) (proposed): standard Matrix ignore account data and explicit reports to the account's homeserver.
 - [ADR-0035](adr/0035-keep-favourites-and-room-sections-local-to-the-profile.md) (proposed): local encrypted favourites and named sections, without Matrix room tags.
 - [ADR-0037](adr/0037-browse-public-room-directories-and-join-only-listed-rooms.md) (proposed): browse a public room directory through the homeserver, and join only rooms a listed page offered as open to anyone.
+- [ADR-0043](adr/0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md) (proposed): audio calls through MatrixRTC and a LiveKit SFU, with WebRTC in a contained call worker that gets only the SFU token, TURN credentials and frame keys; direct connection with a proxy only after confirmation.
 
 ## Evidence
 
@@ -75,6 +77,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Native window hand checks](evidence/native-windows-hand-checks.md): the P4 checklist for the core's native windows; not run yet.
 - [Account settings](evidence/account-settings.md): password change, email and phone, verifying another session, the recovery-key change and file, the notification level and content-free desktop notifications through the core; live run on Merovingian only, native windows not exercised.
 - [Contact verification](evidence/contact-verification.md): emoji comparison with another person in an existing direct-message room, in both directions and with a mismatch; live runs on Merovingian and Synapse, lazy members, `m.direct` refresh and Synapse's message rate limit.
+- [Audio calls with Element Call](evidence/live-calls.md): two-way encrypted audio with Element Call 0.28.2, mute, key rotation on rejoin, leave, lock, close, a killed worker, the proxy warning and the missing loopback exemption; three product faults found and fixed; Windows and Synapse only, plain loopback without TLS, debug builds.
 - [Session owner](evidence/session-owner.md): lock and unlock while running; leases, generation fencing, retained ownership on timeout; real-app walkthrough.
 - [Unlock secret](evidence/unlock-secret.md): profile passphrase with Argon2id inside DPAPI, upgrade of DPAPI-only profiles, wrong-entry limit, native-confirmed reset, Lock help text.
 - [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.
@@ -102,3 +105,4 @@ Earlier P0 probes (19 and 20 October 2026; historical run records with pre-restr
 
 - [Slint and iced security research](research/slint-iced-security-research.md): dependency and feature investigation retained after the Tauri decision.
 - [GTK and Tauri security-model comparison](research/gtk-tauri-security-model.md): rendering and containment considerations.
+- [MatrixRTC call standards](research/matrixrtc-call-standards.md): status on 16 November 2026 of the MatrixRTC, LiveKit transport, sticky events and delayed events proposals; server requirements; pinned SDK support. Desk research only; calls are out of scope.

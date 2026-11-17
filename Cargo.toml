@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/call-protocol",
+    "crates/call-worker",
     "crates/contracts",
     "crates/core",
     "crates/core-protocol",
@@ -14,6 +16,9 @@ members = [
     "tests/storage",
     "tests/platform/windows",
 ]
+# Vendored crates (ADR-0043) are patch sources, not members: the workspace
+# checks and lints must not run on third-party code.
+exclude = ["third_party/*"]
 
 # Shared components and integration test programs. The desktop host follows
 # after its security and compatibility gates pass.
@@ -40,3 +45,10 @@ incremental = false
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# Vendored LiveKit crates, each with a small marked patch (ADR-0043). See
+# PERSEPHONE-PATCH.md in each folder. Reapply the patches for each LiveKit update.
+[patch.crates-io]
+livekit-net = { path = "third_party/livekit-net-0.2.0" }
+libwebrtc = { path = "third_party/libwebrtc-0.4.1" }
+webrtc-sys = { path = "third_party/webrtc-sys-0.3.54" }

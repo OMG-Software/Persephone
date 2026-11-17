@@ -178,12 +178,12 @@ notes name the commit and the workflow run.
 
 The release-only Tauri settings (`bundle.active`, sidecars, bundled licence
 files) come from
-`python tools/release.py bundle-config`, which the workflow merges with
+`python tools/release.py bundle-config --platform <windows|linux|macos>`, which the workflow merges with
 `cargo tauri --config`. `src-tauri/tauri.conf.json` holds the other bundle
 settings but keeps `bundle.active` false, as the IPC configuration test
 requires. The sidecars and resources are not in it because tauri-build copies
 them on every build and fails when they are missing, which would break
-development builds. The workflow creates `src-tauri/binaries/` itself; do not commit it.
+development builds. Only the Windows bundle adds the call worker sidecar (`binaries/persephone-call-worker`), because calls run on Windows only. The Windows jobs write a Windows-only copy of the notices with `python tools/release.py append-notice`, because the call worker links libwebrtc statically. It adds the `LICENSE.md` of the SHA-256-verified libwebrtc archive, which it finds in the cache that `tools/dev.py webrtc` filled; no argument names a file; the Linux and macOS notices are unchanged. The workflow creates `src-tauri/binaries/` itself; do not commit it.
 
 ## Owner set-up
 

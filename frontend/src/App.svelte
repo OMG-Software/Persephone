@@ -4,9 +4,18 @@
   import BrandMark from './BrandMark.svelte';
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
+  import CallBar from './CallBar.svelte';
+  import {
+    CallRefresher,
+    IDLE_CALL,
+    JOIN_ERROR_TEXT,
+    STARTING_TEXT,
+    callButton,
+    inCall
+  } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callJoin, callLeave, callMute, callReadiness, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -146,6 +155,8 @@
     setAccountSettings,
     type AccountSettings,
     type AppStatus,
+    type CallReadiness,
+    type CallStatus,
     type ContactStatus,
     type InviteList,
     type RoomIdentityChanges,
@@ -711,8 +722,154 @@
     }
   }
 
+  // Audio calls. The core holds the call; this is what it last said. The
+  // refresher drops replies from before a session change.
+  let callState = $state<CallStatus>(IDLE_CALL);
+  let callDismissed = $state(false);
+  let callPending = $state(false);
+  let callBusy = $state(false);
+  let callJoinText = $state<string | null>(null);
+  let readiness = $state<CallReadiness | null>(null);
+  let callNames = $state<ReadonlyMap<string, string>>(new Map());
+  let readinessRequest = 0;
+  let callNamesFor: string | null = null;
+  const callRefresher = new CallRefresher(callStatus, (next) => {
+    callState = next;
+    if (next.phase !== 'ended') callDismissed = false;
+  });
+
+  const callRoomName = $derived(
+    callState.roomId === null
+      ? ''
+      : (rooms?.rooms.find((room) => room.roomId === callState.roomId)?.displayName ?? callState.roomId)
+  );
+  const callView = $derived(
+    selected === null ? null : callButton(selected, readiness, callState, callPending)
+  );
+
+  // Ask again whether the shown room can take a call when the room or the
+  // call changes. Speaking changes alone do not.
+  const readinessKey = $derived(
+    `${selected}|${callState.phase}|${callState.roomId}|${callState.participants.length}`
+  );
+  $effect(() => {
+    readinessKey;
+    refreshReadiness(selected);
+  });
+
+  async function refreshReadiness(roomId: string | null) {
+    const generation = sessionGeneration;
+    const request = ++readinessRequest;
+    if (roomId === null || !signedIn) {
+      readiness = null;
+      return;
+    }
+    try {
+      const reply = await callReadiness(roomId);
+      if (generation === sessionGeneration && request === readinessRequest) readiness = reply;
+    } catch {
+      if (generation === sessionGeneration && request === readinessRequest) readiness = null;
+    }
+  }
+
+  // Names for the call bar come from the call room's members.
+  $effect(() => {
+    const roomId = callState.roomId;
+    if (roomId === null || !inCall(callState)) return;
+    if (callNamesFor === roomId) return;
+    callNamesFor = roomId;
+    const generation = sessionGeneration;
+    roomMembers(roomId, '')
+      .then((reply) => {
+        if (generation !== sessionGeneration || callNamesFor !== roomId) return;
+        const found = new Map<string, string>();
+        for (const member of reply.members) {
+          if (member.displayName !== null) found.set(member.userId, member.displayName);
+        }
+        callNames = found;
+      })
+      .catch(() => {
+        if (callNamesFor === roomId) callNamesFor = null;
+      });
+  });
+
+  function focusCallControl() {
+    tick().then(() => {
+      const target =
+        document.querySelector<HTMLElement>('.call-dismiss') ??
+        document.querySelector<HTMLElement>('.call-start:not([aria-disabled="true"]):not(:disabled)');
+      target?.focus();
+    });
+  }
+
+  async function startCall() {
+    if (!selected || callPending || callView?.disabled) return;
+    const roomId = selected;
+    const generation = sessionGeneration;
+    callPending = true;
+    callJoinText = null;
+    try {
+      const reply = await callJoin(roomId);
+      if (generation !== sessionGeneration) return;
+      callJoinText = reply.joinError === null ? null : JOIN_ERROR_TEXT[reply.joinError];
+      callState = reply;
+      if (reply.phase !== 'ended') callDismissed = false;
+    } catch {
+      if (generation === sessionGeneration) callJoinText = JOIN_ERROR_TEXT.declined;
+    } finally {
+      if (generation === sessionGeneration) {
+        callPending = false;
+        callRefresher.request();
+      }
+    }
+  }
+
+  async function toggleMute() {
+    const generation = sessionGeneration;
+    callBusy = true;
+    try {
+      const reply = await callMute(!callState.muted);
+      if (generation === sessionGeneration) callState = reply;
+    } catch {
+      // The next call change shows the real state.
+    } finally {
+      if (generation === sessionGeneration) {
+        callBusy = false;
+        callRefresher.request();
+      }
+    }
+  }
+
+  async function leaveCall() {
+    const generation = sessionGeneration;
+    try {
+      const reply = await callLeave();
+      if (generation === sessionGeneration) callState = reply;
+    } catch {
+      // The next call change shows the real state.
+    } finally {
+      if (generation === sessionGeneration) callRefresher.request();
+    }
+    focusCallControl();
+  }
+
+  function dismissCall() {
+    callDismissed = true;
+    focusCallControl();
+  }
+
   /** Clear session-bound UI state and invalidate pending room-context work. */
   function reset() {
+    callRefresher.reset();
+    readiness = null;
+    readinessRequest += 1;
+    callPending = false;
+    callBusy = false;
+    callJoinText = null;
+    callDismissed = false;
+    callNames = new Map();
+    callNamesFor = null;
+    callRefresher.request();
     cancelContext?.(); cancelContext = null;
     sessionGeneration += 1;
     roomOpenRequest += 1;
@@ -1161,11 +1318,12 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules);
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request());
     } catch {
       unavailable = true;
       return;
     }
+    callRefresher.request();
     load();
     refreshModules();
   });
@@ -2377,6 +2535,16 @@
             <button type="button" class="secondary" disabled={modulesBusy} onclick={reviewModules}>{unreviewed(modules).length > 1 ? 'Mark all as reviewed' : 'Mark as reviewed'}</button>
           </div>
         {/if}
+        <CallBar
+          status={callState}
+          dismissed={callDismissed}
+          roomName={callRoomName}
+          names={callNames}
+          busy={callBusy}
+          onmute={toggleMute}
+          onleave={leaveCall}
+          ondismiss={dismissCall}
+        />
         {#if selectedRoom}
           <div class="room-view" style:--members-width="{shownMembers}px">
           <div class="room-main">
@@ -2424,7 +2592,36 @@
               : undefined}
             names={senderNames}
             events={settings.timelineEvents}
-          />
+          >
+            {#snippet headerAction()}
+              {#if signedIn && callView && !callView.hidden}
+                <button
+                  type="button"
+                  class="secondary call-start"
+                  disabled={callView.disabled && callView.reason === null}
+                  aria-disabled={callView.disabled && callView.reason !== null ? 'true' : undefined}
+                  aria-describedby={callView.reason !== null ? 'call-reason' : undefined}
+                  onclick={startCall}
+                >
+                  <Icon name="phone" />
+                  {callView.label}
+                </button>
+                {#if callView.reason !== null}
+                  <span id="call-reason" class="visually-hidden">{callView.reason}</span>
+                {/if}
+              {/if}
+            {/snippet}
+            {#snippet headerNotice()}
+              {#if callPending}
+                <p class="call-notice note" role="status">{STARTING_TEXT}</p>
+              {:else if callJoinText}
+                <p class="call-notice error" role="alert">
+                  <span>{callJoinText}</span>
+                  <button type="button" class="secondary" onclick={() => (callJoinText = null)}>Dismiss</button>
+                </p>
+              {/if}
+            {/snippet}
+          </Timeline>
           {#if contactFailure}
             <p role="alert" class="error contact-error">{contactFailure}</p>
           {/if}

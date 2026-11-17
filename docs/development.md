@@ -76,7 +76,7 @@ and the [SDK lifecycle contract](architecture/sdk-lifecycle.md).
 
 ## Toolchain and commands
 
-Install Python, Rust/Cargo, and Node.js with npm available on `PATH`, plus the WebAssembly target for the decoder guest (`rustup target add wasm32-unknown-unknown`). On Windows, use the MSVC Rust target and its native build tools. Install the locked frontend dependencies once, then run checks from the repository root:
+Install Python, Rust/Cargo, and Node.js with npm available on `PATH`, plus the WebAssembly target for the decoder guest (`rustup target add wasm32-unknown-unknown`). On Windows, use the MSVC Rust target and its native build tools. On Linux, the call worker needs clang 21 or later (`clang++`, or `CXX`), because the pinned libwebrtc is built against a libc++ that needs it. With an older clang or none, `check`, `rust`, `build` and `coverage` skip the call worker and print why. The worker does not ship on Linux and calls are refused there (ADR-0043). With `PERSEPHONE_CALL_WORKER=required`, as CI sets it, they fail instead of skipping. Install the locked frontend dependencies once, then run checks from the repository root:
 
 ```powershell
 python tools/dev.py bootstrap
@@ -89,7 +89,10 @@ python tools/dev.py contracts
 python tools/dev.py coverage
 python tools/dev.py audit
 python tools/dev.py sandbox --offline
+python tools/dev.py webrtc
 ```
+
+`webrtc` downloads the pinned libwebrtc archive from `tools/webrtc.json`, verifies its size and SHA-256, and extracts it into `.local/cache/webrtc` for the call worker (ADR-0043). It prints the directory for `LK_CUSTOM_WEBRTC`. It needs network access unless the verified archive is already cached. With `--offline` it fails if nothing is cached.
 
 `coverage` runs the Rust tests instrumented and writes the Rust crates' line coverage to `.local/coverage/rust/lcov.info`, as the SonarQube workflow does. Instrumented builds go to `.local/build/rust-coverage`. It needs the LLVM tools component and cargo-llvm-cov 0.9.1 on `PATH`; `dev.py` refuses another version:
 
@@ -128,15 +131,19 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 | --- | --- | --- | --- |
 | `windows` | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
 | `macos-latest` | `macos-latest` (arm64) | Preinstalled Xcode tools | 3.14 (setup-python) |
-| `ubuntu-latest` | `ubuntu-latest` (24.04) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config` | 3.14 (setup-python) |
-| `ubuntu-24.04-arm` | `ubuntu-24.04-arm` (arm64) | As `ubuntu-latest`; rustup from `sh.rustup.rs` if the image lacks it | 3.14 (setup-python) |
-| `debian-13` | `debian:trixie` container | `apt-get`: build tools, `libwebkit2gtk-4.1-dev` | Distribution `python3` |
-| `arch` | `archlinux:base-devel` container | `pacman -Syu`: `webkit2gtk-4.1` | Distribution `python` |
-| `fedora-44` | `fedora:44` container | `dnf`: build tools, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
-| `opensuse-leap-16.0` | `opensuse/leap:16.0` container | `zypper`: build tools, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
+| `ubuntu-latest` | `ubuntu-latest` (26.04 on 17 November 2026) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config clang` | 3.14 (setup-python) |
+| `ubuntu-24.04-arm` | `ubuntu-24.04-arm` (arm64) | As `ubuntu-latest`; rustup from `sh.rustup.rs` if the image lacks it. Clang 21 from apt.llvm.org, because the image has clang 18 | 3.14 (setup-python) |
+| `debian-13` | `debian:trixie` container | `apt-get`: build tools, `clang`, `libwebkit2gtk-4.1-dev`. Clang 21 from apt.llvm.org, because Debian has clang 19 | Distribution `python3` |
+| `arch` | `archlinux:base-devel` container | `pacman -Syu`: `clang`, `webkit2gtk-4.1` | Distribution `python` |
+| `fedora-44` | `fedora:44` container | `dnf`: build tools, `clang`, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
+| `opensuse-leap-16.0` | `opensuse/leap:16.0` container | `zypper`: build tools, `pkgconfig(webkit2gtk-4.1)`. Clang 21 only, from `devel:tools:compiler`: Leap has clang 19, whose `libclang13` conflicts with clang 21's | Distribution `python3` |
 
 - **Containers.** Container images are pinned by digest in the workflow. Containers install Rust with rustup from `sh.rustup.rs` and Node.js with setup-node.
 - **Packages are not pinned.** Packages come from each distribution's current repositories, so only the base image is fixed. Arch supports only full upgrades, so its job always builds against the current rolling release.
+- **Clang 21 for the call worker.** The pinned libwebrtc's libc++ needs clang 21 or later. Where a job's clang is older, [`.github/scripts/install-clang.sh`](../.github/scripts/install-clang.sh) adds one extra repository and installs clang 21 from it; elsewhere it does nothing. It trusts each repository only through a public signing key committed in `.github/keys`, and downloads no key:
+  - `apt.llvm.org.asc`, LLVM's apt repository (`llvm-toolchain-<codename>-21`) for Debian and Ubuntu: fingerprint `6084 F3CF 814B 57C1 CF12 EFD5 15CF 4D18 AF4F 7421`, no expiry.
+  - `devel-tools-compiler.asc`, the openSUSE Build Service project `devel:tools:compiler` for Leap: fingerprint `CB3E D75A C0E1 FE7B 52F5 58E2 0FD0 7641 6330 7D5D`, expires 13 April 2028. Replace it with the project's renewed key before then.
+  Both keys were taken from the repositories on 17 November 2026 and checked with `gpg --show-keys`. Only clang comes from these repositories: openSUSE gives `devel:tools:compiler` a lower priority than its own repositories.
 - **Off Windows, CI covers build and tests only.** Linux and macOS have worker containment (seccomp on Linux, Seatbelt on macOS; ADR-0010, ADR-0011), and its probe and contained-worker tests run in their jobs. macOS also has its Keychain vault, prompts, image picker and UI host (CI-tested only, never run with a display). Its file panels, link opening and idle time (13 November 2026) have not yet been through macOS CI. Linux also has its Secret Service vault, GTK prompts and file choosers, and UI host with a systemd scope (ADR-0010); its live Secret Service and scope tests are ignored by `check` and run only in the SonarQube coverage job (`coverage --linux-live`, Ubuntu) and by hand in WSL ([dependency evidence](evidence/dependencies.md#linux-platform-layer-gtk-and-zbus-in-the-core-13-november-2026)), and its windows have never been shown. No job launches the application on any OS.
 - **Tests that compile on one OS only.** The AppContainer probe, DPAPI and the native Windows prompts run only on Windows; seccomp probes only on Linux; Keychain, AppKit and Seatbelt tests only on macOS. Test counts therefore differ between jobs.
 

@@ -54,6 +54,13 @@ remaining SDK task inventory. A completed search or application lease does not
 prove that these SDK tasks stopped. The `restart_required` rule remains.
 See [room tools](../room-tools.md) and its [verification record](../evidence/room-tools.md).
 
+Since 16 November 2026, audio calls (ADR-0043) follow the same rule. A
+call's background tasks hold no client; each SDK operation takes a lease and
+is refused after admission closes or the generation changes. The lock's
+announcement kills the call worker and stops the call before the lock waits.
+The call's SDK work is covered only by these leases; the SDK tasks that the
+call's to-device and state handlers run inside are the sync loop's.
+
 ## Required SDK completion surface
 
 The preferred resolution preserves SDK-owned cryptography and adds or obtains
