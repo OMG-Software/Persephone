@@ -143,6 +143,115 @@ impl RestartHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calls::readiness::tests::signed_in;
+    use matrix_sdk::ruma::room_id;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path, path_regex, query_param},
+    };
+
+    const STATE_KEY: &str = "_alice_PERSEPHONE";
+    const STATE_PATH: &str =
+        r"^/_matrix/client/v3/rooms/[^/]+/state/org\.matrix\.msc3401\.call\.member/[^/]+$";
+    const UPDATE_PATH: &str = "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/delay-1";
+
+    async fn schedule_answer(server: &MockServer, response: ResponseTemplate) {
+        Mock::given(method("PUT"))
+            .and(path_regex(STATE_PATH))
+            .and(query_param("org.matrix.msc4140.delay", "8000"))
+            .and(body_json(json!({})))
+            .respond_with(response)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    async fn schedule(server: &MockServer) -> Result<DelayedLeave, DelayedError> {
+        let client = signed_in(server).await;
+        DelayedLeave::schedule(&client, room_id!("!call:synthetic.test"), STATE_KEY).await
+    }
+
+    /// GIVEN a homeserver with delayed events WHEN the leave is scheduled,
+    /// restarted, sent and cancelled THEN each request names the delay ID it
+    /// returned and the action, and the leave content is empty.
+    #[tokio::test]
+    async fn given_a_delay_id_when_updated_then_each_action_names_it() {
+        let server = MockServer::start().await;
+        schedule_answer(
+            &server,
+            ResponseTemplate::new(200).set_body_json(json!({ "delay_id": "delay-1" })),
+        )
+        .await;
+        for action in ["restart", "send", "cancel"] {
+            Mock::given(method("POST"))
+                .and(path(UPDATE_PATH))
+                .and(body_json(json!({ "action": action })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let leave = schedule(&server).await.unwrap();
+        assert_eq!(format!("{leave:?}"), "DelayedLeave { .. }");
+        let client = signed_in(&server).await;
+        assert_eq!(leave.restart(&client).await, Ok(()));
+        assert_eq!(leave.send_now(&client).await, Ok(()));
+        assert_eq!(leave.cancel(&client).await, Ok(()));
+    }
+
+    /// GIVEN a delay ID that is empty or longer than the limit WHEN the leave
+    /// is scheduled THEN it is refused as a bad ID.
+    #[tokio::test]
+    async fn given_an_unusable_delay_id_then_scheduling_fails() {
+        for id in [String::new(), "d".repeat(MAX_DELAY_ID_BYTES + 1)] {
+            let server = MockServer::start().await;
+            schedule_answer(
+                &server,
+                ResponseTemplate::new(200).set_body_json(json!({ "delay_id": id })),
+            )
+            .await;
+            assert_eq!(schedule(&server).await, Err(DelayedError::BadId));
+        }
+    }
+
+    /// GIVEN a homeserver that refuses the request WHEN the leave is
+    /// scheduled or restarted THEN the error is a refusal, with no server
+    /// text.
+    #[tokio::test]
+    async fn given_a_matrix_error_then_the_request_is_refused() {
+        let server = MockServer::start().await;
+        let refusal = ResponseTemplate::new(400)
+            .set_body_json(json!({ "errcode": "M_UNRECOGNIZED", "error": "no delayed events" }));
+        schedule_answer(&server, refusal.clone()).await;
+        assert_eq!(schedule(&server).await, Err(DelayedError::Refused));
+        Mock::given(method("POST"))
+            .and(path(UPDATE_PATH))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(json!({ "errcode": "M_NOT_FOUND", "error": "gone" })),
+            )
+            .mount(&server)
+            .await;
+        let client = signed_in(&server).await;
+        let leave = DelayedLeave {
+            delay_id: "delay-1".to_owned(),
+        };
+        assert_eq!(leave.restart(&client).await, Err(DelayedError::Refused));
+    }
+
+    /// GIVEN an answer that is not a Matrix response WHEN the leave is
+    /// scheduled THEN the error is a network failure, not a refusal.
+    #[tokio::test]
+    async fn given_an_unreadable_answer_then_it_is_a_network_failure() {
+        let server = MockServer::start().await;
+        schedule_answer(
+            &server,
+            ResponseTemplate::new(200).set_body_string("not json"),
+        )
+        .await;
+        assert_eq!(schedule(&server).await, Err(DelayedError::Network));
+    }
 
     /// GIVEN a restart that failed once WHEN the next one works THEN the
     /// count starts again and the call goes on.

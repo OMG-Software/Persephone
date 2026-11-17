@@ -149,6 +149,22 @@ def _extract(archive, destination):
                 shutil.copyfileobj(source, output, CHUNK)
 
 
+def cache_dirs(root, tag, key):
+    """The tag's cache directory and the platform's directory in it. Both
+    come from the pins file, which `load_pins` checks; this check also keeps
+    them inside `.local/cache/webrtc` if a value ever skips that check."""
+    base = os.path.realpath(os.path.join(root, ".local", "cache", "webrtc"))
+    cache = os.path.realpath(os.path.join(base, tag))
+    target = os.path.realpath(os.path.join(cache, key))
+    if (
+        os.path.commonpath([base, target]) != base
+        or os.path.dirname(cache) != base
+        or os.path.dirname(target) != cache
+    ):
+        raise WebrtcError(f"libwebrtc cache path for {tag!r}/{key!r} leaves .local/cache/webrtc")
+    return Path(cache), Path(target)
+
+
 def ensure(root, *, key=None, opener=None, offline=False, pins_path=PINS, announce=print):
     """Returns the directory `LK_CUSTOM_WEBRTC` must name, downloading and
     verifying the archive first unless a verified copy is cached."""
@@ -157,8 +173,7 @@ def ensure(root, *, key=None, opener=None, offline=False, pins_path=PINS, announ
     asset = pins["assets"].get(key)
     if asset is None:
         raise WebrtcError(f"no pinned libwebrtc archive for {key}")
-    cache = Path(root) / ".local/cache/webrtc" / pins["tag"]
-    target = cache / key
+    cache, target = cache_dirs(root, pins["tag"], key)
     if _marker_matches(target, asset["sha256"]):
         return _library_root(target / "files")
     if offline:

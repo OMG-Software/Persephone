@@ -168,3 +168,117 @@ impl CallHost for Unsupported {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    /// A worker process that records kills and answers `wait_exit` with
+    /// `exits`.
+    #[derive(Default)]
+    struct FakeProcess {
+        exits: bool,
+        kills: AtomicUsize,
+        waits: Mutex<Vec<Duration>>,
+    }
+
+    impl WorkerProcess for Arc<FakeProcess> {
+        fn kill(&self) {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wait_exit(&self, timeout: Duration) -> bool {
+            self.waits.lock().unwrap().push(timeout);
+            self.exits
+        }
+    }
+
+    fn link(
+        exits: bool,
+        queue: usize,
+    ) -> (CallWorkerLink, mpsc::Receiver<ToWorker>, Arc<FakeProcess>) {
+        let (commands, received) = mpsc::channel(queue);
+        let (_events_tx, events) = mpsc::channel(1);
+        let process = Arc::new(FakeProcess {
+            exits,
+            ..FakeProcess::default()
+        });
+        let link = CallWorkerLink::from_parts(commands, events, Box::new(Arc::clone(&process)));
+        (link, received, process)
+    }
+
+    /// GIVEN a platform without reviewed call containment WHEN a call starts
+    /// or asks to bypass the proxy THEN it is refused.
+    #[test]
+    fn given_an_unsupported_platform_then_calls_are_refused() {
+        let host = Unsupported;
+        assert!(!host.supported());
+        assert!(!host.confirm_direct_connection());
+        assert_eq!(host.start().err(), Some(StartError::Unsupported));
+    }
+
+    /// GIVEN each start error WHEN shown THEN it is a distinct fixed text,
+    /// and the containment bits are in hexadecimal.
+    #[test]
+    fn given_start_errors_then_each_text_is_distinct() {
+        let texts: Vec<String> = [
+            StartError::Unsupported,
+            StartError::NoExe,
+            StartError::Launch,
+            StartError::Containment(0x12),
+            StartError::NotReady,
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let unique: std::collections::HashSet<&String> = texts.iter().collect();
+        assert_eq!(unique.len(), texts.len());
+        assert_eq!(texts[3], "the call worker is not contained (0x12)");
+    }
+
+    /// GIVEN a full command queue WHEN another message is sent THEN it is
+    /// refused at once; GIVEN a worker that has gone THEN sending is refused.
+    #[test]
+    fn given_a_full_or_closed_queue_then_send_is_refused() {
+        let (link, received, _) = link(true, 1);
+        assert_eq!(link.send(ToWorker::Leave), Ok(()));
+        assert_eq!(link.send(ToWorker::Leave), Err(WorkerGone));
+        drop(received);
+        assert_eq!(link.send(ToWorker::Leave), Err(WorkerGone));
+    }
+
+    /// GIVEN a worker that exits after Leave WHEN the link finishes THEN Leave
+    /// is sent, the wait uses the timeout, and only the drop kills it.
+    #[test]
+    fn given_a_worker_that_exits_when_finished_then_it_is_asked_to_leave() {
+        let (link, mut received, process) = link(true, 4);
+        link.finish(Duration::from_secs(3));
+        assert!(matches!(received.try_recv(), Ok(ToWorker::Leave)));
+        assert_eq!(*process.waits.lock().unwrap(), [Duration::from_secs(3)]);
+        assert_eq!(process.kills.load(Ordering::SeqCst), 1);
+    }
+
+    /// GIVEN a worker that does not exit WHEN the link finishes THEN it is
+    /// killed, and the drop kills it again.
+    #[test]
+    fn given_a_worker_that_stays_when_finished_then_it_is_killed() {
+        let (link, _received, process) = link(false, 4);
+        link.finish(Duration::from_millis(1));
+        assert_eq!(process.kills.load(Ordering::SeqCst), 2);
+    }
+
+    /// GIVEN a kill handle WHEN it is used while the link is alive THEN it
+    /// ends the same process the link owns.
+    #[test]
+    fn given_a_kill_handle_then_it_ends_the_same_process() {
+        let (link, _received, process) = link(true, 4);
+        link.kill_handle().kill();
+        assert_eq!(process.kills.load(Ordering::SeqCst), 1);
+        drop(link);
+        assert_eq!(process.kills.load(Ordering::SeqCst), 2);
+    }
+}

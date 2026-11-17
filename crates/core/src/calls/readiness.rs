@@ -151,7 +151,7 @@ pub async fn readiness(client: &matrix_sdk::Client) -> Result<CallReadiness, Rea
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use matrix_sdk::{
         Client, SessionMeta, SessionTokens, authentication::matrix::MatrixSession,
@@ -166,7 +166,8 @@ mod tests {
     const TURN_PATH: &str = "/_matrix/client/v3/voip/turnServer";
     const RTC_PATH: &str = "/_matrix/client/unstable/org.matrix.msc4143/rtc/transports";
 
-    async fn signed_in(server: &MockServer) -> Client {
+    /// A client signed in to `server` as `@alice:synthetic.test`, without retries.
+    pub(in crate::calls) async fn signed_in(server: &MockServer) -> Client {
         Mock::given(method("GET"))
             .and(path("/_matrix/client/versions"))
             .respond_with(

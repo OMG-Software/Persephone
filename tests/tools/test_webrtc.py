@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -214,6 +215,14 @@ class WebrtcTest(unittest.TestCase):
         second, opener = self.ensure(data, offline=True)
         self.assertEqual(first, second)
         self.assertEqual(opener.urls, [])
+
+    def test_given_a_tag_or_key_that_leaves_the_cache_then_the_path_is_refused(self):
+        base = Path(os.path.realpath(self.root / ".local/cache/webrtc"))
+        cache, target = webrtc.cache_dirs(self.root, "webrtc-test", KEY)
+        self.assertEqual((cache, target), (base / "webrtc-test", base / "webrtc-test" / KEY))
+        for tag, key in [("..", KEY), ("../outside", KEY), ("webrtc-test", ".."), ("webrtc-test", "../../x"), ("a/b", KEY)]:
+            with self.subTest(tag=tag, key=key), self.assertRaises(webrtc.WebrtcError):
+                webrtc.cache_dirs(self.root, tag, key)
 
     def test_given_an_http_url_then_nothing_is_downloaded(self):
         data = good_zip()
