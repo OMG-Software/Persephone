@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-acknowledge-modules"
+description = "Enables the acknowledge_modules command without any pre-configured scope."
+commands.allow = ["acknowledge_modules"]
+
+[[permission]]
+identifier = "deny-acknowledge-modules"
+description = "Denies the acknowledge_modules command without any pre-configured scope."
+commands.deny = ["acknowledge_modules"]

@@ -12,11 +12,16 @@ import type {
   SyncMode,
   ImagePick,
   ImageView,
+  ModuleProcess,
+  ModuleScanState,
+  ModuleSignature,
   PendingMessage,
   RoomChange,
   RoomPicture,
   RoomSettings,
   RoomSummary,
+  ThirdPartyModule,
+  ThirdPartyModules,
   TimelineItem,
 } from "../generated/contracts.js";
 
@@ -173,6 +178,26 @@ const unknownAttachment: AttachmentKind = "videos";
 const unknownSync: SyncMode = "polling";
 // @ts-expect-error missing health observations must be explicit null
 const missingHealth: ConnectionHealth = { accountState: "signed_out", storeState: "protected", syncMode: "unknown", consecutiveFailures: 0, retryDelayMs: 0, lastError: null };
+// @ts-expect-error only the defined module scan states are accepted
+const unknownScan: ModuleScanState = "done";
+// @ts-expect-error only the defined module signatures are accepted
+const unknownSignature: ModuleSignature = "signed";
+// @ts-expect-error only the defined module processes are accepted
+const unknownProcess: ModuleProcess = "webview";
+// @ts-expect-error a missing signer must be explicit null
+const missingSigner: ThirdPartyModule = { id: "a", fileName: "a.dll", path: "C:\a.dll", signature: "unsigned", processes: ["core"], firstSeen: 1, acknowledged: false };
+// @ts-expect-error a missing scan time must be explicit null
+const missingScan: ThirdPartyModules = { state: "pending", modules: [], truncated: false, incomplete: false };
+const validModules: ThirdPartyModules = { state: "ready", scannedAt: null, modules: [{ id: "a", fileName: "a.dll", path: "C:\a.dll", signer: null, signature: "unsigned", processes: ["core", "web_view"], firstSeen: 1, acknowledged: false }], truncated: false, incomplete: false };
+// @ts-expect-error the incomplete flag is required
+const missingIncomplete: ThirdPartyModules = { state: "pending", scannedAt: null, modules: [], truncated: false };
+void unknownScan;
+void unknownSignature;
+void unknownProcess;
+void missingSigner;
+void missingScan;
+void missingIncomplete;
+void validModules;
 void missingFilter;
 void validFilters;
 void bigintFilter;

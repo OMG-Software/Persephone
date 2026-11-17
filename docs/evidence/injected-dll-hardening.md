@@ -2,7 +2,13 @@
 
 Checked 16 November 2026 on Windows 11 Pro x64 (build 26300), debug builds,
 rustc 1.99.1, WebView2 runtime 157.0.4341.46. Source: commit `f6b84b8` plus
-the hardening change only, built in a separate worktree. **Result: the core
+the hardening change only, built in a separate worktree. That tree was then
+committed unchanged as `e3cb522`; its `Cargo.lock` is blob `f1d06a4`, the same
+as in `f6b84b8`. Both commits are local and unpublished: `f6b84b8` belongs to
+other, unmerged work. The published equivalent is `7b3e00d` on the pull
+request branch, on a later `main`. Its `harden.rs` files, `crates/core/src/main.rs`
+and `src-tauri/src/lib.rs` are byte-identical to `e3cb522`. A labelled rerun on
+the published branch is under [Tests](#tests). **Result: the core
 and the UI now refuse images not signed through Microsoft and all
 extension-point DLLs, including global window hooks, from the first statement
 of `main`. The demo app started and ran with both policies on. The live block
@@ -23,7 +29,8 @@ Owner decisions (16 November 2026):
 * Keep refusing DLLs not signed through Microsoft.
 * Do not stop Persephone from running beside anti-malware software. Report
   every other DLL that loads, in an in-app panel with a notice for new ones.
-  The report is not built yet.
+  The report is recorded separately in
+  [third-party module report](third-party-module-report.md).
 
 ## Design
 
@@ -44,12 +51,35 @@ Owner decisions (16 November 2026):
 * The UI crate does not depend on the core, so the 30-line function exists
   twice. No manifest or lockfile changed: `Win32_System_Threading` was already
   enabled in both crates.
+* A third policy, `ProcessImageLoadPolicy`, was added later. See
+  [Image-load policy](#image-load-policy). The records above and below it
+  describe the two-policy run.
 
 ## What the signature policy admits on this host
 
 A probe set `MicrosoftSignedOnly` and then mapped each DLL without running it
 (`LoadLibraryExW` with `DONT_RESOLVE_DLL_REFERENCES`). A control run without the
 policy loaded all five.
+
+Provenance (recorded on 16 November 2026 from the session record; not rerun):
+
+* The probe is the standalone script in [the appendix](#appendix-signer-probe).
+  It uses no Persephone source or build, only Python 3.14.4 `ctypes` and
+  `kernel32`.
+* It ran twice, as `python -I signed_probe.py control <dll>...` and
+  `python -I signed_probe.py block <dll>...`, with these five paths:
+  * `C:\Program Files\Sophos\Sophos AMSI Protection\SophosAmsiProvider.dll`
+  * `C:\Windows\System32\hmpalert.dll`
+  * `C:\Program Files (x86)\RivaTuner Statistics Server\RTSSHooks64.dll`
+  * `C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.25110.6-0\MpOAV.dll`
+  * `C:\Windows\System32\msimg32.dll`
+* Both runs completed and printed one line for each DLL. The `block` run did
+  not stop at its `policy not set` exit, so the policy was in effect. The
+  numeric exit status was not captured separately.
+* The signers came from each file's Authenticode signer chain, read on the same
+  host after the probe.
+* The raw output was not kept. The table below is the sanitized result; it
+  contains no user paths or identifiers.
 
 | DLL | Signer (issuing CA) | With the policy |
 | --- | --- | --- |
@@ -94,6 +124,39 @@ persephone-core --bin persephone` (13 passed), `cargo test -p
 persephone-desktop` (15 lib, 34 IPC) and default-feature Clippy for both
 packages, all passing.
 
+Source comparison record, taken on 16 November 2026 with `git rev-parse
+<commit>:<path>`. The tested commit `e3cb522` is local and unpublished; the
+published column can be checked against `7b3e00d`:
+
+| Path | Blob at `e3cb522` (tested) | Blob at `7b3e00d` (published) |
+| --- | --- | --- |
+| `crates/core/src/platform/windows/harden.rs` | `63958ff64e59ee144040693097afe942fb4c8668` | same |
+| `src-tauri/src/harden.rs` | `2c39cda3ae355fbfdea6e3b1f2f0e3aa2e81a170` | same |
+| `crates/core/src/main.rs` | `da6dfa8d3e5bd3a17c6f89e607db832b9eef9614` | same |
+| `src-tauri/src/lib.rs` | `557a16706a2c66287661936f6101760532b01c6d` | same |
+| `crates/core/src/platform/windows/mod.rs` | `7778a54bfcdaca413da97d18a37ad2e08e140b01` | `2ed80f9f7f96614a4db8ab5297d708fa3351482a` |
+| `docs/README.md` | `41efe79c193e014460d308ba2da8aef665d739d3` | `709cb5233233d4ec6ad33c3c93c77955c10ead3a` |
+| `Cargo.lock` | `f1d06a4e105381d64ca35f31bed414cca8f3cf14` | `adf1bca4c816be8111958b8b1bc2813086114524` |
+
+The last three differ because the bases differ: in each, the hardening change
+adds the same lines (one `pub mod harden;` line, one index line). The tested
+lockfile is not published, so its identity cannot be checked independently.
+The signer probe does not depend on it: the probe uses no Persephone source,
+build or lockfile, only Python and the host's DLLs.
+
+Rerun on 16 November 2026 on the published pull request branch at `bfd71ef`
+(`7b3e00d` plus the test-path fix below; `Cargo.lock` blob `adf1bca`), same
+host, debug, `--locked --offline`, worktree `.local/wt-pr`,
+`CARGO_TARGET_DIR=.local/build/rust-pr`. The whole run exited with status 0:
+
+* `cargo fmt -p persephone-core -p persephone-desktop -- --check`: passed.
+* `cargo test --locked --offline -p persephone-core harden`: 1 passed, 1 ignored.
+* `cargo test --locked --offline -p persephone-desktop --lib harden`: 1 passed, 1 ignored.
+* `cargo clippy --locked --offline -p persephone-core -p persephone-desktop --all-targets -- -D warnings`: passed.
+
+The fix in `bfd71ef` builds the test DLL paths from `GetSystemDirectoryW`
+instead of a fixed `C:\Windows\System32`. The live run below was not repeated.
+
 ## Live run
 
 `persephone.exe --demo` from the worktree build, with
@@ -106,6 +169,51 @@ packages, all passing.
 * modules outside Windows folders: the executables, `hmpalert.dll` in both, and
   the Microsoft-signed `EmbeddedBrowserWebView.dll` in the UI;
 * stopping the core left no process of the run.
+
+## Image-load policy
+
+Added on 16 November 2026, on branch `claude/image-load-and-capture`, stacked
+on the [third-party module report](third-party-module-report.md). This is a
+later change and a separate run.
+
+* Both `block_injected_dlls` functions now set and read back a third policy,
+  `ProcessImageLoadPolicy`, between the other two, with three flags:
+  * `NoRemoteImages`: no image from a network share;
+  * `NoLowMandatoryLabel`: no image file labelled low integrity, such as one
+    a sandboxed or low-integrity process wrote;
+  * `PreferSystem32Images`: DLL searches look in System32 first, so a
+    Microsoft-signed DLL planted next to the executable is not loaded in place
+    of the system copy.
+* The read-back requires all three bits, not only one. A failure still exits
+  with status 2.
+* No manifest or lockfile changed. `ProcessImageLoadPolicy` is in the already
+  enabled `Win32_System_Threading` feature.
+
+The two child-process tests now also check the new policy:
+
+* Before hardening, the child loads an intact copy of `version.dll` labelled
+  low integrity with `icacls /setintegritylevel low` (negative control: it
+  loads).
+* After hardening, a second low-labelled copy fails with
+  `ERROR_ACCESS_DENIED` (5), and an unlabelled intact copy still loads. The
+  unlabelled copy shows that the refusal comes from the label, not the copy.
+* The copies are written under the system temporary folder. `icacls` could not
+  set the label on the `O:` drive used for the worktree (exit 5), so a probe
+  folder on a drive without label support would fail the test, not pass it.
+
+`NoRemoteImages` and `PreferSystem32Images` have no test. A remote image needs
+a network share, and a planted-DLL test needs a writable application folder
+with a name that the process loads by search.
+
+Checks: `cargo test --locked --offline -p persephone-core --lib harden` and
+`cargo test --locked --offline -p persephone-desktop --lib harden` (each 1
+passed, 1 ignored), `cargo fmt --all -- --check` and core Clippy passed
+first; the full list of the branch is recorded under
+[capture protection](capture-protection.md#checks-run), and includes both
+tests. In the live demo run of that branch, the core and the UI kept
+running. Because a policy that is not in effect exits with status 2, both
+processes set and read back all three policies. This is inferred from that
+exit rule; the policies were not read from outside the processes.
 
 ## Limits
 
@@ -122,3 +230,40 @@ packages, all passing.
 * Not checked under the policies: the native file and credential dialogs, the
   passkey prompt, a real sign-in, and an RTSS injection attempt.
 * Debug builds on one Windows host only.
+
+## Appendix: signer probe
+
+The script as run (`signed_probe.py`):
+
+```python
+"""Tries to map each DLL given as an image, with or without the
+MicrosoftSignedOnly binary signature policy, without running its code
+(DONT_RESOLVE_DLL_REFERENCES: no DllMain, no imports resolved).
+
+Usage: python -I signed_probe.py control|block <dll> [<dll> ...]
+Prints one line per DLL: loaded, or the Windows error code.
+"""
+import ctypes
+import sys
+from ctypes import wintypes
+
+mode, paths = sys.argv[1], sys.argv[2:]
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.LoadLibraryExW.restype = wintypes.HMODULE
+k32.LoadLibraryExW.argtypes = [wintypes.LPCWSTR, wintypes.HANDLE, wintypes.DWORD]
+k32.FreeLibrary.argtypes = [wintypes.HMODULE]
+DONT_RESOLVE_DLL_REFERENCES = 0x1
+
+if mode == "block":
+    flags = wintypes.DWORD(1)  # MicrosoftSignedOnly
+    if not k32.SetProcessMitigationPolicy(8, ctypes.byref(flags), 4):
+        sys.exit(f"policy not set: {ctypes.get_last_error()}")
+
+for path in paths:
+    handle = k32.LoadLibraryExW(path, None, DONT_RESOLVE_DLL_REFERENCES)
+    if handle:
+        print(f"{mode:7} loaded   {path}")
+        k32.FreeLibrary(handle)
+    else:
+        print(f"{mode:7} refused  {path}  (error {ctypes.get_last_error()})")
+```

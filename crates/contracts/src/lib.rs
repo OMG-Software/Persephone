@@ -1165,6 +1165,133 @@ pub struct NewSessions {
     pub truncated: bool,
 }
 
+/// Whether a module loaded into Persephone has a signature that verifies.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleSignature {
+    Valid,
+    /// No embedded or catalog signature.
+    Unsigned,
+    /// Signed, but the signature does not verify.
+    Invalid,
+}
+
+/// A Persephone process a module is loaded in. The order is the display
+/// order.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleProcess {
+    /// The core, which holds the keys.
+    Core,
+    /// The keyless UI host.
+    Ui,
+    /// A WebView2 process of the UI.
+    WebView,
+}
+
+/// Whether the core has listed the modules yet.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleScanState {
+    /// The first scan has not finished.
+    Pending,
+    Ready,
+    /// This platform cannot list modules.
+    Unsupported,
+}
+
+/// A module (DLL or EXE) loaded into Persephone that is not an expected one.
+/// Text fields are projected like names (ADR-0026); the file name and signer
+/// are at most 128 characters.
+#[derive(Clone, Debug, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ThirdPartyModule {
+    /// Opaque acknowledgement key, at most `MAX_MODULE_ID_BYTES`.
+    pub id: String,
+    pub file_name: String,
+    /// The full path, at most `MAX_MODULE_PATH_BYTES`, cut with "…".
+    pub path: String,
+    /// The verified signer's simple name. Only for `Valid`; otherwise null.
+    pub signer: Option<String>,
+    pub signature: ModuleSignature,
+    /// The processes it is loaded in: sorted, unique, one to three.
+    pub processes: Vec<ModuleProcess>,
+    /// When this core process first saw it.
+    #[ts(type = "number")]
+    pub first_seen: UnixMillis,
+    /// The user marked it as reviewed.
+    pub acknowledged: bool,
+}
+
+impl<'de> Deserialize<'de> for ThirdPartyModule {
+    /// A missing signer is explicit null, not a missing protocol field.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            id: String,
+            file_name: String,
+            path: String,
+            signer: RequiredNullableString,
+            signature: ModuleSignature,
+            processes: Vec<ModuleProcess>,
+            first_seen: UnixMillis,
+            acknowledged: bool,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            id: input.id,
+            file_name: input.file_name,
+            path: input.path,
+            signer: input.signer.into_option(),
+            signature: input.signature,
+            processes: input.processes,
+            first_seen: input.first_seen,
+            acknowledged: input.acknowledged,
+        })
+    }
+}
+
+/// Reply of `third_party_modules` and `acknowledge_modules`: the modules in
+/// the report, at most `MAX_THIRD_PARTY_MODULES`: unacknowledged first, then
+/// by lowercase file name, then by path. `truncated` says more exist.
+/// `incomplete` says the last scan could not read every process, or every
+/// module of one, so code can be loaded that the list does not show.
+#[derive(Clone, Debug, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ThirdPartyModules {
+    pub state: ModuleScanState,
+    /// Null until the first scan finishes.
+    #[ts(type = "number | null")]
+    pub scanned_at: Option<UnixMillis>,
+    pub modules: Vec<ThirdPartyModule>,
+    pub truncated: bool,
+    pub incomplete: bool,
+}
+
+impl<'de> Deserialize<'de> for ThirdPartyModules {
+    /// A missing scan time is explicit null, not a missing protocol field.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Input {
+            state: ModuleScanState,
+            scanned_at: RequiredNullable<UnixMillis>,
+            modules: Vec<ThirdPartyModule>,
+            truncated: bool,
+            incomplete: bool,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            state: input.state,
+            scanned_at: input.scanned_at.into_option(),
+            modules: input.modules,
+            truncated: input.truncated,
+            incomplete: input.incomplete,
+        })
+    }
+}
+
 /// Reply of `account_settings`: this account's settings, kept in its
 /// encrypted profile. A setting never saved has its default.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -1204,6 +1331,10 @@ pub struct AccountSettings {
     /// server that holds the picture, that this account looked at it. Off by
     /// default (ADR-0041).
     pub load_room_pictures: bool,
+    /// Hide the main window from screenshots, screen recording and screen
+    /// sharing that use the Windows capture APIs. On by default. Windows only;
+    /// before Windows 10 version 2004 a capture shows it black (ADR-0045).
+    pub capture_protection: bool,
     /// Which kinds of room changes the timeline shows. All on by default.
     pub timeline_events: TimelineEvents,
     /// The colours of the interface. Grey and orange by default.
@@ -1332,6 +1463,7 @@ impl Default for AccountSettings {
             idle_lock_minutes: 0,
             notification_names: true,
             load_room_pictures: false,
+            capture_protection: true,
             timeline_events: TimelineEvents::default(),
             theme: Theme::Orange,
         }
@@ -2255,6 +2387,11 @@ pub fn generated_typescript() -> String {
         format!("export {}", HomeserverFound::decl(&config)),
         format!("export {}", NewSession::decl(&config)),
         format!("export {}", NewSessions::decl(&config)),
+        format!("export {}", ModuleSignature::decl(&config)),
+        format!("export {}", ModuleProcess::decl(&config)),
+        format!("export {}", ModuleScanState::decl(&config)),
+        format!("export {}", ThirdPartyModule::decl(&config)),
+        format!("export {}", ThirdPartyModules::decl(&config)),
         format!("export {}", TimelineEvents::decl(&config)),
         format!("export {}", Theme::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
@@ -2459,6 +2596,56 @@ mod personal_contract_tests {
                 }
             }
         }
+    }
+
+    /// GIVEN a module report WHEN it crosses the wire THEN it round-trips,
+    /// refuses extra fields, and a missing or wrong nullable field fails.
+    #[test]
+    fn module_report_round_trips_and_requires_explicit_nulls() {
+        let module = serde_json::json!({"id":"a.dll\u{1f}unsigned","fileName":"a.dll","path":"C:\\x\\a.dll","signer":null,"signature":"unsigned","processes":["core","web_view"],"firstSeen":1,"acknowledged":false});
+        let report = serde_json::json!({"state":"ready","scannedAt":null,"modules":[module],"truncated":false,"incomplete":true});
+        let decoded: ThirdPartyModules = serde_json::from_value(report.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), report);
+        assert_eq!(decoded.modules[0].processes[1], ModuleProcess::WebView);
+        strict_round_trip(decoded.modules[0].clone());
+        strict_round_trip(decoded);
+        for field in ["scannedAt", "modules", "truncated", "incomplete", "state"] {
+            let mut missing = report.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ThirdPartyModules>(missing).is_err());
+        }
+        let mut stamped = report.clone();
+        stamped["scannedAt"] = 9_007_199_254_740_991_u64.into();
+        assert!(serde_json::from_value::<ThirdPartyModules>(stamped).is_ok());
+        for bad in [
+            serde_json::json!(9_007_199_254_740_992_u64),
+            serde_json::json!(-1),
+            serde_json::json!("1"),
+        ] {
+            let mut input = report.clone();
+            input["scannedAt"] = bad;
+            assert!(serde_json::from_value::<ThirdPartyModules>(input).is_err());
+        }
+        let wire = serde_json::to_string(&report).unwrap();
+        let duplicate = format!("{},\"scannedAt\":null}}", &wire[..wire.len() - 1]);
+        assert!(serde_json::from_str::<ThirdPartyModules>(&duplicate).is_err());
+        for field in ["signer", "id", "firstSeen", "acknowledged"] {
+            let mut input = report.clone();
+            input["modules"][0].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ThirdPartyModules>(input).is_err());
+        }
+        let mut signed = report.clone();
+        signed["modules"][0]["signer"] = "Example Ltd".into();
+        signed["modules"][0]["signature"] = "valid".into();
+        assert!(serde_json::from_value::<ThirdPartyModules>(signed).is_ok());
+        let mut wrong = report.clone();
+        wrong["modules"][0]["signer"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<ThirdPartyModules>(wrong).is_err());
+        for bad in ["\"pending2\"", "\"Ready\""] {
+            assert!(serde_json::from_str::<ModuleScanState>(bad).is_err());
+        }
+        assert!(serde_json::from_str::<ModuleProcess>("\"webview\"").is_err());
+        assert!(serde_json::from_str::<ModuleSignature>("\"signed\"").is_err());
     }
 
     #[test]

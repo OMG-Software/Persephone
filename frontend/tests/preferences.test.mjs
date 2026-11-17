@@ -44,6 +44,7 @@ test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes ar
     idleLockMinutes: 0,
     notificationNames: true,
     loadRoomPictures: false,
+    captureProtection: true,
     timelineEvents: {
       joins: true,
       leaves: true,

@@ -134,16 +134,23 @@ persephone-media-broker = { path = "../media-broker" }
 # picked image; UI_Controls_Dialogs: the native file dialog (GetOpenFileNameW);
 # UI_Shell: the default profile's base folder (SHGetKnownFolderPath) and
 # opening a confirmed link (ShellExecuteW); UI_Input_KeyboardAndMouse and
-# System_SystemInformation: the idle time (GetLastInputInfo, GetTickCount).
+# System_SystemInformation: the idle time (GetLastInputInfo, GetTickCount);
+# Security_WinTrust, Security_Cryptography_Catalog and System_ProcessStatus: the
+# loaded-module report (WinVerifyTrust, catalog lookup, module listing;
+# Cryptography_Sip gates the WTHelper* signer functions).
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Credentials",
   "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
+  "Win32_Security_WinTrust",
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
   "Win32_System_JobObjects",
+  "Win32_System_ProcessStatus",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_UI_Controls_Dialogs",

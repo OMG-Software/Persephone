@@ -36,6 +36,7 @@ struct Stored {
     idle_lock_minutes: u16,
     notification_names: bool,
     load_room_pictures: bool,
+    capture_protection: bool,
     /// Kept as a map of switch names, read by [`timeline_events`].
     timeline_events: Map<String, Value>,
     /// Kept as any value, read by [`theme`]: a theme name from another
@@ -61,6 +62,7 @@ impl From<AccountSettings> for Stored {
             idle_lock_minutes: settings.idle_lock_minutes,
             notification_names: settings.notification_names,
             load_room_pictures: settings.load_room_pictures,
+            capture_protection: settings.capture_protection,
             timeline_events: match serde_json::to_value(settings.timeline_events) {
                 Ok(Value::Object(switches)) => switches,
                 _ => Map::new(),
@@ -105,6 +107,7 @@ impl From<Stored> for AccountSettings {
             idle_lock_minutes: stored.idle_lock_minutes,
             notification_names: stored.notification_names,
             load_room_pictures: stored.load_room_pictures,
+            capture_protection: stored.capture_protection,
             timeline_events: timeline_events(&stored.timeline_events),
             theme: theme(&stored.theme),
         };
@@ -178,6 +181,7 @@ mod tests {
             idle_lock_minutes: 30,
             notification_names: false,
             load_room_pictures: true,
+            capture_protection: false,
             timeline_events: TimelineEvents {
                 leaves: false,
                 room_picture: false,
@@ -264,6 +268,14 @@ mod tests {
         assert!(
             decode(br#"{"desktop_notifications":true}"#).notification_names,
             "a record from before the setting names the sender, as before"
+        );
+        assert!(
+            decode(br#"{"notification_names":true,"load_room_pictures":true}"#).capture_protection,
+            "a record from before the setting hides the window from capture"
+        );
+        assert!(
+            !decode(br#"{"capture_protection":false}"#).capture_protection,
+            "a stored off stays off"
         );
         assert!(
             !decode(br#"{"notification_names":true}"#).load_room_pictures,

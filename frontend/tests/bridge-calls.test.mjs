@@ -132,6 +132,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           idleLockMinutes: 15,
           notificationNames: false,
           loadRoomPictures: true,
+          captureProtection: false,
           timelineEvents: { ...ALL_SHOWN, leaves: false },
           theme: 'red'
         }),
@@ -147,6 +148,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           idleLockMinutes: 15,
           notificationNames: false,
           loadRoomPictures: true,
+          captureProtection: false,
           timelineEvents: { ...ALL_SHOWN, leaves: false },
           theme: 'red'
         }
@@ -155,6 +157,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.loadRoomPicture('!r:s'), 'load_room_picture', { roomId: '!r:s' }],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
     [() => bridge.newSessions(), 'new_sessions', {}],
+    [() => bridge.thirdPartyModules(), 'third_party_modules', {}],
+    [() => bridge.acknowledgeModules(['a.dllunsigned']), 'acknowledge_modules', { ids: ['a.dllunsigned'] }],
     [() => bridge.signInWithOidc('https://e.org'), 'sign_in_with_oidc', { homeserver: 'https://e.org' }],
     [() => bridge.proxySetting(), 'proxy_setting', {}],
     [() => bridge.setProxySetting('127.0.0.1:9050'), 'set_proxy_setting', { proxy: '127.0.0.1:9050' }],
@@ -225,6 +229,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       idleLockMinutes: 0,
       notificationNames: true,
       loadRoomPictures: false,
+      captureProtection: true,
       timelineEvents: { ...ALL_SHOWN, polls: false },
       theme: 'blue',
       accent: 'green'
@@ -241,6 +246,7 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       idleLockMinutes: 0,
       notificationNames: true,
       loadRoomPictures: false,
+      captureProtection: true,
       timelineEvents: ALL_SHOWN,
       theme: 'blue'
     }
@@ -328,7 +334,7 @@ test('GIVEN a paste that is not one PNG or JPEG of 1 byte to 20 MiB WHEN attache
   assert.deepEqual(sent, []);
 });
 
-test('GIVEN session channel messages WHEN delivered THEN each reaches its own callback and an unknown message counts as a session change', async () => {
+test('GIVEN session channel messages WHEN delivered THEN each reaches its own callback and only an unknown message counts as a session change', async () => {
   let channel;
   mockIPC((command, args) => {
     assert.equal(command, 'watch_session');
@@ -340,10 +346,11 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
     () => seen.push('session'),
     () => seen.push('rooms'),
     () => seen.push('security'),
+    () => seen.push('modules'),
     () => seen.push('calls')
   );
-  for (const message of ['calls', 'rooms', 'security', 'session', 'something-new', 'calls']) {
+  for (const message of ['calls', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls']) {
     channel.onmessage(message);
   }
-  assert.deepEqual(seen, ['calls', 'rooms', 'security', 'session', 'session', 'calls']);
+  assert.deepEqual(seen, ['calls', 'modules', 'rooms', 'security', 'session', 'session', 'calls']);
 });

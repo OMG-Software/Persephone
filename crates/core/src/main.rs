@@ -68,6 +68,19 @@ use std::{
 
 mod ui_watch;
 
+/// Lists the modules loaded into Persephone's processes. Only Windows can.
+#[cfg(windows)]
+type Scanner = persephone_core::platform::windows::modules::Scanner;
+#[cfg(not(windows))]
+struct Scanner;
+
+#[cfg(not(windows))]
+impl Scanner {
+    fn new() -> Self {
+        Self
+    }
+}
+
 const DEMO_ROOM: &str = "!planning:example.invalid";
 /// The demo stops after this many messages so memory stays bounded.
 const DEMO_MESSAGES: u32 = 1000;
@@ -77,6 +90,12 @@ const EXIT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCH_PERIOD: Duration = Duration::from_millis(500);
 /// How long a replaced UI tree may take to exit before a new UI starts.
 const REPLACE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the first module scan waits for the page to reach the core.
+#[cfg(windows)]
+const MODULE_READY_WAIT: Duration = Duration::from_secs(10);
+/// How often the modules are listed again.
+#[cfg(windows)]
+const MODULE_SCAN_PERIOD: Duration = Duration::from_secs(30);
 
 /// How one UI run ended.
 enum Run {
@@ -231,9 +250,11 @@ fn run(options: Options) -> ExitCode {
     };
     let host = ui_host::platform();
     let mut retries = ui_watch::Retries::default();
+    // Its signature results are kept between window runs.
+    let mut scanner = Scanner::new();
     let mut switch = None;
     let code = loop {
-        match run_ui(&core, &*host, &mut retries, options.demo_live) {
+        match run_ui(&core, &*host, &mut retries, &mut scanner, options.demo_live) {
             Run::Exit(code) => break code,
             Run::Retry => {
                 eprintln!("persephone: starting the window again");
@@ -281,7 +302,13 @@ fn run(options: Options) -> ExitCode {
     }
 }
 
-fn run_ui(core: &Core, host: &dyn UiHost, retries: &mut ui_watch::Retries, demo_live: bool) -> Run {
+fn run_ui(
+    core: &Core,
+    host: &dyn UiHost,
+    retries: &mut ui_watch::Retries,
+    scanner: &mut Scanner,
+    demo_live: bool,
+) -> Run {
     // The host contains the UI before it creates its web view; a platform
     // without UI containment refuses here.
     let StartedUi { mut child, tree } = match host.start() {
@@ -296,21 +323,33 @@ fn run_ui(core: &Core, host: &dyn UiHost, retries: &mut ui_watch::Retries, demo_
         return Run::Exit(ExitCode::from(2));
     };
     let finished = (Mutex::new(false), Condvar::new());
+    #[cfg(not(windows))]
+    let _ = &scanner;
+    #[cfg(windows)]
+    let ui_pid = child.id();
     let (end, verdict) = thread::scope(|scope| {
         if demo_live {
             scope.spawn(|| demo(core));
         }
         let watcher = scope.spawn(|| watch(core, host, &*tree, &finished, retries));
+        #[cfg(windows)]
+        let scan = scope.spawn(|| scan_modules(core, &*tree, ui_pid, scanner, &finished));
         let end = serve(core, from_ui, to_ui);
         *finished.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
         finished.1.notify_all();
         let verdict = watcher.join().unwrap_or(Verdict::None);
+        // Stop the UI before waiting for the scan thread, which may be in
+        // the middle of a scan.
+        if end != ServeEnd::UiClosed && verdict == Verdict::None {
+            eprintln!("persephone: stopping the UI: {end:?}");
+            let _ = child.kill();
+        }
+        // The report is a transparency aid: a panic in its thread must not
+        // reach the scope, which would skip the shutdown below.
+        #[cfg(windows)]
+        let _ = scan.join();
         (end, verdict)
     });
-    if end != ServeEnd::UiClosed && verdict == Verdict::None {
-        eprintln!("persephone: stopping the UI: {end:?}");
-        let _ = child.kill();
-    }
     let status = child.wait();
     // Closing the tree after the wait ends anything left in it.
     drop(tree);
@@ -377,6 +416,80 @@ fn watch(
         } else {
             Verdict::Close
         };
+    }
+}
+
+/// Waits for `period`, or until the run has finished. Returns `true` once it
+/// has.
+#[cfg(windows)]
+fn finished_within(finished: &(Mutex<bool>, Condvar), period: Duration) -> bool {
+    let (done, wake) = finished;
+    let done = done.lock().unwrap_or_else(|p| p.into_inner());
+    *wake
+        .wait_timeout_while(done, period, |done| !*done)
+        .unwrap_or_else(|p| p.into_inner())
+        .0
+}
+
+/// Lists the third-party modules of the core, the UI and its web view
+/// processes: first once the page has reached the core (or after a time),
+/// then every [`MODULE_SCAN_PERIOD`] until the run has finished. Only this
+/// thread scans, and it never blocks on the stores. Nothing it finds is
+/// printed or logged: paths can contain the user name.
+#[cfg(windows)]
+fn scan_modules(
+    core: &Core,
+    tree: &dyn UiTree,
+    ui_pid: u32,
+    scanner: &mut Scanner,
+    finished: &(Mutex<bool>, Condvar),
+) {
+    use persephone_contracts::ModuleProcess;
+    use persephone_core::platform::windows::modules::ScanTarget;
+
+    let start = Instant::now();
+    while !core.ui_ready() && start.elapsed() < MODULE_READY_WAIT {
+        if finished_within(finished, WATCH_PERIOD) {
+            return;
+        }
+    }
+    let core_pid = std::process::id();
+    loop {
+        let mut targets = vec![
+            ScanTarget {
+                pid: core_pid,
+                process: ModuleProcess::Core,
+            },
+            ScanTarget {
+                pid: ui_pid,
+                process: ModuleProcess::Ui,
+            },
+        ];
+        // When the tree cannot list all its processes, the core, the UI and
+        // the listed ones are still scanned, and the report says it is
+        // incomplete.
+        let web_views = tree.process_ids();
+        let listed = web_views.as_ref().map_or(&[][..], |list| &list.ids[..]);
+        for &pid in listed {
+            if pid != core_pid && pid != ui_pid {
+                targets.push(ScanTarget {
+                    pid,
+                    process: ModuleProcess::WebView,
+                });
+            }
+        }
+        let stopped = || *finished.0.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(result) = scanner.scan_until(&targets, &stopped) else {
+            return;
+        };
+        core.update_modules(
+            result.modules.into_iter().map(Into::into).collect(),
+            result.incomplete || !web_views.as_ref().is_ok_and(|list| list.complete),
+            persephone_core::views::now_millis(),
+        );
+        if finished_within(finished, MODULE_SCAN_PERIOD) {
+            return;
+        }
     }
 }
 
