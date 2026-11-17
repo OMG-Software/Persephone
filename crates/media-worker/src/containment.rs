@@ -135,6 +135,13 @@ mod linux {
     /// needed: the worker has one thread, so locks never wait (`futex`), and
     /// a worker that faults or aborts is killed by the filter (SIGSYS)
     /// instead of by its own signal, which the broker treats the same.
+    ///
+    /// `sigaltstack` stays out on purpose. std before Rust 1.99 calls it
+    /// (with `SS_DISABLE`, then `munmap`) when `main` returns, so a worker
+    /// built with such a toolchain is killed after every reply. The
+    /// workspace `rust-version` requires 1.99, whose runtime cleanup does
+    /// not touch the signal stack; allowing the call would only hide a
+    /// toolchain that also builds a guest that cannot allocate.
     fn allowlist() -> Result<BTreeMap<i64, Vec<SeccompRule>>, ()> {
         let any = Vec::new;
         Ok(BTreeMap::from([
