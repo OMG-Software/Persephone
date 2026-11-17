@@ -220,7 +220,8 @@ fn signer_name(code: &SecStaticCode) -> Option<String> {
     name.filter(|name| !name.is_empty())
 }
 
-/// Checks the signature of one file.
+/// Checks the signature of one file, without network access: no revocation
+/// or other online check is fetched.
 fn check(own: &Own, path: &Path, apple: &SecRequirement, any: &SecRequirement) -> Verdict {
     let Some(url) = CFURL::from_path(path, false) else {
         return Some((ModuleSignature::Invalid, None));
@@ -228,10 +229,10 @@ fn check(own: &Own, path: &Path, apple: &SecRequirement, any: &SecRequirement) -
     let Ok(code) = SecStaticCode::from_path(&url, Flags::NONE) else {
         return Some((ModuleSignature::Invalid, None));
     };
-    if code.check_validity(Flags::NONE, apple).is_ok() {
+    if code.check_validity(Flags::NO_NETWORK_ACCESS, apple).is_ok() {
         return None;
     }
-    match code.check_validity(Flags::NONE, any) {
+    match code.check_validity(Flags::NO_NETWORK_ACCESS, any) {
         Ok(()) if own.in_bundle(path) => None,
         Ok(()) => Some((ModuleSignature::Valid, signer_name(&code))),
         Err(error) if error.code() == ERR_SEC_CS_UNSIGNED => {

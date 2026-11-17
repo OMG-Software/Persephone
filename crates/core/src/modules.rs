@@ -401,10 +401,15 @@ fn display_path(path: &Path) -> String {
     cut
 }
 
-/// The key for the same file in two processes: no `\\?\` prefix, `\`
-/// separators, lowercase.
+/// The key for the same file in two processes. A Unix path (Linux, macOS)
+/// starts with `/` and is kept as it is: its case and any `\` are part of
+/// the name. A Windows path loses its `\\?\` prefix and is compared with `\`
+/// separators, in lowercase.
 fn path_key(path: &Path) -> String {
     let text = path.to_string_lossy();
+    if text.starts_with('/') {
+        return text.into_owned();
+    }
     let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
     text.replace('/', r"\").to_lowercase()
 }
@@ -565,6 +570,56 @@ mod tests {
             at(2_000),
         );
         assert!(!later.report().modules[0].acknowledged);
+    }
+
+    /// GIVEN two Unix paths that differ only in case, or by a `\` in a name
+    /// WHEN merged THEN each stays its own row with its own process, because
+    /// they name different files; GIVEN one Windows file in two spellings
+    /// THEN it is still one row.
+    #[test]
+    fn given_unix_paths_that_differ_in_case_then_they_stay_separate_rows() {
+        let modules = ready(vec![
+            linux(
+                "/opt/Plugin/hook.so",
+                ModuleProcess::Core,
+                ModuleReason::OutsideSystem,
+            ),
+            linux(
+                "/opt/plugin/hook.so",
+                ModuleProcess::Ui,
+                ModuleReason::OutsideSystem,
+            ),
+            linux(
+                "/opt/a\\b/hook.so",
+                ModuleProcess::WebView,
+                ModuleReason::OutsideSystem,
+            ),
+            linux(
+                "/opt/a/b/hook.so",
+                ModuleProcess::WebView,
+                ModuleReason::OutsideSystem,
+            ),
+        ]);
+        let mut paths: Vec<(String, Vec<ModuleProcess>)> = modules
+            .report()
+            .modules
+            .iter()
+            .map(|m| (m.path.clone(), m.processes.clone()))
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                ("/opt/Plugin/hook.so".into(), vec![ModuleProcess::Core]),
+                ("/opt/a/b/hook.so".into(), vec![ModuleProcess::WebView]),
+                ("/opt/a\\b/hook.so".into(), vec![ModuleProcess::WebView]),
+                ("/opt/plugin/hook.so".into(), vec![ModuleProcess::Ui]),
+            ]
+        );
+        assert_eq!(
+            path_key(Path::new(r"\\?\C:\Tools\Hook.DLL")),
+            path_key(Path::new("c:/tools/hook.dll"))
+        );
     }
 
     fn ready(items: Vec<Found>) -> Modules {

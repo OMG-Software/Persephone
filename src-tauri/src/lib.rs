@@ -1945,9 +1945,17 @@ pub fn run() {
             std::process::exit(2);
         }
     };
-    configure(tauri::Builder::default(), core, subscriptions)
-        .run(context())
+    let app = configure(tauri::Builder::default(), core, subscriptions)
+        .build(context())
         .expect("Persephone UI failed to start");
+    // The display GTK opened for the window, for the capture note on Linux
+    // (ADR-0047). `run` is on the GTK main thread, and the window exists once
+    // the app is built.
+    #[cfg(target_os = "linux")]
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        capture::record_display_session(capture::read_display_session(&window));
+    }
+    app.run(|_, _| {});
 }
 
 #[cfg(test)]

@@ -16,10 +16,7 @@
 //! that decides who can read it (ADR-0047).
 
 use persephone_contracts::DisplaySession;
-use std::{
-    ffi::OsStr,
-    sync::{Mutex, MutexGuard},
-};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Applies the wanted state to the window. Called with the state locked, so
 /// calls never overlap or reorder.
@@ -124,57 +121,45 @@ pub fn apply_to_window(hwnd: isize, on: bool) {
     }
 }
 
-/// The display server that draws this window: on Linux, from the same
-/// environment GTK reads when it opens its display; elsewhere `Unknown`.
+/// The display server GTK opened for the main window, recorded once at
+/// start ([`record_display_session`]).
+static DISPLAY: OnceLock<DisplaySession> = OnceLock::new();
+
+/// The display server that draws the main window: on Linux, the GDK display
+/// GTK opened; `Unknown` elsewhere, or when it could not be read.
 pub fn display_session() -> DisplaySession {
-    #[cfg(target_os = "linux")]
-    {
-        let var = std::env::var_os;
-        session_from(
-            var("GDK_BACKEND").as_deref(),
-            var("WAYLAND_DISPLAY").as_deref(),
-            var("DISPLAY").as_deref(),
-        )
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        DisplaySession::Unknown
+    DISPLAY.get().copied().unwrap_or(DisplaySession::Unknown)
+}
+
+/// Records the display server once. A later call changes nothing.
+pub fn record_display_session(session: DisplaySession) {
+    let _ = DISPLAY.set(session);
+}
+
+/// The display server of a GDK display, from its type name. GTK names the
+/// backend that actually opened, so a failed Wayland connection that fell
+/// back to X11 (XWayland included) reads as X11. Any other backend is
+/// `Unknown`.
+pub fn session_of_display_type(name: &str) -> DisplaySession {
+    match name {
+        "GdkWaylandDisplay" => DisplaySession::Wayland,
+        "GdkX11Display" => DisplaySession::X11,
+        _ => DisplaySession::Unknown,
     }
 }
 
-/// GTK 3's choice of display. `GDK_BACKEND` is a comma-separated list tried
-/// in order, where `*` (the default) means Wayland, then X11; a backend is
-/// used when its display is named. An empty value counts as unset. GTK can
-/// also find a Wayland socket that `WAYLAND_DISPLAY` does not name; that
-/// case reads as X11, the answer that claims less protection.
-pub fn session_from(
-    backend: Option<&OsStr>,
-    wayland: Option<&OsStr>,
-    x11: Option<&OsStr>,
-) -> DisplaySession {
-    let named = |value: Option<&OsStr>| value.is_some_and(|value| !value.is_empty());
-    let backends = backend.filter(|value| !value.is_empty()).map_or_else(
-        || "*".to_owned(),
-        |value| value.to_string_lossy().into_owned(),
-    );
-    for entry in backends.split(',').map(str::trim) {
-        let order: &[DisplaySession] = match entry {
-            "*" => &[DisplaySession::Wayland, DisplaySession::X11],
-            "wayland" => &[DisplaySession::Wayland],
-            "x11" => &[DisplaySession::X11],
-            _ => &[],
-        };
-        for &session in order {
-            let display = match session {
-                DisplaySession::Wayland => wayland,
-                _ => x11,
-            };
-            if named(display) {
-                return session;
-            }
+/// Reads the display server of the window's GDK display. Must run on the
+/// GTK main thread.
+#[cfg(target_os = "linux")]
+pub fn read_display_session(window: &tauri::WebviewWindow) -> DisplaySession {
+    use gtk::prelude::{ObjectExt, WidgetExt};
+    match window.gtk_window() {
+        Ok(gtk_window) => {
+            let display = WidgetExt::display(&gtk_window);
+            session_of_display_type(ObjectExt::type_(&display).name())
         }
+        Err(_) => DisplaySession::Unknown,
     }
-    DisplaySession::Unknown
 }
 
 #[cfg(test)]
@@ -182,51 +167,26 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    fn session(backend: Option<&str>, wayland: Option<&str>, x11: Option<&str>) -> DisplaySession {
-        session_from(
-            backend.map(OsStr::new),
-            wayland.map(OsStr::new),
-            x11.map(OsStr::new),
-        )
-    }
-
-    /// GIVEN the environment GTK reads THEN the session follows GTK's order:
-    /// Wayland first by default, `GDK_BACKEND` in its own order, a backend
-    /// only when its display is named, and unknown when none is.
+    /// GIVEN the type name of the GDK display GTK opened THEN Wayland and
+    /// X11 are told apart, a Wayland session where GTK fell back to X11
+    /// reads as X11, and any other or unknown backend is `Unknown`.
     #[test]
-    fn given_the_display_environment_then_the_session_follows_gtk() {
-        let cases = [
-            (None, Some("wayland-0"), Some(":0"), DisplaySession::Wayland),
-            (None, None, Some(":0"), DisplaySession::X11),
-            (None, Some(""), Some(":0"), DisplaySession::X11),
-            (Some(""), Some("wayland-0"), None, DisplaySession::Wayland),
-            (
-                Some("x11"),
-                Some("wayland-0"),
-                Some(":0"),
-                DisplaySession::X11,
-            ),
-            (
-                Some("x11,wayland"),
-                Some("wayland-0"),
-                None,
-                DisplaySession::Wayland,
-            ),
-            (
-                Some("broadway, x11"),
-                Some("wayland-0"),
-                Some(":1"),
-                DisplaySession::X11,
-            ),
-            (Some("wayland"), None, Some(":0"), DisplaySession::Unknown),
-            (Some("*"), None, None, DisplaySession::Unknown),
-            (None, None, None, DisplaySession::Unknown),
-        ];
-        for (backend, wayland, x11, expected) in cases {
+    fn given_a_gdk_display_type_then_the_session_names_the_opened_backend() {
+        assert_eq!(
+            session_of_display_type("GdkWaylandDisplay"),
+            DisplaySession::Wayland
+        );
+        // A Wayland desktop where the Wayland connection failed: GTK opened
+        // X11 through XWayland, so any X11 client can read the window.
+        assert_eq!(
+            session_of_display_type("GdkX11Display"),
+            DisplaySession::X11
+        );
+        for other in ["GdkBroadwayDisplay", "GdkDisplay", "", "gdkwaylanddisplay"] {
             assert_eq!(
-                session(backend, wayland, x11),
-                expected,
-                "{backend:?} {wayland:?} {x11:?}"
+                session_of_display_type(other),
+                DisplaySession::Unknown,
+                "{other}"
             );
         }
     }

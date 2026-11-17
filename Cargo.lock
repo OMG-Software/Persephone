@@ -4404,6 +4404,7 @@ dependencies = [
 name = "persephone-desktop"
 version = "0.0.1"
 dependencies = [
+ "gtk",
  "libc",
  "persephone-contracts",
  "persephone-core-protocol",

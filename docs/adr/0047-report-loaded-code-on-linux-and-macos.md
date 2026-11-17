@@ -72,7 +72,9 @@ no package database.
     the entry, so `/nix/store` works.
 * These are reported, most serious first:
   * a file named in `LD_PRELOAD`, `LD_AUDIT` or `/etc/ld.so.preload`, even a
-    system file;
+    system file or a file of Persephone's own image. In
+    `/etc/ld.so.preload`, a `#` starts a comment to the end of the line, as in
+    glibc's loader;
   * in the core only, executable memory with no file: anonymous memory,
     `memfd` and named regions such as `[heap]`. The kernel's `[vdso]`,
     `[vsyscall]` and `[uprobes]` pages are not code from a file and are
@@ -84,8 +86,10 @@ no package database.
   * any other file.
 * A process in another mount namespace is not judged, because its paths name
   other files. The scan is then incomplete. So are a cut `maps` or `environ`
-  read, more than 8192 files in one process, and an unreadable
-  `/etc/ld.so.preload`.
+  read, a cut `cgroup.procs` list, more than 8192 files in one process, and an
+  unreadable `/etc/ld.so.preload`.
+* Paths are compared as they are. Two Linux paths that differ only in case
+  are two files and two rows.
 * Reads are bounded: 8 MiB of `maps`, 1 MiB of `environ`, 64 KiB of
   `/etc/ld.so.preload`, and at most 64 folders above one file.
 
@@ -99,15 +103,18 @@ no package database.
   `.app` bundle the core runs from.
 * Every other image is reported with its signature state and, when the
   signature is valid, the common name of the leaf certificate.
+* Signature checks use `kSecCSNoNetworkAccess`: no revocation or other online
+  check is fetched.
 * A signature check reads the whole file, so its result is kept while the
   file's device, inode, size and times are unchanged.
 
 ### Capture note on Linux
 
-* The UI host answers `display_session` with `wayland`, `x11` or `unknown`. It
-  follows GTK's choice: `GDK_BACKEND` in order, `*` meaning Wayland then X11,
-  and a backend only when its display is named. The core is not asked: it has
-  no window.
+* The UI host answers `display_session` with `wayland`, `x11` or `unknown`.
+  At start, on the GTK main thread, it reads the type of the GDK display the
+  window opened on (`GdkWaylandDisplay` or `GdkX11Display`). GTK names the
+  backend that actually opened, so a Wayland session where GTK fell back to
+  X11 reads as X11. The core is not asked: it has no window.
 * Settings > Security says that Linux cannot hide a window from capture and
   which display server draws the window. It is information only.
 
@@ -134,9 +141,8 @@ no package database.
   `no_file`.
 * The macOS report cannot see the UI and web view processes. The hardened
   runtime's library validation protects them; this report does not.
-* The Linux note uses the environment. When GTK finds a Wayland socket that
-  `WAYLAND_DISPLAY` does not name, the note says X11, which claims less
-  protection than there is.
+* The UI host links `gtk` directly to read the display type. It is the
+  version Tauri already links, so no new native library is added.
 * macOS is built and tested on CI only.
 
 ## Pros and Cons of the Options

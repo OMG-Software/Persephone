@@ -163,6 +163,17 @@ pub fn preload_names(list: &[u8]) -> BTreeSet<Vec<u8>> {
         .collect()
 }
 
+/// The file names in `/etc/ld.so.preload`. As in glibc's loader, a `#`
+/// starts a comment that runs to the end of its line.
+pub fn preload_file_names(text: &[u8]) -> BTreeSet<Vec<u8>> {
+    let mut names = BTreeSet::new();
+    for line in text.split(|&b| b == b'\n') {
+        let code = line.split(|&b| b == b'#').next().unwrap_or_default();
+        names.extend(preload_names(code));
+    }
+    names
+}
+
 /// Whether only root can change an entry with this owner and mode. A folder
 /// that others can write to still counts when it is sticky, because then
 /// only the owner of an entry, root here, can remove or rename it.
@@ -258,14 +269,16 @@ fn judge(
     deleted: bool,
     preloaded: &BTreeSet<Vec<u8>>,
 ) -> Option<ModuleReason> {
+    // Every preloaded file is reported, even one of Persephone's own image:
+    // the preload, not the file, is what is unexpected.
+    let name = path.file_name().map(OsStrExt::as_bytes).unwrap_or_default();
+    if preloaded.contains(name) {
+        return Some(ModuleReason::Preloaded);
+    }
     let meta = fs::metadata(path);
     let device = meta.as_ref().ok().map(MetadataExt::dev);
     if !deleted && own.owns(path, device) {
         return None;
-    }
-    let name = path.file_name().map(OsStrExt::as_bytes).unwrap_or_default();
-    if preloaded.contains(name) {
-        return Some(ModuleReason::Preloaded);
     }
     match meta {
         Ok(_) => {}
@@ -326,8 +339,8 @@ impl Scanner {
     ) -> Option<ScanResult> {
         let (system_preloads, mut incomplete) =
             match read_limited(Path::new("/etc/ld.so.preload"), MAX_PRELOAD_FILE_BYTES) {
-                Ok((text, false)) => (preload_names(&text), false),
-                Ok((text, true)) => (preload_names(&text), true),
+                Ok((text, false)) => (preload_file_names(&text), false),
+                Ok((text, true)) => (preload_file_names(&text), true),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => (BTreeSet::new(), false),
                 Err(_) => (BTreeSet::new(), true),
             };
@@ -515,10 +528,33 @@ LD_AUDIT=/tmp/audit.so\0NOT_LD_PRELOAD=/tmp/no.so\0LD_PRELOADX=/tmp/no2.so\0";
             environ_preloads(environ),
             set(&[b"libhook.so", b"libtwo.so", b"three.so", b"audit.so"])
         );
-        // /etc/ld.so.preload has no comments: every word is a name.
+        // In /etc/ld.so.preload a `#` starts a comment to the end of the
+        // line, as in glibc's loader; a commented-out library is not a name.
         assert_eq!(
-            preload_names(b"# not a comment\n/lib/a.so\n"),
-            set(&[b"#", b"not", b"a", b"comment", b"a.so"])
+            preload_file_names(
+                b"# /usr/lib/libexample.so\n/lib/a.so # /lib/b.so\n/lib/c.so:/lib/d#x.so\n/lib/e.so"
+            ),
+            set(&[b"a.so", b"c.so", b"d", b"e.so"])
+        );
+        assert!(preload_file_names(b"#only a comment").is_empty());
+    }
+
+    /// GIVEN a file on Persephone's own read-only image WHEN it is not
+    /// preloaded THEN it is expected; WHEN it is preloaded THEN it is
+    /// reported as preloaded all the same.
+    #[test]
+    fn given_an_own_image_file_then_only_a_preload_reports_it() {
+        let libc = mapped_libc();
+        let own = Own {
+            dir: None,
+            image_device: Some(fs::metadata(&libc).unwrap().dev()),
+            namespace: None,
+        };
+        assert_eq!(judge(&own, &libc, false, &BTreeSet::new()), None);
+        let name = libc.file_name().unwrap().as_bytes().to_vec();
+        assert_eq!(
+            judge(&own, &libc, false, &BTreeSet::from([name])),
+            Some(ModuleReason::Preloaded)
         );
     }
 
