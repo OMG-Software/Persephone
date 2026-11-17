@@ -353,14 +353,29 @@ def webrtc_title(root):
     return f"Prebuilt libwebrtc ({tag})"
 
 
-def append_notice(notices, title, source):
+def _inside(root, path, folder, what):
+    """`path` resolved, if it stays inside `root`/`folder`; else ReleaseError."""
+    base = os.path.realpath(os.path.join(root, *folder))
+    full = os.path.realpath(path)
+    try:
+        inside = os.path.commonpath([base, full]) == base
+    except ValueError:  # Windows: another drive
+        inside = False
+    if not inside:
+        raise ReleaseError(f"{what} {path} is outside {'/'.join(folder)}")
+    return Path(full)
+
+
+def append_notice(notices, title, source, root=ROOT):
     """Append the licence texts of the prebuilt libwebrtc to a notices file.
 
     The text comes from the pinned archive itself, whose SHA-256 tools/webrtc.py
-    checks, so no copy is committed. It refuses a missing, empty or oversized
-    source, and a second append of the same title.
+    checks, so no copy is committed. The source must be in the verified
+    libwebrtc cache and the notices file in `.local`. It refuses a missing,
+    empty or oversized source, and a second append of the same title.
     """
-    notices, source = Path(notices), Path(source)
+    notices = _inside(root, notices, (".local",), "notices file")
+    source = _inside(root, source, (".local", "cache", "webrtc"), "licence file")
     if not notices.is_file():
         raise ReleaseError(f"third-party notices not found at {notices}")
     if not source.is_file():
@@ -408,7 +423,7 @@ def main(argv=None, root=ROOT):
     args = parser.parse_args(argv)
     try:
         if args.command == "append-notice":
-            append_notice(args.notices, args.title or webrtc_title(root), args.source)
+            append_notice(args.notices, args.title or webrtc_title(root), args.source, root)
             return 0
         if args.command == "bundle-config":
             config = bundle_config(root, args.notices, args.platform)

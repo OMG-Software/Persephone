@@ -321,9 +321,11 @@ class AppendNoticeTests(TempTree):
 
     def setUp(self):
         super().setUp()
-        self.notices = self.root / "notices.txt"
+        self.cache = self.root / ".local/cache/webrtc/webrtc-test/win-x64/files"
+        self.cache.mkdir(parents=True)
+        self.notices = self.root / ".local/notices.txt"
         self.notices.write_text("first notices\n", encoding="utf-8")
-        self.source = self.root / "LICENSE.md"
+        self.source = self.cache / "LICENSE.md"
         self.source.write_text("# webrtc\nBSD licence text\n", encoding="utf-8")
 
     def append(self, title=None):
@@ -350,19 +352,39 @@ class AppendNoticeTests(TempTree):
         self.assertIn("\nPrebuilt libwebrtc (webrtc-abc)\n", self.notices.read_text(encoding="utf-8"))
 
     def test_bad_sources_are_refused_and_leave_notices_alone(self):
-        big = self.root / "big.md"
+        big = self.cache / "big.md"
         big.write_bytes(b"a" * (release.NOTICE_SOURCE_LIMIT + 1))
-        empty = self.root / "empty.md"
+        empty = self.cache / "empty.md"
         empty.write_bytes(b"")
-        for name, source in (("missing", self.root / "absent.md"), ("empty", empty), ("oversized", big)):
+        outside = self.root / "LICENSE.md"
+        outside.write_text("text\n", encoding="utf-8")
+        cases = (
+            ("missing", self.cache / "absent.md"),
+            ("empty", empty),
+            ("oversized", big),
+            ("outside the libwebrtc cache", outside),
+            ("escaping the cache", self.cache / "../../../../../LICENSE.md"),
+        )
+        for name, source in cases:
             with self.subTest(source=name):
-                # GIVEN a missing, empty or oversized licence file WHEN it is appended
+                # GIVEN a missing, empty, oversized or outside licence file WHEN it is appended
                 self.source = source
                 code, _, stderr = self.append(self.TITLE)
                 # THEN it is refused and the notices are unchanged
                 self.assertEqual(code, 2)
                 self.assertIn("licence file", stderr)
                 self.assertEqual(self.notices.read_text(encoding="utf-8"), "first notices\n")
+
+    def test_notices_outside_local_are_refused(self):
+        # GIVEN a notices file outside .local WHEN the notice is appended
+        outside = self.root / "notices.txt"
+        outside.write_text("first notices\n", encoding="utf-8")
+        self.notices = outside
+        code, _, stderr = self.append(self.TITLE)
+        # THEN it is refused and the file is unchanged
+        self.assertEqual(code, 2)
+        self.assertIn("outside .local", stderr)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "first notices\n")
 
     def test_second_append_is_refused(self):
         # GIVEN notices that already hold the section WHEN it is appended again

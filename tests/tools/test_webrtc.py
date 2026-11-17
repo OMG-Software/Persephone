@@ -62,6 +62,20 @@ class Opener:
         return io.BytesIO(self.data)
 
 
+class FlakyOpener(Opener):
+    """Times out on the first `failures` calls, then serves `data`."""
+
+    def __init__(self, data, failures):
+        super().__init__(data)
+        self.failures = failures
+
+    def __call__(self, url, timeout=None):
+        response = super().__call__(url, timeout)
+        if len(self.urls) <= self.failures:
+            raise TimeoutError("The read operation timed out")
+        return response
+
+
 class WebrtcTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -223,6 +237,30 @@ class WebrtcTest(unittest.TestCase):
         for tag, key in [("..", KEY), ("../outside", KEY), ("webrtc-test", ".."), ("webrtc-test", "../../x"), ("a/b", KEY)]:
             with self.subTest(tag=tag, key=key), self.assertRaises(webrtc.WebrtcError):
                 webrtc.cache_dirs(self.root, tag, key)
+
+    def test_given_a_network_error_then_the_download_is_tried_again(self):
+        data = good_zip()
+        result, opener = self.ensure(data, opener=FlakyOpener(data, webrtc.ATTEMPTS - 1))
+        self.assertEqual((result / "lib/webrtc.lib").read_bytes(), b"lib")
+        self.assertEqual(len(opener.urls), webrtc.ATTEMPTS)
+
+    def test_given_network_errors_on_every_attempt_then_it_fails_and_leaves_nothing_behind(self):
+        data = good_zip()
+        opener = FlakyOpener(data, webrtc.ATTEMPTS)
+        with self.assertRaises(webrtc.WebrtcError) as raised:
+            self.ensure(data, opener=opener)
+        self.assertIn(f"after {webrtc.ATTEMPTS} attempts", str(raised.exception))
+        self.assertEqual(len(opener.urls), webrtc.ATTEMPTS)
+        self.assertEqual(list(self.cache().iterdir()), [])
+
+    def test_given_a_wrong_hash_then_the_download_is_not_tried_again(self):
+        data = good_zip()
+        pins = pins_for(data)
+        pins["assets"][KEY]["sha256"] = "0" * 64
+        opener = Opener(data)
+        with self.assertRaises(webrtc.WebrtcError):
+            self.ensure(data, pins, opener)
+        self.assertEqual(len(opener.urls), 1)
 
     def test_given_an_http_url_then_nothing_is_downloaded(self):
         data = good_zip()

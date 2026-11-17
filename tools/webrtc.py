@@ -20,6 +20,9 @@ import zipfile
 PINS = Path(__file__).resolve().with_name("webrtc.json")
 CHUNK = 1024 * 1024
 TIMEOUT = 60
+# Download attempts. Only network and file errors are retried; a size or
+# SHA-256 mismatch fails at once.
+ATTEMPTS = 3
 MAX_UNCOMPRESSED = 4 * 1024**3
 MARKER = ".verified"
 NAME = re.compile(r"webrtc-(win|linux|mac)-(x64|arm64)-release\.zip")
@@ -123,6 +126,17 @@ def _download(url, destination, asset, opener):
         raise WebrtcError(f"{asset['name']} does not match the pinned SHA-256")
 
 
+def _fetch(url, destination, asset, opener, announce):
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            _download(url, destination, asset, opener)
+            return
+        except OSError as error:
+            if attempt == ATTEMPTS:
+                raise WebrtcError(f"cannot download {asset['name']} after {ATTEMPTS} attempts: {error}") from error
+            announce(f"download of {asset['name']} failed ({error}); retrying")
+
+
 def _extract(archive, destination):
     root = destination.resolve()
     with zipfile.ZipFile(archive) as bundle:
@@ -188,7 +202,7 @@ def ensure(root, *, key=None, opener=None, offline=False, pins_path=PINS, announ
     temporary = Path(temporary)
     staging = None
     try:
-        _download(url, temporary, asset, opener or _default_opener())
+        _fetch(url, temporary, asset, opener or _default_opener(), announce)
         announce(f"verified {asset['name']}")
         staging = Path(tempfile.mkdtemp(dir=cache, prefix=f"{key}-", suffix=".tmp"))
         (staging / "files").mkdir()

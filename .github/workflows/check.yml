@@ -102,7 +102,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config clang
 
       - name: Install Rust
         run: |
@@ -140,7 +140,9 @@ jobs:
         run: python tools/dev.py check
 
   # Other Linux distributions in containers on an Ubuntu runner. Each installs
-  # its own build tools and WebKitGTK 4.1 from its package manager; Python is
+  # its own build tools and WebKitGTK 4.1 from its package manager. Clang is
+  # required: webrtc-sys compiles against libwebrtc's hermetic libc++, which
+  # GCC miscompiles, so its build script refuses to run without clang++. Python is
   # the distribution's own (setup-python's builds target Ubuntu). Packages
   # come from each distribution's current repositories, so only the base image
   # is fixed by its digest.
@@ -166,22 +168,22 @@ jobs:
             install: >-
               apt-get update &&
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
-              git ca-certificates curl xz-utils build-essential pkg-config python3 libwebkit2gtk-4.1-dev
+              git ca-certificates curl xz-utils build-essential clang pkg-config python3 libwebkit2gtk-4.1-dev
           # Arch supports only full upgrades, so this installs the current
           # rolling release on top of the image.
           - name: arch
             image: archlinux:base-devel@sha256:3cbf69d2d5958d6a294f3722c5668e6187c4df8e00fa27f72352f0bf83e495e1 # base-devel
             install: >-
-              pacman -Syu --noconfirm --needed git curl python webkit2gtk-4.1
+              pacman -Syu --noconfirm --needed git curl python clang webkit2gtk-4.1
           - name: fedora-44
             image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80 # 44
             install: >-
-              dnf install -y git curl tar gzip xz gcc gcc-c++ make pkgconf-pkg-config python3
+              dnf install -y git curl tar gzip xz gcc gcc-c++ clang make pkgconf-pkg-config python3
               'pkgconfig(webkit2gtk-4.1)'
           - name: opensuse-leap-16.0
             image: opensuse/leap:16.0@sha256:0c459bfe558e59b44b484e0e02dad66a28cdba92d24c8121d3901177938a3175 # 16.0
             install: >-
-              zypper --non-interactive install git curl tar gzip xz gcc gcc-c++ make pkg-config python3
+              zypper --non-interactive install git curl tar gzip xz gcc gcc-c++ clang make pkg-config python3
               'pkgconfig(webkit2gtk-4.1)'
     steps:
       # Before checkout, so that it clones with git.
