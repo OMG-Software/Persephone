@@ -241,6 +241,21 @@ pub enum Call {
         #[serde(deserialize_with = "Option::deserialize")]
         proxy: Option<String>,
     },
+    /// The call microphones and speakers, and the saved choice (ADR-0043).
+    /// Lists the devices through a contained call worker, so it can take
+    /// seconds. Available whenever the profile is unlocked.
+    CallDevices {},
+    /// Save the chosen call microphone and speaker as platform device IDs,
+    /// each at most [`MAX_CALL_DEVICE_ID_BYTES`]; null is the system default.
+    /// They apply to calls joined afterwards.
+    SetCallDevices {
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        recording: Option<String>,
+        /// Required, though it may be null.
+        #[serde(deserialize_with = "Option::deserialize")]
+        playout: Option<String>,
+    },
     /// Find the homeserver of a server name such as `example.org`, through
     /// its `.well-known/matrix/client` file, and confirm it speaks Matrix
     /// (ADR-0027). Answered when done; `not_found` when no Matrix server is
@@ -820,6 +835,9 @@ pub const MAX_USERNAME_BYTES: usize = 255;
 
 /// Longest proxy address either side accepts, in bytes.
 pub const MAX_PROXY_BYTES: usize = 300;
+
+/// Longest call device ID either side accepts, in bytes.
+pub const MAX_CALL_DEVICE_ID_BYTES: usize = 512;
 
 /// Longest server name either side accepts in `discover_homeserver`, in
 /// bytes (a DNS name and a port).
@@ -1568,6 +1586,17 @@ mod tests {
                 r#"{"id":1,"call":{"command":"set_proxy_setting","proxy":null}}"#,
             ),
             (
+                Call::CallDevices {},
+                r#"{"id":1,"call":{"command":"call_devices"}}"#,
+            ),
+            (
+                Call::SetCallDevices {
+                    recording: Some("{0.0.1}.{a}".into()),
+                    playout: None,
+                },
+                r#"{"id":1,"call":{"command":"set_call_devices","recording":"{0.0.1}.{a}","playout":null}}"#,
+            ),
+            (
                 Call::DiscoverHomeserver {
                     server_name: "example.org".into(),
                 },
@@ -2073,6 +2102,12 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_proxy_setting"}}"#,
             br#"{"id":1,"call":{"command":"set_proxy_setting","proxy":"h:1","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"proxy_setting","proxy":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices"}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","playout":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":1,"playout":null}}"#,
+            br#"{"id":1,"call":{"command":"call_devices","recording":null}}"#,
             br#"{"id":1,"call":{"command":"discover_homeserver","server_name":"e.org","url":"x"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions","device_ids":"DEV"}}"#,

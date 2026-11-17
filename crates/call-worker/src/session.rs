@@ -10,6 +10,7 @@ use livekit::{
         key_provider::{
             DEFAULT_RATCHET_SALT, KeyDerivationAlgorithm, KeyProvider, KeyProviderOptions,
         },
+        manager::E2eeManager,
     },
     id::ParticipantIdentity,
     options::TrackPublishOptions,
@@ -26,7 +27,8 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
 use crate::mapping::{
-    ConnectFault, RoomChange, SpeakingTracker, apply, failure_for_connect, valid_identity,
+    ConnectFault, RoomChange, SpeakingTracker, apply, bounded_device_list, choose_device,
+    failure_for_connect, valid_identity,
 };
 use crate::{EXIT_DONE, EXIT_FAILED, Input};
 
@@ -54,6 +56,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Sender<F
         relay_only,
         own_identity,
         mut own_key,
+        recording_device,
+        playout_device,
     } = first
     else {
         return fail(output, FailureCode::Protocol).await;
@@ -67,6 +71,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Sender<F
         key_derivation_algorithm: KeyDerivationAlgorithm::HKDF,
     });
     let own = ParticipantIdentity::from(own_identity);
+    let own_index = i32::from(own_key.index);
     if !set_key(&provider, &own, &mut own_key) {
         return fail(output, FailureCode::Internal).await;
     }
@@ -100,6 +105,13 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Sender<F
         Ok(audio) => audio,
         Err(code) => return fail(output, code).await,
     };
+    if let Err(code) = select_devices(
+        &audio,
+        recording_device.as_deref(),
+        playout_device.as_deref(),
+    ) {
+        return fail(output, code).await;
+    }
     let connected = Room::connect(&sfu_url, &jwt, options).await;
     // The token is not needed after the connection attempt.
     drop(jwt);
@@ -114,6 +126,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Sender<F
             return fail(output, code).await;
         }
     };
+    // The sender's frame cryptor exists once `publish_track` returns.
+    use_own_key_index(room.e2ee_manager(), &publication, own_index);
     if output.send(FromWorker::Connected).await.is_err() {
         let _ = room.close().await;
         return EXIT_FAILED;
@@ -129,16 +143,13 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Sender<F
         }
     }
 
-    let end = event_loop(
-        &mut events,
-        input,
-        output,
-        &provider,
-        &own,
-        &publication,
-        &mut tracker,
-    )
-    .await;
+    let own_sender = OwnSender {
+        provider: &provider,
+        identity: &own,
+        publication: &publication,
+        manager: room.e2ee_manager(),
+    };
+    let end = event_loop(&mut events, input, output, &own_sender, &mut tracker).await;
     let _ = room.close().await;
     drop(audio);
     match end {
@@ -151,14 +162,86 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Sender<F
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Lists the microphones and speakers, answers once and ends. It starts no
+/// recording or playout and connects to nothing.
+pub async fn list_devices(output: &Sender<FromWorker>) -> u8 {
+    let audio = match PlatformAudio::new() {
+        Ok(audio) => audio,
+        Err(_) => return fail(output, FailureCode::AudioDevice).await,
+    };
+    let recording_devices: Vec<_> = audio.recording_devices().collect();
+    let playout_devices: Vec<_> = audio.playout_devices().collect();
+    let recording = bounded_device_list(
+        recording_devices
+            .iter()
+            .map(|device| (device.id.as_str(), device.name.as_str())),
+    );
+    let playout = bounded_device_list(
+        playout_devices
+            .iter()
+            .map(|device| (device.id.as_str(), device.name.as_str())),
+    );
+    drop(audio);
+    if output
+        .send(FromWorker::Devices { recording, playout })
+        .await
+        .is_err()
+    {
+        return EXIT_FAILED;
+    }
+    EXIT_DONE
+}
+
+/// Applies the chosen microphone and speaker. `None` keeps the system default.
+fn select_devices(
+    audio: &PlatformAudio,
+    recording: Option<&str>,
+    playout: Option<&str>,
+) -> Result<(), FailureCode> {
+    let recording_devices: Vec<_> = audio.recording_devices().collect();
+    let wanted = choose_device(
+        recording,
+        recording_devices.iter().map(|device| device.id.as_str()),
+    )?;
+    if let Some(wanted) = wanted {
+        let device = recording_devices
+            .iter()
+            .find(|device| device.id.as_str() == wanted)
+            .ok_or(FailureCode::DeviceNotFound)?;
+        audio
+            .set_recording_device(&device.id)
+            .map_err(|_| FailureCode::DeviceNotFound)?;
+    }
+    let playout_devices: Vec<_> = audio.playout_devices().collect();
+    let wanted = choose_device(
+        playout,
+        playout_devices.iter().map(|device| device.id.as_str()),
+    )?;
+    if let Some(wanted) = wanted {
+        let device = playout_devices
+            .iter()
+            .find(|device| device.id.as_str() == wanted)
+            .ok_or(FailureCode::DeviceNotFound)?;
+        audio
+            .set_playout_device(&device.id)
+            .map_err(|_| FailureCode::DeviceNotFound)?;
+    }
+    Ok(())
+}
+
+/// What the worker needs to change its own sending track.
+struct OwnSender<'a> {
+    provider: &'a KeyProvider,
+    identity: &'a ParticipantIdentity,
+    publication: &'a LocalTrackPublication,
+    manager: &'a E2eeManager,
+}
+
 async fn event_loop(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<RoomEvent>,
     input: &mut Receiver<Input>,
     output: &Sender<FromWorker>,
-    provider: &KeyProvider,
-    own: &ParticipantIdentity,
-    publication: &LocalTrackPublication,
+    own: &OwnSender<'_>,
     tracker: &mut SpeakingTracker,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
@@ -180,7 +263,7 @@ async fn event_loop(
                     return End::Left;
                 }
                 Some(Input::Message(message)) => {
-                    match handle_command(message, provider, own, publication) {
+                    match handle_command(message, own) {
                         Ok(reply) => outgoing.extend(reply),
                         Err(code) => return End::Failed(code),
                     }
@@ -212,37 +295,40 @@ async fn event_loop(
     }
 }
 
-/// Handles one command after `Join`. A second `Join` is a protocol failure.
-fn handle_command(
-    message: ToWorker,
-    provider: &KeyProvider,
-    own: &ParticipantIdentity,
-    publication: &LocalTrackPublication,
-) -> Result<Vec<FromWorker>, FailureCode> {
+/// Handles one command after `Join`. A second `Join` or a `ListDevices` is a
+/// protocol failure.
+fn handle_command(message: ToWorker, own: &OwnSender<'_>) -> Result<Vec<FromWorker>, FailureCode> {
     match message {
         ToWorker::SetKey { identity, mut key } => {
             // A refused key (index out of the ring) leaves the old key; the
             // sender's audio then stays silent. It does not end the call.
             if valid_identity(&identity) {
-                set_key(provider, &ParticipantIdentity::from(identity), &mut key);
+                set_key(own.provider, &ParticipantIdentity::from(identity), &mut key);
             }
             Ok(Vec::new())
         }
         ToWorker::SetOwnKey { mut key } => {
-            set_key(provider, own, &mut key);
+            let index = i32::from(key.index);
+            // Switch only after the key is stored, so no frame goes out
+            // under an index whose ring slot still holds an older key.
+            if set_key(own.provider, own.identity, &mut key) {
+                use_own_key_index(own.manager, own.publication, index);
+            }
             Ok(Vec::new())
         }
         // The key provider has no way to remove one participant's keys.
         ToWorker::RemoveParticipant { .. } => Ok(Vec::new()),
         ToWorker::SetMuted { muted } => {
             if muted {
-                publication.mute();
+                own.publication.mute();
             } else {
-                publication.unmute();
+                own.publication.unmute();
             }
             Ok(vec![FromWorker::Muted { muted }])
         }
-        ToWorker::Join { .. } | ToWorker::Leave => Err(FailureCode::Protocol),
+        ToWorker::Join { .. } | ToWorker::ListDevices | ToWorker::Leave => {
+            Err(FailureCode::Protocol)
+        }
     }
 }
 
@@ -251,6 +337,22 @@ fn handle_command(
 fn set_key(provider: &KeyProvider, identity: &ParticipantIdentity, key: &mut FrameKeyMsg) -> bool {
     let bytes = std::mem::take(&mut *key.bytes);
     provider.set_key(identity, i32::from(key.index), bytes)
+}
+
+/// Makes the sender's frame cryptor encrypt with the key at `index`.
+///
+/// Storing a key in the provider does not change the index that a sender's
+/// frame cryptor encrypts with: native libwebrtc keeps that index apart, at
+/// 0 until it is set. Without this call every frame goes out under the first
+/// own key, a member that joins later (and holds only a newer key) hears
+/// silence, and a rotation on leave does not take effect.
+fn use_own_key_index(manager: &E2eeManager, publication: &LocalTrackPublication, index: i32) {
+    let sid = publication.sid();
+    for ((_, track), cryptor) in manager.frame_cryptors() {
+        if track == sid {
+            cryptor.set_key_index(index);
+        }
+    }
 }
 
 fn start_audio() -> Result<PlatformAudio, FailureCode> {

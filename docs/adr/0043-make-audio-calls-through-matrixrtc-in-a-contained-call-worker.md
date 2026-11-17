@@ -111,6 +111,12 @@ Proposed option: "a contained call worker".
   `(i + 1) mod 256`. Rotate when a member leaves. Share the current key
   with new members when it is less than 10 s old, else rotate. Use a new
   key 1 s after it is sent.
+* "Use" means two steps in the worker: store the key at its index, then
+  set the sender's frame cryptor to that index. Native libwebrtc keeps the
+  sender's index apart from the key store, at 0 until it is set. The live
+  test of 16 November 2026 found the second step missing: every frame went
+  out under the first key, so later joiners heard nothing and a rotation
+  did not take effect.
 * Keys are sent as `io.element.call.encryption_keys` to-device events,
   encrypted with Olm, only to devices that are in the call and are signed by
   their owner's cross-signing identity (ADR-0005). Keys are accepted only
@@ -120,6 +126,35 @@ Proposed option: "a contained call worker".
 * Sending Olm-encrypted custom to-device events needs the
   `experimental-send-custom-to-device` feature of `matrix-sdk`. The
   version does not change.
+
+### Audio devices
+
+* Owner request, 16 November 2026: choose the microphone and the speaker
+  in Persephone. A camera choice waits for video calls, which are not
+  approved.
+* The core never opens an audio device. To list devices, it starts a
+  contained call worker through the same host and `Ready` check as a call
+  and sends `ListDevices` as the first message. The worker replies once
+  with at most 32 microphones and 32 speakers, then exits. It does not
+  record, play or connect.
+* A device is the libwebrtc device ID (on Windows the endpoint ID) and the
+  OS name. IDs that LiveKit makes from a list position (`index:N`) are not
+  listed, because a hot-plug can move them to another device. Names are
+  untrusted text: the worker removes control characters and cuts them to
+  256 bytes, the core normalizes them like display names (control and
+  bidirectional formatting characters become U+FFFD), and the page shows
+  them as plain text.
+* A list request during a call is allowed. Its worker creates WebRTC's
+  audio device module and enumerates devices, but never starts recording
+  or playout, so it does not compete with the call for a device. This was
+  read from LiveKit 0.11's `PlatformAudio::new`, not measured.
+* The choice is a profile record in the encrypted store, like the proxy.
+  It applies from the next call. `Join` carries the chosen IDs; none means
+  the system default.
+* A chosen device that is not connected stops the join with
+  `DeviceNotFound`. The worker never falls back to another device, because
+  that device could be a microphone the user did not choose. A record that
+  cannot be read stops the join too.
 
 ### Session lifecycle
 
@@ -216,3 +251,4 @@ Proposed option: "a contained call worker".
 * [ADR-0005](0005-share-room-keys-only-with-cross-signed-devices.md)
 * [ADR-0028](0028-route-every-connection-through-the-profiles-socks5-proxy.md)
 * [Windows sandbox evidence](../evidence/windows-sandbox.md)
+* [Live call run with Element Call](../evidence/live-calls.md)

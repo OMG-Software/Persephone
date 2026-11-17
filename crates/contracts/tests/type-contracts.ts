@@ -1,5 +1,6 @@
 import type {
   AppStatus,
+  CallDevices,
   CallEnd,
   CallJoinError,
   CallReadiness,
@@ -188,6 +189,14 @@ const unknownReason: CallUnavailable = "no_microphone";
 const unknownEnd: CallEnd = "crashed";
 // @ts-expect-error only the defined join errors are accepted
 const unknownJoin: CallJoinError = "busy";
+const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "Microphone" }], playout: [], selectedRecording: null, selectedPlayout: null, unreadable: false };
+// @ts-expect-error a device list carries IDs and names, nothing else
+const deviceWithPath: CallDevices = { ...noDevices, recording: [{ id: "a", name: "b", path: "c" }] };
+// @ts-expect-error the saved choice must be explicit null, not missing
+const missingChoice: CallDevices = { supported: true, recording: [], playout: [], selectedRecording: null, unreadable: false };
+void noDevices;
+void deviceWithPath;
+void missingChoice;
 void idleCall;
 void readyCall;
 void callWithToken;

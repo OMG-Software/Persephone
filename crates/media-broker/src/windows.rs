@@ -76,7 +76,12 @@ const SE_GROUP_ENABLED: u32 = 0x4;
 
 /// The only capabilities a call worker gets: network access for LiveKit and
 /// the microphone. A closed set; callers cannot add names.
-const CALL_CAPABILITIES: [&str; 2] = ["internetClient", "microphone"];
+#[cfg(not(feature = "dev-private-network"))]
+const CALL_CAPABILITIES: &[&str] = &["internetClient", "microphone"];
+/// Development builds for the live call test only: also private networks, so
+/// the worker reaches a disposable SFU on the WSL address. Never shipped.
+#[cfg(feature = "dev-private-network")]
+const CALL_CAPABILITIES: &[&str] = &["internetClient", "microphone", "privateNetworkClientServer"];
 /// Committed memory for the call worker process.
 const CALL_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
@@ -290,7 +295,7 @@ impl LaunchSpec {
     /// mitigation (the audio stack needs both), no CPU limit.
     fn call() -> Self {
         Self {
-            capabilities: &CALL_CAPABILITIES,
+            capabilities: CALL_CAPABILITIES,
             mitigations: Mitigations {
                 prohibit_dynamic_code: false,
                 disable_win32k: false,
@@ -705,14 +710,28 @@ mod tests {
         );
     }
 
-    /// GIVEN the call worker's launch spec WHEN read THEN it has exactly the
-    /// two capabilities, no CPU limit, and the 512 MiB memory limit.
+    /// GIVEN the call worker's launch spec in a build without the dev feature
+    /// WHEN read THEN it has exactly the two capabilities, no CPU limit, and
+    /// the 512 MiB memory limit.
+    #[cfg(not(feature = "dev-private-network"))]
     #[test]
     fn given_call_spec_then_capabilities_are_exactly_network_and_microphone() {
         let spec = LaunchSpec::call();
         assert_eq!(spec.capabilities, ["internetClient", "microphone"]);
         assert_eq!(spec.cpu_time_limit, None);
         assert_eq!(spec.memory_limit_bytes, 512 * 1024 * 1024);
+    }
+
+    /// GIVEN the dev-private-network feature WHEN the call spec is read THEN
+    /// private networks are the only addition to the release capabilities.
+    #[cfg(feature = "dev-private-network")]
+    #[test]
+    fn given_dev_private_network_then_only_private_networks_are_added() {
+        let spec = LaunchSpec::call();
+        assert_eq!(
+            spec.capabilities,
+            ["internetClient", "microphone", "privateNetworkClientServer"]
+        );
     }
 
     /// GIVEN the call worker's mitigations WHEN flags are built THEN every
@@ -743,13 +762,15 @@ mod tests {
         assert_eq!(spec.cpu_time_limit, Some(policy.cpu_time_limit));
     }
 
-    /// GIVEN the two call capability names WHEN the OS derives their SIDs
-    /// THEN each yields one capability SID and the SIDs differ.
+    /// GIVEN the call capability names WHEN the OS derives their SIDs THEN
+    /// each yields one capability SID and the SIDs differ.
     #[test]
-    fn given_call_capabilities_then_the_os_derives_two_distinct_sids() {
-        let sids = CapabilitySids::derive(&CALL_CAPABILITIES).unwrap();
-        assert_eq!(sids.sids.len(), 2);
-        assert_ne!(sids.sids[0], sids.sids[1]);
+    fn given_call_capabilities_then_the_os_derives_distinct_sids() {
+        let sids = CapabilitySids::derive(CALL_CAPABILITIES).unwrap();
+        assert_eq!(sids.sids.len(), CALL_CAPABILITIES.len());
+        for (i, sid) in sids.sids.iter().enumerate() {
+            assert!(sids.sids[i + 1..].iter().all(|other| other != sid));
+        }
         assert!(sids.attributes().iter().all(|a| a.Attributes == 4));
     }
 

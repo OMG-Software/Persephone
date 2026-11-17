@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
@@ -23,6 +23,12 @@ pub const MAX_TURN_CREDENTIAL_BYTES: usize = 512;
 pub const MIN_KEY_BYTES: usize = 16;
 pub const MAX_KEY_BYTES: usize = 64;
 pub const MAX_PARTICIPANTS: usize = 32;
+/// An audio device ID as libwebrtc reports it (on Windows, the endpoint ID).
+pub const MAX_DEVICE_ID_BYTES: usize = 512;
+/// A device name as the OS reports it, cut on a character boundary.
+pub const MAX_DEVICE_NAME_BYTES: usize = 256;
+/// Devices per list (microphones or speakers).
+pub const MAX_DEVICES: usize = 32;
 
 /// Why a message body was refused. There is no free text on purpose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +81,37 @@ impl std::fmt::Debug for TurnServer {
     }
 }
 
+/// One microphone or speaker. The ID is the platform's stable device ID;
+/// the name is untrusted OS text for display only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AudioDevice {
+    pub id: String,
+    pub name: String,
+}
+
+impl AudioDevice {
+    /// A device that fits the wire limits, or `None` when the ID does not:
+    /// empty, over [`MAX_DEVICE_ID_BYTES`], or holding a control character.
+    /// The name loses its control characters and is cut on a character
+    /// boundary to [`MAX_DEVICE_NAME_BYTES`].
+    pub fn bounded(id: &str, name: &str) -> Option<Self> {
+        if id.is_empty() || id.len() > MAX_DEVICE_ID_BYTES || id.chars().any(char::is_control) {
+            return None;
+        }
+        let mut kept = String::new();
+        for c in name.chars().filter(|c| !c.is_control()) {
+            if kept.len() + c.len_utf8() > MAX_DEVICE_NAME_BYTES {
+                break;
+            }
+            kept.push(c);
+        }
+        Some(Self {
+            id: id.to_owned(),
+            name: kept,
+        })
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum ToWorker {
     Join {
@@ -84,7 +121,13 @@ pub enum ToWorker {
         relay_only: bool,
         own_identity: String,
         own_key: FrameKeyMsg,
+        /// The microphone to use; `None` is the system default.
+        recording_device: Option<String>,
+        /// The speaker to use; `None` is the system default.
+        playout_device: Option<String>,
     },
+    /// Only as the first message: report the audio devices, then exit.
+    ListDevices,
     SetKey {
         identity: String,
         key: FrameKeyMsg,
@@ -111,6 +154,8 @@ impl std::fmt::Debug for ToWorker {
                 relay_only,
                 own_identity,
                 own_key,
+                recording_device,
+                playout_device,
             } => f
                 .debug_struct("Join")
                 .field("sfu_url", sfu_url)
@@ -119,7 +164,10 @@ impl std::fmt::Debug for ToWorker {
                 .field("relay_only", relay_only)
                 .field("own_identity", own_identity)
                 .field("own_key", own_key)
+                .field("recording_device", recording_device)
+                .field("playout_device", playout_device)
                 .finish(),
+            Self::ListDevices => f.write_str("ListDevices"),
             Self::SetKey { identity, key } => f
                 .debug_struct("SetKey")
                 .field("identity", identity)
@@ -148,6 +196,8 @@ pub enum FailureCode {
     AudioDevice = 6,
     Protocol = 7,
     Internal = 8,
+    /// The chosen microphone or speaker is not connected.
+    DeviceNotFound = 9,
 }
 
 impl TryFrom<u8> for FailureCode {
@@ -163,6 +213,7 @@ impl TryFrom<u8> for FailureCode {
             6 => Self::AudioDevice,
             7 => Self::Protocol,
             8 => Self::Internal,
+            9 => Self::DeviceNotFound,
             _ => return Err(DecodeError::InvalidValue),
         })
     }
@@ -193,6 +244,11 @@ pub enum FromWorker {
         code: FailureCode,
     },
     Left,
+    /// The reply to `ListDevices`.
+    Devices {
+        recording: Vec<AudioDevice>,
+        playout: Vec<AudioDevice>,
+    },
 }
 
 // Tags of core to worker messages.
@@ -202,6 +258,7 @@ const TO_SET_OWN_KEY: u8 = 3;
 const TO_REMOVE_PARTICIPANT: u8 = 4;
 const TO_SET_MUTED: u8 = 5;
 const TO_LEAVE: u8 = 6;
+const TO_LIST_DEVICES: u8 = 7;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -212,6 +269,7 @@ const FROM_SPEAKING: u8 = 5;
 const FROM_MUTED: u8 = 6;
 const FROM_FAILED: u8 = 7;
 const FROM_LEFT: u8 = 8;
+const FROM_DEVICES: u8 = 9;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -286,6 +344,30 @@ impl<'a> Reader<'a> {
             .to_owned())
     }
 
+    /// An optional device ID: empty means the system default.
+    fn device_choice(&mut self) -> Result<Option<String>, DecodeError> {
+        let id = self.str(MAX_DEVICE_ID_BYTES, CharRule::NoControl, true)?;
+        Ok((!id.is_empty()).then(|| id.to_owned()))
+    }
+
+    fn devices(&mut self) -> Result<Vec<AudioDevice>, DecodeError> {
+        let count = usize::from(self.u8()?);
+        if count > MAX_DEVICES {
+            return Err(DecodeError::TooLarge);
+        }
+        let mut devices = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = self
+                .str(MAX_DEVICE_ID_BYTES, CharRule::NoControl, false)?
+                .to_owned();
+            let name = self
+                .str(MAX_DEVICE_NAME_BYTES, CharRule::NoControl, true)?
+                .to_owned();
+            devices.push(AudioDevice { id, name });
+        }
+        Ok(devices)
+    }
+
     fn secret(&mut self, max: usize, rule: CharRule) -> Result<Zeroizing<String>, DecodeError> {
         Ok(Zeroizing::new(self.str(max, rule, false)?.to_owned()))
     }
@@ -334,6 +416,15 @@ fn put_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(bytes);
 }
 
+fn put_devices(out: &mut Vec<u8>, devices: &[AudioDevice]) {
+    let devices = &devices[..devices.len().min(usize::from(u8::MAX))];
+    out.push(devices.len() as u8);
+    for device in devices {
+        put_str(out, &device.id);
+        put_str(out, &device.name);
+    }
+}
+
 fn put_key(out: &mut Vec<u8>, key: &FrameKeyMsg) {
     let bytes = &key.bytes[..key.bytes.len().min(usize::from(u8::MAX))];
     out.push(key.index);
@@ -372,6 +463,8 @@ impl ToWorker {
                 relay_only,
                 own_identity,
                 own_key,
+                recording_device,
+                playout_device,
             } => {
                 out.push(TO_JOIN);
                 put_str(&mut out, sfu_url);
@@ -385,7 +478,10 @@ impl ToWorker {
                 out.push(u8::from(*relay_only));
                 put_str(&mut out, own_identity);
                 put_key(&mut out, own_key);
+                put_str(&mut out, recording_device.as_deref().unwrap_or(""));
+                put_str(&mut out, playout_device.as_deref().unwrap_or(""));
             }
+            Self::ListDevices => out.push(TO_LIST_DEVICES),
             Self::SetKey { identity, key } => {
                 out.push(TO_SET_KEY);
                 put_str(&mut out, identity);
@@ -440,8 +536,11 @@ impl ToWorker {
                     relay_only: reader.bool()?,
                     own_identity: reader.identity()?,
                     own_key: reader.key()?,
+                    recording_device: reader.device_choice()?,
+                    playout_device: reader.device_choice()?,
                 }
             }
+            TO_LIST_DEVICES => Self::ListDevices,
             TO_SET_KEY => Self::SetKey {
                 identity: reader.identity()?,
                 key: reader.key()?,
@@ -492,6 +591,11 @@ impl FromWorker {
                 out.push(*code as u8);
             }
             Self::Left => out.push(FROM_LEFT),
+            Self::Devices { recording, playout } => {
+                out.push(FROM_DEVICES);
+                put_devices(&mut out, recording);
+                put_devices(&mut out, playout);
+            }
         }
         out
     }
@@ -520,6 +624,10 @@ impl FromWorker {
                 code: FailureCode::try_from(reader.u8()?)?,
             },
             FROM_LEFT => Self::Left,
+            FROM_DEVICES => Self::Devices {
+                recording: reader.devices()?,
+                playout: reader.devices()?,
+            },
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -607,6 +715,13 @@ mod tests {
         }
     }
 
+    fn device(id: &str, name: &str) -> AudioDevice {
+        AudioDevice {
+            id: id.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
     fn turn(uri: &str) -> TurnServer {
         TurnServer {
             uri: uri.to_owned(),
@@ -626,6 +741,8 @@ mod tests {
             relay_only: true,
             own_identity: "@alice:example.org:DEVICE".to_owned(),
             own_key: key(3, 16),
+            recording_device: Some("{0.0.1.00000000}.{6a2c}".to_owned()),
+            playout_device: None,
         }
     }
 
@@ -644,6 +761,8 @@ mod tests {
             relay_only: false,
             own_identity: identity.to_owned(),
             own_key,
+            recording_device: None,
+            playout_device: None,
         }
         .encode()
         .to_vec()
@@ -662,6 +781,7 @@ mod tests {
             },
             ToWorker::SetMuted { muted: true },
             ToWorker::Leave,
+            ToWorker::ListDevices,
         ]
     }
 
@@ -683,8 +803,16 @@ mod tests {
             },
             FromWorker::Muted { muted: false },
             FromWorker::Left,
+            FromWorker::Devices {
+                recording: vec![device("{0.0.1.00000000}.{6a2c}", "Microphone (Headset)")],
+                playout: vec![device("p", ""), device("q", "Lautsprecher (Ü)")],
+            },
+            FromWorker::Devices {
+                recording: Vec::new(),
+                playout: Vec::new(),
+            },
         ];
-        for code in 1..=8 {
+        for code in 1..=9 {
             all.push(FromWorker::Failed {
                 code: FailureCode::try_from(code).unwrap(),
             });
@@ -878,7 +1006,7 @@ mod tests {
     #[test]
     fn given_unknown_version_tag_or_oversize_body_when_decoded_then_it_is_rejected() {
         assert_eq!(
-            ToWorker::decode(&[2, TO_LEAVE]),
+            ToWorker::decode(&[1, TO_LEAVE]),
             Err(DecodeError::UnknownVersion)
         );
         assert_eq!(
@@ -886,11 +1014,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 7]),
+            ToWorker::decode(&[VERSION, 8]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 9]),
+            FromWorker::decode(&[VERSION, 10]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -908,7 +1036,7 @@ mod tests {
             Err(DecodeError::InvalidValue)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, FROM_FAILED, 9]),
+            FromWorker::decode(&[VERSION, FROM_FAILED, 10]),
             Err(DecodeError::InvalidValue)
         );
         assert_eq!(
@@ -1032,5 +1160,126 @@ mod tests {
         let server = format!("{:?}", turn("turn:a"));
         assert!(!server.contains("SECRET"));
         assert!(server.contains("turn:a"));
+    }
+
+    /// Join with only the speaker replaced.
+    fn join_with_playout(playout: &str) -> ToWorker {
+        let ToWorker::Join {
+            sfu_url,
+            jwt,
+            turn,
+            relay_only,
+            own_identity,
+            own_key,
+            ..
+        } = join()
+        else {
+            unreachable!()
+        };
+        ToWorker::Join {
+            sfu_url,
+            jwt,
+            turn,
+            relay_only,
+            own_identity,
+            own_key,
+            recording_device: None,
+            playout_device: Some(playout.to_owned()),
+        }
+    }
+
+    /// GIVEN device lists or device IDs over their limits, or with a
+    /// control character
+    /// WHEN the messages are decoded
+    /// THEN each is rejected.
+    #[test]
+    fn given_device_fields_over_limit_when_decoded_then_they_are_rejected() {
+        let long_id = "d".repeat(MAX_DEVICE_ID_BYTES + 1);
+        let long_name = "n".repeat(MAX_DEVICE_NAME_BYTES + 1);
+        let list = |recording: Vec<AudioDevice>| FromWorker::Devices {
+            recording,
+            playout: Vec::new(),
+        };
+        let full_id = "d".repeat(MAX_DEVICE_ID_BYTES);
+        let full_name = "n".repeat(MAX_DEVICE_NAME_BYTES);
+        let at_limit = list(
+            (0..MAX_DEVICES)
+                .map(|_| device(&full_id, &full_name))
+                .collect(),
+        );
+        assert!(FromWorker::decode(&at_limit.encode()).is_ok());
+        let cases = [
+            (
+                list((0..=MAX_DEVICES).map(|_| device("d", "n")).collect()),
+                DecodeError::TooLarge,
+            ),
+            (list(vec![device(&long_id, "n")]), DecodeError::TooLarge),
+            (list(vec![device("d", &long_name)]), DecodeError::TooLarge),
+            (list(vec![device("", "n")]), DecodeError::TooShort),
+            (
+                list(vec![device("d\nx", "n")]),
+                DecodeError::InvalidCharacter,
+            ),
+            (
+                list(vec![device("d", "n\u{1b}[2J")]),
+                DecodeError::InvalidCharacter,
+            ),
+        ];
+        for (case, expected) in cases {
+            assert_eq!(
+                FromWorker::decode(&case.encode()),
+                Err(expected),
+                "{case:?}"
+            );
+        }
+        assert_eq!(
+            ToWorker::decode(&join_with_playout(&long_id).encode()),
+            Err(DecodeError::TooLarge)
+        );
+        assert_eq!(
+            ToWorker::decode(&join_with_playout("a\u{0}b").encode()),
+            Err(DecodeError::InvalidCharacter)
+        );
+    }
+
+    /// GIVEN a Join with no device chosen
+    /// WHEN it is encoded and decoded
+    /// THEN both devices stay the system default (`None`), not an empty ID.
+    #[test]
+    fn given_default_devices_when_round_tripped_then_they_stay_none() {
+        let body = join_with("wss://h", "t", vec![], "id", key(0, 16));
+        let Ok(ToWorker::Join {
+            recording_device,
+            playout_device,
+            ..
+        }) = ToWorker::decode(&body)
+        else {
+            panic!("join decodes");
+        };
+        assert_eq!((recording_device, playout_device), (None, None));
+    }
+
+    /// GIVEN OS device text with control characters, an over-long name, or
+    /// a bad ID
+    /// WHEN it is bounded for the wire
+    /// THEN controls are removed, the name is cut on a character boundary,
+    /// and a bad ID gives no device.
+    #[test]
+    fn given_os_device_text_when_bounded_then_it_fits_the_wire() {
+        let named = AudioDevice::bounded("id", "Mic\u{1b}[31m (USB)\n").unwrap();
+        assert_eq!(named.name, "Mic[31m (USB)");
+        let wide = "é".repeat(MAX_DEVICE_NAME_BYTES);
+        let cut = AudioDevice::bounded("id", &wide).unwrap();
+        assert!(cut.name.len() <= MAX_DEVICE_NAME_BYTES);
+        assert_eq!(cut.name.chars().count(), MAX_DEVICE_NAME_BYTES / 2);
+        let long_id = "i".repeat(MAX_DEVICE_ID_BYTES + 1);
+        for bad in ["", "a\tb", long_id.as_str()] {
+            assert_eq!(AudioDevice::bounded(bad, "n"), None, "{bad:?}");
+        }
+        let fits = FromWorker::Devices {
+            recording: vec![cut],
+            playout: vec![named],
+        };
+        assert!(FromWorker::decode(&fits.encode()).is_ok());
     }
 }

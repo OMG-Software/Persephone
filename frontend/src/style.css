@@ -1183,7 +1183,8 @@ kbd {
   font-weight: 600;
 }
 
-.proxy-settings {
+.proxy-settings,
+.call-devices {
   display: grid;
   gap: 6px;
   margin-top: 8px;

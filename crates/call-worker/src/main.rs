@@ -3,7 +3,7 @@
 //! One process runs one call. It checks its own containment, reports the
 //! result in `Ready`, and then reads core messages from stdin and writes
 //! worker messages to stdout, both as media-protocol Control frames. The
-//! first message must be `Join`. Stdout is the frame channel: nothing else
+//! first message must be `Join` or `ListDevices`. Stdout is the frame channel: nothing else
 //! may write to it, and the worker writes nothing to stderr.
 //!
 //! Three bounded queues connect the parts: the stdin reader thread, the
@@ -45,12 +45,8 @@ fn main() -> ExitCode {
     let bits = containment::missing_controls();
     let (output, writer_queue) = mpsc::channel::<FromWorker>(OUTPUT_CAPACITY);
     let writer = std::thread::spawn(move || write_loop(writer_queue));
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_time()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(_) => return ExitCode::from(EXIT_UNREPORTABLE),
+    let Ok(runtime) = build_runtime() else {
+        return ExitCode::from(EXIT_UNREPORTABLE);
     };
     let code = runtime.block_on(run(bits, output));
     // Dropping the runtime stops its tasks; the writer ends when the last
@@ -60,6 +56,16 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::from(code),
         _ => ExitCode::from(EXIT_UNREPORTABLE),
     }
+}
+
+/// The call task's runtime. LiveKit opens its signalling socket with tokio's
+/// networking, so the IO driver must be on: without it the first connect
+/// panics and the worker exits with no `Failed` message.
+fn build_runtime() -> io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_io()
+        .enable_time()
+        .build()
 }
 
 async fn run(bits: u32, output: mpsc::Sender<FromWorker>) -> u8 {
@@ -84,6 +90,7 @@ async fn run(bits: u32, output: mpsc::Sender<FromWorker>) -> u8 {
     let (input_tx, mut input) = mpsc::channel::<Input>(INPUT_CAPACITY);
     std::thread::spawn(move || read_loop(input_tx));
     match input.recv().await {
+        Some(Input::Message(ToWorker::ListDevices)) => session::list_devices(&output).await,
         Some(Input::Message(first)) if mapping::is_first_message_allowed(&first) => {
             session::run(first, &mut input, &output).await
         }
@@ -126,4 +133,27 @@ fn write_loop(mut queue: mpsc::Receiver<FromWorker>) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_runtime;
+
+    /// GIVEN the worker's runtime WHEN a loopback TCP connection is made on it
+    /// THEN it succeeds (a runtime without the IO driver panics here, as the
+    /// first LiveKit signalling connect did in the live call test).
+    #[test]
+    fn given_worker_runtime_when_tcp_connects_then_it_does_not_panic() {
+        let runtime = build_runtime().expect("runtime builds");
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind loopback");
+            let address = listener.local_addr().expect("local address");
+            let (client, server) =
+                tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+            client.expect("connect");
+            server.expect("accept");
+        });
+    }
 }

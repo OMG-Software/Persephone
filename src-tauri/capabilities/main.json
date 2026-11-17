@@ -32,6 +32,8 @@
     "allow-discover-homeserver",
     "allow-proxy-setting",
     "allow-set-proxy-setting",
+    "allow-call-devices",
+    "allow-set-call-devices",
     "allow-register",
     "allow-sign-out",
     "allow-security-status",

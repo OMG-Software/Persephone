@@ -1988,6 +1988,8 @@ pub enum CallEnd {
     KeysUnavailable,
     SessionEnded,
     Internal,
+    /// The chosen microphone or speaker is not connected.
+    DeviceNotFound,
 }
 
 /// Why a join was refused or failed.
@@ -2008,6 +2010,35 @@ pub enum CallJoinError {
     CallServer,
     Keys,
     ProxyUnreadable,
+    /// The saved call devices could not be read; the call never falls back
+    /// to the defaults.
+    DeviceSettingUnreadable,
+}
+
+/// One microphone or speaker. The name is untrusted operating system text,
+/// shown as plain text only. The ID is the platform's device ID, kept and
+/// returned unchanged.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallDevice {
+    pub id: String,
+    pub name: String,
+}
+
+/// Reply of `call_devices`: the devices now connected and the saved choice
+/// (ADR-0043). `supported` is false where calls have no reviewed containment;
+/// the lists are then empty. A saved choice may name a device that is not
+/// connected now. `unreadable` is true when the saved record could not be
+/// read; both choices are then null.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallDevices {
+    pub supported: bool,
+    pub recording: Vec<CallDevice>,
+    pub playout: Vec<CallDevice>,
+    pub selected_recording: Option<String>,
+    pub selected_playout: Option<String>,
+    pub unreadable: bool,
 }
 
 /// Reply of every call command except `call_readiness`. Codes, bounded IDs
@@ -2175,6 +2206,8 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallEnd::decl(&config)),
         format!("export {}", CallJoinError::decl(&config)),
         format!("export {}", CallStatus::decl(&config)),
+        format!("export {}", CallDevice::decl(&config)),
+        format!("export {}", CallDevices::decl(&config)),
         format!("export {}", ContactTrust::decl(&config)),
         format!("export {}", ContactStatus::decl(&config)),
         format!("export {}", IdentityChange::decl(&config)),

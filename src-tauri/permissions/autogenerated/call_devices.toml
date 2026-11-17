@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-devices"
+description = "Enables the call_devices command without any pre-configured scope."
+commands.allow = ["call_devices"]
+
+[[permission]]
+identifier = "deny-call-devices"
+description = "Denies the call_devices command without any pre-configured scope."
+commands.deny = ["call_devices"]

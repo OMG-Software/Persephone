@@ -42,6 +42,8 @@ fn main() {
             "discover_homeserver",
             "proxy_setting",
             "set_proxy_setting",
+            "call_devices",
+            "set_call_devices",
             "register",
             "sign_out",
             "security_status",

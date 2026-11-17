@@ -98,13 +98,28 @@ pub async fn turn_servers(
     }
 }
 
+/// A LiveKit service as the homeserver advertised it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SfuService {
+    /// The parsed URL, for requests and comparisons.
+    pub url: Url,
+    /// The advertised string, unchanged. The membership carries this
+    /// string, because Element Call compares transports as strings and
+    /// `Url` adds `/` to an empty path.
+    pub advertised: String,
+}
+
 /// The first LiveKit service URL that is safe to use.
-fn first_livekit(transports: &[RtcTransport]) -> Option<Url> {
+fn first_livekit(transports: &[RtcTransport]) -> Option<SfuService> {
     transports.iter().find_map(|transport| match transport {
         RtcTransport::LiveKit(livekit) if livekit.service_url.len() <= MAX_URL_BYTES => {
             Url::parse(&livekit.service_url)
                 .ok()
                 .filter(|url| is_service_url(url, "https", "http"))
+                .map(|url| SfuService {
+                    url,
+                    advertised: livekit.service_url.clone(),
+                })
         }
         _ => None,
     })
@@ -112,7 +127,9 @@ fn first_livekit(transports: &[RtcTransport]) -> Option<Url> {
 
 /// The homeserver's first usable LiveKit service. `None` when it offers
 /// none.
-pub async fn sfu_transport(client: &matrix_sdk::Client) -> Result<Option<Url>, ReadinessError> {
+pub async fn sfu_transport(
+    client: &matrix_sdk::Client,
+) -> Result<Option<SfuService>, ReadinessError> {
     let transports = client
         .discover_rtc_transports()
         .await
@@ -128,7 +145,7 @@ pub struct CallReadiness {
 }
 
 pub async fn readiness(client: &matrix_sdk::Client) -> Result<CallReadiness, ReadinessError> {
-    let sfu = sfu_transport(client).await?;
+    let sfu = sfu_transport(client).await?.map(|service| service.url);
     let turn = turn_servers(client).await?.is_some();
     Ok(CallReadiness { sfu, turn })
 }
@@ -248,10 +265,22 @@ mod tests {
             transports.insert(0, RtcTransport::livekit("http://127.0.0.1:8080".to_owned()));
         }
         assert_eq!(
-            first_livekit(&transports).unwrap().as_str(),
+            first_livekit(&transports).unwrap().url.as_str(),
             "https://good.example.org/jwt"
         );
         assert!(first_livekit(&[]).is_none());
+    }
+
+    /// GIVEN a service advertised as a bare origin, with or without a final
+    /// slash WHEN it is picked THEN the advertised string is kept unchanged,
+    /// though the parsed URL always ends in `/`.
+    #[test]
+    fn given_bare_origin_then_advertised_string_is_kept() {
+        for advertised in ["https://sfu.example.org", "https://sfu.example.org/"] {
+            let service = first_livekit(&[RtcTransport::livekit(advertised.to_owned())]).unwrap();
+            assert_eq!(service.advertised, advertised);
+            assert_eq!(service.url.as_str(), "https://sfu.example.org/");
+        }
     }
 
     /// GIVEN a homeserver with TURN servers WHEN asked THEN valid servers come back.
@@ -318,8 +347,9 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let url = sfu_transport(&client).await.unwrap().unwrap();
-        assert_eq!(url.as_str(), "https://sfu.example.org/jwt");
+        let service = sfu_transport(&client).await.unwrap().unwrap();
+        assert_eq!(service.url.as_str(), "https://sfu.example.org/jwt");
+        assert_eq!(service.advertised, "https://sfu.example.org/jwt");
         Mock::given(method("GET"))
             .and(path(TURN_PATH))
             .respond_with(

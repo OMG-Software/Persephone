@@ -20,6 +20,8 @@
 //!   token. The answer must name a `wss://` URL and a well-formed JWT.
 //! * [`readiness`]: whether the homeserver offers an SFU transport and TURN
 //!   servers, so the page can say a call is not possible before it starts.
+//! * [`devices`]: the saved microphone and speaker, and the device list a
+//!   contained worker reports.
 //! * [`delayed`]: the delayed leave (MSC4140) that ends a membership when the
 //!   core stops restarting it.
 //! * [`incoming`]: the bounded to-device handler for other members' keys and
@@ -35,6 +37,7 @@
 
 pub mod controller;
 pub mod delayed;
+pub mod devices;
 pub mod encryption_keys;
 pub mod incoming;
 pub mod keys;

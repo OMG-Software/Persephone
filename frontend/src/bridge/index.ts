@@ -8,6 +8,7 @@ import type {
   AccountSettings,
   AccountStatus,
   AppStatus,
+  CallDevices,
   CallEnd,
   CallJoinError,
   CallParticipant,
@@ -389,6 +390,24 @@ export function callLeave(): Promise<CallStatus> {
  */
 export function callMute(muted: boolean): Promise<CallStatus> {
   return invoke<CallStatus>('call_mute', { muted });
+}
+
+/**
+ * The call microphones and speakers now connected, and the saved choice
+ * (ADR-0043). The core lists them through a contained worker, so it can take
+ * a few seconds. Names are untrusted text: render them as plain text only.
+ */
+export function callDevices(): Promise<CallDevices> {
+  return invoke<CallDevices>('call_devices');
+}
+
+/**
+ * Saves the call microphone and speaker as device IDs from `callDevices`;
+ * `null` is the system default. A device need not be connected now. It
+ * applies to calls joined afterwards.
+ */
+export function setCallDevices(recording: string | null, playout: string | null): Promise<void> {
+  return invoke<void>('set_call_devices', { recording, playout });
 }
 
 /** The call as the core shows it: codes, flags and bounded IDs only. */

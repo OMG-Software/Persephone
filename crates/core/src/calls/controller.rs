@@ -89,6 +89,9 @@ pub enum CallError {
     Declined,
     /// The profile's proxy setting could not be read.
     ProxyUnreadable,
+    /// The saved call devices could not be read. The call never uses the
+    /// defaults instead.
+    DeviceSettingUnreadable,
     Worker(StartError),
     /// The homeserver does not accept delayed events (MSC4140).
     NoDelayedEvents,
@@ -153,6 +156,15 @@ pub enum CallState {
         room_id: OwnedRoomId,
         reason: EndReason,
     },
+}
+
+/// The saved call devices. A record that cannot be read refuses the call.
+pub async fn device_selection(
+    stores: &crate::store::Stores,
+) -> Result<super::devices::Selection, CallError> {
+    super::devices::load(stores)
+        .await
+        .map_err(|_| CallError::DeviceSettingUnreadable)
 }
 
 /// Whether the profile has a SOCKS5 proxy: the `proxy_configured` argument of
@@ -321,6 +333,11 @@ impl View {
                 }
             }
             FromWorker::Failed { code } => Applied::End(EndReason::WorkerFailed(*code)),
+            // The device list answers `ListDevices` only; in a call it is a
+            // protocol violation.
+            FromWorker::Devices { .. } => {
+                Applied::End(EndReason::WorkerFailed(FailureCode::Protocol))
+            }
             FromWorker::Left => Applied::End(EndReason::WorkerStopped),
         }
     }
@@ -501,6 +518,8 @@ pub struct DirectConsent(());
 pub struct JoinScope {
     pub generation: u64,
     pub runtime: Handle,
+    /// The saved microphone and speaker, read with the proxy setting.
+    pub devices: super::devices::Selection,
 }
 
 // ---------------------------------------------------------------------
@@ -669,6 +688,11 @@ impl CallController {
         self.inner.host.supported()
     }
 
+    /// The platform's call host, for the device list.
+    pub fn host(&self) -> Arc<dyn CallHost> {
+        self.inner.host.clone()
+    }
+
     /// Asks, when the profile has a proxy, whether the call may connect
     /// directly (ADR-0043, ADR-0028). Anything but an explicit yes declines.
     /// Blocks until answered, so call it from a thread that holds no lease:
@@ -822,8 +846,8 @@ impl CallController {
         flags.halt()?;
 
         // 3. An SFU; TURN is optional.
-        let sfu_url = match sfu_transport(client).await {
-            Ok(Some(url)) => url,
+        let sfu = match sfu_transport(client).await {
+            Ok(Some(service)) => service,
             _ => return Err(CallError::NoSfu),
         };
         let turn = turn_servers(client).await.ok().flatten();
@@ -877,7 +901,7 @@ impl CallController {
                     state_key: state_key.clone(),
                     user_id: user_id.clone(),
                     device_id: device_id.clone(),
-                    sfu_url: sfu_url.clone(),
+                    sfu_url: sfu.advertised.clone(),
                     created_ts,
                 },
                 failed_tx,
@@ -890,7 +914,7 @@ impl CallController {
             room_id.as_str(),
             &device_id,
             &user_id,
-            &sfu_url,
+            &sfu.advertised,
             Some(created_ts),
         );
         setup.membership_sent = true;
@@ -909,7 +933,7 @@ impl CallController {
             .await
             .map_err(|_| CallError::OpenId)?;
         let body = sfu::request_body(room_id, &device_id, &OpenIdToken::from(openid));
-        let grant = sfu::get_grant(client.http_client(), &sfu_url, &body)
+        let grant = sfu::get_grant(client.http_client(), &sfu.url, &body)
             .await
             .map_err(CallError::Sfu)?;
         flags.halt()?;
@@ -925,6 +949,8 @@ impl CallController {
             relay_only: false,
             own_identity: own_identity.clone(),
             own_key: worker_key(own_keys.current()),
+            recording_device: scope.devices.recording.clone(),
+            playout_device: scope.devices.playout.clone(),
         };
         if link.send(join).is_err() {
             setup.link = Some(link);
@@ -939,7 +965,7 @@ impl CallController {
             own_device: device_id,
             own_keys,
             remote: RemoteKeys::new(),
-            view: View::new(room_id.to_owned(), sfu_url),
+            view: View::new(room_id.to_owned(), sfu.url),
             changes,
             incoming,
             failed,
@@ -1084,7 +1110,8 @@ struct KeeperMembership {
     state_key: String,
     user_id: OwnedUserId,
     device_id: OwnedDeviceId,
-    sfu_url: Url,
+    /// As advertised (`SfuService::advertised`).
+    sfu_url: String,
     created_ts: u64,
 }
 
@@ -1653,6 +1680,13 @@ mod tests {
         assert_eq!(
             view.apply(&FromWorker::Left),
             Applied::End(EndReason::WorkerStopped)
+        );
+        assert_eq!(
+            view.apply(&FromWorker::Devices {
+                recording: Vec::new(),
+                playout: Vec::new()
+            }),
+            Applied::End(EndReason::WorkerFailed(FailureCode::Protocol))
         );
     }
 

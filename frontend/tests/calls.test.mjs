@@ -4,11 +4,21 @@ import {
   CallRefresher,
   END_TEXT,
   IDLE_CALL,
+  DEFAULT_DEVICE_LABEL,
+  DEVICES_NOTE_TEXT,
+  DEVICES_UNREADABLE_TEXT,
+  DEVICES_UNSUPPORTED_TEXT,
   IN_CALL_TEXT,
+  MISSING_DEVICE_LABEL,
+  UNNAMED_DEVICE_LABEL,
   JOIN_ERROR_TEXT,
   UNAVAILABLE_TEXT,
   callAnnouncement,
   callButton,
+  deviceChoice,
+  deviceOptions,
+  deviceValue,
+  devicesNote,
   showCallBar
 } from '../src/calls.ts';
 
@@ -18,8 +28,8 @@ const ready = (over) => ({ available: true, reason: null, activeMembers: 0, ...o
 test('GIVEN every call code in the contract WHEN its text is read THEN each is plain, non-empty text, except a normal leave', () => {
   const codes = {
     unavailable: ['unsupported_platform', 'not_joined', 'not_encrypted', 'no_call_server', 'server_unreachable'],
-    join: ['already_in_call', 'not_joined', 'not_encrypted', 'no_call_server', 'declined', 'unsupported_platform', 'containment', 'no_worker', 'no_delayed_events', 'membership', 'call_server', 'keys', 'proxy_unreadable'],
-    end: ['connection_failed', 'audio_device', 'containment', 'worker_stopped', 'membership_lost', 'keys_unavailable', 'session_ended', 'internal']
+    join: ['already_in_call', 'not_joined', 'not_encrypted', 'no_call_server', 'declined', 'unsupported_platform', 'containment', 'no_worker', 'no_delayed_events', 'membership', 'call_server', 'keys', 'proxy_unreadable', 'device_setting_unreadable'],
+    end: ['connection_failed', 'audio_device', 'device_not_found', 'containment', 'worker_stopped', 'membership_lost', 'keys_unavailable', 'session_ended', 'internal']
   };
   for (const [table, list] of [[UNAVAILABLE_TEXT, codes.unavailable], [JOIN_ERROR_TEXT, codes.join], [END_TEXT, codes.end]]) {
     assert.deepEqual(Object.keys(table).filter((key) => key !== 'left').sort(), [...list].sort());
@@ -132,4 +142,40 @@ test('GIVEN a call shown and a reply in flight WHEN the session changes THEN the
   await new Promise((done) => setImmediate(done));
   assert.deepEqual(shown, [IDLE_CALL]);
   assert.equal(showCallBar(shown.at(-1), false), false);
+});
+
+test('GIVEN connected devices WHEN the menu is built THEN the default comes first, names are kept as text, and an empty name is labelled', () => {
+  const options = deviceOptions([{ id: 'a', name: 'Headset <b>x</b>' }, { id: 'b', name: '' }], null);
+  assert.deepEqual(options, [
+    { value: '', label: DEFAULT_DEVICE_LABEL },
+    { value: 'a', label: 'Headset <b>x</b>' },
+    { value: 'b', label: UNNAMED_DEVICE_LABEL }
+  ]);
+});
+
+test('GIVEN a saved device that is connected WHEN the menu is built THEN there is no extra choice', () => {
+  const options = deviceOptions([{ id: 'a', name: 'Headset' }], 'a');
+  assert.equal(options.length, 2);
+  assert.equal(deviceValue('a'), 'a');
+});
+
+test('GIVEN a saved device that is not connected WHEN the menu is built THEN one extra choice keeps it selected', () => {
+  const options = deviceOptions([{ id: 'a', name: 'Headset' }], 'gone');
+  assert.deepEqual(options.at(-1), { value: 'gone', label: MISSING_DEVICE_LABEL });
+  assert.equal(options.filter((option) => option.label === MISSING_DEVICE_LABEL).length, 1);
+  assert.equal(deviceValue('gone'), 'gone');
+  assert.equal(deviceOptions([], null).length, 1);
+});
+
+test('GIVEN menu values WHEN turned into a choice THEN the default is null and a device ID is kept', () => {
+  assert.equal(deviceChoice(''), null);
+  assert.equal(deviceChoice('{0.0.1}.{a}'), '{0.0.1}.{a}');
+  assert.equal(deviceValue(null), '');
+});
+
+test('GIVEN device replies WHEN the note is chosen THEN unsupported, unreadable and normal texts differ', () => {
+  const base = { supported: true, recording: [], playout: [], selectedRecording: null, selectedPlayout: null, unreadable: false };
+  assert.equal(devicesNote(base), DEVICES_NOTE_TEXT);
+  assert.equal(devicesNote({ ...base, unreadable: true }), DEVICES_UNREADABLE_TEXT);
+  assert.equal(devicesNote({ ...base, supported: false }), DEVICES_UNSUPPORTED_TEXT);
 });

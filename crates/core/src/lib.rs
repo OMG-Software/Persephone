@@ -325,6 +325,7 @@ pub struct Core {
     call_readiness: conversations::Busy,
     call_join: conversations::Busy,
     call_leave: conversations::Busy,
+    call_device_list: conversations::Busy,
     /// One device-list request at a time.
     devices: conversations::Busy,
     /// Reading a room's settings, listing its members, and changing it, each
@@ -541,6 +542,7 @@ impl Core {
             call_readiness: conversations::Busy::default(),
             call_join: conversations::Busy::default(),
             call_leave: conversations::Busy::default(),
+            call_device_list: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             room_settings: conversations::Busy::default(),
             room_members: turns::Queue::new(LISTING_PLACES),
@@ -685,6 +687,10 @@ impl Core {
                     Err(code) => error(code),
                 }
             }
+            Call::CallDevices {} => match self.call_devices() {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
@@ -1003,6 +1009,13 @@ impl Core {
                     Ok(call) => call(),
                     Err(code) => Outcome::Error(code),
                 }
+            }
+            Call::CallDevices {} => match self.call_devices() {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
+            Call::SetCallDevices { recording, playout } => {
+                self.set_call_devices(recording.as_deref(), playout.as_deref())
             }
             Call::CallMute { muted } => self.call_mute(*muted),
             Call::CallStatus {} => match self.calls_open() {
@@ -2052,6 +2065,90 @@ impl Core {
         }))
     }
 
+    /// Admits the device list (ADR-0043). Only one runs at a time, on its own
+    /// thread, because it starts a contained worker and waits for it.
+    fn call_devices<'a>(&'a self) -> Result<LongCall<'a>, ErrorCode> {
+        let slot = self.call_device_list.begin()?;
+        Ok(Box::new(move || {
+            let _slot = slot;
+            refused(self.finish_call_devices())
+        }))
+    }
+
+    /// The saved choice, then the devices a worker reports. An unreadable
+    /// record is shown, with both choices null, and does not hide the list.
+    /// A listing that fails is `unavailable`.
+    fn finish_call_devices(&self) -> Result<persephone_contracts::CallDevices, ErrorCode> {
+        let (selection, unreadable) = self.saved_call_devices()?;
+        let listing =
+            calls::devices::list(self.calls.host().as_ref()).map_err(|_| ErrorCode::Unavailable)?;
+        let device =
+            |device: persephone_call_protocol::AudioDevice| persephone_contracts::CallDevice {
+                id: device.id,
+                name: device.name,
+            };
+        Ok(persephone_contracts::CallDevices {
+            supported: listing.supported,
+            recording: listing.recording.into_iter().map(device).collect(),
+            playout: listing.playout.into_iter().map(device).collect(),
+            selected_recording: selection.recording,
+            selected_playout: selection.playout,
+            unreadable,
+        })
+    }
+
+    /// The saved call devices and whether the record was unreadable (then
+    /// both are the default). No profile means the defaults; `locked` while
+    /// the profile is locked.
+    fn saved_call_devices(&self) -> Result<(calls::devices::Selection, bool), ErrorCode> {
+        if !self.session.is_configured() {
+            return Ok((calls::devices::Selection::default(), false));
+        }
+        let lease = self.session.admit().map_err(|error| match error {
+            session::AdmissionError::Locked => ErrorCode::Locked,
+            session::AdmissionError::Saturated => ErrorCode::LimitExceeded,
+        })?;
+        Ok(
+            match lease
+                .stores()
+                .block_on(calls::devices::load(lease.stores()))
+            {
+                Ok(selection) => (selection, false),
+                Err(calls::devices::Unreadable) => (calls::devices::Selection::default(), true),
+            },
+        )
+    }
+
+    /// Saves the call devices; they apply to calls joined afterwards. A
+    /// device need not be connected now.
+    fn set_call_devices(&self, recording: Option<&str>, playout: Option<&str>) -> Outcome {
+        let selection = calls::devices::Selection {
+            recording: recording.map(str::to_owned),
+            playout: playout.map(str::to_owned),
+        };
+        if !selection.is_valid() {
+            return Outcome::Error(ErrorCode::InvalidArgument);
+        }
+        if !self.session.is_configured() {
+            return Outcome::Error(ErrorCode::Unavailable);
+        }
+        let lease = match self.session.admit() {
+            Ok(lease) => lease,
+            Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => {
+                return Outcome::Error(ErrorCode::LimitExceeded);
+            }
+        };
+        if lease
+            .stores()
+            .block_on(calls::devices::save(lease.stores(), &selection))
+        {
+            Outcome::Ok(serde_json::Value::Null)
+        } else {
+            Outcome::Error(ErrorCode::Internal)
+        }
+    }
+
     /// A lease and the client; the client must be dropped inside the stores'
     /// runtime, before the lease.
     fn call_lease(&self) -> Result<(session::Lease, matrix_sdk::Client), ErrorCode> {
@@ -2098,6 +2195,9 @@ impl Core {
         let proxy = lease
             .stores()
             .block_on(calls::controller::proxy_configured(lease.stores()));
+        let devices = lease
+            .stores()
+            .block_on(calls::controller::device_selection(lease.stores()));
         {
             let _context = lease.stores().runtime().enter();
             drop(client);
@@ -2105,6 +2205,11 @@ impl Core {
         drop(lease);
         let proxy = match proxy {
             Ok(proxy) => proxy,
+            Err(error) => return refuse(error),
+        };
+        // Unreadable devices refuse the call; it never uses the defaults.
+        let devices = match devices {
+            Ok(devices) => devices,
             Err(error) => return refuse(error),
         };
         let consent = match self.calls.confirm_direct(proxy) {
@@ -2120,6 +2225,7 @@ impl Core {
         let scope = JoinScope {
             generation,
             runtime: lease.stores().runtime().handle().clone(),
+            devices,
         };
         let joined = lease
             .stores()

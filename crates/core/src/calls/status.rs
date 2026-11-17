@@ -26,6 +26,7 @@ pub fn end_code(reason: EndReason) -> CallEnd {
                 CallEnd::ConnectionFailed
             }
             FailureCode::AudioDevice => CallEnd::AudioDevice,
+            FailureCode::DeviceNotFound => CallEnd::DeviceNotFound,
             FailureCode::Decryption | FailureCode::Protocol | FailureCode::Internal => {
                 CallEnd::Internal
             }
@@ -48,6 +49,7 @@ pub fn join_error(error: CallError) -> Option<CallJoinError> {
         CallError::NoSfu => CallJoinError::NoCallServer,
         CallError::Declined => CallJoinError::Declined,
         CallError::ProxyUnreadable => CallJoinError::ProxyUnreadable,
+        CallError::DeviceSettingUnreadable => CallJoinError::DeviceSettingUnreadable,
         CallError::Worker(StartError::Unsupported) => CallJoinError::UnsupportedPlatform,
         CallError::Worker(StartError::Containment(_) | StartError::NotReady) => {
             CallJoinError::Containment
@@ -222,6 +224,7 @@ mod tests {
             assert_eq!(code(failure), CallEnd::ConnectionFailed, "{failure:?}");
         }
         assert_eq!(code(FailureCode::AudioDevice), CallEnd::AudioDevice);
+        assert_eq!(code(FailureCode::DeviceNotFound), CallEnd::DeviceNotFound);
         for failure in [
             FailureCode::Decryption,
             FailureCode::Protocol,
@@ -254,6 +257,10 @@ mod tests {
             (CallError::NoSfu, CallJoinError::NoCallServer),
             (CallError::Declined, CallJoinError::Declined),
             (CallError::ProxyUnreadable, CallJoinError::ProxyUnreadable),
+            (
+                CallError::DeviceSettingUnreadable,
+                CallJoinError::DeviceSettingUnreadable,
+            ),
             (
                 CallError::Worker(StartError::Unsupported),
                 CallJoinError::UnsupportedPlatform,

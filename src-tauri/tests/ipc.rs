@@ -449,6 +449,20 @@ impl CoreTransport for FakeCore {
                 None | Some("127.0.0.1:9050") => Ok(serde_json::Value::Null),
                 Some(_) => Err(CoreError::Core(ErrorCode::InvalidArgument)),
             },
+            Call::CallDevices {} => Ok(serde_json::json!({
+                "supported": true,
+                "recording": [{"id": "mic-1", "name": "Headset"}],
+                "playout": [],
+                "selectedRecording": null,
+                "selectedPlayout": null,
+                "unreadable": false
+            })),
+            Call::SetCallDevices { recording, playout } => {
+                match (recording.as_deref(), playout.as_deref()) {
+                    (None | Some("mic-1"), None | Some("spk-1")) => Ok(serde_json::Value::Null),
+                    _ => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+                }
+            }
             Call::NewSessions {} => Ok(serde_json::json!({
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
             })),
@@ -832,6 +846,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-discover-homeserver",
             "allow-proxy-setting",
             "allow-set-proxy-setting",
+            "allow-call-devices",
+            "allow-set-call-devices",
             "allow-register",
             "allow-sign-out",
             "allow-security-status",
@@ -2036,6 +2052,33 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         .unwrap_err(),
         "invalid_argument"
     );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        invoke("call_devices", serde_json::json!({})).unwrap()["recording"][0]["id"],
+        "mic-1"
+    );
+    for args in [
+        serde_json::json!({"recording": "mic-1", "playout": null}),
+        serde_json::json!({"recording": null, "playout": "spk-1"}),
+        serde_json::json!({}),
+    ] {
+        assert_eq!(
+            invoke("set_call_devices", args),
+            Ok(serde_json::Value::Null)
+        );
+    }
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({"recording": "m".repeat(513), "playout": null}),
+        serde_json::json!({"recording": null, "playout": "s".repeat(513)}),
+        serde_json::json!({"recording": "", "playout": null}),
+    ] {
+        assert_eq!(
+            invoke("set_call_devices", args).unwrap_err(),
+            "invalid_argument"
+        );
+    }
+    assert!(invoke("set_call_devices", serde_json::json!({"recording": 7})).is_err());
     assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
         invoke(

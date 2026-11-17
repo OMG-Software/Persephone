@@ -51,8 +51,14 @@ zeroize = "=1.9.1"
 # Development only, for the disposable homeservers in tools/servers: accept
 # plain http:// to 127.0.0.1 and [::1], and allow a test credential source that
 # reads the harness profile instead of showing the native prompt. Never enabled
-# by default, in CI or in release builds.
-dev-disposable-servers = []
+# by default, in CI or in release builds. It also lets the call protocol
+# carry a loopback ws:// SFU URL, so the worker must be built with it too,
+# and gives the call worker private-network access, so it can reach a
+# disposable SFU on the WSL address (the live call test).
+dev-disposable-servers = [
+  "persephone-call-protocol/dev-disposable-servers",
+  "persephone-media-broker/dev-private-network",
+]
 
 [dev-dependencies]
 tempfile = "=3.27.0"

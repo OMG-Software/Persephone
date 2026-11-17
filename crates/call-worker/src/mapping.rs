@@ -4,7 +4,8 @@ use std::collections::{BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{
-    FailureCode, FromWorker, MAX_IDENTITY_BYTES, MAX_PARTICIPANTS, ToWorker,
+    AudioDevice, FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_PARTICIPANTS,
+    ToWorker,
 };
 
 /// The most `Speaking` messages sent in any one second.
@@ -18,9 +19,54 @@ pub fn valid_identity(identity: &str) -> bool {
         && !identity.chars().any(char::is_control)
 }
 
-/// The first message must be `Join`; nothing else may start a call.
+/// The first message must be `Join` or `ListDevices`; nothing else may start.
 pub fn is_first_message_allowed(message: &ToWorker) -> bool {
-    matches!(message, ToWorker::Join { .. })
+    matches!(message, ToWorker::Join { .. } | ToWorker::ListDevices)
+}
+
+/// LiveKit makes `index:N` IDs when the OS gives no GUID. They change when a
+/// device is plugged in or out, so they are never listed or selected.
+pub fn is_listable_device_id(id: &str) -> bool {
+    !id.starts_with("index:")
+}
+
+/// Picks the wanted device from the available IDs. `None` means the system
+/// default (no choice). A missing or unstable ID is `DeviceNotFound`.
+pub fn choose_device<'a>(
+    wanted: Option<&str>,
+    available: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<String>, FailureCode> {
+    let Some(wanted) = wanted else {
+        return Ok(None);
+    };
+    if !is_listable_device_id(wanted) {
+        return Err(FailureCode::DeviceNotFound);
+    }
+    if available.into_iter().any(|id| id == wanted) {
+        Ok(Some(wanted.to_owned()))
+    } else {
+        Err(FailureCode::DeviceNotFound)
+    }
+}
+
+/// Builds one wire list from (ID, name) pairs. It skips unstable IDs, IDs the
+/// wire refuses and repeated IDs, and keeps at most `MAX_DEVICES`.
+pub fn bounded_device_list<'a>(
+    devices: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<AudioDevice> {
+    let mut list: Vec<AudioDevice> = Vec::new();
+    for (id, name) in devices {
+        if list.len() >= MAX_DEVICES {
+            break;
+        }
+        if !is_listable_device_id(id) || list.iter().any(|device| device.id == id) {
+            continue;
+        }
+        if let Some(device) = AudioDevice::bounded(id, name) {
+            list.push(device);
+        }
+    }
+    list
 }
 
 /// What the worker saw in the room, reduced to what it reports.
@@ -200,8 +246,102 @@ mod tests {
             relay_only: false,
             own_identity: "@a:example.org:D".to_owned(),
             own_key: key(),
+            recording_device: None,
+            playout_device: None,
         };
         assert!(is_first_message_allowed(&join));
+    }
+
+    #[test]
+    fn given_list_devices_when_it_is_first_then_it_is_allowed() {
+        // GIVEN ListDevices, WHEN it is the first message, THEN it is accepted.
+        assert!(is_first_message_allowed(&ToWorker::ListDevices));
+    }
+
+    #[test]
+    fn given_device_ids_when_checked_then_index_ids_are_not_listable() {
+        // GIVEN a GUID and index IDs, WHEN checked, THEN only the GUID passes.
+        assert!(is_listable_device_id("{0.0.1.00000000}.{6a2c}"));
+        assert!(!is_listable_device_id("index:0"));
+        assert!(!is_listable_device_id("index:"));
+    }
+
+    #[test]
+    fn given_no_wanted_device_when_chosen_then_system_default_is_kept() {
+        // GIVEN no wanted ID, WHEN chosen, THEN nothing is selected.
+        assert_eq!(choose_device(None, ["a", "b"]), Ok(None));
+        assert_eq!(choose_device(None, []), Ok(None));
+    }
+
+    #[test]
+    fn given_wanted_device_when_present_then_it_is_chosen() {
+        // GIVEN a wanted ID in the list, WHEN chosen, THEN it is returned.
+        assert_eq!(
+            choose_device(Some("b"), ["a", "b"]),
+            Ok(Some("b".to_owned()))
+        );
+    }
+
+    #[test]
+    fn given_wanted_device_when_absent_or_inexact_then_it_is_not_found() {
+        // GIVEN absent and near-miss IDs, WHEN chosen, THEN DeviceNotFound.
+        assert_eq!(
+            choose_device(Some("c"), ["a", "b"]),
+            Err(FailureCode::DeviceNotFound)
+        );
+        assert_eq!(
+            choose_device(Some("A"), ["a"]),
+            Err(FailureCode::DeviceNotFound)
+        );
+        assert_eq!(
+            choose_device(Some("a"), []),
+            Err(FailureCode::DeviceNotFound)
+        );
+    }
+
+    #[test]
+    fn given_index_id_when_chosen_then_it_never_matches() {
+        // GIVEN an index ID that is also available, WHEN chosen, THEN refused.
+        assert_eq!(
+            choose_device(Some("index:1"), ["index:1"]),
+            Err(FailureCode::DeviceNotFound)
+        );
+    }
+
+    #[test]
+    fn given_mixed_devices_when_listed_then_bad_and_repeated_ones_are_dropped() {
+        // GIVEN an index ID, an empty ID, a control ID and a repeat,
+        // WHEN the list is built, THEN only the first good ones stay.
+        let list = bounded_device_list([
+            ("index:0", "Unstable"),
+            ("", "No id"),
+            ("bad\u{7}id", "Control id"),
+            ("a", "First\u{7}"),
+            ("b", "Second"),
+            ("a", "Repeat"),
+        ]);
+        assert_eq!(
+            list,
+            vec![
+                AudioDevice {
+                    id: "a".into(),
+                    name: "First".into()
+                },
+                AudioDevice {
+                    id: "b".into(),
+                    name: "Second".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn given_too_many_devices_when_listed_then_the_list_is_cut() {
+        // GIVEN more devices than the limit, WHEN listed, THEN MAX_DEVICES stay.
+        let ids: Vec<String> = (0..MAX_DEVICES + 5).map(|n| format!("id{n}")).collect();
+        let list = bounded_device_list(ids.iter().map(|id| (id.as_str(), "n")));
+        assert_eq!(list.len(), MAX_DEVICES);
+        assert_eq!(list[0].id, "id0");
     }
 
     #[test]

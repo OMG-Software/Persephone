@@ -33,17 +33,17 @@ pub mod launcher;
 
 use core_link::{Band, CoreError, CoreLink};
 use persephone_contracts::{
-    AccountChange, AccountSettings, AccountStatus, AppStatus, CallReadiness, CallStatus,
-    ContactStatus, ConversationStart, DeviceList, DisplayName, HomeserverFound, ImagePick,
-    ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel, NotificationSettings,
-    PendingMessage, ProfileList, ProxySetting, PublicRoomPage, RoomActivity, RoomChange,
-    RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomPicture, RoomReaders,
-    RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList, ThreePidMedium,
-    TimelinePage, UserSearch,
+    AccountChange, AccountSettings, AccountStatus, AppStatus, CallDevices, CallReadiness,
+    CallStatus, ContactStatus, ConversationStart, DeviceList, DisplayName, HomeserverFound,
+    ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
+    NotificationSettings, PendingMessage, ProfileList, ProxySetting, PublicRoomPage, RoomActivity,
+    RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomPicture,
+    RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
+    ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
-    COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CURSOR_BYTES,
-    MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
+    COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CALL_DEVICE_ID_BYTES,
+    MAX_CURSOR_BYTES, MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
     MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES,
     MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES, MAX_MEMBER_FILTER_BYTES,
     MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PASTED_IMAGE_BYTES,
@@ -1418,6 +1418,31 @@ async fn set_proxy_setting(core: State<'_, CoreLink>, proxy: Option<String>) -> 
     relay(core.inner(), Call::SetProxySetting { proxy }).await
 }
 
+/// The call microphones and speakers now connected, and the saved choice
+/// (ADR-0043). The core lists them through a contained worker.
+#[tauri::command]
+async fn call_devices(core: State<'_, CoreLink>) -> Result<CallDevices, String> {
+    relay(core.inner(), Call::CallDevices {}).await
+}
+
+/// Saves the call microphone and speaker as device IDs; null is the system
+/// default. The core checks the IDs again.
+#[tauri::command]
+async fn set_call_devices(
+    core: State<'_, CoreLink>,
+    recording: Option<String>,
+    playout: Option<String>,
+) -> Result<(), String> {
+    if [&recording, &playout]
+        .into_iter()
+        .flatten()
+        .any(|id| id.is_empty() || id.len() > MAX_CALL_DEVICE_ID_BYTES)
+    {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::SetCallDevices { recording, playout }).await
+}
+
 /// Finds the homeserver of a server name through its `.well-known` file
 /// and confirms it speaks Matrix (ADR-0027).
 #[tauri::command]
@@ -1682,6 +1707,8 @@ pub fn configure<R: Runtime>(
             discover_homeserver,
             proxy_setting,
             set_proxy_setting,
+            call_devices,
+            set_call_devices,
             acknowledge_sessions,
             remove_device,
             pending_messages,

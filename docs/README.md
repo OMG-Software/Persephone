@@ -4,6 +4,7 @@
 
 - [Project plan](planning/project-plan.md): approved scope, open decisions, and milestones.
 - [Feasibility workbench](planning/feasibility.md): current status, recorded results, and P0 acceptance blockers.
+- [Live call test plan](planning/live-call-test.md): the interop run that gates any claim that calls work; run on Synapse, Merovingian and TLS still open.
 - [Architecture and development plan](architecture/development-plan.md): current component layout, planned application structure, and implementation sequence.
 - [SDK lifecycle completion contract](architecture/sdk-lifecycle.md): required stop-and-join ownership before lock, logout or store handoff can be approved.
 - [Image messaging design](architecture/image-messaging.md): P5 design for sending and receiving images, pixel transport and limits; built on Windows.
@@ -74,6 +75,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Native window hand checks](evidence/native-windows-hand-checks.md): the P4 checklist for the core's native windows; not run yet.
 - [Account settings](evidence/account-settings.md): password change, email and phone, verifying another session, the recovery-key change and file, the notification level and content-free desktop notifications through the core; live run on Merovingian only, native windows not exercised.
 - [Contact verification](evidence/contact-verification.md): emoji comparison with another person in an existing direct-message room, in both directions and with a mismatch; live runs on Merovingian and Synapse, lazy members, `m.direct` refresh and Synapse's message rate limit.
+- [Audio calls with Element Call](evidence/live-calls.md): two-way encrypted audio with Element Call 0.28.2, mute, key rotation on rejoin, leave, lock, close, a killed worker, the proxy warning and the missing loopback exemption; three product faults found and fixed; Windows and Synapse only, plain loopback without TLS, debug builds.
 - [Session owner](evidence/session-owner.md): lock and unlock while running; leases, generation fencing, retained ownership on timeout; real-app walkthrough.
 - [Unlock secret](evidence/unlock-secret.md): profile passphrase with Argon2id inside DPAPI, upgrade of DPAPI-only profiles, wrong-entry limit, native-confirmed reset, Lock help text.
 - [Protected local store](evidence/protected-store.md): DPAPI-wrapped store key, core-owned SDK SQLite stores, fail-closed key states, real-app walkthrough.

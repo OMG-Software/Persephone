@@ -10,6 +10,13 @@ publish.workspace = true
 [dependencies]
 persephone-media-protocol = { path = "../media-protocol" }
 
+[features]
+# Development only, for the live call test against disposable servers on the
+# WSL address: adds `privateNetworkClientServer` to the call worker's
+# AppContainer. The core enables it only through its own
+# `dev-disposable-servers` feature. Never enabled in a build that ships.
+dev-private-network = []
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",

@@ -3,6 +3,8 @@
 // full `Record`, so a new code in the contract fails type checking until it
 // has a text.
 import type {
+  CallDevice,
+  CallDevices,
   CallEnd,
   CallJoinError,
   CallPhase,
@@ -33,7 +35,9 @@ export const JOIN_ERROR_TEXT: Record<CallJoinError, string> = {
   membership: 'Your homeserver refused the call membership.',
   call_server: 'The call server refused the connection.',
   keys: 'The call keys could not be made.',
-  proxy_unreadable: 'The proxy setting cannot be read, so the call was not started.'
+  proxy_unreadable: 'The proxy setting cannot be read, so the call was not started.',
+  device_setting_unreadable:
+    'The call device setting cannot be read. Choose the devices again in Preferences.'
 };
 
 // `left` has no text: the bar just goes away.
@@ -41,6 +45,8 @@ export const END_TEXT: Record<CallEnd, string> = {
   left: '',
   connection_failed: 'The connection to the call server failed.',
   audio_device: 'The microphone or speaker is not available.',
+  device_not_found:
+    'The chosen microphone or speaker is not connected. Choose another in Preferences.',
   containment: 'The call stopped: its process was not contained.',
   worker_stopped: 'The call process stopped.',
   membership_lost: 'Your homeserver ended your call membership.',
@@ -174,4 +180,51 @@ export class CallRefresher {
       this.#running = false;
     }
   }
+}
+
+/** One choice in a device menu. `value` is the device ID, or '' for the default. */
+export interface DeviceOption {
+  value: string;
+  label: string;
+}
+
+export const DEFAULT_DEVICE_LABEL = 'System default';
+export const UNNAMED_DEVICE_LABEL = 'Unnamed device';
+export const MISSING_DEVICE_LABEL = 'Saved device (not connected)';
+
+/**
+ * The choices of one device menu: the system default, each connected device
+ * by name, and one extra choice when the saved device is not connected, so
+ * the saved choice stays visible and is not lost by looking at the list.
+ * Names are untrusted text: the labels are for text rendering only.
+ */
+export function deviceOptions(devices: readonly CallDevice[], selected: string | null): DeviceOption[] {
+  const options: DeviceOption[] = [{ value: '', label: DEFAULT_DEVICE_LABEL }];
+  for (const device of devices) {
+    options.push({ value: device.id, label: device.name === '' ? UNNAMED_DEVICE_LABEL : device.name });
+  }
+  if (selected !== null && selected !== '' && !devices.some((device) => device.id === selected)) {
+    options.push({ value: selected, label: MISSING_DEVICE_LABEL });
+  }
+  return options;
+}
+
+/** The value a menu shows for a saved choice. */
+export function deviceValue(selected: string | null): string {
+  return selected ?? '';
+}
+
+/** The saved choice a menu value stands for: '' is the system default, `null`. */
+export function deviceChoice(value: string): string | null {
+  return value === '' ? null : value;
+}
+
+export const DEVICES_UNSUPPORTED_TEXT = 'Calls are not available on this system yet.';
+export const DEVICES_UNREADABLE_TEXT = 'The saved call devices could not be read. Choose them again.';
+export const DEVICES_NOTE_TEXT = 'Changes apply from the next call.';
+
+/** The note under the menus, for a device reply. */
+export function devicesNote(devices: CallDevices): string {
+  if (!devices.supported) return DEVICES_UNSUPPORTED_TEXT;
+  return devices.unreadable ? DEVICES_UNREADABLE_TEXT : DEVICES_NOTE_TEXT;
 }

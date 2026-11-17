@@ -159,6 +159,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.proxySetting(), 'proxy_setting', {}],
     [() => bridge.setProxySetting('127.0.0.1:9050'), 'set_proxy_setting', { proxy: '127.0.0.1:9050' }],
     [() => bridge.setProxySetting(null), 'set_proxy_setting', { proxy: null }],
+    [() => bridge.callDevices(), 'call_devices', {}],
+    [() => bridge.setCallDevices('mic', null), 'set_call_devices', { recording: 'mic', playout: null }],
     [() => bridge.discoverHomeserver('example.org'), 'discover_homeserver', { serverName: 'example.org' }],
     [() => bridge.publicRooms(null, null, null), 'public_rooms', { server: null, filter: null, since: null }],
     [() => bridge.publicRooms('example.org', 'rust', 'p30'), 'public_rooms', { server: 'example.org', filter: 'rust', since: 'p30' }],

@@ -54,7 +54,7 @@ pub fn own_membership(
     room_id: &str,
     device_id: &DeviceId,
     user_id: &UserId,
-    service_url: &Url,
+    service_url: &str,
     created_ts: Option<u64>,
 ) -> Value {
     let mut content = json!({
@@ -66,7 +66,7 @@ pub fn own_membership(
         "focus_active": { "type": "livekit", "focus_selection": "multi_sfu" },
         "foci_preferred": [{
             "type": "livekit",
-            "livekit_service_url": service_url.as_str(),
+            "livekit_service_url": service_url,
             "livekit_alias": room_id,
         }],
         "membershipID": participant_identity(user_id, device_id),
@@ -256,7 +256,7 @@ mod tests {
             "!r:example.org",
             &OwnedDeviceId::from(device),
             &OwnedUserId::try_from(sender).unwrap(),
-            &url(),
+            SERVICE,
             None,
         );
         event(sender, device, ts, content)
@@ -269,7 +269,7 @@ mod tests {
             "!r:example.org",
             device_id!("DEV"),
             user_id!("@a:example.org"),
-            &url(),
+            SERVICE,
             None,
         );
         assert_eq!(
@@ -294,10 +294,21 @@ mod tests {
             "!r:example.org",
             device_id!("DEV"),
             user_id!("@a:example.org"),
-            &url(),
+            SERVICE,
             Some(42),
         );
         assert_eq!(refreshed["created_ts"], 42);
+        let bare = own_membership(
+            "!r:example.org",
+            device_id!("DEV"),
+            user_id!("@a:example.org"),
+            "https://livekit.example.org",
+            None,
+        );
+        assert_eq!(
+            bare["foci_preferred"][0]["livekit_service_url"], "https://livekit.example.org",
+            "the service URL is written as given, with no slash added"
+        );
         assert_eq!(leave_content(), json!({}));
         assert_eq!(
             own_state_key(user_id!("@a:example.org"), device_id!("DEV")),
