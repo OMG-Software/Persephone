@@ -11,6 +11,10 @@
 //! the process that holds the keys. This does not stop a program of the same
 //! user from reading the process's memory by other means.
 //!
+//! On Linux the core does not make itself undumpable (ADR-0046): the desktop
+//! portal refuses every call from an undumpable process, and the core opens
+//! links and OIDC sign-in through it.
+//!
 //! The platform's [`UiHost`] starts and contains the UI; a platform without
 //! UI containment refuses, and the core exits with status 2. The core also
 //! watches the UI's window ([`ui_watch`]). If the page never reaches the
