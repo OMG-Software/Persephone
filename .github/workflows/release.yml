@@ -257,10 +257,9 @@ jobs:
           for name in persephone persephone-media-worker persephone-call-worker; do
             cp ".local/build/rust/$TRIPLE/release/$name.exe" "src-tauri/binaries/$name-$TRIPLE.exe"
           done
-          # Windows-only copy: the call worker links libwebrtc, which the other bundles do not.
-          cp .local/release/notices/THIRD-PARTY-NOTICES.txt .local/release/notices/THIRD-PARTY-NOTICES-windows.txt
-          python tools/release.py append-notice --notices .local/release/notices/THIRD-PARTY-NOTICES-windows.txt \
-            --source "$LK_CUSTOM_WEBRTC/LICENSE.md"
+          # Windows-only notices: the call worker links libwebrtc, which the other
+          # bundles do not. append-notice reads its licence from the verified cache.
+          python tools/release.py append-notice
           python tools/release.py bundle-config --platform windows --notices .local/release/notices/THIRD-PARTY-NOTICES-windows.txt \
             --output .local/release/tauri.release.json
 
@@ -385,12 +384,12 @@ jobs:
           name: stage-windows-tauri-cli
           path: ${{ runner.temp }}/tools/bin
 
-      # Only the licence text is used here; nothing is compiled or linked.
+      # Only the licence text is used here, which append-notice reads from the
+      # verified cache; nothing is compiled or linked.
       - name: Fetch and verify libwebrtc
         run: |
           webrtc=$(python tools/dev.py webrtc | tail -n 1)
           [ -d "$webrtc" ] || { echo "::error::libwebrtc directory not found"; exit 1; }
-          echo "LK_CUSTOM_WEBRTC=$webrtc" >> "$GITHUB_ENV"
 
       - name: Place the executables where the bundler expects them
         run: |
@@ -406,9 +405,7 @@ jobs:
           cp "$exes/persephone-media-worker.exe" "src-tauri/binaries/persephone-media-worker-$TRIPLE.exe"
           cp "$exes/persephone-call-worker.exe" "src-tauri/binaries/persephone-call-worker-$TRIPLE.exe"
           cp "$exes/persephone-ui.exe" "$release/persephone-ui.exe"
-          cp .local/release/notices/THIRD-PARTY-NOTICES.txt .local/release/notices/THIRD-PARTY-NOTICES-windows.txt
-          python tools/release.py append-notice --notices .local/release/notices/THIRD-PARTY-NOTICES-windows.txt \
-            --source "$LK_CUSTOM_WEBRTC/LICENSE.md"
+          python tools/release.py append-notice
           python tools/release.py bundle-config --platform windows --notices .local/release/notices/THIRD-PARTY-NOTICES-windows.txt \
             --output .local/release/tauri.release.json
 

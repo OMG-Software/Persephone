@@ -220,6 +220,11 @@ def main():
             print(f"webrtc: {error}", file=sys.stderr)
             return 1
         skip = call_worker_skip(environment, environment["LK_CUSTOM_WEBRTC"])
+        if skip and environment.get("PERSEPHONE_CALL_WORKER") == "required":
+            # CI installs a new enough clang on every platform, so a skip
+            # there is a fault, not a reduced check.
+            print(f"call worker: {skip}, and PERSEPHONE_CALL_WORKER is required", file=sys.stderr)
+            return 1
         if skip:
             print(f"call worker skipped: {skip}. It is not built, tested or linted here.", file=sys.stderr, flush=True)
         worker_built = skip is None

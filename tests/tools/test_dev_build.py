@@ -117,6 +117,25 @@ class BuildTest(unittest.TestCase):
                 self.assertTrue([c for c in commands if c[:2] == ["cargo", "build"]])
 
 
+    def test_given_the_call_worker_is_required_then_a_skip_fails_before_anything_runs(self):
+        # GIVEN PERSEPHONE_CALL_WORKER=required, as in CI, and a reason to skip
+        commands = []
+        with mock.patch.dict(dev.os.environ, {"PERSEPHONE_CALL_WORKER": "required"}):
+            with mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr:
+                with mock.patch.object(sys, "argv", ["dev.py", "rust"]), mock.patch.object(dev, "run", lambda *a, **k: commands.append(a)):
+                    with mock.patch.object(dev.webrtc, "ensure", return_value=Path("webrtc-root")):
+                        with mock.patch.object(dev, "call_worker_skip", return_value="clang 19 is older"):
+                            # WHEN rust runs THEN it fails and runs nothing
+                            self.assertEqual(dev.main(), 1)
+        self.assertEqual(commands, [])
+        self.assertIn("PERSEPHONE_CALL_WORKER is required", stderr.getvalue())
+
+    def test_given_the_call_worker_is_required_and_buildable_then_it_is_built(self):
+        with mock.patch.dict(dev.os.environ, {"PERSEPHONE_CALL_WORKER": "required"}):
+            commands = build("rust")
+        self.assertEqual([c[1] for c in commands if packages(c) == ["persephone-call-worker"]], ["build", "test", "clippy"])
+
+
 class CallWorkerSkipTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

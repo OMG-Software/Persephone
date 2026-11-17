@@ -25,6 +25,9 @@ concurrency:
 env:
   RUST_TOOLCHAIN: "1.99.1"
   CARGO_TERM_COLOR: always
+  # Every job has a clang new enough for the call worker, so tools/dev.py
+  # fails instead of skipping it.
+  PERSEPHONE_CALL_WORKER: required
 
 jobs:
   windows:
@@ -104,6 +107,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config clang
 
+      # Ubuntu 24.04's clang is older than libwebrtc's libc++ needs; the
+      # script installs clang 21 from apt.llvm.org then, and does nothing
+      # where the runner's clang is new enough.
+      - name: Install clang 21 if needed
+        if: runner.os == 'Linux'
+        run: sh .github/scripts/install-clang.sh
+
       - name: Install Rust
         run: |
           # The arm64 Ubuntu image may not include rustup; install it the
@@ -142,8 +152,7 @@ jobs:
   # Other Linux distributions in containers on an Ubuntu runner. Each installs
   # its own build tools and WebKitGTK 4.1 from its package manager. Clang
   # builds the call worker: webrtc-sys compiles against libwebrtc's hermetic
-  # libc++, which needs clang 21 or later. With an older clang, tools/dev.py
-  # skips the call worker and says so; it does not ship on Linux. Python is
+  # libc++, which needs clang 21 or later (see the clang step). Python is
   # the distribution's own (setup-python's builds target Ubuntu). Packages
   # come from each distribution's current repositories, so only the base image
   # is fixed by its digest.
@@ -194,6 +203,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Debian 13 and openSUSE Leap 16 have clang 19; the script installs
+      # clang 21 from apt.llvm.org or devel:tools:compiler there, and does
+      # nothing where the distribution's clang is new enough.
+      - name: Install clang 21 if needed
+        run: sh .github/scripts/install-clang.sh
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

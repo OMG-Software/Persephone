@@ -9,8 +9,8 @@ with `cargo metadata --locked --offline` that the lockfile is still valid.
 `check-tag vX.Y.Z[-pre]` exits 1 and lists each manifest whose version differs
 from the tag. The release workflow runs it before it builds anything.
 
-`append-notice --notices FILE --source FILE [--title TEXT]` appends the prebuilt
-libwebrtc licence texts to a notices file once.
+`append-notice [--title TEXT]` writes .local/release/notices/THIRD-PARTY-NOTICES-windows.txt:
+the shared notices plus the licence texts of the verified libwebrtc in the cache.
 
 `bundle-config --platform windows|linux|macos --notices FILE --output FILE` writes the release-only Tauri
 configuration (sidecars and bundled licence files) that the workflow merges
@@ -32,6 +32,11 @@ import re
 import subprocess
 import sys
 import tomllib
+
+try:  # run as tools/release.py
+    import webrtc
+except ImportError:  # imported as tools.release
+    from tools import webrtc
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -339,6 +344,8 @@ def bundle_config(root, notices, platform):
 
 
 NOTICE_SOURCE_LIMIT = 1024 * 1024
+NOTICES = Path(".local/release/notices/THIRD-PARTY-NOTICES.txt")
+WINDOWS_NOTICES = NOTICES.with_name("THIRD-PARTY-NOTICES-windows.txt")
 NOTICE_SEPARATOR = "=" * 78
 
 
@@ -353,30 +360,29 @@ def webrtc_title(root):
     return f"Prebuilt libwebrtc ({tag})"
 
 
-def _inside(root, path, folder, what):
-    """`path` resolved, if it stays inside `root`/`folder`; else ReleaseError.
-    The drive is compared first: on Windows, `commonpath` raises for paths on
-    two drives."""
-    base = os.path.realpath(os.path.join(root, *folder))
-    full = os.path.realpath(path)
-    if (
-        os.path.splitdrive(full)[0].lower() != os.path.splitdrive(base)[0].lower()
-        or os.path.commonpath([base, full]) != base
-    ):
-        raise ReleaseError(f"{what} {path} is outside {'/'.join(folder)}")
-    return Path(full)
+def webrtc_licence(root):
+    """LICENSE.md of the pinned libwebrtc archive, from the copy that
+    tools/webrtc.py verified into the cache. Nothing is downloaded here."""
+    try:
+        library = webrtc.ensure(root, offline=True, announce=lambda _message: None)
+    except webrtc.WebrtcError as error:
+        raise ReleaseError(f"no verified libwebrtc in the cache: {error}") from error
+    return Path(library) / "LICENSE.md"
 
 
-def append_notice(notices, title, source, root=ROOT):
-    """Append the licence texts of the prebuilt libwebrtc to a notices file.
+def append_notice(title, root=ROOT):
+    """Write the Windows notices: the shared notices plus the licence texts of
+    the prebuilt libwebrtc that the call worker links.
 
-    The text comes from the pinned archive itself, whose SHA-256 tools/webrtc.py
-    checks, so no copy is committed. The source must be in the verified
-    libwebrtc cache and the notices file in `.local`. It refuses a missing,
-    empty or oversized source, and a second append of the same title.
+    Both paths are fixed: the shared notices in `.local/release/notices` and
+    the licence file of the verified libwebrtc archive, whose SHA-256
+    tools/webrtc.py checks, so no copy is committed and no argument names a
+    file. It refuses a missing, empty or oversized licence file, and shared
+    notices that already hold the section. The Windows file is written again
+    on each run.
     """
-    notices = _inside(root, notices, (".local",), "notices file")
-    source = _inside(root, source, (".local", "cache", "webrtc"), "licence file")
+    notices = root / NOTICES
+    source = webrtc_licence(root)
     if not notices.is_file():
         raise ReleaseError(f"third-party notices not found at {notices}")
     if not source.is_file():
@@ -392,7 +398,7 @@ def append_notice(notices, title, source, root=ROOT):
         raise ReleaseError(f"licence file {source} is not UTF-8: {error}") from error
     if not text.strip():
         raise ReleaseError(f"licence file {source} is empty")
-    existing = _read(notices)
+    existing = _read(notices).replace("\r\n", "\n")
     if f"\n{title}\n" in f"\n{existing}":
         raise ReleaseError(f"notices already contain {title!r}")
     if existing and not existing.endswith("\n"):
@@ -405,7 +411,7 @@ def append_notice(notices, title, source, root=ROOT):
         "Licence texts as shipped in the pinned archive:\n\n"
         f"{text}"
     )
-    _write(notices, existing + section)
+    _write(root / WINDOWS_NOTICES, existing + section)
 
 
 def main(argv=None, root=ROOT):
@@ -417,14 +423,14 @@ def main(argv=None, root=ROOT):
     bundle.add_argument("--platform", required=True, choices=sorted(PLATFORM_SIDECARS), help="bundle platform")
     bundle.add_argument("--notices", required=True, help="third-party notices file to bundle")
     bundle.add_argument("--output", required=True, help="JSON file for `cargo tauri --config`")
-    append = commands.add_parser("append-notice", help="append the prebuilt libwebrtc licence texts to a notices file")
-    append.add_argument("--notices", required=True, help="notices file to extend (use a Windows-only copy)")
-    append.add_argument("--source", required=True, help="LICENSE.md from the verified libwebrtc directory")
+    append = commands.add_parser(
+        "append-notice", help=f"write {WINDOWS_NOTICES.as_posix()}: the notices plus the libwebrtc licence texts"
+    )
     append.add_argument("--title", help="section title; default from the tag in tools/webrtc.json")
     args = parser.parse_args(argv)
     try:
         if args.command == "append-notice":
-            append_notice(args.notices, args.title or webrtc_title(root), args.source, root)
+            append_notice(args.title or webrtc_title(root), root)
             return 0
         if args.command == "bundle-config":
             config = bundle_config(root, args.notices, args.platform)

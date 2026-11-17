@@ -1,13 +1,14 @@
 import contextlib
 import io
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 from unittest.mock import patch
 
 from tools import release
@@ -322,27 +323,48 @@ class AppendNoticeTests(TempTree):
 
     def setUp(self):
         super().setUp()
-        self.cache = self.root / ".local/cache/webrtc/webrtc-test/win-x64/files"
-        self.cache.mkdir(parents=True)
-        self.notices = self.root / ".local/notices.txt"
+        self.notices = self.root / release.NOTICES
+        self.notices.parent.mkdir(parents=True)
         self.notices.write_text("first notices\n", encoding="utf-8")
-        self.source = self.cache / "LICENSE.md"
+        self.windows = self.root / release.WINDOWS_NOTICES
+        self.library = self.root / ".local/cache/webrtc/webrtc-test/win-x64/files/win-x64-release"
+        self.library.mkdir(parents=True)
+        self.source = self.library / "LICENSE.md"
         self.source.write_text("# webrtc\nBSD licence text\n", encoding="utf-8")
+        self.ensure = mock.patch.object(release.webrtc, "ensure", return_value=self.library)
+        self.ensured = self.ensure.start()
+        self.addCleanup(self.ensure.stop)
 
     def append(self, title=None):
-        args = ["append-notice", "--notices", str(self.notices), "--source", str(self.source)]
-        return run_main(args + (["--title", title] if title else []), self.root)
+        return run_main(["append-notice"] + (["--title", title] if title else []), self.root)
 
-    def test_appends_header_and_text(self):
-        # GIVEN notices and a licence file WHEN the notice is appended
+    def test_writes_the_windows_notices_with_header_and_text(self):
+        # GIVEN shared notices and a verified libwebrtc WHEN the notice is appended
         code, _, _ = self.append(self.TITLE)
-        # THEN the old text stays and the title, the linking line and the licence text follow
+        # THEN the Windows notices hold the shared text, the title, the linking line and the licence text
         self.assertEqual(code, 0)
-        text = self.notices.read_text(encoding="utf-8")
+        text = self.windows.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("first notices\n"))
         self.assertIn(f"\n{self.TITLE}\n", text)
         self.assertIn("Linked statically into persephone-call-worker.exe. Licence texts as shipped in the pinned archive:", text)
         self.assertTrue(text.endswith("# webrtc\nBSD licence text\n"))
+        # AND the shared notices, which the other bundles use, are unchanged
+        self.assertEqual(self.notices.read_text(encoding="utf-8"), "first notices\n")
+
+    def test_the_licence_comes_from_the_verified_cache_without_a_download(self):
+        # WHEN the notice is appended THEN libwebrtc is looked up in the cache only, under the root
+        self.assertEqual(self.append(self.TITLE)[0], 0)
+        self.assertEqual(self.ensured.call_args.args, (self.root,))
+        self.assertIs(self.ensured.call_args.kwargs["offline"], True)
+
+    def test_no_verified_libwebrtc_is_refused(self):
+        # GIVEN no verified libwebrtc in the cache WHEN the notice is appended
+        self.ensured.side_effect = release.webrtc.WebrtcError("not cached")
+        code, _, stderr = self.append(self.TITLE)
+        # THEN it is refused and nothing is written
+        self.assertEqual(code, 2)
+        self.assertIn("no verified libwebrtc", stderr)
+        self.assertFalse(self.windows.exists())
 
     def test_title_defaults_to_the_pinned_tag(self):
         # GIVEN pins in the root WHEN no title is given THEN the tag names the section
@@ -350,56 +372,49 @@ class AppendNoticeTests(TempTree):
         (self.root / "tools/webrtc.json").write_text('{"tag": "webrtc-abc"}', encoding="utf-8")
         code, _, _ = self.append()
         self.assertEqual(code, 0)
-        self.assertIn("\nPrebuilt libwebrtc (webrtc-abc)\n", self.notices.read_text(encoding="utf-8"))
+        self.assertIn("\nPrebuilt libwebrtc (webrtc-abc)\n", self.windows.read_text(encoding="utf-8"))
 
-    def test_bad_sources_are_refused_and_leave_notices_alone(self):
-        big = self.cache / "big.md"
-        big.write_bytes(b"a" * (release.NOTICE_SOURCE_LIMIT + 1))
-        empty = self.cache / "empty.md"
-        empty.write_bytes(b"")
-        outside = self.root / "LICENSE.md"
-        outside.write_text("text\n", encoding="utf-8")
-        cases = (
-            ("missing", self.cache / "absent.md"),
-            ("empty", empty),
-            ("oversized", big),
-            ("outside the libwebrtc cache", outside),
-            ("escaping the cache", self.cache / "../../../../../LICENSE.md"),
-        )
-        if os.name == "nt":
-            # Another drive, where `commonpath` alone would raise.
-            drive = "Y:" if self.root.drive.upper() == "Z:" else "Z:"
-            cases += (("on another drive", Path(f"{drive}/LICENSE.md")),)
-        for name, source in cases:
+    def test_bad_licence_files_are_refused_and_write_nothing(self):
+        for name, content in (("missing", None), ("empty", b""), ("blank", b" \n\n"), ("oversized", b"a" * (release.NOTICE_SOURCE_LIMIT + 1))):
             with self.subTest(source=name):
-                # GIVEN a missing, empty, oversized or outside licence file WHEN it is appended
-                self.source = source
+                # GIVEN a missing, empty or oversized licence file WHEN it is appended
+                if content is None:
+                    self.source.unlink(missing_ok=True)
+                else:
+                    self.source.write_bytes(content)
                 code, _, stderr = self.append(self.TITLE)
-                # THEN it is refused and the notices are unchanged
+                # THEN it is refused and no Windows notices are written
                 self.assertEqual(code, 2)
                 self.assertIn("licence file", stderr)
-                self.assertEqual(self.notices.read_text(encoding="utf-8"), "first notices\n")
+                self.assertFalse(self.windows.exists())
 
-    def test_notices_outside_local_are_refused(self):
-        # GIVEN a notices file outside .local WHEN the notice is appended
-        outside = self.root / "notices.txt"
-        outside.write_text("first notices\n", encoding="utf-8")
-        self.notices = outside
+    def test_missing_shared_notices_are_refused(self):
+        self.notices.unlink()
         code, _, stderr = self.append(self.TITLE)
-        # THEN it is refused and the file is unchanged
         self.assertEqual(code, 2)
-        self.assertIn("outside .local", stderr)
-        self.assertEqual(outside.read_text(encoding="utf-8"), "first notices\n")
+        self.assertIn("third-party notices not found", stderr)
 
-    def test_second_append_is_refused(self):
-        # GIVEN notices that already hold the section WHEN it is appended again
-        self.assertEqual(self.append(self.TITLE)[0], 0)
-        before = self.notices.read_text(encoding="utf-8")
+    def test_shared_notices_that_hold_the_section_are_refused(self):
+        # GIVEN shared notices that already hold the section WHEN it is appended
+        self.notices.write_text(f"first notices\n{self.TITLE}\n", encoding="utf-8")
         code, _, stderr = self.append(self.TITLE)
-        # THEN it is refused and nothing changes
+        # THEN it is refused and nothing is written
         self.assertEqual(code, 2)
         self.assertIn("already contain", stderr)
-        self.assertEqual(self.notices.read_text(encoding="utf-8"), before)
+        self.assertFalse(self.windows.exists())
+
+    def test_a_second_run_writes_the_same_file(self):
+        # GIVEN a first run WHEN it runs again THEN the Windows notices are the same, not appended twice
+        self.assertEqual(self.append(self.TITLE)[0], 0)
+        first = self.windows.read_text(encoding="utf-8")
+        self.assertEqual(self.append(self.TITLE)[0], 0)
+        self.assertEqual(self.windows.read_text(encoding="utf-8"), first)
+
+    def test_no_argument_names_a_file(self):
+        # GIVEN the old path arguments WHEN they are passed THEN the parser refuses them
+        for argument in ("--notices", "--source"):
+            with self.subTest(argument), mock.patch.object(sys, "stderr"), self.assertRaises(SystemExit):
+                release.main(["append-notice", argument, "x"], self.root)
 
 
 class BundleConfigTests(TempTree):
