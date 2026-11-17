@@ -87,8 +87,15 @@ class WebrtcTest(unittest.TestCase):
         path = self.root / "pins.json"
         path.write_text(json.dumps(pins), encoding="utf-8")
         opener = Opener(data) if opener is None else opener
+        self.sleeps = []
         result = webrtc.ensure(
-            self.root, key=KEY, opener=opener, pins_path=path, announce=lambda *_: None, **options
+            self.root,
+            key=KEY,
+            opener=opener,
+            pins_path=path,
+            announce=lambda *_: None,
+            sleep=self.sleeps.append,
+            **options,
         )
         return result, opener
 
@@ -234,7 +241,12 @@ class WebrtcTest(unittest.TestCase):
         base = Path(os.path.realpath(self.root / ".local/cache/webrtc"))
         cache, target = webrtc.cache_dirs(self.root, "webrtc-test", KEY)
         self.assertEqual((cache, target), (base / "webrtc-test", base / "webrtc-test" / KEY))
-        for tag, key in [("..", KEY), ("../outside", KEY), ("webrtc-test", ".."), ("webrtc-test", "../../x"), ("a/b", KEY)]:
+        cases = [("..", KEY), ("../outside", KEY), ("webrtc-test", ".."), ("webrtc-test", "../../x"), ("a/b", KEY)]
+        if os.name == "nt":
+            # A drive in a value moves the path to that drive.
+            drive = "Y:" if self.root.drive.upper() == "Z:" else "Z:"
+            cases += [(f"{drive}x", KEY), ("webrtc-test", f"{drive}x")]
+        for tag, key in cases:
             with self.subTest(tag=tag, key=key), self.assertRaises(webrtc.WebrtcError):
                 webrtc.cache_dirs(self.root, tag, key)
 
@@ -243,6 +255,8 @@ class WebrtcTest(unittest.TestCase):
         result, opener = self.ensure(data, opener=FlakyOpener(data, webrtc.ATTEMPTS - 1))
         self.assertEqual((result / "lib/webrtc.lib").read_bytes(), b"lib")
         self.assertEqual(len(opener.urls), webrtc.ATTEMPTS)
+        # THEN each retry waits longer than the one before
+        self.assertEqual(self.sleeps, [webrtc.RETRY_DELAY * n for n in range(1, webrtc.ATTEMPTS)])
 
     def test_given_network_errors_on_every_attempt_then_it_fails_and_leaves_nothing_behind(self):
         data = good_zip()
@@ -251,6 +265,8 @@ class WebrtcTest(unittest.TestCase):
             self.ensure(data, opener=opener)
         self.assertIn(f"after {webrtc.ATTEMPTS} attempts", str(raised.exception))
         self.assertEqual(len(opener.urls), webrtc.ATTEMPTS)
+        # THEN there is no wait after the last attempt
+        self.assertEqual(len(self.sleeps), webrtc.ATTEMPTS - 1)
         self.assertEqual(list(self.cache().iterdir()), [])
 
     def test_given_a_wrong_hash_then_the_download_is_not_tried_again(self):

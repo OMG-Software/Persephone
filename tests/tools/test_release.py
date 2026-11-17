@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -365,6 +366,10 @@ class AppendNoticeTests(TempTree):
             ("outside the libwebrtc cache", outside),
             ("escaping the cache", self.cache / "../../../../../LICENSE.md"),
         )
+        if os.name == "nt":
+            # Another drive, where `commonpath` alone would raise.
+            drive = "Y:" if self.root.drive.upper() == "Z:" else "Z:"
+            cases += (("on another drive", Path(f"{drive}/LICENSE.md")),)
         for name, source in cases:
             with self.subTest(source=name):
                 # GIVEN a missing, empty, oversized or outside licence file WHEN it is appended

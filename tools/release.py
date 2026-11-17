@@ -354,14 +354,15 @@ def webrtc_title(root):
 
 
 def _inside(root, path, folder, what):
-    """`path` resolved, if it stays inside `root`/`folder`; else ReleaseError."""
+    """`path` resolved, if it stays inside `root`/`folder`; else ReleaseError.
+    The drive is compared first: on Windows, `commonpath` raises for paths on
+    two drives."""
     base = os.path.realpath(os.path.join(root, *folder))
     full = os.path.realpath(path)
-    try:
-        inside = os.path.commonpath([base, full]) == base
-    except ValueError:  # Windows: another drive
-        inside = False
-    if not inside:
+    if (
+        os.path.splitdrive(full)[0].lower() != os.path.splitdrive(base)[0].lower()
+        or os.path.commonpath([base, full]) != base
+    ):
         raise ReleaseError(f"{what} {path} is outside {'/'.join(folder)}")
     return Path(full)
 

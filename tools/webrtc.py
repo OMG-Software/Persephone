@@ -13,6 +13,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -23,6 +24,8 @@ TIMEOUT = 60
 # Download attempts. Only network and file errors are retried; a size or
 # SHA-256 mismatch fails at once.
 ATTEMPTS = 3
+# Seconds to wait before retry n: n times this.
+RETRY_DELAY = 5
 MAX_UNCOMPRESSED = 4 * 1024**3
 MARKER = ".verified"
 NAME = re.compile(r"webrtc-(win|linux|mac)-(x64|arm64)-release\.zip")
@@ -126,7 +129,13 @@ def _download(url, destination, asset, opener):
         raise WebrtcError(f"{asset['name']} does not match the pinned SHA-256")
 
 
-def _fetch(url, destination, asset, opener, announce):
+def _announce(message):
+    # Flushed, so that a CI log shows the line before a slow download, not
+    # after it ends.
+    print(message, flush=True)
+
+
+def _fetch(url, destination, asset, opener, announce, sleep):
     for attempt in range(1, ATTEMPTS + 1):
         try:
             _download(url, destination, asset, opener)
@@ -134,7 +143,9 @@ def _fetch(url, destination, asset, opener, announce):
         except OSError as error:
             if attempt == ATTEMPTS:
                 raise WebrtcError(f"cannot download {asset['name']} after {ATTEMPTS} attempts: {error}") from error
-            announce(f"download of {asset['name']} failed ({error}); retrying")
+            delay = RETRY_DELAY * attempt
+            announce(f"download of {asset['name']} failed ({error}); retrying in {delay} s")
+            sleep(delay)
 
 
 def _extract(archive, destination):
@@ -166,12 +177,15 @@ def _extract(archive, destination):
 def cache_dirs(root, tag, key):
     """The tag's cache directory and the platform's directory in it. Both
     come from the pins file, which `load_pins` checks; this check also keeps
-    them inside `.local/cache/webrtc` if a value ever skips that check."""
+    them inside `.local/cache/webrtc` if a value ever skips that check. The
+    drive is compared first: on Windows, a value such as `Z:x` moves the path
+    to another drive, where `commonpath` raises."""
     base = os.path.realpath(os.path.join(root, ".local", "cache", "webrtc"))
     cache = os.path.realpath(os.path.join(base, tag))
     target = os.path.realpath(os.path.join(cache, key))
     if (
-        os.path.commonpath([base, target]) != base
+        os.path.splitdrive(target)[0].lower() != os.path.splitdrive(base)[0].lower()
+        or os.path.commonpath([base, target]) != base
         or os.path.dirname(cache) != base
         or os.path.dirname(target) != cache
     ):
@@ -179,7 +193,7 @@ def cache_dirs(root, tag, key):
     return Path(cache), Path(target)
 
 
-def ensure(root, *, key=None, opener=None, offline=False, pins_path=PINS, announce=print):
+def ensure(root, *, key=None, opener=None, offline=False, pins_path=PINS, announce=_announce, sleep=time.sleep):
     """Returns the directory `LK_CUSTOM_WEBRTC` must name, downloading and
     verifying the archive first unless a verified copy is cached."""
     pins = load_pins(pins_path)
@@ -202,7 +216,7 @@ def ensure(root, *, key=None, opener=None, offline=False, pins_path=PINS, announ
     temporary = Path(temporary)
     staging = None
     try:
-        _fetch(url, temporary, asset, opener or _default_opener(), announce)
+        _fetch(url, temporary, asset, opener or _default_opener(), announce, sleep)
         announce(f"verified {asset['name']}")
         staging = Path(tempfile.mkdtemp(dir=cache, prefix=f"{key}-", suffix=".tmp"))
         (staging / "files").mkdir()
