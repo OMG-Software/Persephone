@@ -3,6 +3,7 @@
 import argparse
 import os
 import re
+import shlex
 from pathlib import Path
 import shutil
 import subprocess
@@ -135,6 +136,57 @@ def call_worker_environment(environment):
     return environment
 
 
+# webrtc-sys's fallback when the archive's libc++ does not state its minimum.
+MIN_CALL_WORKER_CLANG = 21
+LIBCXX_COMPILER_HEADER = "include/third_party/libc++/src/include/__configuration/compiler.h"
+
+
+def required_clang(library):
+    """The clang major version the libwebrtc archive's hermetic libc++ needs,
+    read as webrtc-sys's build script reads it."""
+    try:
+        text = (Path(library) / LIBCXX_COMPILER_HEADER).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return MIN_CALL_WORKER_CLANG
+    match = re.search(r"_LIBCPP_CLANG_VER < (\d+)", text)
+    return int(match.group(1)) // 100 if match else MIN_CALL_WORKER_CLANG
+
+
+def clang_major(environment):
+    """The major version of the C++ compiler webrtc-sys uses (`CXX`, else
+    `clang++`), or None if it is missing or is not clang."""
+    compiler = shlex.split(environment.get("CXX") or "clang++")
+    try:
+        result = subprocess.run(
+            [*compiler, "-dM", "-E", "-x", "c++", os.devnull],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"^#define __clang_major__ (\d+)$", result.stdout, re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def call_worker_skip(environment, library, platform=None):
+    """Why the call worker cannot be built here, or None. Only on Linux: the
+    worker does not ship there and calls are refused (ADR-0043), so a clang
+    older than libwebrtc's libc++ needs skips the worker instead of failing."""
+    platform = sys.platform if platform is None else platform
+    if not platform.startswith("linux"):
+        return None
+    needed = required_clang(library)
+    found = clang_major(environment)
+    if found is None:
+        return f"no clang found (CXX or clang++); libwebrtc needs clang {needed} or later"
+    if found < needed:
+        return f"clang {found} is older than the clang {needed} libwebrtc needs"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -167,6 +219,10 @@ def main():
         except webrtc.WebrtcError as error:
             print(f"webrtc: {error}", file=sys.stderr)
             return 1
+        skip = call_worker_skip(environment, environment["LK_CUSTOM_WEBRTC"])
+        if skip:
+            print(f"call worker skipped: {skip}. It is not built, tested or linted here.", file=sys.stderr, flush=True)
+        worker_built = skip is None
     call_worker = ["-p", "persephone-call-worker"]
     # The sandbox tests load this guest module; `rust` lints its wasm-only code.
     wasm_guest = ["-p", "persephone-media-decoder", "--target", "wasm32-unknown-unknown"]
@@ -195,10 +251,11 @@ def main():
             ["cargo", "clippy", *cargo_flags, "--workspace", "--exclude", "persephone-call-worker", "--all-targets", "--", "-D", "warnings"],
             environment,
         )
-        worker_environment = call_worker_environment(environment)
-        run(["cargo", "build", *cargo_flags, *call_worker], worker_environment)
-        run(["cargo", "test", *cargo_flags, *call_worker, "--all-targets"], worker_environment)
-        run(["cargo", "clippy", *cargo_flags, *call_worker, "--all-targets", "--", "-D", "warnings"], worker_environment)
+        if worker_built:
+            worker_environment = call_worker_environment(environment)
+            run(["cargo", "build", *cargo_flags, *call_worker], worker_environment)
+            run(["cargo", "test", *cargo_flags, *call_worker, "--all-targets"], worker_environment)
+            run(["cargo", "clippy", *cargo_flags, *call_worker, "--all-targets", "--", "-D", "warnings"], worker_environment)
         run(["cargo", "test", *cargo_flags, *dev_core, *dev_core_tests], environment)
         run(["cargo", "clippy", *cargo_flags, *dev_core, "--all-targets", "--", "-D", "warnings"], environment)
     if args.command == "coverage":
@@ -216,7 +273,8 @@ def main():
         # tests contain themselves the same way, so they are left out.
         run(["cargo", "build", *cargo_flags, "-p", "persephone-media-worker"], environment)
         # The call worker builds apart, uninstrumented, and has no coverage yet.
-        run(["cargo", "build", *cargo_flags, *call_worker], call_worker_environment(environment))
+        if worker_built:
+            run(["cargo", "build", *cargo_flags, *call_worker], call_worker_environment(environment))
         coverage = coverage_environment(environment)
         run(["cargo", "llvm-cov", "clean", "--workspace"], coverage)
         workspace = ["--workspace", "--exclude", "persephone-media-worker", "--exclude", "persephone-call-worker", "--all-targets"]
@@ -244,10 +302,11 @@ def main():
         core_and_worker += ["-p", "persephone-media-worker", "--bin", "persephone-media-worker"]
         run(["cargo", "build", *cargo_flags, *profile, *core_and_worker], environment)
         # Apart from the core and worker: the call worker needs the static C runtime.
-        run(
-            ["cargo", "build", *cargo_flags, *profile, *call_worker, "--bin", "persephone-call-worker"],
-            call_worker_environment(environment),
-        )
+        if worker_built:
+            run(
+                ["cargo", "build", *cargo_flags, *profile, *call_worker, "--bin", "persephone-call-worker"],
+                call_worker_environment(environment),
+            )
         run(["cargo", "build", *cargo_flags, *profile, "-p", "persephone-desktop", "--bin", "persephone-ui"], environment)
     if args.command in ("check", "frontend", "bootstrap"):
         if not npm:

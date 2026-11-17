@@ -76,7 +76,7 @@ and the [SDK lifecycle contract](architecture/sdk-lifecycle.md).
 
 ## Toolchain and commands
 
-Install Python, Rust/Cargo, and Node.js with npm available on `PATH`, plus the WebAssembly target for the decoder guest (`rustup target add wasm32-unknown-unknown`). On Windows, use the MSVC Rust target and its native build tools. Install the locked frontend dependencies once, then run checks from the repository root:
+Install Python, Rust/Cargo, and Node.js with npm available on `PATH`, plus the WebAssembly target for the decoder guest (`rustup target add wasm32-unknown-unknown`). On Windows, use the MSVC Rust target and its native build tools. On Linux, the call worker needs clang 21 or later (`clang++`, or `CXX`), because the pinned libwebrtc is built against a libc++ that needs it. With an older clang or none, `check`, `rust`, `build` and `coverage` skip the call worker and print why. The worker does not ship on Linux and calls are refused there (ADR-0043). Install the locked frontend dependencies once, then run checks from the repository root:
 
 ```powershell
 python tools/dev.py bootstrap
@@ -131,12 +131,12 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 | --- | --- | --- | --- |
 | `windows` | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
 | `macos-latest` | `macos-latest` (arm64) | Preinstalled Xcode tools | 3.14 (setup-python) |
-| `ubuntu-latest` | `ubuntu-latest` (24.04) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config` | 3.14 (setup-python) |
-| `ubuntu-24.04-arm` | `ubuntu-24.04-arm` (arm64) | As `ubuntu-latest`; rustup from `sh.rustup.rs` if the image lacks it | 3.14 (setup-python) |
-| `debian-13` | `debian:trixie` container | `apt-get`: build tools, `libwebkit2gtk-4.1-dev` | Distribution `python3` |
-| `arch` | `archlinux:base-devel` container | `pacman -Syu`: `webkit2gtk-4.1` | Distribution `python` |
-| `fedora-44` | `fedora:44` container | `dnf`: build tools, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
-| `opensuse-leap-16.0` | `opensuse/leap:16.0` container | `zypper`: build tools, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
+| `ubuntu-latest` | `ubuntu-latest` (26.04 on 17 November 2026) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config clang` | 3.14 (setup-python) |
+| `ubuntu-24.04-arm` | `ubuntu-24.04-arm` (arm64) | As `ubuntu-latest`; rustup from `sh.rustup.rs` if the image lacks it. Its clang 18 skips the call worker | 3.14 (setup-python) |
+| `debian-13` | `debian:trixie` container | `apt-get`: build tools, `clang`, `libwebkit2gtk-4.1-dev`. Its clang 19 skips the call worker | Distribution `python3` |
+| `arch` | `archlinux:base-devel` container | `pacman -Syu`: `clang`, `webkit2gtk-4.1` | Distribution `python` |
+| `fedora-44` | `fedora:44` container | `dnf`: build tools, `clang`, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
+| `opensuse-leap-16.0` | `opensuse/leap:16.0` container | `zypper`: build tools, `clang`, `pkgconfig(webkit2gtk-4.1)` | Distribution `python3` |
 
 - **Containers.** Container images are pinned by digest in the workflow. Containers install Rust with rustup from `sh.rustup.rs` and Node.js with setup-node.
 - **Packages are not pinned.** Packages come from each distribution's current repositories, so only the base image is fixed. Arch supports only full upgrades, so its job always builds against the current rolling release.

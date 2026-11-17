@@ -604,7 +604,7 @@ jobs:
       - name: Install Tauri prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config clang file librsvg2-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config file librsvg2-dev
 
       - name: Install Rust
         run: |

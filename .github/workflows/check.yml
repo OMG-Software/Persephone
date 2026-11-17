@@ -140,9 +140,10 @@ jobs:
         run: python tools/dev.py check
 
   # Other Linux distributions in containers on an Ubuntu runner. Each installs
-  # its own build tools and WebKitGTK 4.1 from its package manager. Clang is
-  # required: webrtc-sys compiles against libwebrtc's hermetic libc++, which
-  # GCC miscompiles, so its build script refuses to run without clang++. Python is
+  # its own build tools and WebKitGTK 4.1 from its package manager. Clang
+  # builds the call worker: webrtc-sys compiles against libwebrtc's hermetic
+  # libc++, which needs clang 21 or later. With an older clang, tools/dev.py
+  # skips the call worker and says so; it does not ship on Linux. Python is
   # the distribution's own (setup-python's builds target Ubuntu). Packages
   # come from each distribution's current repositories, so only the base image
   # is fixed by its digest.
