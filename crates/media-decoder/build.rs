@@ -8,6 +8,12 @@
 //! 4000 × 4000 input (a progressive 4:4:4 JPEG, 158 MiB) with about 11%
 //! headroom. It must stay equal to `persephone-media-sandbox`'s default
 //! `Limits::max_memory_bytes`.
+//!
+//! The guest's heap is the part of that memory above the data and stack
+//! (`__heap_base` to `__heap_end`). std's allocator uses that region only
+//! from Rust 1.97 (dlmalloc 0.2.13); an older one asks `memory.grow`, gets
+//! nothing, and the guest traps on its first allocation. The workspace
+//! `rust-version` enforces a toolchain that has it.
 
 const GUEST_MEMORY_BYTES: u64 = 176 * 1024 * 1024;
 
