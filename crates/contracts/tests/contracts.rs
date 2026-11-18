@@ -816,6 +816,20 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         serde_json::from_value::<persephone_contracts::CallVideoTile>(no_participant).is_err(),
         "a missing participant is rejected"
     );
+    for (stream, valid) in [
+        (0_u64, true),
+        (9_007_199_254_740_991, true),
+        (9_007_199_254_740_992, false),
+        (u64::MAX, false),
+    ] {
+        let mut numbered = tile.clone();
+        numbered["stream"] = serde_json::json!(stream);
+        assert_eq!(
+            serde_json::from_value::<persephone_contracts::CallVideoTile>(numbered).is_ok(),
+            valid,
+            "stream {stream}"
+        );
+    }
     let mut no_stream = tile.clone();
     no_stream.as_object_mut().unwrap().remove("stream");
     assert!(

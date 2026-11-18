@@ -750,11 +750,23 @@
   let callVideoTicks = $state(0);
   let callJoinText = $state<string | null>(null);
   let cameraText = $state<string | null>(null);
+  // The newest camera command. Its failure alone shows `cameraText`; a
+  // Mute or Leave in between does not hide it. Goes up when the call ends
+  // and on a session change, so an old command shows nothing.
+  let cameraRequest = 0;
   let readiness = $state<CallReadiness | null>(null);
   let callNames = $state<ReadonlyMap<string, string>>(new Map());
   let readinessRequest = 0;
   let callNamesFor: string | null = null;
   const callOperations = new CallOperations();
+  // A camera failure is about the call that is running; it goes when that
+  // call ends.
+  $effect(() => {
+    if (callState.phase === 'ended' || callState.phase === 'idle') {
+      cameraRequest += 1;
+      cameraText = null;
+    }
+  });
   // A status read during which a call command finished is dropped: that
   // command's reply is newer, and the command asks for a fresh read.
   const callRefresher = new CallRefresher(
@@ -849,8 +861,9 @@
     } catch {
       if (generation === sessionGeneration) callJoinText = JOIN_ERROR_TEXT.declined;
     } finally {
-      callOperations.complete();
+      // A command of an old session must not drop the new session's read.
       if (generation === sessionGeneration) {
+        callOperations.complete(operation);
         callPending = false;
         callRefresher.request();
       }
@@ -867,8 +880,8 @@
     } catch {
       // The next call change shows the real state.
     } finally {
-      callOperations.complete();
       if (generation === sessionGeneration) {
+        callOperations.complete(operation);
         callBusy = false;
         callRefresher.request();
       }
@@ -879,6 +892,8 @@
     const generation = sessionGeneration;
     cameraBusy = true;
     cameraText = null;
+    cameraRequest += 1;
+    const request = cameraRequest;
     const operation = callOperations.begin();
     try {
       const reply = await callCamera(callState.camera !== 'on' && callState.camera !== 'starting');
@@ -886,12 +901,12 @@
     } catch {
       // The command failed before the core answered. The refresh shows the
       // real camera state; this says why it did not change.
-      if (generation === sessionGeneration && callOperations.isCurrent(operation)) {
+      if (generation === sessionGeneration && request === cameraRequest) {
         cameraText = CAMERA_COMMAND_TEXT;
       }
     } finally {
-      callOperations.complete();
       if (generation === sessionGeneration) {
+        callOperations.complete(operation);
         cameraBusy = false;
         callRefresher.request();
       }
@@ -907,8 +922,10 @@
     } catch {
       // The next call change shows the real state.
     } finally {
-      callOperations.complete();
-      if (generation === sessionGeneration) callRefresher.request();
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        callRefresher.request();
+      }
     }
     focusCallControl();
   }
@@ -920,6 +937,7 @@
 
   /** Clear session-bound UI state and invalidate pending room-context work. */
   function reset() {
+    callOperations.reset();
     callRefresher.reset();
     readiness = null;
     readinessRequest += 1;
@@ -928,6 +946,7 @@
     cameraBusy = false;
     callJoinText = null;
     cameraText = null;
+    cameraRequest += 1;
     callDismissed = false;
     callNames = new Map();
     callNamesFor = null;
@@ -2640,6 +2659,12 @@
           onleave={leaveCall}
           ondismiss={dismissCall}
         />
+        {#if cameraText}
+          <p class="call-notice camera-notice error" role="alert">
+            <span>{cameraText}</span>
+            <button type="button" class="secondary" onclick={() => (cameraText = null)}>Dismiss</button>
+          </p>
+        {/if}
         {#if hasVideo(callState)}
           <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} />
         {/if}
@@ -2729,11 +2754,6 @@
                 <p class="call-notice error" role="alert">
                   <span>{callJoinText}</span>
                   <button type="button" class="secondary" onclick={() => (callJoinText = null)}>Dismiss</button>
-                </p>
-              {:else if cameraText}
-                <p class="call-notice error" role="alert">
-                  <span>{cameraText}</span>
-                  <button type="button" class="secondary" onclick={() => (cameraText = null)}>Dismiss</button>
                 </p>
               {/if}
             {/snippet}

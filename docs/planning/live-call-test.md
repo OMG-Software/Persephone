@@ -474,12 +474,21 @@ not apply to these systems.
 Run on a host with Landlock ABI 3 or newer (Linux 6.2 or newer) and on one
 without it.
 
-1. Before the call: `cat /sys/kernel/security/lsm` names `landlock`.
+1. Before the call, on the supported host only: `cat
+   /sys/kernel/security/lsm` names `landlock`. On the host without
+   Landlock, record the list as it is; step 4 applies there.
 2. Join a call with the camera off. While it is connected, find the call
-   worker's process ID (`pgrep -f persephone-call-worker`).
+   worker's process ID (`pgrep -f persephone-call-worker`) and the process
+   that started it (`ps -o ppid= -p <pid>`).
+   - Record the baseline: `Seccomp_filters:` in `/proc/<ppid>/status`. The
+     worker inherits these filters.
    - Expected pass: `/proc/<pid>/status` shows `NoNewPrivs: 1`,
-     `Seccomp: 2` and `Seccomp_filters:` of at least 2 (stage 1 and stage
-     2).
+     `Seccomp: 2` and `Seccomp_filters:` of exactly the baseline plus 4.
+     Stage 1 installs two programs (kill and `ENOSYS`) and stage 2 installs
+     two more (Landlock calls killed, new `AF_UNIX` sockets refused with
+     `EACCES`). The baseline plus 2 means that stage 2 is missing, and the
+     step fails. Stage 2 runs before the SFU connection, so a connected call
+     must show it.
    - Expected pass: the worker is not dumpable, so `stat -c %U
      /proc/<pid>/environ` shows `root`.
    - Expected pass: `ls -l /proc/<pid>/fd` shows no descriptor of the
@@ -488,6 +497,11 @@ without it.
    access.
    - Expected pass: a grant shows the own tile. A refusal leaves the camera
      `Unavailable` and makes no V4L2 attempt.
+   - Expected pass: while the own tile shows, `ls -l /proc/<pid>/fd` again
+     shows no descriptor of the session bus and, on the portal path, no
+     `/dev/video*` node. The portal path gets frames over the PipeWire
+     remote only, so a video node opened after the grant fails the step.
+     `Seccomp_filters:` is still the baseline plus 4.
    - Expected pass: closing the call while the access dialog is open closes
      the dialog and ends the call at once.
 4. Expected refusal: on a kernel without Landlock ABI 3, or with Landlock

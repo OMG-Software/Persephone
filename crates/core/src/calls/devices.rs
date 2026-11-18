@@ -17,6 +17,7 @@ use persephone_call_protocol::{
     FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES, MediaDevice, ToWorker,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub const DEVICES_KEY: &str = "persephone.call_devices.v1";
@@ -112,30 +113,31 @@ pub enum ListError {
     Start(StartError),
     /// The worker did not answer with a device list in time.
     NoAnswer,
+    /// The page that asked has gone; nothing was listed.
+    Cancelled,
 }
 
 /// On the portal camera path, gets the PipeWire remote from the camera portal
 /// and sends it to the worker. Blocks for up to 60 seconds while the desktop
 /// asks the user. Any failure sends nothing.
 #[cfg(target_os = "linux")]
-fn send_portal_remote(link: &super::worker::CallWorkerLink) {
+fn send_portal_remote(link: &super::worker::CallWorkerLink, cancel: &AtomicBool) {
     use crate::platform::linux::camera_portal;
     use std::os::fd::AsFd;
     if link.camera_path() != super::worker::CameraPath::Portal {
         return;
     }
-    // A listing is not cancelled: it ends with the user's answer or the
-    // access timeout.
-    let never = std::sync::atomic::AtomicBool::new(false);
-    if let Ok(remote) = camera_portal::open_remote(&never) {
+    if let Ok(remote) = camera_portal::open_remote(cancel) {
         let _ = link.send_camera_handle(remote.as_fd());
     }
 }
 
 /// Lists the audio devices through a contained call worker. Blocks for up to
 /// [`LIST_TIMEOUT`] after the worker starts; call it from its own thread.
-/// Nothing starts where the host does not support calls.
-pub fn list(host: &dyn CallHost) -> Result<Listing, ListError> {
+/// Nothing starts where the host does not support calls. `cancel` is set
+/// when the page that asked has gone: a camera portal request then ends,
+/// and the worker finishes without listing ([`ListError::Cancelled`]).
+pub fn list(host: &dyn CallHost, cancel: &AtomicBool) -> Result<Listing, ListError> {
     if !host.supported() {
         return Ok(Listing::default());
     }
@@ -144,7 +146,11 @@ pub fn list(host: &dyn CallHost) -> Result<Listing, ListError> {
     // may show its dialog. Without access no cameras are listed; microphones
     // and speakers still are.
     #[cfg(target_os = "linux")]
-    send_portal_remote(&link);
+    send_portal_remote(&link, cancel);
+    if cancel.load(Ordering::SeqCst) {
+        link.finish(FINISH_TIMEOUT);
+        return Err(ListError::Cancelled);
+    }
     let answer = if link.send(ToWorker::ListDevices).is_ok() {
         let deadline = Instant::now() + LIST_TIMEOUT;
         loop {
@@ -376,7 +382,7 @@ mod tests {
     fn given_an_unsupported_host_then_nothing_starts() {
         let mut host = Host::new(None);
         host.supported = false;
-        assert_eq!(list(&host), Ok(Listing::default()));
+        assert_eq!(list(&host, &AtomicBool::new(false)), Ok(Listing::default()));
         assert!(!host.started.load(Ordering::SeqCst));
     }
 
@@ -395,7 +401,7 @@ mod tests {
             playout: vec![device("p", "")],
             cameras: vec![device("c", " Front\u{202E}  camera "), device("c", "Again")],
         }));
-        let listing = list(&host).unwrap();
+        let listing = list(&host, &AtomicBool::new(false)).unwrap();
         assert!(listing.supported);
         assert_eq!(
             listing.recording,
@@ -419,6 +425,24 @@ mod tests {
         );
     }
 
+    /// GIVEN the page that asked has gone (the cancel flag is set) WHEN
+    /// listed THEN the worker is ended without `ListDevices` and the listing
+    /// is cancelled.
+    #[test]
+    fn given_a_cancelled_listing_then_the_worker_ends_without_listing() {
+        let host = Host::new(Some(FromWorker::Devices {
+            recording: Vec::new(),
+            playout: Vec::new(),
+            cameras: Vec::new(),
+        }));
+        assert_eq!(
+            list(&host, &AtomicBool::new(true)),
+            Err(ListError::Cancelled)
+        );
+        assert!(host.ended.load(Ordering::SeqCst));
+        assert!(host.sent.lock().unwrap().is_empty(), "nothing was asked");
+    }
+
     /// GIVEN a worker that fails, answers another message, closes, or does
     /// not start WHEN listed THEN the listing fails and the worker is ended.
     #[test]
@@ -431,12 +455,18 @@ mod tests {
             }),
         ] {
             let host = Host::new(reply);
-            assert_eq!(list(&host), Err(ListError::NoAnswer));
+            assert_eq!(
+                list(&host, &AtomicBool::new(false)),
+                Err(ListError::NoAnswer)
+            );
             assert!(host.ended.load(Ordering::SeqCst));
         }
         let mut host = Host::new(None);
         host.start = Err(StartError::Launch);
-        assert_eq!(list(&host), Err(ListError::Start(StartError::Launch)));
+        assert_eq!(
+            list(&host, &AtomicBool::new(false)),
+            Err(ListError::Start(StartError::Launch))
+        );
     }
 
     /// GIVEN more devices than the limit and long names WHEN cleaned THEN

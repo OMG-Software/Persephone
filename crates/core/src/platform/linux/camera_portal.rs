@@ -16,10 +16,11 @@
 //! to V4L2 after a portal exists: a refused camera stays off. The worker
 //! never sees the bus.
 //!
-//! The caller can end the wait for the user early with a cancel flag: the
-//! wait looks at it every [`CANCEL_CHECK`], then closes the request, so the
-//! dialog goes away and a call or profile shutdown does not wait for the
-//! user.
+//! The caller can end the request early with a cancel flag. Nothing is
+//! asked once the flag is set. The method calls and the wait for the user
+//! look at it every [`CANCEL_CHECK`]; a cancel then closes the request and
+//! the request's own bus connection, so the dialog goes away and a call or
+//! profile shutdown waits neither for the user nor for a stalled portal.
 
 use super::bus::{self, BusError};
 use crate::calls::worker::CameraPath;
@@ -211,6 +212,9 @@ fn is_lacking_fdo(error: &zbus::fdo::Error) -> bool {
 /// user within [`CANCEL_CHECK`] and closes the request; a set flag also stops
 /// the remote from being opened after a grant.
 pub fn open_remote(cancel: &AtomicBool) -> Result<OwnedFd, CameraError> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(CameraError::Cancelled);
+    }
     let connection = bus::session().map_err(|error| match error {
         BusError::Absent => CameraError::NoPortal,
         BusError::Failed => CameraError::Failed,
@@ -233,21 +237,29 @@ pub fn open_remote(cancel: &AtomicBool) -> Result<OwnedFd, CameraError> {
         })
         .map_err(|_| CameraError::Failed)?;
 
-    let access = connection
-        .call_method(
-            Some(PORTAL),
-            PORTAL_PATH,
-            Some(CAMERA),
-            "AccessCamera",
-            &(access_options(&token),),
-        )
-        .map_err(|error| failure(&error))
-        .and_then(|reply| {
-            reply
-                .body()
-                .deserialize::<OwnedObjectPath>()
-                .map_err(|_| CameraError::Failed)
-        });
+    // A cancel during the bus setup asks nothing.
+    let access = if cancel.load(Ordering::SeqCst) {
+        Err(CameraError::Cancelled)
+    } else {
+        let options_token = token.clone();
+        cancellable(&connection, cancel, move |connection| {
+            connection
+                .call_method(
+                    Some(PORTAL),
+                    PORTAL_PATH,
+                    Some(CAMERA),
+                    "AccessCamera",
+                    &(access_options(&options_token),),
+                )
+                .map_err(|error| failure(&error))
+                .and_then(|reply| {
+                    reply
+                        .body()
+                        .deserialize::<OwnedObjectPath>()
+                        .map_err(|_| CameraError::Failed)
+                })
+        })
+    };
     // The portal must have made the request at the path that was listened on.
     let granted = match access {
         Ok(handle) if handle.as_str() == path => wait_for_response(&receiver, cancel),
@@ -269,27 +281,81 @@ pub fn open_remote(cancel: &AtomicBool) -> Result<OwnedFd, CameraError> {
     drop(waiter);
     granted?;
     if cancel.load(Ordering::SeqCst) {
+        let _ = connection.close();
         return Err(CameraError::Cancelled);
     }
 
-    let reply = connection
-        .call_method(
-            Some(PORTAL),
-            PORTAL_PATH,
-            Some(CAMERA),
-            "OpenPipeWireRemote",
-            &(HashMap::<&str, Value<'_>>::new(),),
-        )
-        .map_err(|error| failure(&error))?;
-    let fd: zbus::zvariant::OwnedFd = reply
-        .body()
-        .deserialize()
-        .map_err(|_| CameraError::Failed)?;
-    let fd = OwnedFd::from(fd);
+    let remote = cancellable(&connection, cancel, |connection| {
+        let reply = connection
+            .call_method(
+                Some(PORTAL),
+                PORTAL_PATH,
+                Some(CAMERA),
+                "OpenPipeWireRemote",
+                &(HashMap::<&str, Value<'_>>::new(),),
+            )
+            .map_err(|error| failure(&error))?;
+        let fd: zbus::zvariant::OwnedFd = reply
+            .body()
+            .deserialize()
+            .map_err(|_| CameraError::Failed)?;
+        Ok(OwnedFd::from(fd))
+    });
+    let fd = match remote {
+        Ok(fd) => fd,
+        Err(error) => {
+            // Ends a call still waiting on the bus.
+            let _ = connection.close();
+            return Err(error);
+        }
+    };
     if is_socket(&fd) {
         Ok(fd)
     } else {
         Err(CameraError::Failed)
+    }
+}
+
+/// Runs the method call `call` on its own thread and waits for its result,
+/// looking at `cancel` every [`CANCEL_CHECK`]. A set flag ends the wait at
+/// once with [`CameraError::Cancelled`]; the caller then closes the
+/// connection, which ends the call. The thread is not joined, so a stalled
+/// portal cannot hold the caller.
+fn cancellable<T, F>(
+    connection: &zbus::blocking::Connection,
+    cancel: &AtomicBool,
+    call: F,
+) -> Result<T, CameraError>
+where
+    T: Send + 'static,
+    F: FnOnce(&zbus::blocking::Connection) -> Result<T, CameraError> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    let connection = connection.clone();
+    std::thread::Builder::new()
+        .name("camera-portal-call".to_owned())
+        .spawn(move || {
+            let _ = sender.send(call(&connection));
+        })
+        .map_err(|_| CameraError::Failed)?;
+    wait_cancellable(&receiver, cancel)
+}
+
+/// Waits for one result on `receiver` until `cancel` is set. A closed
+/// channel (the thread ended without a result) is a failure.
+fn wait_cancellable<T>(
+    receiver: &mpsc::Receiver<Result<T, CameraError>>,
+    cancel: &AtomicBool,
+) -> Result<T, CameraError> {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CameraError::Cancelled);
+        }
+        match receiver.recv_timeout(CANCEL_CHECK) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(CameraError::Failed),
+        }
     }
 }
 
@@ -511,6 +577,41 @@ mod tests {
             wait_for_response(&receiver, &cancel),
             Err(CameraError::Failed)
         );
+    }
+
+    /// GIVEN a set cancel flag WHEN a request starts THEN it ends at once,
+    /// before any bus connection, so an ended call asks nothing.
+    #[test]
+    fn given_a_cancel_before_the_request_then_nothing_is_asked() {
+        let cancel = AtomicBool::new(true);
+        assert_eq!(open_remote(&cancel).err(), Some(CameraError::Cancelled));
+    }
+
+    /// GIVEN a method call that never answers WHEN the cancel flag is set
+    /// THEN the wait ends as cancelled; a result that comes first is
+    /// returned, and a thread that ends without one is a failure.
+    #[test]
+    fn given_a_stalled_method_call_then_a_cancel_ends_the_wait() {
+        let (_sender, receiver) = mpsc::channel::<Result<u8, CameraError>>();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        assert_eq!(
+            wait_cancellable(&receiver, &cancel),
+            Err(CameraError::Cancelled)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        setter.join().expect("setter");
+        let idle = AtomicBool::new(false);
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(7u8)).expect("send");
+        assert_eq!(wait_cancellable(&receiver, &idle), Ok(7));
+        drop(sender);
+        assert_eq!(wait_cancellable(&receiver, &idle), Err(CameraError::Failed));
     }
 
     /// GIVEN a wait for the user's answer WHEN the cancel flag is set, before

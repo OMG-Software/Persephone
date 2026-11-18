@@ -113,6 +113,7 @@ tile: number, participant: CallParticipantRef | null, own: boolean,
 /**
  * The tile's stream number. It changes when the tile starts showing a
  * new stream; `call_video_frame` gives pictures of this stream only.
+ * At most 2^53 - 1, so the page holds it exactly.
  */
 stream: number, };
 

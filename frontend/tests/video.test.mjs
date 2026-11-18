@@ -256,10 +256,11 @@ test('GIVEN another device taking a tile WHEN the old reply arrives last THEN it
   );
   fetcher.setTiles([{ tile: 1, key: 'a', stream: 0 }]);
   fetcher.setTiles([{ tile: 1, key: 'b', stream: 0 }]);
-  assert.equal(gates.length, 2, 'one request for each device');
-  gates[1].resolve(picture(2));
-  await later();
+  assert.equal(gates.length, 1, 'the tile keeps its one request');
   gates[0].resolve(picture(50));
+  await later();
+  assert.equal(gates.length, 2, 'the new device is asked when the old reply is in');
+  gates[1].resolve(picture(2));
   await later();
   assert.deepEqual(asked, [0, 0], 'the new device starts again from 0');
   assert.deepEqual(shown, [2], 'the old picture is not shown');
@@ -285,12 +286,44 @@ test('GIVEN a tile whose stream number changes WHEN the old reply arrives last T
   assert.equal(gates.length, 1, 'an unchanged tile keeps its request');
   fetcher.setTiles([{ tile: 1, key: 'a', stream: 2 }]);
   assert.deepEqual(cleared, [1]);
-  assert.deepEqual(asked, [[1, 0, 1], [1, 0, 2]]);
-  gates[1].resolve(picture(4));
-  await later();
+  assert.deepEqual(asked, [[1, 0, 1]], 'no second request while the first runs');
   gates[0].resolve(picture(9));
   await later();
+  assert.deepEqual(asked, [[1, 0, 1], [1, 0, 2]], 'the new stream from 0, at once');
+  gates[1].resolve(picture(4));
+  await later();
   assert.deepEqual(shown, [4], 'the old stream picture is not shown');
+});
+
+test('GIVEN five tiles each with a request at the host WHEN streams change and tiles go and come back THEN there are never more than five requests', async () => {
+  const pending = [];
+  let most = 0;
+  const shown = [];
+  const fetcher = new VideoFetcher(
+    (tile, after, stream) => {
+      const gate = deferred();
+      pending.push({ tile, stream, gate });
+      most = Math.max(most, pending.length);
+      return gate.promise.finally(() => pending.splice(pending.findIndex((entry) => entry.gate === gate), 1));
+    },
+    (tile, next) => shown.push([tile, next.seq])
+  );
+  const tiles = (stream) => [0, 1, 2, 3, 4].map((tile) => ({ tile, key: 'k', stream }));
+  fetcher.setTiles(tiles(1));
+  fetcher.setTiles(tiles(2));
+  fetcher.setTiles([]);
+  fetcher.setTiles(tiles(3));
+  assert.equal(pending.length, 5);
+  for (const { gate } of [...pending]) gate.resolve(picture(7));
+  await later();
+  assert.deepEqual(shown, [], 'no picture of an old stream shows');
+  assert.equal(pending.length, 5, 'each tile asks once for its new stream');
+  assert.ok(pending.every((entry) => entry.stream === 3));
+  for (const { gate } of [...pending]) gate.resolve(picture(1));
+  await later();
+  assert.equal(shown.length, 5);
+  assert.equal(most, 5);
+  assert.deepEqual(fetcher.active, [0, 1, 2, 3, 4]);
 });
 
 test('GIVEN a stream number that is not a safe non-negative integer WHEN set THEN the tile is ignored', async () => {

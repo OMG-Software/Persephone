@@ -72,6 +72,9 @@ type TileState = {
   stream: number;
   // The picture number last shown; the next request asks for newer ones.
   seq: number;
+  // False once the tile is gone. A gone tile keeps its state only while its
+  // request runs, so a tile that comes back waits for that request.
+  active: boolean;
   running: boolean;
   again: boolean;
 };
@@ -79,12 +82,15 @@ type TileState = {
 /**
  * Fetches pictures for the active tiles. A `poke` (the core says a new
  * picture is waiting) asks each active tile for a picture newer than the last
- * shown one. At most one request runs for each tile; a poke that arrives
- * while one runs makes at most one more run after it. A picture that is not
- * newer than the one shown is dropped. A tile that disappears, that another
- * device takes, or whose stream number changes loses its state, and a reply
- * still on its way is ignored. A failed request keeps the picture shown; the
- * next poke asks again.
+ * shown one. At most one request runs for each tile number, whatever device
+ * or stream it shows, so the tiles never have more requests at the host than
+ * there are tiles. A poke that arrives while one runs makes at most one more
+ * run after it. A picture that is not newer than the one shown is dropped.
+ * When another device takes a tile or its stream number changes, the tile
+ * starts again from picture 0 and its canvas is cleared; a reply still on its
+ * way for the old device or stream is dropped, and the tile then asks for the
+ * new one at once. A reply for a tile that is gone is dropped. A failed
+ * request keeps the picture shown; the next poke asks again.
  */
 export class VideoFetcher {
   #fetch: (tile: number, after: number, stream: number) => Promise<VideoPicture | null>;
@@ -102,9 +108,12 @@ export class VideoFetcher {
     this.#clear = clear;
   }
 
-  /** The tiles with state now, in order. */
+  /** The active tiles, in order. */
   get active(): number[] {
-    return [...this.#tiles.keys()].sort((a, b) => a - b);
+    return [...this.#tiles]
+      .filter(([, state]) => state.active)
+      .map(([tile]) => tile)
+      .sort((a, b) => a - b);
   }
 
   /**
@@ -126,39 +135,54 @@ export class VideoFetcher {
       }
     }
     for (const [tile, state] of [...this.#tiles]) {
-      const next = wanted.get(tile);
-      if (next?.key !== state.key || next.stream !== state.stream) {
-        this.#tiles.delete(tile);
-        this.#clear(tile);
-      }
+      if (state.active && !wanted.has(tile)) this.#drop(tile, state);
     }
-    let added = false;
     for (const [tile, { key, stream }] of wanted) {
-      if (!this.#tiles.has(tile)) {
-        // A reply for an earlier state of this tile finds a different object
-        // here and is ignored.
-        this.#tiles.set(tile, { key, stream, seq: 0, running: false, again: false });
-        added = true;
+      const state = this.#tiles.get(tile);
+      if (state === undefined) {
+        const fresh = { key, stream, seq: 0, active: true, running: false, again: false };
+        this.#tiles.set(tile, fresh);
+        void this.#run(tile, fresh);
+      } else if (!state.active || state.key !== key || state.stream !== stream) {
+        if (state.active) this.#clear(tile);
+        state.key = key;
+        state.stream = stream;
+        state.seq = 0;
+        state.active = true;
+        this.#ask(tile, state);
       }
     }
-    if (added) this.poke();
   }
 
   /** Asks every active tile for a newer picture. */
   poke(): void {
     for (const [tile, state] of this.#tiles) {
-      if (state.running) {
-        state.again = true;
-      } else {
-        void this.#run(tile, state);
-      }
+      if (state.active) this.#ask(tile, state);
     }
   }
 
   /** Drops all tiles and ignores replies still on their way. */
   stop(): void {
-    for (const tile of [...this.#tiles.keys()]) this.#clear(tile);
-    this.#tiles.clear();
+    for (const [tile, state] of [...this.#tiles]) {
+      if (state.active) this.#drop(tile, state);
+    }
+  }
+
+  /** Runs a request now, or one more after the running one. */
+  #ask(tile: number, state: TileState): void {
+    if (state.running) {
+      state.again = true;
+    } else {
+      void this.#run(tile, state);
+    }
+  }
+
+  /** Clears a gone tile; its state stays only while its request runs. */
+  #drop(tile: number, state: TileState): void {
+    state.active = false;
+    state.again = false;
+    this.#clear(tile);
+    if (!state.running) this.#tiles.delete(tile);
   }
 
   async #run(tile: number, state: TileState): Promise<void> {
@@ -166,19 +190,24 @@ export class VideoFetcher {
     try {
       do {
         state.again = false;
+        const { key, stream, seq } = state;
         try {
-          const picture = await this.#fetch(tile, state.seq, state.stream);
-          if (this.#tiles.get(tile) !== state) return;
-          if (picture !== null && picture.seq > state.seq) {
+          const picture = await this.#fetch(tile, seq, stream);
+          if (!state.active) return;
+          if (state.key !== key || state.stream !== stream) {
+            // The tile changed while the request ran: ask for the new one.
+            state.again = true;
+          } else if (picture !== null && picture.seq > state.seq) {
             state.seq = picture.seq;
             this.#show(tile, picture);
           }
         } catch {
           // Keep what is shown; the next poke asks again.
         }
-      } while (state.again && this.#tiles.get(tile) === state);
+      } while (state.again && state.active);
     } finally {
       state.running = false;
+      if (!state.active && this.#tiles.get(tile) === state) this.#tiles.delete(tile);
     }
   }
 }

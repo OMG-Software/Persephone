@@ -99,7 +99,7 @@ use std::{
     io::{Read, Write},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -173,7 +173,15 @@ struct Hub {
     /// Weak: the core owns the controller, and the controller's admission
     /// reaches the session that holds this hub.
     calls: OnceLock<Weak<calls::controller::CallController>>,
+    /// The UI connection has closed. Long calls that wait for the user (the
+    /// camera portal of a device listing) end when it is set.
+    closing: AtomicBool,
 }
+
+/// The largest JSON reply of a device listing, below the UI pipe's control
+/// frame limit with room for the reply envelope (`id` and `outcome`).
+const MAX_DEVICE_REPLY_BYTES: usize =
+    persephone_media_protocol::CONTROL_FRAME_LIMIT as usize - 1024;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned lock means a panic mid-update; the core stops either way.
@@ -516,6 +524,18 @@ fn refused<T: Serialize>(result: Result<T, ErrorCode>) -> Outcome {
     match result {
         Ok(value) => ok(&value),
         Err(code) => Outcome::Error(code),
+    }
+}
+
+/// `Ok` when the JSON of `devices` fits [`MAX_DEVICE_REPLY_BYTES`]. Names
+/// and IDs that JSON escapes can make three lists of valid devices larger
+/// than the UI pipe takes; the writer would then refuse the frame and the
+/// page would get no reply.
+fn within_device_reply(devices: &persephone_contracts::CallDevices) -> Result<(), ErrorCode> {
+    match serde_json::to_vec(devices) {
+        Ok(bytes) if bytes.len() <= MAX_DEVICE_REPLY_BYTES => Ok(()),
+        Ok(_) => Err(ErrorCode::LimitExceeded),
+        Err(_) => Err(ErrorCode::Internal),
     }
 }
 
@@ -2196,16 +2216,26 @@ impl Core {
     /// The saved choice, then the devices a worker reports. An unreadable
     /// record is shown, with both choices null, and does not hide the list.
     /// A listing that fails is `unavailable`.
+    ///
+    /// The saved choice belongs to the session that was open when it was
+    /// read. The listing can wait up to a minute for the camera portal, and
+    /// holds no session lease meanwhile, so a lock or another session after
+    /// the read gives `locked` and the old choice is not sent. A reply too
+    /// large for the UI pipe is `limit_exceeded`.
     fn finish_call_devices(&self) -> Result<persephone_contracts::CallDevices, ErrorCode> {
+        let generation = self.media_generation();
         let (selection, unreadable) = self.saved_call_devices()?;
-        let listing =
-            calls::devices::list(self.calls.host().as_ref()).map_err(|_| ErrorCode::Unavailable)?;
+        let listing = calls::devices::list(self.calls.host().as_ref(), &self.hub.closing)
+            .map_err(|_| ErrorCode::Unavailable)?;
+        if generation.is_none() || self.media_generation() != generation {
+            return Err(ErrorCode::Locked);
+        }
         let device =
             |device: persephone_call_protocol::MediaDevice| persephone_contracts::CallDevice {
                 id: device.id,
                 name: device.name,
             };
-        Ok(persephone_contracts::CallDevices {
+        let devices = persephone_contracts::CallDevices {
             supported: listing.supported,
             recording: listing.recording.into_iter().map(device).collect(),
             playout: listing.playout.into_iter().map(device).collect(),
@@ -2214,7 +2244,9 @@ impl Core {
             selected_playout: selection.playout,
             selected_camera: selection.camera,
             unreadable,
-        })
+        };
+        within_device_reply(&devices)?;
+        Ok(devices)
     }
 
     /// The saved call devices and whether the record was unreadable (then
@@ -3208,10 +3240,12 @@ impl Core {
     pub fn reopen(&self) {
         self.media.purge();
         *lock(&self.hub.notifications) = Notifications::default();
+        self.hub.closing.store(false, Ordering::SeqCst);
         self.hub.changed.notify_all();
     }
 
     fn close(&self) {
+        self.hub.closing.store(true, Ordering::SeqCst);
         lock(&self.hub.notifications).closed = true;
         self.hub.changed.notify_all();
     }
@@ -3354,6 +3388,47 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN device lists WHEN the reply is checked THEN an ordinary one
+    /// fits, and three full lists of names and IDs that JSON escapes to
+    /// twice their size are `limit_exceeded` instead of a frame the UI pipe
+    /// refuses.
+    #[test]
+    fn given_a_device_reply_then_only_one_that_fits_the_pipe_is_sent() {
+        use persephone_call_protocol::{MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES};
+        let list = |id: &str, name: &str, count: usize| {
+            vec![
+                persephone_contracts::CallDevice {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                };
+                count
+            ]
+        };
+        let devices = |recording, playout, cameras| persephone_contracts::CallDevices {
+            supported: true,
+            recording,
+            playout,
+            cameras,
+            selected_recording: None,
+            selected_playout: None,
+            selected_camera: None,
+            unreadable: false,
+        };
+        let ordinary = devices(
+            list("a", "Mic", 2),
+            list("b", "Speaker", 2),
+            list("c", "Cam", 1),
+        );
+        assert_eq!(within_device_reply(&ordinary), Ok(()));
+        let id = "\"".repeat(MAX_DEVICE_ID_BYTES);
+        let name = "\"".repeat(MAX_DEVICE_NAME_BYTES);
+        let full = || list(&id, &name, MAX_DEVICES);
+        assert_eq!(
+            within_device_reply(&devices(full(), full(), full())),
+            Err(ErrorCode::LimitExceeded)
+        );
+    }
 
     #[test]
     /// Reserve room and cache-search slots independently, and refuse excess work.

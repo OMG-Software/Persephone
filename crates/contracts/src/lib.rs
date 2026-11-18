@@ -34,6 +34,17 @@ impl<'de> Deserialize<'de> for UnixMillis {
     }
 }
 
+/// A `u64` field that JavaScript holds exactly: at most [`UnixMillis::MAX`].
+/// A larger value fails to deserialize.
+fn safe_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    if value <= UnixMillis::MAX {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("number out of JavaScript's exact range"))
+    }
+}
+
 /// Deliberately small frontend projection; never expose SDK, authentication, or key types here.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2267,6 +2278,8 @@ pub struct CallVideoTile {
     pub own: bool,
     /// The tile's stream number. It changes when the tile starts showing a
     /// new stream; `call_video_frame` gives pictures of this stream only.
+    /// At most 2^53 - 1, so the page holds it exactly.
+    #[serde(deserialize_with = "safe_u64")]
     #[ts(type = "number")]
     pub stream: u64,
 }

@@ -200,6 +200,8 @@ export function callAnnouncement(status: CallStatus, dismissed: boolean): string
 export class CallOperations {
   #latest = 0;
   #completed = 0;
+  // The last token of the previous session; older tokens count for nothing.
+  #session = 0;
 
   /** Starts an operation. The newest token is the only current one. */
   begin(): number {
@@ -207,14 +209,23 @@ export class CallOperations {
     return this.#latest;
   }
 
-  /** True while no later operation has started. */
+  /** True while no later operation has started and no reset came after it. */
   isCurrent(token: number): boolean {
-    return token === this.#latest;
+    return token === this.#latest && token > this.#session;
   }
 
-  /** An operation finished, with or without a reply. */
-  complete(): void {
-    this.#completed += 1;
+  /**
+   * The operation `token` finished, with or without a reply. An operation
+   * of a session before the last `reset` is not counted: it asks for no
+   * fresh read in the new session, so it must not drop that session's read.
+   */
+  complete(token: number): void {
+    if (token > this.#session) this.#completed += 1;
+  }
+
+  /** A session change: operations started before it are neither current nor counted. */
+  reset(): void {
+    this.#session = this.#latest;
   }
 
   /** How many operations have finished. A status read compares it before and after. */

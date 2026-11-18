@@ -253,8 +253,7 @@ test('GIVEN a status read in flight WHEN a call command finishes before it THEN 
   refresher.request();
   // A camera command starts and finishes while the read runs; its reply
   // already showed `on`, and it asks for a fresh read.
-  operations.begin();
-  operations.complete();
+  operations.complete(operations.begin());
   refresher.request();
   gates[0].resolve(status({ phase: 'active', camera: 'off' }));
   await new Promise((done) => setImmediate(done));
@@ -268,10 +267,36 @@ test('GIVEN a status read in flight WHEN a call command finishes before it THEN 
 test('GIVEN finished operations WHEN counted THEN each finish counts once', () => {
   const operations = new CallOperations();
   assert.equal(operations.completed, 0);
-  operations.begin();
-  operations.complete();
-  operations.complete();
+  operations.complete(operations.begin());
+  operations.complete(operations.begin());
   assert.equal(operations.completed, 2);
+});
+
+test('GIVEN a command of the old session WHEN it finishes while the new session reads status THEN the read still shows', async () => {
+  const gates = [];
+  const shown = [];
+  const operations = new CallOperations();
+  const refresher = new CallRefresher(
+    () => { const gate = deferred(); gates.push(gate); return gate.promise; },
+    (next) => shown.push(next.phase),
+    () => operations.completed
+  );
+  const old = operations.begin();
+  // The session changes: the page resets and reads the new session's status.
+  operations.reset();
+  refresher.reset();
+  refresher.request();
+  assert.equal(operations.isCurrent(old), false, 'the old command is not current');
+  // The old command finishes during that read; it asks for no new read.
+  operations.complete(old);
+  assert.equal(operations.completed, 0, 'the old command is not counted');
+  gates[gates.length - 1].resolve(status({ phase: 'active' }));
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(shown.slice(-1), ['active'], 'the new session read is shown');
+  const next = operations.begin();
+  assert.equal(operations.isCurrent(next), true);
+  operations.complete(next);
+  assert.equal(operations.completed, 1, 'a new session command counts');
 });
 
 test('GIVEN one operation WHEN no later one starts THEN its reply is current', () => {

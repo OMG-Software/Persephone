@@ -157,14 +157,17 @@ The worker applies two stages itself.
 * Formats: NV12, I420 and YUYV only, at most 1280x720. The worker converts
   YUYV to I420. It decodes no MJPEG. PipeWire buffers must be shared memory
   (`MemFd` or `MemPtr`); DMA buffers are refused.
-* Camera IDs: the PipeWire `node.name` on the portal path. On the V4L2
-  path, the driver, card (model name) and bus information of the node,
-  joined with `|` (a `|` or `\` inside a field is escaped). The bus
-  information alone names a port, not a device, so it is not the ID by
-  itself: a camera of another model or driver in the same port does not
-  match a saved choice. A saved camera that does not match stays off with
-  `NotFound`, and so does a camera chosen on the other path. The worker
-  never takes another camera in its place.
+* Camera IDs: each ID starts with its path, `pipewire:` or `v4l2:`. After
+  `pipewire:` comes the PipeWire `node.name`. After `v4l2:` come the
+  driver, card (model name) and bus information of the node, joined with
+  `|` (a `|` or `\` inside a field is escaped); a node without one of these
+  fields is not listed. The bus information alone names a port, not a
+  device, so it is not the ID by itself: a camera of another model or
+  driver in the same port does not match a saved choice. A saved camera
+  that does not match stays off with `NotFound`. So does a camera chosen on
+  the other path, or saved without a prefix: the worker never reads a
+  `node.name` as V4L2 information or the reverse. The worker never takes
+  another camera in its place.
 * Limit: the V4L2 ioctls on `/dev/video*` give no serial number, so two
   cameras of the same model swapped in the same port have the same ID. A
   serial number would need the media controller (`/dev/media*`) or sysfs,

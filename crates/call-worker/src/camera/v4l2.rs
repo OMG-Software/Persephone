@@ -304,7 +304,8 @@ fn open_node(index: u32) -> Option<OwnedFd> {
 }
 
 /// The ID ([`camera_id`]) and name (card) of a capture node. A node without
-/// a driver name or bus information is not listed.
+/// a driver name, card or bus information is not listed: each field is part
+/// of the ID, so an empty one would let other devices match it.
 fn identify(fd: RawFd) -> Option<(String, String)> {
     let mut capability: Capability = zeroed_struct();
     ioctl(fd, VIDIOC_QUERYCAP, &mut capability).ok()?;
@@ -313,7 +314,7 @@ fn identify(fd: RawFd) -> Option<(String, String)> {
     }
     let driver = field_text(&capability.driver)?;
     let bus_info = field_text(&capability.bus_info)?;
-    let name = field_text(&capability.card).unwrap_or_default();
+    let name = field_text(&capability.card)?;
     Some((camera_id(&driver, &name, &bus_info), name))
 }
 

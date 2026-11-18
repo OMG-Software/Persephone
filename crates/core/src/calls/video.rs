@@ -33,13 +33,17 @@
 //! show under the old stream's participant. Pictures do not go through the
 //! controller's queue: they only need the counts to agree.
 //!
-//! The applied count is also the tile's stream number. Each kept picture
-//! carries it, the page's call status names it for each tile, and
-//! [`VideoStore::newest`] gives a picture only to a request for the same
-//! number. So a page whose status is older than a tile's reassignment gets
-//! no picture of the new stream under the old participant's name.
+//! Each tile also has a stream number. A new store gives every tile a fresh
+//! one, and each applied change gives that tile the next one. The numbers
+//! come from one counter for the whole process, so no two calls share one.
+//! Each kept picture carries its tile's number, the page's call status
+//! names it for each tile, and [`VideoStore::newest`] gives a picture only
+//! to a request for the same number. So a page whose status is older than a
+//! tile's reassignment, or than the call itself, gets no picture of another
+//! stream under the old participant's name.
 
 use persephone_call_protocol::{MAX_VIDEO_PIXELS, MAX_VIDEO_ROTATION, MAX_VIDEO_SIDE, VIDEO_TILES};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Tiles in a call: 0 is the own camera, 1 to 4 are remote.
@@ -50,10 +54,19 @@ const OWN_TILE: usize = 0;
 /// Largest picture number: the page reads it as a JavaScript number.
 const MAX_SEQ: u64 = 9_007_199_254_740_991;
 
-/// The next stream count. It wraps inside the JavaScript-safe range, so the
-/// page can read every stream number.
+/// The next stream count. It wraps inside the JavaScript-safe range.
 fn next_count(count: u64) -> u64 {
     (count + 1) & MAX_SEQ
+}
+
+/// The process's stream number counter: shared by every store, so a stream
+/// number names one stream of one call.
+static NEXT_STREAM: AtomicU64 = AtomicU64::new(1);
+
+/// A stream number no other stream of this process had (until the counter
+/// wraps after 2^53 streams). It is JavaScript-safe.
+fn next_stream() -> u64 {
+    NEXT_STREAM.fetch_add(1, Ordering::Relaxed) & MAX_SEQ
 }
 
 /// The bytes of a picture, with any budget reservation that covers them
@@ -109,6 +122,8 @@ struct State {
     changed: [u64; TILES],
     /// Stream changes of each tile that the controller has applied.
     applied: [u64; TILES],
+    /// The stream number of each tile ([`next_stream`]).
+    streams: [u64; TILES],
     pictures: [Option<Picture>; TILES],
     seq: u64,
     closed: bool,
@@ -116,14 +131,41 @@ struct State {
 }
 
 /// The shared picture store of one call worker. Clones share it.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct VideoStore {
     state: Arc<Mutex<State>>,
 }
 
+impl Default for VideoStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VideoStore {
+    /// A store whose tiles have fresh stream numbers.
     pub fn new() -> Self {
-        Self::default()
+        let state = State {
+            streams: std::array::from_fn(|_| next_stream()),
+            ..State::default()
+        };
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
+    }
+
+    /// The stream number of each tile now (tile 0 first).
+    pub fn streams(&self) -> [u64; TILES] {
+        self.state().streams
+    }
+
+    /// The stream number of `tile` now; 0 for a tile out of range.
+    pub fn stream(&self, tile: u8) -> u64 {
+        self.state()
+            .streams
+            .get(usize::from(tile))
+            .copied()
+            .unwrap_or(0)
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -172,7 +214,7 @@ impl VideoStore {
             }
             state.seq += 1;
             let seq = state.seq;
-            let stream = state.applied[index];
+            let stream = state.streams[index];
             state.pictures[index] = Some(Picture {
                 seq,
                 stream,
@@ -233,8 +275,8 @@ impl VideoStore {
 
     /// The controller applied a `VideoStarted` or `VideoStopped` of `tile`:
     /// the tile starts empty, and pictures are kept again once every change
-    /// the read thread passed on is applied. Returns the tile's new stream
-    /// number (0 for a tile out of range).
+    /// the read thread passed on is applied. The tile gets a new stream
+    /// number, which this returns (0 for a tile out of range).
     pub fn stream_applied(&self, tile: u8) -> u64 {
         let mut state = self.state();
         let index = usize::from(tile);
@@ -243,7 +285,8 @@ impl VideoStore {
         }
         state.applied[index] = next_count(state.applied[index]);
         state.pictures[index] = None;
-        state.applied[index]
+        state.streams[index] = next_stream();
+        state.streams[index]
     }
 
     /// Records a camera request of the user and returns its number. An off
@@ -311,7 +354,7 @@ mod tests {
         let store = VideoStore::new();
         for tile in 0..5 {
             assert!(!store.insert(tile, 0, 2, 2, rgba(2, 2, 1)));
-            assert!(store.newest(tile, 0, 0).is_none());
+            assert!(store.newest(tile, 0, store.stream(tile)).is_none());
         }
     }
 
@@ -324,12 +367,15 @@ mod tests {
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         assert!(store.insert(1, 3, 4, 2, rgba(4, 2, 2)));
         assert!(store.insert(0, 1, 2, 2, rgba(2, 2, 3)));
-        let own = store.newest(0, 0, 0).expect("own picture");
+        let own = store.newest(0, 0, store.stream(0)).expect("own picture");
         assert_eq!((own.seq, own.rotation, own.bytes()[0]), (3, 1, 3));
-        let remote = store.newest(1, 0, 0).expect("remote picture");
+        let remote = store.newest(1, 0, store.stream(1)).expect("remote picture");
         assert_eq!((remote.seq, remote.width, remote.height), (2, 4, 2));
-        assert!(store.newest(0, 3, 0).is_none(), "nothing newer than 3");
-        assert!(store.newest(0, 2, 0).is_some());
+        assert!(
+            store.newest(0, 3, store.stream(0)).is_none(),
+            "nothing newer than 3"
+        );
+        assert!(store.newest(0, 2, store.stream(0)).is_some());
         assert_eq!(store.kept(), 2, "one picture per tile");
     }
 
@@ -355,7 +401,9 @@ mod tests {
                 "{tile} {rotation} {width}x{height} {len}"
             );
         }
-        let kept = store.newest(1, 0, 0).expect("the first picture stays");
+        let kept = store
+            .newest(1, 0, store.stream(1))
+            .expect("the first picture stays");
         assert_eq!((kept.seq, kept.bytes()[0]), (1, 7));
         let largest = store.insert(1, 0, 640, 360, rgba(640, 360, 1));
         assert!(largest, "the largest allowed picture is kept");
@@ -369,8 +417,8 @@ mod tests {
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         assert!(store.insert(2, 0, 2, 2, rgba(2, 2, 1)));
         store.sync(false, [true, false, true, true]);
-        assert!(store.newest(0, 0, 0).is_none());
-        assert!(store.newest(2, 0, 0).is_none());
+        assert!(store.newest(0, 0, store.stream(0)).is_none());
+        assert!(store.newest(2, 0, store.stream(2)).is_none());
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         assert!(!store.insert(2, 0, 2, 2, rgba(2, 2, 1)));
         assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 1)));
@@ -387,10 +435,17 @@ mod tests {
         store.stream_changed(3);
         store.stream_changed(9);
         assert_eq!(store.stream_applied(9), 0, "out of range");
-        assert!(store.newest(3, 0, 0).is_none());
-        assert_eq!(store.stream_applied(3), 1);
+        assert!(store.newest(3, 0, store.stream(3)).is_none());
+        let before = store.stream(3);
+        let stream = store.stream_applied(3);
+        assert_ne!(stream, before, "a new stream number");
+        assert_eq!(store.stream(3), stream);
         assert!(store.insert(3, 0, 2, 2, rgba(2, 2, 1)));
-        assert_eq!(store.newest(3, 0, 1).unwrap().seq, 2);
+        assert_eq!(store.newest(3, 0, stream).unwrap().seq, 2);
+        assert!(
+            store.newest(3, 0, before).is_none(),
+            "the old number gets nothing"
+        );
     }
 
     /// GIVEN tile 1 shows stream A WHEN the read thread reads that A stopped
@@ -403,22 +458,25 @@ mod tests {
         assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 1)));
         store.stream_changed(1); // VideoStopped (A)
         store.stream_changed(1); // VideoStarted (B)
-        assert!(store.newest(1, 0, 0).is_none(), "A's picture goes at once");
+        assert!(
+            store.newest(1, 0, store.stream(1)).is_none(),
+            "A's picture goes at once"
+        );
         assert!(!store.insert(1, 0, 2, 2, rgba(2, 2, 2)), "B waits");
         assert!(
             store.insert(2, 0, 2, 2, rgba(2, 2, 3)),
             "tile 2 is not affected"
         );
-        store.stream_applied(1);
+        let first = store.stream_applied(1);
         assert!(
             !store.insert(1, 0, 2, 2, rgba(2, 2, 2)),
             "one change is left"
         );
-        assert_eq!(store.stream_applied(1), 2);
+        let second = store.stream_applied(1);
         assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 2)));
-        assert_eq!(store.newest(1, 0, 2).unwrap().bytes()[0], 2);
+        assert_eq!(store.newest(1, 0, second).unwrap().bytes()[0], 2);
         assert!(
-            store.newest(1, 0, 1).is_none() && store.newest(1, 0, 0).is_none(),
+            store.newest(1, 0, first).is_none(),
             "a request for an older stream gets nothing"
         );
     }
@@ -431,7 +489,7 @@ mod tests {
         let store = open_store();
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         let off = store.camera_request(false);
-        assert!(store.newest(0, 0, 0).is_none());
+        assert!(store.newest(0, 0, store.stream(0)).is_none());
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 2)));
         assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 2)), "remote tiles stay");
         store.sync(true, [true; 4]);
@@ -475,7 +533,7 @@ mod tests {
         assert_eq!(store.kept(), 0);
         store.sync(true, [true; 4]);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
-        assert!(store.newest(0, 0, 0).is_none());
+        assert!(store.newest(0, 0, store.stream(0)).is_none());
     }
 
     /// GIVEN a notifier WHEN pictures are kept or dropped THEN it runs once
@@ -489,7 +547,7 @@ mod tests {
         store.set_notifier(Arc::new(move || {
             counter.fetch_add(1, Ordering::SeqCst);
             // The lock is free here, so the notifier can read the store.
-            if inner.newest(0, 0, 0).is_some() {
+            if inner.newest(0, 0, inner.stream(0)).is_some() {
                 probe.fetch_add(1, Ordering::SeqCst);
             }
         }));
@@ -506,7 +564,7 @@ mod tests {
         let store = open_store();
         store.state().seq = MAX_SEQ - 1;
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
-        assert_eq!(store.newest(0, 0, 0).unwrap().seq, MAX_SEQ);
+        assert_eq!(store.newest(0, 0, store.stream(0)).unwrap().seq, MAX_SEQ);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
     }
 
@@ -516,10 +574,10 @@ mod tests {
     fn given_a_held_picture_then_a_newer_one_does_not_change_it() {
         let store = open_store();
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
-        let held = store.newest(0, 0, 0).unwrap();
+        let held = store.newest(0, 0, store.stream(0)).unwrap();
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 2)));
         assert_eq!(held.bytes()[0], 1);
-        assert_eq!(store.newest(0, 0, 0).unwrap().bytes()[0], 2);
+        assert_eq!(store.newest(0, 0, store.stream(0)).unwrap().bytes()[0], 2);
     }
 
     /// GIVEN a stream count at the largest JavaScript-safe number WHEN it
@@ -529,5 +587,22 @@ mod tests {
         assert_eq!(next_count(0), 1);
         assert_eq!(next_count(MAX_SEQ - 1), MAX_SEQ);
         assert_eq!(next_count(MAX_SEQ), 0);
+    }
+
+    /// GIVEN two calls' stores WHEN each has a picture on tile 1 THEN their
+    /// stream numbers differ, so a request with the first call's number gets
+    /// nothing from the second call's store, and each store answers its own.
+    #[test]
+    fn given_two_calls_then_their_stream_numbers_never_match() {
+        let first = open_store();
+        let second = open_store();
+        assert!(first.insert(1, 0, 2, 2, rgba(2, 2, 1)));
+        assert!(second.insert(1, 0, 2, 2, rgba(2, 2, 2)));
+        for tile in 0..5 {
+            assert_ne!(first.stream(tile), second.stream(tile));
+        }
+        assert!(second.newest(1, 0, first.stream(1)).is_none());
+        assert_eq!(second.newest(1, 0, second.stream(1)).unwrap().bytes()[0], 2);
+        assert_eq!(first.newest(1, 0, first.stream(1)).unwrap().bytes()[0], 1);
     }
 }

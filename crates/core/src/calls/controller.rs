@@ -358,6 +358,12 @@ impl View {
         (self.camera == CallCamera::On, remote)
     }
 
+    /// Starts the view with the picture store's stream numbers.
+    fn with_video_streams(mut self, streams: [u64; VIDEO_TILES as usize]) -> Self {
+        self.video_streams = streams;
+        self
+    }
+
     /// Records the stream number of `tile`; a tile out of range is ignored.
     fn set_video_stream(&mut self, tile: u8, stream: u64) {
         if let Some(slot) = self.video_streams.get_mut(usize::from(tile)) {
@@ -1172,6 +1178,7 @@ impl CallController {
             setup.link = Some(link);
             return Err(CallError::Worker(StartError::NotReady));
         }
+        let video_streams = link.video().streams();
         Ok(Call {
             access: access.clone(),
             link,
@@ -1181,7 +1188,8 @@ impl CallController {
             own_device: device_id,
             own_keys,
             remote: RemoteKeys::new(),
-            view: View::new(room_id.to_owned(), sfu.url, scope.video),
+            view: View::new(room_id.to_owned(), sfu.url, scope.video)
+                .with_video_streams(video_streams),
             changes,
             incoming,
             failed,
@@ -1979,8 +1987,12 @@ impl Call {
             view,
             handles,
             mut tasks,
+            portal,
             ..
         } = self;
+        // A portal request still waiting for the user is cancelled first, so
+        // its dialog does not stay open while the call is torn down.
+        drop(portal);
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
         if session_ended {
@@ -2488,6 +2500,7 @@ mod tests {
         let (command_tx, to_worker) = mpsc::channel(8);
         let (events, event_rx) = mpsc::channel(4);
         let link = CallWorkerLink::from_parts(command_tx, event_rx, Box::new(FakeProcess(killed)));
+        let video_streams = link.video().streams();
         let (changes_tx, changes) = mpsc::channel(1);
         let (incoming_tx, incoming) = mpsc::channel(1);
         let (failed_tx, failed) = mpsc::channel(1);
@@ -2504,7 +2517,7 @@ mod tests {
             own_device: owned_device_id!("A"),
             own_keys: OwnKeys::new(Instant::now()).unwrap(),
             remote: RemoteKeys::new(),
-            view: view(),
+            view: view().with_video_streams(video_streams),
             changes,
             incoming,
             failed,
@@ -2826,6 +2839,7 @@ mod tests {
         call.worker_event(&inner, &started(1, "@a:example.org:A"))
             .unwrap();
         assert!(store.insert(1, 0, 2, 2, vec![1; 16]), "A shows");
+        let a_stream = store.stream(1);
         // The read thread reads B's handover before the task applies it.
         store.stream_changed(1);
         store.stream_changed(1);
@@ -2846,9 +2860,15 @@ mod tests {
             Some("@b:example.org")
         );
         // A page that still holds A's stream number gets no picture of B.
-        assert_eq!(tiles[0].stream, 3);
-        assert!(store.newest(1, 0, 1).is_none(), "A's stream: nothing");
-        assert!(store.newest(1, 0, 3).is_some(), "B's stream: B");
+        assert_eq!(tiles[0].stream, store.stream(1));
+        assert!(
+            store.newest(1, 0, a_stream).is_none(),
+            "A's stream: nothing"
+        );
+        assert!(
+            store.newest(1, 0, tiles[0].stream).is_some(),
+            "B's stream: B"
+        );
         let CallState::Active { video, .. } = inner.state.borrow().clone() else {
             panic!("an active call");
         };
@@ -2868,15 +2888,19 @@ mod tests {
         let inner = controller(FakeHost::new(true, None)).inner.clone();
         let mut call = fixture.call;
         call.worker_event(&inner, &FromWorker::Connected).unwrap();
-        for stream in [1, 2] {
+        let mut seen = Vec::new();
+        for _ in 0..2 {
             call.worker_event(&inner, &started(2, "@a:example.org:A"))
                 .unwrap();
             let CallState::Active { video, .. } = inner.state.borrow().clone() else {
                 panic!("an active call");
             };
             assert_eq!(video.len(), 1);
-            assert_eq!((video[0].tile, video[0].stream), (2, stream));
+            assert_eq!(video[0].tile, 2);
+            assert_eq!(video[0].stream, call.link.video().stream(2));
+            seen.push(video[0].stream);
         }
+        assert_ne!(seen[0], seen[1], "the second stream has a new number");
     }
 
     /// GIVEN a portal request waiting for the user WHEN the call drops its
@@ -2890,10 +2914,15 @@ mod tests {
         let (ended, ended_rx) = std::sync::mpsc::channel();
         let portal = PortalTask {
             task: tokio::task::spawn_blocking(move || {
-                while !flag.load(Ordering::SeqCst) {
+                // The deadline only keeps a regression from hanging the
+                // runtime's shutdown; the test reports it.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !flag.load(Ordering::SeqCst) && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                let _ = ended.send(());
+                if flag.load(Ordering::SeqCst) {
+                    let _ = ended.send(());
+                }
                 PortalRemote::default()
             }),
             cancel: cancel.clone(),
@@ -3237,14 +3266,14 @@ mod tests {
                 stream: 0,
             }],
         });
-        assert!(calls.video_picture(0, 0, 0).is_some());
+        assert!(calls.video_picture(0, 0, store.stream(0)).is_some());
         assert_eq!(calls.set_camera(false), Ok(()));
         assert!(matches!(
             commands.try_recv(),
             Ok(Command::Camera { on: false, .. })
         ));
         assert!(
-            calls.video_picture(0, 0, 0).is_none(),
+            calls.video_picture(0, 0, store.stream(0)).is_none(),
             "the picture is gone"
         );
         assert!(
@@ -3255,7 +3284,7 @@ mod tests {
         // the camera on: the own tile stays shut.
         store.sync(true, [false; 4]);
         assert!(!store.insert(0, 0, 2, 2, vec![3; 16]));
-        assert!(calls.video_picture(0, 0, 0).is_none());
+        assert!(calls.video_picture(0, 0, store.stream(0)).is_none());
         let CallState::Active { camera, video, .. } = calls.state() else {
             panic!("active");
         };
@@ -3320,7 +3349,10 @@ mod tests {
         assert_eq!(calls.state(), active_state());
         assert_eq!(calls.set_camera(false), Err(CallError::NotInCall));
         assert_eq!(calls.state(), active_state());
-        assert!(calls.video_picture(0, 0, 0).is_some(), "the picture stays");
+        assert!(
+            calls.video_picture(0, 0, store.stream(0)).is_some(),
+            "the picture stays"
+        );
     }
 
     /// GIVEN a picture in the store WHEN the page asks THEN only a newer
@@ -3335,10 +3367,14 @@ mod tests {
         let (store, _commands, _) = running_call(&calls, active_state());
         store.sync(false, [true, false, false, false]);
         assert!(store.insert(1, 3, 2, 2, vec![5; 16]));
-        let picture = calls.video_picture(1, 0, 0).expect("picture");
+        let picture = calls.video_picture(1, 0, store.stream(1)).expect("picture");
         assert_eq!((picture.seq, picture.rotation), (1, 3));
-        assert!(calls.video_picture(1, 1, 0).is_none());
-        assert!(calls.video_picture(9, 0, 0).is_none());
+        assert!(calls.video_picture(1, 1, store.stream(1)).is_none());
+        assert!(
+            calls.video_picture(1, 0, store.stream(1) + 1).is_none(),
+            "another stream number gets nothing"
+        );
+        assert!(calls.video_picture(9, 0, store.stream(9)).is_none());
     }
 
     /// GIVEN pictures in a running call WHEN the session ends THEN every
@@ -3357,8 +3393,8 @@ mod tests {
             } else {
                 assert!(calls.inner.release(5));
             }
-            assert!(calls.video_picture(0, 0, 0).is_none());
-            assert!(calls.video_picture(4, 0, 0).is_none());
+            assert!(calls.video_picture(0, 0, store.stream(0)).is_none());
+            assert!(calls.video_picture(4, 0, store.stream(4)).is_none());
             store.sync(true, [true; 4]);
             assert!(!store.insert(0, 0, 2, 2, vec![1; 16]), "{session_end}");
         }
