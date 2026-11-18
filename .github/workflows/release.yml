@@ -70,8 +70,8 @@ env:
   SUFFIX: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') && '-unsigned' || '' }}
 
 jobs:
-  # The same check as check.yml plus the dependency audit, the tag/version
-  # match and the third-party notices that every bundle includes.
+  # The dependency audit, the tag/version match and the third-party notices
+  # that every bundle includes, plus check.yml's check on tag and manual runs.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -125,17 +125,43 @@ jobs:
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
 
+      # On a push to main, check.yml runs this same check on the same commit,
+      # after the merge queue ran it on every platform, so the gate skips it
+      # there (ADR-0051). A tag or manual run checks again.
       - name: Check
+        if: github.event_name != 'push' || github.ref_type == 'tag'
         run: python tools/dev.py check
 
       - name: Audit dependencies
         run: python tools/dev.py audit
 
+      # A non-tag run reuses a cargo-about that an earlier main run built
+      # (ADR-0051). A tag run always builds it from source: a cached binary,
+      # unlike a downloaded crate, is not checked against a lock file.
+      - name: Restore cargo-about
+        id: cargo-about
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: cargo-about-${{ env.CARGO_ABOUT_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}
+
+      # The cargo-about binary needs its `cli` feature; without it cargo
+      # install builds the library, installs nothing and still exits 0.
+      - name: Install cargo-about
+        if: steps.cargo-about.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli --root "$RUNNER_TEMP/tools"
+
+      - name: Save cargo-about
+        if: github.ref == 'refs/heads/main' && steps.cargo-about.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: ${{ steps.cargo-about.outputs.cache-primary-key }}
+
       - name: Generate third-party notices
         run: |
-          # The cargo-about binary needs its `cli` feature; without it cargo
-          # install builds the library, installs nothing and still exits 0.
-          cargo install --locked cargo-about --version "$CARGO_ABOUT_VERSION" --features cli --root "$RUNNER_TEMP/tools"
+          test -x "$RUNNER_TEMP/tools/bin/cargo-about"
           mkdir -p .local/release/notices
           "$RUNNER_TEMP/tools/bin/cargo-about" generate --locked --fail --workspace \
             -c tools/about.toml -o .local/release/notices/THIRD-PARTY-NOTICES.txt tools/about.hbs
@@ -225,10 +251,32 @@ jobs:
           key: release-windows-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: release-windows-
 
+      # A non-tag run reuses a Tauri CLI that an earlier main run built
+      # (ADR-0051). A tag run always builds it from source: a cached binary,
+      # unlike a downloaded crate, is not checked against a lock file.
+      - name: Restore the Tauri CLI
+        id: tauri-cli
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}
+
       - name: Install the Tauri CLI
-        run: |
-          cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
-          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
+
+      # Saved straight after it is built, before any project dependency code
+      # runs in this job.
+      - name: Save the Tauri CLI
+        if: github.ref == 'refs/heads/main' && steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: ${{ steps.tauri-cli.outputs.cache-primary-key }}
+
+      - name: Put the Tauri CLI on PATH
+        run: echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -637,10 +685,32 @@ jobs:
           key: release-linux-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: release-linux-${{ matrix.arch }}-
 
+      # A non-tag run reuses a Tauri CLI that an earlier main run built
+      # (ADR-0051). A tag run always builds it from source: a cached binary,
+      # unlike a downloaded crate, is not checked against a lock file.
+      - name: Restore the Tauri CLI
+        id: tauri-cli
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}
+
       - name: Install the Tauri CLI
-        run: |
-          cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
-          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
+
+      # Saved straight after it is built, before any project dependency code
+      # runs in this job.
+      - name: Save the Tauri CLI
+        if: github.ref == 'refs/heads/main' && steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: ${{ steps.tauri-cli.outputs.cache-primary-key }}
+
+      - name: Put the Tauri CLI on PATH
+        run: echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -751,10 +821,32 @@ jobs:
           key: release-macos-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: release-macos-
 
+      # A non-tag run reuses a Tauri CLI that an earlier main run built
+      # (ADR-0051). A tag run always builds it from source: a cached binary,
+      # unlike a downloaded crate, is not checked against a lock file.
+      - name: Restore the Tauri CLI
+        id: tauri-cli
+        if: ${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN }}
+
       - name: Install the Tauri CLI
-        run: |
-          cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
-          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+        if: steps.tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install --locked tauri-cli --version "$TAURI_CLI_VERSION" --root "$RUNNER_TEMP/tools"
+
+      # Saved straight after it is built, before any project dependency code
+      # runs in this job.
+      - name: Save the Tauri CLI
+        if: github.ref == 'refs/heads/main' && steps.tauri-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tools
+          key: ${{ steps.tauri-cli.outputs.cache-primary-key }}
+
+      - name: Put the Tauri CLI on PATH
+        run: echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

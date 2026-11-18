@@ -51,7 +51,10 @@ install directory and the web view's data folder.
 1. `gate`: on a tag, `python tools/release.py check-tag <tag>`; then
    `python tools/dev.py bootstrap`, `check` and `audit`; then the third-party
    notices with cargo-about ([`tools/about.toml`](../tools/about.toml),
-   [`tools/about.hbs`](../tools/about.hbs)).
+   [`tools/about.hbs`](../tools/about.hbs)). On a push to `main` it skips
+   `check`, which `check.yml` runs on the same commit (ADR-0051).
+   Non-tag runs reuse the cargo-about and Tauri CLI binaries that a `main` run
+   built and cached; a tag run always builds both from source.
 2. `preflight`: on a tag, fails if any signing secret is missing. It names the
    missing secrets and never prints values.
 3. Windows, in five jobs:
