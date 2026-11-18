@@ -105,7 +105,7 @@ impl CoreTransport for FakeCore {
             Call::ResetProfile {} => Ok(serde_json::json!("unlocking")),
             Call::SignOut {} => Ok(serde_json::json!("restart_required")),
             Call::SecurityStatus {} => Ok(
-                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false}),
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false}),
             ),
             Call::CallStatus {} | Call::CallLeave {} => Ok(call_idle()),
             Call::CallReadiness { room_id } => match room_id.as_str() {
@@ -135,13 +135,13 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": muted, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true}], "ended": null, "joinError": null}),
             ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
-                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false,
+                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": "f1", "phase": "waiting", "emoji": [], "otherDevice": null}
             })),
             Call::AcceptVerification { flow_id }
             | Call::ConfirmVerification { flow_id }
             | Call::CancelVerification { flow_id } => Ok(serde_json::json!({
-                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false,
+                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": flow_id, "phase": "compare",
                     "emoji": [{"symbol": "🐶", "description": "Dog"}], "otherDevice": "<b>Laptop</b>"}
             })),
@@ -232,17 +232,17 @@ impl CoreTransport for FakeCore {
             }
             Call::AcceptIdentity { .. } => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "enabled", "operation": "waiting_for_confirmation",
-                "error": null, "canSetUpRecovery": false, "canStartNewBackup": false, "verification": null
+                "error": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false, "verification": null
             })),
             Call::VerifyContact { .. } | Call::VerifyMember { .. } => Ok(serde_json::json!({
-                "identity": "verified", "recovery": "enabled", "operation": "working", "error": null, "canSetUpRecovery": false, "canStartNewBackup": false,
+                "identity": "verified", "recovery": "enabled", "operation": "working", "error": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": null
             })),
             Call::SetUpRecovery {} => Ok(
-                serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false}),
+                serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false}),
             ),
             Call::SetUpEncryption {} => Ok(
-                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false}),
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false}),
             ),
             // A reply carrying a secret is refused by the contract.
             Call::SendMessage { room_id, body, .. } | Call::EditMessage { room_id, body, .. } => {
@@ -265,7 +265,7 @@ impl CoreTransport for FakeCore {
             },
             Call::AllowUnencrypted { .. } => Ok(serde_json::Value::Null),
             Call::RecoverWithKey {} => Ok(
-                serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "recoveryKey": "x"}),
+                serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false, "recoveryKey": "x"}),
             ),
             Call::Register { username, .. } => match username.as_str() {
                 "taken" => Ok(
@@ -510,19 +510,24 @@ impl CoreTransport for FakeCore {
             Call::RemoveThreePid { .. } => Ok(serde_json::json!("done")),
             Call::VerifyDevice { device_id } => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "enabled", "operation": "working",
-                "error": null, "canSetUpRecovery": false, "canStartNewBackup": false,
+                "error": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": device_id, "phase": "waiting", "emoji": [],
                     "otherDevice": null, "contact": null}
             })),
             Call::ChangeRecoveryKey {} => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "enabled",
                 "operation": "waiting_for_confirmation", "error": null,
-                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false
+                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false
+            })),
+            Call::SetProfilePassphrase { on } => Ok(serde_json::json!({
+                "identity": "verified", "recovery": "enabled",
+                "operation": "waiting_for_passphrase", "error": null,
+                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": !on
             })),
             Call::StartNewBackup {} => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "incomplete",
                 "operation": "waiting_for_confirmation", "error": null,
-                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": true
+                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": true, "profilePassphrase": false
             })),
             Call::NotificationLevel {} => Ok(serde_json::json!({"level": "custom"})),
             Call::SetNotificationLevel { .. } => Ok(serde_json::Value::Null),
@@ -944,6 +949,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-remove-three-pid",
             "allow-verify-device",
             "allow-change-recovery-key",
+            "allow-set-profile-passphrase",
             "allow-start-new-backup",
             "allow-notification-level",
             "allow-set-notification-level",
@@ -1293,7 +1299,7 @@ fn given_encryption_commands_then_only_codes_cross_and_secrets_are_refused() {
     assert_eq!(
         invoke("security_status"),
         Ok(
-            serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false})
+            serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false})
         )
     );
     assert_eq!(
@@ -2178,6 +2184,31 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         invoke("change_recovery_key", serde_json::json!({})).unwrap()["operation"],
         "waiting_for_confirmation"
     );
+    let turned_on = invoke("set_profile_passphrase", serde_json::json!({"on": true})).unwrap();
+    assert_eq!(turned_on["operation"], "waiting_for_passphrase");
+    assert_eq!(turned_on["profilePassphrase"], false, "not changed yet");
+    // Only the choice crosses: a passphrase argument or a missing or
+    // mistyped choice never reaches the core.
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({}),
+        serde_json::json!({"on": "yes"}),
+        serde_json::json!({"on": null}),
+    ] {
+        assert!(
+            invoke("set_profile_passphrase", args).is_err(),
+            "bad arguments refused"
+        );
+    }
+    assert!(
+        invoke(
+            "set_profile_passphrase",
+            serde_json::json!({"on": true, "passphrase": "hunter2 hunter2"})
+        )
+        .is_ok(),
+        "unknown arguments are ignored by Tauri and never forwarded"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls + 1);
     assert_eq!(
         invoke("start_new_backup", serde_json::json!({})).unwrap()["operation"],
         "waiting_for_confirmation"

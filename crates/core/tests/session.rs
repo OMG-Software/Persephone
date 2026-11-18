@@ -1,13 +1,14 @@
 //! The session owner over real SDK stores: admission, generation fencing,
-//! retained ownership across a lock timeout, and unlocking.
+//! retained ownership across a lock timeout, unlocking, and turning the
+//! profile passphrase on or off (ADR-0050).
 
 use matrix_sdk_crypto::store::CryptoStore;
 use persephone_contracts::SignInError;
-use persephone_contracts::StoreState;
+use persephone_contracts::{SecurityError, SecurityOperation, SecurityStatus, StoreState};
 use persephone_core::{
     credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
     session::{AdmissionError, MAX_LEASES, Session, SessionListener},
-    store::{self, KEY_FILE},
+    store::{self, SEALED_KEY_FILE, VAULT_KEY_FILE},
 };
 use std::{
     fs,
@@ -168,13 +169,16 @@ fn given_a_locked_session_whose_key_is_gone_then_unlock_stays_locked_until_it_re
     let dir = TempDir::new().unwrap();
     let session = open(dir.path());
     assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
-    let key = fs::read(dir.path().join(KEY_FILE)).unwrap();
-    fs::remove_file(dir.path().join(KEY_FILE)).unwrap();
+    let key = fs::read(dir.path().join(VAULT_KEY_FILE)).unwrap();
+    fs::remove_file(dir.path().join(VAULT_KEY_FILE)).unwrap();
     assert_eq!(session.unlock(), StoreState::Unlocking);
     assert_eq!(settled(&session), StoreState::KeyMissing);
-    assert!(!dir.path().join(KEY_FILE).exists(), "no replacement key");
+    assert!(
+        !dir.path().join(VAULT_KEY_FILE).exists(),
+        "no replacement key"
+    );
     assert_eq!(session.admit().err(), Some(AdmissionError::Locked));
-    fs::write(dir.path().join(KEY_FILE), key).unwrap();
+    fs::write(dir.path().join(VAULT_KEY_FILE), key).unwrap();
     assert_eq!(session.unlock(), StoreState::Unlocking);
     assert_eq!(settled(&session), StoreState::Protected);
 }
@@ -259,7 +263,17 @@ fn given_a_lease_ending_during_a_lock_then_the_lock_completes() {
     }
 }
 
+/// A profile with the passphrase on ([`PASSPHRASE`]), closed again.
+fn protected_profile(dir: &Path) {
+    let stores = store::open(dir, &Tagged(1), &unlock()).unwrap();
+    store::turn_on_passphrase(dir, &Tagged(1), &unlock()).unwrap();
+    assert!(stores.close());
+    assert!(dir.join(SEALED_KEY_FILE).exists());
+}
+
+/// Opens a profile that has a passphrase: its first prompt is the open.
 fn open_with(dir: &Path, source: Arc<dyn CredentialSource>) -> Session {
+    protected_profile(dir);
     let session = Session::open(dir.to_path_buf(), Arc::new(Tagged(1)), unlock_with(source));
     assert_eq!(session.state(), StoreState::Protected);
     session
@@ -293,9 +307,9 @@ fn read_marker(session: &Session) -> Option<Vec<u8>> {
 #[test]
 fn given_wrong_passphrases_at_unlock_then_the_session_is_rejected_until_a_right_one() {
     let dir = TempDir::new().unwrap();
-    // Two answers create the profile; then one empty and four wrong entries.
+    // One answer opens the profile; then one empty and four wrong entries.
     let script = Script::new(
-        [Ok(PASSPHRASE), Ok(PASSPHRASE), Err(PromptError::Invalid)]
+        [Ok(PASSPHRASE), Err(PromptError::Invalid)]
             .into_iter()
             .chain([Ok("not the passphrase"); 4]),
     );
@@ -307,9 +321,9 @@ fn given_wrong_passphrases_at_unlock_then_the_session_is_rejected_until_a_right_
     assert_eq!(settled(&session), StoreState::SecretRejected);
     assert_eq!(session.admit().err(), Some(AdmissionError::Locked));
     let seen = script.seen();
-    assert_eq!(seen.len(), 7, "{seen:?}");
-    assert_eq!(seen[2], "Passphrase { retry: false }");
-    assert!(seen[3..].iter().all(|p| p == "Passphrase { retry: true }"));
+    assert_eq!(seen.len(), 6, "{seen:?}");
+    assert_eq!(seen[1], "Passphrase { retry: false }");
+    assert!(seen[2..].iter().all(|p| p == "Passphrase { retry: true }"));
 
     assert_eq!(session.unlock(), StoreState::Unlocking);
     assert_eq!(settled(&session), StoreState::Protected);
@@ -323,23 +337,22 @@ fn given_a_cancelled_or_failed_prompt_at_unlock_then_the_session_stays_locked() 
     let dir = TempDir::new().unwrap();
     let script = Script::new([
         Ok(PASSPHRASE),
-        Ok(PASSPHRASE),
         Err(PromptError::Cancelled),
         Err(PromptError::Failed),
     ]);
     let session = open_with(dir.path(), script);
     assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
-    let key = fs::read(dir.path().join(KEY_FILE)).unwrap();
+    let key = fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
     for _ in 0..2 {
         assert_eq!(session.unlock(), StoreState::Unlocking);
         assert_eq!(settled(&session), StoreState::Locked);
-        assert_eq!(fs::read(dir.path().join(KEY_FILE)).unwrap(), key);
+        assert_eq!(fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(), key);
     }
     assert_eq!(session.unlock(), StoreState::Unlocking);
     assert_eq!(settled(&session), StoreState::Protected);
 }
 
-/// Answers the two prompts that create a profile, then holds every later
+/// Answers the first prompt (opening the profile), then holds every later
 /// prompt until released.
 struct Gate {
     asked: Mutex<usize>,
@@ -356,7 +369,7 @@ impl CredentialSource for Gate {
         let first = {
             let mut asked = self.asked.lock().unwrap();
             *asked += 1;
-            *asked <= 2
+            *asked <= 1
         };
         if !first {
             let open = self.open.lock().unwrap();
@@ -380,7 +393,7 @@ fn given_an_open_unlock_prompt_then_other_transitions_wait_without_blocking() {
     let session = open_with(dir.path(), gate.clone());
     assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
     assert_eq!(session.unlock(), StoreState::Unlocking);
-    while *gate.asked.lock().unwrap() < 3 {
+    while *gate.asked.lock().unwrap() < 2 {
         std::thread::yield_now();
     }
     let started = Instant::now();
@@ -396,7 +409,7 @@ fn given_an_open_unlock_prompt_then_other_transitions_wait_without_blocking() {
     *gate.open.lock().unwrap() = true;
     gate.wake.notify_all();
     assert_eq!(settled(&session), StoreState::Protected);
-    assert_eq!(*gate.asked.lock().unwrap(), 3, "one prompt for one unlock");
+    assert_eq!(*gate.asked.lock().unwrap(), 2, "one prompt for one unlock");
 }
 
 /// GIVEN a locked profile with data WHEN a reset is declined in the core's
@@ -417,7 +430,7 @@ fn given_a_declined_reset_then_the_profile_is_kept() {
             script.seen().last().map(String::as_str),
             Some("ConfirmReset")
         );
-        assert!(dir.path().join(KEY_FILE).exists());
+        assert!(dir.path().join(SEALED_KEY_FILE).exists());
 
         assert_eq!(session.unlock(), StoreState::Unlocking);
         assert_eq!(settled(&session), StoreState::Protected);
@@ -426,23 +439,26 @@ fn given_a_declined_reset_then_the_profile_is_kept() {
 }
 
 /// GIVEN a profile rejected after a forgotten passphrase WHEN a reset is
-/// confirmed THEN the old data is gone, a new passphrase makes a new empty
-/// profile, and the account says the old session was not revoked.
+/// confirmed THEN the old data is gone, a new empty profile opens without a
+/// passphrase and without a prompt, and the account says the old session was
+/// not revoked.
 #[test]
-fn given_a_confirmed_reset_then_a_new_empty_profile_opens_with_a_new_passphrase() {
+fn given_a_confirmed_reset_then_a_new_empty_profile_opens_without_a_passphrase() {
     let dir = TempDir::new().unwrap();
     let script = Script::answering_reset(
-        [Ok(PASSPHRASE), Ok(PASSPHRASE)]
-            .into_iter()
-            .chain([Ok("forgotten it"); 5])
-            .chain([Ok("a new passphrase"), Ok("a new passphrase")]),
+        [Ok(PASSPHRASE)].into_iter().chain([Ok("forgotten it"); 5]),
         Ok(true),
     );
     let session = open_with(dir.path(), script.clone());
     write_marker(&session);
+    assert!(session.security_status().profile_passphrase);
     assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
     assert_eq!(session.unlock(), StoreState::Unlocking);
     assert_eq!(settled(&session), StoreState::SecretRejected);
+    assert!(
+        session.security_status().profile_passphrase,
+        "a closed profile reports its key file"
+    );
 
     assert_eq!(session.reset_profile(), StoreState::Unlocking);
     assert_eq!(settled(&session), StoreState::Protected);
@@ -452,25 +468,21 @@ fn given_a_confirmed_reset_then_a_new_empty_profile_opens_with_a_new_passphrase(
         Some(SignInError::SessionNotRevoked)
     );
     assert_eq!(
-        script.seen()[7..],
-        [
-            "ConfirmReset",
-            "NewPassphrase(Choose)",
-            "NewPassphrase(Confirm)"
-        ]
+        script.seen()[6..],
+        ["ConfirmReset"],
+        "no passphrase prompt after the confirmation"
     );
+    assert!(!session.security_status().profile_passphrase);
     assert!(!dir.path().join(store::SIGNED_OUT_FILE).exists());
+    assert!(dir.path().join(VAULT_KEY_FILE).exists());
+    assert!(!dir.path().join(SEALED_KEY_FILE).exists());
 
-    // The new passphrase opens it; the old one does not.
+    // It reopens with no prompt; the old passphrase is not needed.
     assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
-    let reopened = Script::new([Ok("a new passphrase")]);
-    let other = store::open(dir.path(), &Tagged(1), &unlock_with(reopened)).unwrap();
+    let reopened = Script::new([]);
+    let other = store::open(dir.path(), &Tagged(1), &unlock_with(reopened.clone())).unwrap();
     assert!(other.close());
-    let old = Script::new([Ok(PASSPHRASE); 5]);
-    assert_eq!(
-        store::open(dir.path(), &Tagged(1), &unlock_with(old)).err(),
-        Some(StoreState::SecretRejected)
-    );
+    assert!(reopened.seen().is_empty());
 }
 
 /// GIVEN an open profile, or no profile WHEN a reset is asked THEN nothing
@@ -492,7 +504,7 @@ fn given_an_open_or_missing_profile_then_reset_is_refused() {
     );
 }
 
-/// Answers the two prompts that create a profile, then panics once.
+/// Answers the first prompt (opening the profile), then panics once.
 struct PanicsOnce {
     asked: Mutex<usize>,
 }
@@ -508,7 +520,7 @@ impl CredentialSource for PanicsOnce {
             *asked += 1;
             *asked
         };
-        if asked == 3 {
+        if asked == 2 {
             panic!("synthetic prompt failure");
         }
         Ok(Zeroizing::new(PASSPHRASE.into()))
@@ -569,4 +581,265 @@ fn given_a_panicking_listener_at_unlock_then_the_state_is_published_first() {
         session.account_status().error,
         Some(SignInError::SessionNotRevoked)
     );
+}
+
+/// Holds every prompt until released, then answers [`PASSPHRASE`].
+struct Hold {
+    asked: Mutex<usize>,
+    open: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+impl Hold {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            asked: Mutex::new(0),
+            open: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        })
+    }
+
+    fn wait_asked(&self) {
+        while *self.asked.lock().unwrap() < 1 {
+            std::thread::yield_now();
+        }
+    }
+
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.wake.notify_all();
+    }
+}
+
+impl CredentialSource for Hold {
+    fn ask(&self, _: &str) -> Result<Credentials, PromptError> {
+        Err(PromptError::Unsupported)
+    }
+
+    fn ask_secret(&self, _: SecretPrompt<'_>) -> Result<Zeroizing<String>, PromptError> {
+        *self.asked.lock().unwrap() += 1;
+        let open = self.open.lock().unwrap();
+        drop(self.wake.wait_while(open, |open| !*open).unwrap());
+        Ok(Zeroizing::new(PASSPHRASE.into()))
+    }
+}
+
+/// Counts the announced security changes.
+struct SecurityChanges(AtomicUsize);
+
+impl SessionListener for SecurityChanges {
+    fn rooms_changed(&self, _: &[String]) {}
+
+    fn session_changed(&self) {}
+
+    fn security_changed(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// The status once no passphrase operation waits any more.
+fn finished(session: &Session) -> SecurityStatus {
+    let deadline = Instant::now() + LONG;
+    while session.security_status().operation != SecurityOperation::Idle
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    session.security_status()
+}
+
+/// A session over a new profile, which has no passphrase, with a listener
+/// that counts security changes. Its own prompts are `script`.
+fn open_plain(dir: &Path, script: Arc<Script>) -> (Session, Arc<SecurityChanges>) {
+    let session = Session::open(dir.to_path_buf(), Arc::new(Tagged(1)), unlock_with(script));
+    assert_eq!(session.state(), StoreState::Protected);
+    assert!(!session.security_status().profile_passphrase);
+    let changes = Arc::new(SecurityChanges(AtomicUsize::new(0)));
+    session.set_listener(changes.clone());
+    (session, changes)
+}
+
+/// GIVEN an open profile without a passphrase WHEN it is turned on THEN the
+/// core asks for a new one twice, replies at once, writes `store-key.v2` and
+/// deletes `store-key.v1`, announces the change, and the next unlock asks.
+#[test]
+fn given_a_profile_without_a_passphrase_then_the_session_turns_it_on() {
+    let dir = TempDir::new().unwrap();
+    let own = Script::new([]);
+    let (session, changes) = open_plain(dir.path(), own.clone());
+    assert!(
+        own.seen().is_empty(),
+        "a new profile opens without a prompt"
+    );
+    write_marker(&session);
+
+    let script = Script::new([]);
+    let reply = session.set_profile_passphrase(true, script.clone());
+    assert_eq!(reply.error, None);
+    let done = finished(&session);
+    assert_eq!(done.error, None);
+    assert!(done.profile_passphrase);
+    assert_eq!(
+        script.seen(),
+        ["NewPassphrase(TurnOn)", "NewPassphrase(Confirm)"]
+    );
+    assert!(changes.0.load(Ordering::SeqCst) >= 1, "announced");
+    assert!(dir.path().join(SEALED_KEY_FILE).exists());
+    assert!(!dir.path().join(VAULT_KEY_FILE).exists());
+
+    assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
+    assert!(
+        session.security_status().profile_passphrase,
+        "a closed profile reports its key file"
+    );
+    assert_eq!(session.unlock(), StoreState::Unlocking);
+    assert_eq!(settled(&session), StoreState::Protected);
+    assert_eq!(own.seen(), ["Passphrase { retry: false }"]);
+    assert_eq!(read_marker(&session).as_deref(), Some(MARKER));
+}
+
+/// GIVEN an open profile with a passphrase WHEN it is turned off with the
+/// right one THEN `store-key.v1` replaces `store-key.v2`, and later unlocks
+/// show no prompt.
+#[test]
+fn given_a_profile_with_a_passphrase_then_the_session_turns_it_off() {
+    let dir = TempDir::new().unwrap();
+    let own = Script::new([]);
+    let session = open_with(dir.path(), own.clone());
+    assert!(session.security_status().profile_passphrase);
+    write_marker(&session);
+
+    let script = Script::new([]);
+    session.set_profile_passphrase(false, script.clone());
+    let done = finished(&session);
+    assert_eq!(done.error, None);
+    assert!(!done.profile_passphrase);
+    assert_eq!(script.seen(), ["Passphrase { retry: false }"]);
+    assert!(dir.path().join(VAULT_KEY_FILE).exists());
+    assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+
+    assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
+    assert_eq!(session.unlock(), StoreState::Unlocking);
+    assert_eq!(settled(&session), StoreState::Protected);
+    assert_eq!(own.seen().len(), 1, "only the first open asked");
+    assert_eq!(read_marker(&session).as_deref(), Some(MARKER));
+}
+
+/// GIVEN a profile with a passphrase WHEN turning it off gets five wrong
+/// entries THEN the result is `passphrase_rejected`, the passphrase stays on
+/// and no file changes; WHEN turning it on is cancelled or unsupported THEN
+/// the error says so and `store-key.v1` stays.
+#[test]
+fn given_a_failed_switch_then_the_error_is_reported_and_no_file_changes() {
+    let dir = TempDir::new().unwrap();
+    let session = open_with(dir.path(), Script::new([]));
+    let sealed = fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
+    session.set_profile_passphrase(false, Script::new([Ok("not the passphrase"); 5]));
+    let done = finished(&session);
+    assert_eq!(done.error, Some(SecurityError::PassphraseRejected));
+    assert!(done.profile_passphrase);
+    assert_eq!(fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(), sealed);
+    assert!(!dir.path().join(VAULT_KEY_FILE).exists());
+
+    let plain = TempDir::new().unwrap();
+    let (session, changes) = open_plain(plain.path(), Script::new([]));
+    for (answer, error) in [
+        (PromptError::Cancelled, SecurityError::Cancelled),
+        (PromptError::Unsupported, SecurityError::Unsupported),
+    ] {
+        let before = changes.0.load(Ordering::SeqCst);
+        session.set_profile_passphrase(true, Script::new([Err(answer)]));
+        let done = finished(&session);
+        assert_eq!(done.error, Some(error));
+        assert!(!done.profile_passphrase);
+        assert!(changes.0.load(Ordering::SeqCst) > before, "announced");
+        assert!(plain.path().join(VAULT_KEY_FILE).exists());
+        assert!(!plain.path().join(SEALED_KEY_FILE).exists());
+        assert!(!plain.path().join(format!("{SEALED_KEY_FILE}.tmp")).exists());
+    }
+}
+
+/// GIVEN a closed, unchanged or missing profile, or a running operation WHEN
+/// a switch is asked THEN the status comes back as it was and nothing is
+/// asked or written.
+#[test]
+fn given_a_switch_that_cannot_start_then_the_status_is_unchanged_and_nothing_is_asked() {
+    let dir = TempDir::new().unwrap();
+    let (session, _) = open_plain(dir.path(), Script::new([]));
+    let asked = Script::new([]);
+
+    // The setting is already as asked.
+    let before = session.security_status();
+    assert_eq!(session.set_profile_passphrase(false, asked.clone()), before);
+
+    // A switch is waiting for its prompt: nothing else starts.
+    let hold = Hold::new();
+    let waiting = session.set_profile_passphrase(true, hold.clone());
+    assert_eq!(waiting.operation, SecurityOperation::WaitingForPassphrase);
+    hold.wait_asked();
+    assert_eq!(
+        session
+            .set_profile_passphrase(true, asked.clone())
+            .operation,
+        SecurityOperation::WaitingForPassphrase
+    );
+    assert_eq!(
+        session
+            .set_profile_passphrase(false, asked.clone())
+            .operation,
+        SecurityOperation::WaitingForPassphrase
+    );
+    hold.release();
+    assert!(finished(&session).profile_passphrase);
+
+    // A closed profile.
+    assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
+    let files = fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap();
+    let closed = session.security_status();
+    assert_eq!(session.set_profile_passphrase(false, asked.clone()), closed);
+    assert_eq!(fs::read(dir.path().join(SEALED_KEY_FILE)).unwrap(), files);
+
+    // No profile at all.
+    let none = Session::not_configured();
+    assert_eq!(
+        none.set_profile_passphrase(true, asked.clone()),
+        SecurityStatus::unknown()
+    );
+    assert!(asked.seen().is_empty(), "no prompt: {:?}", asked.seen());
+}
+
+/// GIVEN a switch whose prompt is open WHEN the session locks THEN the lock
+/// is not held up, and when the prompt is answered afterwards nothing is
+/// written, also after the session is unlocked again.
+#[test]
+fn given_a_lock_during_the_prompt_then_the_answer_is_dropped_and_nothing_is_written() {
+    let dir = TempDir::new().unwrap();
+    let own = Script::new([]);
+    let (session, _) = open_plain(dir.path(), own.clone());
+    let vault_key = fs::read(dir.path().join(VAULT_KEY_FILE)).unwrap();
+
+    let hold = Hold::new();
+    session.set_profile_passphrase(true, hold.clone());
+    hold.wait_asked();
+    let started = Instant::now();
+    assert_eq!(session.lock(LONG, || {}).0, StoreState::Locked);
+    assert!(started.elapsed() < Duration::from_secs(5), "not held up");
+
+    hold.release();
+    assert_eq!(session.unlock(), StoreState::Unlocking);
+    assert_eq!(settled(&session), StoreState::Protected);
+    // Both answers (choose and confirm) have been given by now or soon: a
+    // write would take milliseconds with these test parameters.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        fs::read(dir.path().join(VAULT_KEY_FILE)).unwrap(),
+        vault_key
+    );
+    assert!(!dir.path().join(SEALED_KEY_FILE).exists());
+    assert!(!dir.path().join(format!("{SEALED_KEY_FILE}.tmp")).exists());
+    let status = session.security_status();
+    assert!(!status.profile_passphrase);
+    assert_eq!(status.operation, SecurityOperation::Idle);
+    assert_eq!(status.error, None, "the dropped answer reports nothing");
+    assert!(own.seen().is_empty(), "no prompt at unlock");
 }

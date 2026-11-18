@@ -613,6 +613,15 @@ pub enum Call {
     /// offers to save it to a file it writes itself. The key never crosses
     /// this channel. Replies at once with the status.
     ChangeRecoveryKey {},
+    /// Turn the local profile passphrase on or off (ADR-0050). The core asks
+    /// for the passphrase in its own window: a new one (twice) to turn it
+    /// on, the current one to turn it off. The passphrase never crosses this
+    /// channel. Replies at once with the status; progress and the result
+    /// arrive as [`Event::SecurityChanged`]. An unchanged setting, a locked
+    /// profile or a running security operation leaves the status as it is.
+    SetProfilePassphrase {
+        on: bool,
+    },
     /// Delete the homeserver's key backup, which this verified device cannot
     /// use, and start a new one with a new recovery key (ADR-0040). The core
     /// asks in its own window first, then shows the new key as for
@@ -1826,6 +1835,10 @@ mod tests {
                 r#"{"id":1,"call":{"command":"change_recovery_key"}}"#,
             ),
             (
+                Call::SetProfilePassphrase { on: true },
+                r#"{"id":1,"call":{"command":"set_profile_passphrase","on":true}}"#,
+            ),
+            (
                 Call::StartNewBackup {},
                 r#"{"id":1,"call":{"command":"start_new_backup"}}"#,
             ),
@@ -1866,6 +1879,10 @@ mod tests {
             br#"{"id":1,"call":{"command":"verify_device","device_id":null}}"#,
             br#"{"id":1,"call":{"command":"change_recovery_key","key":"x"}}"#,
             br#"{"id":1,"call":{"command":"change_recovery_key","path":"C:\\x"}}"#,
+            br#"{"id":1,"call":{"command":"set_profile_passphrase"}}"#,
+            br#"{"id":1,"call":{"command":"set_profile_passphrase","on":null}}"#,
+            br#"{"id":1,"call":{"command":"set_profile_passphrase","on":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"set_profile_passphrase","on":true,"passphrase":"x"}}"#,
             br#"{"id":1,"call":{"command":"start_new_backup","key":"x"}}"#,
             br#"{"id":1,"call":{"command":"start_new_backup","delete":true}}"#,
             br#"{"id":1,"call":{"command":"set_notification_level"}}"#,

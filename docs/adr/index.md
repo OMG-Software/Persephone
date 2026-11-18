@@ -25,6 +25,7 @@
 * [0045 - Exclude the main window from screen capture by default](0045-exclude-the-main-window-from-screen-capture-by-default.md)
 * [0046 - Do not block same-user attach to the Linux core](0046-do-not-block-same-user-attach-to-the-linux-core.md)
 * [0047 - Report loaded code on Linux and macOS](0047-report-loaded-code-on-linux-and-macos.md)
+* [0050 - Make the profile passphrase optional and off by default](0050-make-the-profile-passphrase-optional-and-off-by-default.md)
 
 ## Proposed Records
 

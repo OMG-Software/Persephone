@@ -109,6 +109,7 @@
     "allow-remove-three-pid",
     "allow-verify-device",
     "allow-change-recovery-key",
+    "allow-set-profile-passphrase",
     "allow-start-new-backup",
     "allow-notification-level",
     "allow-set-notification-level",

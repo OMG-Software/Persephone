@@ -29,9 +29,9 @@ export type IdentityState = "unknown" | "none" | "unverified" | "verified";
 
 export type RecoveryState = "unknown" | "disabled" | "incomplete" | "enabled";
 
-export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_confirmation" | "working";
+export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_passphrase" | "waiting_for_confirmation" | "working";
 
-export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "backup_key_unavailable" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "cannot_sign_devices" | "device_not_found" | "recovery_key_not_saved" | "failed";
+export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "backup_key_unavailable" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "cannot_sign_devices" | "device_not_found" | "recovery_key_not_saved" | "passphrase_rejected" | "profile_unavailable" | "failed";
 
 export type VerificationPhase = "incoming" | "waiting" | "compare" | "confirmed" | "done" | "cancelled";
 
@@ -64,7 +64,12 @@ canSetUpRecovery: boolean,
  * is incomplete. It may delete that backup and start a new one, after a
  * confirmation in the core's own window (ADR-0040).
  */
-canStartNewBackup: boolean, };
+canStartNewBackup: boolean, 
+/**
+ * The local profile asks for a passphrase before it opens (ADR-0050).
+ * Off by default.
+ */
+profilePassphrase: boolean, };
 
 export type CallUnavailable = "unsupported_platform" | "not_joined" | "not_encrypted" | "no_call_server" | "server_unreachable";
 

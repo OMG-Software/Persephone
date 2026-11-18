@@ -73,11 +73,7 @@ pub fn secret<'a>(request: &SecretPrompt<'a>) -> SecretText<'a> {
                  key backup."
             );
             let message = match step {
-                NewPassphrase::Choose => choose,
-                NewPassphrase::Upgrade => format!(
-                    "Persephone now protects this computer's profile with a \
-                     passphrase. {choose}"
-                ),
+                NewPassphrase::TurnOn => choose,
                 NewPassphrase::Confirm => {
                     "Type the same passphrase again to confirm it.".to_owned()
                 }
@@ -373,8 +369,7 @@ mod tests {
             },
         ];
         for step in [
-            NewPassphrase::Choose,
-            NewPassphrase::Upgrade,
+            NewPassphrase::TurnOn,
             NewPassphrase::Confirm,
             NewPassphrase::TooShort,
             NewPassphrase::Mismatch,

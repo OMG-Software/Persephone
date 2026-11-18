@@ -1,6 +1,7 @@
 # Lock after system idle time measured in the core
 
-* Status: proposed
+* Status: proposed; refined by [ADR-0050](0050-make-the-profile-passphrase-optional-and-off-by-default.md)
+  (the idle lock runs only while the passphrase is on)
 * Deciders: project owner (decision pending)
 * Date: 2026-10-28
 

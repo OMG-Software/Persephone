@@ -1618,6 +1618,16 @@ async fn change_recovery_key(core: State<'_, CoreLink>) -> Result<SecurityStatus
     relay(core.inner(), Call::ChangeRecoveryKey {}).await
 }
 
+/// Turns the local profile passphrase on or off. Only the choice crosses: the
+/// core asks for the passphrase in its own window (ADR-0050).
+#[tauri::command]
+async fn set_profile_passphrase(
+    core: State<'_, CoreLink>,
+    on: bool,
+) -> Result<SecurityStatus, String> {
+    relay(core.inner(), Call::SetProfilePassphrase { on }).await
+}
+
 /// Deletes a key backup this device cannot use and starts a new one. Nothing
 /// crosses: the core asks, shows the new key and saves it in its own windows
 /// (ADR-0040).
@@ -1816,6 +1826,7 @@ pub fn configure<R: Runtime>(
             remove_three_pid,
             verify_device,
             change_recovery_key,
+            set_profile_passphrase,
             start_new_backup,
             notification_level,
             set_notification_level,

@@ -438,3 +438,16 @@ test('GIVEN the idle-lock choices WHEN shown THEN off comes first and each reads
     ['Never', 'After 5 minutes', 'After 15 minutes', 'After 30 minutes', 'After 1 hour']
   );
 });
+
+test('GIVEN the profile passphrase and store state WHEN Lock is considered THEN it shows only for an open profile with a passphrase', () => {
+  const { lockOffered } = preferences;
+  assert.equal(lockOffered('protected', true), true);
+  assert.equal(lockOffered('locking', true), true);
+  assert.equal(lockOffered('protected', false), false, 'passphrase off');
+  assert.equal(lockOffered('locking', false), false);
+  assert.equal(lockOffered('protected', null), false, 'not known yet');
+  for (const closed of ['locked', 'secret_rejected', 'key_missing', 'unlocking', 'not_configured']) {
+    assert.equal(lockOffered(closed, true), false, closed);
+  }
+  assert.equal(lockOffered(undefined, true), false);
+});

@@ -64,8 +64,8 @@
     {:else}
       <h2 id="accounts-heading">Accounts</h2>
       <p class="lede">
-        Each account has its own encrypted data and passphrase on this computer. One is open at a
-        time.
+        Each account has its own encrypted data on this computer, and its own passphrase if you turn
+        one on. One is open at a time.
       </p>
     {/if}
     <ul class="account-list">
@@ -91,8 +91,8 @@
       <div class="confirm" role="alertdialog" aria-labelledby="switch-question">
         <p id="switch-question">
           {asking === 'new'
-            ? 'Persephone closes this window, locks this account and starts again with a new, empty account. You choose its passphrase, then sign in.'
-            : `Persephone closes this window, locks this account and starts again with ${label(asking)}. You enter that account's passphrase.`}
+            ? 'Persephone closes this window, locks this account and starts again with a new, empty account. It has no passphrase until you turn one on. Then sign in.'
+            : `Persephone closes this window, locks this account and starts again with ${label(asking)}. If that account has a passphrase, you enter it.`}
         </p>
         <button type="button" class="primary" disabled={switching} onclick={confirm}>
           {switching ? 'Switching…' : asking === 'new' ? 'Add account' : 'Switch'}

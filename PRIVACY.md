@@ -209,10 +209,14 @@ request normal room history to locate that message. Saved drafts can remain
 after leaving a room. Use Saved drafts to view or discard those local records.
 
 * A random 32-byte key encrypts the values in these databases.
-* Your profile passphrase protects that key. You choose the passphrase when
-  you create the profile. The app has no way to recover a forgotten
-  passphrase.
-* The operating system's keystore adds a second layer. On Windows this is
+* By default, the operating system's keystore alone protects that key. The
+  profile then opens with no prompt. Anyone, and any program, that can use
+  your computer account can open it.
+* You can turn on a profile passphrase in Settings, Security. It protects
+  the key with a second layer, and the app asks for it each time it starts.
+  You can turn it off again. The app has no way to recover a forgotten
+  passphrase. Lock and the idle lock exist only while the passphrase is on.
+* The operating system's keystore protects the key in both cases. On Windows this is
   DPAPI. The Linux Secret Service adapter is not implemented. The macOS
   Keychain adapter is implemented but has no recorded native app run.
   If no keystore is available, the profile
@@ -230,7 +234,7 @@ deletes the profile's key, so the remaining files cannot be read. The next
 time the app starts, it deletes the profile's files.
 
 If you forget your passphrase, "Reset profile" deletes the profile without
-the passphrase. The app cannot end the old session on the homeserver in this
+the passphrase. The new profile has no passphrase. The app cannot end the old session on the homeserver in this
 case. Remove the old device from another Matrix client.
 
 ### Limits

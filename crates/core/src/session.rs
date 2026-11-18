@@ -27,6 +27,11 @@
 //! short-lived threads without a lease, so a prompt left open never holds up
 //! a lock; an answer given after a lock (or a lock and unlock) is dropped.
 //!
+//! Turning the profile passphrase on or off (ADR-0050) asks on a short-lived
+//! thread without a lease, like the other prompts. Only the file switch that
+//! follows takes `transition`, and it writes nothing unless the same session
+//! is still open, so a lock during the prompt drops the answer.
+//!
 //! Unlocking and resetting the profile ask for the passphrase (ADR-0006) in
 //! the core's own window. They run on a worker thread in the `unlocking`
 //! state, which refuses every other transition, so the serving loop is never
@@ -423,8 +428,9 @@ pub struct Session {
     protector: Arc<dyn KeyProtector>,
     unlock: Unlock,
     shared: Arc<Shared>,
-    /// Serializes lock and unlock; admission does not take it.
-    transition: Mutex<()>,
+    /// Serializes lock, unlock and the passphrase switch; admission does not
+    /// take it. Shared with the switch's worker thread.
+    transition: Arc<Mutex<()>>,
 }
 
 /// Takes a lease and the client for one complete operation, or `None` once
@@ -1369,6 +1375,56 @@ fn security_prompt_error(error: PromptError) -> SecurityError {
     }
 }
 
+/// The error a failed passphrase switch reports. A prompt that gave no entry
+/// leaves the profile `locked` in the store's vocabulary.
+fn passphrase_error(state: StoreState) -> SecurityError {
+    match state {
+        StoreState::Locked => SecurityError::Cancelled,
+        StoreState::Unsupported => SecurityError::Unsupported,
+        StoreState::SecretRejected => SecurityError::PassphraseRejected,
+        _ => SecurityError::ProfileUnavailable,
+    }
+}
+
+/// The worker's work for [`Session::set_profile_passphrase`]: asks, then
+/// writes the key file under `transition` if the session of `generation` is
+/// still open. Returns the error to report, `None` for success. For a session
+/// that moved on nothing is written and the change is dropped.
+fn switch_passphrase(
+    shared: &Arc<Shared>,
+    transition: &Mutex<()>,
+    dir: &Path,
+    protector: &dyn KeyProtector,
+    unlock: &Unlock,
+    generation: u64,
+    on: bool,
+) -> Option<SecurityError> {
+    let change = match store::ask_passphrase_change(dir, protector, unlock, on) {
+        Ok(change) => change,
+        Err(state) => return Some(passphrase_error(state)),
+    };
+    let _transition = transition
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // No lock, unlock or reset can run while this guard is held. A lock
+    // during the prompt has already moved the generation on: the answer is
+    // dropped (and zeroed) without a write.
+    let stores = {
+        let inner = lock(shared);
+        (inner.generation == generation && inner.state == StoreState::Protected)
+            .then(|| inner.stores.clone())
+            .flatten()
+    };
+    let Some(stores) = stores else {
+        return Some(SecurityError::Cancelled);
+    };
+    let written = store::apply_passphrase_change(dir, protector, unlock, change);
+    // A failure after the new key file is in place still changed the
+    // setting (see `store.rs`), so the files, not the result, decide.
+    stores.set_passphrase(store::passphrase_on(dir));
+    written.err().map(passphrase_error)
+}
+
 impl Session {
     /// A session with no profile: nothing is stored and nothing can unlock.
     pub fn not_configured() -> Self {
@@ -1446,7 +1502,7 @@ impl Session {
                 idle_lock_minutes: AtomicU16::new(0),
                 typing: Arc::default(),
             }),
-            transition: Mutex::new(()),
+            transition: Arc::new(Mutex::new(())),
         }
     }
 
@@ -2194,8 +2250,16 @@ impl Session {
     /// The account's idle lock in minutes, 0 when off (ADR-0025). It stays
     /// as last loaded while the profile is locked or signed out, which is
     /// harmless: only an open profile can be locked.
+    ///
+    /// The lock needs the profile passphrase to reopen, so the idle lock is
+    /// off (0) while the profile has none, whatever was saved (ADR-0050).
     pub fn idle_lock_minutes(&self) -> u16 {
-        self.shared.idle_lock_minutes.load(Ordering::SeqCst)
+        let minutes = self.shared.idle_lock_minutes.load(Ordering::SeqCst);
+        let passphrase = lock(&self.shared)
+            .stores
+            .as_ref()
+            .is_some_and(|stores| stores.passphrase());
+        if passphrase { minutes } else { 0 }
     }
 
     /// Who is typing in each room, from the sync.
@@ -2246,8 +2310,19 @@ impl Session {
     }
 
     /// The account's encryption state; `unknown` without a signed-in account.
+    /// `profile_passphrase` is the profile's own: the open stores say so;
+    /// for a closed profile it is whether `store-key.v2` exists, read from
+    /// disk because the session keeps no copy that could go stale across a
+    /// reset. No profile (demo, unavailable) has none.
     pub fn security_status(&self) -> SecurityStatus {
-        guard(&self.shared.security).status.clone()
+        let mut status = guard(&self.shared.security).status.clone();
+        let open = lock(&self.shared)
+            .stores
+            .as_ref()
+            .map(|stores| stores.passphrase());
+        status.profile_passphrase =
+            open.unwrap_or_else(|| self.profile.as_deref().is_some_and(store::passphrase_on));
+        status
     }
 
     /// Starts setting up encryption for an account without an identity: the
@@ -2566,6 +2641,87 @@ impl Session {
                         });
                     }
                 }
+            });
+        if spawned.is_err() {
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
+            });
+        }
+        self.security_status()
+    }
+
+    /// Starts turning the profile passphrase on or off (ADR-0050). Does
+    /// nothing, and replies with the status as it is, unless the profile is
+    /// open, `on` differs from the current setting and no other security
+    /// operation runs. The core asks in its own window on a thread without a
+    /// lease, so the serving loop and a lock are never held up by the prompt.
+    /// Its answer is written under `transition` and only if the same session
+    /// is still open: after a lock nothing is written. Replies at once; the
+    /// result arrives as a security change.
+    pub fn set_profile_passphrase(
+        &self,
+        on: bool,
+        source: Arc<dyn CredentialSource>,
+    ) -> SecurityStatus {
+        let Some(dir) = self.profile.clone() else {
+            return self.security_status();
+        };
+        let started = {
+            let inner = lock(&self.shared);
+            match &inner.stores {
+                Some(stores)
+                    if inner.state == StoreState::Protected && stores.passphrase() != on =>
+                {
+                    Some(inner.generation)
+                }
+                _ => None,
+            }
+        };
+        let Some(started) = started else {
+            return self.security_status();
+        };
+        let accepted = self.shared.with_security(started, |security| {
+            let free =
+                security.status.operation == SecurityOperation::Idle && security.command.is_none();
+            if free {
+                security.status.operation = SecurityOperation::WaitingForPassphrase;
+                security.status.error = None;
+            }
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
+        }
+        let shared = self.shared.clone();
+        let transition = self.transition.clone();
+        let protector = self.protector.clone();
+        let unlock = Unlock {
+            source,
+            kdf: self.unlock.kdf,
+            backoff: self.unlock.backoff,
+        };
+        let spawned = std::thread::Builder::new()
+            .name("core-profile-passphrase".into())
+            .spawn(move || {
+                // A panic in a prompt or the vault must not leave the
+                // operation waiting for good.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    switch_passphrase(
+                        &shared,
+                        &transition,
+                        &dir,
+                        &*protector,
+                        &unlock,
+                        started,
+                        on,
+                    )
+                }))
+                .unwrap_or(Some(SecurityError::Failed));
+                shared.with_security(started, |security| {
+                    security.status.operation = SecurityOperation::Idle;
+                    security.status.error = outcome;
+                });
             });
         if spawned.is_err() {
             self.shared.with_security(started, |security| {
@@ -3235,6 +3391,41 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         session.state()
+    }
+
+    /// GIVEN a saved idle lock of five minutes WHEN the profile has no
+    /// passphrase THEN the effective idle lock is off, because a lock could
+    /// not be reopened with a passphrase; WHEN the passphrase is on THEN it
+    /// applies, and WHEN it is turned off again THEN it is off again.
+    #[test]
+    fn given_a_saved_idle_lock_then_it_applies_only_with_a_passphrase() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        session.shared.idle_lock_minutes.store(5, Ordering::SeqCst);
+        assert_eq!(session.idle_lock_minutes(), 0, "no passphrase");
+
+        let wait = |session: &Session| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while session.security_status().operation != SecurityOperation::Idle
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        session.set_profile_passphrase(true, Arc::new(Answer));
+        wait(&session);
+        assert!(session.security_status().profile_passphrase);
+        assert_eq!(session.idle_lock_minutes(), 5, "passphrase on");
+
+        session.set_profile_passphrase(false, Arc::new(Answer));
+        wait(&session);
+        assert!(!session.security_status().profile_passphrase);
+        assert_eq!(session.idle_lock_minutes(), 0, "passphrase off again");
+        assert_eq!(
+            session.shared.idle_lock_minutes.load(Ordering::SeqCst),
+            5,
+            "the saved setting is kept"
+        );
     }
 
     /// GIVEN a write meant for the session before a lock WHEN it arrives

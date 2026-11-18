@@ -72,6 +72,15 @@ export function isLockShortcut(
 }
 
 /**
+ * Whether Lock is offered: the profile is open (or closing) and has a
+ * passphrase to open it again (ADR-0050). Unlock is not part of this: a closed
+ * profile can always be opened again.
+ */
+export function lockOffered(store: string | undefined, profilePassphrase: boolean | null): boolean {
+  return profilePassphrase === true && (store === 'protected' || store === 'locking');
+}
+
+/**
  * The text sizes offered, in percent of the normal size. The core refuses
  * any size outside 80 to 200 for messages and 80 to 150 for the interface
  * (the whole interface grows with it, so it stops sooner).

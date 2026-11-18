@@ -1,6 +1,7 @@
 # Require an unlock secret for the local profile
 
-* Status: accepted
+* Status: accepted; refined by [ADR-0050](0050-make-the-profile-passphrase-optional-and-off-by-default.md)
+  (the passphrase is optional and off by default)
 * Deciders: project owner
 * Date: 2026-10-23
 
