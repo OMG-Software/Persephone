@@ -380,22 +380,22 @@ test('GIVEN the video frame call WHEN the host answers THEN an empty body is no 
     });
   };
   answer(new ArrayBuffer(0));
-  assert.equal(await bridge.callVideoFrame(3, 11), null);
+  assert.equal(await bridge.callVideoFrame(3, 11, 2), null);
   answer(body.buffer);
-  const picture = await bridge.callVideoFrame(0, 0);
+  const picture = await bridge.callVideoFrame(0, 0, 0);
   assert.deepEqual([picture.seq, picture.rotation, picture.width, picture.height], [12, 1, 2, 1]);
   assert.deepEqual(calls.map((call) => call.command), ['call_video_frame', 'call_video_frame']);
-  assert.deepEqual(calls[0].args, { tile: 3, after: 11 });
+  assert.deepEqual(calls[0].args, { tile: 3, after: 11, stream: 2 });
   assert.ok(registered.has('call_video_frame') && registered.has('call_camera'));
-  assert.deepEqual(hostArguments.get('call_video_frame'), ['after', 'tile']);
+  assert.deepEqual(hostArguments.get('call_video_frame'), ['after', 'stream', 'tile']);
   assert.deepEqual(hostArguments.get('call_camera'), ['on']);
   assert.deepEqual(hostArguments.get('call_join'), ['roomId', 'video']);
   assert.deepEqual(hostArguments.get('set_call_devices'), ['camera', 'playout', 'recording']);
 
   for (const bad of [null, { seq: 1 }, 'x', body.slice(0, 27), new Uint8Array(21)]) {
     answer(bad);
-    await assert.rejects(bridge.callVideoFrame(0, 0), (reason) => reason === 'bad_video');
+    await assert.rejects(bridge.callVideoFrame(0, 0, 0), (reason) => reason === 'bad_video');
   }
   mockIPC(() => Promise.reject('limit_exceeded'));
-  await assert.rejects(bridge.callVideoFrame(0, 0), (reason) => reason === 'limit_exceeded');
+  await assert.rejects(bridge.callVideoFrame(0, 0, 0), (reason) => reason === 'limit_exceeded');
 });

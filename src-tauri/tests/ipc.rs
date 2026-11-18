@@ -639,11 +639,15 @@ impl CoreTransport for FakeCore {
 
     /// Tile 0 has picture 5 (2 by 1 pixels, one quarter turn), tile 1 has
     /// picture 7, tile 2 has none, tile 3 is busy and tile 4 gives pixels of
-    /// the wrong tile.
-    fn video_frame(&self, tile: u8, after: u64) -> Result<Option<Video>, CoreError> {
+    /// the wrong tile. Every picture belongs to stream 1; another stream has
+    /// none.
+    fn video_frame(&self, tile: u8, after: u64, stream: u64) -> Result<Option<Video>, CoreError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if !self.available {
             return Err(CoreError::Unavailable);
+        }
+        if stream != 1 && tile < 3 {
+            return Ok(None);
         }
         let seq = match tile {
             0 => 5,
@@ -2851,18 +2855,18 @@ fn given_an_image_band_then_the_page_gets_raw_bytes_with_width_and_rows() {
 fn given_a_call_video_frame_then_the_page_gets_raw_bytes_or_an_empty_body() {
     let app = app();
     let window = create_main_window(&app).unwrap();
-    let frame = |tile: u64, after: u64| {
+    let frame = |tile: u64, after: u64, stream: u64| {
         get_ipc_response(
             &window,
             request(
                 "call_video_frame",
                 app_origin(),
-                serde_json::json!({"tile": tile, "after": after}),
+                serde_json::json!({"tile": tile, "after": after, "stream": stream}),
             ),
         )
     };
     assert_eq!(VIDEO_PREFIX_BYTES, 20);
-    let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = frame(1, 6) else {
+    let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = frame(1, 6, 1) else {
         panic!("the picture is not a raw response");
     };
     assert_eq!(u64::from_le_bytes(body[0..8].try_into().unwrap()), 7);
@@ -2870,20 +2874,21 @@ fn given_a_call_video_frame_then_the_page_gets_raw_bytes_or_an_empty_body() {
     assert_eq!(u32::from_le_bytes(body[12..16].try_into().unwrap()), 2);
     assert_eq!(u32::from_le_bytes(body[16..20].try_into().unwrap()), 1);
     assert_eq!(&body[VIDEO_PREFIX_BYTES..], &(0..8).collect::<Vec<u8>>());
-    // No newer picture: an empty raw body, never JSON.
-    for (tile, after) in [(1, 7), (1, 9), (2, 0)] {
-        let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = frame(tile, after) else {
-            panic!("tile {tile} after {after} is not a raw response");
+    // No newer picture, or none of the asked stream: an empty raw body,
+    // never JSON.
+    for (tile, after, stream) in [(1, 7, 1), (1, 9, 1), (2, 0, 1), (1, 0, 2)] {
+        let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = frame(tile, after, stream) else {
+            panic!("tile {tile} after {after} stream {stream} is not a raw response");
         };
-        assert!(body.is_empty(), "tile {tile} after {after}");
+        assert!(body.is_empty(), "tile {tile} after {after} stream {stream}");
     }
-    assert_eq!(frame(3, 0).unwrap_err(), "limit_exceeded");
+    assert_eq!(frame(3, 0, 1).unwrap_err(), "limit_exceeded");
     // A reply that breaks the contract is a generic error.
-    assert_eq!(frame(4, 0).unwrap_err(), "core_unavailable");
+    assert_eq!(frame(4, 0, 1).unwrap_err(), "core_unavailable");
 }
 
-/// GIVEN a tile outside 0 to 4 or an `after` the page cannot hold exactly
-/// WHEN `call_video_frame` is called THEN it is refused without calling the
+/// GIVEN a tile outside 0 to 4 or an `after` or `stream` the page cannot
+/// hold exactly WHEN `call_video_frame` is called THEN it is refused without calling the
 /// core, from the app origin and from a remote one.
 #[test]
 fn given_bad_call_video_arguments_then_the_ui_refuses_without_calling_the_core() {
@@ -2891,10 +2896,12 @@ fn given_bad_call_video_arguments_then_the_ui_refuses_without_calling_the_core()
     let app = app_with(core.clone());
     let window = create_main_window(&app).unwrap();
     for args in [
-        serde_json::json!({"tile": 5, "after": 0}),
-        serde_json::json!({"tile": 255, "after": 0}),
-        serde_json::json!({"tile": 0, "after": 9_007_199_254_740_992_u64}),
-        serde_json::json!({"tile": 0, "after": u64::MAX}),
+        serde_json::json!({"tile": 5, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 255, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 9_007_199_254_740_992_u64, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": u64::MAX, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": 9_007_199_254_740_992_u64}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": u64::MAX}),
     ] {
         assert_eq!(
             invoke_on(&window, "call_video_frame", app_origin(), args.clone()).unwrap_err(),
@@ -2903,12 +2910,14 @@ fn given_bad_call_video_arguments_then_the_ui_refuses_without_calling_the_core()
         );
     }
     for args in [
-        serde_json::json!({"tile": 256, "after": 0}),
-        serde_json::json!({"tile": -1, "after": 0}),
-        serde_json::json!({"tile": 0, "after": -1}),
-        serde_json::json!({"tile": "0", "after": 0}),
-        serde_json::json!({"tile": 0}),
-        serde_json::json!({"after": 0}),
+        serde_json::json!({"tile": 256, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": -1, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": -1, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": -1}),
+        serde_json::json!({"tile": "0", "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "stream": 0}),
+        serde_json::json!({"after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0}),
     ] {
         assert!(
             get_ipc_response(
@@ -2920,7 +2929,7 @@ fn given_bad_call_video_arguments_then_the_ui_refuses_without_calling_the_core()
         );
     }
     assert_eq!(core.calls.load(Ordering::SeqCst), 0);
-    let ok = serde_json::json!({"tile": 0, "after": 0});
+    let ok = serde_json::json!({"tile": 0, "after": 0, "stream": 0});
     for (cmd, args) in [
         ("call_video_frame", ok.clone()),
         ("call_camera", serde_json::json!({"on": true})),
@@ -2951,7 +2960,7 @@ fn given_unreachable_core_then_a_call_video_frame_is_a_generic_error() {
             &window,
             "call_video_frame",
             app_origin(),
-            serde_json::json!({"tile": 0, "after": 0})
+            serde_json::json!({"tile": 0, "after": 0, "stream": 0})
         )
         .unwrap_err(),
         "core_unavailable"

@@ -684,12 +684,14 @@ pub enum Call {
         on: bool,
     },
     /// The newest picture on a video tile (0 is the own camera, 1 to 4 are
-    /// remote), if its number is above `after`. Answered at once with a
+    /// remote), if its number is above `after` and it belongs to the tile's
+    /// stream `stream` (from the call status). Answered at once with a
     /// [`VideoReply`] and one pixel frame, or with an `ok` reply holding null
-    /// when there is no newer picture.
+    /// when there is no such picture.
     CallVideoFrame {
         tile: u8,
         after: u64,
+        stream: u64,
     },
     /// The call as the page shows it. Replies `CallStatus`.
     CallStatus {},
@@ -1101,14 +1103,20 @@ pub struct VideoPicture {
 
 /// Cheap checks for the relay and authoritative receiver on the call video
 /// commands: [`Call::CallVideoFrame`] needs a tile below [`CALL_VIDEO_TILES`]
-/// and a JavaScript-safe `after`; a camera ID in [`Call::SetCallDevices`]
+/// and a JavaScript-safe `after` and `stream`; a camera ID in [`Call::SetCallDevices`]
 /// must be non-empty, at most [`MAX_CALL_DEVICE_ID_BYTES`] and free of
 /// control characters. Any other call is not constrained here and gives
 /// `true`.
 pub fn call_video_within_limits(call: &Call) -> bool {
     match call {
-        Call::CallVideoFrame { tile, after } => {
-            *tile < CALL_VIDEO_TILES && *after <= MAX_SAFE_TIMESTAMP
+        Call::CallVideoFrame {
+            tile,
+            after,
+            stream,
+        } => {
+            *tile < CALL_VIDEO_TILES
+                && *after <= MAX_SAFE_TIMESTAMP
+                && *stream <= MAX_SAFE_TIMESTAMP
         }
         Call::SetCallDevices { camera, .. } => camera.as_ref().is_none_or(|id| {
             !id.is_empty()
@@ -1900,8 +1908,12 @@ mod tests {
                 r#"{"id":1,"call":{"command":"call_camera","on":false}}"#,
             ),
             (
-                Call::CallVideoFrame { tile: 4, after: 9 },
-                r#"{"id":1,"call":{"command":"call_video_frame","tile":4,"after":9}}"#,
+                Call::CallVideoFrame {
+                    tile: 4,
+                    after: 9,
+                    stream: 2,
+                },
+                r#"{"id":1,"call":{"command":"call_video_frame","tile":4,"after":9,"stream":2}}"#,
             ),
             (
                 Call::CallLeave {},
@@ -2325,10 +2337,12 @@ mod tests {
             br#"{"id":1,"call":{"command":"call_video_frame"}}"#,
             br#"{"id":1,"call":{"command":"call_video_frame","tile":1}}"#,
             br#"{"id":1,"call":{"command":"call_video_frame","after":0}}"#,
-            br#"{"id":1,"call":{"command":"call_video_frame","tile":256,"after":0}}"#,
-            br#"{"id":1,"call":{"command":"call_video_frame","tile":-1,"after":0}}"#,
-            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":-1}}"#,
-            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":256,"after":0,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":-1,"after":0,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":-1,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0,"stream":-1}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0,"stream":0,"x":1}}"#,
             br#"{"id":1,"call":{"command":"call_leave","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_mute"}}"#,
             br#"{"id":1,"call":{"command":"call_mute","muted":"yes"}}"#,
@@ -3019,12 +3033,29 @@ mod tests {
     /// 0 to 4 and safe cursors pass, and every other value is refused.
     #[test]
     fn given_video_calls_when_limits_are_checked_then_bounds_hold() {
-        let frame = |tile, after| Call::CallVideoFrame { tile, after };
-        assert!(call_video_within_limits(&frame(0, 0)));
-        assert!(call_video_within_limits(&frame(4, MAX_SAFE_TIMESTAMP)));
-        assert!(!call_video_within_limits(&frame(5, 0)));
-        assert!(!call_video_within_limits(&frame(255, 0)));
-        assert!(!call_video_within_limits(&frame(0, MAX_SAFE_TIMESTAMP + 1)));
+        let frame = |tile, after, stream| Call::CallVideoFrame {
+            tile,
+            after,
+            stream,
+        };
+        assert!(call_video_within_limits(&frame(0, 0, 0)));
+        assert!(call_video_within_limits(&frame(
+            4,
+            MAX_SAFE_TIMESTAMP,
+            MAX_SAFE_TIMESTAMP
+        )));
+        assert!(!call_video_within_limits(&frame(5, 0, 0)));
+        assert!(!call_video_within_limits(&frame(255, 0, 0)));
+        assert!(!call_video_within_limits(&frame(
+            0,
+            MAX_SAFE_TIMESTAMP + 1,
+            0
+        )));
+        assert!(!call_video_within_limits(&frame(
+            0,
+            0,
+            MAX_SAFE_TIMESTAMP + 1
+        )));
         let devices = |camera: Option<String>| Call::SetCallDevices {
             recording: None,
             playout: None,

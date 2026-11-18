@@ -27,8 +27,9 @@
 //! little-endian `u32`, followed by exactly `width * rows * 4` RGBA bytes.
 //!
 //! Call video (ADR-0048) crosses the same way. The page fetches the newest
-//! picture of a tile with `call_video_frame`. The response body is empty when
-//! no picture is newer than the page's `after`. Otherwise it is a 20-byte
+//! picture of a tile with `call_video_frame`, naming the tile's stream number
+//! from the call status. The response body is empty when no picture of that
+//! stream is newer than the page's `after`. Otherwise it is a 20-byte
 //! prefix, then exactly `width * height * 4` RGBA bytes. The prefix holds the
 //! picture number as a little-endian `u64`, then the rotation in quarter turns
 //! clockwise, the width and the height, each a little-endian `u32`.
@@ -1110,17 +1111,22 @@ fn video_response(video: Option<Video>) -> Vec<u8> {
     body
 }
 
-/// The newest picture of a video tile if it is newer than `after`, as a raw
-/// binary response (see the module documentation for its layout). The body is
-/// empty when there is none.
+/// The newest picture of a video tile if it is newer than `after` and of the
+/// tile's stream `stream`, as a raw binary response (see the module
+/// documentation for its layout). The body is empty when there is none.
 #[tauri::command]
 async fn call_video_frame(
     core: State<'_, CoreLink>,
     video: State<'_, VideoInFlight>,
     tile: u8,
     after: u64,
+    stream: u64,
 ) -> Result<Response, String> {
-    if !call_video_within_limits(&Call::CallVideoFrame { tile, after }) {
+    if !call_video_within_limits(&Call::CallVideoFrame {
+        tile,
+        after,
+        stream,
+    }) {
         return Err(INVALID_ARGUMENT.to_string());
     }
     // Held until this returns, like an image band's slot.
@@ -1128,10 +1134,11 @@ async fn call_video_frame(
         return Err(LIMIT_EXCEEDED.to_string());
     };
     let core = core.inner().clone();
-    let picture = tauri::async_runtime::spawn_blocking(move || core.video_frame(tile, after))
-        .await
-        .map_err(|_| UNAVAILABLE.to_string())?
-        .map_err(page_error)?;
+    let picture =
+        tauri::async_runtime::spawn_blocking(move || core.video_frame(tile, after, stream))
+            .await
+            .map_err(|_| UNAVAILABLE.to_string())?
+            .map_err(page_error)?;
     Ok(Response::new(video_response(picture)))
 }
 

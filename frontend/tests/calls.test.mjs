@@ -241,6 +241,39 @@ test('GIVEN a camera request pending WHEN leave starts and finishes THEN the lat
   assert.equal(operations.isCurrent(camera), false, 'the late camera reply is ignored');
 });
 
+test('GIVEN a status read in flight WHEN a call command finishes before it THEN the read is dropped and the next read shows', async () => {
+  const gates = [];
+  const shown = [];
+  const operations = new CallOperations();
+  const refresher = new CallRefresher(
+    () => { const gate = deferred(); gates.push(gate); return gate.promise; },
+    (next) => shown.push(next.camera),
+    () => operations.completed
+  );
+  refresher.request();
+  // A camera command starts and finishes while the read runs; its reply
+  // already showed `on`, and it asks for a fresh read.
+  operations.begin();
+  operations.complete();
+  refresher.request();
+  gates[0].resolve(status({ phase: 'active', camera: 'off' }));
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(shown, [], 'the older read does not overwrite the reply');
+  assert.equal(gates.length, 2, 'a fresh read follows');
+  gates[1].resolve(status({ phase: 'active', camera: 'on' }));
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(shown, ['on']);
+});
+
+test('GIVEN finished operations WHEN counted THEN each finish counts once', () => {
+  const operations = new CallOperations();
+  assert.equal(operations.completed, 0);
+  operations.begin();
+  operations.complete();
+  operations.complete();
+  assert.equal(operations.completed, 2);
+});
+
 test('GIVEN one operation WHEN no later one starts THEN its reply is current', () => {
   const operations = new CallOperations();
   assert.equal(operations.isCurrent(operations.begin()), true);

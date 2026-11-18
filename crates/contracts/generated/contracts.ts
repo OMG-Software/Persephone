@@ -109,7 +109,12 @@ export type CallVideoTile = {
 /**
  * 0 to 4.
  */
-tile: number, participant: CallParticipantRef | null, own: boolean, };
+tile: number, participant: CallParticipantRef | null, own: boolean, 
+/**
+ * The tile's stream number. It changes when the tile starts showing a
+ * new stream; `call_video_frame` gives pictures of this stream only.
+ */
+stream: number, };
 
 export type CallStatus = { phase: CallPhase, roomId: string | null, muted: boolean, 
 /**

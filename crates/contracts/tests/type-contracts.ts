@@ -239,13 +239,16 @@ const unknownCamera: CallCamera = "notFound";
 // @ts-expect-error the camera state is required
 const missingCamera: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, video: [] };
 // @ts-expect-error a tile names its participant explicitly, or null
-const tileWithoutParticipant: CallVideoTile = { tile: 0, own: true };
+const tileWithoutParticipant: CallVideoTile = { tile: 0, own: true, stream: 0 };
 // @ts-expect-error a tile carries no picture data or URL
-const tileWithUrl: CallVideoTile = { tile: 0, participant: null, own: true, url: "x" };
-const remoteTile: CallVideoTile = { tile: 1, participant: { userId: "@a:s", deviceId: "D" }, own: false };
+const tileWithUrl: CallVideoTile = { tile: 0, participant: null, own: true, stream: 0, url: "x" };
+// @ts-expect-error a tile names its stream number
+const tileWithoutStream: CallVideoTile = { tile: 0, participant: null, own: true };
+const remoteTile: CallVideoTile = { tile: 1, participant: { userId: "@a:s", deviceId: "D" }, own: false, stream: 1 };
 void unknownCamera;
 void missingCamera;
 void tileWithoutParticipant;
+void tileWithoutStream;
 void tileWithUrl;
 void remoteTile;
 void noDevices;

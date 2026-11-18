@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub const DEVICES_KEY: &str = "persephone.call_devices.v1";
-const MAX_RECORD_BYTES: usize = 2048;
+/// The largest saved record: three IDs at the limit, each one escaped to
+/// at most two bytes a byte (`"` and `\`) plus its quotes, and the field
+/// names. Every valid selection serializes under it.
+const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 64;
 /// How long the worker has to answer `ListDevices`.
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the worker has to exit after the list.
@@ -121,7 +124,10 @@ fn send_portal_remote(link: &super::worker::CallWorkerLink) {
     if link.camera_path() != super::worker::CameraPath::Portal {
         return;
     }
-    if let Ok(remote) = camera_portal::open_remote() {
+    // A listing is not cancelled: it ends with the user's answer or the
+    // access timeout.
+    let never = std::sync::atomic::AtomicBool::new(false);
+    if let Ok(remote) = camera_portal::open_remote(&never) {
         let _ = link.send_camera_handle(remote.as_fd());
     }
 }
@@ -319,6 +325,29 @@ mod tests {
         }
         let at_limit = format!(r#"{{"recording":"{}","playout":null}}"#, "d".repeat(512));
         assert!(parse(at_limit.as_bytes()).is_ok());
+    }
+
+    /// GIVEN three IDs at the limit made only of characters JSON escapes
+    /// WHEN saved THEN the record fits under the cap and reads back.
+    #[test]
+    fn given_ids_that_escape_to_twice_their_size_then_the_record_round_trips() {
+        for c in ['"', '\\'] {
+            let id = c.to_string().repeat(MAX_DEVICE_ID_BYTES);
+            let selection = Selection {
+                recording: Some(id.clone()),
+                playout: Some(id.clone()),
+                camera: Some(id),
+            };
+            assert!(selection.is_valid());
+            let bytes = serde_json::to_vec(&selection).unwrap();
+            assert!(bytes.len() <= MAX_RECORD_BYTES, "{}", bytes.len());
+            assert_eq!(parse(&bytes), Ok(selection));
+        }
+        let over = format!(
+            r#"{{"recording":"a","playout":"{}"}}"#,
+            "d".repeat(MAX_RECORD_BYTES)
+        );
+        assert_eq!(parse(over.as_bytes()), Err(Unreadable));
     }
 
     /// GIVEN device IDs WHEN checked THEN empty, long and control IDs fail.

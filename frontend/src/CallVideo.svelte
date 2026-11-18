@@ -56,11 +56,12 @@
   const shown = $derived([...tiles].sort((a, b) => a.tile - b.tile));
 
   // The tile list changed: drop tiles that went, reset tiles another device
-  // took, and fetch the new ones.
+  // took or that show a new stream, and fetch the new ones.
   $effect(() => {
     const next: TileRef[] = shown.map((tile) => ({
       tile: tile.tile,
-      key: tile.own ? 'own' : `${tile.participant?.userId}/${tile.participant?.deviceId}`
+      key: tile.own ? 'own' : `${tile.participant?.userId}/${tile.participant?.deviceId}`,
+      stream: tile.stream
     }));
     untrack(() => fetcher.setTiles(next));
   });

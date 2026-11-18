@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(event_rx.try_recv().unwrap(), FromWorker::Connected);
         assert_eq!(event_rx.try_recv().unwrap(), FromWorker::Left);
         assert!(event_rx.try_recv().is_err());
-        let picture = video.newest(1, 0).expect("kept picture");
+        let picture = video.newest(1, 0, 0).expect("kept picture");
         assert_eq!(
             (picture.rotation, picture.width, picture.bytes()[0]),
             (2, 2, 7)
@@ -383,7 +383,7 @@ mod tests {
         let video = VideoStore::new();
         video.sync(false, [true, false, false, false]);
         read_loop(Cursor::new(wire), first_tx, event_tx, video.clone());
-        assert!(video.newest(1, 0).is_none(), "the picture waited");
+        assert!(video.newest(1, 0, 0).is_none(), "the picture waited");
         assert_eq!(
             event_rx.try_recv().unwrap(),
             FromWorker::VideoStopped { tile: 1 }
@@ -416,7 +416,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_QUEUE);
         let video = VideoStore::new();
         read_loop(Cursor::new(wire), first_tx, event_tx, video.clone());
-        assert!(video.newest(3, 0).is_none());
+        assert!(video.newest(3, 0, 0).is_none());
         assert_eq!(event_rx.try_recv().unwrap(), FromWorker::Connected);
     }
 
@@ -448,7 +448,7 @@ mod tests {
         video.sync(true, [true; 4]);
         read_loop(Cursor::new(wire), first_tx, event_tx, video.clone());
         assert!(event_rx.try_recv().is_err());
-        assert!(video.newest(1, 0).is_none());
+        assert!(video.newest(1, 0, 0).is_none());
     }
 
     /// GIVEN a worker that reports missing controls WHEN the reader runs

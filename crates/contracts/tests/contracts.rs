@@ -800,14 +800,14 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             .selected_camera,
         None
     );
-    let tile = serde_json::json!({"tile": 0, "participant": null, "own": true});
+    let tile = serde_json::json!({"tile": 0, "participant": null, "own": true, "stream": 3});
     assert_eq!(
         serde_json::from_value::<persephone_contracts::CallVideoTile>(tile.clone())
             .unwrap()
             .participant,
         None
     );
-    let mut no_participant = tile;
+    let mut no_participant = tile.clone();
     no_participant
         .as_object_mut()
         .unwrap()
@@ -815,6 +815,12 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
     assert!(
         serde_json::from_value::<persephone_contracts::CallVideoTile>(no_participant).is_err(),
         "a missing participant is rejected"
+    );
+    let mut no_stream = tile.clone();
+    no_stream.as_object_mut().unwrap().remove("stream");
+    assert!(
+        serde_json::from_value::<persephone_contracts::CallVideoTile>(no_stream).is_err(),
+        "a missing stream number is rejected"
     );
     assert_eq!(
         serde_json::to_value(persephone_contracts::CallEnd::DeviceNotFound).unwrap(),

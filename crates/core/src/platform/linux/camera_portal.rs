@@ -15,13 +15,19 @@
 //! A refusal, a timeout or any failure ends in an error. There is no fallback
 //! to V4L2 after a portal exists: a refused camera stays off. The worker
 //! never sees the bus.
+//!
+//! The caller can end the wait for the user early with a cancel flag: the
+//! wait looks at it every [`CANCEL_CHECK`], then closes the request, so the
+//! dialog goes away and a call or profile shutdown does not wait for the
+//! user.
 
 use super::bus::{self, BusError};
 use crate::calls::worker::CameraPath;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zbus::blocking::Proxy;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
@@ -33,6 +39,8 @@ const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 
 /// The longest wait for the user's answer to the access request.
 pub const ACCESS_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often the wait for the user's answer looks at the cancel flag.
+const CANCEL_CHECK: Duration = Duration::from_millis(100);
 
 /// Why no remote came.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +53,8 @@ pub enum CameraError {
     Failed,
     /// The portal did not answer in time.
     TimedOut,
+    /// The caller ended the request.
+    Cancelled,
 }
 
 // --- Pure parts --------------------------------------------------------------
@@ -197,8 +207,10 @@ fn is_lacking_fdo(error: &zbus::fdo::Error) -> bool {
 
 /// Asks the portal for camera access and returns the PipeWire remote.
 /// Blocks for up to [`ACCESS_TIMEOUT`] while the desktop asks the user; call
-/// it from a thread that may block.
-pub fn open_remote() -> Result<OwnedFd, CameraError> {
+/// it from a thread that may block. Setting `cancel` ends the wait for the
+/// user within [`CANCEL_CHECK`] and closes the request; a set flag also stops
+/// the remote from being opened after a grant.
+pub fn open_remote(cancel: &AtomicBool) -> Result<OwnedFd, CameraError> {
     let connection = bus::session().map_err(|error| match error {
         BusError::Absent => CameraError::NoPortal,
         BusError::Failed => CameraError::Failed,
@@ -238,7 +250,7 @@ pub fn open_remote() -> Result<OwnedFd, CameraError> {
         });
     // The portal must have made the request at the path that was listened on.
     let granted = match access {
-        Ok(handle) if handle.as_str() == path => wait_for_response(&receiver),
+        Ok(handle) if handle.as_str() == path => wait_for_response(&receiver, cancel),
         Ok(_) => Err(CameraError::Failed),
         Err(error) => Err(error),
     };
@@ -256,6 +268,9 @@ pub fn open_remote() -> Result<OwnedFd, CameraError> {
     // not joined, so a stuck bus cannot hold the caller.
     drop(waiter);
     granted?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err(CameraError::Cancelled);
+    }
 
     let reply = connection
         .call_method(
@@ -297,7 +312,6 @@ fn failure(error: &zbus::Error) -> CameraError {
     }
 }
 
-/// Waits for the `Response` message. Success only for code 0.
 /// The `Close` call of the request at `path`, marked so that the portal sends
 /// no reply and nothing waits for one.
 fn close_message(path: &str) -> zbus::Result<zbus::Message> {
@@ -308,11 +322,28 @@ fn close_message(path: &str) -> zbus::Result<zbus::Message> {
         .build(&())
 }
 
-fn wait_for_response(receiver: &mpsc::Receiver<Option<zbus::Message>>) -> Result<(), CameraError> {
-    let message = match receiver.recv_timeout(ACCESS_TIMEOUT) {
-        Ok(Some(message)) => message,
-        Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => return Err(CameraError::Failed),
-        Err(mpsc::RecvTimeoutError::Timeout) => return Err(CameraError::TimedOut),
+/// Waits for the `Response` message, for at most [`ACCESS_TIMEOUT`]. Success
+/// only for code 0. A set `cancel` ends the wait within [`CANCEL_CHECK`].
+fn wait_for_response(
+    receiver: &mpsc::Receiver<Option<zbus::Message>>,
+    cancel: &AtomicBool,
+) -> Result<(), CameraError> {
+    let deadline = Instant::now() + ACCESS_TIMEOUT;
+    let message = loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CameraError::Cancelled);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(CameraError::TimedOut);
+        }
+        match receiver.recv_timeout(left.min(CANCEL_CHECK)) {
+            Ok(Some(message)) => break message,
+            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(CameraError::Failed);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
     };
     let (code, _results): (u32, HashMap<String, OwnedValue>) = message
         .body()
@@ -467,11 +498,44 @@ mod tests {
     /// or an ended stream is a failure, never a grant.
     #[test]
     fn given_no_response_when_the_channel_closes_then_it_fails() {
+        let cancel = AtomicBool::new(false);
         let (sender, receiver) = mpsc::channel::<Option<zbus::Message>>();
         drop(sender);
-        assert_eq!(wait_for_response(&receiver), Err(CameraError::Failed));
+        assert_eq!(
+            wait_for_response(&receiver, &cancel),
+            Err(CameraError::Failed)
+        );
         let (sender, receiver) = mpsc::channel::<Option<zbus::Message>>();
         sender.send(None).expect("send");
-        assert_eq!(wait_for_response(&receiver), Err(CameraError::Failed));
+        assert_eq!(
+            wait_for_response(&receiver, &cancel),
+            Err(CameraError::Failed)
+        );
+    }
+
+    /// GIVEN a wait for the user's answer WHEN the cancel flag is set, before
+    /// or during the wait THEN it ends as cancelled within a few checks, far
+    /// before the access timeout.
+    #[test]
+    fn given_a_cancel_flag_then_the_wait_ends_without_the_user() {
+        let (_sender, receiver) = mpsc::channel::<Option<zbus::Message>>();
+        let set = AtomicBool::new(true);
+        assert_eq!(
+            wait_for_response(&receiver, &set),
+            Err(CameraError::Cancelled)
+        );
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_response(&receiver, &cancel),
+            Err(CameraError::Cancelled)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        setter.join().expect("setter");
     }
 }

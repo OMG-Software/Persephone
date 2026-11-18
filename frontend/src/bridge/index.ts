@@ -419,14 +419,15 @@ export function callCamera(on: boolean): Promise<CallStatus> {
 
 /**
  * The newest picture on video tile `tile` (0 to 4; 0 is the own camera) if
- * its number is above `after`, else null. The host answers with raw bytes: an
+ * its number is above `after` and it belongs to the tile's stream `stream`
+ * (from the call status), else null. The host answers with raw bytes: an
  * empty body for no newer picture, otherwise the picture number as a
  * little-endian u64, then rotation, width and height as little-endian u32,
  * then the RGBA pixels. Rejects with `bad_video` when the answer is anything
  * else.
  */
-export async function callVideoFrame(tile: number, after: number): Promise<VideoPicture | null> {
-  return parseVideoPicture(await invoke<unknown>('call_video_frame', { tile, after }));
+export async function callVideoFrame(tile: number, after: number, stream: number): Promise<VideoPicture | null> {
+  return parseVideoPicture(await invoke<unknown>('call_video_frame', { tile, after, stream }));
 }
 
 /** Leaves the call, or cancels a join in progress. Codes only. */

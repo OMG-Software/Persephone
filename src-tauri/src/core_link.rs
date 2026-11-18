@@ -56,9 +56,9 @@ pub trait CoreTransport: Send + Sync {
     /// One band of rows of a loaded or picked image.
     fn image_band(&self, handle: String, band: u32) -> Result<Band, CoreError>;
 
-    /// The newest video picture on `tile` if it is newer than `after`; `None`
-    /// when there is none.
-    fn video_frame(&self, tile: u8, after: u64) -> Result<Option<Video>, CoreError>;
+    /// The newest video picture of stream `stream` on `tile` if it is newer
+    /// than `after`; `None` when there is none.
+    fn video_frame(&self, tile: u8, after: u64, stream: u64) -> Result<Option<Video>, CoreError>;
 
     /// A pasted image for `room_id`: its request and its image frame.
     fn paste_image(&self, room_id: String, bytes: Vec<u8>) -> Result<serde_json::Value, CoreError>;
@@ -314,8 +314,12 @@ impl CoreTransport for PipeTransport {
         }
     }
 
-    fn video_frame(&self, tile: u8, after: u64) -> Result<Option<Video>, CoreError> {
-        let call = Call::CallVideoFrame { tile, after };
+    fn video_frame(&self, tile: u8, after: u64, stream: u64) -> Result<Option<Video>, CoreError> {
+        let call = Call::CallVideoFrame {
+            tile,
+            after,
+            stream,
+        };
         if !call_video_within_limits(&call) {
             return Err(CoreError::Core(ErrorCode::InvalidArgument));
         }
@@ -681,7 +685,7 @@ mod tests {
         after: u64,
     ) -> std::thread::JoinHandle<Result<Option<Video>, CoreError>> {
         let link = link.clone();
-        std::thread::spawn(move || link.video_frame(tile, after))
+        std::thread::spawn(move || link.video_frame(tile, after, 1))
     }
 
     fn video_reply(id: u32, tile: u8, seq: u64) -> VideoReply {
@@ -704,7 +708,14 @@ mod tests {
         let budgets = ResourceBudgets::default();
         let first = video_call(&core.link, 2, 4);
         let request: Request = receive(&mut core.from_ui, &budgets).unwrap();
-        assert_eq!(request.call, Call::CallVideoFrame { tile: 2, after: 4 });
+        assert_eq!(
+            request.call,
+            Call::CallVideoFrame {
+                tile: 2,
+                after: 4,
+                stream: 1
+            }
+        );
         let pixels: Vec<u8> = (0..8).collect();
         send_video_reply(&mut core.to_ui, &video_reply(request.id, 2, 5), &pixels).unwrap();
         assert_eq!(
@@ -788,7 +799,7 @@ mod tests {
             }
             wait_broken(&core.link);
             assert_eq!(
-                core.link.video_frame(1, 0),
+                core.link.video_frame(1, 0, 0),
                 Err(CoreError::Unavailable),
                 "{case}"
             );
@@ -801,15 +812,23 @@ mod tests {
     fn given_a_bad_video_request_then_nothing_is_sent() {
         let core = scripted();
         assert_eq!(
-            core.link.call(Call::CallVideoFrame { tile: 0, after: 0 }),
+            core.link.call(Call::CallVideoFrame {
+                tile: 0,
+                after: 0,
+                stream: 0
+            }),
             Err(CoreError::BadReply)
         );
         assert_eq!(
-            core.link.video_frame(5, 0),
+            core.link.video_frame(5, 0, 0),
             Err(CoreError::Core(ErrorCode::InvalidArgument))
         );
         assert_eq!(
-            core.link.video_frame(0, u64::MAX),
+            core.link.video_frame(0, u64::MAX, 0),
+            Err(CoreError::Core(ErrorCode::InvalidArgument))
+        );
+        assert_eq!(
+            core.link.video_frame(0, 0, u64::MAX),
             Err(CoreError::Core(ErrorCode::InvalidArgument))
         );
         assert_eq!(lock(&core.link.writer).next_id, 1, "nothing was written");

@@ -121,7 +121,7 @@ test('GIVEN tiles set WHEN no request runs THEN each tile is asked once, after i
     },
     () => {}
   );
-  fetcher.setTiles([{ tile: 0, key: 'own' }, { tile: 2, key: 'a' }]);
+  fetcher.setTiles([{ tile: 0, key: 'own', stream: 0 }, { tile: 2, key: 'a', stream: 0 }]);
   await later();
   assert.deepEqual(asked.sort(), [[0, 0], [2, 0]]);
 });
@@ -141,7 +141,7 @@ test('GIVEN a request in flight WHEN pokes arrive THEN at most one runs per tile
     },
     (tile, next) => shown.push([tile, next.seq])
   );
-  fetcher.setTiles([{ tile: 1, key: 'a' }]);
+  fetcher.setTiles([{ tile: 1, key: 'a', stream: 0 }]);
   fetcher.poke();
   fetcher.poke();
   fetcher.poke();
@@ -169,7 +169,7 @@ test('GIVEN two tiles WHEN one is slow THEN the other is not held back', async (
     },
     (tile, next) => shown.push([tile, next.seq])
   );
-  fetcher.setTiles([{ tile: 0, key: 'own' }, { tile: 1, key: 'a' }]);
+  fetcher.setTiles([{ tile: 0, key: 'own', stream: 0 }, { tile: 1, key: 'a', stream: 0 }]);
   gates.get(1).resolve(picture(2));
   await later();
   assert.deepEqual(shown, [[1, 2]]);
@@ -189,7 +189,7 @@ test('GIVEN a picture that is not newer WHEN it arrives THEN it is ignored and t
     },
     (tile, next) => shown.push(next.seq)
   );
-  fetcher.setTiles([{ tile: 0, key: 'own' }]);
+  fetcher.setTiles([{ tile: 0, key: 'own', stream: 0 }]);
   await later();
   for (let i = 0; i < 3; i += 1) {
     fetcher.poke();
@@ -209,7 +209,7 @@ test('GIVEN a failed request WHEN the next poke comes THEN the picture stays and
     },
     (tile, next) => shown.push(next.seq)
   );
-  fetcher.setTiles([{ tile: 0, key: 'own' }]);
+  fetcher.setTiles([{ tile: 0, key: 'own', stream: 0 }]);
   await later();
   assert.deepEqual(shown, []);
   fail = false;
@@ -231,8 +231,8 @@ test('GIVEN a tile that disappears WHEN its reply arrives THEN it is dropped and
     (tile, next) => shown.push([tile, next.seq]),
     (tile) => cleared.push(tile)
   );
-  fetcher.setTiles([{ tile: 0, key: 'own' }, { tile: 3, key: 'a' }]);
-  fetcher.setTiles([{ tile: 0, key: 'own' }]);
+  fetcher.setTiles([{ tile: 0, key: 'own', stream: 0 }, { tile: 3, key: 'a', stream: 0 }]);
+  fetcher.setTiles([{ tile: 0, key: 'own', stream: 0 }]);
   assert.deepEqual(cleared, [3]);
   assert.deepEqual(fetcher.active, [0]);
   gates.get(3).resolve(picture(8));
@@ -254,8 +254,8 @@ test('GIVEN another device taking a tile WHEN the old reply arrives last THEN it
     },
     (tile, next) => shown.push(next.seq)
   );
-  fetcher.setTiles([{ tile: 1, key: 'a' }]);
-  fetcher.setTiles([{ tile: 1, key: 'b' }]);
+  fetcher.setTiles([{ tile: 1, key: 'a', stream: 0 }]);
+  fetcher.setTiles([{ tile: 1, key: 'b', stream: 0 }]);
   assert.equal(gates.length, 2, 'one request for each device');
   gates[1].resolve(picture(2));
   await later();
@@ -263,6 +263,53 @@ test('GIVEN another device taking a tile WHEN the old reply arrives last THEN it
   await later();
   assert.deepEqual(asked, [0, 0], 'the new device starts again from 0');
   assert.deepEqual(shown, [2], 'the old picture is not shown');
+});
+
+test('GIVEN a tile whose stream number changes WHEN the old reply arrives last THEN it is dropped and the tile asks for the new stream', async () => {
+  const gates = [];
+  const shown = [];
+  const asked = [];
+  const cleared = [];
+  const fetcher = new VideoFetcher(
+    (tile, after, stream) => {
+      asked.push([tile, after, stream]);
+      const gate = deferred();
+      gates.push(gate);
+      return gate.promise;
+    },
+    (tile, next) => shown.push(next.seq),
+    (tile) => cleared.push(tile)
+  );
+  fetcher.setTiles([{ tile: 1, key: 'a', stream: 1 }]);
+  fetcher.setTiles([{ tile: 1, key: 'a', stream: 1 }]);
+  assert.equal(gates.length, 1, 'an unchanged tile keeps its request');
+  fetcher.setTiles([{ tile: 1, key: 'a', stream: 2 }]);
+  assert.deepEqual(cleared, [1]);
+  assert.deepEqual(asked, [[1, 0, 1], [1, 0, 2]]);
+  gates[1].resolve(picture(4));
+  await later();
+  gates[0].resolve(picture(9));
+  await later();
+  assert.deepEqual(shown, [4], 'the old stream picture is not shown');
+});
+
+test('GIVEN a stream number that is not a safe non-negative integer WHEN set THEN the tile is ignored', async () => {
+  const asked = [];
+  const fetcher = new VideoFetcher(
+    async (tile, after, stream) => {
+      asked.push([tile, stream]);
+      return null;
+    },
+    () => {}
+  );
+  fetcher.setTiles([
+    { tile: 0, key: 'own', stream: -1 },
+    { tile: 1, key: 'a', stream: 1.5 },
+    { tile: 2, key: 'b', stream: Number.MAX_SAFE_INTEGER + 1 },
+    { tile: 3, key: 'c', stream: Number.MAX_SAFE_INTEGER }
+  ]);
+  await later();
+  assert.deepEqual(asked, [[3, Number.MAX_SAFE_INTEGER]]);
 });
 
 test('GIVEN a stopped fetcher WHEN a reply or a poke arrives THEN nothing is shown or asked', async () => {
@@ -276,7 +323,7 @@ test('GIVEN a stopped fetcher WHEN a reply or a poke arrives THEN nothing is sho
     },
     (tile, next) => shown.push(next.seq)
   );
-  fetcher.setTiles([{ tile: 0, key: 'own' }]);
+  fetcher.setTiles([{ tile: 0, key: 'own', stream: 0 }]);
   fetcher.stop();
   fetcher.poke();
   gate.resolve(picture(1));
@@ -296,11 +343,11 @@ test('GIVEN tiles outside 0 to 4 or repeated WHEN set THEN they are ignored', as
     () => {}
   );
   fetcher.setTiles([
-    { tile: 5, key: 'x' },
-    { tile: -1, key: 'x' },
-    { tile: 1.5, key: 'x' },
-    { tile: 4, key: 'a' },
-    { tile: 4, key: 'b' }
+    { tile: 5, key: 'x', stream: 0 },
+    { tile: -1, key: 'x', stream: 0 },
+    { tile: 1.5, key: 'x', stream: 0 },
+    { tile: 4, key: 'a', stream: 0 },
+    { tile: 4, key: 'b', stream: 0 }
   ]);
   await later();
   assert.deepEqual(asked, [4]);

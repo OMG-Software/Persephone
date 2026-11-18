@@ -2265,6 +2265,10 @@ pub struct CallVideoTile {
     #[serde(deserialize_with = "Option::deserialize")]
     pub participant: Option<CallParticipantRef>,
     pub own: bool,
+    /// The tile's stream number. It changes when the tile starts showing a
+    /// new stream; `call_video_frame` gives pictures of this stream only.
+    #[ts(type = "number")]
+    pub stream: u64,
 }
 
 /// Reply of every call command except `call_readiness`. Codes, bounded IDs

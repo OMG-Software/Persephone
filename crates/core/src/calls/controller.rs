@@ -274,6 +274,10 @@ struct View {
     /// with `VideoStarted`. An identity that is not a member yet waits here
     /// and shows once the membership is read.
     remote_video: [Option<String>; REMOTE_TILES],
+    /// The stream number of each tile (tile 0 first), as the picture store
+    /// gave it when the controller applied the tile's latest change. The
+    /// page asks for pictures of this stream only.
+    video_streams: [u64; VIDEO_TILES as usize],
 }
 
 /// Remote video tiles: tiles 1 to 4.
@@ -297,6 +301,7 @@ impl View {
                 CallCamera::Off
             },
             remote_video: Default::default(),
+            video_streams: Default::default(),
         }
     }
 
@@ -353,6 +358,13 @@ impl View {
         (self.camera == CallCamera::On, remote)
     }
 
+    /// Records the stream number of `tile`; a tile out of range is ignored.
+    fn set_video_stream(&mut self, tile: u8, stream: u64) {
+        if let Some(slot) = self.video_streams.get_mut(usize::from(tile)) {
+            *slot = stream;
+        }
+    }
+
     /// The video tiles the page shows: the own camera while it is on, and
     /// each remote tile whose identity is a current member.
     fn video_tiles(&self) -> Vec<CallVideoTile> {
@@ -363,6 +375,7 @@ impl View {
                 tile: 0,
                 participant: None,
                 own: true,
+                stream: self.video_streams[0],
             });
         }
         for (index, identity) in self.remote_video.iter().enumerate() {
@@ -379,6 +392,7 @@ impl View {
                     device_id: member.device_id.to_string(),
                 }),
                 own: false,
+                stream: self.video_streams[index + 1],
             });
         }
         tiles
@@ -852,11 +866,11 @@ impl CallController {
         *plain(&self.inner.video_listener) = Some(listener);
     }
 
-    /// The newest picture on `tile` with a number above `after`, if any. It
-    /// holds the store lock only to copy a pointer.
-    pub fn video_picture(&self, tile: u8, after: u64) -> Option<Picture> {
+    /// The newest picture of stream `stream` on `tile` with a number above
+    /// `after`, if any. It holds the store lock only to copy a pointer.
+    pub fn video_picture(&self, tile: u8, after: u64, stream: u64) -> Option<Picture> {
         let store = plain(&self.inner.video).clone();
-        store?.newest(tile, after)
+        store?.newest(tile, after, stream)
     }
 
     /// The content-free call state.
@@ -1468,7 +1482,8 @@ struct Call {
     /// queues the command; the task only reads it.
     camera_wanted: Arc<AtomicBool>,
     /// The camera portal access request in flight (Linux portal path).
-    portal: Option<JoinHandle<PortalRemote>>,
+    /// Dropping it (the call ends) cancels the request.
+    portal: Option<PortalTask>,
     /// A portal remote went to the worker for a capture that may still run.
     /// Kept apart from the shown camera state, which a late worker reply can
     /// set back to `On` after an off: only a camera-on while this holds may
@@ -1493,14 +1508,29 @@ fn uses_portal(link: &CallWorkerLink) -> bool {
     link.camera_path() == super::worker::CameraPath::Portal
 }
 
+/// A camera portal access request running on a blocking thread. Dropping it
+/// sets the request's cancel flag: the request then closes its portal
+/// dialog and ends within a fraction of a second, so the end of a call or a
+/// profile lock does not wait for the user's answer.
+struct PortalTask {
+    task: JoinHandle<PortalRemote>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for PortalTask {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Waits for the portal request in `slot`, if any; otherwise it never ends.
 /// The request stays in `slot` when the wait is dropped, so the call loop
 /// can wait for it again.
-async fn portal_done(slot: &mut Option<JoinHandle<PortalRemote>>) -> PortalRemote {
-    let Some(task) = slot.as_mut() else {
+async fn portal_done(slot: &mut Option<PortalTask>) -> PortalRemote {
+    let Some(portal) = slot.as_mut() else {
         return std::future::pending().await;
     };
-    let result = task.await;
+    let result = (&mut portal.task).await;
     *slot = None;
     result.unwrap_or_default()
 }
@@ -1612,9 +1642,12 @@ impl Call {
         #[cfg(target_os = "linux")]
         if self.portal.is_none() {
             use crate::platform::linux::camera_portal;
-            self.portal = Some(tokio::task::spawn_blocking(|| {
-                camera_portal::open_remote().ok()
-            }));
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = cancel.clone();
+            self.portal = Some(PortalTask {
+                task: tokio::task::spawn_blocking(move || camera_portal::open_remote(&flag).ok()),
+                cancel,
+            });
         }
     }
 
@@ -1666,10 +1699,12 @@ impl Call {
 
     /// Applies one worker event. For a tile's `VideoStarted` or
     /// `VideoStopped`, the store is told only after the new metadata is
-    /// applied, synced and published: the read thread counted the change, and
-    /// the tile keeps pictures again only once every counted change is
-    /// applied here. So no picture of a new stream shows under the old
-    /// participant.
+    /// applied and synced: the read thread counted the change, and the tile
+    /// keeps pictures again only once every counted change is applied here.
+    /// The new stream number is then published, also when the metadata did
+    /// not change, and the page asks for pictures of that stream only. So no
+    /// picture of a new stream shows under the old participant, even on a
+    /// page whose status is older.
     fn worker_event(&mut self, inner: &Inner, event: &FromWorker) -> Result<(), EndReason> {
         // A camera that is not on has no capture left: its remote is used up.
         // An `On` after a remote went (and no off since) is a capture over it.
@@ -1680,16 +1715,24 @@ impl Call {
                 self.portal_capture = true;
             }
         }
-        match self.view.apply(event) {
-            Applied::Same => {}
+        let changed = match self.view.apply(event) {
+            Applied::Same => false,
             Applied::Changed => {
                 self.sync_video();
-                self.publish(inner);
+                true
             }
             Applied::End(reason) => return Err(reason),
-        }
-        if let FromWorker::VideoStarted { tile, .. } | FromWorker::VideoStopped { tile } = event {
-            self.link.video().stream_applied(*tile);
+        };
+        let stream = match event {
+            FromWorker::VideoStarted { tile, .. } | FromWorker::VideoStopped { tile } => {
+                let stream = self.link.video().stream_applied(*tile);
+                self.view.set_video_stream(*tile, stream);
+                true
+            }
+            _ => false,
+        };
+        if changed || stream {
+            self.publish(inner);
         }
         Ok(())
     }
@@ -1851,6 +1894,10 @@ impl Call {
             .collect();
         let diff = diff_members(&known, &current);
         self.view.set_members(current);
+        // The video filter follows the members at once, so a later error
+        // cannot leave a departed member's picture allowed. A video stream
+        // may also have started before its member was known.
+        self.sync_video();
         if !diff.left.is_empty() {
             let view = &self.view;
             self.remote.retain_members(|id| view.is_member(id));
@@ -1878,8 +1925,6 @@ impl Call {
         for candidate in std::mem::take(parked) {
             self.key_received(inner, candidate, parked)?;
         }
-        // A video stream may have started before its member was known.
-        self.sync_video();
         self.publish(inner);
         Ok(())
     }
@@ -2800,6 +2845,65 @@ mod tests {
             tiles[0].participant.as_ref().map(|p| p.user_id.as_str()),
             Some("@b:example.org")
         );
+        // A page that still holds A's stream number gets no picture of B.
+        assert_eq!(tiles[0].stream, 3);
+        assert!(store.newest(1, 0, 1).is_none(), "A's stream: nothing");
+        assert!(store.newest(1, 0, 3).is_some(), "B's stream: B");
+        let CallState::Active { video, .. } = inner.state.borrow().clone() else {
+            panic!("an active call");
+        };
+        assert_eq!(video, tiles, "the page sees B's stream number");
+    }
+
+    /// GIVEN tile 2 shows member A WHEN a second `VideoStarted` for A
+    /// arrives (a new stream, the same metadata) THEN the new stream number
+    /// is still published, so the page asks for the new stream's pictures.
+    #[test]
+    fn given_a_stream_change_without_new_metadata_then_its_number_is_published() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let mut call = fixture.call;
+        call.worker_event(&inner, &FromWorker::Connected).unwrap();
+        for stream in [1, 2] {
+            call.worker_event(&inner, &started(2, "@a:example.org:A"))
+                .unwrap();
+            let CallState::Active { video, .. } = inner.state.borrow().clone() else {
+                panic!("an active call");
+            };
+            assert_eq!(video.len(), 1);
+            assert_eq!((video[0].tile, video[0].stream), (2, stream));
+        }
+    }
+
+    /// GIVEN a portal request waiting for the user WHEN the call drops its
+    /// task (the call or the session ends) THEN the request's cancel flag is
+    /// set, so the blocking wait ends and the runtime's shutdown does not
+    /// wait for the user.
+    #[tokio::test]
+    async fn given_a_portal_request_when_its_task_is_dropped_then_it_is_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let (ended, ended_rx) = std::sync::mpsc::channel();
+        let portal = PortalTask {
+            task: tokio::task::spawn_blocking(move || {
+                while !flag.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let _ = ended.send(());
+                PortalRemote::default()
+            }),
+            cancel: cancel.clone(),
+        };
+        drop(portal);
+        assert!(cancel.load(Ordering::SeqCst));
+        assert!(
+            ended_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the wait ended"
+        );
     }
 
     /// GIVEN a running call WHEN the session stops admitting work THEN the
@@ -2906,7 +3010,8 @@ mod tests {
             [CallVideoTile {
                 tile: 0,
                 participant: None,
-                own: true
+                own: true,
+                stream: 0,
             }]
         );
     }
@@ -2968,6 +3073,7 @@ mod tests {
                     device_id: "A".to_owned(),
                 }),
                 own: false,
+                stream: 0,
             }]
         );
         view.set_members(vec![member(
@@ -3128,15 +3234,19 @@ mod tests {
                 tile: 0,
                 participant: None,
                 own: true,
+                stream: 0,
             }],
         });
-        assert!(calls.video_picture(0, 0).is_some());
+        assert!(calls.video_picture(0, 0, 0).is_some());
         assert_eq!(calls.set_camera(false), Ok(()));
         assert!(matches!(
             commands.try_recv(),
             Ok(Command::Camera { on: false, .. })
         ));
-        assert!(calls.video_picture(0, 0).is_none(), "the picture is gone");
+        assert!(
+            calls.video_picture(0, 0, 0).is_none(),
+            "the picture is gone"
+        );
         assert!(
             !store.insert(0, 0, 2, 2, vec![2; 16]),
             "a late own picture is refused before the task takes the command"
@@ -3145,7 +3255,7 @@ mod tests {
         // the camera on: the own tile stays shut.
         store.sync(true, [false; 4]);
         assert!(!store.insert(0, 0, 2, 2, vec![3; 16]));
-        assert!(calls.video_picture(0, 0).is_none());
+        assert!(calls.video_picture(0, 0, 0).is_none());
         let CallState::Active { camera, video, .. } = calls.state() else {
             panic!("active");
         };
@@ -3210,7 +3320,7 @@ mod tests {
         assert_eq!(calls.state(), active_state());
         assert_eq!(calls.set_camera(false), Err(CallError::NotInCall));
         assert_eq!(calls.state(), active_state());
-        assert!(calls.video_picture(0, 0).is_some(), "the picture stays");
+        assert!(calls.video_picture(0, 0, 0).is_some(), "the picture stays");
     }
 
     /// GIVEN a picture in the store WHEN the page asks THEN only a newer
@@ -3218,14 +3328,17 @@ mod tests {
     #[tokio::test]
     async fn given_a_stored_picture_then_the_controller_returns_newer_ones_only() {
         let calls = controller(FakeHost::new(true, None));
-        assert!(calls.video_picture(1, 0).is_none(), "no call, no picture");
+        assert!(
+            calls.video_picture(1, 0, 0).is_none(),
+            "no call, no picture"
+        );
         let (store, _commands, _) = running_call(&calls, active_state());
         store.sync(false, [true, false, false, false]);
         assert!(store.insert(1, 3, 2, 2, vec![5; 16]));
-        let picture = calls.video_picture(1, 0).expect("picture");
+        let picture = calls.video_picture(1, 0, 0).expect("picture");
         assert_eq!((picture.seq, picture.rotation), (1, 3));
-        assert!(calls.video_picture(1, 1).is_none());
-        assert!(calls.video_picture(9, 0).is_none());
+        assert!(calls.video_picture(1, 1, 0).is_none());
+        assert!(calls.video_picture(9, 0, 0).is_none());
     }
 
     /// GIVEN pictures in a running call WHEN the session ends THEN every
@@ -3244,8 +3357,8 @@ mod tests {
             } else {
                 assert!(calls.inner.release(5));
             }
-            assert!(calls.video_picture(0, 0).is_none());
-            assert!(calls.video_picture(4, 0).is_none());
+            assert!(calls.video_picture(0, 0, 0).is_none());
+            assert!(calls.video_picture(4, 0, 0).is_none());
             store.sync(true, [true; 4]);
             assert!(!store.insert(0, 0, 2, 2, vec![1; 16]), "{session_end}");
         }

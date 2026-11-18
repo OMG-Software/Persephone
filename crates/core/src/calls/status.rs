@@ -366,6 +366,7 @@ mod tests {
                     tile: 0,
                     participant: None,
                     own: true,
+                    stream: 0,
                 };
                 CALL_VIDEO_TILES_MAX + 3
             ],

@@ -66,8 +66,12 @@ The worker applies two stages itself.
 * **Stage 1, before it reads any input:**
   * `PR_SET_DUMPABLE` 0. The core stays dumpable (ADR-0046); the worker
     calls no portal, so the portal problem of ADR-0046 does not apply.
-  * Landlock, ABI 3 or newer (Linux 6.2), handling every file system right
-    of the running ABI. Read and execute: `/usr`, `/lib`, `/lib64`, `/etc`,
+  * Landlock, ABI 3 or newer (Linux 6.2), handling a fixed set of file
+    system rights: the ABI 1 rights (bits 0 to 12), `REFER` (ABI 2),
+    `TRUNCATE` (ABI 3) and, from ABI 5, `IOCTL_DEV`. The code knows the
+    rights up to ABI 7. A right that a newer ABI adds stays unhandled and
+    restricts nothing, so it cannot block the sound server's socket by
+    surprise. Read and execute: `/usr`, `/lib`, `/lib64`, `/etc`,
     `/run/systemd/resolve`, `/proc/self`. Read: `$HOME/.config/pulse`,
     `/dev/urandom`, `/dev/null`. Read and write: `/dev/shm`. With
     `--camera=v4l2` only: read and write on the `/dev/video*` nodes (and
@@ -195,7 +199,9 @@ The worker applies two stages itself.
 * Releases ship the call worker on Linux (x64 and arm64) and macOS
   (universal), built against the pinned, hash-checked libwebrtc archives.
 * Calls on each system stay unverified until a live run like the Windows run
-  of 16 November 2026 passes there, including the containment checks below.
+  of 16 November 2026 passes there, including the containment checks in
+  [the live call test plan](../planning/live-call-test.md#linux-and-macos-containment-checks-adr-0049-not-yet-run).
+  Those checks have not been run.
 
 ### Positive Consequences
 
@@ -236,7 +242,8 @@ The worker applies two stages itself.
 ### Linux: seccomp and Landlock
 
 * Good, because no root rights or user namespaces are needed.
-* Bad, because Landlock cannot stop a connection to a Unix socket path.
+* Bad, because this policy does not stop a connection to a Unix socket
+  path. It handles no right that controls such a connection.
 
 ### Linux: namespaces (bubblewrap)
 

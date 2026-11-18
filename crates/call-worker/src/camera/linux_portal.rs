@@ -1,11 +1,13 @@
 //! The PipeWire camera backend (Linux, `--camera=portal`, ADR-0049).
 //!
 //! The core asked the camera portal for access and sent the PipeWire remote it
-//! got (`OpenPipeWireRemote`) over the camera channel (descriptor 3). Each
-//! listing and each capture takes the newest descriptor from the channel and
-//! connects to it. That remote shows only the camera nodes the portal allows.
-//! The worker never opens a device node or the session bus. A call without a
-//! descriptor finds no camera.
+//! got (`OpenPipeWireRemote`) over the camera channel (descriptor 3). The
+//! channel keeps the remotes in arrival order. A listing takes the oldest
+//! one; a capture gets the remote its `SetCamera { remote: true }` took (a
+//! `camera::Grant`). The connection owns its remote and closes it when it
+//! ends, so a remote serves one listing or one capture only. That remote
+//! shows only the camera nodes the portal allows. The worker never opens a
+//! device node or the session bus. A call without a remote finds no camera.
 //!
 //! Only nodes of media class `Video/Source` count. The ID is the node's
 //! `node.name`. Formats: NV12, I420 and YUY2 (YUYV) at most 1280x720;

@@ -60,11 +60,16 @@ export function parseVideoPicture(raw: unknown): VideoPicture | null {
   return { seq: Number(seq), rotation, width, height, pixels };
 }
 
-/** One video tile as the scheduler tracks it. `key` changes when another device takes the tile. */
-export type TileRef = { tile: number; key: string };
+/**
+ * One video tile as the scheduler tracks it. `key` changes when another device
+ * takes the tile. `stream` is the tile's stream number from the call status:
+ * the core gives pictures of that stream only.
+ */
+export type TileRef = { tile: number; key: string; stream: number };
 
 type TileState = {
   key: string;
+  stream: number;
   // The picture number last shown; the next request asks for newer ones.
   seq: number;
   running: boolean;
@@ -76,18 +81,19 @@ type TileState = {
  * picture is waiting) asks each active tile for a picture newer than the last
  * shown one. At most one request runs for each tile; a poke that arrives
  * while one runs makes at most one more run after it. A picture that is not
- * newer than the one shown is dropped. A tile that disappears, or that
- * another device takes, loses its state, and a reply still on its way is
- * ignored. A failed request keeps the picture shown; the next poke asks again.
+ * newer than the one shown is dropped. A tile that disappears, that another
+ * device takes, or whose stream number changes loses its state, and a reply
+ * still on its way is ignored. A failed request keeps the picture shown; the
+ * next poke asks again.
  */
 export class VideoFetcher {
-  #fetch: (tile: number, after: number) => Promise<VideoPicture | null>;
+  #fetch: (tile: number, after: number, stream: number) => Promise<VideoPicture | null>;
   #show: (tile: number, picture: VideoPicture) => void;
   #clear: (tile: number) => void;
   #tiles = new Map<number, TileState>();
 
   constructor(
-    fetch: (tile: number, after: number) => Promise<VideoPicture | null>,
+    fetch: (tile: number, after: number, stream: number) => Promise<VideoPicture | null>,
     show: (tile: number, picture: VideoPicture) => void,
     clear: (tile: number) => void = () => {}
   ) {
@@ -101,24 +107,37 @@ export class VideoFetcher {
     return [...this.#tiles.keys()].sort((a, b) => a - b);
   }
 
-  /** Replaces the active tiles. Tiles outside 0 to 4 and repeated tiles are ignored. */
+  /**
+   * Replaces the active tiles. Tiles outside 0 to 4, repeated tiles, and
+   * stream numbers that are not safe non-negative integers are ignored.
+   */
   setTiles(tiles: readonly TileRef[]): void {
-    const wanted = new Map<number, string>();
-    for (const { tile, key } of tiles) {
-      if (Number.isInteger(tile) && tile >= 0 && tile < VIDEO_TILES && !wanted.has(tile)) wanted.set(tile, key);
+    const wanted = new Map<number, { key: string; stream: number }>();
+    for (const { tile, key, stream } of tiles) {
+      if (
+        Number.isInteger(tile) &&
+        tile >= 0 &&
+        tile < VIDEO_TILES &&
+        Number.isSafeInteger(stream) &&
+        stream >= 0 &&
+        !wanted.has(tile)
+      ) {
+        wanted.set(tile, { key, stream });
+      }
     }
     for (const [tile, state] of [...this.#tiles]) {
-      if (wanted.get(tile) !== state.key) {
+      const next = wanted.get(tile);
+      if (next?.key !== state.key || next.stream !== state.stream) {
         this.#tiles.delete(tile);
         this.#clear(tile);
       }
     }
     let added = false;
-    for (const [tile, key] of wanted) {
+    for (const [tile, { key, stream }] of wanted) {
       if (!this.#tiles.has(tile)) {
         // A reply for an earlier state of this tile finds a different object
         // here and is ignored.
-        this.#tiles.set(tile, { key, seq: 0, running: false, again: false });
+        this.#tiles.set(tile, { key, stream, seq: 0, running: false, again: false });
         added = true;
       }
     }
@@ -148,7 +167,7 @@ export class VideoFetcher {
       do {
         state.again = false;
         try {
-          const picture = await this.#fetch(tile, state.seq);
+          const picture = await this.#fetch(tile, state.seq, state.stream);
           if (this.#tiles.get(tile) !== state) return;
           if (picture !== null && picture.seq > state.seq) {
             state.seq = picture.seq;

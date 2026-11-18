@@ -7,6 +7,7 @@
   import CallBar from './CallBar.svelte';
   import CallVideo from './CallVideo.svelte';
   import {
+    CAMERA_COMMAND_TEXT,
     CallRefresher,
     IDLE_CALL,
     JOIN_ERROR_TEXT,
@@ -748,15 +749,22 @@
   // Goes up each time the core says a new video picture is waiting.
   let callVideoTicks = $state(0);
   let callJoinText = $state<string | null>(null);
+  let cameraText = $state<string | null>(null);
   let readiness = $state<CallReadiness | null>(null);
   let callNames = $state<ReadonlyMap<string, string>>(new Map());
   let readinessRequest = 0;
   let callNamesFor: string | null = null;
   const callOperations = new CallOperations();
-  const callRefresher = new CallRefresher(callStatus, (next) => {
-    callState = next;
-    if (next.phase !== 'ended') callDismissed = false;
-  });
+  // A status read during which a call command finished is dropped: that
+  // command's reply is newer, and the command asks for a fresh read.
+  const callRefresher = new CallRefresher(
+    callStatus,
+    (next) => {
+      callState = next;
+      if (next.phase !== 'ended') callDismissed = false;
+    },
+    () => callOperations.completed
+  );
 
   const callRoomName = $derived(
     callState.roomId === null
@@ -841,6 +849,7 @@
     } catch {
       if (generation === sessionGeneration) callJoinText = JOIN_ERROR_TEXT.declined;
     } finally {
+      callOperations.complete();
       if (generation === sessionGeneration) {
         callPending = false;
         callRefresher.request();
@@ -858,6 +867,7 @@
     } catch {
       // The next call change shows the real state.
     } finally {
+      callOperations.complete();
       if (generation === sessionGeneration) {
         callBusy = false;
         callRefresher.request();
@@ -868,13 +878,19 @@
   async function toggleCamera() {
     const generation = sessionGeneration;
     cameraBusy = true;
+    cameraText = null;
     const operation = callOperations.begin();
     try {
       const reply = await callCamera(callState.camera !== 'on' && callState.camera !== 'starting');
       if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
     } catch {
-      // The next call change shows the real state.
+      // The command failed before the core answered. The refresh shows the
+      // real camera state; this says why it did not change.
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) {
+        cameraText = CAMERA_COMMAND_TEXT;
+      }
     } finally {
+      callOperations.complete();
       if (generation === sessionGeneration) {
         cameraBusy = false;
         callRefresher.request();
@@ -891,6 +907,7 @@
     } catch {
       // The next call change shows the real state.
     } finally {
+      callOperations.complete();
       if (generation === sessionGeneration) callRefresher.request();
     }
     focusCallControl();
@@ -910,6 +927,7 @@
     callBusy = false;
     cameraBusy = false;
     callJoinText = null;
+    cameraText = null;
     callDismissed = false;
     callNames = new Map();
     callNamesFor = null;
@@ -2711,6 +2729,11 @@
                 <p class="call-notice error" role="alert">
                   <span>{callJoinText}</span>
                   <button type="button" class="secondary" onclick={() => (callJoinText = null)}>Dismiss</button>
+                </p>
+              {:else if cameraText}
+                <p class="call-notice error" role="alert">
+                  <span>{cameraText}</span>
+                  <button type="button" class="secondary" onclick={() => (cameraText = null)}>Dismiss</button>
                 </p>
               {/if}
             {/snippet}

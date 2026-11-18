@@ -14,6 +14,9 @@ import type {
   CallUnavailable
 } from '../../crates/contracts/generated/contracts';
 
+/** Shown when a camera command fails before the core answers. */
+export const CAMERA_COMMAND_TEXT = 'The camera did not change. Try again.';
+
 export const UNAVAILABLE_TEXT: Record<CallUnavailable, string> = {
   unsupported_platform: 'Calls are not available on this system yet.',
   not_joined: 'Join the room to start a call.',
@@ -196,6 +199,7 @@ export function callAnnouncement(status: CallStatus, dismissed: boolean): string
 /** Orders call operations, so a late reply cannot undo a later one. */
 export class CallOperations {
   #latest = 0;
+  #completed = 0;
 
   /** Starts an operation. The newest token is the only current one. */
   begin(): number {
@@ -207,23 +211,42 @@ export class CallOperations {
   isCurrent(token: number): boolean {
     return token === this.#latest;
   }
+
+  /** An operation finished, with or without a reply. */
+  complete(): void {
+    this.#completed += 1;
+  }
+
+  /** How many operations have finished. A status read compares it before and after. */
+  get completed(): number {
+    return this.#completed;
+  }
 }
 
 /**
  * Runs `fetch` for call status. A request that arrives while one is in
  * flight makes at most one more run after it. `reset` (a session change)
  * clears the shown call at once and drops any reply still on its way.
+ * `completed` counts the call commands that have finished: a read during
+ * which one finished is dropped, because that command's reply is newer. The
+ * command requests a refresh when it finishes, so a fresh read follows.
  */
 export class CallRefresher {
   #fetch: () => Promise<CallStatus>;
   #apply: (status: CallStatus) => void;
+  #completed: () => number;
   #running = false;
   #again = false;
   #generation = 0;
 
-  constructor(fetch: () => Promise<CallStatus>, apply: (status: CallStatus) => void) {
+  constructor(
+    fetch: () => Promise<CallStatus>,
+    apply: (status: CallStatus) => void,
+    completed: () => number = () => 0
+  ) {
     this.#fetch = fetch;
     this.#apply = apply;
+    this.#completed = completed;
   }
 
   request(): void {
@@ -246,9 +269,10 @@ export class CallRefresher {
       do {
         this.#again = false;
         const generation = this.#generation;
+        const completed = this.#completed();
         try {
           const status = await this.#fetch();
-          if (generation === this.#generation) this.#apply(status);
+          if (generation === this.#generation && completed === this.#completed()) this.#apply(status);
         } catch {
           // Keep what is shown; the next change asks again.
         }

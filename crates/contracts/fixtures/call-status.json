@@ -18,7 +18,8 @@
     {
       "tile": 0,
       "participant": null,
-      "own": true
+      "own": true,
+      "stream": 0
     },
     {
       "tile": 1,
@@ -26,7 +27,8 @@
         "userId": "@alice:server.invalid",
         "deviceId": "ALICEDEVICE"
       },
-      "own": false
+      "own": false,
+      "stream": 2
     }
   ]
 }

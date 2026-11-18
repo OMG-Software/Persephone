@@ -448,8 +448,9 @@ enum Answer<'a> {
     Reply(Reply),
     /// A pixel reply and the band it announces.
     Pixels(PixelReply, media::Band),
-    /// A video reply and the picture it announces.
-    Video(VideoReply, calls::video::Picture),
+    /// A video reply, the picture it announces, and the open session's
+    /// generation from before the picture was chosen.
+    Video(VideoReply, calls::video::Picture, Option<u64>),
     /// Admitted; the reply follows when the call finishes.
     Later(u32, LongCall<'a>),
 }
@@ -791,13 +792,19 @@ impl Core {
                     Err(code) => error(code),
                 }
             }
-            Call::CallVideoFrame { tile, after } => {
+            Call::CallVideoFrame {
+                tile,
+                after,
+                stream,
+            } => {
                 if !call_video_within_limits(&request.call) {
                     return error(ErrorCode::InvalidArgument);
                 }
                 // No newer picture, no call, and a locked profile all give the
-                // same answer: nothing to show.
-                match self.calls.video_picture(*tile, *after) {
+                // same answer: nothing to show. The generation is read first,
+                // so a lock after it is seen again when the reply is written.
+                let generation = self.media_generation();
+                match self.calls.video_picture(*tile, *after, *stream) {
                     Some(picture) => Answer::Video(
                         VideoReply {
                             id,
@@ -808,6 +815,7 @@ impl Core {
                             height: picture.height,
                         },
                         picture,
+                        generation,
                     ),
                     None => Answer::Reply(Reply {
                         id,
@@ -3264,8 +3272,24 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                         }
                         // The picture's bytes are shared with the store, which
                         // is not locked here: only the pipe is.
-                        Answer::Video(reply, picture) => {
-                            send_video_reply(&mut *lock(&output), &reply, picture.bytes())
+                        // A lock between the choice and this write must keep
+                        // the picture from the page, so the generation is
+                        // checked again while the pipe is held. The session
+                        // state lock is a leaf: nothing holding it waits on
+                        // the pipe.
+                        Answer::Video(reply, picture, generation) => {
+                            let mut output = lock(&output);
+                            if generation.is_some() && core.media_generation() == generation {
+                                send_video_reply(&mut *output, &reply, picture.bytes())
+                            } else {
+                                send(
+                                    &mut *output,
+                                    &CoreMessage::Reply(Reply {
+                                        id: reply.id,
+                                        outcome: Outcome::Ok(serde_json::Value::Null),
+                                    }),
+                                )
+                            }
                         }
                         Answer::Later(id, call) => {
                             let output = &output;

@@ -458,6 +458,61 @@ Pass criteria are in brackets. Each step records its observed result.
     Media Foundation in the AppContainer, and the worker's peak memory with
     four remote videos against its 512 MiB Job limit.
 
+## Linux and macOS containment checks (ADR-0049, not yet run)
+
+ADR-0049 keeps calls on Linux and macOS unverified until a live run like the
+Windows run passes on each system, with these checks. The expected results
+below come from the record and the current code. None of them has been
+observed yet. Record each result, with the OS, kernel or macOS version and
+commit, in the evidence report before any claim.
+
+The containment step of the Windows run (Media Foundation and the Job) does
+not apply to these systems.
+
+### Linux
+
+Run on a host with Landlock ABI 3 or newer (Linux 6.2 or newer) and on one
+without it.
+
+1. Before the call: `cat /sys/kernel/security/lsm` names `landlock`.
+2. Join a call with the camera off. While it is connected, find the call
+   worker's process ID (`pgrep -f persephone-call-worker`).
+   - Expected pass: `/proc/<pid>/status` shows `NoNewPrivs: 1`,
+     `Seccomp: 2` and `Seccomp_filters:` of at least 2 (stage 1 and stage
+     2).
+   - Expected pass: the worker is not dumpable, so `stat -c %U
+     /proc/<pid>/environ` shows `root`.
+   - Expected pass: `ls -l /proc/<pid>/fd` shows no descriptor of the
+     session bus and, on the portal path, no `/dev/video*` node.
+3. Turn the camera on. On the portal path the desktop asks for camera
+   access.
+   - Expected pass: a grant shows the own tile. A refusal leaves the camera
+     `Unavailable` and makes no V4L2 attempt.
+   - Expected pass: closing the call while the access dialog is open closes
+     the dialog and ends the call at once.
+4. Expected refusal: on a kernel without Landlock ABI 3, or with Landlock
+   turned off, the join is refused with the containment text ("The call did
+   not start: its process could not be contained."). No worker stays
+   running.
+
+### macOS
+
+1. Before the call: `codesign -d --entitlements - <call worker>` lists only
+   `com.apple.security.device.audio-input` and
+   `com.apple.security.device.camera`, and `codesign -dv <call worker>`
+   shows the hardened runtime. The main app and the other helpers have no
+   entitlements.
+2. Join a call with the camera off.
+   - Expected pass: Activity Monitor's Sandbox column shows the call worker
+     as sandboxed.
+   - Record the Mach and I/O Kit services that the worker uses (the
+     record requires this list before it is accepted).
+3. Turn the camera on. Expected pass: macOS asks for camera access for
+   Persephone, and a grant shows the own tile.
+4. Expected refusal: a worker that reports any missing control (for example
+   a build without the call profile) makes the join fail with the
+   containment text. No input reaches it.
+
 ## Evidence
 
 - A dated report `docs/evidence/live-calls.md` in the format of
@@ -471,6 +526,7 @@ Pass criteria are in brackets. Each step records its observed result.
 ## Not covered by this run
 
 - TLS 1.3 to a real SFU (the `livekit-net` patch), TURN relay, IPv6.
-- Linux and macOS (the call host refuses there by design).
+- Linux and macOS: each needs its own run with the containment checks
+  above.
 - Merovingian (separate run after its probe).
 - More than two participants.
