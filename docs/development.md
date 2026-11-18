@@ -125,13 +125,21 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 
 ### Continuous integration
 
-[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` (`python3` in the distribution containers) for every pull request, every push to `main` and on demand. Every job pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target) and Node.js 24.15.0, uses the committed lockfiles, and caches only downloaded Cargo and npm sources. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit.
+[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` (`python3` in the distribution containers). Every job pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target) and Node.js 24.15.0 and uses the committed lockfiles. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit.
+
+The jobs are tiered by event ([ADR-0051](adr/0051-tier-ci-by-event-and-run-the-full-matrix-in-the-merge-queue.md)):
+
+- **Pull request:** `windows` and `ubuntu-latest` run. The other six jobs are skipped, and a skipped job reports success. A newer push to the pull request cancels the older run.
+- **Merge queue (`merge_group`), push to `main`, manual run:** all eight jobs run, and no run is cancelled. A branch without a pull request is run by hand with `workflow_dispatch`.
+- **Required checks:** each job name in the table below is a required check of the "Protect main" ruleset. Branch protection matches names exactly, so no job that reports one is a matrix. The shared steps are YAML anchors. Keep the ruleset, the job names and `REQUIRED_CHECKS` in `tests/tools/test_workflows.py` the same.
+- **Caches:** every job restores the downloaded Cargo and npm sources and libwebrtc; only `main` saves them. `windows` and `ubuntu-latest` also restore compiled dependencies (rust-cache, saved from `main` only) and write the hit and the target size to the job summary.
+- **Workflow tests:** `tests/tools/test_workflows.py` checks these rules for every workflow. It needs PyYAML and is skipped without it, except in `ubuntu-latest`, which installs PyYAML from [`tools/ci-requirements.txt`](../tools/ci-requirements.txt) (pinned by hash) and sets `PERSEPHONE_WORKFLOW_TESTS=required`.
 
 | Job | Runner or image | Prerequisites | Python |
 | --- | --- | --- | --- |
-| `windows` | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
+| `windows` (pull requests too) | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
 | `macos-latest` | `macos-latest` (arm64) | Preinstalled Xcode tools | 3.14 (setup-python) |
-| `ubuntu-latest` | `ubuntu-latest` (26.04 on 17 November 2026) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config clang` | 3.14 (setup-python) |
+| `ubuntu-latest` (pull requests too) | `ubuntu-latest` (26.04 on 17 November 2026) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config clang` | 3.14 (setup-python) |
 | `ubuntu-24.04-arm` | `ubuntu-24.04-arm` (arm64) | As `ubuntu-latest`; rustup from `sh.rustup.rs` if the image lacks it. Clang 21 from apt.llvm.org, because the image has clang 18 | 3.14 (setup-python) |
 | `debian-13` | `debian:trixie` container | `apt-get`: build tools, `clang`, `libwebkit2gtk-4.1-dev`. Clang 21 from apt.llvm.org, because Debian has clang 19 | Distribution `python3` |
 | `arch` | `archlinux:base-devel` container | `pacman -Syu`: `clang`, `webkit2gtk-4.1` | Distribution `python` |
@@ -147,7 +155,7 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 - **Off Windows, CI covers build and tests only.** Linux and macOS have worker containment (seccomp on Linux, Seatbelt on macOS; ADR-0010, ADR-0011), and its probe and contained-worker tests run in their jobs. macOS also has its Keychain vault, prompts, image picker and UI host (CI-tested only, never run with a display). Its file panels, link opening and idle time (13 November 2026) have not yet been through macOS CI. Linux also has its Secret Service vault, GTK prompts and file choosers, and UI host with a systemd scope (ADR-0010); its live Secret Service and scope tests are ignored by `check` and run only in the SonarQube coverage job (`coverage --linux-live`, Ubuntu) and by hand in WSL ([dependency evidence](evidence/dependencies.md#linux-platform-layer-gtk-and-zbus-in-the-core-13-november-2026)), and its windows have never been shown. No job launches the application on any OS.
 - **Tests that compile on one OS only.** The AppContainer probe, DPAPI and the native Windows prompts run only on Windows; seccomp probes only on Linux; Keychain, AppKit and Seatbelt tests only on macOS. Test counts therefore differ between jobs.
 
-Other workflows: [`sonar.yml`](../.github/workflows/sonar.yml) sends the source to SonarQube Cloud for static analysis on pushes to `main` and same-repository pull requests; it builds and runs nothing. [`pages.yml`](../.github/workflows/pages.yml) deploys `site/`.
+Other workflows: [`sonar.yml`](../.github/workflows/sonar.yml) sends the source to SonarQube Cloud for static analysis on pushes to `main` and same-repository pull requests. Its `coverage` job, which has no secret, runs the frontend and instrumented Rust tests and uploads the LCOV reports; its `sonarqube` job holds `SONAR_TOKEN` and only downloads the reports and runs the scan. [`pages.yml`](../.github/workflows/pages.yml) deploys `site/`.
 
 Run 39785251911 at `04c0538` (22 October 2026) passed every job it had. The `ubuntu-24.04-arm` job was added later and has no recorded result here:
 
