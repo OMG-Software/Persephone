@@ -799,8 +799,11 @@ impl Call<'_> {
                 if stop != CameraStop::WasOff {
                     reply.push(FromWorker::VideoStopped { tile: OWN_TILE });
                 }
-                // Off only when no capture still holds the camera.
-                let held = stop == CameraStop::Stalled || self.stalled_running();
+                // Off only when no capture still holds the camera: neither a
+                // stalled one nor the thread of an open that timed out.
+                let held = stop == CameraStop::Stalled
+                    || self.stalled_running()
+                    || camera::captures_running();
                 reply.push(FromWorker::Camera {
                     state: if held {
                         CameraState::Unavailable

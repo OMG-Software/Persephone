@@ -56,8 +56,9 @@ const MAX_STRIDE: u32 = 2 * MAX_CAPTURE_SIDE;
 /// One camera node of the portal's remote.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Node {
-    /// The global object ID in this connection.
-    object: u32,
+    /// `object.serial`: unlike the global ID, PipeWire never reuses it, so
+    /// the stream targets the node by it.
+    serial: String,
     /// `node.name`: the camera ID.
     name: String,
     /// `node.description`, else `node.nick`, else the name.
@@ -66,34 +67,38 @@ struct Node {
 
 /// The node of a registry object that counts as a camera: a node with media
 /// class `Video/Source` and a name. `get` reads a property.
-fn camera_node<'a>(object: u32, get: impl Fn(&str) -> Option<&'a str>) -> Option<Node> {
+fn camera_node<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Option<Node> {
     if get("media.class") != Some("Video/Source") {
         return None;
     }
     let name = get("node.name").filter(|name| !name.is_empty())?;
+    // A node without a serial cannot be targeted safely.
+    let serial = get("object.serial").filter(|serial| !serial.is_empty())?;
     let description = get("node.description")
         .or_else(|| get("node.nick"))
         .filter(|text| !text.is_empty())
         .unwrap_or(name);
     Some(Node {
-        object,
+        serial: serial.to_owned(),
         name: name.to_owned(),
         description: description.to_owned(),
     })
 }
 
 /// The capture stream's properties. The stream links only to the chosen
-/// node: `node.dont-reconnect` destroys it when that node goes, and
+/// node, by its `object.serial` (`target.object`), which PipeWire never
+/// reuses: `node.dont-reconnect` destroys the stream when that node goes, and
 /// `node.dont-fallback` stops the session manager from linking it to another
 /// camera when the target cannot be linked. A lost camera then ends the
 /// capture; it never falls back to another one.
-fn stream_properties() -> pw::properties::PropertiesBox {
+fn stream_properties(serial: &str) -> pw::properties::PropertiesBox {
     properties! {
         *pw::keys::MEDIA_TYPE => "Video",
         *pw::keys::MEDIA_CATEGORY => "Capture",
         *pw::keys::MEDIA_ROLE => "Camera",
         *pw::keys::NODE_DONT_RECONNECT => "true",
         "node.dont-fallback" => "true",
+        "target.object" => serial,
     }
 }
 
@@ -156,7 +161,7 @@ fn enumerate(remote: &Remote) -> Result<Vec<Node>, CameraState> {
             let Some(props) = global.props else {
                 return;
             };
-            let Some(node) = camera_node(global.id, |key| props.get(key)) else {
+            let Some(node) = camera_node(|key| props.get(key)) else {
                 return;
             };
             let mut seen = seen.borrow_mut();
@@ -539,9 +544,11 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     let Some(node) = node else {
         return;
     };
-    let Ok(stream) =
-        pw::stream::StreamBox::new(&remote.core, "persephone-camera", stream_properties())
-    else {
+    let Ok(stream) = pw::stream::StreamBox::new(
+        &remote.core,
+        "persephone-camera",
+        stream_properties(&node.serial),
+    ) else {
         return;
     };
     let data = StreamData {
@@ -582,12 +589,7 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
         return;
     };
     if stream
-        .connect(
-            Direction::Input,
-            Some(node.object),
-            stream_flags(),
-            &mut [format],
-        )
+        .connect(Direction::Input, None, stream_flags(), &mut [format])
         .is_err()
     {
         return;
@@ -624,7 +626,8 @@ mod tests {
     /// to another camera, and it still links to its target at once.
     #[test]
     fn given_the_capture_stream_then_it_cannot_fall_back_to_another_camera() {
-        let properties = stream_properties();
+        let properties = stream_properties("77");
+        assert_eq!(properties.get("target.object"), Some("77"));
         assert_eq!(properties.get("node.dont-reconnect"), Some("true"));
         assert_eq!(properties.get("node.dont-fallback"), Some("true"));
         assert_eq!(properties.get("media.role"), Some("Camera"));
@@ -640,26 +643,32 @@ mod tests {
     fn given_registry_objects_then_only_video_sources_are_cameras() {
         let camera = [
             ("media.class", "Video/Source"),
+            ("object.serial", "77"),
             ("node.name", "v4l2_input.pci-0000_00_14.0-usb-0_1"),
             ("node.description", "Integrated Camera"),
         ];
-        let node = camera_node(42, props(&camera)).expect("camera");
-        assert_eq!(node.object, 42);
+        let node = camera_node(props(&camera)).expect("camera");
+        assert_eq!(node.serial, "77");
         assert_eq!(node.name, "v4l2_input.pci-0000_00_14.0-usb-0_1");
         assert_eq!(node.description, "Integrated Camera");
 
         let nick = [
             ("media.class", "Video/Source"),
+            ("object.serial", "5"),
             ("node.name", "cam"),
             ("node.nick", "Nick"),
         ];
         assert_eq!(
-            camera_node(1, props(&nick)).expect("camera").description,
+            camera_node(props(&nick)).expect("camera").description,
             "Nick"
         );
-        let bare = [("media.class", "Video/Source"), ("node.name", "cam")];
+        let bare = [
+            ("media.class", "Video/Source"),
+            ("object.serial", "6"),
+            ("node.name", "cam"),
+        ];
         assert_eq!(
-            camera_node(1, props(&bare)).expect("camera").description,
+            camera_node(props(&bare)).expect("camera").description,
             "cam"
         );
 
@@ -670,8 +679,15 @@ mod tests {
             vec![("media.class", "Video/Source")],
             vec![("media.class", "Video/Source"), ("node.name", "")],
             vec![("node.name", "x")],
+            // No serial: the stream could not target it.
+            vec![("media.class", "Video/Source"), ("node.name", "cam")],
+            vec![
+                ("media.class", "Video/Source"),
+                ("object.serial", ""),
+                ("node.name", "cam"),
+            ],
         ] {
-            assert!(camera_node(1, props(&other)).is_none(), "{other:?}");
+            assert!(camera_node(props(&other)).is_none(), "{other:?}");
         }
     }
 

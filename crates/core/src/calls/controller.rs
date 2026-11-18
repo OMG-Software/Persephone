@@ -1175,6 +1175,7 @@ impl CallController {
             tasks: std::mem::take(&mut setup.tasks),
             camera_wanted: Arc::new(AtomicBool::new(scope.video)),
             portal: None,
+            portal_capture: false,
         })
     }
 
@@ -1467,6 +1468,11 @@ struct Call {
     camera_wanted: Arc<AtomicBool>,
     /// The camera portal access request in flight (Linux portal path).
     portal: Option<JoinHandle<PortalRemote>>,
+    /// A portal remote went to the worker for a capture that may still run.
+    /// Kept apart from the shown camera state, which a late worker reply can
+    /// set back to `On` after an off: only a camera-on while this holds may
+    /// go to the worker without a new portal request.
+    portal_capture: bool,
 }
 
 /// The result of a camera portal access request: the PipeWire remote, or
@@ -1559,10 +1565,13 @@ impl Call {
             // there if an off was accepted after it.
             self.link.video().camera_on_taken(request);
         }
-        let idle = !matches!(self.view.camera, CallCamera::On | CallCamera::Starting);
-        if on && uses_portal(&self.link) && (idle || self.portal.is_some()) {
+        if self.portal_needed(on) {
             self.start_portal();
         } else {
+            if !on {
+                // The worker stops the capture and closes its remote.
+                self.portal_capture = false;
+            }
             self.send_worker(ToWorker::SetCamera { on })?;
         }
         let changed = self.view.request_camera(on) == Applied::Changed;
@@ -1576,6 +1585,14 @@ impl Call {
             self.publish(inner);
         }
         Ok(())
+    }
+
+    /// Whether a camera-on goes through the portal first: on the portal path,
+    /// unless a remote already went to the worker for a capture that may
+    /// still run (a repeated on then needs no new request). While a request
+    /// is in flight, the on joins it.
+    fn portal_needed(&self, on: bool) -> bool {
+        on && uses_portal(&self.link) && (!self.portal_capture || self.portal.is_some())
     }
 
     /// Starts a camera portal access request unless one is in flight. The
@@ -1604,7 +1621,7 @@ impl Call {
         #[cfg(target_os = "linux")]
         if let Some(remote) = remote {
             use std::os::fd::AsFd;
-            let _ = self.link.send_camera_handle(remote.as_fd());
+            self.portal_capture = self.link.send_camera_handle(remote.as_fd()).is_ok();
         }
         #[cfg(not(target_os = "linux"))]
         let () = remote;
@@ -1618,6 +1635,12 @@ impl Call {
     /// applied here. So no picture of a new stream shows under the old
     /// participant.
     fn worker_event(&mut self, inner: &Inner, event: &FromWorker) -> Result<(), EndReason> {
+        // A camera that is not on has no capture left: its remote is used up.
+        if let FromWorker::Camera { state } = event
+            && *state != CameraState::On
+        {
+            self.portal_capture = false;
+        }
         match self.view.apply(event) {
             Applied::Same => {}
             Applied::Changed => {
@@ -1793,7 +1816,10 @@ impl Call {
             let view = &self.view;
             self.remote.retain_members(|id| view.is_member(id));
             for identity in &diff.left {
-                self.view.forget_video(identity);
+                // The tile keeps its track: the worker still receives it, and
+                // the member filter hides the tile and drops its picture
+                // until the membership returns. `ParticipantLeft` and
+                // `VideoStopped` end the assignment.
                 self.send_worker(ToWorker::RemoveParticipant {
                     identity: identity.clone(),
                 })?;
@@ -2402,6 +2428,7 @@ mod tests {
             tasks: JoinSet::new(),
             camera_wanted: Arc::new(AtomicBool::new(false)),
             portal: None,
+            portal_capture: false,
         };
         TestCall {
             call,
@@ -2477,6 +2504,79 @@ mod tests {
         assert!(!store.insert(0, 0, 2, 2, vec![1; 16]), "a stale on");
         call.camera_command(&inner, true, latest).unwrap();
         assert!(store.insert(0, 0, 2, 2, vec![2; 16]), "the latest on");
+    }
+
+    /// GIVEN a portal capture that runs WHEN the camera is turned on again
+    /// THEN no new portal request is needed; WHEN it is turned off and a late
+    /// `On` reply of the old capture arrives THEN the next on asks the portal
+    /// again, and so does one after the worker reports the camera
+    /// unavailable.
+    #[test]
+    fn given_a_portal_capture_then_only_a_running_one_skips_the_portal() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let mut call = fixture.call;
+        let mut to_worker = fixture.to_worker;
+        call.link = std::mem::replace(
+            &mut call.link,
+            CallWorkerLink::from_parts(
+                mpsc::channel(1).0,
+                mpsc::channel(1).1,
+                Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+            ),
+        )
+        .with_camera_path(crate::calls::worker::CameraPath::Portal);
+        let on = FromWorker::Camera {
+            state: CameraState::On,
+        };
+        assert!(call.portal_needed(true), "the first on asks the portal");
+        assert!(!call.portal_needed(false));
+        // The remote went to the worker and the capture runs.
+        call.portal_capture = true;
+        call.worker_event(&inner, &on).unwrap();
+        assert!(!call.portal_needed(true), "a repeated on");
+        call.camera_command(&inner, false, 0).unwrap();
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetCamera { on: false })
+        ));
+        call.worker_event(&inner, &on).unwrap();
+        assert_eq!(call.view.camera, CallCamera::On, "a late reply");
+        assert!(call.portal_needed(true), "the old capture is gone");
+        call.portal_capture = true;
+        call.worker_event(
+            &inner,
+            &FromWorker::Camera {
+                state: CameraState::Unavailable,
+            },
+        )
+        .unwrap();
+        assert!(call.portal_needed(true), "an ended capture");
+    }
+
+    /// GIVEN a remote tile WHEN its member's membership lapses and returns
+    /// with the track still live THEN the tile hides meanwhile and shows
+    /// again without a new `VideoStarted`.
+    #[test]
+    fn given_a_membership_lapse_then_a_live_track_shows_again() {
+        let mut view = view();
+        view.apply(&started(1, "@a:example.org:A"));
+        assert!(view.video_allowed().1[0]);
+        let members = view.members.clone();
+        view.set_members(
+            members
+                .iter()
+                .filter(|m| m.identity != "@a:example.org:A")
+                .cloned()
+                .collect(),
+        );
+        assert!(!view.video_allowed().1[0], "hidden during the lapse");
+        view.set_members(members);
+        assert!(view.video_allowed().1[0], "shown again");
     }
 
     /// GIVEN tile 1 shows member A WHEN the read thread has counted A's stop
