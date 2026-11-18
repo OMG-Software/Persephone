@@ -168,6 +168,13 @@ The worker applies two stages itself.
   the other path, or saved without a prefix: the worker never reads a
   `node.name` as V4L2 information or the reverse. The worker never takes
   another camera in its place.
+* Assumption: no released build saved a Linux camera choice without a
+  prefix. Released builds before the prefixes had no camera support and
+  refused calls on Linux. Profiles from development builds made before the
+  prefixes are not supported; choose the camera again in them. If an
+  unprefixed format is ever released, it needs its own format marker.
+  Reading an old choice by its first characters alone is not enough,
+  because a `node.name` could begin with `v4l2:`.
 * Limit: the V4L2 ioctls on `/dev/video*` give no serial number, so two
   cameras of the same model swapped in the same port have the same ID. A
   serial number would need the media controller (`/dev/media*`) or sysfs,

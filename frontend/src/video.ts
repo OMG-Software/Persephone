@@ -168,6 +168,27 @@ export class VideoFetcher {
     }
   }
 
+  /**
+   * Sends pictures to `show` and clears tiles with `clear` from now on: a
+   * page that mounts again uses the same fetcher with its own canvases.
+   */
+  attach(show: (tile: number, picture: VideoPicture) => void, clear: (tile: number) => void = () => {}): void {
+    this.#show = show;
+    this.#clear = clear;
+  }
+
+  /**
+   * Stops all tiles (as `stop`) and forgets the page's callbacks. A request
+   * still at the host keeps its tile number until its reply comes, so a
+   * tile set after the next `attach` waits for it instead of starting
+   * another request that the host would refuse.
+   */
+  detach(): void {
+    this.stop();
+    this.#show = () => {};
+    this.#clear = () => {};
+  }
+
   /** Runs a request now, or one more after the running one. */
   #ask(tile: number, state: TileState): void {
     if (state.running) {

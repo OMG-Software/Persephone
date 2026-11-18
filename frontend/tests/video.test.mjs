@@ -326,6 +326,37 @@ test('GIVEN five tiles each with a request at the host WHEN streams change and t
   assert.deepEqual(fetcher.active, [0, 1, 2, 3, 4]);
 });
 
+test('GIVEN requests at the host WHEN the page unmounts and mounts again THEN the new tiles wait for them and the new page shows', async () => {
+  const pending = [];
+  const first = [];
+  const second = [];
+  const fetcher = new VideoFetcher(
+    (tile, after, stream) => {
+      const gate = deferred();
+      pending.push({ tile, stream, gate });
+      return gate.promise.finally(() => pending.splice(pending.findIndex((entry) => entry.gate === gate), 1));
+    },
+    () => {}
+  );
+  const tiles = (stream) => [0, 1, 2, 3, 4].map((tile) => ({ tile, key: 'k', stream }));
+  fetcher.attach((tile, next) => first.push([tile, next.seq]));
+  fetcher.setTiles(tiles(1));
+  fetcher.detach();
+  assert.deepEqual(fetcher.active, []);
+  fetcher.attach((tile, next) => second.push([tile, next.seq]));
+  fetcher.setTiles(tiles(2));
+  assert.equal(pending.length, 5, 'no request beyond the five at the host');
+  for (const { gate } of [...pending]) gate.resolve(picture(3));
+  await later();
+  assert.deepEqual(first, [], 'the old page shows nothing');
+  assert.deepEqual(second, [], 'no picture of the old stream shows');
+  assert.equal(pending.length, 5, 'each tile asks once for its new stream');
+  assert.ok(pending.every((entry) => entry.stream === 2));
+  for (const { gate } of [...pending]) gate.resolve(picture(4));
+  await later();
+  assert.equal(second.length, 5);
+});
+
 test('GIVEN a stream number that is not a safe non-negative integer WHEN set THEN the tile is ignored', async () => {
   const asked = [];
   const fetcher = new VideoFetcher(

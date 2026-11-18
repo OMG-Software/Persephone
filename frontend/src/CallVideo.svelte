@@ -1,16 +1,26 @@
+<script module lang="ts">
+  import { callVideoFrame } from './bridge';
+  import { VideoFetcher } from './video';
+
+  // One fetcher for the page, kept when the tiles unmount and mount again,
+  // so requests still at the host count against their tiles and a new
+  // mount does not start more than the host takes.
+  const fetcher = new VideoFetcher(callVideoFrame, () => {});
+</script>
+
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import type { CallVideoTile } from '../../crates/contracts/generated/contracts';
-  import { callVideoFrame } from './bridge';
   import { OWN_TILE_LABEL, PARTICIPANT_TILE_LABEL } from './calls';
   import PersonName from './PersonName.svelte';
-  import { tileLayout, VideoFetcher, type TileRef, type VideoPicture } from './video';
+  import { tileLayout, type TileRef, type VideoPicture } from './video';
 
   // The video tiles of the call: the own camera (mirrored, labelled "You")
   // and up to four other devices. The core sends plain RGBA pictures; this
   // draws each on a canvas and does nothing else with them. Names are
   // untrusted text. `ticks` goes up each time the core says a new picture is
-  // waiting. Unmounting stops every request.
+  // waiting. Unmounting stops every tile; replies still on their way are
+  // dropped.
   let {
     tiles,
     names,
@@ -51,7 +61,7 @@
     shapes[tile] = undefined;
   }
 
-  const fetcher = new VideoFetcher(callVideoFrame, show, clear);
+  fetcher.attach(show, clear);
 
   const shown = $derived([...tiles].sort((a, b) => a.tile - b.tile));
 
@@ -72,7 +82,7 @@
     untrack(() => fetcher.poke());
   });
 
-  onDestroy(() => fetcher.stop());
+  onDestroy(() => fetcher.detach());
 
   function canvasRef(node: HTMLCanvasElement, tile: number) {
     canvases[tile] = node;
