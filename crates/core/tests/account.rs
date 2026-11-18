@@ -2108,7 +2108,7 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
             (status.state, status.error),
             (AccountState::SignedOut, None)
         );
-        assert!(!dir.path().join("store-key.v2").exists(), "key deleted");
+        assert!(!dir.path().join("store-key.v1").exists(), "key deleted");
         assert!(
             dir.path().join("signed-out").exists() && dir.path().join("store").exists(),
             "store files are left for the next start"
@@ -2164,7 +2164,7 @@ fn given_the_server_cannot_revoke_then_sign_out_still_wipes_and_warns() {
         Some(SignInError::SessionNotRevoked)
     );
     assert!(
-        !dir.path().join("store-key.v2").exists(),
+        !dir.path().join("store-key.v1").exists(),
         "key deleted anyway"
     );
 }
@@ -2231,7 +2231,7 @@ fn given_the_homeserver_ends_the_session_then_the_profile_is_deleted_and_the_nex
         );
         assert_eq!(core.session().state(), StoreState::RestartRequired);
         assert!(!core.session().has_ended(), "finished once");
-        assert!(!dir.path().join("store-key.v2").exists(), "key deleted");
+        assert!(!dir.path().join("store-key.v1").exists(), "key deleted");
         assert!(dir.path().join("signed-out").exists());
         assert_eq!(
             server.requests_to("/_matrix/client/v3/logout"),
@@ -2286,7 +2286,7 @@ fn given_a_soft_logout_then_the_profile_is_kept() {
     });
     assert!(!core.session().has_ended());
     assert!(!core.finish_ended_session());
-    assert!(dir.path().join("store-key.v2").exists());
+    assert!(dir.path().join("store-key.v1").exists());
     assert_eq!(core.session().state(), StoreState::Protected);
     assert_eq!(
         core.session().account_status().state,
@@ -2312,7 +2312,7 @@ fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_ke
     });
     assert!(!core.session().has_ended());
     assert!(!core.finish_ended_session());
-    assert!(dir.path().join("store-key.v2").exists());
+    assert!(dir.path().join("store-key.v1").exists());
     assert_eq!(core.session().state(), StoreState::Protected);
     assert_eq!(
         core.session().account_status().error,
@@ -2355,7 +2355,7 @@ fn given_a_good_round_between_two_that_end_the_session_then_the_profile_is_kept(
     }
     assert!(!core.session().has_ended());
     assert!(!core.finish_ended_session());
-    assert!(dir.path().join("store-key.v2").exists());
+    assert!(dir.path().join("store-key.v1").exists());
 }
 
 /// GIVEN a password session that holds a refresh token WHEN the homeserver
@@ -2386,7 +2386,7 @@ fn given_no_account_then_sign_out_changes_nothing() {
     let core = make_core(dir.path(), Fixed::new(Ok(())));
     let state: StoreState = value(call(&core, Call::SignOut {}));
     assert_eq!(state, StoreState::Protected);
-    assert!(dir.path().join("store-key.v2").exists());
+    assert!(dir.path().join("store-key.v1").exists());
 }
 
 /// GIVEN every lease in use WHEN signing out THEN the sign-out waits for one;
@@ -2407,7 +2407,7 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
         Err(AdmissionError::Saturated)
     );
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
-    assert!(dir.path().join("store-key.v2").exists(), "nothing deleted");
+    assert!(dir.path().join("store-key.v1").exists(), "nothing deleted");
     assert_eq!(
         core.session().account_status().state,
         AccountState::SignedIn
@@ -2424,7 +2424,7 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
         );
     });
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
-    assert!(!dir.path().join("store-key.v2").exists());
+    assert!(!dir.path().join("store-key.v1").exists());
 }
 
 /// GIVEN a signed-in profile whose sign-out stopped after recording its
@@ -2493,7 +2493,7 @@ fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_e
             "intent recorded before the answer"
         );
         assert!(
-            dir.path().join("store-key.v2").exists(),
+            dir.path().join("store-key.v1").exists(),
             "key deleted only after the answer"
         );
         assert_eq!(announced.load(Ordering::SeqCst), 1, "page cleared first");
@@ -2506,7 +2506,7 @@ fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_e
         assert_eq!(signing_out.join().unwrap(), Ok(StoreState::RestartRequired));
     });
     assert_eq!(announced.load(Ordering::SeqCst), 1, "announced once");
-    assert!(!dir.path().join("store-key.v2").exists());
+    assert!(!dir.path().join("store-key.v1").exists());
 }
 
 /// GIVEN a signed-in core whose UI connection ended (a failed window) WHEN

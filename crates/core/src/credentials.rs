@@ -106,10 +106,8 @@ pub enum NewPassword {
 /// Which step of choosing a new profile passphrase a prompt is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NewPassphrase {
-    /// A new profile.
-    Choose,
-    /// A profile from before passphrases (ADR-0006).
-    Upgrade,
+    /// The user turned the passphrase on in Settings (ADR-0050).
+    TurnOn,
     /// The same passphrase again.
     Confirm,
     /// The last entry was shorter than the minimum.

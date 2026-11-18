@@ -712,3 +712,70 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         );
     }
 }
+
+/// GIVEN an open profile without a passphrase WHEN the UI sends
+/// `set_profile_passphrase` THEN the reply is a status at once, the core's own
+/// prompts (not the UI) supply the passphrase, and the change arrives as a
+/// security event and a status that reports the passphrase on.
+#[test]
+fn given_a_set_profile_passphrase_call_then_the_core_asks_and_announces_the_result() {
+    use persephone_contracts::{SecurityOperation, SecurityStatus};
+    use std::io::{PipeReader, PipeWriter};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let prompts = common::Script::new([]);
+    let core = Core::default()
+        .with_credentials(prompts.clone())
+        .with_session(common::open_session(dir.path()));
+    let (from_ui, mut to_core): (PipeReader, PipeWriter) = std::io::pipe().unwrap();
+    let (mut from_core, to_ui) = std::io::pipe().unwrap();
+    let budgets = ResourceBudgets::default();
+    let mut ask = move |id: u32, call: Call| -> (SecurityStatus, Vec<Event>) {
+        send(&mut to_core, &self::call(id, call)).unwrap();
+        let mut events = Vec::new();
+        loop {
+            match receive::<_, CoreMessage>(&mut from_core, &budgets).unwrap() {
+                CoreMessage::Event(event) => events.push(event),
+                CoreMessage::Reply(reply) => {
+                    assert_eq!(reply.id, id);
+                    let Outcome::Ok(value) = reply.outcome else {
+                        panic!("{:?}", reply.outcome);
+                    };
+                    return (serde_json::from_value(value).unwrap(), events);
+                }
+            }
+        }
+    };
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| persephone_core::serve(&core, from_ui, to_ui));
+        let (status, mut events) = ask(1, Call::SecurityStatus {});
+        assert!(!status.profile_passphrase);
+        let (status, more) = ask(2, Call::SetProfilePassphrase { on: true });
+        events.extend(more);
+        assert!(status.operation != SecurityOperation::Working);
+        let mut id = 3;
+        loop {
+            let (status, more) = ask(id, Call::SecurityStatus {});
+            events.extend(more);
+            if status.operation == SecurityOperation::Idle {
+                assert!(status.profile_passphrase);
+                assert_eq!(status.error, None);
+                break;
+            }
+            assert!(id < 2000, "the switch never finished");
+            id += 1;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(events.contains(&Event::SecurityChanged {}), "{events:?}");
+        drop(ask);
+        assert_eq!(server.join().unwrap(), ServeEnd::UiClosed);
+    });
+    assert_eq!(
+        prompts.seen(),
+        ["NewPassphrase(TurnOn)", "NewPassphrase(Confirm)"]
+    );
+    let (state, _) = core
+        .session()
+        .lock(std::time::Duration::from_secs(30), || {});
+    assert_eq!(state, persephone_contracts::StoreState::Locked);
+}

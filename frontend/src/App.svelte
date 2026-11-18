@@ -73,7 +73,7 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate, withNames } from './people';
-  import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
+  import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, lockOffered, textScale } from './preferences';
   import { applyTheme } from './themes.ts';
   import { OwnNameKeeper } from './ownName';
   import { PASTE_UNSUPPORTED, attachErrorText, sendImageErrorText, type ImageDraft, type PastedImage } from './image';
@@ -123,6 +123,7 @@
     verifyThisDevice,
     verifyDevice,
     changeRecoveryKey,
+    setProfilePassphrase,
     startNewBackup,
     acceptVerification,
     confirmVerification,
@@ -174,6 +175,10 @@
 
   let status = $state<AppStatus | null>(null);
   let security = $state<SecurityStatus | null>(null);
+  // Whether the profile has a passphrase, null until the core says. It is a
+  // property of the profile, so it survives a session change; Lock and the idle
+  // lock show only while it is true (ADR-0050).
+  let passphraseOn = $state<boolean | null>(null);
   let securityBusy = $state(false);
   // Why the last security action failed. Kept apart from `error`, so a later
   // success clears it without hiding a room's error.
@@ -413,7 +418,7 @@
     protected: 'Local store protected',
     locked: 'Local store locked',
     locking: 'Locking: work in progress is finishing',
-    unlocking: 'Unlocking: enter the passphrase in the Persephone window',
+    unlocking: 'Unlocking: if the profile has a passphrase, enter it in the Persephone window',
     lock_failed: 'Local store did not close cleanly; restart Persephone',
     restart_required: 'Locked: restart Persephone to unlock',
     key_missing: 'Local store locked: its key is missing',
@@ -437,7 +442,7 @@
     'store_unavailable'
   ];
 
-  // Closed profiles the core may reset after a forgotten passphrase. The core
+  // Closed profiles the core may reset after a forgotten passphrase or a lost key. The core
   // checks again and asks for confirmation in its own window.
   const resettable: StoreState[] = [
     'locked',
@@ -537,7 +542,7 @@
     // Lock at once, from anywhere, while the profile is open.
     if (isLockShortcut(event, mac)) {
       event.preventDefault();
-      if (status?.store === 'protected') void toggleLock();
+      if (lockOffered(status?.store, passphraseOn) && status?.store === 'protected') void toggleLock();
       return;
     }
     if (!(mac ? event.metaKey : event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'k') {
@@ -600,6 +605,7 @@
     }
     if (generation !== sessionGeneration) return;
     status = reply;
+    if (reply.account.state !== 'signed_in' || reply.store !== 'protected') void refreshPassphrase();
     if (reply.store !== 'protected' && reply.store !== 'not_configured') return;
     if (reply.account.state === 'signed_in') {
       refreshSecurity();
@@ -1061,6 +1067,16 @@
     }
   }
 
+  // Learn whether the profile has a passphrase while no account is signed in
+  // or the profile is closed. The core reports it in every store state.
+  async function refreshPassphrase() {
+    try {
+      passphraseOn = (await securityStatus()).profilePassphrase;
+    } catch {
+      // Lock stays hidden until a later status says so.
+    }
+  }
+
   // The account's encryption state changed: fetch it again. Nothing else
   // changes.
   async function refreshSecurity() {
@@ -1074,6 +1090,7 @@
         security = reply;
         securityShown = request;
       }
+      if (generation === sessionGeneration) passphraseOn = reply.profilePassphrase;
     } catch {
       // The next security or session event tries again.
     }
@@ -1184,6 +1201,7 @@
         security = reply;
         securityShown = request;
       }
+      if (generation === sessionGeneration) passphraseOn = reply.profilePassphrase;
     } catch (reason) {
       if (generation === sessionGeneration) {
         // A refused request leaves the previous status: its error is not
@@ -2165,7 +2183,7 @@
     mainMenuItems(
       {
         signedIn,
-        canLock: status?.store === 'protected' || status?.store === 'locking',
+        canLock: lockOffered(status?.store, passphraseOn),
         switching,
         confirmingSignOut
       },
@@ -2228,6 +2246,7 @@
 
 {#snippet lockButton()}
   <!-- Not while the sign-out question is open: it would apply to a locked session. -->
+  <!-- Callers show it only while the profile has a passphrase (ADR-0050). -->
   <TipButton
     id="lock-help"
     help={LOCK_HELP}
@@ -2283,7 +2302,9 @@
         {#if error}
           <p role="alert" class="error">{error}</p>
         {/if}
-        {@render lockButton()}
+        {#if lockOffered(status.store, passphraseOn)}
+          {@render lockButton()}
+        {/if}
         <Accounts compact />
       </div>
     </div>
@@ -2348,6 +2369,7 @@
             {settings}
             failure={settingsFailure}
             {mac}
+            profilePassphrase={passphraseOn === true}
             onchange={(patch) => settingsKeeper.change(patch)}
           />
         {:else}
@@ -2376,6 +2398,7 @@
               onsetuprecovery={() => startSecurity(setUpRecovery)}
               onverify={() => startSecurity(verifyThisDevice)}
               onchangekey={() => startSecurity(changeRecoveryKey)}
+              onpassphrase={(on) => startSecurity(() => setProfilePassphrase(on))}
               onnewbackup={() => startSecurity(startNewBackup)}
             />
           {:else}
@@ -2421,7 +2444,7 @@
               {/if}
             </p>
           </div>
-          {#if status.store === 'protected' || status.store === 'locking'}
+          {#if lockOffered(status.store, passphraseOn)}
             <div class="panel">
               <h3>Lock</h3>
               <p>{LOCK_HELP}</p>

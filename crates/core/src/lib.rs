@@ -962,6 +962,9 @@ impl Core {
             Call::ChangeRecoveryKey {} => {
                 ok(&self.session.change_recovery_key(self.credentials.clone()))
             }
+            Call::SetProfilePassphrase { on } => ok(&self
+                .session
+                .set_profile_passphrase(*on, self.credentials.clone())),
             Call::StartNewBackup {} => ok(&self.session.start_new_backup(self.credentials.clone())),
             Call::VerifyDevice { device_id } => {
                 if verification::valid_device_id(device_id) {

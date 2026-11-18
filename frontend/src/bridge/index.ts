@@ -991,6 +991,15 @@ export function changeRecoveryKey(): Promise<SecurityStatus> {
 }
 
 /**
+ * Turns the local profile passphrase on or off. Only the choice crosses: the
+ * core asks for the passphrase in its own window, and the result arrives as a
+ * security change (ADR-0050).
+ */
+export function setProfilePassphrase(on: boolean): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('set_profile_passphrase', { on });
+}
+
+/**
  * Deletes the homeserver's key backup, which this device cannot use, and
  * starts a new one. The core asks first, then shows the new key and offers to
  * save it in its own windows; the key never reaches this page.

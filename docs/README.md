@@ -38,6 +38,7 @@
 - [ADR-0035](adr/0035-keep-favourites-and-room-sections-local-to-the-profile.md) (proposed): local encrypted favourites and named sections, without Matrix room tags.
 - [ADR-0037](adr/0037-browse-public-room-directories-and-join-only-listed-rooms.md) (proposed): browse a public room directory through the homeserver, and join only rooms a listed page offered as open to anyone.
 - [ADR-0043](adr/0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md) (proposed): audio calls through MatrixRTC and a LiveKit SFU, with WebRTC in a contained call worker that gets only the SFU token, TURN credentials and frame keys; direct connection with a proxy only after confirmation.
+- [ADR-0050](adr/0050-make-the-profile-passphrase-optional-and-off-by-default.md): the profile passphrase is optional and off by default; the OS vault alone wraps the store key until the user turns the passphrase on, and Lock shows only while it is on.
 
 ## Evidence
 
