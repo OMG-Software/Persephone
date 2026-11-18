@@ -4,6 +4,19 @@
 # elsewhere these fail closed, so the other jobs establish that the code builds
 # and its tests pass, not that the application runs. The workflow does not run
 # live homeservers, the native sandbox probe or the dependency audit.
+#
+# The jobs are tiered by event (ADR-0051):
+# - A pull request runs the core gate: windows and ubuntu-latest.
+# - The merge queue (merge_group), a push to main and a manual run run every
+#   job. The other six jobs have `if: !cancelled() && github.event_name !=
+#   'pull_request'`. A job skipped by its `if` reports success, so on a pull
+#   request it satisfies its required check, and in the merge queue it runs.
+# Each job's name is a required check in the "Protect main" ruleset. The names
+# must match exactly, so no job that holds one is a matrix: a skipped matrix
+# job reports under its unexpanded name, not under each leg's name. The
+# shared steps are YAML anchors (&hosted-steps, &container-steps) instead.
+# tests/tools/test_workflows.py checks these rules.
+#
 # Actions are pinned to full commit SHAs and container images to digests; the
 # tag each was taken from is noted alongside. Toolchains are pinned to the
 # versions the recorded evidence used.
@@ -13,13 +26,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer push to a pull request cancels its older run. Every other run (main,
+# merge queue, manual) has a group of its own and is never cancelled, because
+# a cancelled required check fails the merge queue. The prefix is literal:
+# github.workflow names the caller in a reusable workflow.
 concurrency:
-  group: check-${{ github.ref }}
+  group: check-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -30,9 +48,14 @@ env:
   PERSEPHONE_CALL_WORKER: required
 
 jobs:
+  # Core gate.
   windows:
+    name: windows
     runs-on: windows-latest
     timeout-minutes: 120
+    env:
+      LEG: Windows
+      COMPILE_CACHE: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,24 +75,45 @@ jobs:
           rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
           "RUSTUP_TOOLCHAIN=$env:RUST_TOOLCHAIN" >> $env:GITHUB_ENV
 
-      # tools/dev.py keeps Cargo and npm caches under .local/cache. Only
-      # downloaded sources are cached; build output is too large to keep.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # tools/dev.py keeps Cargo and npm caches under .local/cache. Every run
+      # restores the downloaded sources; only main saves them (the save step
+      # below), so that pull requests do not fill the cache budget.
+      - name: Restore downloaded dependencies
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
+          path: &deps-paths |
             .local/cache/cargo/registry/index
             .local/cache/cargo/registry/cache
             .local/cache/cargo/git/db
             .local/cache/npm
-          key: deps-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
-          restore-keys: deps-${{ runner.os }}-
+          key: deps-${{ env.LEG }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: deps-${{ env.LEG }}-
 
       # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
       # copy by its SHA-256 marker file and does not hash the files again.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore libwebrtc
+        id: webrtc
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .local/cache/webrtc
-          key: webrtc-${{ runner.os }}-${{ hashFiles('tools/webrtc.json') }}
+          key: webrtc-${{ env.LEG }}-${{ hashFiles('tools/webrtc.json') }}
+
+      # Compiled dependencies, for the core gate only (ADR-0051). rust-cache
+      # removes the workspace's own crates before it saves, and saves from
+      # main only. CARGO_HOME is tools/dev.py's, so that its cargo metadata
+      # call reads the restored registry index.
+      - name: Restore compiled dependencies
+        id: rust-cache
+        if: env.COMPILE_CACHE == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        env:
+          CARGO_HOME: ${{ github.workspace }}/.local/cache/cargo
+        with:
+          prefix-key: v1-rust
+          workspaces: ". -> .local/build/rust"
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
@@ -77,18 +121,54 @@ jobs:
       - name: Check
         run: python tools/dev.py check
 
+      - name: Report the compiled-dependency cache
+        if: ${{ !cancelled() && env.COMPILE_CACHE == 'true' }}
+        shell: python
+        env:
+          CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: &cache-report |
+          import os, pathlib
+          # The budget each core-gate job may use (ADR-0051).
+          limit = 2 * 1024**3
+          target = pathlib.Path(".local/build/rust")
+          size = sum(p.stat().st_size for p in target.rglob("*") if p.is_file()) if target.is_dir() else 0
+          hit = os.environ.get("CACHE_HIT") or "none"
+          line = f"Compiled-dependency cache: hit={hit}; target directory {size / 1024**3:.2f} GiB before cleaning"
+          print(line)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(line + "\n")
+          if size > limit and os.environ.get("GITHUB_REF") == "refs/heads/main":
+              print(f"::warning::the target directory is over the {limit // 1024**3} GiB budget; see ADR-0051")
+
+      - name: Save downloaded dependencies
+        if: github.ref == 'refs/heads/main' && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *deps-paths
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Save libwebrtc
+        if: github.ref == 'refs/heads/main' && steps.webrtc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: ${{ steps.webrtc.outputs.cache-primary-key }}
+
   # GitHub-hosted macOS and Ubuntu runners, including arm64 Ubuntu so that the
   # worker's aarch64 seccomp allowlist is exercised. A C toolchain is
   # preinstalled; Ubuntu adds the WebKitGTK headers Tauri links against.
-  hosted:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  # Core gate.
+  ubuntu-latest:
+    name: ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
-    steps:
+    env:
+      LEG: ubuntu-latest
+      COMPILE_CACHE: "true"
+      # This job installs PyYAML (tools/ci-requirements.txt), so the workflow
+      # tests must run here instead of being skipped.
+      PERSEPHONE_WORKFLOW_TESTS: required
+    steps: &hosted-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -100,6 +180,12 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.15.0"
+
+      # PyYAML for tests/tools/test_workflows.py, pinned by hash.
+      - name: Install the workflow test dependency
+        if: env.PERSEPHONE_WORKFLOW_TESTS == 'required'
+        run: |
+          python -m pip install --disable-pip-version-check --no-deps --only-binary :all: --require-hashes -r tools/ci-requirements.txt
 
       - name: Install Tauri prerequisites
         if: runner.os == 'Linux'
@@ -126,22 +212,32 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore downloaded dependencies
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            .local/cache/cargo/registry/index
-            .local/cache/cargo/registry/cache
-            .local/cache/cargo/git/db
-            .local/cache/npm
-          key: deps-${{ matrix.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
-          restore-keys: deps-${{ matrix.os }}-
+          path: *deps-paths
+          key: deps-${{ env.LEG }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: deps-${{ env.LEG }}-
 
-      # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
-      # copy by its SHA-256 marker file and does not hash the files again.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore libwebrtc
+        id: webrtc
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .local/cache/webrtc
-          key: webrtc-${{ matrix.os }}-${{ hashFiles('tools/webrtc.json') }}
+          key: webrtc-${{ env.LEG }}-${{ hashFiles('tools/webrtc.json') }}
+
+      - name: Restore compiled dependencies
+        id: rust-cache
+        if: env.COMPILE_CACHE == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        env:
+          CARGO_HOME: ${{ github.workspace }}/.local/cache/cargo
+        with:
+          prefix-key: v1-rust
+          workspaces: ". -> .local/build/rust"
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
@@ -149,60 +245,80 @@ jobs:
       - name: Check
         run: python tools/dev.py check
 
-  # Other Linux distributions in containers on an Ubuntu runner. Each installs
-  # its own build tools and WebKitGTK 4.1 from its package manager. Clang
-  # builds the call worker: webrtc-sys compiles against libwebrtc's hermetic
-  # libc++, which needs clang 21 or later (see the clang step). Python is
-  # the distribution's own (setup-python's builds target Ubuntu). Packages
-  # come from each distribution's current repositories, so only the base image
-  # is fixed by its digest.
-  container:
-    name: ${{ matrix.name }}
+      - name: Report the compiled-dependency cache
+        if: ${{ !cancelled() && env.COMPILE_CACHE == 'true' }}
+        shell: python
+        env:
+          CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: *cache-report
+
+      - name: Save downloaded dependencies
+        if: github.ref == 'refs/heads/main' && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *deps-paths
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Save libwebrtc
+        if: github.ref == 'refs/heads/main' && steps.webrtc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: ${{ steps.webrtc.outputs.cache-primary-key }}
+
+  # Merge queue, main and manual runs only.
+  macos:
+    name: macos-latest
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      LEG: macos-latest
+    steps: *hosted-steps
+
+  # Merge queue, main and manual runs only.
+  ubuntu-arm:
+    name: ubuntu-24.04-arm
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      LEG: ubuntu-24.04-arm
+    steps: *hosted-steps
+
+  # Other Linux distributions in containers on an Ubuntu runner, in the merge
+  # queue, on main and in manual runs only. Each installs its own build tools
+  # and WebKitGTK 4.1 from its package manager (INSTALL). Clang builds the
+  # call worker: webrtc-sys compiles against libwebrtc's hermetic libc++,
+  # which needs clang 21 or later (see the clang step). Python is the
+  # distribution's own (setup-python's builds target Ubuntu). Packages come
+  # from each distribution's current repositories, so only the base image is
+  # fixed by its digest.
+  debian:
+    name: debian-13
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     container:
-      image: ${{ matrix.image }}
+      image: debian:trixie@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 # trixie
       # The openSUSE image sets no PATH, so once a step adds to GITHUB_PATH
       # the runner's PATH would hold only the added directories.
-      env:
+      env: &container-env
         PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-    defaults:
+    defaults: &container-defaults
       run:
         shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: debian-13
-            image: debian:trixie@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 # trixie
-            install: >-
-              apt-get update &&
-              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
-              git ca-certificates curl xz-utils build-essential clang pkg-config python3 libwebkit2gtk-4.1-dev
-              libpipewire-0.3-dev libclang-dev
-          # Arch supports only full upgrades, so this installs the current
-          # rolling release on top of the image.
-          - name: arch
-            image: archlinux:base-devel@sha256:3cbf69d2d5958d6a294f3722c5668e6187c4df8e00fa27f72352f0bf83e495e1 # base-devel
-            install: >-
-              pacman -Syu --noconfirm --needed git curl python clang webkit2gtk-4.1 pipewire
-          - name: fedora-44
-            image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80 # 44
-            install: >-
-              dnf install -y git curl tar gzip xz gcc gcc-c++ clang make pkgconf-pkg-config python3
-              'pkgconfig(webkit2gtk-4.1)' pipewire-devel clang-devel
-          # No `clang` here: Leap's clang 19 brings libclang13 19, which
-          # conflicts with the libclang13 of the clang 21 the clang step
-          # installs from devel:tools:compiler.
-          - name: opensuse-leap-16.0
-            image: opensuse/leap:16.0@sha256:0c459bfe558e59b44b484e0e02dad66a28cdba92d24c8121d3901177938a3175 # 16.0
-            install: >-
-              zypper --non-interactive install git curl tar gzip xz gcc gcc-c++ make pkg-config python3
-              'pkgconfig(webkit2gtk-4.1)' pipewire-devel
-    steps:
+    env:
+      LEG: debian-13
+      INSTALL: >-
+        apt-get update &&
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
+        git ca-certificates curl xz-utils build-essential clang pkg-config python3 libwebkit2gtk-4.1-dev
+        libpipewire-0.3-dev libclang-dev
+    steps: &container-steps
       # Before checkout, so that it clones with git.
       - name: Install build prerequisites
-        run: ${{ matrix.install }}
+        run: ${{ env.INSTALL }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -227,25 +343,89 @@ jobs:
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
           python3 --version
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore downloaded dependencies
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            .local/cache/cargo/registry/index
-            .local/cache/cargo/registry/cache
-            .local/cache/cargo/git/db
-            .local/cache/npm
-          key: deps-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
-          restore-keys: deps-${{ matrix.name }}-
+          path: *deps-paths
+          key: deps-${{ env.LEG }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
+          restore-keys: deps-${{ env.LEG }}-
 
-      # Caches the verified libwebrtc extraction. tools/dev.py trusts a restored
-      # copy by its SHA-256 marker file and does not hash the files again.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore libwebrtc
+        id: webrtc
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .local/cache/webrtc
-          key: webrtc-${{ matrix.name }}-${{ hashFiles('tools/webrtc.json') }}
+          key: webrtc-${{ env.LEG }}-${{ hashFiles('tools/webrtc.json') }}
 
       - name: Install frontend dependencies
         run: python3 tools/dev.py bootstrap
 
       - name: Check
         run: python3 tools/dev.py check
+
+      - name: Save downloaded dependencies
+        if: github.ref == 'refs/heads/main' && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *deps-paths
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Save libwebrtc
+        if: github.ref == 'refs/heads/main' && steps.webrtc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/cache/webrtc
+          key: ${{ steps.webrtc.outputs.cache-primary-key }}
+
+  # Arch supports only full upgrades, so this installs the current rolling
+  # release on top of the image.
+  arch:
+    name: arch
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: archlinux:base-devel@sha256:3cbf69d2d5958d6a294f3722c5668e6187c4df8e00fa27f72352f0bf83e495e1 # base-devel
+      env: *container-env
+    defaults: *container-defaults
+    env:
+      LEG: arch
+      INSTALL: >-
+        pacman -Syu --noconfirm --needed git curl python clang webkit2gtk-4.1 pipewire
+    steps: *container-steps
+
+  fedora:
+    name: fedora-44
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80 # 44
+      env: *container-env
+    defaults: *container-defaults
+    env:
+      LEG: fedora-44
+      INSTALL: >-
+        dnf install -y git curl tar gzip xz gcc gcc-c++ clang make pkgconf-pkg-config python3
+        'pkgconfig(webkit2gtk-4.1)' pipewire-devel clang-devel
+    steps: *container-steps
+
+  # No `clang` here: Leap's clang 19 brings libclang13 19, which conflicts
+  # with the libclang13 of the clang 21 the clang step installs from
+  # devel:tools:compiler.
+  opensuse:
+    name: opensuse-leap-16.0
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: opensuse/leap:16.0@sha256:0c459bfe558e59b44b484e0e02dad66a28cdba92d24c8121d3901177938a3175 # 16.0
+      env: *container-env
+    defaults: *container-defaults
+    env:
+      LEG: opensuse-leap-16.0
+      INSTALL: >-
+        zypper --non-interactive install git curl tar gzip xz gcc gcc-c++ make pkg-config python3
+        'pkgconfig(webkit2gtk-4.1)' pipewire-devel
+    steps: *container-steps

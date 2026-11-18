@@ -57,6 +57,7 @@
 * [0043 - Make audio calls through MatrixRTC in a contained call worker](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)
 * [0048 - Add camera video to calls in the call worker](0048-add-camera-video-to-calls-in-the-call-worker.md)
 * [0049 - Contain the call worker on Linux and macOS](0049-contain-the-call-worker-on-linux-and-macos.md)
+* [0051 - Tier CI by event and run the full matrix in the merge queue](0051-tier-ci-by-event-and-run-the-full-matrix-in-the-merge-queue.md)
 
 ## Superseded Records
 
