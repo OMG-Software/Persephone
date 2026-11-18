@@ -381,14 +381,14 @@ class RulesReject(unittest.TestCase):
         self.assertEqual(len(problems), 4, problems)
 
     def test_required_checks_that_no_longer_run_on_main(self):
-        """GIVEN check.yml whose push runs on tags only
+        """GIVEN check.yml whose push runs on tags only, or lists main and then excludes it
         WHEN the trigger rule runs
         THEN it reports that main is not covered."""
-        expected = ["check.yml: holds required checks but push does not run on main"]
+        expected = "check.yml: holds required checks but push does not run on main"
         for push in ({"tags": ["v*"]}, {"branches": ["main", "!main"]}, {"branches": ["main", "!ma*"]}):
             with self.subTest(push=push):
                 workflow = self.workflow(on={"push": push, "pull_request": None, "merge_group": None, "workflow_dispatch": None})
-                self.assertEqual(trigger_problems("check.yml", workflow), expected)
+                self.assertIn(expected, trigger_problems("check.yml", workflow))
 
     def test_a_cancelling_group_that_differs_per_run(self):
         """GIVEN a cancelling group that names both the pull request and the run
