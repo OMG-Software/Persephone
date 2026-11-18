@@ -8,6 +8,7 @@ one. PyYAML parses the workflows. Where it is missing these tests are skipped,
 except where PERSEPHONE_WORKFLOW_TESTS=required (check.yml's ubuntu-latest
 job, which installs it): there the import fails."""
 
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -134,8 +135,12 @@ def trigger_problems(name, workflow):
             if event not in on:
                 problems.append(f"{name}: holds required checks but has no {event}")
     push = on.get("push") or {}
-    if name == REQUIRED_WORKFLOW and "main" not in (push.get("branches") or []):
-        problems.append(f"{name}: holds required checks but push does not run on main")
+    if name == REQUIRED_WORKFLOW:
+        listed = push.get("branches") or []
+        # A negative pattern that matches main excludes it again.
+        excluded = any(b.startswith("!") and fnmatch.fnmatchcase("main", b[1:]) for b in listed)
+        if "main" not in listed or excluded:
+            problems.append(f"{name}: holds required checks but push does not run on main")
     if "branches" in push and "branches-ignore" in push:
         problems.append(f"{name}: push has both branches and branches-ignore")
     branches = push.get("branches") or []
@@ -379,8 +384,11 @@ class RulesReject(unittest.TestCase):
         """GIVEN check.yml whose push runs on tags only
         WHEN the trigger rule runs
         THEN it reports that main is not covered."""
-        workflow = self.workflow(on={"push": {"tags": ["v*"]}, "pull_request": None, "merge_group": None, "workflow_dispatch": None})
-        self.assertEqual(trigger_problems("check.yml", workflow), ["check.yml: holds required checks but push does not run on main"])
+        expected = ["check.yml: holds required checks but push does not run on main"]
+        for push in ({"tags": ["v*"]}, {"branches": ["main", "!main"]}, {"branches": ["main", "!ma*"]}):
+            with self.subTest(push=push):
+                workflow = self.workflow(on={"push": push, "pull_request": None, "merge_group": None, "workflow_dispatch": None})
+                self.assertEqual(trigger_problems("check.yml", workflow), expected)
 
     def test_a_cancelling_group_that_differs_per_run(self):
         """GIVEN a cancelling group that names both the pull request and the run
