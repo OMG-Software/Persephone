@@ -440,7 +440,19 @@ mod tests {
             Err(ListError::Cancelled)
         );
         assert!(host.ended.load(Ordering::SeqCst));
-        assert!(host.sent.lock().unwrap().is_empty(), "nothing was asked");
+        // `finish` queues `Leave`; the fake worker's thread records it later.
+        // Wait for it, so the check below sees every command that was sent.
+        for _ in 0..100 {
+            if !host.sent.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            *host.sent.lock().unwrap(),
+            vec![ToWorker::Leave],
+            "the worker was told to leave and was not asked to list"
+        );
     }
 
     /// GIVEN a worker that fails, answers another message, closes, or does
