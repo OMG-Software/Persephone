@@ -8,7 +8,6 @@ one. PyYAML parses the workflows. Where it is missing these tests are skipped,
 except where PERSEPHONE_WORKFLOW_TESTS=required (check.yml's ubuntu-latest
 job, which installs it): there the import fails."""
 
-import fnmatch
 import json
 import os
 from pathlib import Path
@@ -135,12 +134,11 @@ def trigger_problems(name, workflow):
             if event not in on:
                 problems.append(f"{name}: holds required checks but has no {event}")
     push = on.get("push") or {}
-    if name == REQUIRED_WORKFLOW:
-        listed = push.get("branches") or []
-        # A negative pattern that matches main excludes it again.
-        excluded = any(b.startswith("!") and fnmatch.fnmatchcase("main", b[1:]) for b in listed)
-        if "main" not in listed or excluded:
-            problems.append(f"{name}: holds required checks but push does not run on main")
+    # The whole filter, not a pattern match: GitHub's filter syntax (`*`,
+    # `**`, `+`, `?`, `[]`, `!`) differs from fnmatch, and a later negative
+    # pattern can exclude main again.
+    if name == REQUIRED_WORKFLOW and push.get("branches") != ["main"]:
+        problems.append(f"{name}: holds required checks but push branches are not exactly [main]")
     if "branches" in push and "branches-ignore" in push:
         problems.append(f"{name}: push has both branches and branches-ignore")
     branches = push.get("branches") or []
@@ -384,8 +382,13 @@ class RulesReject(unittest.TestCase):
         """GIVEN check.yml whose push runs on tags only, or lists main and then excludes it
         WHEN the trigger rule runs
         THEN it reports that main is not covered."""
-        expected = "check.yml: holds required checks but push does not run on main"
-        for push in ({"tags": ["v*"]}, {"branches": ["main", "!main"]}, {"branches": ["main", "!ma*"]}):
+        expected = "check.yml: holds required checks but push branches are not exactly [main]"
+        for push in (
+            {"tags": ["v*"]},
+            {"branches": ["main", "!main"]},
+            {"branches": ["main", "!ma*"]},
+            {"branches": ["main", "!ma+in"]},
+        ):
             with self.subTest(push=push):
                 workflow = self.workflow(on={"push": push, "pull_request": None, "merge_group": None, "workflow_dispatch": None})
                 self.assertIn(expected, trigger_problems("check.yml", workflow))
