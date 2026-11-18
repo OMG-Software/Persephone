@@ -5,7 +5,11 @@
 //!
 //! Raw ioctls through `libc`, no V4L2 crate. A node is a camera when it has
 //! the single-plane video-capture and streaming capabilities; metadata and
-//! output nodes are skipped. The ID is the node's bus information. Formats:
+//! output nodes are skipped. The ID joins the node's driver, card (model
+//! name) and bus information (port), so another camera model in the same
+//! port has another ID and a saved choice finds nothing (`NotFound`). Two
+//! cameras of the same model in the same port have the same ID: these ioctls
+//! report no serial number. Formats:
 //! NV12, YU12 (I420) and YUYV at most 1280x720; no MJPEG. Buffers are mapped
 //! read-only (`MMAP` streaming). Opening a node is the only side effect of
 //! listing: nothing streams.
@@ -299,16 +303,28 @@ fn open_node(index: u32) -> Option<OwnedFd> {
     Some(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
-/// The ID (bus information) and name (card) of a capture node.
+/// The ID ([`camera_id`]) and name (card) of a capture node. A node without
+/// a driver name or bus information is not listed.
 fn identify(fd: RawFd) -> Option<(String, String)> {
     let mut capability: Capability = zeroed_struct();
     ioctl(fd, VIDIOC_QUERYCAP, &mut capability).ok()?;
     if !is_capture_node(capability.capabilities, capability.device_caps) {
         return None;
     }
-    let id = field_text(&capability.bus_info)?;
+    let driver = field_text(&capability.driver)?;
+    let bus_info = field_text(&capability.bus_info)?;
     let name = field_text(&capability.card).unwrap_or_default();
-    Some((id, name))
+    Some((camera_id(&driver, &name, &bus_info), name))
+}
+
+/// The camera ID: driver, card and bus information, in that order, joined by
+/// `|`. A `\` or `|` inside a field is escaped with `\`, so two different
+/// field sets never give the same ID. The bus information alone names a
+/// port, not a device; with the driver and the card, a different camera
+/// model plugged into the same port does not match a saved choice.
+fn camera_id(driver: &str, card: &str, bus_info: &str) -> String {
+    let escape = |field: &str| field.replace('\\', "\\\\").replace('|', "\\|");
+    format!("{}|{}|{}", escape(driver), escape(card), escape(bus_info))
 }
 
 /// The capture nodes, as (ID, name). Streams nothing.
@@ -679,6 +695,27 @@ mod tests {
         assert_eq!(field_text(&[0xff, 0xfe, 0]), None);
     }
 
+    /// GIVEN the same port WHEN another camera model or driver is plugged in
+    /// THEN its ID differs; separators inside fields cannot make two field
+    /// sets collide, and the ID fits the protocol's limit.
+    #[test]
+    fn given_camera_fields_then_the_id_names_the_device_not_only_the_port() {
+        let port = "usb-0000:00:14.0-1";
+        let saved = camera_id("uvcvideo", "HD Webcam C270", port);
+        assert_eq!(saved, "uvcvideo|HD Webcam C270|usb-0000:00:14.0-1");
+        assert_ne!(camera_id("uvcvideo", "Other Cam", port), saved);
+        assert_ne!(camera_id("gspca", "HD Webcam C270", port), saved);
+        assert_ne!(
+            camera_id("uvcvideo", "HD Webcam C270", "usb-0000:00:14.0-2"),
+            saved
+        );
+        assert_ne!(camera_id("a|b", "c", "d"), camera_id("a", "b|c", "d"));
+        assert_ne!(camera_id("a\\", "|b", "c"), camera_id("a", "\\|b", "c"));
+        assert_eq!(camera_id("a|b\\", "", "c"), "a\\|b\\\\||c");
+        let widest = camera_id(&"|".repeat(16), &"|".repeat(32), &"|".repeat(32));
+        assert!(widest.len() <= persephone_call_protocol::MAX_DEVICE_ID_BYTES);
+    }
+
     /// GIVEN a size range WHEN the standard sizes are taken THEN only those
     /// inside the range and on the step remain.
     #[test]
@@ -723,6 +760,9 @@ mod tests {
     /// NotFound and no other camera is used.
     #[test]
     fn given_unknown_id_when_opened_then_not_found() {
-        assert_eq!(open("no-such-bus-info").err(), Some(CameraState::NotFound));
+        assert_eq!(
+            open("uvcvideo|No Such Camera|usb-none").err(),
+            Some(CameraState::NotFound)
+        );
     }
 }

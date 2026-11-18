@@ -157,10 +157,18 @@ The worker applies two stages itself.
 * Formats: NV12, I420 and YUYV only, at most 1280x720. The worker converts
   YUYV to I420. It decodes no MJPEG. PipeWire buffers must be shared memory
   (`MemFd` or `MemPtr`); DMA buffers are refused.
-* Camera IDs: the PipeWire `node.name` on the portal path, the V4L2 bus
-  information on the V4L2 path. A camera chosen on one path is not found on
-  the other, so the camera stays off with `NotFound`; the worker never
-  takes another camera.
+* Camera IDs: the PipeWire `node.name` on the portal path. On the V4L2
+  path, the driver, card (model name) and bus information of the node,
+  joined with `|` (a `|` or `\` inside a field is escaped). The bus
+  information alone names a port, not a device, so it is not the ID by
+  itself: a camera of another model or driver in the same port does not
+  match a saved choice. A saved camera that does not match stays off with
+  `NotFound`, and so does a camera chosen on the other path. The worker
+  never takes another camera in its place.
+* Limit: the V4L2 ioctls on `/dev/video*` give no serial number, so two
+  cameras of the same model swapped in the same port have the same ID. A
+  serial number would need the media controller (`/dev/media*`) or sysfs,
+  which the Landlock policy does not allow.
 
 ### macOS: launch and containment
 
