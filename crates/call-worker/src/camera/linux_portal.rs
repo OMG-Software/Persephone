@@ -698,7 +698,10 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     remote.mainloop.run();
     // A chosen camera's stream that never started: one round trip handles
     // every registry event the server sent before, so a removal of the
-    // camera is seen whatever order it and the stream error came in.
+    // camera is seen whatever order it and the stream error came in. If the
+    // round trip times out or fails before a removal arrives, the camera's
+    // absence is not established and the open reports `Unavailable`; both
+    // results are failures that never fall back to another camera.
     let unreported = {
         let shared = shared.borrow();
         !shared.streaming && shared.open_result.is_some()
@@ -750,8 +753,11 @@ mod tests {
 
     /// GIVEN a chosen camera's stream that fails before it starts WHEN the
     /// stream error comes before the camera's removal THEN nothing is
-    /// reported at the error, and the end of the capture reports `NotFound`;
-    /// without a removal it reports `Unavailable`.
+    /// reported at the error, and the end of the capture reports `NotFound`.
+    /// WHEN no removal arrives before the end (the round trip timed out or
+    /// failed, or the camera is still there) THEN it reports `Unavailable`.
+    /// The round trip itself needs a PipeWire server, which unit tests do not
+    /// have; this checks the decision on both sides of it.
     #[test]
     fn given_a_stream_error_before_the_removal_then_not_found_is_reported() {
         for removed in [true, false] {
