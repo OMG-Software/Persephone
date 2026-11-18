@@ -22,11 +22,15 @@
     settings,
     failure,
     mac,
+    profilePassphrase,
     onchange
   }: {
     settings: AccountSettings;
     failure: string | null;
     mac: boolean;
+    // The idle lock and the lock shortcut exist only while the profile has a
+    // passphrase (ADR-0050). The saved idle time stays as it is.
+    profilePassphrase: boolean;
     // Only the settings a control changes, down to one timeline switch; the
     // caller lays them over the stored ones.
     onchange: (patch: SettingsPatch) => void;
@@ -264,26 +268,28 @@
       picture tells your homeserver, and the server that holds the picture, that you looked at it.
       Persephone decodes pictures in its contained image decoder.
     </p>
-    <label for="idle-lock">Lock Persephone when this computer is not used</label>
-    <!-- Only Windows reads the computer's idle time yet (ADR-0025); elsewhere
-         the setting could not take effect, so it is not offered. -->
-    <select
-      id="idle-lock"
-      class="field"
-      disabled={idleUnavailable}
-      value={idleUnavailable ? 0 : settings.idleLockMinutes}
-      onchange={(event) => onchange({ idleLockMinutes: Number(event.currentTarget.value) })}
-    >
-      {#each IDLE_LOCK_CHOICES as minutes (minutes)}
-        <option value={minutes}>{idleLockText(minutes)}</option>
-      {/each}
-    </select>
-    <p class="note">
-      {idleUnavailable
-        ? 'Not available on this system yet: Persephone cannot read how long it has been idle.'
-        : 'Counts time without keyboard or mouse input on this computer, in any program. Locking closes the profile; your passphrase opens it again.'}
-      Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
-    </p>
+    {#if profilePassphrase}
+      <label for="idle-lock">Lock Persephone when this computer is not used</label>
+      <!-- Only Windows reads the computer's idle time yet (ADR-0025); elsewhere
+           the setting could not take effect, so it is not offered. -->
+      <select
+        id="idle-lock"
+        class="field"
+        disabled={idleUnavailable}
+        value={idleUnavailable ? 0 : settings.idleLockMinutes}
+        onchange={(event) => onchange({ idleLockMinutes: Number(event.currentTarget.value) })}
+      >
+        {#each IDLE_LOCK_CHOICES as minutes (minutes)}
+          <option value={minutes}>{idleLockText(minutes)}</option>
+        {/each}
+      </select>
+      <p class="note">
+        {idleUnavailable
+          ? 'Not available on this system yet: Persephone cannot read how long it has been idle.'
+          : 'Counts time without keyboard or mouse input on this computer, in any program. Locking closes the profile; your passphrase opens it again.'}
+        Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
+      </p>
+    {/if}
   </div>
   {#if failure}
     <p role="alert" class="error">{failure}</p>

@@ -248,7 +248,7 @@ mod tests {
     use crate::{
         credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
         passphrase::{KdfParams, Unlock},
-        store::{self, KEY_FILE, STORE_DIR},
+        store::{self, STORE_DIR, VAULT_KEY_FILE},
         vault::{KeyProtector, VaultError},
     };
     use persephone_contracts::StoreState;
@@ -648,9 +648,9 @@ mod tests {
             .unwrap();
         assert!(stores.close());
         assert!(open(second.path()).close());
-        let key_path = first.path().join(KEY_FILE);
+        let key_path = first.path().join(VAULT_KEY_FILE);
         let original = fs::read(&key_path).unwrap();
-        fs::copy(second.path().join(KEY_FILE), &key_path).unwrap();
+        fs::copy(second.path().join(VAULT_KEY_FILE), &key_path).unwrap();
         let unlock = Unlock {
             source: Arc::new(Fixture),
             kdf: KdfParams::new(64, 1, 1).unwrap(),

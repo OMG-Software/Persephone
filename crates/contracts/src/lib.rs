@@ -1748,7 +1748,8 @@ pub struct JoinedRoom {
 pub enum StoreState {
     /// No profile was given; nothing is stored.
     NotConfigured,
-    /// The store is open with its key, unsealed by the profile passphrase.
+    /// The store is open with its key (unsealed by the profile passphrase
+    /// when the profile has one, ADR-0050).
     Protected,
     /// Locked on request; the stores are closed.
     Locked,
@@ -1909,6 +1910,9 @@ pub enum SecurityOperation {
     WaitingForPassword,
     /// The core's own window is asking for the recovery key.
     WaitingForRecoveryKey,
+    /// The core's own window is asking for the profile passphrase, to turn
+    /// it on or off (ADR-0050).
+    WaitingForPassphrase,
     /// The core's own window is asking whether to accept a contact's new
     /// identity (ADR-0007).
     WaitingForConfirmation,
@@ -1956,6 +1960,12 @@ pub enum SecurityError {
     DeviceNotFound,
     /// A new recovery key was made and shown, but saving it to a file failed.
     RecoveryKeyNotSaved,
+    /// Too many wrong entries of the current profile passphrase, so the
+    /// passphrase was not turned off.
+    PassphraseRejected,
+    /// The profile's key file or the OS vault failed, so the passphrase
+    /// setting did not change.
+    ProfileUnavailable,
     /// Anything else.
     Failed,
 }
@@ -2074,6 +2084,9 @@ pub struct SecurityStatus {
     /// is incomplete. It may delete that backup and start a new one, after a
     /// confirmation in the core's own window (ADR-0040).
     pub can_start_new_backup: bool,
+    /// The local profile asks for a passphrase before it opens (ADR-0050).
+    /// Off by default.
+    pub profile_passphrase: bool,
 }
 
 impl SecurityStatus {
@@ -2086,6 +2099,7 @@ impl SecurityStatus {
             verification: None,
             can_set_up_recovery: false,
             can_start_new_backup: false,
+            profile_passphrase: false,
         }
     }
 }

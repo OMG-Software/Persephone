@@ -825,3 +825,34 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         "device_setting_unreadable"
     );
 }
+
+/// GIVEN the profile passphrase setting WHEN a security status crosses the
+/// wire THEN it carries `profilePassphrase`, off by default, the new codes
+/// keep their snake_case names, and unknown fields stay refused.
+#[test]
+fn security_status_carries_the_profile_passphrase_setting() {
+    use persephone_contracts::{SecurityError, SecurityOperation, SecurityStatus};
+    let mut status = SecurityStatus::unknown();
+    assert!(!status.profile_passphrase, "off by default");
+    status.profile_passphrase = true;
+    status.operation = SecurityOperation::WaitingForPassphrase;
+    status.error = Some(SecurityError::PassphraseRejected);
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["profilePassphrase"], true);
+    assert_eq!(json["operation"], "waiting_for_passphrase");
+    assert_eq!(json["error"], "passphrase_rejected");
+    assert_eq!(
+        serde_json::to_value(SecurityError::ProfileUnavailable).unwrap(),
+        "profile_unavailable"
+    );
+    assert_eq!(
+        serde_json::from_value::<SecurityStatus>(json.clone()).unwrap(),
+        status
+    );
+    let mut missing = json.clone();
+    missing.as_object_mut().unwrap().remove("profilePassphrase");
+    assert!(serde_json::from_value::<SecurityStatus>(missing).is_err());
+    let mut extra = json;
+    extra["passphrase"] = "x".into();
+    assert!(serde_json::from_value::<SecurityStatus>(extra).is_err());
+}
