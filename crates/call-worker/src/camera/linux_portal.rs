@@ -510,10 +510,18 @@ impl<F> StreamData<F> {
     /// failure is reported only when the loop has ended and the registry
     /// events that came before it are handled (`run`, then
     /// [`Shared::finish`]): a stream error can arrive before the removal of
-    /// the camera that caused it.
+    /// the camera that caused it. After the loop has ended, a stream error
+    /// does not end the registry drain, so a removal that comes after it is
+    /// still read.
     fn fail(&self) {
-        self.shared.borrow_mut().stream_failed();
-        quit(&self.mainloop);
+        let closed = {
+            let mut shared = self.shared.borrow_mut();
+            shared.stream_failed();
+            shared.closed
+        };
+        if !closed {
+            quit(&self.mainloop);
+        }
     }
 }
 

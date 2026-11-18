@@ -129,13 +129,15 @@ The worker applies two stages itself.
     `xdg-desktop-portal`);
   * a portal that refuses access is not a missing portal. The camera then
     stays off with `Unavailable`. There is no fallback after a refusal, and
-    the core sends no `SetCamera` for it. The worker closes a descriptor
-    that a camera-on does not use.
+    the core sends no `SetCamera` for it. Each camera-on on this path goes
+    directly after its own descriptor; the worker closes a descriptor that
+    its camera-on does not use.
 * Portal path: when the camera turns on (or a list of cameras is asked
   for), the core calls `AccessCamera` and waits for its `Response` for at
   most 60 seconds. On success it calls `OpenPipeWireRemote` and sends the
   returned descriptor to the worker over the camera channel (`SCM_RIGHTS`,
-  one descriptor and one byte). It then sends `SetCamera`. The worker
+  one descriptor and one byte). It then sends `SetCamera` to turn the
+  camera on, or `ListDevices` to list the cameras. The worker
   connects to that PipeWire remote, which shows only the camera nodes the
   portal allows. It never opens a device node or the session bus.
 * Listing on the portal path asks the portal for access, so the desktop may

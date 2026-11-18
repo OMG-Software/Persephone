@@ -873,8 +873,12 @@ enum CameraStop {
 
 /// A camera-on that starts no open closes the portal remote the core sent
 /// with it (Linux portal path), so that remote can never start a later
-/// capture. The core sends the remote before the on, so it is waiting now.
-/// Off the portal path there is none.
+/// capture. On the portal path the core sends each camera-on directly after
+/// its own remote and sends no other camera-on (`Call::camera_command` in
+/// the core), so the remote waiting now is this command's. If a newer remote
+/// came first (a race of microseconds against a desktop dialog), it is
+/// closed and its open reports `Unavailable`: the failure is closed. Off the
+/// portal path there is none.
 fn drop_unused_handle() {
     #[cfg(target_os = "linux")]
     drop(crate::camera_channel::take_handle());
