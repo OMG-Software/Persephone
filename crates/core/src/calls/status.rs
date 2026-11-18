@@ -12,8 +12,8 @@ use super::worker::StartError;
 use matrix_sdk::{Client, RoomState, ruma::RoomId};
 use persephone_call_protocol::FailureCode;
 use persephone_contracts::{
-    CALL_PARTICIPANTS_MAX, CallEnd, CallJoinError, CallParticipant, CallPhase, CallReadiness,
-    CallStatus, CallUnavailable,
+    CALL_PARTICIPANTS_MAX, CALL_VIDEO_TILES_MAX, CallEnd, CallJoinError, CallParticipant,
+    CallPhase, CallReadiness, CallStatus, CallUnavailable,
 };
 
 /// The page's code for the end of a call.
@@ -76,6 +76,8 @@ pub fn status(state: &CallState) -> CallStatus {
             room_id,
             muted,
             participants,
+            camera,
+            video,
         } => CallStatus {
             phase: CallPhase::Active,
             room_id: Some(room_id.to_string()),
@@ -93,6 +95,8 @@ pub fn status(state: &CallState) -> CallStatus {
                 .collect(),
             ended: None,
             join_error: None,
+            camera: *camera,
+            video: video.iter().take(CALL_VIDEO_TILES_MAX).cloned().collect(),
         },
         CallState::Ended { room_id, reason } => CallStatus {
             phase: CallPhase::Ended,
@@ -209,6 +213,7 @@ mod tests {
     use crate::calls::controller::Participant;
     use crate::calls::sfu::{Refusal, SfuError};
     use matrix_sdk::ruma::{owned_device_id, owned_user_id, room_id};
+    use persephone_contracts::{CallCamera, CallVideoTile};
 
     /// GIVEN each worker failure code WHEN mapped THEN it becomes the page's
     /// code: containment, a connection failure, the audio device or internal.
@@ -308,6 +313,8 @@ mod tests {
             room_id: room.clone(),
             muted: true,
             participants: Vec::new(),
+            camera: CallCamera::Off,
+            video: Vec::new(),
         };
         let refused = join_reply(CallError::Declined, &CallState::Idle);
         assert_eq!(refused.phase, CallPhase::Idle);
@@ -353,7 +360,18 @@ mod tests {
             room_id: room.clone(),
             muted: false,
             participants: many,
+            camera: CallCamera::On,
+            video: vec![
+                CallVideoTile {
+                    tile: 0,
+                    participant: None,
+                    own: true,
+                };
+                CALL_VIDEO_TILES_MAX + 3
+            ],
         });
+        assert_eq!(active.camera, CallCamera::On);
+        assert_eq!(active.video.len(), CALL_VIDEO_TILES_MAX);
         assert_eq!(active.phase, CallPhase::Active);
         assert_eq!(active.participants.len(), CALL_PARTICIPANTS_MAX);
         assert_eq!(active.participants[0].user_id, "@a:example.org");

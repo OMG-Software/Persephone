@@ -5,17 +5,20 @@
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
   import CallBar from './CallBar.svelte';
+  import CallVideo from './CallVideo.svelte';
   import {
     CallRefresher,
     IDLE_CALL,
     JOIN_ERROR_TEXT,
     STARTING_TEXT,
     callButton,
-    inCall
+    hasVideo,
+    inCall,
+    videoCallButton
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callJoin, callLeave, callMute, callReadiness, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callJoin, callLeave, callMute, callReadiness, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -734,6 +737,9 @@
   let callDismissed = $state(false);
   let callPending = $state(false);
   let callBusy = $state(false);
+  let cameraBusy = $state(false);
+  // Goes up each time the core says a new video picture is waiting.
+  let callVideoTicks = $state(0);
   let callJoinText = $state<string | null>(null);
   let readiness = $state<CallReadiness | null>(null);
   let callNames = $state<ReadonlyMap<string, string>>(new Map());
@@ -751,6 +757,9 @@
   );
   const callView = $derived(
     selected === null ? null : callButton(selected, readiness, callState, callPending)
+  );
+  const videoView = $derived(
+    selected === null ? null : videoCallButton(selected, readiness, callState, callPending)
   );
 
   // Ask again whether the shown room can take a call when the room or the
@@ -808,14 +817,14 @@
     });
   }
 
-  async function startCall() {
+  async function startCall(video: boolean) {
     if (!selected || callPending || callView?.disabled) return;
     const roomId = selected;
     const generation = sessionGeneration;
     callPending = true;
     callJoinText = null;
     try {
-      const reply = await callJoin(roomId);
+      const reply = await callJoin(roomId, video);
       if (generation !== sessionGeneration) return;
       callJoinText = reply.joinError === null ? null : JOIN_ERROR_TEXT[reply.joinError];
       callState = reply;
@@ -846,6 +855,22 @@
     }
   }
 
+  async function toggleCamera() {
+    const generation = sessionGeneration;
+    cameraBusy = true;
+    try {
+      const reply = await callCamera(callState.camera !== 'on' && callState.camera !== 'starting');
+      if (generation === sessionGeneration) callState = reply;
+    } catch {
+      // The next call change shows the real state.
+    } finally {
+      if (generation === sessionGeneration) {
+        cameraBusy = false;
+        callRefresher.request();
+      }
+    }
+  }
+
   async function leaveCall() {
     const generation = sessionGeneration;
     try {
@@ -871,6 +896,7 @@
     readinessRequest += 1;
     callPending = false;
     callBusy = false;
+    cameraBusy = false;
     callJoinText = null;
     callDismissed = false;
     callNames = new Map();
@@ -1324,7 +1350,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request());
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1));
     } catch {
       unavailable = true;
       return;
@@ -2561,10 +2587,15 @@
           roomName={callRoomName}
           names={callNames}
           busy={callBusy}
+          {cameraBusy}
           onmute={toggleMute}
+          oncamera={toggleCamera}
           onleave={leaveCall}
           ondismiss={dismissCall}
         />
+        {#if hasVideo(callState)}
+          <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} />
+        {/if}
         {#if selectedRoom}
           <div class="room-view" style:--members-width="{shownMembers}px">
           <div class="room-main">
@@ -2621,11 +2652,24 @@
                   disabled={callView.disabled && callView.reason === null}
                   aria-disabled={callView.disabled && callView.reason !== null ? 'true' : undefined}
                   aria-describedby={callView.reason !== null ? 'call-reason' : undefined}
-                  onclick={startCall}
+                  onclick={() => startCall(false)}
                 >
                   <Icon name="phone" />
                   {callView.label}
                 </button>
+                {#if videoView && !videoView.hidden}
+                  <button
+                    type="button"
+                    class="secondary call-start call-start-video"
+                    disabled={videoView.disabled && videoView.reason === null}
+                    aria-disabled={videoView.disabled && videoView.reason !== null ? 'true' : undefined}
+                    aria-describedby={videoView.reason !== null ? 'call-reason' : undefined}
+                    onclick={() => startCall(true)}
+                  >
+                    <Icon name="video" />
+                    {videoView.label}
+                  </button>
+                {/if}
                 {#if callView.reason !== null}
                   <span id="call-reason" class="visually-hidden">{callView.reason}</span>
                 {/if}

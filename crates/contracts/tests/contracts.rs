@@ -753,8 +753,13 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             name: "Headset".into(),
         }],
         playout: Vec::new(),
+        cameras: vec![persephone_contracts::CallDevice {
+            id: "usb#cam".into(),
+            name: "Camera".into(),
+        }],
         selected_recording: Some("{0.0.1}.{a}".into()),
         selected_playout: None,
+        selected_camera: Some("usb#cam".into()),
         unreadable: false,
     };
     let json = serde_json::to_value(&devices).unwrap();
@@ -764,8 +769,10 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             "supported": true,
             "recording": [{"id": "{0.0.1}.{a}", "name": "Headset"}],
             "playout": [],
+            "cameras": [{"id": "usb#cam", "name": "Camera"}],
             "selectedRecording": "{0.0.1}.{a}",
             "selectedPlayout": null,
+            "selectedCamera": "usb#cam",
             "unreadable": false
         })
     );
@@ -773,9 +780,12 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         serde_json::from_value::<persephone_contracts::CallDevices>(json.clone()).unwrap(),
         devices
     );
-    let mut extra = json;
+    let mut extra = json.clone();
     extra["path"] = "C:/x".into();
     assert!(serde_json::from_value::<persephone_contracts::CallDevices>(extra).is_err());
+    let mut without = json.clone();
+    without.as_object_mut().unwrap().remove("cameras");
+    assert!(serde_json::from_value::<persephone_contracts::CallDevices>(without).is_err());
     assert_eq!(
         serde_json::to_value(persephone_contracts::CallEnd::DeviceNotFound).unwrap(),
         "device_not_found"

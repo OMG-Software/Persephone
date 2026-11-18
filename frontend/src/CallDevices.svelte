@@ -4,12 +4,13 @@
   import { callDevices, setCallDevices } from './bridge';
   import { deviceChoice, deviceOptions, deviceValue, devicesNote } from './calls';
 
-  // The call microphone and speaker (ADR-0043). The core lists them through a
+  // The call microphone, speaker and camera (ADR-0043, ADR-0048). The core lists them through a
   // contained worker and keeps the choice with the profile. Device names come
   // from the operating system: they are shown as plain text only.
   let devices = $state<CallDevices | null>(null);
   let recording = $state('');
   let playout = $state('');
+  let camera = $state('');
   let loading = $state(false);
   let saving = $state(false);
   let failure = $state<string | null>(null);
@@ -33,6 +34,7 @@
       devices = next;
       recording = deviceValue(next.selectedRecording);
       playout = deviceValue(next.selectedPlayout);
+      camera = deviceValue(next.selectedCamera);
     } catch (reason) {
       if (mine === generation) failure = failures[String(reason)] ?? 'The call devices could not be listed.';
     } finally {
@@ -42,13 +44,13 @@
 
   onMount(load);
 
-  // Saves both choices at once; the menus keep the values shown on failure.
+  // Saves all choices at once; the menus keep the values shown on failure.
   async function save() {
     if (saving) return;
     saving = true;
     failure = null;
     try {
-      await setCallDevices(deviceChoice(recording), deviceChoice(playout));
+      await setCallDevices(deviceChoice(recording), deviceChoice(playout), deviceChoice(camera));
       if (devices) devices = { ...devices, unreadable: false };
     } catch (reason) {
       failure = failures[String(reason)] ?? 'The call devices could not be saved.';
@@ -59,6 +61,7 @@
 
   let recordingOptions = $derived(deviceOptions(devices?.recording ?? [], deviceChoice(recording)));
   let playoutOptions = $derived(deviceOptions(devices?.playout ?? [], deviceChoice(playout)));
+  let cameraOptions = $derived(deviceOptions(devices?.cameras ?? [], deviceChoice(camera)));
 </script>
 
 <div class="call-devices">
@@ -86,6 +89,18 @@
       onchange={save}
     >
       {#each playoutOptions as option (option.value)}
+        <option value={option.value}>{option.label}</option>
+      {/each}
+    </select>
+    <label for="call-camera">Camera</label>
+    <select
+      id="call-camera"
+      class="field"
+      disabled={!devices || loading || saving}
+      bind:value={camera}
+      onchange={save}
+    >
+      {#each cameraOptions as option (option.value)}
         <option value={option.value}>{option.label}</option>
       {/each}
     </select>

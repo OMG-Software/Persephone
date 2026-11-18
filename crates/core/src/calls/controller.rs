@@ -1,4 +1,4 @@
-//! The call controller: one MatrixRTC audio call at a time (ADR-0043).
+//! The call controller: one MatrixRTC call at a time (ADR-0043, ADR-0048).
 //!
 //! The controller does the Matrix side of a call and drives the contained
 //! call worker. Joining fails closed at every step and undoes the earlier
@@ -25,6 +25,7 @@ use super::membership::{
 };
 use super::readiness::{TurnServers, sfu_transport, turn_servers};
 use super::sfu::{self, OpenIdToken, SfuError};
+use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{CallHost, CallWorkerLink, StartError, WorkerProcess};
 use super::{MAX_CALL_MEMBERS, keys::FrameKey};
 use crate::session::Admission;
@@ -36,7 +37,10 @@ use matrix_sdk::{
         api::client::account::request_openid_token, events::AnySyncStateEvent, serde::Raw,
     },
 };
-use persephone_call_protocol::{FailureCode, FrameKeyMsg, FromWorker, ToWorker, TurnServer};
+use persephone_call_protocol::{
+    CameraState, FailureCode, FrameKeyMsg, FromWorker, ToWorker, TurnServer, VIDEO_TILES,
+};
+use persephone_contracts::{CallCamera, CallParticipantRef, CallVideoTile};
 use std::{
     collections::{BTreeSet, HashSet},
     future::Future,
@@ -151,6 +155,9 @@ pub enum CallState {
         muted: bool,
         /// At most [`MAX_CALL_MEMBERS`], other devices only.
         participants: Vec<Participant>,
+        camera: CallCamera,
+        /// The active video tiles, at most [`VIDEO_TILES`].
+        video: Vec<CallVideoTile>,
     },
     Ended {
         room_id: OwnedRoomId,
@@ -262,10 +269,20 @@ struct View {
     members: Vec<ActiveMember>,
     speaking: HashSet<String>,
     keyed: HashSet<String>,
+    camera: CallCamera,
+    /// The identity on each remote tile (tile 1 first), as the worker said
+    /// with `VideoStarted`. An identity that is not a member yet waits here
+    /// and shows once the membership is read.
+    remote_video: [Option<String>; REMOTE_TILES],
 }
 
+/// Remote video tiles: tiles 1 to 4.
+const REMOTE_TILES: usize = VIDEO_TILES as usize - 1;
+
 impl View {
-    fn new(room_id: OwnedRoomId, own_sfu: Url) -> Self {
+    /// `video` is true when the call is joined with the camera on: the
+    /// camera is `starting` until the worker says how it went.
+    fn new(room_id: OwnedRoomId, own_sfu: Url, video: bool) -> Self {
         Self {
             room_id,
             own_sfu,
@@ -274,6 +291,12 @@ impl View {
             members: Vec::new(),
             speaking: HashSet::new(),
             keyed: HashSet::new(),
+            camera: if video {
+                CallCamera::Starting
+            } else {
+                CallCamera::Off
+            },
+            remote_video: Default::default(),
         }
     }
 
@@ -288,9 +311,120 @@ impl View {
         self.keyed.retain(|id| present.contains(id.as_str()));
     }
 
+    /// The page asked for the camera on or off. The state shows `starting`
+    /// until the worker answers.
+    fn request_camera(&mut self, on: bool) -> Applied {
+        let next = match (on, self.camera) {
+            (true, CallCamera::On | CallCamera::Starting) => self.camera,
+            (true, _) => CallCamera::Starting,
+            (false, _) => CallCamera::Off,
+        };
+        self.set_camera(next)
+    }
+
+    fn set_camera(&mut self, camera: CallCamera) -> Applied {
+        if self.camera == camera {
+            return Applied::Same;
+        }
+        self.camera = camera;
+        Applied::Changed
+    }
+
+    /// Forgets the video of a member that left.
+    fn forget_video(&mut self, identity: &str) -> bool {
+        let mut changed = false;
+        for slot in &mut self.remote_video {
+            if slot.as_deref() == Some(identity) {
+                *slot = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Which tiles may keep a picture: the own tile while the camera is on,
+    /// a remote tile while its identity is a current member.
+    fn video_allowed(&self) -> (bool, [bool; REMOTE_TILES]) {
+        let remote = std::array::from_fn(|i| {
+            self.remote_video[i]
+                .as_deref()
+                .is_some_and(|identity| self.is_member(identity))
+        });
+        (self.camera == CallCamera::On, remote)
+    }
+
+    /// The video tiles the page shows: the own camera while it is on, and
+    /// each remote tile whose identity is a current member.
+    fn video_tiles(&self) -> Vec<CallVideoTile> {
+        let (own, _) = self.video_allowed();
+        let mut tiles = Vec::with_capacity(VIDEO_TILES as usize);
+        if own {
+            tiles.push(CallVideoTile {
+                tile: 0,
+                participant: None,
+                own: true,
+            });
+        }
+        for (index, identity) in self.remote_video.iter().enumerate() {
+            let Some(member) = identity
+                .as_deref()
+                .and_then(|identity| self.members.iter().find(|m| m.identity == identity))
+            else {
+                continue;
+            };
+            tiles.push(CallVideoTile {
+                tile: index as u8 + 1,
+                participant: Some(CallParticipantRef {
+                    user_id: member.user_id.to_string(),
+                    device_id: member.device_id.to_string(),
+                }),
+                own: false,
+            });
+        }
+        tiles
+    }
+
     fn apply(&mut self, event: &FromWorker) -> Applied {
         match event {
             FromWorker::Ready { .. } | FromWorker::ParticipantJoined { .. } => Applied::Same,
+            FromWorker::Camera { state } => self.set_camera(match state {
+                CameraState::Off => CallCamera::Off,
+                CameraState::On => CallCamera::On,
+                CameraState::NotFound => CallCamera::NotFound,
+                CameraState::Unavailable => CallCamera::Unavailable,
+            }),
+            FromWorker::VideoStarted { tile, identity } => {
+                let Some(slot) = usize::from(*tile)
+                    .checked_sub(1)
+                    .and_then(|index| self.remote_video.get_mut(index))
+                else {
+                    return Applied::Same;
+                };
+                if slot.as_deref() == Some(identity.as_str()) {
+                    return Applied::Same;
+                }
+                *slot = Some(identity.clone());
+                Applied::Changed
+            }
+            FromWorker::VideoStopped { tile } => {
+                let Some(slot) = usize::from(*tile)
+                    .checked_sub(1)
+                    .and_then(|index| self.remote_video.get_mut(index))
+                else {
+                    // Tile 0 follows the camera state, which has its own message.
+                    return Applied::Same;
+                };
+                if slot.take().is_some() {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
+            // The reader turns a picture announcement into a picture; the
+            // bare message is a protocol violation.
+            FromWorker::VideoFrame { .. } => {
+                Applied::End(EndReason::WorkerFailed(FailureCode::Protocol))
+            }
             FromWorker::Connected => {
                 let changed = !self.connected;
                 self.connected = true;
@@ -301,7 +435,8 @@ impl View {
                 }
             }
             FromWorker::ParticipantLeft { identity } => {
-                if self.speaking.remove(identity) {
+                let video = self.forget_video(identity);
+                if self.speaking.remove(identity) || video {
                     Applied::Changed
                 } else {
                     Applied::Same
@@ -363,6 +498,8 @@ impl View {
                     keyed: self.keyed.contains(&m.identity),
                 })
                 .collect(),
+            camera: self.camera,
+            video: self.video_tiles(),
         }
     }
 }
@@ -518,8 +655,10 @@ pub struct DirectConsent(());
 pub struct JoinScope {
     pub generation: u64,
     pub runtime: Handle,
-    /// The saved microphone and speaker, read with the proxy setting.
+    /// The saved microphone, speaker and camera, read with the proxy setting.
     pub devices: super::devices::Selection,
+    /// Join with the camera on, and with the `video` call intent (ADR-0048).
+    pub video: bool,
 }
 
 // ---------------------------------------------------------------------
@@ -547,8 +686,15 @@ struct RunHandle {
     /// Ends the worker from outside the call task.
     kill: Arc<dyn WorkerProcess>,
     stop: Option<oneshot::Sender<()>>,
-    commands: mpsc::Sender<bool>,
+    commands: mpsc::Sender<Command>,
     task: Option<JoinHandle<()>>,
+}
+
+/// What the page asks of a running call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    Mute(bool),
+    Camera(bool),
 }
 
 /// Tells the owner of the controller that the state changed.
@@ -560,10 +706,24 @@ struct Inner {
     slot: Mutex<Slot>,
     admission: Mutex<Admission>,
     listener: Mutex<Option<Listener>>,
+    /// Tells the owner that a video picture arrived; see
+    /// [`CallController::set_video_listener`].
+    video_listener: Mutex<Option<Notifier>>,
+    /// The picture store of the running worker, from its start to the end of
+    /// the call or join.
+    video: Mutex<Option<VideoStore>>,
     next_id: AtomicU64,
 }
 
 impl Inner {
+    /// Ends the picture store: every picture goes and no later one is kept.
+    fn close_video(&self) {
+        let store = plain(&self.video).take();
+        if let Some(store) = store {
+            store.close();
+        }
+    }
+
     fn slot(&self) -> MutexGuard<'_, Slot> {
         plain(&self.slot)
     }
@@ -600,6 +760,8 @@ impl Inner {
         };
         if mine {
             *slot = Slot::Idle;
+            // Under the slot lock, so a later join cannot meet this close.
+            self.close_video();
         }
         mine
     }
@@ -657,6 +819,8 @@ impl CallController {
                 slot: Mutex::new(Slot::Idle),
                 admission: Mutex::new(admission),
                 listener: Mutex::new(None),
+                video_listener: Mutex::new(None),
+                video: Mutex::new(None),
                 next_id: AtomicU64::new(0),
             }),
         }
@@ -671,6 +835,21 @@ impl CallController {
     /// changed it. It must not block and must not call the controller.
     pub fn set_listener(&self, listener: Listener) {
         *plain(&self.inner.listener) = Some(listener);
+    }
+
+    /// Calls `listener` after each kept video picture, on the worker read
+    /// thread. It must not block and must not call the controller. Pictures
+    /// are not part of the call state: fetch them with
+    /// [`CallController::video_picture`].
+    pub fn set_video_listener(&self, listener: Notifier) {
+        *plain(&self.inner.video_listener) = Some(listener);
+    }
+
+    /// The newest picture on `tile` with a number above `after`, if any. It
+    /// holds the store lock only to copy a pointer.
+    pub fn video_picture(&self, tile: u8, after: u64) -> Option<Picture> {
+        let store = plain(&self.inner.video).clone();
+        store?.newest(tile, after)
     }
 
     /// The content-free call state.
@@ -856,6 +1035,12 @@ impl CallController {
         // 4. The worker, before any Matrix side effect.
         let link = start_worker(&self.inner.host).await?;
         *plain(kill) = Some(link.kill_handle());
+        // Pictures go to the store from now on; the store ends with the call.
+        let store = link.video();
+        if let Some(notifier) = plain(&self.inner.video_listener).clone() {
+            store.set_notifier(notifier);
+        }
+        *plain(&self.inner.video) = Some(store);
         setup.link = Some(link);
         flags.halt()?;
 
@@ -903,6 +1088,7 @@ impl CallController {
                     device_id: device_id.clone(),
                     sfu_url: sfu.advertised.clone(),
                     created_ts,
+                    video: scope.video,
                 },
                 failed_tx,
             ),
@@ -916,6 +1102,7 @@ impl CallController {
             &user_id,
             &sfu.advertised,
             Some(created_ts),
+            scope.video,
         );
         setup.membership_sent = true;
         time::timeout(
@@ -951,6 +1138,8 @@ impl CallController {
             own_key: worker_key(own_keys.current()),
             recording_device: scope.devices.recording.clone(),
             playout_device: scope.devices.playout.clone(),
+            camera_device: scope.devices.camera.clone(),
+            camera_on: scope.video,
         };
         if link.send(join).is_err() {
             setup.link = Some(link);
@@ -965,7 +1154,7 @@ impl CallController {
             own_device: device_id,
             own_keys,
             remote: RemoteKeys::new(),
-            view: View::new(room_id.to_owned(), sfu.url),
+            view: View::new(room_id.to_owned(), sfu.url, scope.video),
             changes,
             incoming,
             failed,
@@ -1003,10 +1192,54 @@ impl CallController {
         match &*self.inner.slot() {
             Slot::Running(run) => run
                 .commands
-                .try_send(muted)
+                .try_send(Command::Mute(muted))
                 .map_err(|_| CallError::NotInCall),
             _ => Err(CallError::NotInCall),
         }
+    }
+
+    /// Turns the camera on or off. Refused unless a call is connected. The
+    /// state shows `starting` at once when turned on, and the worker's answer
+    /// replaces it. Turning the camera off drops the own picture at once.
+    pub fn set_camera(&self, on: bool) -> Result<(), CallError> {
+        let slot = self.inner.slot();
+        let Slot::Running(run) = &*slot else {
+            return Err(CallError::NotInCall);
+        };
+        if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
+            return Err(CallError::NotInCall);
+        }
+        run.commands
+            .try_send(Command::Camera(on))
+            .map_err(|_| CallError::NotInCall)?;
+        if !on && let Some(store) = plain(&self.inner.video).clone() {
+            // Stale pictures stop at once, before the task takes the command.
+            store.clear_tile(0);
+        }
+        drop(slot);
+        let changed = self.inner.state.send_if_modified(|state| {
+            let CallState::Active { camera, video, .. } = state else {
+                return false;
+            };
+            let next = match (on, *camera) {
+                (true, CallCamera::On | CallCamera::Starting) => *camera,
+                (true, _) => CallCamera::Starting,
+                (false, _) => CallCamera::Off,
+            };
+            if next == *camera {
+                return false;
+            }
+            *camera = next;
+            video.retain(|tile| !tile.own || next == CallCamera::On);
+            true
+        });
+        if changed {
+            let listener = plain(&self.inner.listener).clone();
+            if let Some(listener) = listener {
+                listener();
+            }
+        }
+        Ok(())
     }
 
     /// The session stops admitting work (lock, sign-out, an ended session,
@@ -1043,6 +1276,7 @@ impl CallController {
         if let Some(kill) = kill {
             kill.kill();
         }
+        self.inner.close_video();
         self.inner.publish(CallState::Ended {
             room_id,
             reason: EndReason::SessionEnded,
@@ -1113,6 +1347,8 @@ struct KeeperMembership {
     /// As advertised (`SfuService::advertised`).
     sfu_url: String,
     created_ts: u64,
+    /// The `m.call.intent` of the join; a refresh keeps it.
+    video: bool,
 }
 
 /// Restarts the delayed leave and refreshes the membership while the call
@@ -1167,6 +1403,7 @@ async fn keeper(
                             &membership.user_id,
                             &membership.sfu_url,
                             Some(membership.created_ts),
+                            membership.video,
                         );
                         let _ = time::timeout(
                             SEND_TIMEOUT,
@@ -1231,7 +1468,7 @@ async fn run_call(
     flags: Arc<Flags>,
     mut call: Call,
     mut stop: oneshot::Receiver<()>,
-    mut commands: mpsc::Receiver<bool>,
+    mut commands: mpsc::Receiver<Command>,
 ) {
     let room_id = call.view.room_id.clone();
     let mut guard = EndGuard {
@@ -1256,6 +1493,30 @@ async fn run_call(
 }
 
 impl Call {
+    /// On the portal camera path, asks the camera portal for access and sends
+    /// the PipeWire remote to the worker (ADR-0049). The wait for the user
+    /// runs off the runtime threads, up to 60 seconds. Returns false when the
+    /// call was asked to stop meanwhile. Any failure sends nothing: the worker
+    /// finds no remote and the camera stays unavailable. There is no fallback
+    /// to another camera path.
+    #[cfg(target_os = "linux")]
+    async fn send_portal_remote(&self, stop: &mut oneshot::Receiver<()>) -> bool {
+        use crate::platform::linux::camera_portal;
+        use std::os::fd::AsFd;
+        if self.link.camera_path() != super::worker::CameraPath::Portal {
+            return true;
+        }
+        let task = tokio::task::spawn_blocking(camera_portal::open_remote);
+        let opened = tokio::select! {
+            _ = &mut *stop => return false,
+            joined = task => joined,
+        };
+        if let Ok(Ok(remote)) = opened {
+            let _ = self.link.send_camera_handle(remote.as_fd());
+        }
+        true
+    }
+
     fn send_worker(&self, message: ToWorker) -> Result<(), EndReason> {
         self.link
             .send(message)
@@ -1264,6 +1525,12 @@ impl Call {
 
     fn publish(&self, inner: &Inner) {
         inner.publish(self.view.state());
+    }
+
+    /// Tells the picture store which tiles may show now.
+    fn sync_video(&self) {
+        let (own, remote) = self.view.video_allowed();
+        self.link.video().sync(own, remote);
     }
 
     /// The call members now, from the room's stored state. `None` when they
@@ -1315,6 +1582,7 @@ impl Call {
         if let Some(members) = self.read_members().await? {
             self.view.set_members(others(members, &self.own_identity));
         }
+        self.sync_video();
         let outgoing = Outgoing {
             key: self.own_keys.current().clone(),
             use_at: Instant::now(),
@@ -1330,7 +1598,7 @@ impl Call {
         &mut self,
         inner: &Inner,
         stop: &mut oneshot::Receiver<()>,
-        commands: &mut mpsc::Receiver<bool>,
+        commands: &mut mpsc::Receiver<Command>,
     ) -> Result<(), EndReason> {
         let mut parked: Vec<Candidate> = Vec::new();
         let mut pending_own: Option<(Instant, FrameKeyMsg)> = None;
@@ -1341,16 +1609,39 @@ impl Call {
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
                 command = commands.recv() => match command {
-                    Some(muted) => self.send_worker(ToWorker::SetMuted { muted })?,
+                    Some(Command::Mute(muted)) => self.send_worker(ToWorker::SetMuted { muted })?,
+                    Some(Command::Camera(on)) => {
+                        // Portal path (Linux): the remote goes to the worker
+                        // before the camera starts. A refusal sends nothing,
+                        // and the worker then reports the camera unavailable.
+                        #[cfg(target_os = "linux")]
+                        if on && !self.send_portal_remote(stop).await {
+                            return Ok(());
+                        }
+                        self.send_worker(ToWorker::SetCamera { on })?;
+                        if self.view.request_camera(on) == Applied::Changed {
+                            self.sync_video();
+                            self.publish(inner);
+                        }
+                    }
                     None => return Ok(()),
                 },
                 event = self.link.events.recv() => {
                     let Some(event) = event else {
                         return Err(EndReason::WorkerStopped);
                     };
+                    // A tile whose stream starts or stops starts empty.
+                    if let FromWorker::VideoStarted { tile, .. }
+                    | FromWorker::VideoStopped { tile } = &event
+                    {
+                        self.link.video().clear_tile(*tile);
+                    }
                     match self.view.apply(&event) {
                         Applied::Same => {}
-                        Applied::Changed => self.publish(inner),
+                        Applied::Changed => {
+                            self.sync_video();
+                            self.publish(inner);
+                        }
                         Applied::End(reason) => return Err(reason),
                     }
                 }
@@ -1405,6 +1696,7 @@ impl Call {
             let view = &self.view;
             self.remote.retain_members(|id| view.is_member(id));
             for identity in &diff.left {
+                self.view.forget_video(identity);
                 self.send_worker(ToWorker::RemoveParticipant {
                     identity: identity.clone(),
                 })?;
@@ -1424,6 +1716,8 @@ impl Call {
         for candidate in std::mem::take(parked) {
             self.key_received(inner, candidate, parked)?;
         }
+        // A video stream may have started before its member was known.
+        self.sync_video();
         self.publish(inner);
         Ok(())
     }
@@ -1606,6 +1900,7 @@ mod tests {
         let mut view = View::new(
             room_id!("!r:example.org").to_owned(),
             Url::parse("https://sfu.example.org").unwrap(),
+            false,
         );
         view.set_members(vec![
             member("@a:example.org", "A", "https://sfu.example.org"),
@@ -1684,7 +1979,8 @@ mod tests {
         assert_eq!(
             view.apply(&FromWorker::Devices {
                 recording: Vec::new(),
-                playout: Vec::new()
+                playout: Vec::new(),
+                cameras: Vec::new()
             }),
             Applied::End(EndReason::WorkerFailed(FailureCode::Protocol))
         );
@@ -2005,7 +2301,11 @@ mod tests {
             own_device: owned_device_id!("A"),
             own_keys: OwnKeys::new(Instant::now()).unwrap(),
             remote: RemoteKeys::new(),
-            view: View::new(room.clone(), Url::parse("https://sfu.example.org").unwrap()),
+            view: View::new(
+                room.clone(),
+                Url::parse("https://sfu.example.org").unwrap(),
+                false,
+            ),
             changes,
             incoming,
             failed,
@@ -2043,5 +2343,340 @@ mod tests {
                 reason: EndReason::SessionEnded
             }
         );
+    }
+
+    /// GIVEN a joining call WHEN it joins with video THEN the camera is
+    /// `starting` until the worker answers; without video it is off.
+    #[test]
+    fn given_a_join_with_video_then_the_camera_starts_until_the_worker_answers() {
+        let url = || Url::parse("https://sfu.example.org").unwrap();
+        let room = || room_id!("!r:example.org").to_owned();
+        let mut with = View::new(room(), url(), true);
+        with.apply(&FromWorker::Connected);
+        let CallState::Active { camera, video, .. } = with.state() else {
+            panic!("active");
+        };
+        assert_eq!(camera, CallCamera::Starting);
+        assert!(video.is_empty(), "no own tile until the camera is on");
+        assert_eq!(
+            View::new(room(), url(), false).camera,
+            CallCamera::Off,
+            "no video, no camera"
+        );
+    }
+
+    /// GIVEN each camera state the worker reports WHEN applied THEN the page
+    /// sees the matching code, the own tile shows only while the camera is
+    /// on, and the picture store allows the own tile only then.
+    #[test]
+    fn given_camera_reports_then_the_state_and_the_own_tile_follow() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        for (state, camera) in [
+            (CameraState::On, CallCamera::On),
+            (CameraState::NotFound, CallCamera::NotFound),
+            (CameraState::Unavailable, CallCamera::Unavailable),
+            (CameraState::Off, CallCamera::Off),
+        ] {
+            assert_eq!(view.apply(&FromWorker::Camera { state }), Applied::Changed);
+            assert_eq!(view.camera, camera);
+            let on = camera == CallCamera::On;
+            assert_eq!(view.video_allowed().0, on);
+            assert_eq!(view.video_tiles().len(), usize::from(on));
+            assert_eq!(
+                view.apply(&FromWorker::Camera { state }),
+                Applied::Same,
+                "a repeat changes nothing"
+            );
+        }
+        view.apply(&FromWorker::Camera {
+            state: CameraState::On,
+        });
+        assert_eq!(
+            view.video_tiles(),
+            [CallVideoTile {
+                tile: 0,
+                participant: None,
+                own: true
+            }]
+        );
+    }
+
+    /// GIVEN the page turns the camera on and off WHEN requested THEN it is
+    /// `starting` until the worker says `on`, an `on` camera stays on, and
+    /// off is at once.
+    #[test]
+    fn given_camera_requests_then_the_camera_starts_and_stops() {
+        let mut view = view();
+        assert_eq!(view.request_camera(false), Applied::Same);
+        assert_eq!(view.request_camera(true), Applied::Changed);
+        assert_eq!(view.camera, CallCamera::Starting);
+        assert_eq!(view.request_camera(true), Applied::Same);
+        view.apply(&FromWorker::Camera {
+            state: CameraState::On,
+        });
+        assert_eq!(view.request_camera(true), Applied::Same);
+        assert_eq!(view.camera, CallCamera::On);
+        assert_eq!(view.request_camera(false), Applied::Changed);
+        assert_eq!(view.camera, CallCamera::Off);
+        view.apply(&FromWorker::Camera {
+            state: CameraState::Unavailable,
+        });
+        assert_eq!(view.request_camera(true), Applied::Changed);
+        assert_eq!(view.camera, CallCamera::Starting, "a retry starts again");
+    }
+
+    fn started(tile: u8, identity: &str) -> FromWorker {
+        FromWorker::VideoStarted {
+            tile,
+            identity: identity.to_owned(),
+        }
+    }
+
+    /// GIVEN video starts on remote tiles WHEN the identity is a member THEN
+    /// the tile shows with that member's IDs and its picture is allowed; an
+    /// identity that is not a member shows nothing, and shows once it joins.
+    #[test]
+    fn given_remote_video_then_only_members_show_and_may_keep_pictures() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        assert_eq!(
+            view.apply(&started(1, "@a:example.org:A")),
+            Applied::Changed
+        );
+        assert_eq!(view.apply(&started(1, "@a:example.org:A")), Applied::Same);
+        view.apply(&started(2, "@stranger:example.org:S"));
+        assert_eq!(view.video_allowed(), (false, [true, false, false, false]));
+        let CallState::Active { video, .. } = view.state() else {
+            panic!("active");
+        };
+        assert_eq!(
+            video,
+            [CallVideoTile {
+                tile: 1,
+                participant: Some(CallParticipantRef {
+                    user_id: "@a:example.org".to_owned(),
+                    device_id: "A".to_owned(),
+                }),
+                own: false,
+            }]
+        );
+        view.set_members(vec![member(
+            "@stranger:example.org",
+            "S",
+            "https://sfu.example.org",
+        )]);
+        assert_eq!(view.video_allowed().1, [false, true, false, false]);
+        assert_eq!(view.video_tiles()[0].tile, 2);
+    }
+
+    /// GIVEN video on tiles WHEN a stream stops, a member leaves, or the tile
+    /// is out of range THEN the tile goes, and nothing out of range changes.
+    #[test]
+    fn given_video_ends_then_the_tile_goes_and_bad_tiles_are_ignored() {
+        let mut view = view();
+        view.apply(&started(1, "@a:example.org:A"));
+        view.apply(&started(3, "@b:example.org:B"));
+        assert_eq!(view.apply(&started(0, "@a:example.org:A")), Applied::Same);
+        assert_eq!(view.apply(&started(5, "@a:example.org:A")), Applied::Same);
+        assert_eq!(
+            view.apply(&FromWorker::VideoStopped { tile: 0 }),
+            Applied::Same
+        );
+        assert_eq!(
+            view.apply(&FromWorker::VideoStopped { tile: 5 }),
+            Applied::Same
+        );
+        assert_eq!(view.video_allowed().1, [true, false, true, false]);
+        assert_eq!(
+            view.apply(&FromWorker::VideoStopped { tile: 1 }),
+            Applied::Changed
+        );
+        assert_eq!(
+            view.apply(&FromWorker::VideoStopped { tile: 1 }),
+            Applied::Same
+        );
+        assert_eq!(
+            view.apply(&FromWorker::ParticipantLeft {
+                identity: "@b:example.org:B".to_owned()
+            }),
+            Applied::Changed
+        );
+        assert_eq!(view.video_allowed().1, [false; 4]);
+        view.apply(&started(2, "@a:example.org:A"));
+        assert!(view.forget_video("@a:example.org:A"));
+        assert!(!view.forget_video("@a:example.org:A"));
+    }
+
+    /// GIVEN a bare picture announcement WHEN applied THEN it is a protocol
+    /// violation: the reader turns announcements into pictures.
+    #[test]
+    fn given_a_bare_video_frame_message_then_the_call_ends() {
+        assert_eq!(
+            view().apply(&FromWorker::VideoFrame {
+                tile: 1,
+                rotation: 0
+            }),
+            Applied::End(EndReason::WorkerFailed(FailureCode::Protocol))
+        );
+    }
+
+    /// A running call with a picture store and a published state, and the
+    /// receiver of what the page asked of it.
+    fn running_call(
+        calls: &CallController,
+        state: CallState,
+    ) -> (VideoStore, mpsc::Receiver<Command>, Arc<AtomicBool>) {
+        let room = room_id!("!r:example.org");
+        let (killed, kill) = killer();
+        let (commands, command_rx) = mpsc::channel(4);
+        let store = VideoStore::new();
+        *plain(&calls.inner.video) = Some(store.clone());
+        *calls.inner.slot() = Slot::Running(RunHandle {
+            id: 5,
+            room_id: room.to_owned(),
+            flags: Arc::new(Flags::default()),
+            kill,
+            stop: None,
+            commands,
+            task: None,
+        });
+        calls.inner.publish(state);
+        (store, command_rx, killed)
+    }
+
+    fn active_state() -> CallState {
+        CallState::Active {
+            room_id: room_id!("!r:example.org").to_owned(),
+            muted: false,
+            participants: Vec::new(),
+            camera: CallCamera::Off,
+            video: Vec::new(),
+        }
+    }
+
+    /// GIVEN no call, a joining call, or a call whose queue is closed WHEN the
+    /// camera is turned on THEN it is refused and no state changes.
+    #[tokio::test]
+    async fn given_no_connected_call_then_the_camera_is_refused() {
+        let calls = controller(FakeHost::new(true, None));
+        assert_eq!(calls.set_camera(true), Err(CallError::NotInCall));
+        let _guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        assert_eq!(calls.set_camera(true), Err(CallError::NotInCall));
+
+        let calls = controller(FakeHost::new(true, None));
+        let joining = CallState::Joining {
+            room_id: room_id!("!r:example.org").to_owned(),
+        };
+        let (_store, _commands, _) = running_call(&calls, joining.clone());
+        assert_eq!(
+            calls.set_camera(true),
+            Err(CallError::NotInCall),
+            "a call that is not connected yet"
+        );
+        assert_eq!(calls.state(), joining);
+
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, commands, _) = running_call(&calls, active_state());
+        drop(commands);
+        assert_eq!(calls.set_camera(true), Err(CallError::NotInCall));
+        assert_eq!(calls.state(), active_state());
+    }
+
+    /// GIVEN a connected call WHEN the camera is turned on THEN the task gets
+    /// the command and the state shows `starting` at once; WHEN it is turned
+    /// off THEN the own picture and tile go at once.
+    #[tokio::test]
+    async fn given_a_connected_call_then_the_camera_command_reaches_the_task() {
+        let calls = controller(FakeHost::new(true, None));
+        let (store, mut commands, _) = running_call(&calls, active_state());
+        let changes = Arc::new(AtomicUsize::new(0));
+        let counted = changes.clone();
+        calls.set_listener(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }));
+        assert_eq!(calls.set_camera(true), Ok(()));
+        assert_eq!(commands.try_recv().ok(), Some(Command::Camera(true)));
+        let CallState::Active { camera, .. } = calls.state() else {
+            panic!("active");
+        };
+        assert_eq!(camera, CallCamera::Starting);
+        assert_eq!(changes.load(Ordering::SeqCst), 1);
+
+        // The worker answered: the own tile shows and holds a picture.
+        store.sync(true, [false; 4]);
+        assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
+        calls.inner.publish(CallState::Active {
+            room_id: room_id!("!r:example.org").to_owned(),
+            muted: false,
+            participants: Vec::new(),
+            camera: CallCamera::On,
+            video: vec![CallVideoTile {
+                tile: 0,
+                participant: None,
+                own: true,
+            }],
+        });
+        assert!(calls.video_picture(0, 0).is_some());
+        assert_eq!(calls.set_camera(false), Ok(()));
+        assert_eq!(commands.try_recv().ok(), Some(Command::Camera(false)));
+        assert!(calls.video_picture(0, 0).is_none(), "the picture is gone");
+        let CallState::Active { camera, video, .. } = calls.state() else {
+            panic!("active");
+        };
+        assert_eq!(camera, CallCamera::Off);
+        assert!(video.is_empty());
+    }
+
+    /// GIVEN a picture in the store WHEN the page asks THEN only a newer
+    /// picture is returned; with no call there is none.
+    #[tokio::test]
+    async fn given_a_stored_picture_then_the_controller_returns_newer_ones_only() {
+        let calls = controller(FakeHost::new(true, None));
+        assert!(calls.video_picture(1, 0).is_none(), "no call, no picture");
+        let (store, _commands, _) = running_call(&calls, active_state());
+        store.sync(false, [true, false, false, false]);
+        assert!(store.insert(1, 3, 2, 2, vec![5; 16]));
+        let picture = calls.video_picture(1, 0).expect("picture");
+        assert_eq!((picture.seq, picture.rotation), (1, 3));
+        assert!(calls.video_picture(1, 1).is_none());
+        assert!(calls.video_picture(9, 0).is_none());
+    }
+
+    /// GIVEN pictures in a running call WHEN the session ends THEN every
+    /// picture is dropped and later ones are refused; WHEN the call ends by
+    /// itself THEN the same holds.
+    #[tokio::test]
+    async fn given_the_call_ends_then_every_picture_is_dropped() {
+        for session_end in [true, false] {
+            let calls = controller(FakeHost::new(true, None));
+            let (store, _commands, _) = running_call(&calls, active_state());
+            store.sync(true, [true; 4]);
+            assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
+            assert!(store.insert(4, 0, 2, 2, vec![1; 16]));
+            if session_end {
+                calls.stop_for_session_end();
+            } else {
+                assert!(calls.inner.release(5));
+            }
+            assert!(calls.video_picture(0, 0).is_none());
+            assert!(calls.video_picture(4, 0).is_none());
+            store.sync(true, [true; 4]);
+            assert!(!store.insert(0, 0, 2, 2, vec![1; 16]), "{session_end}");
+        }
+    }
+
+    /// GIVEN a join that fails after the worker started WHEN its guard drops
+    /// THEN the picture store of that worker is closed.
+    #[tokio::test]
+    async fn given_a_join_that_ends_then_its_picture_store_is_closed() {
+        let calls = controller(FakeHost::new(true, None));
+        let guard = calls.claim(room_id!("!r:example.org")).unwrap();
+        let store = VideoStore::new();
+        *plain(&calls.inner.video) = Some(store.clone());
+        store.sync(true, [true; 4]);
+        drop(guard);
+        assert!(!store.insert(0, 0, 2, 2, vec![1; 16]));
+        assert!(plain(&calls.inner.video).is_none());
     }
 }

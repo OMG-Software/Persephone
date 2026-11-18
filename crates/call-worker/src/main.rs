@@ -7,20 +7,26 @@
 //! may write to it, and the worker writes nothing to stderr.
 //!
 //! Three bounded queues connect the parts: the stdin reader thread, the
-//! call task, and the stdout writer thread.
+//! call task, and the stdout writer thread. Video pictures do not use the
+//! output queue: see `output.rs`.
 
+mod args;
+mod camera;
+mod camera_channel;
 mod containment;
 mod mapping;
+mod output;
 mod session;
+mod video;
 
 use std::io;
 use std::process::ExitCode;
 
-use persephone_call_protocol::{
-    FailureCode, FromWorker, ReadError, ToWorker, read_message, write_message,
-};
+use persephone_call_protocol::{FailureCode, FromWorker, ReadError, ToWorker, read_message};
 use persephone_media_protocol::ResourceBudgets;
 use tokio::sync::mpsc;
+
+use crate::output::Output;
 
 pub const EXIT_DONE: u8 = 0;
 pub const EXIT_FAILED: u8 = 1;
@@ -29,10 +35,9 @@ pub const EXIT_CONTAINMENT: u8 = 3;
 
 /// Core messages waiting for the call task.
 const INPUT_CAPACITY: usize = 16;
-/// Worker messages waiting for the stdout writer.
-const OUTPUT_CAPACITY: usize = 64;
 
 /// What the stdin reader hands to the call task.
+#[allow(clippy::large_enum_variant)] // one value at a time in a queue of 16
 pub enum Input {
     Message(ToWorker),
     /// The core closed stdin.
@@ -42,9 +47,19 @@ pub enum Input {
 }
 
 fn main() -> ExitCode {
-    let bits = containment::missing_controls();
-    let (output, writer_queue) = mpsc::channel::<FromWorker>(OUTPUT_CAPACITY);
-    let writer = std::thread::spawn(move || write_loop(writer_queue));
+    // The arguments come first: a refused argument is a missing control, so
+    // the worker reports it as one and ends (ADR-0049).
+    let arguments_ok = args::init();
+    // Descriptor 3, the camera channel, is adopted before anything else can
+    // open a descriptor.
+    #[cfg(target_os = "linux")]
+    camera_channel::init();
+    let mut bits = containment::missing_controls();
+    if !arguments_ok {
+        bits |= containment::CHECK_FAILED;
+    }
+    let (output, writer_queue) = Output::new();
+    let writer = std::thread::spawn(move || output::write_stdout(writer_queue));
     let Ok(runtime) = build_runtime() else {
         return ExitCode::from(EXIT_UNREPORTABLE);
     };
@@ -68,7 +83,7 @@ fn build_runtime() -> io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
-async fn run(bits: u32, output: mpsc::Sender<FromWorker>) -> u8 {
+async fn run(bits: u32, output: Output) -> u8 {
     if output
         .send(FromWorker::Ready {
             containment_bits: bits,
@@ -121,18 +136,6 @@ fn read_loop(queue: mpsc::Sender<Input>) {
             return;
         }
     }
-}
-
-/// Writes worker messages until every sender is gone. Returns false when a
-/// write failed.
-fn write_loop(mut queue: mpsc::Receiver<FromWorker>) -> bool {
-    let mut stdout = io::stdout().lock();
-    while let Some(message) = queue.blocking_recv() {
-        if write_message(&mut stdout, &message).is_err() {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]

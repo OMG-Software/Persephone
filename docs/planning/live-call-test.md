@@ -435,6 +435,29 @@ Pass criteria are in brackets. Each step records its observed result.
 14. **Proxy prompt.** Set a SOCKS5 proxy in the profile and join.
     [the core's own dialog appears; "No" stops the join]
 
+### Video steps (ADR-0048, added 17 November 2026, not yet run)
+
+15. **Cameras listed.** Settings lists the cameras through a contained
+    worker; no camera light comes on. [list shown; worker exits with 0]
+16. **Video call from Persephone.** [member event has `m.call.intent`
+    `video`; the camera light comes on; the own tile shows the camera]
+17. **Video both ways.** Element Call turns its camera on. [each side sees
+    the other; LiveKit reports encrypted video tracks; Persephone's tile is
+    at most 640x360]
+18. **Camera off and on** in the call bar. [the camera light goes out and
+    the peer's tile for Persephone goes away; on again, the peer sees video]
+19. **Rejoin with video.** Element Call leaves and rejoins. [Element Call
+    sees Persephone's video after the key rotation, so the camera track uses
+    the current own key index]
+20. **Camera from an audio call.** Join with the call button, then turn the
+    camera on. [intent stays `audio`; the peer sees video]
+21. **Chosen camera missing.** Choose a camera, unplug it, turn the camera
+    on. [the call bar says the camera is not connected; no other camera
+    light comes on; audio goes on]
+22. **Containment.** Record whether any mitigation must be relaxed for
+    Media Foundation in the AppContainer, and the worker's peak memory with
+    four remote videos against its 512 MiB Job limit.
+
 ## Evidence
 
 - A dated report `docs/evidence/live-calls.md` in the format of

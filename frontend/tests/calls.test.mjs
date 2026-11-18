@@ -14,7 +14,12 @@ import {
   JOIN_ERROR_TEXT,
   UNAVAILABLE_TEXT,
   callAnnouncement,
+  CAMERA_TEXT,
+  VIDEO_CALL_LABEL,
   callButton,
+  cameraButton,
+  hasVideo,
+  videoCallButton,
   deviceChoice,
   deviceOptions,
   deviceValue,
@@ -178,4 +183,51 @@ test('GIVEN device replies WHEN the note is chosen THEN unsupported, unreadable 
   assert.equal(devicesNote(base), DEVICES_NOTE_TEXT);
   assert.equal(devicesNote({ ...base, unreadable: true }), DEVICES_UNREADABLE_TEXT);
   assert.equal(devicesNote({ ...base, supported: false }), DEVICES_UNSUPPORTED_TEXT);
+});
+
+test('GIVEN each camera state WHEN its text is read THEN failures say what happened and working states say nothing', () => {
+  assert.deepEqual(Object.keys(CAMERA_TEXT).sort(), ['not_found', 'off', 'on', 'starting', 'unavailable']);
+  assert.equal(CAMERA_TEXT.not_found, 'The chosen camera is not connected');
+  assert.equal(CAMERA_TEXT.unavailable, 'The camera could not start');
+  assert.equal(CAMERA_TEXT.starting, 'Starting the camera…');
+  assert.equal(CAMERA_TEXT.off, '');
+  assert.equal(CAMERA_TEXT.on, '');
+});
+
+test('GIVEN each camera state WHEN the toggle is built THEN it offers to turn off only a camera that is on or starting', () => {
+  assert.deepEqual(cameraButton('off'), { label: 'Turn camera on', pressed: false });
+  assert.deepEqual(cameraButton('on'), { label: 'Turn camera off', pressed: true });
+  assert.deepEqual(cameraButton('starting'), { label: 'Turn camera off', pressed: true });
+  for (const failed of ['not_found', 'unavailable']) {
+    assert.deepEqual(cameraButton(failed), { label: 'Turn camera on', pressed: false });
+  }
+});
+
+test('GIVEN the same room states WHEN both buttons are built THEN the video button follows the call button and only the label differs', () => {
+  const cases = [
+    [ready(), IDLE_CALL, false],
+    [ready({ activeMembers: 2 }), IDLE_CALL, false],
+    [ready({ available: false, reason: 'not_encrypted' }), IDLE_CALL, false],
+    [null, IDLE_CALL, false],
+    [ready(), IDLE_CALL, true],
+    [ready(), status({ phase: 'active', roomId: '!r:s' }), false],
+    [ready(), status({ phase: 'joining', roomId: '!other:s' }), false]
+  ];
+  for (const [readiness, call, pending] of cases) {
+    const { label: callLabel, ...expected } = callButton('!r:s', readiness, call, pending);
+    const { label, ...video } = videoCallButton('!r:s', readiness, call, pending);
+    assert.deepEqual(video, expected);
+    assert.notEqual(label, callLabel);
+  }
+  assert.equal(videoCallButton('!r:s', ready(), IDLE_CALL, false).label, VIDEO_CALL_LABEL);
+  assert.equal(videoCallButton('!r:s', ready({ activeMembers: 3 }), IDLE_CALL, false).label, 'Join with video (3)');
+});
+
+test('GIVEN a call WHEN video tiles exist or not THEN the grid shows only during a call with tiles', () => {
+  const tile = { tile: 0, participant: null, own: true };
+  assert.equal(hasVideo(IDLE_CALL), false);
+  assert.equal(hasVideo(status({ phase: 'active' })), false);
+  assert.equal(hasVideo(status({ phase: 'active', video: [tile] })), true);
+  assert.equal(hasVideo(status({ phase: 'joining', video: [tile] })), true);
+  assert.equal(hasVideo(status({ phase: 'ended', video: [tile] })), false);
 });

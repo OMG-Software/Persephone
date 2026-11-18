@@ -18,7 +18,7 @@
 use crate::{
     LaunchError, WorkerPolicy,
     launch::{Launcher, Spawned},
-    unix::{self, Limits, UnixWorker},
+    unix::{self, Limits, LongLivedWorker, StartedCallWorker, UnixWorker},
 };
 use std::{
     ffi::{c_char, c_int},
@@ -66,6 +66,35 @@ impl Launcher for SeatbeltContainment {
         }
         unix::spawn(command, confirm)
     }
+}
+
+/// Starts the call worker with the macOS launch rules of ADR-0049: the media
+/// worker's launch (new session, descriptors above 2 closed at exec, empty
+/// environment) with the call limits (no file writes, no core dumps, 256
+/// descriptors; macOS enforces no address-space limit). The worker applies
+/// its call Seatbelt profile and reports `Ready`; the caller then calls
+/// `confirm_contained` on the returned worker before it sends any input.
+pub fn start_call_worker(
+    _profile: &SeatbeltContainment,
+    exe: &Path,
+) -> Result<StartedCallWorker, LaunchError> {
+    let mut command = unix::command(exe)?;
+    // SAFETY: the closure runs between fork and exec and makes only system
+    // calls; it allocates nothing.
+    unsafe {
+        command.pre_exec(|| {
+            unix::new_session()?;
+            unix::cloexec_each_above_stderr()?;
+            unix::set_call_limits(None)
+        });
+    }
+    let spawned = unix::spawn(command, confirm)?;
+    Ok(StartedCallWorker {
+        worker: LongLivedWorker::new(spawned.worker),
+        stdin: spawned.stdin,
+        stdout: spawned.stdout,
+        camera: None,
+    })
 }
 
 #[link(name = "sandbox", kind = "dylib")]

@@ -75,13 +75,19 @@ const PIPE_BUFFER_BYTES: u32 = 1024 * 1024;
 const SE_GROUP_ENABLED: u32 = 0x4;
 
 /// The only capabilities a call worker gets: network access for LiveKit and
-/// the microphone. A closed set; callers cannot add names.
+/// the microphone and the camera (`webcam`, ADR-0048). A closed set; callers
+/// cannot add names.
 #[cfg(not(feature = "dev-private-network"))]
-const CALL_CAPABILITIES: &[&str] = &["internetClient", "microphone"];
+const CALL_CAPABILITIES: &[&str] = &["internetClient", "microphone", "webcam"];
 /// Development builds for the live call test only: also private networks, so
 /// the worker reaches a disposable SFU on the WSL address. Never shipped.
 #[cfg(feature = "dev-private-network")]
-const CALL_CAPABILITIES: &[&str] = &["internetClient", "microphone", "privateNetworkClientServer"];
+const CALL_CAPABILITIES: &[&str] = &[
+    "internetClient",
+    "microphone",
+    "webcam",
+    "privateNetworkClientServer",
+];
 /// Committed memory for the call worker process.
 const CALL_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
@@ -711,13 +717,16 @@ mod tests {
     }
 
     /// GIVEN the call worker's launch spec in a build without the dev feature
-    /// WHEN read THEN it has exactly the two capabilities, no CPU limit, and
+    /// WHEN read THEN it has exactly the three capabilities, no CPU limit, and
     /// the 512 MiB memory limit.
     #[cfg(not(feature = "dev-private-network"))]
     #[test]
-    fn given_call_spec_then_capabilities_are_exactly_network_and_microphone() {
+    fn given_call_spec_then_capabilities_are_exactly_network_microphone_and_camera() {
         let spec = LaunchSpec::call();
-        assert_eq!(spec.capabilities, ["internetClient", "microphone"]);
+        assert_eq!(
+            spec.capabilities,
+            ["internetClient", "microphone", "webcam"]
+        );
         assert_eq!(spec.cpu_time_limit, None);
         assert_eq!(spec.memory_limit_bytes, 512 * 1024 * 1024);
     }
@@ -730,7 +739,12 @@ mod tests {
         let spec = LaunchSpec::call();
         assert_eq!(
             spec.capabilities,
-            ["internetClient", "microphone", "privateNetworkClientServer"]
+            [
+                "internetClient",
+                "microphone",
+                "webcam",
+                "privateNetworkClientServer"
+            ]
         );
     }
 

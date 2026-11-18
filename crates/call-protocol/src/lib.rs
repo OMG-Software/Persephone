@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
@@ -23,12 +23,27 @@ pub const MAX_TURN_CREDENTIAL_BYTES: usize = 512;
 pub const MIN_KEY_BYTES: usize = 16;
 pub const MAX_KEY_BYTES: usize = 64;
 pub const MAX_PARTICIPANTS: usize = 32;
-/// An audio device ID as libwebrtc reports it (on Windows, the endpoint ID).
+/// A device ID as the platform reports it: an audio endpoint ID from
+/// libwebrtc, or a camera's symbolic link.
 pub const MAX_DEVICE_ID_BYTES: usize = 512;
 /// A device name as the OS reports it, cut on a character boundary.
 pub const MAX_DEVICE_NAME_BYTES: usize = 256;
-/// Devices per list (microphones or speakers).
+/// Devices per list (microphones, speakers or cameras).
 pub const MAX_DEVICES: usize = 32;
+/// The longest side of a video picture, in pixels (ADR-0048).
+pub const MAX_VIDEO_SIDE: u32 = 640;
+/// The most pixels in one video picture.
+pub const MAX_VIDEO_PIXELS: u32 = 640 * 360;
+/// The most bytes in one video picture: RGBA, four bytes per pixel.
+pub const MAX_VIDEO_BYTES: usize = MAX_VIDEO_PIXELS as usize * 4;
+/// Video tiles in a call. Tile 0 is the own camera; tiles 1 to 4 are remote.
+pub const VIDEO_TILES: u8 = 5;
+/// The most pictures per second for one tile.
+pub const MAX_VIDEO_FPS: u32 = 15;
+/// The largest rotation: quarter turns clockwise, 0 to 3.
+pub const MAX_VIDEO_ROTATION: u8 = 3;
+/// The fixed length of a media-protocol frame header.
+const FRAME_HEADER_LEN: usize = 17;
 
 /// Why a message body was refused. There is no free text on purpose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,15 +96,15 @@ impl std::fmt::Debug for TurnServer {
     }
 }
 
-/// One microphone or speaker. The ID is the platform's stable device ID;
-/// the name is untrusted OS text for display only.
+/// One microphone, speaker or camera. The ID is the platform's stable
+/// device ID; the name is untrusted OS text for display only.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AudioDevice {
+pub struct MediaDevice {
     pub id: String,
     pub name: String,
 }
 
-impl AudioDevice {
+impl MediaDevice {
     /// A device that fits the wire limits, or `None` when the ID does not:
     /// empty, over [`MAX_DEVICE_ID_BYTES`], or holding a control character.
     /// The name loses its control characters and is cut on a character
@@ -125,8 +140,12 @@ pub enum ToWorker {
         recording_device: Option<String>,
         /// The speaker to use; `None` is the system default.
         playout_device: Option<String>,
+        /// The camera to use; `None` is the first camera the system lists.
+        camera_device: Option<String>,
+        /// Start the camera as the call connects.
+        camera_on: bool,
     },
-    /// Only as the first message: report the audio devices, then exit.
+    /// Only as the first message: report the devices, then exit.
     ListDevices,
     SetKey {
         identity: String,
@@ -142,6 +161,11 @@ pub enum ToWorker {
         muted: bool,
     },
     Leave,
+    /// Turn the camera on or off. The worker answers with
+    /// [`FromWorker::Camera`].
+    SetCamera {
+        on: bool,
+    },
 }
 
 impl std::fmt::Debug for ToWorker {
@@ -156,6 +180,8 @@ impl std::fmt::Debug for ToWorker {
                 own_key,
                 recording_device,
                 playout_device,
+                camera_device,
+                camera_on,
             } => f
                 .debug_struct("Join")
                 .field("sfu_url", sfu_url)
@@ -166,6 +192,8 @@ impl std::fmt::Debug for ToWorker {
                 .field("own_key", own_key)
                 .field("recording_device", recording_device)
                 .field("playout_device", playout_device)
+                .field("camera_device", camera_device)
+                .field("camera_on", camera_on)
                 .finish(),
             Self::ListDevices => f.write_str("ListDevices"),
             Self::SetKey { identity, key } => f
@@ -180,6 +208,7 @@ impl std::fmt::Debug for ToWorker {
                 .finish(),
             Self::SetMuted { muted } => f.debug_struct("SetMuted").field("muted", muted).finish(),
             Self::Leave => f.write_str("Leave"),
+            Self::SetCamera { on } => f.debug_struct("SetCamera").field("on", on).finish(),
         }
     }
 }
@@ -219,6 +248,33 @@ impl TryFrom<u8> for FailureCode {
     }
 }
 
+/// The state of the camera, as the worker reports it. A closed set with no
+/// text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum CameraState {
+    Off = 0,
+    On = 1,
+    /// The chosen camera is not connected.
+    NotFound = 2,
+    /// No camera, the OS denied it, it is in use, or capture failed.
+    Unavailable = 3,
+}
+
+impl TryFrom<u8> for CameraState {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, DecodeError> {
+        Ok(match value {
+            0 => Self::Off,
+            1 => Self::On,
+            2 => Self::NotFound,
+            3 => Self::Unavailable,
+            _ => return Err(DecodeError::InvalidValue),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FromWorker {
     /// Containment self-check result. Zero means all controls are present,
@@ -246,8 +302,30 @@ pub enum FromWorker {
     Left,
     /// The reply to `ListDevices`.
     Devices {
-        recording: Vec<AudioDevice>,
-        playout: Vec<AudioDevice>,
+        recording: Vec<MediaDevice>,
+        playout: Vec<MediaDevice>,
+        cameras: Vec<MediaDevice>,
+    },
+    /// The camera state. Sent after every `SetCamera`, after a join with
+    /// the camera on, and when capture fails during a call.
+    Camera {
+        state: CameraState,
+    },
+    /// A remote participant's video arrived on this tile (1 to 4).
+    VideoStarted {
+        tile: u8,
+        identity: String,
+    },
+    /// The video on this tile (0 to 4) ended.
+    VideoStopped {
+        tile: u8,
+    },
+    /// Announces one picture for this tile (0 to 4). Always followed at once
+    /// by exactly one `RgbaPixels` frame: use [`read_worker_item`] and
+    /// [`write_video_frame`]. `rotation` is quarter turns clockwise, 0 to 3.
+    VideoFrame {
+        tile: u8,
+        rotation: u8,
     },
 }
 
@@ -259,6 +337,7 @@ const TO_REMOVE_PARTICIPANT: u8 = 4;
 const TO_SET_MUTED: u8 = 5;
 const TO_LEAVE: u8 = 6;
 const TO_LIST_DEVICES: u8 = 7;
+const TO_SET_CAMERA: u8 = 8;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -270,6 +349,10 @@ const FROM_MUTED: u8 = 6;
 const FROM_FAILED: u8 = 7;
 const FROM_LEFT: u8 = 8;
 const FROM_DEVICES: u8 = 9;
+const FROM_CAMERA: u8 = 10;
+const FROM_VIDEO_STARTED: u8 = 11;
+const FROM_VIDEO_STOPPED: u8 = 12;
+const FROM_VIDEO_FRAME: u8 = 13;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -350,7 +433,17 @@ impl<'a> Reader<'a> {
         Ok((!id.is_empty()).then(|| id.to_owned()))
     }
 
-    fn devices(&mut self) -> Result<Vec<AudioDevice>, DecodeError> {
+    /// A tile number from `first` up to the last tile.
+    fn tile(&mut self, first: u8) -> Result<u8, DecodeError> {
+        let tile = self.u8()?;
+        if (first..VIDEO_TILES).contains(&tile) {
+            Ok(tile)
+        } else {
+            Err(DecodeError::InvalidValue)
+        }
+    }
+
+    fn devices(&mut self) -> Result<Vec<MediaDevice>, DecodeError> {
         let count = usize::from(self.u8()?);
         if count > MAX_DEVICES {
             return Err(DecodeError::TooLarge);
@@ -363,7 +456,7 @@ impl<'a> Reader<'a> {
             let name = self
                 .str(MAX_DEVICE_NAME_BYTES, CharRule::NoControl, true)?
                 .to_owned();
-            devices.push(AudioDevice { id, name });
+            devices.push(MediaDevice { id, name });
         }
         Ok(devices)
     }
@@ -416,7 +509,7 @@ fn put_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(bytes);
 }
 
-fn put_devices(out: &mut Vec<u8>, devices: &[AudioDevice]) {
+fn put_devices(out: &mut Vec<u8>, devices: &[MediaDevice]) {
     let devices = &devices[..devices.len().min(usize::from(u8::MAX))];
     out.push(devices.len() as u8);
     for device in devices {
@@ -465,6 +558,8 @@ impl ToWorker {
                 own_key,
                 recording_device,
                 playout_device,
+                camera_device,
+                camera_on,
             } => {
                 out.push(TO_JOIN);
                 put_str(&mut out, sfu_url);
@@ -480,6 +575,8 @@ impl ToWorker {
                 put_key(&mut out, own_key);
                 put_str(&mut out, recording_device.as_deref().unwrap_or(""));
                 put_str(&mut out, playout_device.as_deref().unwrap_or(""));
+                put_str(&mut out, camera_device.as_deref().unwrap_or(""));
+                out.push(u8::from(*camera_on));
             }
             Self::ListDevices => out.push(TO_LIST_DEVICES),
             Self::SetKey { identity, key } => {
@@ -500,6 +597,10 @@ impl ToWorker {
                 out.push(u8::from(*muted));
             }
             Self::Leave => out.push(TO_LEAVE),
+            Self::SetCamera { on } => {
+                out.push(TO_SET_CAMERA);
+                out.push(u8::from(*on));
+            }
         }
         out
     }
@@ -538,6 +639,8 @@ impl ToWorker {
                     own_key: reader.key()?,
                     recording_device: reader.device_choice()?,
                     playout_device: reader.device_choice()?,
+                    camera_device: reader.device_choice()?,
+                    camera_on: reader.bool()?,
                 }
             }
             TO_LIST_DEVICES => Self::ListDevices,
@@ -553,6 +656,7 @@ impl ToWorker {
                 muted: reader.bool()?,
             },
             TO_LEAVE => Self::Leave,
+            TO_SET_CAMERA => Self::SetCamera { on: reader.bool()? },
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -591,10 +695,33 @@ impl FromWorker {
                 out.push(*code as u8);
             }
             Self::Left => out.push(FROM_LEFT),
-            Self::Devices { recording, playout } => {
+            Self::Devices {
+                recording,
+                playout,
+                cameras,
+            } => {
                 out.push(FROM_DEVICES);
                 put_devices(&mut out, recording);
                 put_devices(&mut out, playout);
+                put_devices(&mut out, cameras);
+            }
+            Self::Camera { state } => {
+                out.push(FROM_CAMERA);
+                out.push(*state as u8);
+            }
+            Self::VideoStarted { tile, identity } => {
+                out.push(FROM_VIDEO_STARTED);
+                out.push(*tile);
+                put_str(&mut out, identity);
+            }
+            Self::VideoStopped { tile } => {
+                out.push(FROM_VIDEO_STOPPED);
+                out.push(*tile);
+            }
+            Self::VideoFrame { tile, rotation } => {
+                out.push(FROM_VIDEO_FRAME);
+                out.push(*tile);
+                out.push(*rotation);
             }
         }
         out
@@ -627,7 +754,26 @@ impl FromWorker {
             FROM_DEVICES => Self::Devices {
                 recording: reader.devices()?,
                 playout: reader.devices()?,
+                cameras: reader.devices()?,
             },
+            FROM_CAMERA => Self::Camera {
+                state: CameraState::try_from(reader.u8()?)?,
+            },
+            FROM_VIDEO_STARTED => Self::VideoStarted {
+                tile: reader.tile(1)?,
+                identity: reader.identity()?,
+            },
+            FROM_VIDEO_STOPPED => Self::VideoStopped {
+                tile: reader.tile(0)?,
+            },
+            FROM_VIDEO_FRAME => {
+                let tile = reader.tile(0)?;
+                let rotation = reader.u8()?;
+                if rotation > MAX_VIDEO_ROTATION {
+                    return Err(DecodeError::InvalidValue);
+                }
+                Self::VideoFrame { tile, rotation }
+            }
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -670,6 +816,26 @@ pub enum ReadError {
     /// The frame was not a Control frame.
     NotControl,
     Decode(DecodeError),
+    /// After a `VideoFrame`, the next frame was not an `RgbaPixels` frame.
+    NotPixels,
+    /// After a `VideoFrame`, the pixel frame is over the video limits. Its
+    /// body was not read.
+    VideoLimit,
+}
+
+/// What the core reads from the worker: a message, or a video picture.
+#[derive(Debug, Eq, PartialEq)]
+pub enum WorkerItem {
+    Message(FromWorker),
+    /// A [`FromWorker::VideoFrame`] with its pixel frame: `width` by `height`
+    /// RGBA pixels, bytes in the order R, G, B, A.
+    Video {
+        tile: u8,
+        rotation: u8,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
 }
 
 /// Writes one message as a Control frame and flushes it.
@@ -703,6 +869,82 @@ pub fn read_message<R: Read, M: Message>(
     M::from_body(frame.body()).map_err(ReadError::Decode)
 }
 
+/// The header of a video pixel frame is inside the video limits.
+fn video_header_fits(header: &FrameHeader) -> bool {
+    header.kind == FrameKind::RgbaPixels
+        && (1..=MAX_VIDEO_SIDE).contains(&header.width)
+        && (1..=MAX_VIDEO_SIDE).contains(&header.height)
+        && u64::from(header.width) * u64::from(header.height) <= u64::from(MAX_VIDEO_PIXELS)
+        && header.length == u64::from(header.width) * u64::from(header.height) * 4
+}
+
+/// Reads one message from the worker (the core side). After a
+/// [`FromWorker::VideoFrame`], the next frame must be an `RgbaPixels` frame
+/// inside the video limits. That header is checked before the body is
+/// allocated or its budget reserved. A missing, wrong-kind or over-limit
+/// pixel frame is an error, and the caller must treat the worker as failed.
+pub fn read_worker_item<R: Read>(
+    reader: &mut R,
+    budgets: &ResourceBudgets,
+) -> Result<WorkerItem, ReadError> {
+    let message: FromWorker = read_message(reader, budgets)?;
+    let FromWorker::VideoFrame { tile, rotation } = message else {
+        return Ok(WorkerItem::Message(message));
+    };
+    let mut wire = [0; FRAME_HEADER_LEN];
+    reader
+        .read_exact(&mut wire)
+        .map_err(|error| ReadError::Frame(FrameError::Io(error.kind())))?;
+    let header = FrameHeader::decode(wire).map_err(ReadError::Frame)?;
+    if header.kind != FrameKind::RgbaPixels {
+        return Err(ReadError::NotPixels);
+    }
+    if !video_header_fits(&header) {
+        return Err(ReadError::VideoLimit);
+    }
+    // The header was checked; give it back to the budgeted reader together
+    // with the body that follows it.
+    let frame = read_frame(&mut (&wire[..]).chain(reader), budgets).map_err(ReadError::Frame)?;
+    let (rgba, _permit) = frame.into_parts();
+    Ok(WorkerItem::Video {
+        tile,
+        rotation,
+        width: header.width,
+        height: header.height,
+        rgba,
+    })
+}
+
+/// Writes a [`FromWorker::VideoFrame`] and its pixel frame as one unit (the
+/// worker side). Everything is checked before anything is written: the tile,
+/// the rotation, the size limits, and that `rgba` is exactly
+/// `width * height * 4` bytes. The caller holds its output lock across this
+/// call, so no other frame comes between the two.
+pub fn write_video_frame<W: Write>(
+    writer: &mut W,
+    tile: u8,
+    rotation: u8,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> io::Result<()> {
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
+    if tile >= VIDEO_TILES || rotation > MAX_VIDEO_ROTATION {
+        return Err(invalid("video tile or rotation out of range"));
+    }
+    let header = FrameHeader {
+        kind: FrameKind::RgbaPixels,
+        length: rgba.len() as u64,
+        width,
+        height,
+    };
+    if !video_header_fits(&header) {
+        return Err(invalid("video picture outside the video limits"));
+    }
+    write_message(writer, &FromWorker::VideoFrame { tile, rotation })?;
+    write_frame(writer, header, rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,8 +957,8 @@ mod tests {
         }
     }
 
-    fn device(id: &str, name: &str) -> AudioDevice {
-        AudioDevice {
+    fn device(id: &str, name: &str) -> MediaDevice {
+        MediaDevice {
             id: id.to_owned(),
             name: name.to_owned(),
         }
@@ -743,6 +985,8 @@ mod tests {
             own_key: key(3, 16),
             recording_device: Some("{0.0.1.00000000}.{6a2c}".to_owned()),
             playout_device: None,
+            camera_device: Some("usb#vid_046d&pid_0825#cam".to_owned()),
+            camera_on: true,
         }
     }
 
@@ -763,6 +1007,8 @@ mod tests {
             own_key,
             recording_device: None,
             playout_device: None,
+            camera_device: None,
+            camera_on: false,
         }
         .encode()
         .to_vec()
@@ -782,6 +1028,8 @@ mod tests {
             ToWorker::SetMuted { muted: true },
             ToWorker::Leave,
             ToWorker::ListDevices,
+            ToWorker::SetCamera { on: true },
+            ToWorker::SetCamera { on: false },
         ]
     }
 
@@ -806,10 +1054,42 @@ mod tests {
             FromWorker::Devices {
                 recording: vec![device("{0.0.1.00000000}.{6a2c}", "Microphone (Headset)")],
                 playout: vec![device("p", ""), device("q", "Lautsprecher (Ü)")],
+                cameras: vec![device("usb#cam", "Integrated Camera")],
             },
             FromWorker::Devices {
                 recording: Vec::new(),
                 playout: Vec::new(),
+                cameras: Vec::new(),
+            },
+            FromWorker::Camera {
+                state: CameraState::Off,
+            },
+            FromWorker::Camera {
+                state: CameraState::On,
+            },
+            FromWorker::Camera {
+                state: CameraState::NotFound,
+            },
+            FromWorker::Camera {
+                state: CameraState::Unavailable,
+            },
+            FromWorker::VideoStarted {
+                tile: 1,
+                identity: "@bob:example.org:D".to_owned(),
+            },
+            FromWorker::VideoStarted {
+                tile: 4,
+                identity: "ünï".to_owned(),
+            },
+            FromWorker::VideoStopped { tile: 0 },
+            FromWorker::VideoStopped { tile: 4 },
+            FromWorker::VideoFrame {
+                tile: 0,
+                rotation: 0,
+            },
+            FromWorker::VideoFrame {
+                tile: 4,
+                rotation: 3,
             },
         ];
         for code in 1..=9 {
@@ -1014,11 +1294,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 8]),
+            ToWorker::decode(&[VERSION, 9]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 10]),
+            FromWorker::decode(&[VERSION, 14]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -1185,6 +1465,8 @@ mod tests {
             own_key,
             recording_device: None,
             playout_device: Some(playout.to_owned()),
+            camera_device: None,
+            camera_on: false,
         }
     }
 
@@ -1196,9 +1478,10 @@ mod tests {
     fn given_device_fields_over_limit_when_decoded_then_they_are_rejected() {
         let long_id = "d".repeat(MAX_DEVICE_ID_BYTES + 1);
         let long_name = "n".repeat(MAX_DEVICE_NAME_BYTES + 1);
-        let list = |recording: Vec<AudioDevice>| FromWorker::Devices {
+        let list = |recording: Vec<MediaDevice>| FromWorker::Devices {
             recording,
             playout: Vec::new(),
+            cameras: Vec::new(),
         };
         let full_id = "d".repeat(MAX_DEVICE_ID_BYTES);
         let full_name = "n".repeat(MAX_DEVICE_NAME_BYTES);
@@ -1266,20 +1549,332 @@ mod tests {
     /// and a bad ID gives no device.
     #[test]
     fn given_os_device_text_when_bounded_then_it_fits_the_wire() {
-        let named = AudioDevice::bounded("id", "Mic\u{1b}[31m (USB)\n").unwrap();
+        let named = MediaDevice::bounded("id", "Mic\u{1b}[31m (USB)\n").unwrap();
         assert_eq!(named.name, "Mic[31m (USB)");
         let wide = "é".repeat(MAX_DEVICE_NAME_BYTES);
-        let cut = AudioDevice::bounded("id", &wide).unwrap();
+        let cut = MediaDevice::bounded("id", &wide).unwrap();
         assert!(cut.name.len() <= MAX_DEVICE_NAME_BYTES);
         assert_eq!(cut.name.chars().count(), MAX_DEVICE_NAME_BYTES / 2);
         let long_id = "i".repeat(MAX_DEVICE_ID_BYTES + 1);
         for bad in ["", "a\tb", long_id.as_str()] {
-            assert_eq!(AudioDevice::bounded(bad, "n"), None, "{bad:?}");
+            assert_eq!(MediaDevice::bounded(bad, "n"), None, "{bad:?}");
         }
         let fits = FromWorker::Devices {
             recording: vec![cut],
             playout: vec![named],
+            cameras: Vec::new(),
         };
         assert!(FromWorker::decode(&fits.encode()).is_ok());
+    }
+
+    /// A video picture of `width` x `height` with a pattern in every byte.
+    fn picture(width: u32, height: u32) -> Vec<u8> {
+        (0..width as usize * height as usize * 4)
+            .map(|i| (i % 251) as u8)
+            .collect()
+    }
+
+    fn video_wire(tile: u8, rotation: u8, width: u32, height: u32) -> Vec<u8> {
+        let mut wire = Vec::new();
+        write_video_frame(
+            &mut wire,
+            tile,
+            rotation,
+            width,
+            height,
+            &picture(width, height),
+        )
+        .unwrap();
+        wire
+    }
+
+    fn read_item(wire: Vec<u8>) -> (Result<WorkerItem, ReadError>, u64) {
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(wire);
+        let result = read_worker_item(&mut reader, &budgets);
+        assert_eq!(budgets.aggregate_used(), 0);
+        (result, reader.position())
+    }
+
+    fn pixel_header(width: u32, height: u32, length: u64) -> Vec<u8> {
+        FrameHeader {
+            kind: FrameKind::RgbaPixels,
+            length,
+            width,
+            height,
+        }
+        .encode()
+        .to_vec()
+    }
+
+    fn control_wire(message: &FromWorker) -> Vec<u8> {
+        let mut wire = Vec::new();
+        write_message(&mut wire, message).unwrap();
+        wire
+    }
+
+    /// GIVEN a picture at the largest size and one at the smallest
+    /// WHEN it is written and read back
+    /// THEN the tile, rotation, size and every pixel byte are unchanged.
+    #[test]
+    fn given_video_frame_when_written_then_read_back_unchanged() {
+        for (tile, rotation, width, height) in [(0, 0, 640, 360), (4, 3, 1, 1), (2, 1, 360, 640)] {
+            let (item, _) = read_item(video_wire(tile, rotation, width, height));
+            assert_eq!(
+                item,
+                Ok(WorkerItem::Video {
+                    tile,
+                    rotation,
+                    width,
+                    height,
+                    rgba: picture(width, height),
+                })
+            );
+        }
+        assert_eq!(MAX_VIDEO_BYTES, 921_600);
+    }
+
+    /// GIVEN a plain message
+    /// WHEN it is read as a worker item
+    /// THEN it comes back as a message and no pixel frame is expected.
+    #[test]
+    fn given_plain_message_when_read_as_item_then_it_is_a_message() {
+        let message = FromWorker::Camera {
+            state: CameraState::On,
+        };
+        let (item, _) = read_item(control_wire(&message));
+        assert_eq!(item, Ok(WorkerItem::Message(message)));
+    }
+
+    /// GIVEN a video announcement followed by each wrong frame
+    /// WHEN it is read
+    /// THEN it fails, and no body past the checked header is read.
+    #[test]
+    fn given_wrong_frame_after_video_frame_then_read_fails_before_the_body() {
+        let announce = FromWorker::VideoFrame {
+            tile: 1,
+            rotation: 0,
+        };
+        let mut control = control_wire(&announce);
+        let end = control.len() as u64;
+        // A control frame instead of pixels.
+        let mut wire = control.clone();
+        wire.extend(control_wire(&FromWorker::Left));
+        let (result, position) = read_item(wire);
+        assert_eq!(result, Err(ReadError::NotPixels));
+        assert_eq!(position, end + FRAME_HEADER_LEN as u64);
+        // Pixels over the side limit, the pixel limit, or with a bad length.
+        for (width, height, length) in [
+            (641, 1, 641 * 4),
+            (1, 641, 641 * 4),
+            (640, 361, 640 * 361 * 4),
+            (8192, 1, 8192 * 4),
+            (2, 2, 15),
+        ] {
+            let mut wire = control.clone();
+            wire.extend(pixel_header(width, height, length));
+            wire.extend(vec![0; 64]);
+            let (result, position) = read_item(wire);
+            assert!(
+                matches!(
+                    result,
+                    Err(ReadError::VideoLimit)
+                        | Err(ReadError::Frame(FrameError::PixelLengthMismatch))
+                ),
+                "{width}x{height}: {result:?}"
+            );
+            assert_eq!(position, end + FRAME_HEADER_LEN as u64);
+        }
+        // Zero dimensions are a frame error.
+        control.extend(pixel_header(0, 4, 16));
+        let (result, _) = read_item(control);
+        assert_eq!(result, Err(ReadError::Frame(FrameError::ZeroDimension)));
+    }
+
+    /// GIVEN a video announcement with a missing or cut-off pixel frame
+    /// WHEN it is read
+    /// THEN the read fails with an I/O error.
+    #[test]
+    fn given_truncated_pixel_frame_when_read_then_it_fails() {
+        let full = video_wire(0, 0, 4, 4);
+        let control_len = control_wire(&FromWorker::VideoFrame {
+            tile: 0,
+            rotation: 0,
+        })
+        .len();
+        for cut in [
+            control_len,
+            control_len + 5,
+            control_len + 17,
+            full.len() - 1,
+        ] {
+            let (result, _) = read_item(full[..cut].to_vec());
+            assert!(
+                matches!(result, Err(ReadError::Frame(FrameError::Io(_)))),
+                "cut at {cut}: {result:?}"
+            );
+        }
+    }
+
+    /// GIVEN bad values in a video announcement
+    /// WHEN it is decoded
+    /// THEN it is rejected.
+    #[test]
+    fn given_bad_tile_or_rotation_when_decoded_then_it_is_rejected() {
+        let invalid = DecodeError::InvalidValue;
+        let cases: [(&[u8], DecodeError); 8] = [
+            (&[VERSION, FROM_VIDEO_FRAME, 5, 0], invalid),
+            (&[VERSION, FROM_VIDEO_FRAME, 0, 4], invalid),
+            (&[VERSION, FROM_VIDEO_FRAME, 0], DecodeError::Truncated),
+            (&[VERSION, FROM_VIDEO_STOPPED, 5], invalid),
+            (&[VERSION, FROM_VIDEO_STARTED, 0, 0, 1, 97], invalid),
+            (&[VERSION, FROM_VIDEO_STARTED, 5, 0, 1, 97], invalid),
+            (
+                &[VERSION, FROM_VIDEO_STARTED, 1, 0, 0],
+                DecodeError::TooShort,
+            ),
+            (&[VERSION, FROM_CAMERA, 4], invalid),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(FromWorker::decode(body), Err(expected), "{body:?}");
+        }
+        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_CAMERA, 2]), Err(invalid));
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA]),
+            Err(DecodeError::Truncated)
+        );
+        let long = FromWorker::VideoStarted {
+            tile: 1,
+            identity: "i".repeat(MAX_IDENTITY_BYTES + 1),
+        };
+        assert_eq!(
+            FromWorker::decode(&long.encode()),
+            Err(DecodeError::TooLarge)
+        );
+        let control = FromWorker::VideoStarted {
+            tile: 1,
+            identity: "a\nb".to_owned(),
+        };
+        assert_eq!(
+            FromWorker::decode(&control.encode()),
+            Err(DecodeError::InvalidCharacter)
+        );
+    }
+
+    /// GIVEN a picture outside the limits, or a bad tile or rotation
+    /// WHEN the worker tries to write it
+    /// THEN nothing is written.
+    #[test]
+    fn given_bad_video_frame_when_written_then_nothing_is_written() {
+        let ok = picture(2, 2);
+        let big = vec![0; 641 * 640 * 4];
+        let cases: [(u8, u8, u32, u32, &[u8]); 8] = [
+            (5, 0, 2, 2, &ok),
+            (0, 4, 2, 2, &ok),
+            (0, 0, 0, 2, &[]),
+            (0, 0, 2, 2, &ok[..15]),
+            (0, 0, 2, 2, &[0; 17]),
+            (0, 0, 641, 1, &big[..641 * 4]),
+            (0, 0, 1, 641, &big[..641 * 4]),
+            (0, 0, 640, 361, &big[..640 * 361 * 4]),
+        ];
+        for (tile, rotation, width, height, body) in cases {
+            let mut wire = Vec::new();
+            assert!(write_video_frame(&mut wire, tile, rotation, width, height, body).is_err());
+            assert!(wire.is_empty(), "{tile} {rotation} {width}x{height}");
+        }
+    }
+
+    /// GIVEN a Join with a camera chosen, or none
+    /// WHEN it is encoded and decoded
+    /// THEN the camera ID and flag are kept, and no camera stays `None`.
+    #[test]
+    fn given_join_camera_fields_when_round_tripped_then_they_are_kept() {
+        let Ok(ToWorker::Join {
+            camera_device,
+            camera_on,
+            ..
+        }) = ToWorker::decode(&join().encode())
+        else {
+            panic!("join decodes");
+        };
+        assert_eq!(camera_device.as_deref(), Some("usb#vid_046d&pid_0825#cam"));
+        assert!(camera_on);
+        let none = join_with("wss://h", "t", vec![], "id", key(0, 16));
+        let Ok(ToWorker::Join {
+            camera_device,
+            camera_on,
+            ..
+        }) = ToWorker::decode(&none)
+        else {
+            panic!("join decodes");
+        };
+        assert_eq!((camera_device, camera_on), (None, false));
+        // A version 2 Join is refused.
+        let mut old = join().encode().to_vec();
+        old[0] = 2;
+        assert_eq!(ToWorker::decode(&old), Err(DecodeError::UnknownVersion));
+    }
+
+    /// GIVEN a camera ID or camera list over its limits
+    /// WHEN the messages are decoded
+    /// THEN each is rejected.
+    #[test]
+    fn given_camera_fields_over_limit_when_decoded_then_they_are_rejected() {
+        let long = "c".repeat(MAX_DEVICE_ID_BYTES + 1);
+        let with_camera = |camera: &str| {
+            let ToWorker::Join {
+                sfu_url,
+                jwt,
+                turn,
+                relay_only,
+                own_identity,
+                own_key,
+                ..
+            } = join()
+            else {
+                unreachable!()
+            };
+            ToWorker::Join {
+                sfu_url,
+                jwt,
+                turn,
+                relay_only,
+                own_identity,
+                own_key,
+                recording_device: None,
+                playout_device: None,
+                camera_device: Some(camera.to_owned()),
+                camera_on: true,
+            }
+            .encode()
+        };
+        assert!(ToWorker::decode(&with_camera(&"c".repeat(MAX_DEVICE_ID_BYTES))).is_ok());
+        assert_eq!(
+            ToWorker::decode(&with_camera(&long)),
+            Err(DecodeError::TooLarge)
+        );
+        assert_eq!(
+            ToWorker::decode(&with_camera("a\nb")),
+            Err(DecodeError::InvalidCharacter)
+        );
+        let cameras = |cameras: Vec<MediaDevice>| FromWorker::Devices {
+            recording: Vec::new(),
+            playout: Vec::new(),
+            cameras,
+        };
+        let full: Vec<MediaDevice> = (0..MAX_DEVICES).map(|_| device("c", "n")).collect();
+        assert!(FromWorker::decode(&cameras(full).encode()).is_ok());
+        for (list, expected) in [
+            (
+                (0..=MAX_DEVICES).map(|_| device("c", "n")).collect(),
+                DecodeError::TooLarge,
+            ),
+            (vec![device(&long, "n")], DecodeError::TooLarge),
+            (vec![device("", "n")], DecodeError::TooShort),
+            (vec![device("c\u{0}", "n")], DecodeError::InvalidCharacter),
+        ] {
+            assert_eq!(FromWorker::decode(&cameras(list).encode()), Err(expected));
+        }
     }
 }

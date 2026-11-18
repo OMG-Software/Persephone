@@ -326,7 +326,7 @@ class AppendNoticeTests(TempTree):
         self.notices = self.root / release.NOTICES
         self.notices.parent.mkdir(parents=True)
         self.notices.write_text("first notices\n", encoding="utf-8")
-        self.windows = self.root / release.WINDOWS_NOTICES
+        self.windows = self.root / release.notices_path("windows")
         self.library = self.root / ".local/cache/webrtc/webrtc-test/win-x64/files/win-x64-release"
         self.library.mkdir(parents=True)
         self.source = self.library / "LICENSE.md"
@@ -335,8 +335,17 @@ class AppendNoticeTests(TempTree):
         self.ensured = self.ensure.start()
         self.addCleanup(self.ensure.stop)
 
-    def append(self, title=None):
-        return run_main(["append-notice"] + (["--title", title] if title else []), self.root)
+    def append(self, title=None, platform="windows", keys=()):
+        args = ["append-notice", "--platform", platform]
+        for key in keys:
+            args += ["--key", key]
+        return run_main(args + (["--title", title] if title else []), self.root)
+
+    def library_for(self, key, text):
+        library = self.root / f".local/cache/webrtc/webrtc-test/{key}/files/{key}-release"
+        library.mkdir(parents=True)
+        (library / "LICENSE.md").write_text(text, encoding="utf-8")
+        return library
 
     def test_writes_the_windows_notices_with_header_and_text(self):
         # GIVEN shared notices and a verified libwebrtc WHEN the notice is appended
@@ -356,6 +365,7 @@ class AppendNoticeTests(TempTree):
         self.assertEqual(self.append(self.TITLE)[0], 0)
         self.assertEqual(self.ensured.call_args.args, (self.root,))
         self.assertIs(self.ensured.call_args.kwargs["offline"], True)
+        self.assertEqual(self.ensured.call_args.kwargs["key"], "win-x64")
 
     def test_no_verified_libwebrtc_is_refused(self):
         # GIVEN no verified libwebrtc in the cache WHEN the notice is appended
@@ -387,6 +397,106 @@ class AppendNoticeTests(TempTree):
                 self.assertEqual(code, 2)
                 self.assertIn("licence file", stderr)
                 self.assertFalse(self.windows.exists())
+
+    def test_windows_content_is_exactly_the_historic_layout(self):
+        # GIVEN shared notices and one verified archive WHEN the Windows notice is appended
+        self.assertEqual(self.append(self.TITLE)[0], 0)
+        # THEN the file is byte-for-byte the shared text plus one section, as before the platform option
+        bar = "=" * 78
+        self.assertEqual(
+            self.windows.read_bytes().decode("utf-8"),
+            f"first notices\n\n{bar}\n{self.TITLE}\n{bar}\n\n"
+            "Linked statically into persephone-call-worker.exe. Licence texts as shipped in the pinned archive:\n\n"
+            "# webrtc\nBSD licence text\n",
+        )
+
+    def test_each_linux_arch_gets_its_own_archive_licence(self):
+        for key in ("linux-x64", "linux-arm64"):
+            with self.subTest(key=key):
+                # GIVEN a verified archive for the key WHEN the Linux notice is appended
+                self.ensured.return_value = self.library_for(key, f"licence of {key}\n")
+                code, _, _ = self.append(self.TITLE, "linux", [key])
+                # THEN that archive was looked up and its text is in the Linux notices, which name the unsuffixed binary
+                self.assertEqual(code, 0)
+                self.assertEqual(self.ensured.call_args.kwargs["key"], key)
+                text = (self.root / release.notices_path("linux")).read_text(encoding="utf-8")
+                self.assertTrue(text.endswith(f"licence of {key}\n"))
+                self.assertIn("Linked statically into persephone-call-worker. ", text)
+                self.assertNotIn(".exe", text)
+
+    def test_linux_needs_a_key_and_each_key_must_match_its_platform(self):
+        for platform, keys in (
+            ("linux", []),
+            ("linux", ["win-x64"]),
+            ("windows", ["linux-x64"]),
+            ("macos", ["mac-arm64"]),
+            ("macos", ["mac-arm64", "linux-x64"]),
+        ):
+            with self.subTest(platform=platform, keys=keys):
+                # WHEN the key list is missing or wrong THEN it is refused and nothing is written
+                code, _, stderr = self.append(self.TITLE, platform, keys)
+                self.assertEqual(code, 2)
+                self.assertTrue(stderr)
+                self.assertFalse((self.root / release.notices_path(platform)).exists())
+
+    def test_macos_includes_both_archives_and_collapses_identical_texts(self):
+        # GIVEN two verified archives with the same licence text
+        libraries = {key: self.library_for(key, "same licence\n") for key in ("mac-arm64", "mac-x64")}
+        self.ensured.side_effect = lambda _root, key, **_: libraries[key]
+        # WHEN the macOS notice is appended with the default keys
+        code, _, _ = self.append(self.TITLE, "macos")
+        # THEN both archives were checked and the text appears once, naming both
+        self.assertEqual(code, 0)
+        self.assertEqual([call.kwargs["key"] for call in self.ensured.call_args_list], ["mac-arm64", "mac-x64"])
+        text = (self.root / release.notices_path("macos")).read_text(encoding="utf-8")
+        self.assertEqual(text.count("same licence\n"), 1)
+        self.assertIn("archives mac-arm64, mac-x64; identical licence texts", text)
+
+    def test_macos_keeps_both_texts_when_the_archives_differ(self):
+        # GIVEN two verified archives with different licence texts
+        libraries = {
+            "mac-arm64": self.library_for("mac-arm64", "arm licence\n"),
+            "mac-x64": self.library_for("mac-x64", "x64 licence\n"),
+        }
+        self.ensured.side_effect = lambda _root, key, **_: libraries[key]
+        # WHEN the macOS notice is appended THEN each text has its own section
+        self.assertEqual(self.append(self.TITLE, "macos")[0], 0)
+        text = (self.root / release.notices_path("macos")).read_text(encoding="utf-8")
+        self.assertIn("arm licence\n", text)
+        self.assertIn("x64 licence\n", text)
+        self.assertIn(f"{self.TITLE} [mac-arm64]", text)
+        self.assertIn(f"{self.TITLE} [mac-x64]", text)
+
+    def test_macos_refuses_when_one_archive_is_not_verified(self):
+        # GIVEN one archive that is cached and one that is not
+        good = self.library_for("mac-arm64", "licence\n")
+
+        def ensure(_root, key, **_):
+            if key == "mac-arm64":
+                return good
+            raise release.webrtc.WebrtcError("not cached")
+
+        self.ensured.side_effect = ensure
+        # WHEN the macOS notice is appended THEN it fails closed and writes nothing
+        code, _, stderr = self.append(self.TITLE, "macos")
+        self.assertEqual(code, 2)
+        self.assertIn("mac-x64", stderr)
+        self.assertFalse((self.root / release.notices_path("macos")).exists())
+
+    def test_empty_licence_text_in_any_platform_archive_is_refused(self):
+        for platform, key in (("linux", "linux-x64"), ("macos", "mac-arm64")):
+            with self.subTest(platform=platform):
+                # GIVEN an archive whose LICENSE.md is empty WHEN the notice is appended
+                self.ensured.return_value = self.library_for(key, "")
+                code, _, stderr = self.append(self.TITLE, platform, [key] if platform == "linux" else [])
+                # THEN it is an error, never an empty notice
+                self.assertEqual(code, 2)
+                self.assertIn("licence file", stderr)
+                self.assertFalse((self.root / release.notices_path(platform)).exists())
+
+    def test_platform_is_required(self):
+        with mock.patch.object(sys, "stderr"), self.assertRaises(SystemExit):
+            release.main(["append-notice"], self.root)
 
     def test_missing_shared_notices_are_refused(self):
         self.notices.unlink()
@@ -444,15 +554,27 @@ class BundleConfigTests(TempTree):
                                      notices.resolve(): "THIRD-PARTY-NOTICES.txt"})
         self.assertNotIn("windows", bundle)
 
-    def test_linux_and_macos_configs_leave_out_the_call_worker(self):
-        for platform in ("linux", "macos"):
-            with self.subTest(platform=platform):
-                # GIVEN generated notices WHEN a non-Windows configuration is written
-                code, _, _, output = self.write_config(platform)
-                # THEN calls are not shipped, so only the core and media worker are sidecars.
-                self.assertEqual(code, 0)
-                bundle = json.loads(output.read_text(encoding="utf-8"))["bundle"]
-                self.assertEqual(bundle["externalBin"], ["binaries/persephone", "binaries/persephone-media-worker"])
+    def test_macos_config_names_the_call_worker(self):
+        # GIVEN generated notices WHEN the macOS release configuration is written
+        code, _, _, output = self.write_config("macos")
+        # THEN the call worker is a sidecar beside the core and media worker (ADR-0049).
+        self.assertEqual(code, 0)
+        bundle = json.loads(output.read_text(encoding="utf-8"))["bundle"]
+        self.assertEqual(
+            bundle["externalBin"],
+            ["binaries/persephone", "binaries/persephone-media-worker", "binaries/persephone-call-worker"],
+        )
+
+    def test_linux_config_names_the_call_worker(self):
+        # GIVEN generated notices WHEN a Linux configuration is written
+        code, _, _, output = self.write_config("linux")
+        # THEN the call worker is a sidecar beside the core and media worker (ADR-0049).
+        self.assertEqual(code, 0)
+        bundle = json.loads(output.read_text(encoding="utf-8"))["bundle"]
+        self.assertEqual(
+            bundle["externalBin"],
+            ["binaries/persephone", "binaries/persephone-media-worker", "binaries/persephone-call-worker"],
+        )
 
     def test_unknown_platform_is_refused(self):
         # GIVEN a platform that the release does not build

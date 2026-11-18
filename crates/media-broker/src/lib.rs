@@ -35,9 +35,11 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
-pub use linux::SeccompContainment;
+pub use linux::{CallCamera, SeccompContainment, send_camera_fd, start_call_worker};
 #[cfg(target_os = "macos")]
-pub use macos::SeatbeltContainment;
+pub use macos::{SeatbeltContainment, start_call_worker};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::{LongLivedWorker, StartedCallWorker};
 #[cfg(windows)]
 pub use windows::{AppContainerProfile, LongLivedWorker, StartedCallWorker, start_call_worker};
 

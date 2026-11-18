@@ -8,6 +8,7 @@ import type {
   AccountSettings,
   AccountStatus,
   AppStatus,
+  CallCamera,
   CallDevices,
   CallEnd,
   CallJoinError,
@@ -16,6 +17,7 @@ import type {
   CallReadiness,
   CallStatus,
   CallUnavailable,
+  CallVideoTile,
   ContactStatus,
   ConversationStart,
   DeviceList,
@@ -89,12 +91,16 @@ import type {
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
 import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
+import { parseVideoPicture, type VideoPicture } from '../video.ts';
+
+export type { VideoPicture };
 
 export type {
   AccountChange,
   AccountSettings,
   AccountStatus,
   AppStatus,
+  CallCamera,
   CallEnd,
   CallJoinError,
   CallParticipant,
@@ -102,6 +108,7 @@ export type {
   CallReadiness,
   CallStatus,
   CallUnavailable,
+  CallVideoTile,
   ContactStatus,
   ConversationStart,
   DeviceList,
@@ -286,15 +293,17 @@ export async function subscribeRoom(
  * `onSecurity` when the account's encryption state changed (it clears
  * nothing), `onModules` when the report of loaded code changed (it clears
  * nothing either), and `onCalls` when the call changed state or participants
- * (ask `callStatus`; it clears nothing). Anything else counts as a session
- * change, which clears the page.
+ * (ask `callStatus`; it clears nothing), and `onCallVideo` when a new video
+ * picture is waiting (ask `callVideoFrame` for each active tile; it clears
+ * nothing). Anything else counts as a session change, which clears the page.
  */
 export async function watchSession(
   onSession: () => void,
   onRooms: () => void,
   onSecurity: () => void,
   onModules: () => void,
-  onCalls: () => void
+  onCalls: () => void,
+  onCallVideo: () => void
 ): Promise<void> {
   const channel = new Channel<string>((message) =>
     message === 'rooms'
@@ -305,7 +314,9 @@ export async function watchSession(
           ? onModules()
           : message === 'calls'
             ? onCalls()
-          : onSession()
+            : message === 'callVideo'
+              ? onCallVideo()
+              : onSession()
   );
   await invoke<null>('watch_session', { onChange: channel });
 }
@@ -386,15 +397,36 @@ export function callReadiness(roomId: string): Promise<CallReadiness> {
 }
 
 /**
- * Joins the audio call in this room. With a profile proxy the core first
+ * Joins the call in this room, with the camera on when `video` is true. With a profile proxy the core first
  * asks, in its own window, whether the call may connect around the proxy: the
  * call joins only after that window confirms it, and never otherwise. The
  * reply carries codes only, never a key, token or URL. A refused join is a
  * status with `joinError` set, not a rejection. Progress arrives as call
  * changes (`watchSession`'s `onCalls`).
  */
-export function callJoin(roomId: string): Promise<CallStatus> {
-  return invoke<CallStatus>('call_join', { roomId });
+export function callJoin(roomId: string, video: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_join', { roomId, video });
+}
+
+/**
+ * Turns the camera on or off during a call. The reply is the call as it is
+ * now, with the camera `starting` when turned on; the worker's answer arrives
+ * as a call change. Codes only.
+ */
+export function callCamera(on: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_camera', { on });
+}
+
+/**
+ * The newest picture on video tile `tile` (0 to 4; 0 is the own camera) if
+ * its number is above `after`, else null. The host answers with raw bytes: an
+ * empty body for no newer picture, otherwise the picture number as a
+ * little-endian u64, then rotation, width and height as little-endian u32,
+ * then the RGBA pixels. Rejects with `bad_video` when the answer is anything
+ * else.
+ */
+export async function callVideoFrame(tile: number, after: number): Promise<VideoPicture | null> {
+  return parseVideoPicture(await invoke<unknown>('call_video_frame', { tile, after }));
 }
 
 /** Leaves the call, or cancels a join in progress. Codes only. */
@@ -420,12 +452,16 @@ export function callDevices(): Promise<CallDevices> {
 }
 
 /**
- * Saves the call microphone and speaker as device IDs from `callDevices`;
+ * Saves the call microphone, speaker and camera as device IDs from `callDevices`;
  * `null` is the system default. A device need not be connected now. It
  * applies to calls joined afterwards.
  */
-export function setCallDevices(recording: string | null, playout: string | null): Promise<void> {
-  return invoke<void>('set_call_devices', { recording, playout });
+export function setCallDevices(
+  recording: string | null,
+  playout: string | null,
+  camera: string | null
+): Promise<void> {
+  return invoke<void>('set_call_devices', { recording, playout, camera });
 }
 
 /** The call as the core shows it: codes, flags and bounded IDs only. */

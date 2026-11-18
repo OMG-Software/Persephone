@@ -14,10 +14,16 @@
 //! frame instead (or by an ordinary error reply). The reader checks that the
 //! band goes to a caller that asked for exactly that band; anything else
 //! breaks the channel, like a reply nobody asked for.
+//!
+//! A `call_video_frame` call is answered the same way, by a video reply and
+//! one bounded pixel frame, or by an ordinary reply holding null when no newer
+//! picture exists (ADR-0048). The reader checks that a picture goes to the
+//! caller that asked for exactly that tile, and that it is newer than the
+//! caller's `after`.
 
 use persephone_core_protocol::{
-    Call, CoreMessage, ErrorCode, Event, FromCore, Outcome, PixelBand, Request, receive_from_core,
-    send, send_pasted_image,
+    Call, CoreMessage, ErrorCode, Event, FromCore, Outcome, PixelBand, Request, VideoPicture,
+    call_video_within_limits, receive_from_core, send, send_pasted_image,
 };
 use persephone_media_protocol::ResourceBudgets;
 use std::{
@@ -50,6 +56,10 @@ pub trait CoreTransport: Send + Sync {
     /// One band of rows of a loaded or picked image.
     fn image_band(&self, handle: String, band: u32) -> Result<Band, CoreError>;
 
+    /// The newest video picture on `tile` if it is newer than `after`; `None`
+    /// when there is none.
+    fn video_frame(&self, tile: u8, after: u64) -> Result<Option<Video>, CoreError>;
+
     /// A pasted image for `room_id`: its request and its image frame.
     fn paste_image(&self, room_id: String, bytes: Vec<u8>) -> Result<serde_json::Value, CoreError>;
 }
@@ -61,6 +71,19 @@ pub trait CoreTransport: Send + Sync {
 pub struct Band {
     pub width: u32,
     pub rows: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// One call video picture the core sent: picture number `seq`, turned
+/// `rotation` quarter turns clockwise, `width` by `height` RGBA pixels. The
+/// protocol reader checked all of it before it allocated `pixels`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Video {
+    pub tile: u8,
+    pub seq: u64,
+    pub rotation: u8,
+    pub width: u32,
+    pub height: u32,
     pub pixels: Vec<u8>,
 }
 
@@ -82,12 +105,17 @@ enum Expect {
     Reply,
     /// A pixel band with this index, or an error reply.
     Band(u32),
+    /// A video picture of this tile with a number above `after`, or an error
+    /// reply, or an `ok` reply holding null (no newer picture).
+    Video { tile: u8, after: u64 },
 }
 
 enum Answer {
     Outcome(Outcome),
     /// The band index the core announced, and the band.
     Band(u32, Band),
+    /// The video picture the core announced.
+    Video(Video),
 }
 
 struct Waiter {
@@ -121,6 +149,18 @@ fn route(waiting: &Mutex<Waiting>, from_core: FromCore, on_event: &EventSink) ->
             };
             (reply.id, Answer::Band(reply.band, band))
         }
+        FromCore::Video(VideoPicture { reply, pixels }) => {
+            // Copied out at once, like a band; at most `MAX_CALL_VIDEO_BYTES`.
+            let video = Video {
+                tile: reply.tile,
+                seq: reply.seq,
+                rotation: reply.rotation,
+                width: reply.width,
+                height: reply.height,
+                pixels: pixels.body().to_vec(),
+            };
+            (reply.id, Answer::Video(video))
+        }
     };
     let Some(waiter) = lock(waiting).replies.remove(&id) else {
         return false;
@@ -130,8 +170,15 @@ fn route(waiting: &Mutex<Waiting>, from_core: FromCore, on_event: &EventSink) ->
         // A band is answered with pixels or an error, never with a value.
         (Answer::Outcome(Outcome::Error(_)), Expect::Band(_)) => true,
         (Answer::Outcome(Outcome::Ok(_)), Expect::Band(_)) => false,
-        (Answer::Band(..), Expect::Reply) => false,
+        // A video request is answered with a picture, an error, or null.
+        (Answer::Outcome(Outcome::Error(_)), Expect::Video { .. }) => true,
+        (Answer::Outcome(Outcome::Ok(value)), Expect::Video { .. }) => value.is_null(),
+        (Answer::Band(..) | Answer::Video(_), Expect::Reply) => false,
         (Answer::Band(sent, _), Expect::Band(asked)) => *sent == asked,
+        (Answer::Video(_), Expect::Band(_)) | (Answer::Band(..), Expect::Video { .. }) => false,
+        (Answer::Video(sent), Expect::Video { tile, after }) => {
+            sent.tile == tile && sent.seq > after
+        }
     };
     if !fits {
         // Dropping the waiter wakes its caller as unavailable.
@@ -244,14 +291,17 @@ impl CoreTransport for PipeTransport {
         // Its answer is a pixel band, which only `image_band` accepts; sent
         // here, it would break the channel.
         // A paste needs its image frame: only `paste_image` sends one.
-        if matches!(call, Call::ImageBand { .. } | Call::PasteImage { .. }) {
+        if matches!(
+            call,
+            Call::ImageBand { .. } | Call::PasteImage { .. } | Call::CallVideoFrame { .. }
+        ) {
             return Err(CoreError::BadReply);
         }
         match self.exchange(call, None, Expect::Reply)? {
             Answer::Outcome(Outcome::Ok(value)) => Ok(value),
             // `route` delivers nothing else to a reply waiter.
             Answer::Outcome(Outcome::Error(code)) => Err(CoreError::Core(code)),
-            Answer::Band(..) => Err(CoreError::BadReply),
+            Answer::Band(..) | Answer::Video(_) => Err(CoreError::BadReply),
         }
     }
 
@@ -260,7 +310,21 @@ impl CoreTransport for PipeTransport {
             Answer::Band(_, pixels) => Ok(pixels),
             // `route` delivers only bands and errors to a band waiter.
             Answer::Outcome(Outcome::Error(code)) => Err(CoreError::Core(code)),
-            Answer::Outcome(Outcome::Ok(_)) => Err(CoreError::BadReply),
+            Answer::Outcome(Outcome::Ok(_)) | Answer::Video(_) => Err(CoreError::BadReply),
+        }
+    }
+
+    fn video_frame(&self, tile: u8, after: u64) -> Result<Option<Video>, CoreError> {
+        let call = Call::CallVideoFrame { tile, after };
+        if !call_video_within_limits(&call) {
+            return Err(CoreError::Core(ErrorCode::InvalidArgument));
+        }
+        match self.exchange(call, None, Expect::Video { tile, after })? {
+            Answer::Video(video) => Ok(Some(video)),
+            Answer::Outcome(Outcome::Ok(_)) => Ok(None),
+            // `route` delivers only pictures, null and errors to this waiter.
+            Answer::Outcome(Outcome::Error(code)) => Err(CoreError::Core(code)),
+            Answer::Band(..) => Err(CoreError::BadReply),
         }
     }
 
@@ -272,7 +336,7 @@ impl CoreTransport for PipeTransport {
         match self.exchange(call, Some(&bytes), Expect::Reply)? {
             Answer::Outcome(Outcome::Ok(value)) => Ok(value),
             Answer::Outcome(Outcome::Error(code)) => Err(CoreError::Core(code)),
-            Answer::Band(..) => Err(CoreError::BadReply),
+            Answer::Band(..) | Answer::Video(_) => Err(CoreError::BadReply),
         }
     }
 }
@@ -395,7 +459,9 @@ fn take_stdio() -> io::Result<(File, File)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use persephone_core_protocol::{PixelReply, Reply, receive, send_pixel_reply};
+    use persephone_core_protocol::{
+        PixelReply, Reply, VideoReply, receive, send_pixel_reply, send_video_reply,
+    };
     use std::sync::mpsc::channel;
 
     const HANDLE: &str = "0123456789abcdef0123456789abcdef";
@@ -607,6 +673,147 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    fn video_call(
+        link: &Arc<PipeTransport>,
+        tile: u8,
+        after: u64,
+    ) -> std::thread::JoinHandle<Result<Option<Video>, CoreError>> {
+        let link = link.clone();
+        std::thread::spawn(move || link.video_frame(tile, after))
+    }
+
+    fn video_reply(id: u32, tile: u8, seq: u64) -> VideoReply {
+        VideoReply {
+            id,
+            tile,
+            seq,
+            rotation: 1,
+            width: 2,
+            height: 1,
+        }
+    }
+
+    /// GIVEN a video request WHEN the core answers with a picture, with null,
+    /// or with an error THEN the caller gets the picture, nothing, or the
+    /// error, and the channel stays usable.
+    #[test]
+    fn given_video_answers_then_each_reaches_the_caller_that_asked() {
+        let mut core = scripted();
+        let budgets = ResourceBudgets::default();
+        let first = video_call(&core.link, 2, 4);
+        let request: Request = receive(&mut core.from_ui, &budgets).unwrap();
+        assert_eq!(request.call, Call::CallVideoFrame { tile: 2, after: 4 });
+        let pixels: Vec<u8> = (0..8).collect();
+        send_video_reply(&mut core.to_ui, &video_reply(request.id, 2, 5), &pixels).unwrap();
+        assert_eq!(
+            first.join().unwrap(),
+            Ok(Some(Video {
+                tile: 2,
+                seq: 5,
+                rotation: 1,
+                width: 2,
+                height: 1,
+                pixels
+            }))
+        );
+
+        let none = video_call(&core.link, 2, 5);
+        let request: Request = receive(&mut core.from_ui, &budgets).unwrap();
+        reply(
+            &mut core.to_ui,
+            request.id,
+            Outcome::Ok(serde_json::Value::Null),
+        );
+        assert_eq!(none.join().unwrap(), Ok(None));
+
+        let missing = video_call(&core.link, 1, 0);
+        let request: Request = receive(&mut core.from_ui, &budgets).unwrap();
+        reply(
+            &mut core.to_ui,
+            request.id,
+            Outcome::Error(ErrorCode::NotFound),
+        );
+        assert_eq!(
+            missing.join().unwrap(),
+            Err(CoreError::Core(ErrorCode::NotFound))
+        );
+        assert!(!lock(&core.link.waiting).broken);
+    }
+
+    /// GIVEN a video answer that does not fit its request WHEN it arrives
+    /// THEN the channel breaks: another tile, a picture no newer than `after`,
+    /// a value, pixels for a text call, or a picture nobody asked for.
+    #[test]
+    fn given_a_video_answer_that_does_not_fit_then_the_channel_breaks() {
+        let budgets = ResourceBudgets::default();
+        let pixels = [9u8; 8];
+        for case in ["other_tile", "stale", "value", "pixels_for_text", "unasked"] {
+            let mut core = scripted();
+            let (waiter, id) = match case {
+                "pixels_for_text" => {
+                    let link = core.link.clone();
+                    let waiter = std::thread::spawn(move || {
+                        link.call(Call::AppStatus {}).map(|_| None::<Video>)
+                    });
+                    let request: Request = receive(&mut core.from_ui, &budgets).unwrap();
+                    (Some(waiter), request.id)
+                }
+                "unasked" => (None, 77),
+                _ => {
+                    let waiter = video_call(&core.link, 1, 5);
+                    let request: Request = receive(&mut core.from_ui, &budgets).unwrap();
+                    (Some(waiter), request.id)
+                }
+            };
+            match case {
+                "value" => reply(&mut core.to_ui, id, Outcome::Ok(serde_json::json!(1))),
+                _ => {
+                    let (tile, seq) = match case {
+                        "other_tile" => (2, 6),
+                        "stale" => (1, 5),
+                        _ => (1, 6),
+                    };
+                    send_video_reply(&mut core.to_ui, &video_reply(id, tile, seq), &pixels)
+                        .unwrap();
+                }
+            }
+            if let Some(waiter) = waiter {
+                assert_eq!(
+                    waiter.join().unwrap(),
+                    Err(CoreError::Unavailable),
+                    "{case}"
+                );
+            }
+            wait_broken(&core.link);
+            assert_eq!(
+                core.link.video_frame(1, 0),
+                Err(CoreError::Unavailable),
+                "{case}"
+            );
+        }
+    }
+
+    /// GIVEN `call_video_frame` sent as an ordinary call or with an argument
+    /// outside the limits THEN it is refused before it is written.
+    #[test]
+    fn given_a_bad_video_request_then_nothing_is_sent() {
+        let core = scripted();
+        assert_eq!(
+            core.link.call(Call::CallVideoFrame { tile: 0, after: 0 }),
+            Err(CoreError::BadReply)
+        );
+        assert_eq!(
+            core.link.video_frame(5, 0),
+            Err(CoreError::Core(ErrorCode::InvalidArgument))
+        );
+        assert_eq!(
+            core.link.video_frame(0, u64::MAX),
+            Err(CoreError::Core(ErrorCode::InvalidArgument))
+        );
+        assert_eq!(lock(&core.link.writer).next_id, 1, "nothing was written");
+        assert!(!lock(&core.link.waiting).broken);
     }
 
     /// GIVEN `image_band` sent as an ordinary call THEN it is refused before

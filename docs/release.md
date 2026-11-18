@@ -32,13 +32,17 @@ files as workflow artifacts.
 Every release also has `SHA256SUMS` over all files, `SHA256SUMS.sigstore.json`
 (cosign keyless signature), `SHA256SUMS.asc` (GPG signature), a CycloneDX SBOM
 (`*-sbom.cdx.json`, from syft) and the third-party notices
-(`*-THIRD-PARTY-NOTICES.txt`, from cargo-about). Each file in `SHA256SUMS` also
+(one `*-THIRD-PARTY-NOTICES-<platform>.txt` per bundle: `windows`, `linux-x64`,
+`linux-arm64` and `macos`; each is the cargo-about text plus the libwebrtc
+licence texts that the bundle's call worker links). Each file in `SHA256SUMS` also
 has a GitHub build-provenance attestation.
 
 Each bundle installs `persephone` (the core), `persephone-ui` and
-`persephone-media-worker` side by side. `persephone-ui` is the bundle's main
-binary; the core and worker are Tauri sidecars. Each bundle also contains
-`LICENSE.txt` and `THIRD-PARTY-NOTICES.txt`. The installed app keeps its
+`persephone-media-worker` and `persephone-call-worker` side by side.
+`persephone-ui` is the bundle's main binary; the core and workers are Tauri
+sidecars. Each bundle also contains
+`LICENSE.txt` and `THIRD-PARTY-NOTICES.txt` (the platform file, stored under that
+name). The installed app keeps its
 encrypted profile in the default profile folder (ADR-0013), outside both the
 install directory and the web view's data folder.
 
@@ -74,8 +78,10 @@ install directory and the web view's data folder.
 5. macOS, in two jobs:
    1. `macos-build` (no secrets): builds both architectures, joins them with
       `lipo`, and bundles an unsigned `.app` with `cargo tauri bundle --no-sign`.
+      The call worker is built once per architecture, each against its own
+      pinned libwebrtc archive (`mac-arm64` and `mac-x64` of `tools/webrtc.json`).
       It uploads the app as a tar file, which keeps symbolic links and
-      permissions. On a dry run it also makes the unsigned `.dmg` and `.app.zip`.
+      permissions, and `src-tauri/entitlements/call-worker.plist` beside it. On a dry run it also makes the unsigned `.dmg` and `.app.zip`.
    2. `macos-sign` (tag only, `release` environment): see
       [Apple Developer ID and notarization](#apple-developer-id-and-notarization).
 6. `checksums`: SBOM, `SHA256SUMS`, cosign and GPG signatures, attestations.
@@ -183,7 +189,7 @@ files) come from
 settings but keeps `bundle.active` false, as the IPC configuration test
 requires. The sidecars and resources are not in it because tauri-build copies
 them on every build and fails when they are missing, which would break
-development builds. Only the Windows bundle adds the call worker sidecar (`binaries/persephone-call-worker`), because calls run on Windows only. The Windows jobs write a Windows-only copy of the notices with `python tools/release.py append-notice`, because the call worker links libwebrtc statically. It adds the `LICENSE.md` of the SHA-256-verified libwebrtc archive, which it finds in the cache that `tools/dev.py webrtc` filled; no argument names a file; the Linux and macOS notices are unchanged. The workflow creates `src-tauri/binaries/` itself; do not commit it.
+development builds. Every bundle adds the call worker sidecar (`binaries/persephone-call-worker`; ADR-0049 added Linux and macOS). The call worker links libwebrtc statically, so each bundling job writes its own notices with `python tools/release.py append-notice --platform windows|linux|macos [--key KEY]...`. The command writes `.local/release/notices/THIRD-PARTY-NOTICES-<platform>.txt`: the cargo-about notices plus the `LICENSE.md` of each SHA-256-verified libwebrtc archive that the job linked. It reads the cache that `tools/dev.py webrtc` (or `webrtc.ensure`) filled and never downloads. Windows uses `win-x64`; each Linux job passes `--key linux-x64` or `--key linux-arm64`; macOS needs both `mac-arm64` and `mac-x64`, because the universal worker links both. If the macOS texts are identical, the notices hold the text once and name both archives; otherwise each archive has its own section. A missing archive, or a licence file that is missing, empty, not UTF-8 or over 1 MiB, is an error, never an empty notice. The job passes that file to `bundle-config --notices` and uploads it as `notices-<platform>` (`notices-linux-<arch>` on Linux); `checksums` publishes these four files as `persephone-<version>-THIRD-PARTY-NOTICES-<platform>.txt`, so the published notices match what each bundle carries. `tools/about.toml` lists the Linux and macOS targets and keeps build dependencies, so cargo-about already covers the call worker's `pipewire`, `libspa` and `objc2-*` crates (all MIT or Zlib/Apache-2.0/MIT). `libpipewire` is a system library on Linux and is not shipped. The workflow creates `src-tauri/binaries/` itself; do not commit it.
 
 ## Owner set-up
 
@@ -316,17 +322,31 @@ replace that script and keep the "files to sign" interface.
 
 `macos-sign` does not use Tauri. It unpacks the app and refuses an archive
 with entries outside `Persephone.app`, symbolic links that leave the bundle,
-or programs other than the three it signs. It imports the certificate into a
-temporary keychain. It signs the two sidecars, then the main binary, then the
-bundle, each with `codesign --options runtime --timestamp` and without
-`--deep`. It notarizes the app with `xcrun notarytool` (the API key is written
+or programs other than the four it signs. It checks that the entitlements
+file from the build job holds exactly the two keys below, both true. It
+imports the certificate into a temporary keychain. It signs the three
+sidecars, then the main binary, then the bundle, each with
+`codesign --options runtime --timestamp` and without `--deep`. Only the call
+worker also gets `--entitlements src-tauri/entitlements/call-worker.plist`. It notarizes the app with `xcrun notarytool` (the API key is written
 to a temporary file), staples the ticket and zips the app. It builds the
 `.dmg` with `hdiutil`, then signs, notarizes and staples it. It then checks
 `codesign --verify --deep --strict` on the app, the hardened-runtime flag on
-all three binaries, both architectures, `stapler validate` and
+all four binaries, both architectures, the entitlements of each binary
+(the call worker's two keys, none on the others), `stapler validate` and
 `spctl --assess` on the app and the `.dmg`, `codesign --verify --strict` on
 the `.dmg`, and the app inside the mounted `.dmg`. A last step that always
-runs deletes the keychain and the key file. The app uses no entitlements.
+runs deletes the keychain and the key file.
+
+Entitlements (ADR-0049): only the call worker has any, and only
+`com.apple.security.device.audio-input` (microphone) and
+`com.apple.security.device.camera`. The hardened runtime needs them for the
+call worker to reach those devices. The main app, `persephone` and
+`persephone-media-worker` have none, and the call worker has none of the
+other device, file, network or JIT entitlements. The app's `Info.plist` gets
+`NSMicrophoneUsageDescription` and `NSCameraUsageDescription` from
+`src-tauri/Info.plist`, which Tauri merges into the bundle. TCC asks the user
+on first use. The macOS notices carry the libwebrtc licence text of both
+architecture archives (`append-notice --platform macos`).
 
 ### GPG key
 

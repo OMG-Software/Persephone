@@ -3,6 +3,7 @@
 // full `Record`, so a new code in the contract fails type checking until it
 // has a text.
 import type {
+  CallCamera,
   CallDevice,
   CallDevices,
   CallEnd,
@@ -73,7 +74,9 @@ export const IDLE_CALL: CallStatus = {
   muted: false,
   participants: [],
   ended: null,
-  joinError: null
+  joinError: null,
+  camera: 'off',
+  video: []
 };
 
 /** This account is in a call, or joining one. */
@@ -112,6 +115,64 @@ export function callButton(
     return { hidden: false, disabled: true, label, reason };
   }
   return { hidden: false, disabled: false, label, reason: null };
+}
+
+export const VIDEO_CALL_LABEL = 'Video call';
+
+/**
+ * The room header's video call button. It follows the call button's rules:
+ * the same readiness, the same reasons and the same pending state. Only the
+ * label differs.
+ */
+export function videoCallButton(
+  roomId: string,
+  readiness: CallReadiness | null,
+  status: CallStatus,
+  pending: boolean
+): CallButtonView {
+  const view = callButton(roomId, readiness, status, pending);
+  const count = readiness?.activeMembers ?? 0;
+  return { ...view, label: count > 0 ? `Join with video (${count})` : VIDEO_CALL_LABEL };
+}
+
+export const CAMERA_ON_LABEL = 'Turn camera on';
+export const CAMERA_OFF_LABEL = 'Turn camera off';
+export const CAMERA_STARTING_TEXT = 'Starting the camera…';
+export const CAMERA_NOT_FOUND_TEXT = 'The chosen camera is not connected';
+export const CAMERA_UNAVAILABLE_TEXT = 'The camera could not start';
+
+/** The note beside the camera toggle; empty when the camera needs none. */
+export const CAMERA_TEXT: Record<CallCamera, string> = {
+  off: '',
+  starting: CAMERA_STARTING_TEXT,
+  on: '',
+  not_found: CAMERA_NOT_FOUND_TEXT,
+  unavailable: CAMERA_UNAVAILABLE_TEXT
+};
+
+export type CameraButtonView = {
+  label: string;
+  // The camera is on, or is starting.
+  pressed: boolean;
+};
+
+/**
+ * The camera toggle in the call bar. A camera that failed (`not_found`,
+ * `unavailable`) is off, so the toggle offers to turn it on again.
+ */
+export function cameraButton(camera: CallCamera): CameraButtonView {
+  const pressed = camera === 'on' || camera === 'starting';
+  return { label: pressed ? CAMERA_OFF_LABEL : CAMERA_ON_LABEL, pressed };
+}
+
+/** The label of the own tile. */
+export const OWN_TILE_LABEL = 'You';
+/** The label of a remote tile the core sent without a device. */
+export const PARTICIPANT_TILE_LABEL = 'Participant';
+
+/** The call has a camera picture to show: at least one video tile. */
+export function hasVideo(status: CallStatus): boolean {
+  return inCall(status) && status.video.length > 0;
 }
 
 /**

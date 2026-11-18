@@ -20,8 +20,10 @@
 //!   token. The answer must name a `wss://` URL and a well-formed JWT.
 //! * [`readiness`]: whether the homeserver offers an SFU transport and TURN
 //!   servers, so the page can say a call is not possible before it starts.
-//! * [`devices`]: the saved microphone and speaker, and the device list a
-//!   contained worker reports.
+//! * [`devices`]: the saved microphone, speaker and camera, and the device
+//!   list a contained worker reports.
+//! * [`video`]: the newest picture on each video tile, kept apart from the
+//!   worker's blocking event queue (ADR-0048).
 //! * [`delayed`]: the delayed leave (MSC4140) that ends a membership when the
 //!   core stops restarting it.
 //! * [`incoming`]: the bounded to-device handler for other members' keys and
@@ -45,6 +47,7 @@ pub mod membership;
 pub mod readiness;
 pub mod sfu;
 pub mod status;
+pub mod video;
 pub mod worker;
 
 /// Most call members kept: examined events become at most this many members,

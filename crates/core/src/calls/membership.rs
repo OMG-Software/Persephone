@@ -50,12 +50,15 @@ pub fn participant_identity(user_id: &UserId, device_id: &DeviceId) -> String {
 ///
 /// `livekit_alias` is the room ID, as the Rust SDK's LiveKit focus requires.
 /// `created_ts` is set on a refresh, so the join time survives it.
+/// `m.call.intent` is `"video"` when the call was joined with `video`, else
+/// `"audio"`. It is fixed at the join and not changed by the camera button.
 pub fn own_membership(
     room_id: &str,
     device_id: &DeviceId,
     user_id: &UserId,
     service_url: &str,
     created_ts: Option<u64>,
+    video: bool,
 ) -> Value {
     let mut content = json!({
         "application": "m.call",
@@ -70,7 +73,7 @@ pub fn own_membership(
             "livekit_alias": room_id,
         }],
         "membershipID": participant_identity(user_id, device_id),
-        "m.call.intent": "audio",
+        "m.call.intent": if video { "video" } else { "audio" },
     });
     if let (Some(ts), Some(map)) = (created_ts, content.as_object_mut()) {
         map.insert("created_ts".to_owned(), json!(ts));
@@ -258,6 +261,7 @@ mod tests {
             &OwnedUserId::try_from(sender).unwrap(),
             SERVICE,
             None,
+            false,
         );
         event(sender, device, ts, content)
     }
@@ -271,6 +275,7 @@ mod tests {
             user_id!("@a:example.org"),
             SERVICE,
             None,
+            false,
         );
         assert_eq!(
             content,
@@ -296,14 +301,30 @@ mod tests {
             user_id!("@a:example.org"),
             SERVICE,
             Some(42),
+            false,
         );
         assert_eq!(refreshed["created_ts"], 42);
+        let video = own_membership(
+            "!r:example.org",
+            device_id!("DEV"),
+            user_id!("@a:example.org"),
+            SERVICE,
+            Some(42),
+            true,
+        );
+        assert_eq!(video["m.call.intent"], "video");
+        assert_eq!(refreshed["m.call.intent"], "audio");
+        assert_eq!(
+            video["created_ts"], 42,
+            "a video refresh keeps the join time"
+        );
         let bare = own_membership(
             "!r:example.org",
             device_id!("DEV"),
             user_id!("@a:example.org"),
             "https://livekit.example.org",
             None,
+            false,
         );
         assert_eq!(
             bare["foci_preferred"][0]["livekit_service_url"], "https://livekit.example.org",

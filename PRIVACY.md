@@ -191,6 +191,26 @@ health snapshot.
 
 The app does not show link previews and does not load content from the web.
 
+### Calls
+
+* **Who sees a call.** A call uses your homeserver's call service (a LiveKit
+  media server) and its relay (TURN) servers. They see who is in the call,
+  when, your IP address, and the size and timing of the audio and video
+  packets. They do not see the audio or the video: each sender encrypts its
+  media with keys that only the call members get.
+* **Proxy.** Calls cannot use the profile's SOCKS5 proxy. When a proxy is set,
+  the app asks before each call whether to connect directly.
+* **Microphone.** The app records from the microphone only during a call.
+  Mute stops sending audio.
+* **Camera.** The app uses the camera only after you choose "Video call" or
+  turn the camera on during a call. Turning the camera off stops it, and the
+  camera light goes out. The app uses only the camera that you chose in
+  Settings, or the first camera when you chose none. It never changes to
+  another camera.
+* **Devices.** The app saves your choice of microphone, speaker and camera in
+  the encrypted profile. Listing devices does not record, play or open a
+  camera.
+
 ## What the app stores on your device
 
 The app keeps your account in a local profile. The profile holds the Matrix

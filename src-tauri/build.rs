@@ -51,6 +51,8 @@ fn main() {
             "call_join",
             "call_leave",
             "call_mute",
+            "call_camera",
+            "call_video_frame",
             "call_status",
             "set_up_encryption",
             "recover_with_key",

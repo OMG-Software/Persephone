@@ -96,6 +96,16 @@ export type CallEnd = "left" | "connection_failed" | "audio_device" | "containme
 
 export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
 
+export type CallCamera = "off" | "starting" | "on" | "not_found" | "unavailable";
+
+export type CallParticipantRef = { userId: string, deviceId: string, };
+
+export type CallVideoTile = { 
+/**
+ * 0 to 4.
+ */
+tile: number, participant: CallParticipantRef | null, own: boolean, };
+
 export type CallStatus = { phase: CallPhase, roomId: string | null, muted: boolean, 
 /**
  * At most [`CALL_PARTICIPANTS_MAX`], other devices only.
@@ -108,11 +118,15 @@ ended: CallEnd | null,
 /**
  * Set when this reply refuses a join.
  */
-joinError: CallJoinError | null, };
+joinError: CallJoinError | null, camera: CallCamera, 
+/**
+ * The active video tiles, at most [`CALL_VIDEO_TILES_MAX`].
+ */
+video: Array<CallVideoTile>, };
 
 export type CallDevice = { id: string, name: string, };
 
-export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, unreadable: boolean, };
+export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, unreadable: boolean, };
 
 export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
 
