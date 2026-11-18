@@ -11,7 +11,10 @@ matrix in the merge queue and on pushes to `main`; `workflow_dispatch` only
 for branches without a pull request; the eight required check names kept;
 the `latest` pre-release still built on every merge; a 10 GB cache budget
 with compiled dependencies cached for the core gate only. The account is on
-the GitHub Free plan (20 concurrent jobs, 5 of them macOS).
+the GitHub Free plan (20 concurrent jobs, 5 of them macOS). The rollout order
+under Decision Outcome is part of this proposal and is not yet confirmed by
+the owner: the merge queue is turned on before this change merges, so there
+is no period in which a pull request merges after the core gate alone.
 
 ## Context and Problem Statement
 
@@ -44,7 +47,7 @@ before a merge?
 ## Decision Drivers
 
 * Every one of the eight required checks must pass before code reaches
-  `main`.
+  `main`, with no exception during the rollout.
 * Branch protection matches check names exactly; the owner keeps the eight
   names.
 * Queue time, not run time, made the slow runs.
@@ -113,6 +116,17 @@ core gate. The changes:
 | `fedora-44` | `fedora` | skipped (success) | runs |
 | `opensuse-leap-16.0` | `opensuse` | skipped (success) | runs |
 
+Rollout, in this order:
+
+1. The owner turns on **Require merge queue** in the "Protect main"
+   ruleset and keeps the eight required check names.
+2. This change merges through the queue, before any other pull request.
+   Its queue commit contains the new `check.yml`, so all eight jobs run.
+3. Only then may other pull requests enter the queue.
+
+If the queue is not on, this change must not merge: with the queue-only
+jobs skipped on pull requests, a merge would rest on the core gate alone.
+
 Rejected:
 
 * **Matrix plus aggregate jobs.** An aggregate job sees only the result of
@@ -157,8 +171,10 @@ Rejected:
   it again.
 * Each merge waits for a full matrix run in the queue (about 25 minutes
   without queueing), and `main` runs it once more.
-* Until the owner turns on the merge queue, pull requests merge after only
-  the core gate. The other six checks then run first on `main`.
+* A pull request queued before this change merges has no `merge_group`
+  trigger in its queue commit. Its six queue-only checks never report, so
+  the queue times it out instead of merging it (it fails closed). This
+  change must therefore be the first to merge through the queue.
 * The `latest` pre-release on `main` no longer waits for its own check. It
   depends on Check, which ran on the same commit in the merge queue.
 * The scan downloads SonarQube's plugins on every run.

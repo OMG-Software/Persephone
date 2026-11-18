@@ -43,9 +43,15 @@ REQUIRED_WORKFLOW = "check.yml"
 
 QUEUE_ONLY = "${{ !cancelled() && github.event_name != 'pull_request' }}"
 PR_CANCEL = "${{ github.event_name == 'pull_request' }}"
+# The group suffix of a workflow that cancels: one group per pull request,
+# and one per run for every other event.
+PR_GROUP = "${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}"
 ON_MAIN = "github.ref == 'refs/heads/main'"
+# The whole `if` of a cache save: main, and only when the restore missed.
+SAVE_GUARD = re.compile(r"github\.ref == 'refs/heads/main' && steps\.[A-Za-z0-9_-]+\.outputs\.cache-hit != 'true'")
 NOT_TAG = "${{ !(github.event_name == 'push' && github.ref_type == 'tag') }}"
-FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
+# The whole `if` of a SONAR_TOKEN job: every event but a fork pull request.
+FORK_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
 PINNED = re.compile(r"[^@\s]+@[0-9a-f]{40}")
 # Commands that run dependency code (build scripts, package scripts) or fetch
 # packages. None may run in a job that holds a secret.
@@ -128,6 +134,8 @@ def trigger_problems(name, workflow):
             if event not in on:
                 problems.append(f"{name}: holds required checks but has no {event}")
     push = on.get("push") or {}
+    if name == REQUIRED_WORKFLOW and "main" not in (push.get("branches") or []):
+        problems.append(f"{name}: holds required checks but push does not run on main")
     if "branches" in push and "branches-ignore" in push:
         problems.append(f"{name}: push has both branches and branches-ignore")
     branches = push.get("branches") or []
@@ -158,8 +166,8 @@ def concurrency_problems(name, workflow):
     cancel = concurrency.get("cancel-in-progress", False)
     if cancel not in (False, PR_CANCEL):
         problems.append(f"{name}: cancel-in-progress {cancel!r} may cancel a run that is not a pull request's")
-    if cancel == PR_CANCEL and ("github.run_id" not in group or "pull_request.number" not in group):
-        problems.append(f"{name}: a cancelling group must be per pull request and per run otherwise")
+    if cancel == PR_CANCEL and group != f"{stem}-{PR_GROUP}":
+        problems.append(f"{name}: a cancelling group must be {stem}-{PR_GROUP}")
     return problems
 
 
@@ -179,7 +187,7 @@ def cache_problems(name, workflow):
             label = f"{name}: job {job_id} step {step.get('name', uses)!r}"
             if uses.startswith("actions/cache@") and untrusted:
                 problems.append(f"{label} saves a cache from pull requests; use restore and save")
-            if uses.startswith("actions/cache/save@") and ON_MAIN not in str(step.get("if", "")):
+            if uses.startswith("actions/cache/save@") and not SAVE_GUARD.fullmatch(str(step.get("if", ""))):
                 problems.append(f"{label} saves a cache outside main")
             if uses.startswith("Swatinem/rust-cache@"):
                 if (step.get("with") or {}).get("save-if") != "${{ " + ON_MAIN + " }}":
@@ -198,8 +206,10 @@ def secret_problems(name, workflow):
     memory. A SONAR_TOKEN job skips fork pull requests. Every action is
     pinned to a full commit SHA."""
     problems = []
+    # A job inherits the workflow's env, and any secret in it.
+    inherited = json.dumps(workflow.get("env") or {})
     for job_id, job in jobs(workflow):
-        text = json.dumps(job)
+        text = json.dumps(job) + inherited
         for step in steps(job):
             uses = step.get("uses", "")
             if uses and not uses.startswith("./") and not PINNED.fullmatch(uses):
@@ -213,7 +223,7 @@ def secret_problems(name, workflow):
                 problems.append(f"{label} runs a build or package command")
             if step.get("uses", "").startswith(CACHE_ACTIONS):
                 problems.append(f"{label} restores a cache")
-        if "SONAR_TOKEN" in secrets and FORK_GUARD not in str(job.get("if", "")):
+        if "SONAR_TOKEN" in secrets and job.get("if") != FORK_GUARD:
             problems.append(f"{name}: job {job_id} holds SONAR_TOKEN without the fork guard")
     return problems
 
@@ -364,6 +374,53 @@ class RulesReject(unittest.TestCase):
         }
         problems = secret_problems("sonar.yml", self.workflow(jobs={"sonarqube": job}))
         self.assertEqual(len(problems), 4, problems)
+
+    def test_required_checks_that_no_longer_run_on_main(self):
+        """GIVEN check.yml whose push runs on tags only
+        WHEN the trigger rule runs
+        THEN it reports that main is not covered."""
+        workflow = self.workflow(on={"push": {"tags": ["v*"]}, "pull_request": None, "merge_group": None, "workflow_dispatch": None})
+        self.assertEqual(trigger_problems("check.yml", workflow), ["check.yml: holds required checks but push does not run on main"])
+
+    def test_a_cancelling_group_that_differs_per_run(self):
+        """GIVEN a cancelling group that names both the pull request and the run
+        WHEN the concurrency rule runs
+        THEN it reports that a newer push could not cancel the older run."""
+        group = "check-${{ github.event.pull_request.number || github.run_id }}-${{ github.run_id }}"
+        workflow = self.workflow(concurrency={"group": group, "cancel-in-progress": PR_CANCEL})
+        problems = concurrency_problems("check.yml", workflow)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("a cancelling group must be", problems[0])
+
+    def test_a_save_guard_that_also_admits_pull_requests(self):
+        """GIVEN a cache save whose `if` contains the main test but also allows pull requests
+        WHEN the cache rule runs
+        THEN it reports a save outside main, and the approved guard still passes."""
+        loose = {"name": "s", "uses": "actions/cache/save@" + "0" * 40, "if": f"{ON_MAIN} || github.event_name == 'pull_request'"}
+        exact = {"name": "t", "uses": "actions/cache/save@" + "0" * 40, "if": f"{ON_MAIN} && steps.deps.outputs.cache-hit != 'true'"}
+        problems = cache_problems("check.yml", self.workflow(jobs={"j": {"steps": [loose, exact]}}))
+        self.assertEqual(problems, ["check.yml: job j step 's' saves a cache outside main"])
+
+    def test_a_secret_inherited_from_the_workflow_env(self):
+        """GIVEN SONAR_TOKEN in the workflow-level env and a job that builds
+        WHEN the secret rule runs
+        THEN it reports the build, although the job itself names no secret."""
+        workflow = self.workflow(
+            env={"SONAR_TOKEN": "${{ secrets.SONAR_TOKEN }}"},
+            jobs={"coverage": {"if": FORK_GUARD, "steps": [{"name": "build", "run": "cargo build"}]}},
+        )
+        problems = secret_problems("sonar.yml", workflow)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("runs a build or package command", problems[0])
+
+    def test_an_inverted_fork_guard(self):
+        """GIVEN a SONAR_TOKEN job whose `if` contains the repository test but admits every pull request
+        WHEN the secret rule runs
+        THEN it reports the missing fork guard."""
+        guard = "github.event_name == 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository"
+        job = {"if": guard, "steps": [{"name": "scan", "env": {"SONAR_TOKEN": "${{ secrets.SONAR_TOKEN }}"}}]}
+        problems = secret_problems("sonar.yml", self.workflow(jobs={"sonarqube": job}))
+        self.assertEqual(problems, ["sonar.yml: job sonarqube holds SONAR_TOKEN without the fork guard"])
 
 
 if __name__ == "__main__":
