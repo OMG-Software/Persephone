@@ -14,6 +14,13 @@
 //! the core's frames with [`receive_from_core`], which checks the pixel
 //! frame's header against its reply before it allocates the body.
 //!
+//! `call_video_frame` has the same shape: a [`VideoReply`] control frame
+//! followed at once by exactly one `RgbaPixels` frame of at most
+//! [`MAX_CALL_VIDEO_BYTES`] ([`send_video_reply`], ADR-0048). When no newer
+//! picture exists, it gets an ordinary `Reply` whose outcome is `ok` with a
+//! null value, and no pixel frame follows. [`receive_from_core`] checks the
+//! pixel frame's header against its reply before it allocates the body.
+//!
 //! One call carries bytes the other way: `paste_image` is a control frame
 //! followed at once by exactly one `EncodedImage` frame of the length it
 //! declares, at most [`MAX_PASTED_IMAGE_BYTES`] ([`send_pasted_image`],
@@ -257,8 +264,8 @@ pub enum Call {
     /// Lists the devices through a contained call worker, so it can take
     /// seconds. Available whenever the profile is unlocked.
     CallDevices {},
-    /// Save the chosen call microphone and speaker as platform device IDs,
-    /// each at most [`MAX_CALL_DEVICE_ID_BYTES`]; null is the system default.
+    /// Save the chosen call microphone, speaker and camera as platform device
+    /// IDs, each at most [`MAX_CALL_DEVICE_ID_BYTES`]; null is the system default.
     /// They apply to calls joined afterwards.
     SetCallDevices {
         /// Required, though it may be null.
@@ -267,6 +274,10 @@ pub enum Call {
         /// Required, though it may be null.
         #[serde(deserialize_with = "Option::deserialize")]
         playout: Option<String>,
+        /// The camera, as a platform device ID. Required, though it may be
+        /// null (the first camera the system lists).
+        #[serde(deserialize_with = "Option::deserialize")]
+        camera: Option<String>,
     },
     /// Find the homeserver of a server name such as `example.org`, through
     /// its `.well-known/matrix/client` file, and confirm it speaks Matrix
@@ -650,12 +661,14 @@ pub enum Call {
     CallReadiness {
         room_id: String,
     },
-    /// Join the audio call in this joined, encrypted room. With a profile
+    /// Join the call in this joined, encrypted room, with the camera on when
+    /// `video` is true (ADR-0048). With a profile
     /// proxy the core first asks, in its own window, whether the call may
     /// connect directly. Replies `CallStatus`; a refusal is a `joinError` in
     /// it, not an error code. Progress arrives as [`Event::CallChanged`].
     CallJoin {
         room_id: String,
+        video: bool,
     },
     /// Leave the call, or cancel a join in progress. Replies `CallStatus`.
     CallLeave {},
@@ -663,6 +676,22 @@ pub enum Call {
     /// answer arrives as [`Event::CallChanged`].
     CallMute {
         muted: bool,
+    },
+    /// Turn the camera on or off during a call. Replies `CallStatus`, with the
+    /// camera `starting` when turned on; the worker's answer arrives as
+    /// [`Event::CallChanged`]. Refused when no call is connected.
+    CallCamera {
+        on: bool,
+    },
+    /// The newest picture on a video tile (0 is the own camera, 1 to 4 are
+    /// remote), if its number is above `after` and it belongs to the tile's
+    /// stream `stream` (from the call status). Answered at once with a
+    /// [`VideoReply`] and one pixel frame, or with an `ok` reply holding null
+    /// when there is no such picture.
+    CallVideoFrame {
+        tile: u8,
+        after: u64,
+        stream: u64,
     },
     /// The call as the page shows it. Replies `CallStatus`.
     CallStatus {},
@@ -870,6 +899,21 @@ pub const MAX_PROXY_BYTES: usize = 300;
 /// Longest call device ID either side accepts, in bytes.
 pub const MAX_CALL_DEVICE_ID_BYTES: usize = 512;
 
+/// Video tiles in a call: tile 0 is the own camera, tiles 1 to 4 are remote.
+pub const CALL_VIDEO_TILES: u8 = 5;
+
+/// The longest side of a call video picture, in pixels.
+pub const MAX_CALL_VIDEO_SIDE: u32 = 640;
+
+/// The most pixels in one call video picture.
+pub const MAX_CALL_VIDEO_PIXELS: u32 = 640 * 360;
+
+/// The most bytes in the one `RgbaPixels` frame after a [`VideoReply`].
+pub const MAX_CALL_VIDEO_BYTES: u64 = MAX_CALL_VIDEO_PIXELS as u64 * 4;
+
+/// The largest picture rotation: quarter turns clockwise, 0 to 3.
+pub const MAX_CALL_VIDEO_ROTATION: u8 = 3;
+
 /// Longest server name either side accepts in `discover_homeserver`, in
 /// bytes (a DNS name and a port).
 pub const MAX_SERVER_NAME_BYTES: usize = 261;
@@ -903,6 +947,9 @@ pub enum Event {
     /// The call changed state, or its participants did: ask for
     /// `call_status`. Coalesced; it carries no call data.
     CallChanged {},
+    /// A new video picture is waiting: ask for `call_video_frame` on each
+    /// active tile. Content-free and coalesced like `CallChanged`.
+    CallVideo {},
     /// The list of third-party modules changed: ask for `third_party_modules`.
     /// Content-free and coalesced like `SecurityChanged`.
     ModulesChanged {},
@@ -1005,6 +1052,81 @@ impl PixelReply {
     }
 }
 
+/// Announces the video picture that follows it: tile `tile`, picture number
+/// `seq`, turned `rotation` quarter turns clockwise, `width` by `height` RGBA
+/// pixels, for request `id`. On the wire it is `{"video_reply":{...}}` in a
+/// control frame.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VideoReply {
+    pub id: u32,
+    pub tile: u8,
+    pub seq: u64,
+    pub rotation: u8,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl VideoReply {
+    /// The pixel frame header this reply announces, or `None` when the tile
+    /// or rotation is out of range, the picture number is not JavaScript-safe,
+    /// or the picture is empty, too wide or too tall, or over
+    /// [`MAX_CALL_VIDEO_PIXELS`].
+    pub fn frame_header(&self) -> Option<FrameHeader> {
+        if self.tile >= CALL_VIDEO_TILES
+            || self.rotation > MAX_CALL_VIDEO_ROTATION
+            || self.seq > MAX_SAFE_TIMESTAMP
+            || !(1..=MAX_CALL_VIDEO_SIDE).contains(&self.width)
+            || !(1..=MAX_CALL_VIDEO_SIDE).contains(&self.height)
+        {
+            return None;
+        }
+        let pixels = u64::from(self.width) * u64::from(self.height);
+        if pixels > u64::from(MAX_CALL_VIDEO_PIXELS) {
+            return None;
+        }
+        Some(FrameHeader {
+            kind: FrameKind::RgbaPixels,
+            length: pixels * RGBA_BYTES_PER_PIXEL,
+            width: self.width,
+            height: self.height,
+        })
+    }
+}
+
+/// A [`VideoReply`] and its pixel frame. The frame keeps its budget
+/// reservation until it is dropped.
+pub struct VideoPicture {
+    pub reply: VideoReply,
+    pub pixels: ReceivedFrame,
+}
+
+/// Cheap checks for the relay and authoritative receiver on the call video
+/// commands: [`Call::CallVideoFrame`] needs a tile below [`CALL_VIDEO_TILES`]
+/// and a JavaScript-safe `after` and `stream`; a camera ID in [`Call::SetCallDevices`]
+/// must be non-empty, at most [`MAX_CALL_DEVICE_ID_BYTES`] and free of
+/// control characters. Any other call is not constrained here and gives
+/// `true`.
+pub fn call_video_within_limits(call: &Call) -> bool {
+    match call {
+        Call::CallVideoFrame {
+            tile,
+            after,
+            stream,
+        } => {
+            *tile < CALL_VIDEO_TILES
+                && *after <= MAX_SAFE_TIMESTAMP
+                && *stream <= MAX_SAFE_TIMESTAMP
+        }
+        Call::SetCallDevices { camera, .. } => camera.as_ref().is_none_or(|id| {
+            !id.is_empty()
+                && id.len() <= MAX_CALL_DEVICE_ID_BYTES
+                && !id.chars().any(char::is_control)
+        }),
+        _ => true,
+    }
+}
+
 /// A [`PixelReply`] and its pixel frame. The frame keeps its budget
 /// reservation until it is dropped.
 pub struct PixelBand {
@@ -1012,20 +1134,23 @@ pub struct PixelBand {
     pub pixels: ReceivedFrame,
 }
 
-/// What the UI reads from the core: a message, or a band of pixels.
+/// What the UI reads from the core: a message, a band of pixels, or a video
+/// picture.
 pub enum FromCore {
     Message(CoreMessage),
     Pixels(PixelBand),
+    Video(VideoPicture),
 }
 
 /// Every control message from the core: [`CoreMessage`]'s two forms and the
-/// pixel reply, in the same externally tagged form.
+/// pixel and video replies, in the same externally tagged form.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum Wire<R, P> {
+enum Wire<R, P, V> {
     Reply(R),
     Event(Event),
     PixelReply(P),
+    VideoReply(V),
 }
 
 /// The fixed frame header length of `persephone-media-protocol`.
@@ -1097,7 +1222,37 @@ pub fn send_pixel_reply<W: Write>(
     }
     FrameHeader::decode(header.encode())
         .map_err(|_| invalid("pixel frame header fails receiver validation"))?;
-    let body = serde_json::to_vec(&Wire::<(), &PixelReply>::PixelReply(reply))
+    let body = serde_json::to_vec(&Wire::<(), &PixelReply, ()>::PixelReply(reply))
+        .map_err(io::Error::other)?;
+    let control = FrameHeader {
+        kind: FrameKind::Control,
+        length: body.len() as u64,
+        width: 0,
+        height: 0,
+    };
+    write_frame(writer, control, &body)?;
+    write_frame(writer, header, pixels)
+}
+
+/// Writes a [`VideoReply`] and then its pixel frame. Everything is checked
+/// before anything is written: the reply must be inside the video limits, and
+/// `pixels` must be exactly `width * height` RGBA pixels. The caller holds
+/// its output lock across this call, so no other frame comes between the two.
+pub fn send_video_reply<W: Write>(
+    writer: &mut W,
+    reply: &VideoReply,
+    pixels: &[u8],
+) -> io::Result<()> {
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
+    let header = reply
+        .frame_header()
+        .ok_or_else(|| invalid("video picture outside the video limits"))?;
+    if u64::try_from(pixels.len()).ok() != Some(header.length) {
+        return Err(invalid("video picture length does not match its reply"));
+    }
+    FrameHeader::decode(header.encode())
+        .map_err(|_| invalid("pixel frame header fails receiver validation"))?;
+    let body = serde_json::to_vec(&Wire::<(), (), &VideoReply>::VideoReply(reply))
         .map_err(io::Error::other)?;
     let control = FrameHeader {
         kind: FrameKind::Control,
@@ -1199,11 +1354,12 @@ pub fn receive_request<R: Read>(
     }
 }
 
-/// Reads one message or pixel band from the core (the UI side). After a
-/// [`PixelReply`], the next frame must be an `RgbaPixels` frame whose width,
-/// height and length match it. That header is checked before the body is
-/// allocated, and the body is read with the budgeted reader. A reply over the
-/// band limit is refused without reading the frame that follows.
+/// Reads one message, pixel band or video picture from the core (the UI
+/// side). After a [`PixelReply`] or [`VideoReply`], the next frame must be an
+/// `RgbaPixels` frame whose width, height and length match it. That header is
+/// checked before the body is allocated, and the body is read with the
+/// budgeted reader. A reply over its limit is refused without reading the
+/// frame that follows.
 pub fn receive_from_core<R: Read>(
     reader: &mut R,
     budgets: &ResourceBudgets,
@@ -1212,14 +1368,16 @@ pub fn receive_from_core<R: Read>(
     if frame.header().kind != FrameKind::Control {
         return Err(ReceiveError::UnexpectedKind);
     }
-    let reply = match serde_json::from_slice::<Wire<Reply, PixelReply>>(frame.body()) {
-        Ok(Wire::Reply(reply)) => return Ok(FromCore::Message(CoreMessage::Reply(reply))),
-        Ok(Wire::Event(event)) => return Ok(FromCore::Message(CoreMessage::Event(event))),
-        Ok(Wire::PixelReply(reply)) => reply,
-        Err(_) => return Err(ReceiveError::Malformed),
-    };
+    let (expected, reply) =
+        match serde_json::from_slice::<Wire<Reply, PixelReply, VideoReply>>(frame.body()) {
+            Ok(Wire::Reply(reply)) => return Ok(FromCore::Message(CoreMessage::Reply(reply))),
+            Ok(Wire::Event(event)) => return Ok(FromCore::Message(CoreMessage::Event(event))),
+            Ok(Wire::PixelReply(reply)) => (reply.frame_header(), Announced::Band(reply)),
+            Ok(Wire::VideoReply(reply)) => (reply.frame_header(), Announced::Video(reply)),
+            Err(_) => return Err(ReceiveError::Malformed),
+        };
     drop(frame);
-    let expected = reply.frame_header().ok_or(ReceiveError::Malformed)?;
+    let expected = expected.ok_or(ReceiveError::Malformed)?;
     let mut wire = [0; FRAME_HEADER_LEN];
     reader
         .read_exact(&mut wire)
@@ -1234,7 +1392,16 @@ pub fn receive_from_core<R: Read>(
     // The header was checked; give it back to the budgeted reader together
     // with the body that follows it.
     let pixels = read_frame(&mut (&wire[..]).chain(reader), budgets).map_err(frame_error)?;
-    Ok(FromCore::Pixels(PixelBand { reply, pixels }))
+    Ok(match reply {
+        Announced::Band(reply) => FromCore::Pixels(PixelBand { reply, pixels }),
+        Announced::Video(reply) => FromCore::Video(VideoPicture { reply, pixels }),
+    })
+}
+
+/// The reply that announced a pixel frame.
+enum Announced {
+    Band(PixelReply),
+    Video(VideoReply),
 }
 
 #[cfg(test)]
@@ -1299,6 +1466,7 @@ mod tests {
         let list = CoreMessage::Event(Event::RoomListChanged {});
         let security = CoreMessage::Event(Event::SecurityChanged {});
         let calls = CoreMessage::Event(Event::CallChanged {});
+        let video = CoreMessage::Event(Event::CallVideo {});
         let modules = CoreMessage::Event(Event::ModulesChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
@@ -1314,10 +1482,15 @@ mod tests {
             "wire form of the security event"
         );
         send(&mut wire, &calls).unwrap();
+        send(&mut wire, &video).unwrap();
         send(&mut wire, &modules).unwrap();
         assert!(
             String::from_utf8_lossy(&wire).contains(r#"{"event":{"call_changed":{}}}"#),
             "wire form of the call event"
+        );
+        assert!(
+            String::from_utf8_lossy(&wire).contains(r#"{"event":{"call_video":{}}}"#),
+            "wire form of the call video event"
         );
         assert!(
             String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"modules_changed":{}}}"#),
@@ -1325,7 +1498,7 @@ mod tests {
         );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session, list, security, calls, modules] {
+        for expected in [reply, event, session, list, security, calls, video, modules] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -1343,6 +1516,8 @@ mod tests {
             br#"{"event":{"call_changed":{"room_id":"!r:s"}}}"#,
             br#"{"event":{"call_changed":{"participants":[]}}}"#,
             br#"{"event":"call_changed"}"#,
+            br#"{"event":{"call_video":{"tile":1}}}"#,
+            br#"{"event":"call_video"}"#,
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));
             assert!(
@@ -1633,8 +1808,17 @@ mod tests {
                 Call::SetCallDevices {
                     recording: Some("{0.0.1}.{a}".into()),
                     playout: None,
+                    camera: Some("usb#cam".into()),
                 },
-                r#"{"id":1,"call":{"command":"set_call_devices","recording":"{0.0.1}.{a}","playout":null}}"#,
+                r#"{"id":1,"call":{"command":"set_call_devices","recording":"{0.0.1}.{a}","playout":null,"camera":"usb#cam"}}"#,
+            ),
+            (
+                Call::SetCallDevices {
+                    recording: None,
+                    playout: None,
+                    camera: None,
+                },
+                r#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"camera":null}}"#,
             ),
             (
                 Call::DiscoverHomeserver {
@@ -1715,8 +1899,21 @@ mod tests {
             (
                 Call::CallJoin {
                     room_id: "!r:s".into(),
+                    video: true,
                 },
-                r#"{"id":1,"call":{"command":"call_join","room_id":"!r:s"}}"#,
+                r#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","video":true}}"#,
+            ),
+            (
+                Call::CallCamera { on: false },
+                r#"{"id":1,"call":{"command":"call_camera","on":false}}"#,
+            ),
+            (
+                Call::CallVideoFrame {
+                    tile: 4,
+                    after: 9,
+                    stream: 2,
+                },
+                r#"{"id":1,"call":{"command":"call_video_frame","tile":4,"after":9,"stream":2}}"#,
             ),
             (
                 Call::CallLeave {},
@@ -2130,8 +2327,22 @@ mod tests {
             br#"{"id":1,"call":{"command":"call_readiness"}}"#,
             br#"{"id":1,"call":{"command":"call_readiness","room_id":"!r:s","video":true}}"#,
             br#"{"id":1,"call":{"command":"call_join"}}"#,
-            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","proxy_ok":true}}"#,
-            br#"{"id":1,"call":{"command":"call_join","room_id":null}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","video":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","video":false,"proxy_ok":true}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":null,"video":false}}"#,
+            br#"{"id":1,"call":{"command":"call_camera"}}"#,
+            br#"{"id":1,"call":{"command":"call_camera","on":1}}"#,
+            br#"{"id":1,"call":{"command":"call_camera","on":true,"device":"x"}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame"}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","after":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":256,"after":0,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":-1,"after":0,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":-1,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0,"stream":-1}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0,"stream":0,"x":1}}"#,
             br#"{"id":1,"call":{"command":"call_leave","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_mute"}}"#,
             br#"{"id":1,"call":{"command":"call_mute","muted":"yes"}}"#,
@@ -2164,8 +2375,11 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_call_devices"}}"#,
             br#"{"id":1,"call":{"command":"set_call_devices","recording":null}}"#,
             br#"{"id":1,"call":{"command":"set_call_devices","playout":null}}"#,
-            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"x":1}}"#,
-            br#"{"id":1,"call":{"command":"set_call_devices","recording":1,"playout":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"camera":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"camera":null,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":1,"playout":null,"camera":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"camera":1}}"#,
             br#"{"id":1,"call":{"command":"call_devices","recording":null}}"#,
             br#"{"id":1,"call":{"command":"discover_homeserver","server_name":"e.org","url":"x"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions"}}"#,
@@ -2609,6 +2823,255 @@ mod tests {
         let huge = serde_json::Value::String("x".repeat(200 * 1024));
         assert!(send(&mut wire, &huge).is_err());
         assert!(wire.is_empty());
+    }
+
+    fn video_reply(tile: u8, width: u32, height: u32) -> VideoReply {
+        VideoReply {
+            id: 5,
+            tile,
+            seq: 42,
+            rotation: 1,
+            width,
+            height,
+        }
+    }
+
+    /// GIVEN a video reply between an event and a reply WHEN the UI reads THEN
+    /// it gets the event, the picture with its pixels and the reply, in order;
+    /// the documented wire form is used, and a reader that knows only
+    /// messages refuses it.
+    #[test]
+    fn given_a_video_reply_then_the_picture_arrives_whole_between_messages() {
+        let mut wire = Vec::new();
+        send(&mut wire, &CoreMessage::Event(Event::CallVideo {})).unwrap();
+        let reply = video_reply(3, 4, 2);
+        let pixels: Vec<u8> = (0..32).collect();
+        let start = wire.len();
+        send_video_reply(&mut wire, &reply, &pixels).unwrap();
+        let documented =
+            r#"{"video_reply":{"id":5,"tile":3,"seq":42,"rotation":1,"width":4,"height":2}}"#;
+        let body = start + 17;
+        assert_eq!(
+            String::from_utf8_lossy(&wire[body..body + documented.len()]),
+            documented
+        );
+        assert_eq!(
+            wire[body + documented.len()],
+            FrameKind::RgbaPixels as u8,
+            "the pixel frame follows at once"
+        );
+        send(
+            &mut wire,
+            &CoreMessage::Reply(Reply {
+                id: 6,
+                outcome: Outcome::Ok(serde_json::Value::Null),
+            }),
+        )
+        .unwrap();
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(wire.clone());
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Ok(FromCore::Message(CoreMessage::Event(Event::CallVideo {})))
+        ));
+        match receive_from_core(&mut reader, &budgets) {
+            Ok(FromCore::Video(picture)) => {
+                assert_eq!(picture.reply, reply);
+                assert_eq!(picture.pixels.body(), &pixels[..]);
+                assert_eq!(picture.pixels.header().width, 4);
+                assert_eq!(picture.pixels.header().height, 2);
+            }
+            _ => panic!("expected a video picture"),
+        }
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Ok(FromCore::Message(CoreMessage::Reply(Reply { id: 6, .. })))
+        ));
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Err(ReceiveError::Closed)
+        ));
+        let mut reader = Cursor::new(wire[start..].to_vec());
+        assert!(matches!(
+            receive::<_, CoreMessage>(&mut reader, &budgets),
+            Err(ReceiveError::Malformed)
+        ));
+    }
+
+    /// GIVEN no newer picture WHEN the core answers THEN it is an ordinary
+    /// `ok` reply with null and no pixel frame follows.
+    #[test]
+    fn given_no_newer_picture_then_the_reply_is_ok_null_without_pixels() {
+        let mut wire = Vec::new();
+        send(
+            &mut wire,
+            &CoreMessage::Reply(Reply {
+                id: 8,
+                outcome: Outcome::Ok(serde_json::Value::Null),
+            }),
+        )
+        .unwrap();
+        let documented = r#"{"reply":{"id":8,"outcome":{"ok":null}}}"#;
+        assert_eq!(String::from_utf8_lossy(&wire[17..]), documented);
+        assert!(matches!(
+            receive_from_core(&mut Cursor::new(wire), &ResourceBudgets::default()),
+            Ok(FromCore::Message(CoreMessage::Reply(Reply { id: 8, .. })))
+        ));
+    }
+
+    /// GIVEN pixel frames that do not match their video reply WHEN read THEN
+    /// each is refused, and the pixel body is never read.
+    #[test]
+    fn given_a_mismatched_or_missing_video_frame_then_receive_refuses() {
+        let budgets = ResourceBudgets::default();
+        let reply =
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":2,"height":2}}"#;
+        let body = [7u8; 16];
+        for (follower, expected) in [
+            (pixels_frame(4, 1, &body), "malformed"),
+            (pixels_frame(1, 4, &body), "malformed"),
+            (frame(FrameKind::Control, b"{}"), "kind"),
+            (frame(FrameKind::EncodedImage, &body), "kind"),
+            (Vec::new(), "closed"),
+            (pixels_frame(2, 2, &body)[..9].to_vec(), "closed"),
+        ] {
+            let mut wire = pixel_reply_frame(reply);
+            let header_end = wire.len() + 17;
+            wire.extend_from_slice(&follower);
+            let mut reader = Cursor::new(wire);
+            let result = receive_from_core(&mut reader, &budgets);
+            let matched = match (expected, &result) {
+                ("malformed", Err(ReceiveError::Malformed))
+                | ("kind", Err(ReceiveError::UnexpectedKind)) => {
+                    reader.position() == header_end as u64
+                }
+                ("closed", Err(ReceiveError::Closed)) => true,
+                _ => false,
+            };
+            assert!(matched, "{expected}");
+        }
+        let mut wire = pixel_reply_frame(reply);
+        wire.extend_from_slice(&pixels_frame(2, 2, &body)[..25]);
+        assert!(matches!(
+            receive_from_core(&mut Cursor::new(wire), &budgets),
+            Err(ReceiveError::Closed)
+        ));
+    }
+
+    /// GIVEN a video reply outside the video limits, or with extra or missing
+    /// fields WHEN read THEN it is refused before the next frame is touched;
+    /// WHEN the core tries to send one THEN nothing is written.
+    #[test]
+    fn given_an_out_of_limit_video_reply_then_nothing_crosses() {
+        let budgets = ResourceBudgets::default();
+        for reply in [
+            r#"{"video_reply":{"id":1,"tile":5,"seq":1,"rotation":0,"width":1,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":4,"width":1,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":0,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1,"height":0}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":641,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1,"height":641}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":640,"height":361}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":9007199254740992,"rotation":0,"width":1,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1,"height":1,"x":0}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":256,"seq":1,"rotation":0,"width":1,"height":1}}"#,
+        ] {
+            let mut wire = pixel_reply_frame(reply);
+            let end = wire.len() as u64;
+            wire.extend_from_slice(&pixels_frame(1, 1, &[0; 4]));
+            let mut reader = Cursor::new(wire);
+            assert!(
+                matches!(
+                    receive_from_core(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{reply}"
+            );
+            assert_eq!(reader.position(), end, "{reply}");
+        }
+        // The largest picture that fits: 640 x 360, and its turned form.
+        for (width, height) in [(640, 360), (360, 640), (1, 1)] {
+            let largest = video_reply(4, width, height);
+            let mut wire = Vec::new();
+            let pixels = vec![1; width as usize * height as usize * 4];
+            send_video_reply(&mut wire, &largest, &pixels).unwrap();
+            assert!(matches!(
+                receive_from_core(&mut Cursor::new(wire), &budgets),
+                Ok(FromCore::Video(_))
+            ));
+        }
+        for (reply, length) in [
+            (video_reply(5, 2, 2), 16),
+            (
+                VideoReply {
+                    rotation: 4,
+                    ..video_reply(0, 2, 2)
+                },
+                16,
+            ),
+            (video_reply(0, 640, 361), 640 * 361 * 4),
+            (video_reply(0, 641, 1), 641 * 4),
+            (video_reply(0, 0, 2), 0),
+            (video_reply(0, 2, 2), 15),
+            (video_reply(0, 2, 2), 20),
+            (
+                VideoReply {
+                    seq: MAX_SAFE_TIMESTAMP + 1,
+                    ..video_reply(0, 2, 2)
+                },
+                16,
+            ),
+        ] {
+            let mut wire = Vec::new();
+            assert!(send_video_reply(&mut wire, &reply, &vec![0; length]).is_err());
+            assert!(wire.is_empty(), "{reply:?}");
+        }
+    }
+
+    /// GIVEN video and camera calls WHEN their limits are checked THEN tiles
+    /// 0 to 4 and safe cursors pass, and every other value is refused.
+    #[test]
+    fn given_video_calls_when_limits_are_checked_then_bounds_hold() {
+        let frame = |tile, after, stream| Call::CallVideoFrame {
+            tile,
+            after,
+            stream,
+        };
+        assert!(call_video_within_limits(&frame(0, 0, 0)));
+        assert!(call_video_within_limits(&frame(
+            4,
+            MAX_SAFE_TIMESTAMP,
+            MAX_SAFE_TIMESTAMP
+        )));
+        assert!(!call_video_within_limits(&frame(5, 0, 0)));
+        assert!(!call_video_within_limits(&frame(255, 0, 0)));
+        assert!(!call_video_within_limits(&frame(
+            0,
+            MAX_SAFE_TIMESTAMP + 1,
+            0
+        )));
+        assert!(!call_video_within_limits(&frame(
+            0,
+            0,
+            MAX_SAFE_TIMESTAMP + 1
+        )));
+        let devices = |camera: Option<String>| Call::SetCallDevices {
+            recording: None,
+            playout: None,
+            camera,
+        };
+        assert!(call_video_within_limits(&devices(None)));
+        assert!(call_video_within_limits(&devices(Some("c".into()))));
+        assert!(call_video_within_limits(&devices(Some(
+            "c".repeat(MAX_CALL_DEVICE_ID_BYTES)
+        ))));
+        assert!(!call_video_within_limits(&devices(Some(String::new()))));
+        assert!(!call_video_within_limits(&devices(Some(
+            "c".repeat(MAX_CALL_DEVICE_ID_BYTES + 1)
+        ))));
+        assert!(!call_video_within_limits(&devices(Some("a\nb".into()))));
+        assert!(call_video_within_limits(&Call::CallCamera { on: true }));
     }
 }
 

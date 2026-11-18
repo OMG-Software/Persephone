@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{
-    AudioDevice, FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_PARTICIPANTS,
+    FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_PARTICIPANTS, MediaDevice,
     ToWorker,
 };
 
@@ -53,8 +53,8 @@ pub fn choose_device<'a>(
 /// wire refuses and repeated IDs, and keeps at most `MAX_DEVICES`.
 pub fn bounded_device_list<'a>(
     devices: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> Vec<AudioDevice> {
-    let mut list: Vec<AudioDevice> = Vec::new();
+) -> Vec<MediaDevice> {
+    let mut list: Vec<MediaDevice> = Vec::new();
     for (id, name) in devices {
         if list.len() >= MAX_DEVICES {
             break;
@@ -62,7 +62,7 @@ pub fn bounded_device_list<'a>(
         if !is_listable_device_id(id) || list.iter().any(|device| device.id == id) {
             continue;
         }
-        if let Some(device) = AudioDevice::bounded(id, name) {
+        if let Some(device) = MediaDevice::bounded(id, name) {
             list.push(device);
         }
     }
@@ -248,6 +248,8 @@ mod tests {
             own_key: key(),
             recording_device: None,
             playout_device: None,
+            camera_device: None,
+            camera_on: false,
         };
         assert!(is_first_message_allowed(&join));
     }
@@ -323,11 +325,11 @@ mod tests {
         assert_eq!(
             list,
             vec![
-                AudioDevice {
+                MediaDevice {
                     id: "a".into(),
                     name: "First".into()
                 },
-                AudioDevice {
+                MediaDevice {
                     id: "b".into(),
                     name: "Second".into()
                 },
@@ -350,6 +352,10 @@ mod tests {
         for message in [
             ToWorker::Leave,
             ToWorker::SetMuted { muted: true },
+            ToWorker::SetCamera {
+                on: true,
+                remote: false,
+            },
             ToWorker::SetOwnKey { key: key() },
             ToWorker::SetKey {
                 identity: "@a:example.org:D".to_owned(),

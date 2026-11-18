@@ -13,6 +13,8 @@
 //! warning that its memory is not capped.
 
 pub mod bus;
+pub mod call;
+pub mod camera_portal;
 pub mod credentials;
 pub mod gtk_thread;
 pub mod modules;
@@ -113,9 +115,11 @@ pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Re
     command.spawn().map(drop)
 }
 
-/// No call containment is reviewed for this OS (ADR-0043): calls are refused.
+/// The contained call worker host (ADR-0049): the broker's call launcher,
+/// the worker's seccomp and Landlock containment, and the `/proc` check
+/// before any input.
 pub(crate) fn call_host() -> std::sync::Arc<dyn crate::calls::worker::CallHost> {
-    std::sync::Arc::new(crate::calls::worker::Unsupported)
+    std::sync::Arc::new(call::ContainedCallHost::next_to_core())
 }
 
 #[cfg(test)]

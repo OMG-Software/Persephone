@@ -25,6 +25,14 @@
 //! with a raw binary IPC response (never JSON numbers or base64): an 8-byte
 //! prefix holding the band's width and then its row count, each a
 //! little-endian `u32`, followed by exactly `width * rows * 4` RGBA bytes.
+//!
+//! Call video (ADR-0048) crosses the same way. The page fetches the newest
+//! picture of a tile with `call_video_frame`, naming the tile's stream number
+//! from the call status. The response body is empty when no picture of that
+//! stream is newer than the page's `after`. Otherwise it is a 20-byte
+//! prefix, then exactly `width * height * 4` RGBA bytes. The prefix holds the
+//! picture number as a little-endian `u64`, then the rotation in quarter turns
+//! clockwise, the width and the height, each a little-endian `u32`.
 
 pub mod capture;
 pub mod core_link;
@@ -32,7 +40,7 @@ pub mod core_link;
 mod harden;
 pub mod launcher;
 
-use core_link::{Band, CoreError, CoreLink};
+use core_link::{Band, CoreError, CoreLink, Video};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, CallDevices, CallReadiness,
     CallStatus, ContactStatus, ConversationStart, DeviceList, DisplayName, HomeserverFound,
@@ -43,14 +51,15 @@ use persephone_contracts::{
     ThreePidMedium, TimelinePage, UserSearch,
 };
 use persephone_core_protocol::{
-    COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES, MAX_CALL_DEVICE_ID_BYTES,
-    MAX_CURSOR_BYTES, MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
-    MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES,
-    MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES, MAX_MEMBER_FILTER_BYTES,
-    MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PASTED_IMAGE_BYTES,
-    MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES,
-    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES,
-    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, room_change_within_limits,
+    CALL_VIDEO_TILES, COUNTRY_CODE_BYTES, Call, ErrorCode, Event, IMAGE_HANDLE_BYTES,
+    MAX_CALL_DEVICE_ID_BYTES, MAX_CURSOR_BYTES, MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES,
+    MAX_DIRECTORY_TOKEN_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES,
+    MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
+    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES,
+    MAX_PASTED_IMAGE_BYTES, MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES,
+    MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES,
+    MAX_SERVER_NAME_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES,
+    call_video_within_limits, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -422,6 +431,11 @@ impl Subscriptions {
                     let _ = channel.send("calls");
                 }
             }
+            Event::CallVideo {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("callVideo");
+                }
+            }
             Event::ModulesChanged {} => {
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("modules");
@@ -589,15 +603,20 @@ async fn call_readiness(
     relay(core.inner(), Call::CallReadiness { room_id }).await
 }
 
-/// Joins the audio call in this room. With a profile proxy the core asks in
-/// its own window first; the call never connects around the proxy without
-/// that yes. The reply carries codes only; a refusal is a `joinError` in it.
+/// Joins the call in this room, with the camera on when `video` is true. With
+/// a profile proxy the core asks in its own window first; the call never
+/// connects around the proxy without that yes. The reply carries codes only; a
+/// refusal is a `joinError` in it.
 #[tauri::command]
-async fn call_join(core: State<'_, CoreLink>, room_id: String) -> Result<CallStatus, String> {
+async fn call_join(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    video: bool,
+) -> Result<CallStatus, String> {
     if room_id.len() > MAX_ROOM_ID_BYTES {
         return Err(INVALID_ARGUMENT.to_string());
     }
-    relay(core.inner(), Call::CallJoin { room_id }).await
+    relay(core.inner(), Call::CallJoin { room_id, video }).await
 }
 
 /// Leaves the call, or cancels a join in progress.
@@ -611,6 +630,12 @@ async fn call_leave(core: State<'_, CoreLink>) -> Result<CallStatus, String> {
 #[tauri::command]
 async fn call_mute(core: State<'_, CoreLink>, muted: bool) -> Result<CallStatus, String> {
     relay(core.inner(), Call::CallMute { muted }).await
+}
+
+/// Turns the camera on or off. The worker's answer arrives as a call change.
+#[tauri::command]
+async fn call_camera(core: State<'_, CoreLink>, on: bool) -> Result<CallStatus, String> {
+    relay(core.inner(), Call::CallCamera { on }).await
 }
 
 /// The call as the page shows it. Codes, flags and bounded IDs only.
@@ -1006,28 +1031,45 @@ async fn load_room_picture(
 /// delivered to the web view is not counted.
 pub const MAX_BANDS_IN_FLIGHT: usize = 4;
 
+/// Most `call_video_frame` calls the page may have running at once: one for
+/// each video tile. They are counted apart from the image bands, so a call
+/// does not starve an image and an image does not starve a call. Each holds at
+/// most one picture (`MAX_CALL_VIDEO_BYTES`, 900 KiB) while it runs.
+pub const MAX_VIDEO_IN_FLIGHT: usize = CALL_VIDEO_TILES as usize;
+
 /// Counts running `image_band` calls, up to the return of their `Response`.
 #[derive(Default)]
 struct BandsInFlight(AtomicUsize);
 
-/// A slot in [`BandsInFlight`], given back when dropped.
+/// Counts running `call_video_frame` calls, up to the return of their
+/// `Response`.
+#[derive(Default)]
+struct VideoInFlight(AtomicUsize);
+
+/// A slot in [`BandsInFlight`] or [`VideoInFlight`], given back when dropped.
 struct BandSlot<'a>(&'a AtomicUsize);
+
+/// Takes one slot of `limit` in `running`, or none when all are taken.
+fn take_slot(running: &AtomicUsize, limit: usize) -> Option<BandSlot<'_>> {
+    let mut now = running.load(Ordering::Acquire);
+    while now < limit {
+        match running.compare_exchange_weak(now, now + 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Some(BandSlot(running)),
+            Err(seen) => now = seen,
+        }
+    }
+    None
+}
 
 impl BandsInFlight {
     fn take(&self) -> Option<BandSlot<'_>> {
-        let mut running = self.0.load(Ordering::Acquire);
-        while running < MAX_BANDS_IN_FLIGHT {
-            match self.0.compare_exchange_weak(
-                running,
-                running + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(BandSlot(&self.0)),
-                Err(now) => running = now,
-            }
-        }
-        None
+        take_slot(&self.0, MAX_BANDS_IN_FLIGHT)
+    }
+}
+
+impl VideoInFlight {
+    fn take(&self) -> Option<BandSlot<'_>> {
+        take_slot(&self.0, MAX_VIDEO_IN_FLIGHT)
     }
 }
 
@@ -1048,6 +1090,56 @@ fn band_response(band: Band) -> Vec<u8> {
     body.extend_from_slice(&band.rows.to_le_bytes());
     body.extend_from_slice(&band.pixels);
     body
+}
+
+/// Length of the prefix before a video picture's pixels in the raw response.
+pub const VIDEO_PREFIX_BYTES: usize = 20;
+
+/// The raw response for one video picture: the picture number as a
+/// little-endian `u64`, then the rotation, width and height as little-endian
+/// `u32`, then the RGBA bytes. No newer picture is an empty body.
+fn video_response(video: Option<Video>) -> Vec<u8> {
+    let Some(video) = video else {
+        return Vec::new();
+    };
+    let mut body = Vec::with_capacity(VIDEO_PREFIX_BYTES + video.pixels.len());
+    body.extend_from_slice(&video.seq.to_le_bytes());
+    body.extend_from_slice(&u32::from(video.rotation).to_le_bytes());
+    body.extend_from_slice(&video.width.to_le_bytes());
+    body.extend_from_slice(&video.height.to_le_bytes());
+    body.extend_from_slice(&video.pixels);
+    body
+}
+
+/// The newest picture of a video tile if it is newer than `after` and of the
+/// tile's stream `stream`, as a raw binary response (see the module
+/// documentation for its layout). The body is empty when there is none.
+#[tauri::command]
+async fn call_video_frame(
+    core: State<'_, CoreLink>,
+    video: State<'_, VideoInFlight>,
+    tile: u8,
+    after: u64,
+    stream: u64,
+) -> Result<Response, String> {
+    if !call_video_within_limits(&Call::CallVideoFrame {
+        tile,
+        after,
+        stream,
+    }) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    // Held until this returns, like an image band's slot.
+    let Some(_slot) = video.take() else {
+        return Err(LIMIT_EXCEEDED.to_string());
+    };
+    let core = core.inner().clone();
+    let picture =
+        tauri::async_runtime::spawn_blocking(move || core.video_frame(tile, after, stream))
+            .await
+            .map_err(|_| UNAVAILABLE.to_string())?
+            .map_err(page_error)?;
+    Ok(Response::new(video_response(picture)))
 }
 
 /// One band of rows of a loaded or picked image, as a raw binary response
@@ -1451,22 +1543,37 @@ async fn call_devices(core: State<'_, CoreLink>) -> Result<CallDevices, String> 
     relay(core.inner(), Call::CallDevices {}).await
 }
 
-/// Saves the call microphone and speaker as device IDs; null is the system
-/// default. The core checks the IDs again.
+/// Saves the call microphone, speaker and camera as device IDs; null is the
+/// system default. The core checks the IDs again.
 #[tauri::command]
 async fn set_call_devices(
     core: State<'_, CoreLink>,
     recording: Option<String>,
     playout: Option<String>,
+    camera: Option<String>,
 ) -> Result<(), String> {
-    if [&recording, &playout]
+    let call = Call::SetCallDevices {
+        recording,
+        playout,
+        camera,
+    };
+    let Call::SetCallDevices {
+        recording,
+        playout,
+        camera,
+    } = &call
+    else {
+        return Err(INVALID_ARGUMENT.to_string());
+    };
+    if [recording, playout, camera]
         .into_iter()
         .flatten()
         .any(|id| id.is_empty() || id.len() > MAX_CALL_DEVICE_ID_BYTES)
+        || !call_video_within_limits(&call)
     {
         return Err(INVALID_ARGUMENT.to_string());
     }
-    relay(core.inner(), Call::SetCallDevices { recording, playout }).await
+    relay(core.inner(), call).await
 }
 
 /// Finds the homeserver of a server name through its `.well-known` file
@@ -1718,6 +1825,7 @@ pub fn configure<R: Runtime>(
         .manage(subscriptions.capture())
         .manage(subscriptions)
         .manage(BandsInFlight::default())
+        .manage(VideoInFlight::default())
         .manage(PasteInFlight::default())
         .invoke_handler(tauri::generate_handler![
             app_status,
@@ -1753,6 +1861,8 @@ pub fn configure<R: Runtime>(
             call_join,
             call_leave,
             call_mute,
+            call_camera,
+            call_video_frame,
             call_status,
             set_up_encryption,
             recover_with_key,
@@ -1989,6 +2099,39 @@ mod tests {
         assert!(bands.take().is_none());
         drop(freed);
         drop(slots);
+    }
+
+    /// GIVEN `MAX_VIDEO_IN_FLIGHT` running video calls WHEN another starts
+    /// THEN it gets no slot, and image bands keep their own slots.
+    #[test]
+    fn given_video_in_flight_then_only_one_per_tile_runs_and_bands_are_apart() {
+        assert_eq!(MAX_VIDEO_IN_FLIGHT, 5);
+        let video = VideoInFlight::default();
+        let bands = BandsInFlight::default();
+        let slots: Vec<_> = (0..MAX_VIDEO_IN_FLIGHT)
+            .map(|_| video.take().expect("a free slot"))
+            .collect();
+        assert!(video.take().is_none());
+        assert!(bands.take().is_some());
+        drop(slots);
+        assert!(video.take().is_some());
+    }
+
+    #[test]
+    fn given_a_video_picture_then_its_response_has_the_documented_layout() {
+        assert!(video_response(None).is_empty());
+        let body = video_response(Some(Video {
+            tile: 1,
+            seq: 0x0102_0304_0506_0708,
+            rotation: 3,
+            width: 2,
+            height: 1,
+            pixels: vec![7; 8],
+        }));
+        assert_eq!(VIDEO_PREFIX_BYTES, 20);
+        assert_eq!(&body[..8], &[8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(&body[8..20], &[3, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&body[20..], &[7; 8]);
     }
 
     #[test]

@@ -1,6 +1,15 @@
 <script lang="ts">
   import type { CallStatus } from '../../crates/contracts/generated/contracts';
-  import { callAnnouncement, END_TEXT, NO_KEY_TEXT, PHASE_TEXT, showCallBar, UNREACHABLE_TEXT } from './calls';
+  import {
+    callAnnouncement,
+    CAMERA_TEXT,
+    cameraButton,
+    END_TEXT,
+    NO_KEY_TEXT,
+    PHASE_TEXT,
+    showCallBar,
+    UNREACHABLE_TEXT
+  } from './calls';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
 
@@ -14,7 +23,9 @@
     roomName,
     names,
     busy,
+    cameraBusy,
     onmute,
+    oncamera,
     onleave,
     ondismiss
   }: {
@@ -25,13 +36,18 @@
     names: ReadonlyMap<string, string>;
     // A mute or leave request is waiting for the core.
     busy: boolean;
+    // A camera request is waiting for the core.
+    cameraBusy: boolean;
     onmute: () => void;
+    oncamera: () => void;
     onleave: () => void;
     ondismiss: () => void;
   } = $props();
 
   const shown = $derived(showCallBar(status, dismissed));
   const ended = $derived(status.phase === 'ended');
+  const camera = $derived(cameraButton(status.camera));
+  const cameraText = $derived(CAMERA_TEXT[status.camera]);
 </script>
 
 <div class="visually-hidden" aria-live="polite" aria-atomic="true">
@@ -57,10 +73,23 @@
             <Icon name={status.muted ? 'mic-off' : 'mic'} />
             {status.muted ? 'Unmute' : 'Mute'}
           </button>
+          <button
+            type="button"
+            class="secondary call-camera"
+            aria-pressed={camera.pressed}
+            disabled={cameraBusy || status.phase !== 'active'}
+            onclick={oncamera}
+          >
+            <Icon name={camera.pressed ? 'video-off' : 'video'} />
+            {camera.label}
+          </button>
           <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
         {/if}
       </span>
     </div>
+    {#if !ended && cameraText !== ''}
+      <p class="call-camera-note note" role="status">{cameraText}</p>
+    {/if}
     {#if ended}
       <p class="call-end">{status.ended === null ? END_TEXT.internal : END_TEXT[status.ended]}</p>
     {:else if status.participants.length > 0}

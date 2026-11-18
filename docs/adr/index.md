@@ -55,6 +55,8 @@
 * [0037 - Browse public room directories and join only listed rooms](0037-browse-public-room-directories-and-join-only-listed-rooms.md)
 * [0041 - Load room pictures in the core, on request or when turned on](0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md)
 * [0043 - Make audio calls through MatrixRTC in a contained call worker](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)
+* [0048 - Add camera video to calls in the call worker](0048-add-camera-video-to-calls-in-the-call-worker.md)
+* [0049 - Contain the call worker on Linux and macOS](0049-contain-the-call-worker-on-linux-and-macos.md)
 
 ## Superseded Records
 

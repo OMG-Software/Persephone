@@ -3316,6 +3316,60 @@ mark {
   overflow-wrap: anywhere;
 }
 
+.call-camera {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-camera[aria-pressed='true'] {
+  border-color: var(--presence);
+}
+
+.call-camera-note {
+  margin: 0;
+}
+
+/* The call's video tiles: a grid of up to five, each as wide as its picture
+   allows. The canvas is centred in its frame and turned by CSS. */
+.call-video {
+  display: grid;
+  flex: none;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 280px));
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.video-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+}
+
+.video-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--line);
+}
+
+.video-canvas {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  height: auto;
+}
+
+.video-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
 .speaking-mark {
   flex: none;
   width: 10px;

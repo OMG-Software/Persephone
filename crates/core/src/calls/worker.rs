@@ -6,10 +6,13 @@
 //! without reviewed call containment refuses ([`Unsupported`]): the core
 //! never starts an uncontained call worker.
 //!
-//! The link is two bounded queues and the process. The controller sends
-//! [`ToWorker`] messages without blocking and receives [`FromWorker`]
-//! messages. Dropping the link ends the process.
+//! The link is two bounded queues, the picture store and the process. The
+//! controller sends [`ToWorker`] messages without blocking and receives
+//! [`FromWorker`] messages. Video pictures do not use the queue: the read
+//! thread keeps the newest one per tile in the [`VideoStore`] (ADR-0048).
+//! Dropping the link ends the process.
 
+use super::video::VideoStore;
 use persephone_call_protocol::{FromWorker, ToWorker};
 use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -65,12 +68,33 @@ impl fmt::Display for StartError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerGone;
 
+/// Which camera path the call worker may use (ADR-0049). The host decides it
+/// when it starts the worker; the worker never changes it. Only Linux has more
+/// than `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraPath {
+    /// A PipeWire remote that the core gets from the camera portal and sends
+    /// over the camera channel.
+    Portal,
+    /// The worker opens `/dev/video*` itself (no portal runs).
+    V4l2,
+    /// No camera path on this OS or desktop.
+    None,
+}
+
 /// The running worker process, as the link needs it.
 pub trait WorkerProcess: Send + Sync {
     /// Ends the worker and everything in its containment now.
     fn kill(&self);
     /// Waits up to `timeout` for the worker to exit. Returns whether it did.
     fn wait_exit(&self, timeout: Duration) -> bool;
+    /// Whether the OS shows the worker as contained, checked after its `Ready`
+    /// message and before any input goes to it (Linux: `/proc/<pid>/status`;
+    /// macOS: `sandbox_check`). On Windows the containment is complete before
+    /// the worker runs, so the default is `true`.
+    fn confirm_contained(&self) -> bool {
+        true
+    }
 }
 
 /// One running, contained call worker.
@@ -79,7 +103,13 @@ pub struct CallWorkerLink {
     /// Messages from the worker. `None` after the worker exited or its
     /// channel failed.
     pub events: mpsc::Receiver<FromWorker>,
+    video: VideoStore,
     process: Arc<dyn WorkerProcess>,
+    camera_path: CameraPath,
+    /// The core's end of the camera channel (Linux).
+    #[cfg(unix)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    camera: Option<std::os::unix::net::UnixStream>,
 }
 
 impl CallWorkerLink {
@@ -93,8 +123,55 @@ impl CallWorkerLink {
         Self {
             commands,
             events,
+            video: VideoStore::new(),
             process: Arc::from(process),
+            camera_path: CameraPath::None,
+            #[cfg(unix)]
+            camera: None,
         }
+    }
+
+    /// Records the camera path the worker was started with.
+    pub fn with_camera_path(mut self, path: CameraPath) -> Self {
+        self.camera_path = path;
+        self
+    }
+
+    /// Keeps the core's end of the worker's camera channel (Linux).
+    #[cfg(unix)]
+    pub fn with_camera_channel(mut self, channel: std::os::unix::net::UnixStream) -> Self {
+        self.camera = Some(channel);
+        self
+    }
+
+    /// The camera path this worker may use. It was fixed at start.
+    pub fn camera_path(&self) -> CameraPath {
+        self.camera_path
+    }
+
+    /// Sends the PipeWire remote from the camera portal to the worker over
+    /// the camera channel: one descriptor and one byte, without blocking.
+    /// Call it directly before `SetCamera { on: true, remote: true }` (and
+    /// before `ListDevices` on the portal path), once per command. `Err(WorkerGone)`: there is no channel, it is full, or the
+    /// worker has gone. The caller's descriptor stays open; close it after
+    /// the call.
+    #[cfg(target_os = "linux")]
+    pub fn send_camera_handle(&self, fd: std::os::fd::BorrowedFd<'_>) -> Result<(), WorkerGone> {
+        let channel = self.camera.as_ref().ok_or(WorkerGone)?;
+        persephone_media_broker::send_camera_fd(channel, fd).map_err(|_| WorkerGone)
+    }
+
+    /// Uses `video` as the link's picture store: the one the host's read
+    /// thread writes to.
+    pub fn with_video(mut self, video: VideoStore) -> Self {
+        self.video = video;
+        self
+    }
+
+    /// The store of the newest picture on each tile. It is shared with the
+    /// thread that reads the worker.
+    pub fn video(&self) -> VideoStore {
+        self.video.clone()
     }
 
     /// A handle that ends the worker from outside the task that owns the

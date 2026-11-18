@@ -29,7 +29,9 @@
     | 'globe'
     | 'phone'
     | 'mic'
-    | 'mic-off';
+    | 'mic-off'
+    | 'video'
+    | 'video-off';
 </script>
 
 <script lang="ts">
@@ -86,6 +88,11 @@
     <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
   {:else if name === 'mic-off'}
     <path d="M9 9v2a3 3 0 0 0 5 2.2M15 9.3V6a3 3 0 0 0-5.9-.7M5 11a7 7 0 0 0 11.3 5.5M19 11a7 7 0 0 1-.6 2.8M12 18v3M3 3l18 18" />
+  {:else if name === 'video'}
+    <rect x="3" y="6" width="12" height="12" rx="2" />
+    <path d="m15 10 6-3v10l-6-3" />
+  {:else if name === 'video-off'}
+    <path d="M10 6h3a2 2 0 0 1 2 2v3l6-4v10M15 15v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2M3 3l18 18" />
   {:else if name === 'chevron-left'}
     <path d="m15 6-6 6 6 6" />
   {:else if name === 'chevron-right'}

@@ -5,17 +5,22 @@
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
   import CallBar from './CallBar.svelte';
+  import CallVideo from './CallVideo.svelte';
   import {
+    CAMERA_COMMAND_TEXT,
     CallRefresher,
     IDLE_CALL,
     JOIN_ERROR_TEXT,
     STARTING_TEXT,
     callButton,
-    inCall
+    hasVideo,
+    inCall,
+    videoCallButton,
+    CallOperations
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callJoin, callLeave, callMute, callReadiness, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callJoin, callLeave, callMute, callReadiness, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -740,15 +745,38 @@
   let callDismissed = $state(false);
   let callPending = $state(false);
   let callBusy = $state(false);
+  let cameraBusy = $state(false);
+  // Goes up each time the core says a new video picture is waiting.
+  let callVideoTicks = $state(0);
   let callJoinText = $state<string | null>(null);
+  let cameraText = $state<string | null>(null);
+  // The newest camera command. Its failure alone shows `cameraText`; a
+  // Mute or Leave in between does not hide it. Goes up when the call ends
+  // and on a session change, so an old command shows nothing.
+  let cameraRequest = 0;
   let readiness = $state<CallReadiness | null>(null);
   let callNames = $state<ReadonlyMap<string, string>>(new Map());
   let readinessRequest = 0;
   let callNamesFor: string | null = null;
-  const callRefresher = new CallRefresher(callStatus, (next) => {
-    callState = next;
-    if (next.phase !== 'ended') callDismissed = false;
+  const callOperations = new CallOperations();
+  // A camera failure is about the call that is running; it goes when that
+  // call ends.
+  $effect(() => {
+    if (callState.phase === 'ended' || callState.phase === 'idle') {
+      cameraRequest += 1;
+      cameraText = null;
+    }
   });
+  // A status read during which a call command finished is dropped: that
+  // command's reply is newer, and the command asks for a fresh read.
+  const callRefresher = new CallRefresher(
+    callStatus,
+    (next) => {
+      callState = next;
+      if (next.phase !== 'ended') callDismissed = false;
+    },
+    () => callOperations.completed
+  );
 
   const callRoomName = $derived(
     callState.roomId === null
@@ -757,6 +785,9 @@
   );
   const callView = $derived(
     selected === null ? null : callButton(selected, readiness, callState, callPending)
+  );
+  const videoView = $derived(
+    selected === null ? null : videoCallButton(selected, readiness, callState, callPending)
   );
 
   // Ask again whether the shown room can take a call when the room or the
@@ -814,22 +845,25 @@
     });
   }
 
-  async function startCall() {
+  async function startCall(video: boolean) {
     if (!selected || callPending || callView?.disabled) return;
     const roomId = selected;
     const generation = sessionGeneration;
     callPending = true;
     callJoinText = null;
+    const operation = callOperations.begin();
     try {
-      const reply = await callJoin(roomId);
-      if (generation !== sessionGeneration) return;
+      const reply = await callJoin(roomId, video);
+      if (generation !== sessionGeneration || !callOperations.isCurrent(operation)) return;
       callJoinText = reply.joinError === null ? null : JOIN_ERROR_TEXT[reply.joinError];
       callState = reply;
       if (reply.phase !== 'ended') callDismissed = false;
     } catch {
       if (generation === sessionGeneration) callJoinText = JOIN_ERROR_TEXT.declined;
     } finally {
+      // A command of an old session must not drop the new session's read.
       if (generation === sessionGeneration) {
+        callOperations.complete(operation);
         callPending = false;
         callRefresher.request();
       }
@@ -839,14 +873,41 @@
   async function toggleMute() {
     const generation = sessionGeneration;
     callBusy = true;
+    const operation = callOperations.begin();
     try {
       const reply = await callMute(!callState.muted);
-      if (generation === sessionGeneration) callState = reply;
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
     } catch {
       // The next call change shows the real state.
     } finally {
       if (generation === sessionGeneration) {
+        callOperations.complete(operation);
         callBusy = false;
+        callRefresher.request();
+      }
+    }
+  }
+
+  async function toggleCamera() {
+    const generation = sessionGeneration;
+    cameraBusy = true;
+    cameraText = null;
+    cameraRequest += 1;
+    const request = cameraRequest;
+    const operation = callOperations.begin();
+    try {
+      const reply = await callCamera(callState.camera !== 'on' && callState.camera !== 'starting');
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
+    } catch {
+      // The command failed before the core answered. The refresh shows the
+      // real camera state; this says why it did not change.
+      if (generation === sessionGeneration && request === cameraRequest) {
+        cameraText = CAMERA_COMMAND_TEXT;
+      }
+    } finally {
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        cameraBusy = false;
         callRefresher.request();
       }
     }
@@ -854,13 +915,17 @@
 
   async function leaveCall() {
     const generation = sessionGeneration;
+    const operation = callOperations.begin();
     try {
       const reply = await callLeave();
-      if (generation === sessionGeneration) callState = reply;
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
     } catch {
       // The next call change shows the real state.
     } finally {
-      if (generation === sessionGeneration) callRefresher.request();
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        callRefresher.request();
+      }
     }
     focusCallControl();
   }
@@ -872,12 +937,16 @@
 
   /** Clear session-bound UI state and invalidate pending room-context work. */
   function reset() {
+    callOperations.reset();
     callRefresher.reset();
     readiness = null;
     readinessRequest += 1;
     callPending = false;
     callBusy = false;
+    cameraBusy = false;
     callJoinText = null;
+    cameraText = null;
+    cameraRequest += 1;
     callDismissed = false;
     callNames = new Map();
     callNamesFor = null;
@@ -1342,7 +1411,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request());
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1));
     } catch {
       unavailable = true;
       return;
@@ -2584,10 +2653,21 @@
           roomName={callRoomName}
           names={callNames}
           busy={callBusy}
+          {cameraBusy}
           onmute={toggleMute}
+          oncamera={toggleCamera}
           onleave={leaveCall}
           ondismiss={dismissCall}
         />
+        {#if cameraText}
+          <p class="call-notice camera-notice error" role="alert">
+            <span>{cameraText}</span>
+            <button type="button" class="secondary" onclick={() => (cameraText = null)}>Dismiss</button>
+          </p>
+        {/if}
+        {#if hasVideo(callState)}
+          <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} />
+        {/if}
         {#if selectedRoom}
           <div class="room-view" style:--members-width="{shownMembers}px">
           <div class="room-main">
@@ -2644,11 +2724,24 @@
                   disabled={callView.disabled && callView.reason === null}
                   aria-disabled={callView.disabled && callView.reason !== null ? 'true' : undefined}
                   aria-describedby={callView.reason !== null ? 'call-reason' : undefined}
-                  onclick={startCall}
+                  onclick={() => startCall(false)}
                 >
                   <Icon name="phone" />
                   {callView.label}
                 </button>
+                {#if videoView && !videoView.hidden}
+                  <button
+                    type="button"
+                    class="secondary call-start call-start-video"
+                    disabled={videoView.disabled && videoView.reason === null}
+                    aria-disabled={videoView.disabled && videoView.reason !== null ? 'true' : undefined}
+                    aria-describedby={videoView.reason !== null ? 'call-reason' : undefined}
+                    onclick={() => startCall(true)}
+                  >
+                    <Icon name="video" />
+                    {videoView.label}
+                  </button>
+                {/if}
                 {#if callView.reason !== null}
                   <span id="call-reason" class="visually-hidden">{callView.reason}</span>
                 {/if}

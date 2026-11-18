@@ -12,5 +12,23 @@
     }
   ],
   "ended": null,
-  "joinError": null
+  "joinError": null,
+  "camera": "on",
+  "video": [
+    {
+      "tile": 0,
+      "participant": null,
+      "own": true,
+      "stream": 0
+    },
+    {
+      "tile": 1,
+      "participant": {
+        "userId": "@alice:server.invalid",
+        "deviceId": "ALICEDEVICE"
+      },
+      "own": false,
+      "stream": 2
+    }
+  ]
 }

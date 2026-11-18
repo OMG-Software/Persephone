@@ -621,6 +621,11 @@ fn given_call_commands_then_room_ids_are_checked_and_synthetic_data_has_no_call(
             },
             Call::CallJoin {
                 room_id: room_id.into(),
+                video: false,
+            },
+            Call::CallJoin {
+                room_id: room_id.into(),
+                video: true,
             },
         ] {
             assert_eq!(
@@ -636,6 +641,7 @@ fn given_call_commands_then_room_ids_are_checked_and_synthetic_data_has_no_call(
         },
         Call::CallJoin {
             room_id: "!r:example.invalid".into(),
+            video: true,
         },
     ] {
         assert_eq!(
@@ -680,6 +686,7 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         &core,
         Call::CallJoin {
             room_id: room.into(),
+            video: true,
         },
     ) {
         // Where call containment is not implemented, the refusal comes first.
@@ -703,13 +710,101 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         },
         Call::CallJoin {
             room_id: room.into(),
+            video: false,
         },
+        Call::CallCamera { on: true },
     ] {
         assert_eq!(
             answer::<serde_json::Value>(&core, call.clone()),
             Err(ErrorCode::Locked),
             "{call:?}"
         );
+    }
+}
+
+/// GIVEN no call WHEN the page turns the camera on or off THEN the core
+/// refuses it as `unavailable`: there is no connected call to change.
+#[test]
+fn given_no_call_then_the_camera_command_is_refused() {
+    let core = Core::default();
+    for on in [true, false] {
+        assert_eq!(
+            answer::<serde_json::Value>(&core, Call::CallCamera { on }),
+            Err(ErrorCode::Unavailable),
+            "{on}"
+        );
+    }
+}
+
+/// GIVEN video frame requests with and without a call WHEN served THEN every
+/// tile below five answers `ok(null)` (no picture), a tile, `after` or
+/// `stream` out of bounds is an invalid argument, and the loop stays in step
+/// for the next request.
+#[test]
+fn given_video_frame_requests_then_no_picture_is_null_and_bad_bounds_are_refused() {
+    let mut wire = Vec::new();
+    let frame = |tile, after, stream| Call::CallVideoFrame {
+        tile,
+        after,
+        stream,
+    };
+    let calls = [
+        (1, frame(0, 0, 0)),
+        (2, frame(4, 7, 3)),
+        (3, frame(5, 0, 0)),
+        (4, frame(255, 0, 0)),
+        (5, frame(1, 9_007_199_254_740_992, 0)),
+        (6, frame(1, 9_007_199_254_740_991, 9_007_199_254_740_991)),
+        (8, frame(1, 0, 9_007_199_254_740_992)),
+    ];
+    for (id, request) in calls {
+        send(&mut wire, &call(id, request)).unwrap();
+    }
+    send(&mut wire, &call(7, Call::AppStatus {})).unwrap();
+    let mut output = Vec::new();
+    assert_eq!(serve(wire, &mut output), ServeEnd::UiClosed);
+    let outcomes: Vec<(u32, Outcome)> = replies(output)
+        .into_iter()
+        .map(|reply| (reply.id, reply.outcome))
+        .collect();
+    assert_eq!(outcomes[0], (1, Outcome::Ok(serde_json::Value::Null)));
+    assert_eq!(outcomes[1], (2, Outcome::Ok(serde_json::Value::Null)));
+    assert_eq!(outcomes[2], (3, Outcome::Error(ErrorCode::InvalidArgument)));
+    assert_eq!(outcomes[3], (4, Outcome::Error(ErrorCode::InvalidArgument)));
+    assert_eq!(outcomes[4], (5, Outcome::Error(ErrorCode::InvalidArgument)));
+    assert_eq!(outcomes[5], (6, Outcome::Ok(serde_json::Value::Null)));
+    assert_eq!(outcomes[6], (8, Outcome::Error(ErrorCode::InvalidArgument)));
+    assert!(matches!(outcomes[7], (7, Outcome::Ok(_))));
+}
+
+/// GIVEN a camera ID that is empty, too long or has a control character WHEN
+/// the page saves the call devices THEN the core refuses it before any
+/// storage; a valid or absent camera passes the argument check.
+#[test]
+fn given_a_bad_camera_id_then_saving_the_call_devices_is_refused() {
+    let core = Core::default();
+    let save = |camera: Option<String>| {
+        answer::<serde_json::Value>(
+            &core,
+            Call::SetCallDevices {
+                recording: None,
+                playout: None,
+                camera,
+            },
+        )
+    };
+    for bad in [
+        String::new(),
+        "c".repeat(513),
+        "a
+b"
+        .to_owned(),
+    ] {
+        assert_eq!(save(Some(bad.clone())), Err(ErrorCode::InvalidArgument));
+    }
+    // Argument checks pass; without a profile the save is `unavailable`.
+    for fine in [None, Some("cam".to_owned()), Some("c".repeat(512))] {
+        assert_eq!(save(fine), Err(ErrorCode::Unavailable));
     }
 }
 

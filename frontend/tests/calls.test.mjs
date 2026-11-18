@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  CallOperations,
   CallRefresher,
   END_TEXT,
   IDLE_CALL,
@@ -14,7 +15,12 @@ import {
   JOIN_ERROR_TEXT,
   UNAVAILABLE_TEXT,
   callAnnouncement,
+  CAMERA_TEXT,
+  VIDEO_CALL_LABEL,
   callButton,
+  cameraButton,
+  hasVideo,
+  videoCallButton,
   deviceChoice,
   deviceOptions,
   deviceValue,
@@ -178,4 +184,122 @@ test('GIVEN device replies WHEN the note is chosen THEN unsupported, unreadable 
   assert.equal(devicesNote(base), DEVICES_NOTE_TEXT);
   assert.equal(devicesNote({ ...base, unreadable: true }), DEVICES_UNREADABLE_TEXT);
   assert.equal(devicesNote({ ...base, supported: false }), DEVICES_UNSUPPORTED_TEXT);
+});
+
+test('GIVEN each camera state WHEN its text is read THEN failures say what happened and working states say nothing', () => {
+  assert.deepEqual(Object.keys(CAMERA_TEXT).sort(), ['not_found', 'off', 'on', 'starting', 'unavailable']);
+  assert.equal(CAMERA_TEXT.not_found, 'The chosen camera is not connected');
+  assert.equal(CAMERA_TEXT.unavailable, 'The camera could not start');
+  assert.equal(CAMERA_TEXT.starting, 'Starting the camera…');
+  assert.equal(CAMERA_TEXT.off, '');
+  assert.equal(CAMERA_TEXT.on, '');
+});
+
+test('GIVEN each camera state WHEN the toggle is built THEN it offers to turn off only a camera that is on or starting', () => {
+  assert.deepEqual(cameraButton('off'), { label: 'Turn camera on', pressed: false });
+  assert.deepEqual(cameraButton('on'), { label: 'Turn camera off', pressed: true });
+  assert.deepEqual(cameraButton('starting'), { label: 'Turn camera off', pressed: true });
+  for (const failed of ['not_found', 'unavailable']) {
+    assert.deepEqual(cameraButton(failed), { label: 'Turn camera on', pressed: false });
+  }
+});
+
+test('GIVEN the same room states WHEN both buttons are built THEN the video button follows the call button and only the label differs', () => {
+  const cases = [
+    [ready(), IDLE_CALL, false],
+    [ready({ activeMembers: 2 }), IDLE_CALL, false],
+    [ready({ available: false, reason: 'not_encrypted' }), IDLE_CALL, false],
+    [null, IDLE_CALL, false],
+    [ready(), IDLE_CALL, true],
+    [ready(), status({ phase: 'active', roomId: '!r:s' }), false],
+    [ready(), status({ phase: 'joining', roomId: '!other:s' }), false]
+  ];
+  for (const [readiness, call, pending] of cases) {
+    const { label: callLabel, ...expected } = callButton('!r:s', readiness, call, pending);
+    const { label, ...video } = videoCallButton('!r:s', readiness, call, pending);
+    assert.deepEqual(video, expected);
+    assert.notEqual(label, callLabel);
+  }
+  assert.equal(videoCallButton('!r:s', ready(), IDLE_CALL, false).label, VIDEO_CALL_LABEL);
+  assert.equal(videoCallButton('!r:s', ready({ activeMembers: 3 }), IDLE_CALL, false).label, 'Join with video (3)');
+});
+
+test('GIVEN a call WHEN video tiles exist or not THEN the grid shows only during a call with tiles', () => {
+  const tile = { tile: 0, participant: null, own: true };
+  assert.equal(hasVideo(IDLE_CALL), false);
+  assert.equal(hasVideo(status({ phase: 'active' })), false);
+  assert.equal(hasVideo(status({ phase: 'active', video: [tile] })), true);
+  assert.equal(hasVideo(status({ phase: 'joining', video: [tile] })), true);
+  assert.equal(hasVideo(status({ phase: 'ended', video: [tile] })), false);
+});
+
+test('GIVEN a camera request pending WHEN leave starts and finishes THEN the late camera reply is not current', () => {
+  const operations = new CallOperations();
+  const camera = operations.begin();
+  const leave = operations.begin();
+  assert.equal(operations.isCurrent(leave), true);
+  assert.equal(operations.isCurrent(camera), false, 'the late camera reply is ignored');
+});
+
+test('GIVEN a status read in flight WHEN a call command finishes before it THEN the read is dropped and the next read shows', async () => {
+  const gates = [];
+  const shown = [];
+  const operations = new CallOperations();
+  const refresher = new CallRefresher(
+    () => { const gate = deferred(); gates.push(gate); return gate.promise; },
+    (next) => shown.push(next.camera),
+    () => operations.completed
+  );
+  refresher.request();
+  // A camera command starts and finishes while the read runs; its reply
+  // already showed `on`, and it asks for a fresh read.
+  operations.complete(operations.begin());
+  refresher.request();
+  gates[0].resolve(status({ phase: 'active', camera: 'off' }));
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(shown, [], 'the older read does not overwrite the reply');
+  assert.equal(gates.length, 2, 'a fresh read follows');
+  gates[1].resolve(status({ phase: 'active', camera: 'on' }));
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(shown, ['on']);
+});
+
+test('GIVEN finished operations WHEN counted THEN each finish counts once', () => {
+  const operations = new CallOperations();
+  assert.equal(operations.completed, 0);
+  operations.complete(operations.begin());
+  operations.complete(operations.begin());
+  assert.equal(operations.completed, 2);
+});
+
+test('GIVEN a command of the old session WHEN it finishes while the new session reads status THEN the read still shows', async () => {
+  const gates = [];
+  const shown = [];
+  const operations = new CallOperations();
+  const refresher = new CallRefresher(
+    () => { const gate = deferred(); gates.push(gate); return gate.promise; },
+    (next) => shown.push(next.phase),
+    () => operations.completed
+  );
+  const old = operations.begin();
+  // The session changes: the page resets and reads the new session's status.
+  operations.reset();
+  refresher.reset();
+  refresher.request();
+  assert.equal(operations.isCurrent(old), false, 'the old command is not current');
+  // The old command finishes during that read; it asks for no new read.
+  operations.complete(old);
+  assert.equal(operations.completed, 0, 'the old command is not counted');
+  gates[gates.length - 1].resolve(status({ phase: 'active' }));
+  await new Promise((done) => setImmediate(done));
+  assert.deepEqual(shown.slice(-1), ['active'], 'the new session read is shown');
+  const next = operations.begin();
+  assert.equal(operations.isCurrent(next), true);
+  operations.complete(next);
+  assert.equal(operations.completed, 1, 'a new session command counts');
+});
+
+test('GIVEN one operation WHEN no later one starts THEN its reply is current', () => {
+  const operations = new CallOperations();
+  assert.equal(operations.isCurrent(operations.begin()), true);
 });

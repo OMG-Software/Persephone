@@ -3,8 +3,8 @@
 
 use persephone_core_protocol::{Call, ErrorCode, Event, MAX_ROOM_ID_BYTES};
 use persephone_desktop::{
-    BAND_PREFIX_BYTES, MAIN_WINDOW, Subscriptions, configure, context,
-    core_link::{Band, CoreError, CoreLink, CoreTransport},
+    BAND_PREFIX_BYTES, MAIN_WINDOW, Subscriptions, VIDEO_PREFIX_BYTES, configure, context,
+    core_link::{Band, CoreError, CoreLink, CoreTransport, Video},
     create_main_window,
 };
 use std::sync::{
@@ -118,21 +118,27 @@ impl CoreTransport for FakeCore {
                 ),
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },
-            Call::CallJoin { room_id } => match room_id.as_str() {
+            Call::CallJoin { room_id, video } => match room_id.as_str() {
                 "!r:example.invalid" => Ok(
-                    serde_json::json!({"phase": "joining", "roomId": room_id, "muted": false, "participants": [], "ended": null, "joinError": null}),
+                    serde_json::json!({"phase": "joining", "roomId": room_id, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": if video { "starting" } else { "off" }, "video": []}),
                 ),
                 // A refused join is a status with a code, not an error.
                 "!plain:example.invalid" => Ok(
-                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": "not_encrypted"}),
+                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": "not_encrypted", "camera": "off", "video": []}),
                 ),
                 // A reply with a field the contract does not have.
                 _ => Ok(
-                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "sfuUrl": "wss://x"}),
+                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "video": [], "sfuUrl": "wss://x"}),
                 ),
             },
+            Call::CallCamera { on } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "participants": [], "ended": null, "joinError": null, "camera": if on { "starting" } else { "off" }, "video": []}),
+            ),
+            // Answered with a picture, through `video_frame`; the UI never
+            // sends it as an ordinary call.
+            Call::CallVideoFrame { .. } => Err(CoreError::BadReply),
             Call::CallMute { muted } => Ok(
-                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": muted, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true}], "ended": null, "joinError": null}),
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": muted, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true}], "ended": null, "joinError": null, "camera": "off", "video": []}),
             ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
                 "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
@@ -457,16 +463,22 @@ impl CoreTransport for FakeCore {
                 "supported": true,
                 "recording": [{"id": "mic-1", "name": "Headset"}],
                 "playout": [],
+                "cameras": [{"id": "cam-1", "name": "Webcam"}],
                 "selectedRecording": null,
                 "selectedPlayout": null,
+                "selectedCamera": null,
                 "unreadable": false
             })),
-            Call::SetCallDevices { recording, playout } => {
-                match (recording.as_deref(), playout.as_deref()) {
-                    (None | Some("mic-1"), None | Some("spk-1")) => Ok(serde_json::Value::Null),
-                    _ => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+            Call::SetCallDevices {
+                recording,
+                playout,
+                camera,
+            } => match (recording.as_deref(), playout.as_deref(), camera.as_deref()) {
+                (None | Some("mic-1"), None | Some("spk-1"), None | Some("cam-1")) => {
+                    Ok(serde_json::Value::Null)
                 }
-            }
+                _ => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+            },
             Call::NewSessions {} => Ok(serde_json::json!({
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
             })),
@@ -625,6 +637,38 @@ impl CoreTransport for FakeCore {
         })
     }
 
+    /// Tile 0 has picture 5 (2 by 1 pixels, one quarter turn), tile 1 has
+    /// picture 7, tile 2 has none, tile 3 is busy and tile 4 gives pixels of
+    /// the wrong tile. Every picture belongs to stream 1; another stream has
+    /// none.
+    fn video_frame(&self, tile: u8, after: u64, stream: u64) -> Result<Option<Video>, CoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.available {
+            return Err(CoreError::Unavailable);
+        }
+        if stream != 1 && tile < 3 {
+            return Ok(None);
+        }
+        let seq = match tile {
+            0 => 5,
+            1 => 7,
+            2 => return Ok(None),
+            3 => return Err(CoreError::Core(ErrorCode::LimitExceeded)),
+            _ => return Err(CoreError::BadReply),
+        };
+        if seq <= after {
+            return Ok(None);
+        }
+        Ok(Some(Video {
+            tile,
+            seq,
+            rotation: 1,
+            width: 2,
+            height: 1,
+            pixels: (0..8).collect(),
+        }))
+    }
+
     fn paste_image(&self, room_id: String, bytes: Vec<u8>) -> Result<serde_json::Value, CoreError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if !self.available {
@@ -646,7 +690,7 @@ impl CoreTransport for FakeCore {
 /// A well-formed image handle the fake core knows.
 /// The call status when no call exists.
 fn call_idle() -> serde_json::Value {
-    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null})
+    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "video": []})
 }
 
 const HANDLE: &str = "0123456789abcdef0123456789abcdef";
@@ -881,6 +925,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-join",
             "allow-call-leave",
             "allow-call-mute",
+            "allow-call-camera",
+            "allow-call-video-frame",
             "allow-call-status",
             "allow-set-up-encryption",
             "allow-recover-with-key",
@@ -1166,6 +1212,7 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     subscriptions.dispatch(Event::RoomListChanged {});
     subscriptions.dispatch(Event::SecurityChanged {});
     subscriptions.dispatch(Event::CallChanged {});
+    subscriptions.dispatch(Event::CallVideo {});
     subscriptions.dispatch(Event::ModulesChanged {});
     let delivered = delivered.lock().unwrap().clone();
     assert!(
@@ -1174,6 +1221,10 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     );
     assert!(
         delivered.contains(&(3, r#""calls""#.into())),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&(3, r#""callVideo""#.into())),
         "{delivered:?}"
     );
     assert!(
@@ -1333,15 +1384,40 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
         invoke("call_readiness", room("!nope:example.invalid")).unwrap_err(),
         "not_found"
     );
+    let join = |id: &str, video: bool| {
+        invoke(
+            "call_join",
+            serde_json::json!({"roomId": id, "video": video}),
+        )
+    };
+    assert_eq!(join("!r:example.invalid", false).unwrap()["camera"], "off");
     assert_eq!(
-        invoke("call_join", room("!r:example.invalid")).unwrap()["phase"],
-        "joining"
+        join("!r:example.invalid", true).unwrap()["camera"],
+        "starting"
     );
     assert_eq!(
-        invoke("call_join", room("!plain:example.invalid")).unwrap()["joinError"],
+        join("!plain:example.invalid", false).unwrap()["joinError"],
         "not_encrypted"
     );
-    assert!(invoke("call_join", room("!leaky:example.invalid")).is_err());
+    assert!(join("!leaky:example.invalid", false).is_err());
+    // A join without the video flag, or with a flag of another type, is
+    // refused by the argument types.
+    assert!(invoke("call_join", room("!r:example.invalid")).is_err());
+    assert!(
+        invoke(
+            "call_join",
+            serde_json::json!({"roomId": "!r:example.invalid", "video": "yes"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        invoke("call_camera", serde_json::json!({"on": true})).unwrap()["camera"],
+        "starting"
+    );
+    assert_eq!(
+        invoke("call_camera", serde_json::json!({"on": false})).unwrap()["camera"],
+        "off"
+    );
     assert_eq!(
         invoke("call_leave", serde_json::json!({})).unwrap()["phase"],
         "idle"
@@ -1356,16 +1432,20 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
 
     let before = core.calls.load(Ordering::SeqCst);
     let long = "!".to_owned() + &"r".repeat(MAX_ROOM_ID_BYTES);
-    for cmd in ["call_readiness", "call_join"] {
-        assert_eq!(
-            invoke(cmd, room(&long)).unwrap_err(),
-            "invalid_argument",
-            "{cmd}"
-        );
-    }
+    assert_eq!(
+        invoke("call_readiness", room(&long)).unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        join(&long, true).unwrap_err(),
+        "invalid_argument",
+        "call_join"
+    );
     // Arguments of the wrong type or extra arguments do not reach the core.
     assert!(invoke("call_mute", serde_json::json!({"muted": "yes"})).is_err());
     assert!(invoke("call_mute", serde_json::json!({})).is_err());
+    assert!(invoke("call_camera", serde_json::json!({"on": 1})).is_err());
+    assert!(invoke("call_camera", serde_json::json!({})).is_err());
     assert_eq!(core.calls.load(Ordering::SeqCst), before);
 }
 
@@ -2092,9 +2172,14 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         invoke("call_devices", serde_json::json!({})).unwrap()["recording"][0]["id"],
         "mic-1"
     );
+    assert_eq!(
+        invoke("call_devices", serde_json::json!({})).unwrap()["cameras"][0]["id"],
+        "cam-1"
+    );
     for args in [
         serde_json::json!({"recording": "mic-1", "playout": null}),
-        serde_json::json!({"recording": null, "playout": "spk-1"}),
+        serde_json::json!({"recording": null, "playout": "spk-1", "camera": "cam-1"}),
+        serde_json::json!({"camera": "cam-1"}),
         serde_json::json!({}),
     ] {
         assert_eq!(
@@ -2107,6 +2192,9 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         serde_json::json!({"recording": "m".repeat(513), "playout": null}),
         serde_json::json!({"recording": null, "playout": "s".repeat(513)}),
         serde_json::json!({"recording": "", "playout": null}),
+        serde_json::json!({"camera": "c".repeat(513)}),
+        serde_json::json!({"camera": ""}),
+        serde_json::json!({"camera": "cam\n1"}),
     ] {
         assert_eq!(
             invoke("set_call_devices", args).unwrap_err(),
@@ -2114,6 +2202,7 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         );
     }
     assert!(invoke("set_call_devices", serde_json::json!({"recording": 7})).is_err());
+    assert!(invoke("set_call_devices", serde_json::json!({"camera": 7})).is_err());
     assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
         invoke(
@@ -2755,6 +2844,127 @@ fn given_an_image_band_then_the_page_gets_raw_bytes_with_width_and_rows() {
             "{args}"
         );
     }
+}
+
+/// GIVEN a call video picture WHEN the page asks for it THEN it is a raw
+/// binary response: the picture number as a little-endian `u64`, then the
+/// rotation, width and height as little-endian `u32`, then exactly
+/// `width * height * 4` RGBA bytes. No newer picture is an empty body, and a
+/// core error is a fixed code.
+#[test]
+fn given_a_call_video_frame_then_the_page_gets_raw_bytes_or_an_empty_body() {
+    let app = app();
+    let window = create_main_window(&app).unwrap();
+    let frame = |tile: u64, after: u64, stream: u64| {
+        get_ipc_response(
+            &window,
+            request(
+                "call_video_frame",
+                app_origin(),
+                serde_json::json!({"tile": tile, "after": after, "stream": stream}),
+            ),
+        )
+    };
+    assert_eq!(VIDEO_PREFIX_BYTES, 20);
+    let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = frame(1, 6, 1) else {
+        panic!("the picture is not a raw response");
+    };
+    assert_eq!(u64::from_le_bytes(body[0..8].try_into().unwrap()), 7);
+    assert_eq!(u32::from_le_bytes(body[8..12].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(body[12..16].try_into().unwrap()), 2);
+    assert_eq!(u32::from_le_bytes(body[16..20].try_into().unwrap()), 1);
+    assert_eq!(&body[VIDEO_PREFIX_BYTES..], &(0..8).collect::<Vec<u8>>());
+    // No newer picture, or none of the asked stream: an empty raw body,
+    // never JSON.
+    for (tile, after, stream) in [(1, 7, 1), (1, 9, 1), (2, 0, 1), (1, 0, 2)] {
+        let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = frame(tile, after, stream) else {
+            panic!("tile {tile} after {after} stream {stream} is not a raw response");
+        };
+        assert!(body.is_empty(), "tile {tile} after {after} stream {stream}");
+    }
+    assert_eq!(frame(3, 0, 1).unwrap_err(), "limit_exceeded");
+    // A reply that breaks the contract is a generic error.
+    assert_eq!(frame(4, 0, 1).unwrap_err(), "core_unavailable");
+}
+
+/// GIVEN a tile outside 0 to 4 or an `after` or `stream` the page cannot
+/// hold exactly WHEN `call_video_frame` is called THEN it is refused without calling the
+/// core, from the app origin and from a remote one.
+#[test]
+fn given_bad_call_video_arguments_then_the_ui_refuses_without_calling_the_core() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    for args in [
+        serde_json::json!({"tile": 5, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 255, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 9_007_199_254_740_992_u64, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": u64::MAX, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": 9_007_199_254_740_992_u64}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": u64::MAX}),
+    ] {
+        assert_eq!(
+            invoke_on(&window, "call_video_frame", app_origin(), args.clone()).unwrap_err(),
+            "invalid_argument",
+            "{args}"
+        );
+    }
+    for args in [
+        serde_json::json!({"tile": 256, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": -1, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": -1, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": -1}),
+        serde_json::json!({"tile": "0", "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "stream": 0}),
+        serde_json::json!({"after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0}),
+    ] {
+        assert!(
+            get_ipc_response(
+                &window,
+                request("call_video_frame", app_origin(), args.clone())
+            )
+            .is_err(),
+            "{args}"
+        );
+    }
+    assert_eq!(core.calls.load(Ordering::SeqCst), 0);
+    let ok = serde_json::json!({"tile": 0, "after": 0, "stream": 0});
+    for (cmd, args) in [
+        ("call_video_frame", ok.clone()),
+        ("call_camera", serde_json::json!({"on": true})),
+    ] {
+        assert!(
+            get_ipc_response(&window, request(cmd, app_origin(), args.clone())).is_ok(),
+            "{cmd} is allowed from the app"
+        );
+        let calls = core.calls.load(Ordering::SeqCst);
+        for origin in ["https://example.org", "http://localhost:1420"] {
+            assert!(
+                get_ipc_response(&window, request(cmd, origin, args.clone())).is_err(),
+                "{cmd} from {origin}"
+            );
+        }
+        assert_eq!(core.calls.load(Ordering::SeqCst), calls, "{cmd}");
+    }
+}
+
+/// GIVEN an unreachable core WHEN a video picture is asked for THEN the page
+/// gets the generic error.
+#[test]
+fn given_unreachable_core_then_a_call_video_frame_is_a_generic_error() {
+    let app = app_with(FakeCore::new(false));
+    let window = create_main_window(&app).unwrap();
+    assert_eq!(
+        invoke_on(
+            &window,
+            "call_video_frame",
+            app_origin(),
+            serde_json::json!({"tile": 0, "after": 0, "stream": 0})
+        )
+        .unwrap_err(),
+        "core_unavailable"
+    );
 }
 
 /// GIVEN malformed handles or oversized room or event IDs WHEN any image

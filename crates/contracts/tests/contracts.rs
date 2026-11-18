@@ -753,8 +753,13 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             name: "Headset".into(),
         }],
         playout: Vec::new(),
+        cameras: vec![persephone_contracts::CallDevice {
+            id: "usb#cam".into(),
+            name: "Camera".into(),
+        }],
         selected_recording: Some("{0.0.1}.{a}".into()),
         selected_playout: None,
+        selected_camera: Some("usb#cam".into()),
         unreadable: false,
     };
     let json = serde_json::to_value(&devices).unwrap();
@@ -764,8 +769,10 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             "supported": true,
             "recording": [{"id": "{0.0.1}.{a}", "name": "Headset"}],
             "playout": [],
+            "cameras": [{"id": "usb#cam", "name": "Camera"}],
             "selectedRecording": "{0.0.1}.{a}",
             "selectedPlayout": null,
+            "selectedCamera": "usb#cam",
             "unreadable": false
         })
     );
@@ -773,9 +780,62 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         serde_json::from_value::<persephone_contracts::CallDevices>(json.clone()).unwrap(),
         devices
     );
-    let mut extra = json;
+    let mut extra = json.clone();
     extra["path"] = "C:/x".into();
     assert!(serde_json::from_value::<persephone_contracts::CallDevices>(extra).is_err());
+    let mut without = json.clone();
+    without.as_object_mut().unwrap().remove("cameras");
+    assert!(serde_json::from_value::<persephone_contracts::CallDevices>(without).is_err());
+    let mut no_camera = json.clone();
+    no_camera.as_object_mut().unwrap().remove("selectedCamera");
+    assert!(
+        serde_json::from_value::<persephone_contracts::CallDevices>(no_camera).is_err(),
+        "a missing selectedCamera is rejected"
+    );
+    let mut null_camera = json.clone();
+    null_camera["selectedCamera"] = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_value::<persephone_contracts::CallDevices>(null_camera)
+            .unwrap()
+            .selected_camera,
+        None
+    );
+    let tile = serde_json::json!({"tile": 0, "participant": null, "own": true, "stream": 3});
+    assert_eq!(
+        serde_json::from_value::<persephone_contracts::CallVideoTile>(tile.clone())
+            .unwrap()
+            .participant,
+        None
+    );
+    let mut no_participant = tile.clone();
+    no_participant
+        .as_object_mut()
+        .unwrap()
+        .remove("participant");
+    assert!(
+        serde_json::from_value::<persephone_contracts::CallVideoTile>(no_participant).is_err(),
+        "a missing participant is rejected"
+    );
+    for (stream, valid) in [
+        (0_u64, true),
+        (9_007_199_254_740_991, true),
+        (9_007_199_254_740_992, false),
+        (u64::MAX, false),
+    ] {
+        let mut numbered = tile.clone();
+        numbered["stream"] = serde_json::json!(stream);
+        assert_eq!(
+            serde_json::from_value::<persephone_contracts::CallVideoTile>(numbered).is_ok(),
+            valid,
+            "stream {stream}"
+        );
+    }
+    let mut no_stream = tile.clone();
+    no_stream.as_object_mut().unwrap().remove("stream");
+    assert!(
+        serde_json::from_value::<persephone_contracts::CallVideoTile>(no_stream).is_err(),
+        "a missing stream number is rejected"
+    );
     assert_eq!(
         serde_json::to_value(persephone_contracts::CallEnd::DeviceNotFound).unwrap(),
         "device_not_found"

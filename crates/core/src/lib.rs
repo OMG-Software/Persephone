@@ -87,7 +87,8 @@ use persephone_contracts::{
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_EVENT_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
     MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, MAX_USER_ID_BYTES, Outcome,
-    PixelReply, ReceiveError, Reply, Request, ToCore, receive_request, send, send_pixel_reply,
+    PixelReply, ReceiveError, Reply, Request, ToCore, VideoReply, call_video_within_limits,
+    receive_request, send, send_pixel_reply, send_video_reply,
 };
 use persephone_media_protocol::{ReceivedFrame, ResourceBudgets};
 use pick::ImagePicker;
@@ -98,15 +99,18 @@ use std::{
     io::{Read, Write},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const MILESTONE: &str = "P1";
 
 /// The commit this core was built from (`build.rs`).
 pub const REVISION: &str = env!("PERSEPHONE_REVISION");
+
+/// The shortest time between two `call_video` events: about 30 a second.
+const VIDEO_EVENT_GAP: Duration = Duration::from_millis(33);
 
 /// Longest a `lock_session` call waits for admitted work before replying
 /// `locking`; the UI may call again to resume the wait. Covers one sync round.
@@ -144,6 +148,11 @@ struct Notifications {
     security_changed: bool,
     /// The call changed since the last notification.
     calls_changed: bool,
+    /// A call video picture arrived since the last notification. At most one
+    /// `call_video` event per [`VIDEO_EVENT_GAP`] leaves the core.
+    video_changed: bool,
+    /// When the last `call_video` event was taken.
+    video_taken: Option<Instant>,
     /// The report of third-party modules changed since the last notification.
     modules_changed: bool,
     /// The latest desktop notification waiting to be sent (ADR-0022): room
@@ -164,7 +173,15 @@ struct Hub {
     /// Weak: the core owns the controller, and the controller's admission
     /// reaches the session that holds this hub.
     calls: OnceLock<Weak<calls::controller::CallController>>,
+    /// The UI connection has closed. Long calls that wait for the user (the
+    /// camera portal of a device listing) end when it is set.
+    closing: AtomicBool,
 }
+
+/// The largest JSON reply of a device listing, below the UI pipe's control
+/// frame limit with room for the reply envelope (`id` and `outcome`).
+const MAX_DEVICE_REPLY_BYTES: usize =
+    persephone_media_protocol::CONTROL_FRAME_LIMIT as usize - 1024;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned lock means a panic mid-update; the core stops either way.
@@ -200,6 +217,18 @@ impl Hub {
         let mut notifications = lock(&self.notifications);
         if !notifications.calls_changed {
             notifications.calls_changed = true;
+            self.changed.notify_all();
+        }
+    }
+
+    /// Queues one content-free `call_video` event. Pictures before the UI
+    /// reads coalesce; the writer sends it no sooner than [`VIDEO_EVENT_GAP`]
+    /// after the last one. Called from the worker read thread, so it only
+    /// sets a flag.
+    fn video_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.video_changed {
+            notifications.video_changed = true;
             self.changed.notify_all();
         }
     }
@@ -427,6 +456,9 @@ enum Answer<'a> {
     Reply(Reply),
     /// A pixel reply and the band it announces.
     Pixels(PixelReply, media::Band),
+    /// A video reply, the picture it announces, and the open session's
+    /// generation from before the picture was chosen.
+    Video(VideoReply, calls::video::Picture, Option<u64>),
     /// Admitted; the reply follows when the call finishes.
     Later(u32, LongCall<'a>),
 }
@@ -495,6 +527,18 @@ fn refused<T: Serialize>(result: Result<T, ErrorCode>) -> Outcome {
     }
 }
 
+/// `Ok` when the JSON of `devices` fits [`MAX_DEVICE_REPLY_BYTES`]. Names
+/// and IDs that JSON escapes can make three lists of valid devices larger
+/// than the UI pipe takes; the writer would then refuse the frame and the
+/// page would get no reply.
+fn within_device_reply(devices: &persephone_contracts::CallDevices) -> Result<(), ErrorCode> {
+    match serde_json::to_vec(devices) {
+        Ok(bytes) if bytes.len() <= MAX_DEVICE_REPLY_BYTES => Ok(()),
+        Ok(_) => Err(ErrorCode::LimitExceeded),
+        Err(_) => Err(ErrorCode::Internal),
+    }
+}
+
 /// A room ID the SDK accepts, so nothing queued or consented to can fail to
 /// parse later.
 fn valid_room_id(room_id: &str) -> bool {
@@ -534,6 +578,12 @@ impl Core {
         calls.set_listener(Arc::new(move || {
             if let Some(hub) = tell.upgrade() {
                 hub.calls_changed();
+            }
+        }));
+        let tell = Arc::downgrade(&hub);
+        calls.set_video_listener(Arc::new(move || {
+            if let Some(hub) = tell.upgrade() {
+                hub.video_changed();
             }
         }));
         Self {
@@ -760,6 +810,37 @@ impl Core {
                         band,
                     ),
                     Err(code) => error(code),
+                }
+            }
+            Call::CallVideoFrame {
+                tile,
+                after,
+                stream,
+            } => {
+                if !call_video_within_limits(&request.call) {
+                    return error(ErrorCode::InvalidArgument);
+                }
+                // No newer picture, no call, and a locked profile all give the
+                // same answer: nothing to show. The generation is read first,
+                // so a lock after it is seen again when the reply is written.
+                let generation = self.media_generation();
+                match self.calls.video_picture(*tile, *after, *stream) {
+                    Some(picture) => Answer::Video(
+                        VideoReply {
+                            id,
+                            tile: *tile,
+                            seq: picture.seq,
+                            rotation: picture.rotation,
+                            width: picture.width,
+                            height: picture.height,
+                        },
+                        picture,
+                        generation,
+                    ),
+                    None => Answer::Reply(Reply {
+                        id,
+                        outcome: Outcome::Ok(serde_json::Value::Null),
+                    }),
                 }
             }
             call => Answer::Reply(Reply {
@@ -1047,10 +1128,20 @@ impl Core {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
-            Call::SetCallDevices { recording, playout } => {
-                self.set_call_devices(recording.as_deref(), playout.as_deref())
+            Call::SetCallDevices {
+                recording,
+                playout,
+                camera,
+            } => {
+                if !call_video_within_limits(call) {
+                    return Outcome::Error(ErrorCode::InvalidArgument);
+                }
+                self.set_call_devices(recording.as_deref(), playout.as_deref(), camera.as_deref())
             }
             Call::CallMute { muted } => self.call_mute(*muted),
+            Call::CallCamera { on } => self.call_camera(*on),
+            // Its picture reaches only `serve`.
+            Call::CallVideoFrame { .. } => Outcome::Error(ErrorCode::Unavailable),
             Call::CallStatus {} => match self.calls_open() {
                 Ok(()) => ok(&calls::status::status(&self.calls.state())),
                 Err(code) => Outcome::Error(code),
@@ -2054,13 +2145,25 @@ impl Core {
         ok(&calls::status::status(&self.calls.state()))
     }
 
+    /// Turns the camera on or off. Unlike mute, no call is an error: there is
+    /// nothing to turn on.
+    fn call_camera(&self, on: bool) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        match self.calls.set_camera(on) {
+            Ok(()) => ok(&calls::status::status(&self.calls.state())),
+            Err(_) => Outcome::Error(ErrorCode::Unavailable),
+        }
+    }
+
     /// Admits a call command that waits on the homeserver or the worker
     /// (ADR-0043): readiness, join and leave. Each kind runs one at a time,
     /// on its own thread, so a leave can cancel a join in progress.
     fn call_work<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
         enum Work {
             Readiness(matrix_sdk::ruma::OwnedRoomId),
-            Join(matrix_sdk::ruma::OwnedRoomId),
+            Join(matrix_sdk::ruma::OwnedRoomId, bool),
             Leave,
         }
         let room = |room_id: &str| {
@@ -2073,7 +2176,7 @@ impl Core {
         };
         let work = match call {
             Call::CallReadiness { room_id } => Work::Readiness(room(room_id)?),
-            Call::CallJoin { room_id } => Work::Join(room(room_id)?),
+            Call::CallJoin { room_id, video } => Work::Join(room(room_id)?, *video),
             Call::CallLeave {} => Work::Leave,
             _ => return Err(ErrorCode::InvalidArgument),
         };
@@ -2087,14 +2190,14 @@ impl Core {
         self.calls_open()?;
         let slot = match work {
             Work::Readiness(_) => self.call_readiness.begin()?,
-            Work::Join(_) => self.call_join.begin()?,
+            Work::Join(..) => self.call_join.begin()?,
             Work::Leave => self.call_leave.begin()?,
         };
         Ok(Box::new(move || {
             let _slot = slot;
             match work {
                 Work::Readiness(room_id) => refused(self.finish_call_readiness(&room_id)),
-                Work::Join(room_id) => refused(self.finish_call_join(&room_id)),
+                Work::Join(room_id, video) => refused(self.finish_call_join(&room_id, video)),
                 Work::Leave => refused(self.finish_call_leave()),
             }
         }))
@@ -2113,23 +2216,37 @@ impl Core {
     /// The saved choice, then the devices a worker reports. An unreadable
     /// record is shown, with both choices null, and does not hide the list.
     /// A listing that fails is `unavailable`.
+    ///
+    /// The saved choice belongs to the session that was open when it was
+    /// read. The listing can wait up to a minute for the camera portal, and
+    /// holds no session lease meanwhile, so a lock or another session after
+    /// the read gives `locked` and the old choice is not sent. A reply too
+    /// large for the UI pipe is `limit_exceeded`.
     fn finish_call_devices(&self) -> Result<persephone_contracts::CallDevices, ErrorCode> {
+        let generation = self.media_generation();
         let (selection, unreadable) = self.saved_call_devices()?;
-        let listing =
-            calls::devices::list(self.calls.host().as_ref()).map_err(|_| ErrorCode::Unavailable)?;
+        let listing = calls::devices::list(self.calls.host().as_ref(), &self.hub.closing)
+            .map_err(|_| ErrorCode::Unavailable)?;
+        if generation.is_none() || self.media_generation() != generation {
+            return Err(ErrorCode::Locked);
+        }
         let device =
-            |device: persephone_call_protocol::AudioDevice| persephone_contracts::CallDevice {
+            |device: persephone_call_protocol::MediaDevice| persephone_contracts::CallDevice {
                 id: device.id,
                 name: device.name,
             };
-        Ok(persephone_contracts::CallDevices {
+        let devices = persephone_contracts::CallDevices {
             supported: listing.supported,
             recording: listing.recording.into_iter().map(device).collect(),
             playout: listing.playout.into_iter().map(device).collect(),
+            cameras: listing.cameras.into_iter().map(device).collect(),
             selected_recording: selection.recording,
             selected_playout: selection.playout,
+            selected_camera: selection.camera,
             unreadable,
-        })
+        };
+        within_device_reply(&devices)?;
+        Ok(devices)
     }
 
     /// The saved call devices and whether the record was unreadable (then
@@ -2156,10 +2273,16 @@ impl Core {
 
     /// Saves the call devices; they apply to calls joined afterwards. A
     /// device need not be connected now.
-    fn set_call_devices(&self, recording: Option<&str>, playout: Option<&str>) -> Outcome {
+    fn set_call_devices(
+        &self,
+        recording: Option<&str>,
+        playout: Option<&str>,
+        camera: Option<&str>,
+    ) -> Outcome {
         let selection = calls::devices::Selection {
             recording: recording.map(str::to_owned),
             playout: playout.map(str::to_owned),
+            camera: camera.map(str::to_owned),
         };
         if !selection.is_valid() {
             return Outcome::Error(ErrorCode::InvalidArgument);
@@ -2219,6 +2342,7 @@ impl Core {
     fn finish_call_join(
         &self,
         room_id: &matrix_sdk::ruma::RoomId,
+        video: bool,
     ) -> Result<persephone_contracts::CallStatus, ErrorCode> {
         use calls::controller::{CallError, JoinScope};
         let refuse = |error: CallError| Ok(calls::status::join_reply(error, &self.calls.state()));
@@ -2261,6 +2385,7 @@ impl Core {
             generation,
             runtime: lease.stores().runtime().handle().clone(),
             devices,
+            video,
         };
         let joined = lease
             .stores()
@@ -3005,24 +3130,59 @@ impl Core {
     /// once the connection is closed.
     fn take_events(&self) -> Option<Vec<Event>> {
         let mut notifications = lock(&self.hub.notifications);
-        while notifications.pending.is_empty()
-            && !notifications.session_changed
-            && !notifications.room_list_changed
-            && !notifications.security_changed
-            && !notifications.calls_changed
-            && !notifications.modules_changed
-            && notifications.toast.is_none()
-            && !notifications.closed
-        {
-            notifications = self
-                .hub
-                .changed
-                .wait(notifications)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            // A video event waits until the gap since the last one has passed;
+            // any other event does not wait for it.
+            let video_wait = notifications
+                .video_changed
+                .then_some(notifications.video_taken)
+                .flatten()
+                .map(|taken| (taken + VIDEO_EVENT_GAP).saturating_duration_since(Instant::now()))
+                .filter(|wait| !wait.is_zero());
+            let video_due = notifications.video_changed && video_wait.is_none();
+            let idle = notifications.pending.is_empty()
+                && !notifications.session_changed
+                && !notifications.room_list_changed
+                && !notifications.security_changed
+                && !notifications.calls_changed
+                && !notifications.modules_changed
+                && notifications.toast.is_none()
+                && !video_due
+                && !notifications.closed;
+            if !idle {
+                break;
+            }
+            notifications = match video_wait {
+                Some(wait) => {
+                    self.hub
+                        .changed
+                        .wait_timeout(notifications, wait)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .0
+                }
+                None => self
+                    .hub
+                    .changed
+                    .wait(notifications)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            };
         }
         if notifications.closed {
             return None;
         }
+        // Taken only when due: a picture that came during the gap stays
+        // pending for the next call.
+        let video = if notifications.video_changed
+            && notifications
+                .video_taken
+                .is_none_or(|taken| taken.elapsed() >= VIDEO_EVENT_GAP)
+        {
+            notifications.video_changed = false;
+            notifications.video_taken = Some(Instant::now());
+            Some(Event::CallVideo {})
+        } else {
+            None
+        };
         let session =
             std::mem::take(&mut notifications.session_changed).then_some(Event::SessionChanged {});
         let list = std::mem::take(&mut notifications.room_list_changed)
@@ -3044,6 +3204,7 @@ impl Core {
                 .chain(list)
                 .chain(security)
                 .chain(call)
+                .chain(video)
                 .chain(modules)
                 .chain(toast)
                 .chain(
@@ -3079,10 +3240,12 @@ impl Core {
     pub fn reopen(&self) {
         self.media.purge();
         *lock(&self.hub.notifications) = Notifications::default();
+        self.hub.closing.store(false, Ordering::SeqCst);
         self.hub.changed.notify_all();
     }
 
     fn close(&self) {
+        self.hub.closing.store(true, Ordering::SeqCst);
         lock(&self.hub.notifications).closed = true;
         self.hub.changed.notify_all();
     }
@@ -3140,6 +3303,27 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                         }
                         Answer::Pixels(reply, band) => {
                             send_pixel_reply(&mut *lock(&output), &reply, band.bytes())
+                        }
+                        // The picture's bytes are shared with the store, which
+                        // is not locked here: only the pipe is.
+                        // A lock between the choice and this write must keep
+                        // the picture from the page, so the generation is
+                        // checked again while the pipe is held. The session
+                        // state lock is a leaf: nothing holding it waits on
+                        // the pipe.
+                        Answer::Video(reply, picture, generation) => {
+                            let mut output = lock(&output);
+                            if generation.is_some() && core.media_generation() == generation {
+                                send_video_reply(&mut *output, &reply, picture.bytes())
+                            } else {
+                                send(
+                                    &mut *output,
+                                    &CoreMessage::Reply(Reply {
+                                        id: reply.id,
+                                        outcome: Outcome::Ok(serde_json::Value::Null),
+                                    }),
+                                )
+                            }
                         }
                         Answer::Later(id, call) => {
                             let output = &output;
@@ -3204,6 +3388,47 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN device lists WHEN the reply is checked THEN an ordinary one
+    /// fits, and three full lists of names and IDs that JSON escapes to
+    /// twice their size are `limit_exceeded` instead of a frame the UI pipe
+    /// refuses.
+    #[test]
+    fn given_a_device_reply_then_only_one_that_fits_the_pipe_is_sent() {
+        use persephone_call_protocol::{MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES};
+        let list = |id: &str, name: &str, count: usize| {
+            vec![
+                persephone_contracts::CallDevice {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                };
+                count
+            ]
+        };
+        let devices = |recording, playout, cameras| persephone_contracts::CallDevices {
+            supported: true,
+            recording,
+            playout,
+            cameras,
+            selected_recording: None,
+            selected_playout: None,
+            selected_camera: None,
+            unreadable: false,
+        };
+        let ordinary = devices(
+            list("a", "Mic", 2),
+            list("b", "Speaker", 2),
+            list("c", "Cam", 1),
+        );
+        assert_eq!(within_device_reply(&ordinary), Ok(()));
+        let id = "\"".repeat(MAX_DEVICE_ID_BYTES);
+        let name = "\"".repeat(MAX_DEVICE_NAME_BYTES);
+        let full = || list(&id, &name, MAX_DEVICES);
+        assert_eq!(
+            within_device_reply(&devices(full(), full(), full())),
+            Err(ErrorCode::LimitExceeded)
+        );
+    }
 
     #[test]
     /// Reserve room and cache-search slots independently, and refuse excess work.
@@ -3329,6 +3554,63 @@ mod tests {
         }
         assert_eq!(core.take_events(), Some(vec![Event::CallChanged {}]));
         assert!(!lock(&core.hub.notifications).calls_changed);
+    }
+
+    /// GIVEN many pictures before the UI reads WHEN the events are taken THEN
+    /// one video event carries them, and none stays pending.
+    #[test]
+    fn given_many_video_pictures_then_one_video_event_is_taken() {
+        let core = Core::default();
+        for _ in 0..50 {
+            core.hub.video_changed();
+        }
+        assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
+        assert!(!lock(&core.hub.notifications).video_changed);
+    }
+
+    /// GIVEN a video event just taken WHEN pictures arrive again THEN the next
+    /// video event waits out the gap (about 30 a second), and another event
+    /// does not wait for it. The time of the last video event is set by the
+    /// test, so a slow thread cannot change the result.
+    #[test]
+    fn given_video_events_then_they_are_spaced_and_do_not_hold_other_events() {
+        let core = Core::default();
+        core.hub.video_changed();
+        assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
+
+        // The last video event is a day ahead, so the gap cannot pass during
+        // this step however slowly the thread runs.
+        lock(&core.hub.notifications).video_taken =
+            Some(Instant::now() + Duration::from_secs(24 * 60 * 60));
+        core.hub.video_changed();
+        core.hub.calls_changed();
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::CallChanged {}]),
+            "the call event is not held for the video gap"
+        );
+        assert!(lock(&core.hub.notifications).video_changed, "still pending");
+
+        // The last video event is now: the next one waits out the gap.
+        let taken = Instant::now();
+        lock(&core.hub.notifications).video_taken = Some(taken);
+        assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
+        assert!(
+            taken.elapsed() >= VIDEO_EVENT_GAP,
+            "the second video event came after the gap"
+        );
+    }
+
+    /// GIVEN a waiting video event WHEN the connection closes THEN the writer
+    /// stops instead of waiting for the gap.
+    #[test]
+    fn given_a_closed_connection_then_a_pending_video_event_does_not_keep_it_open() {
+        let core = Core::default();
+        core.hub.video_changed();
+        assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
+        core.hub.video_changed();
+        core.close();
+        assert_eq!(core.take_events(), None);
     }
 
     /// GIVEN each setting, profile state and idle time WHEN checked THEN the

@@ -435,6 +435,115 @@ Pass criteria are in brackets. Each step records its observed result.
 14. **Proxy prompt.** Set a SOCKS5 proxy in the profile and join.
     [the core's own dialog appears; "No" stops the join]
 
+### Video steps (ADR-0048, added 17 November 2026, not yet run)
+
+15. **Cameras listed.** Settings lists the cameras through a contained
+    worker; no camera light comes on. [list shown; worker exits with 0]
+16. **Video call from Persephone.** [member event has `m.call.intent`
+    `video`; the camera light comes on; the own tile shows the camera]
+17. **Video both ways.** Element Call turns its camera on. [each side sees
+    the other; LiveKit reports encrypted video tracks; Persephone's tile is
+    at most 640x360]
+18. **Camera off and on** in the call bar. [the camera light goes out and
+    the peer's tile for Persephone goes away; on again, the peer sees video]
+19. **Rejoin with video.** Element Call leaves and rejoins. [Element Call
+    sees Persephone's video after the key rotation, so the camera track uses
+    the current own key index]
+20. **Camera from an audio call.** Join with the call button, then turn the
+    camera on. [intent stays `audio`; the peer sees video]
+21. **Chosen camera missing.** Choose a camera, unplug it, turn the camera
+    on. [the call bar says the camera is not connected; no other camera
+    light comes on; audio goes on]
+22. **Containment.** Record whether any mitigation must be relaxed for
+    Media Foundation in the AppContainer, and the worker's peak memory with
+    four remote videos against its 512 MiB Job limit.
+
+## Linux and macOS containment checks (ADR-0049, not yet run)
+
+ADR-0049 keeps calls on Linux and macOS unverified until a live run like the
+Windows run passes on each system, with these checks. The expected results
+below come from the record and the current code. None of them has been
+observed yet. Record each result, with the OS, kernel or macOS version and
+commit, in the evidence report before any claim.
+
+The containment step of the Windows run (Media Foundation and the Job) does
+not apply to these systems.
+
+### Linux
+
+Run on a host with Landlock ABI 3 or newer (Linux 6.2 or newer) and on one
+without it.
+
+Descriptor check. The worker is not dumpable, so only root can read its
+descriptors. Run each command with `sudo` on the test host. A permission
+error, an empty list or a worker that is gone makes the check inconclusive,
+not a pass; repeat it.
+
+- `sudo ls -l /proc/<pid>/fd` lists every descriptor. Record the list.
+- `sudo ss -xp | grep 'pid=<pid>,'` lists the worker's Unix sockets. For
+  each one, take the peer inode (the number after `*` in the peer column)
+  and find its owner: `sudo ss -xp | grep ' <peer inode> '`.
+- Pass: no `/dev/video*` path in the descriptor list (portal path), and no
+  worker socket whose peer is bound at the session bus address
+  (`$DBUS_SESSION_BUS_ADDRESS` of the desktop user, usually
+  `/run/user/<uid>/bus`) or the accessibility bus
+  (`/run/user/<uid>/at-spi/bus*`), or belongs to `dbus-daemon` or
+  `dbus-broker`.
+  Record each peer and its process. A socket whose peer cannot be found
+  is recorded and makes the check inconclusive.
+
+1. Before the call, on the supported host only: `cat
+   /sys/kernel/security/lsm` names `landlock`. On the host without
+   Landlock, record the list as it is; step 4 applies there.
+2. Join a call with the camera off. While it is connected, find the call
+   worker's process ID (`pgrep -f persephone-call-worker`) and the process
+   that started it (`ps -o ppid= -p <pid>`).
+   - Record the baseline: `Seccomp_filters:` in `/proc/<ppid>/status`. The
+     worker inherits these filters.
+   - Expected pass: `/proc/<pid>/status` shows `NoNewPrivs: 1`,
+     `Seccomp: 2` and `Seccomp_filters:` of exactly the baseline plus 4.
+     Stage 1 installs two programs (kill and `ENOSYS`) and stage 2 installs
+     two more (Landlock calls killed, new `AF_UNIX` sockets refused with
+     `EACCES`). The baseline plus 2 means that stage 2 is missing, and the
+     step fails. Stage 2 runs before the SFU connection, so a connected call
+     must show it.
+   - Expected pass: the worker is not dumpable, so `stat -c %U
+     /proc/<pid>/environ` shows `root`.
+   - Expected pass: the descriptor check (above) passes.
+3. Turn the camera on. On the portal path the desktop asks for camera
+   access.
+   - Expected pass: a grant shows the own tile. A refusal leaves the camera
+     `Unavailable` and makes no V4L2 attempt.
+   - Expected pass: while the own tile shows, the descriptor check passes
+     again. On the portal path the PipeWire remote's peer is the PipeWire
+     daemon, which is expected. The portal path gets frames over that
+     remote only, so a video node opened after the grant fails the step.
+     `Seccomp_filters:` is still the baseline plus 4.
+   - Expected pass: closing the call while the access dialog is open closes
+     the dialog and ends the call at once.
+4. Expected refusal: on a kernel without Landlock ABI 3, or with Landlock
+   turned off, the join is refused with the containment text ("The call did
+   not start: its process could not be contained."). No worker stays
+   running.
+
+### macOS
+
+1. Before the call: `codesign -d --entitlements - <call worker>` lists only
+   `com.apple.security.device.audio-input` and
+   `com.apple.security.device.camera`, and `codesign -dv <call worker>`
+   shows the hardened runtime. The main app and the other helpers have no
+   entitlements.
+2. Join a call with the camera off.
+   - Expected pass: Activity Monitor's Sandbox column shows the call worker
+     as sandboxed.
+   - Record the Mach and I/O Kit services that the worker uses (the
+     record requires this list before it is accepted).
+3. Turn the camera on. Expected pass: macOS asks for camera access for
+   Persephone, and a grant shows the own tile.
+4. Expected refusal: a worker that reports any missing control (for example
+   a build without the call profile) makes the join fail with the
+   containment text. No input reaches it.
+
 ## Evidence
 
 - A dated report `docs/evidence/live-calls.md` in the format of
@@ -448,6 +557,7 @@ Pass criteria are in brackets. Each step records its observed result.
 ## Not covered by this run
 
 - TLS 1.3 to a real SFU (the `livekit-net` patch), TURN relay, IPv6.
-- Linux and macOS (the call host refuses there by design).
+- Linux and macOS: each needs its own run with the containment checks
+  above.
 - Merovingian (separate run after its probe).
 - More than two participants.

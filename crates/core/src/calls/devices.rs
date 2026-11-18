@@ -1,7 +1,7 @@
-//! The call's audio devices (ADR-0043): the user's saved choice and the list
+//! The call's devices (ADR-0043, ADR-0048): the user's saved choice and the list
 //! of devices the page offers.
 //!
-//! * The choice belongs to the profile. It is one JSON record in the encrypted
+//! * The choice (microphone, speaker, camera) belongs to the profile. It is one JSON record in the encrypted
 //!   crypto store, like the proxy. It holds platform device IDs only; `None`
 //!   is the system default. A device need not be present when it is saved.
 //! * A record that cannot be read fails the join. A call never falls back to
@@ -14,13 +14,17 @@ use super::worker::{CallHost, StartError};
 use crate::{store::Stores, views::project_name};
 use matrix_sdk_crypto::store::CryptoStore;
 use persephone_call_protocol::{
-    AudioDevice, FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES, ToWorker,
+    FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES, MediaDevice, ToWorker,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub const DEVICES_KEY: &str = "persephone.call_devices.v1";
-const MAX_RECORD_BYTES: usize = 2048;
+/// The largest saved record: three IDs at the limit, each one escaped to
+/// at most two bytes a byte (`"` and `\`) plus its quotes, and the field
+/// names. Every valid selection serializes under it.
+const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 64;
 /// How long the worker has to answer `ListDevices`.
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the worker has to exit after the list.
@@ -28,12 +32,16 @@ const FINISH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often the wait looks for the answer.
 const POLL: Duration = Duration::from_millis(20);
 
-/// The saved microphone and speaker. `None` is the system default.
+/// The saved microphone, speaker and camera. `None` is the system default
+/// (for the camera: the first one the worker finds). A record saved before
+/// cameras existed has no `camera` and reads as `None`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
     pub recording: Option<String>,
     pub playout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<String>,
 }
 
 /// Whether `id` can be a device ID: not empty, bounded, no control character.
@@ -44,7 +52,7 @@ pub fn valid_id(id: &str) -> bool {
 impl Selection {
     /// Whether every set ID is valid.
     pub fn is_valid(&self) -> bool {
-        [&self.recording, &self.playout]
+        [&self.recording, &self.playout, &self.camera]
             .into_iter()
             .flatten()
             .all(|id| valid_id(id))
@@ -94,8 +102,9 @@ pub async fn save(stores: &Stores, selection: &Selection) -> bool {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Listing {
     pub supported: bool,
-    pub recording: Vec<AudioDevice>,
-    pub playout: Vec<AudioDevice>,
+    pub recording: Vec<MediaDevice>,
+    pub playout: Vec<MediaDevice>,
+    pub cameras: Vec<MediaDevice>,
 }
 
 /// Why the devices could not be listed. The page sees one code.
@@ -104,16 +113,44 @@ pub enum ListError {
     Start(StartError),
     /// The worker did not answer with a device list in time.
     NoAnswer,
+    /// The page that asked has gone; nothing was listed.
+    Cancelled,
+}
+
+/// On the portal camera path, gets the PipeWire remote from the camera portal
+/// and sends it to the worker. Blocks for up to 60 seconds while the desktop
+/// asks the user. Any failure sends nothing.
+#[cfg(target_os = "linux")]
+fn send_portal_remote(link: &super::worker::CallWorkerLink, cancel: &AtomicBool) {
+    use crate::platform::linux::camera_portal;
+    use std::os::fd::AsFd;
+    if link.camera_path() != super::worker::CameraPath::Portal {
+        return;
+    }
+    if let Ok(remote) = camera_portal::open_remote(cancel) {
+        let _ = link.send_camera_handle(remote.as_fd());
+    }
 }
 
 /// Lists the audio devices through a contained call worker. Blocks for up to
 /// [`LIST_TIMEOUT`] after the worker starts; call it from its own thread.
-/// Nothing starts where the host does not support calls.
-pub fn list(host: &dyn CallHost) -> Result<Listing, ListError> {
+/// Nothing starts where the host does not support calls. `cancel` is set
+/// when the page that asked has gone: a camera portal request then ends,
+/// and the worker finishes without listing ([`ListError::Cancelled`]).
+pub fn list(host: &dyn CallHost, cancel: &AtomicBool) -> Result<Listing, ListError> {
     if !host.supported() {
         return Ok(Listing::default());
     }
     let mut link = host.start().map_err(ListError::Start)?;
+    // Portal path (Linux): listing asks the portal for access, so the desktop
+    // may show its dialog. Without access no cameras are listed; microphones
+    // and speakers still are.
+    #[cfg(target_os = "linux")]
+    send_portal_remote(&link, cancel);
+    if cancel.load(Ordering::SeqCst) {
+        link.finish(FINISH_TIMEOUT);
+        return Err(ListError::Cancelled);
+    }
     let answer = if link.send(ToWorker::ListDevices).is_ok() {
         let deadline = Instant::now() + LIST_TIMEOUT;
         loop {
@@ -130,10 +167,15 @@ pub fn list(host: &dyn CallHost) -> Result<Listing, ListError> {
     };
     link.finish(FINISH_TIMEOUT);
     match answer {
-        Some(FromWorker::Devices { recording, playout }) => Ok(Listing {
+        Some(FromWorker::Devices {
+            recording,
+            playout,
+            cameras,
+        }) => Ok(Listing {
             supported: true,
             recording: clean(recording),
             playout: clean(playout),
+            cameras: clean(cameras),
         }),
         _ => Err(ListError::NoAnswer),
     }
@@ -141,8 +183,8 @@ pub fn list(host: &dyn CallHost) -> Result<Listing, ListError> {
 
 /// Makes worker devices safe to show: bounded IDs, normalized and bounded
 /// names, no repeated ID (the first stays), at most [`MAX_DEVICES`].
-fn clean(devices: Vec<AudioDevice>) -> Vec<AudioDevice> {
-    let mut kept: Vec<AudioDevice> = Vec::new();
+fn clean(devices: Vec<MediaDevice>) -> Vec<MediaDevice> {
+    let mut kept: Vec<MediaDevice> = Vec::new();
     for device in devices {
         if kept.len() == MAX_DEVICES {
             break;
@@ -151,7 +193,7 @@ fn clean(devices: Vec<AudioDevice>) -> Vec<AudioDevice> {
         while name.len() > MAX_DEVICE_NAME_BYTES {
             name.pop();
         }
-        let Some(device) = AudioDevice::bounded(&device.id, &name) else {
+        let Some(device) = MediaDevice::bounded(&device.id, &name) else {
             continue;
         };
         if kept.iter().all(|other| other.id != device.id) {
@@ -171,8 +213,8 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
-    fn device(id: &str, name: &str) -> AudioDevice {
-        AudioDevice {
+    fn device(id: &str, name: &str) -> MediaDevice {
+        MediaDevice {
             id: id.to_owned(),
             name: name.to_owned(),
         }
@@ -254,10 +296,18 @@ mod tests {
             parse(br#"{"recording":"a","playout":null}"#),
             Ok(Selection {
                 recording: Some("a".into()),
-                playout: None
+                playout: None,
+                camera: None
             })
         );
         assert_eq!(parse(b"{}"), Ok(Selection::default()));
+        assert_eq!(
+            parse(br#"{"recording":null,"playout":null,"camera":"cam"}"#),
+            Ok(Selection {
+                camera: Some("cam".into()),
+                ..Selection::default()
+            })
+        );
         let long = format!(r#"{{"recording":"{}","playout":null}}"#, "d".repeat(513));
         let huge = format!(r#"{{"recording":"a","playout":"{}"}}"#, "d".repeat(2048));
         for bad in [
@@ -266,6 +316,9 @@ mod tests {
             br#"{"recording":"a\nb","playout":null}"#,
             br#"{"recording":"a","playout":null,"extra":1}"#,
             br#"{"recording":1,"playout":null}"#,
+            br#"{"recording":null,"playout":null,"camera":""}"#,
+            br#"{"recording":null,"playout":null,"camera":"a\u0007"}"#,
+            br#"{"recording":null,"playout":null,"camera":3}"#,
             long.as_bytes(),
             huge.as_bytes(),
         ] {
@@ -280,6 +333,29 @@ mod tests {
         assert!(parse(at_limit.as_bytes()).is_ok());
     }
 
+    /// GIVEN three IDs at the limit made only of characters JSON escapes
+    /// WHEN saved THEN the record fits under the cap and reads back.
+    #[test]
+    fn given_ids_that_escape_to_twice_their_size_then_the_record_round_trips() {
+        for c in ['"', '\\'] {
+            let id = c.to_string().repeat(MAX_DEVICE_ID_BYTES);
+            let selection = Selection {
+                recording: Some(id.clone()),
+                playout: Some(id.clone()),
+                camera: Some(id),
+            };
+            assert!(selection.is_valid());
+            let bytes = serde_json::to_vec(&selection).unwrap();
+            assert!(bytes.len() <= MAX_RECORD_BYTES, "{}", bytes.len());
+            assert_eq!(parse(&bytes), Ok(selection));
+        }
+        let over = format!(
+            r#"{{"recording":"a","playout":"{}"}}"#,
+            "d".repeat(MAX_RECORD_BYTES)
+        );
+        assert_eq!(parse(over.as_bytes()), Err(Unreadable));
+    }
+
     /// GIVEN device IDs WHEN checked THEN empty, long and control IDs fail.
     #[test]
     fn given_device_ids_then_empty_long_and_control_ones_are_invalid() {
@@ -290,6 +366,12 @@ mod tests {
         let selection = Selection {
             recording: Some("ok".into()),
             playout: Some(String::new()),
+            camera: None,
+        };
+        assert!(!selection.is_valid());
+        let selection = Selection {
+            camera: Some("c\u{7f}".into()),
+            ..Selection::default()
         };
         assert!(!selection.is_valid());
     }
@@ -300,7 +382,7 @@ mod tests {
     fn given_an_unsupported_host_then_nothing_starts() {
         let mut host = Host::new(None);
         host.supported = false;
-        assert_eq!(list(&host), Ok(Listing::default()));
+        assert_eq!(list(&host, &AtomicBool::new(false)), Ok(Listing::default()));
         assert!(!host.started.load(Ordering::SeqCst));
     }
 
@@ -317,8 +399,9 @@ mod tests {
                 device("", "No ID"),
             ],
             playout: vec![device("p", "")],
+            cameras: vec![device("c", " Front\u{202E}  camera "), device("c", "Again")],
         }));
-        let listing = list(&host).unwrap();
+        let listing = list(&host, &AtomicBool::new(false)).unwrap();
         assert!(listing.supported);
         assert_eq!(
             listing.recording,
@@ -328,6 +411,7 @@ mod tests {
             ]
         );
         assert_eq!(listing.playout, vec![device("p", "")]);
+        assert_eq!(listing.cameras, vec![device("c", "Front\u{FFFD} camera")]);
         assert!(host.ended.load(Ordering::SeqCst));
         for _ in 0..100 {
             if !host.sent.lock().unwrap().is_empty() {
@@ -339,6 +423,24 @@ mod tests {
             host.sent.lock().unwrap().first(),
             Some(&ToWorker::ListDevices)
         );
+    }
+
+    /// GIVEN the page that asked has gone (the cancel flag is set) WHEN
+    /// listed THEN the worker is ended without `ListDevices` and the listing
+    /// is cancelled.
+    #[test]
+    fn given_a_cancelled_listing_then_the_worker_ends_without_listing() {
+        let host = Host::new(Some(FromWorker::Devices {
+            recording: Vec::new(),
+            playout: Vec::new(),
+            cameras: Vec::new(),
+        }));
+        assert_eq!(
+            list(&host, &AtomicBool::new(true)),
+            Err(ListError::Cancelled)
+        );
+        assert!(host.ended.load(Ordering::SeqCst));
+        assert!(host.sent.lock().unwrap().is_empty(), "nothing was asked");
     }
 
     /// GIVEN a worker that fails, answers another message, closes, or does
@@ -353,12 +455,18 @@ mod tests {
             }),
         ] {
             let host = Host::new(reply);
-            assert_eq!(list(&host), Err(ListError::NoAnswer));
+            assert_eq!(
+                list(&host, &AtomicBool::new(false)),
+                Err(ListError::NoAnswer)
+            );
             assert!(host.ended.load(Ordering::SeqCst));
         }
         let mut host = Host::new(None);
         host.start = Err(StartError::Launch);
-        assert_eq!(list(&host), Err(ListError::Start(StartError::Launch)));
+        assert_eq!(
+            list(&host, &AtomicBool::new(false)),
+            Err(ListError::Start(StartError::Launch))
+        );
     }
 
     /// GIVEN more devices than the limit and long names WHEN cleaned THEN
