@@ -56,6 +56,8 @@ const MAX_STRIDE: u32 = 2 * MAX_CAPTURE_SIDE;
 /// One camera node of the portal's remote.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Node {
+    /// The registry ID in this connection; it names the node in removals.
+    object: u32,
     /// `object.serial`: unlike the global ID, PipeWire never reuses it, so
     /// the stream targets the node by it.
     serial: String,
@@ -67,7 +69,7 @@ struct Node {
 
 /// The node of a registry object that counts as a camera: a node with media
 /// class `Video/Source` and a name. `get` reads a property.
-fn camera_node<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Option<Node> {
+fn camera_node<'a>(object: u32, get: impl Fn(&str) -> Option<&'a str>) -> Option<Node> {
     if get("media.class") != Some("Video/Source") {
         return None;
     }
@@ -79,6 +81,7 @@ fn camera_node<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Option<Node> {
         .filter(|text| !text.is_empty())
         .unwrap_or(name);
     Some(Node {
+        object,
         serial: serial.to_owned(),
         name: name.to_owned(),
         description: description.to_owned(),
@@ -143,16 +146,53 @@ fn quit(mainloop: &MainLoopWeak) {
     }
 }
 
+/// Watches the registry for the removal of the chosen camera node.
+#[derive(Default)]
+struct Removal {
+    /// The registry ID of the chosen camera, once it is picked.
+    target: Cell<Option<u32>>,
+    /// The chosen camera was removed.
+    gone: Cell<bool>,
+}
+
+impl Removal {
+    /// The registry removed object `id`.
+    fn removed(&self, id: u32) {
+        if self.target.get() == Some(id) {
+            self.gone.set(true);
+        }
+    }
+
+    /// Why an open failed: a chosen camera that went is `NotFound`, never a
+    /// reason to use another one; any other failure is `Unavailable`.
+    fn failure(&self) -> CameraState {
+        if self.gone.get() {
+            CameraState::NotFound
+        } else {
+            CameraState::Unavailable
+        }
+    }
+}
+
+/// The registry and its listener, kept while the capture runs, so a removal
+/// of the chosen camera is seen.
+struct Watch {
+    _registry: pw::registry::RegistryRc,
+    _listener: pw::registry::Listener,
+}
+
 /// Reads the camera nodes. Waits for the remote's answer to a sync request, so
-/// every node that exists now has been announced.
-fn enumerate(remote: &Remote) -> Result<Vec<Node>, CameraState> {
+/// every node that exists now has been announced. A node removed meanwhile is
+/// left out. The returned watch reports later removals to `removal`.
+fn enumerate(remote: &Remote, removal: &Rc<Removal>) -> Result<(Vec<Node>, Watch), CameraState> {
     let registry = remote
         .core
-        .get_registry()
+        .get_registry_rc()
         .map_err(|_| CameraState::Unavailable)?;
     let nodes = Rc::new(RefCell::new(Vec::<Node>::new()));
     let seen = nodes.clone();
-    let _registry_listener = registry
+    let (gone_nodes, watched) = (nodes.clone(), removal.clone());
+    let registry_listener = registry
         .add_listener_local()
         .global(move |global| {
             if global.type_ != pw::types::ObjectType::Node {
@@ -161,13 +201,17 @@ fn enumerate(remote: &Remote) -> Result<Vec<Node>, CameraState> {
             let Some(props) = global.props else {
                 return;
             };
-            let Some(node) = camera_node(|key| props.get(key)) else {
+            let Some(node) = camera_node(global.id, |key| props.get(key)) else {
                 return;
             };
             let mut seen = seen.borrow_mut();
             if seen.len() < MAX_NODES {
                 seen.push(node);
             }
+        })
+        .global_remove(move |id| {
+            gone_nodes.borrow_mut().retain(|node| node.object != id);
+            watched.removed(id);
         })
         .register();
 
@@ -196,7 +240,13 @@ fn enumerate(remote: &Remote) -> Result<Vec<Node>, CameraState> {
     if !done.get() {
         return Err(CameraState::Unavailable);
     }
-    Ok(nodes.take())
+    Ok((
+        nodes.take(),
+        Watch {
+            _registry: registry,
+            _listener: registry_listener,
+        },
+    ))
 }
 
 /// The cameras of the portal's remote, as (`node.name`, description). Empty
@@ -205,7 +255,9 @@ pub fn list() -> Vec<(String, String)> {
     let Ok(remote) = connect() else {
         return Vec::new();
     };
-    let nodes = enumerate(&remote).unwrap_or_default();
+    let nodes = enumerate(&remote, &Rc::default())
+        .map(|(nodes, _watch)| nodes)
+        .unwrap_or_default();
     nodes
         .into_iter()
         .map(|node| (node.name, node.description))
@@ -384,6 +436,8 @@ fn buffers_pod() -> Option<Vec<u8>> {
 /// thread.
 struct Shared {
     open_result: Option<Sender<Result<(), CameraState>>>,
+    /// Whether the chosen camera was removed.
+    removal: Rc<Removal>,
     streaming: bool,
     /// The stream failed or ended after it had started.
     ended: bool,
@@ -414,7 +468,8 @@ impl<F> StreamData<F> {
             if shared.streaming {
                 shared.ended = true;
             } else {
-                shared.report(Err(CameraState::Unavailable));
+                let state = shared.removal.failure();
+                shared.report(Err(state));
             }
         }
         quit(&self.mainloop);
@@ -505,6 +560,7 @@ pub fn capture<F, E>(
 {
     let shared = Rc::new(RefCell::new(Shared {
         open_result: Some(open_result),
+        removal: Rc::default(),
         streaming: false,
         ended: false,
     }));
@@ -512,7 +568,10 @@ pub fn capture<F, E>(
     let (ended, never_opened) = {
         let mut shared = shared.borrow_mut();
         let never_opened = shared.open_result.is_some();
-        shared.report(Err(CameraState::Unavailable));
+        // A stream that never started: a chosen camera that went is
+        // `NotFound`, anything else `Unavailable`.
+        let state = shared.removal.failure();
+        shared.report(Err(state));
         (shared.ended, never_opened)
     };
     if ended && !never_opened && !stop.load(Ordering::Acquire) {
@@ -529,7 +588,8 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     let Ok(remote) = connect() else {
         return;
     };
-    let Ok(nodes) = enumerate(&remote) else {
+    let removal = shared.borrow().removal.clone();
+    let Ok((nodes, _watch)) = enumerate(&remote, &removal) else {
         return;
     };
     let wanted = (!device_id.is_empty()).then_some(device_id);
@@ -544,6 +604,11 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     let Some(node) = node else {
         return;
     };
+    // Only a chosen camera that goes is `NotFound`; the default one that
+    // goes leaves no camera, which is `Unavailable` (as in `pick_camera`).
+    if wanted.is_some() {
+        removal.target.set(Some(node.object));
+    }
     let Ok(stream) = pw::stream::StreamBox::new(
         &remote.core,
         "persephone-camera",
@@ -636,6 +701,21 @@ mod tests {
         assert!(flags.contains(pw::stream::StreamFlags::AUTOCONNECT));
     }
 
+    /// GIVEN a chosen camera WHEN another object is removed THEN an open
+    /// failure stays `Unavailable`; WHEN the chosen one is removed THEN it is
+    /// `NotFound`. Without a chosen target no removal counts.
+    #[test]
+    fn given_a_removed_chosen_camera_then_the_failure_is_not_found() {
+        let removal = Removal::default();
+        removal.removed(7);
+        assert_eq!(removal.failure(), CameraState::Unavailable, "no target");
+        removal.target.set(Some(7));
+        removal.removed(8);
+        assert_eq!(removal.failure(), CameraState::Unavailable);
+        removal.removed(7);
+        assert_eq!(removal.failure(), CameraState::NotFound);
+    }
+
     /// GIVEN registry objects WHEN checked THEN only a named Video/Source
     /// node is a camera, and its description falls back to the nick and the
     /// name.
@@ -647,7 +727,8 @@ mod tests {
             ("node.name", "v4l2_input.pci-0000_00_14.0-usb-0_1"),
             ("node.description", "Integrated Camera"),
         ];
-        let node = camera_node(props(&camera)).expect("camera");
+        let node = camera_node(42, props(&camera)).expect("camera");
+        assert_eq!(node.object, 42);
         assert_eq!(node.serial, "77");
         assert_eq!(node.name, "v4l2_input.pci-0000_00_14.0-usb-0_1");
         assert_eq!(node.description, "Integrated Camera");
@@ -659,7 +740,7 @@ mod tests {
             ("node.nick", "Nick"),
         ];
         assert_eq!(
-            camera_node(props(&nick)).expect("camera").description,
+            camera_node(1, props(&nick)).expect("camera").description,
             "Nick"
         );
         let bare = [
@@ -668,7 +749,7 @@ mod tests {
             ("node.name", "cam"),
         ];
         assert_eq!(
-            camera_node(props(&bare)).expect("camera").description,
+            camera_node(1, props(&bare)).expect("camera").description,
             "cam"
         );
 
@@ -687,7 +768,7 @@ mod tests {
                 ("node.name", "cam"),
             ],
         ] {
-            assert!(camera_node(props(&other)).is_none(), "{other:?}");
+            assert!(camera_node(1, props(&other)).is_none(), "{other:?}");
         }
     }
 
