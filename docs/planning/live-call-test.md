@@ -474,6 +474,24 @@ not apply to these systems.
 Run on a host with Landlock ABI 3 or newer (Linux 6.2 or newer) and on one
 without it.
 
+Descriptor check. The worker is not dumpable, so only root can read its
+descriptors. Run each command with `sudo` on the test host. A permission
+error, an empty list or a worker that is gone makes the check inconclusive,
+not a pass; repeat it.
+
+- `sudo ls -l /proc/<pid>/fd` lists every descriptor. Record the list.
+- `sudo ss -xp | grep 'pid=<pid>,'` lists the worker's Unix sockets. For
+  each one, take the peer inode (the number after `*` in the peer column)
+  and find its owner: `sudo ss -xp | grep ' <peer inode> '`.
+- Pass: no `/dev/video*` path in the descriptor list (portal path), and no
+  worker socket whose peer is bound at the session bus address
+  (`$DBUS_SESSION_BUS_ADDRESS` of the desktop user, usually
+  `/run/user/<uid>/bus`) or the accessibility bus
+  (`/run/user/<uid>/at-spi/bus*`), or belongs to `dbus-daemon` or
+  `dbus-broker`.
+  Record each peer and its process. A socket whose peer cannot be found
+  is recorded and makes the check inconclusive.
+
 1. Before the call, on the supported host only: `cat
    /sys/kernel/security/lsm` names `landlock`. On the host without
    Landlock, record the list as it is; step 4 applies there.
@@ -491,15 +509,14 @@ without it.
      must show it.
    - Expected pass: the worker is not dumpable, so `stat -c %U
      /proc/<pid>/environ` shows `root`.
-   - Expected pass: `ls -l /proc/<pid>/fd` shows no descriptor of the
-     session bus and, on the portal path, no `/dev/video*` node.
+   - Expected pass: the descriptor check (above) passes.
 3. Turn the camera on. On the portal path the desktop asks for camera
    access.
    - Expected pass: a grant shows the own tile. A refusal leaves the camera
      `Unavailable` and makes no V4L2 attempt.
-   - Expected pass: while the own tile shows, `ls -l /proc/<pid>/fd` again
-     shows no descriptor of the session bus and, on the portal path, no
-     `/dev/video*` node. The portal path gets frames over the PipeWire
+   - Expected pass: while the own tile shows, the descriptor check passes
+     again. On the portal path the PipeWire remote's peer is the PipeWire
+     daemon, which is expected. The portal path gets frames over that
      remote only, so a video node opened after the grant fails the step.
      `Seccomp_filters:` is still the baseline plus 4.
    - Expected pass: closing the call while the access dialog is open closes
