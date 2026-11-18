@@ -23,9 +23,17 @@ pub const OUTPUT_CAPACITY: usize = 64;
 
 /// What the writer thread reads from the control queue.
 pub enum Item {
-    Control(FromWorker),
+    Control(Queued),
     /// A picture waits in a slot.
     Wake,
+}
+
+/// A queued control message and the tile assignment it belongs to.
+pub struct Queued {
+    message: FromWorker,
+    /// For a `VideoStarted`: its tile's assignment when the start was queued
+    /// (`Slots::assignment`). Zero for every other message.
+    assignment: u64,
 }
 
 /// The control queue is closed: the writer has gone.
@@ -48,6 +56,10 @@ struct Slots {
     /// stream never goes out before the messages that announce it. The own
     /// tile (0) has no stream messages and is always open.
     open: [bool; VIDEO_TILES as usize],
+    /// Each remote tile's current stream assignment. A clear ends it, so a
+    /// `VideoStarted` queued before the clear is stale: written after it, the
+    /// start does not open the tile.
+    assignment: [u64; VIDEO_TILES as usize],
     /// The tile to look at first next time, so no tile starves the others.
     next: usize,
 }
@@ -59,6 +71,7 @@ impl Default for Slots {
         Self {
             pictures: Default::default(),
             open,
+            assignment: [0; VIDEO_TILES as usize],
             next: 0,
         }
     }
@@ -96,7 +109,7 @@ impl VideoSlots {
     }
 
     /// Drops the picture that waits for a tile. A remote tile stays closed
-    /// until the writer writes its next `VideoStarted`.
+    /// until the writer writes a `VideoStarted` queued after this clear.
     pub fn clear(&self, tile: u8) {
         let mut slots = self.lock();
         let index = usize::from(tile);
@@ -104,21 +117,44 @@ impl VideoSlots {
             slots.pictures[index] = None;
             if tile != OWN_TILE {
                 slots.open[index] = false;
+                slots.assignment[index] = slots.assignment[index].wrapping_add(1);
             }
         }
     }
 
-    /// The writer wrote `message`: a remote tile's `VideoStarted` opens it,
-    /// its `VideoStopped` closes it.
-    fn written(&self, message: &FromWorker) {
-        let (tile, open) = match message {
+    /// Binds a control message for the queue: a `VideoStarted` takes its
+    /// tile's current assignment.
+    fn queued(&self, message: FromWorker) -> Item {
+        let assignment = match &message {
+            FromWorker::VideoStarted { tile, .. } => self
+                .lock()
+                .assignment
+                .get(usize::from(*tile))
+                .copied()
+                .unwrap_or(0),
+            _ => 0,
+        };
+        Item::Control(Queued {
+            message,
+            assignment,
+        })
+    }
+
+    /// The writer wrote `queued`: a remote tile's `VideoStarted` opens it
+    /// only while the assignment it was queued with is current; its
+    /// `VideoStopped` closes it.
+    fn written(&self, queued: &Queued) {
+        let (tile, open) = match &queued.message {
             FromWorker::VideoStarted { tile, .. } => (*tile, true),
             FromWorker::VideoStopped { tile } => (*tile, false),
             _ => return,
         };
         let index = usize::from(tile);
         let mut slots = self.lock();
-        if tile != OWN_TILE && index < slots.open.len() {
+        if tile == OWN_TILE || index >= slots.open.len() {
+            return;
+        }
+        if !open || slots.assignment[index] == queued.assignment {
             slots.open[index] = open;
         }
     }
@@ -164,10 +200,10 @@ impl Output {
 
     /// Queues one control message. Waits when the queue is full.
     pub async fn send(&self, message: FromWorker) -> Result<(), Closed> {
-        self.queue
-            .send(Item::Control(message))
-            .await
-            .map_err(|_| Closed)
+        // The assignment is read now: a clear while the send waits for room
+        // makes the start stale.
+        let item = self.slots.queued(message);
+        self.queue.send(item).await.map_err(|_| Closed)
     }
 
     /// A handle for picture producers. It does not keep the writer alive.
@@ -222,11 +258,11 @@ pub fn write_loop<W: Write>(mut out: W, mut input: Receiver) -> bool {
         let mut closed = false;
         loop {
             match input.receiver.try_recv() {
-                Ok(Item::Control(message)) => {
-                    if write_message(&mut out, &message).is_err() {
+                Ok(Item::Control(queued)) => {
+                    if write_message(&mut out, &queued.message).is_err() {
                         return false;
                     }
-                    input.slots.written(&message);
+                    input.slots.written(&queued);
                 }
                 Ok(Item::Wake) => {}
                 Err(TryRecvError::Empty) => break,
@@ -246,11 +282,11 @@ pub fn write_loop<W: Write>(mut out: W, mut input: Receiver) -> bool {
             return true;
         }
         match input.receiver.blocking_recv() {
-            Some(Item::Control(message)) => {
-                if write_message(&mut out, &message).is_err() {
+            Some(Item::Control(queued)) => {
+                if write_message(&mut out, &queued.message).is_err() {
                     return false;
                 }
-                input.slots.written(&message);
+                input.slots.written(&queued);
             }
             Some(Item::Wake) => {}
             None => return true,
@@ -287,6 +323,14 @@ mod tests {
         vec![fill; rgba_len(width, height).unwrap()]
     }
 
+    /// Queues `message` and writes it at once.
+    fn wrote(slots: &VideoSlots, message: FromWorker) {
+        let Item::Control(queued) = slots.queued(message) else {
+            unreachable!()
+        };
+        slots.written(&queued);
+    }
+
     fn started(tile: u8) -> FromWorker {
         FromWorker::VideoStarted {
             tile,
@@ -304,20 +348,39 @@ mod tests {
         let slots = VideoSlots::default();
         assert!(slots.put(1, 0, 1, 1, picture(1, 1, 1)));
         assert!(slots.take().is_none(), "the start is not written yet");
-        slots.written(&started(1));
+        wrote(&slots, started(1));
         assert!(matches!(slots.take(), Some((1, _))));
         // A handover: the old stream is cleared, a new picture arrives.
         slots.clear(1);
         assert!(slots.put(1, 0, 1, 1, picture(1, 1, 2)));
         assert!(slots.take().is_none(), "closed until the next start");
-        slots.written(&FromWorker::VideoStopped { tile: 1 });
+        wrote(&slots, FromWorker::VideoStopped { tile: 1 });
         assert!(slots.take().is_none());
-        slots.written(&started(1));
+        wrote(&slots, started(1));
         assert!(matches!(slots.take(), Some((1, _))));
         // The own tile has no stream messages and stays open.
         slots.clear(0);
         assert!(slots.put(0, 0, 1, 1, picture(1, 1, 3)));
         assert!(matches!(slots.take(), Some((0, _))));
+    }
+
+    /// GIVEN a remote tile's `VideoStarted` queued WHEN the tile is cleared
+    /// before the writer writes it THEN the written start does not open the
+    /// tile, so the next stream's picture waits for its own start.
+    #[test]
+    fn given_a_start_queued_before_a_clear_then_it_cannot_open_the_tile() {
+        let slots = VideoSlots::default();
+        let Item::Control(stale) = slots.queued(started(1)) else {
+            unreachable!()
+        };
+        slots.clear(1);
+        slots.written(&stale);
+        assert!(slots.put(1, 0, 1, 1, picture(1, 1, 1)));
+        assert!(slots.take().is_none(), "the stale start opened the tile");
+        wrote(&slots, FromWorker::VideoStopped { tile: 1 });
+        assert!(slots.take().is_none());
+        wrote(&slots, started(1));
+        assert!(matches!(slots.take(), Some((1, _))));
     }
 
     /// GIVEN a handover queued as stop then start, with the new stream's
@@ -330,9 +393,12 @@ mod tests {
         sink.put(1, 0, 1, 1, picture(1, 1, 4));
         output
             .queue
-            .try_send(Item::Control(FromWorker::VideoStopped { tile: 1 }))
+            .try_send(output.slots.queued(FromWorker::VideoStopped { tile: 1 }))
             .unwrap();
-        output.queue.try_send(Item::Control(started(1))).unwrap();
+        output
+            .queue
+            .try_send(output.slots.queued(started(1)))
+            .unwrap();
         drop(sink);
         drop(output);
         let mut wire = Vec::new();
@@ -368,11 +434,11 @@ mod tests {
         sink.put(0, 1, 4, 2, picture(4, 2, 7));
         output
             .queue
-            .try_send(Item::Control(FromWorker::Left))
+            .try_send(output.slots.queued(FromWorker::Left))
             .unwrap();
         output
             .queue
-            .try_send(Item::Control(FromWorker::VideoStopped { tile: 3 }))
+            .try_send(output.slots.queued(FromWorker::VideoStopped { tile: 3 }))
             .unwrap();
         drop(sink);
         drop(output);
@@ -428,7 +494,7 @@ mod tests {
         for _ in 0..OUTPUT_CAPACITY {
             output
                 .queue
-                .try_send(Item::Control(FromWorker::Left))
+                .try_send(output.slots.queued(FromWorker::Left))
                 .unwrap();
         }
         let sink = output.pictures();
@@ -451,7 +517,7 @@ mod tests {
     fn given_pictures_on_many_tiles_when_taken_then_tiles_take_turns() {
         let slots = VideoSlots::default();
         for tile in [3, 4] {
-            slots.written(&started(tile));
+            wrote(&slots, started(tile));
         }
         for tile in [0, 3, 4] {
             assert!(slots.put(tile, 0, 1, 1, picture(1, 1, tile)));
@@ -521,7 +587,7 @@ mod tests {
         let (output, receiver) = Output::new();
         output
             .queue
-            .try_send(Item::Control(FromWorker::Left))
+            .try_send(output.slots.queued(FromWorker::Left))
             .unwrap();
         drop(output);
         assert!(!write_loop(Broken, receiver));

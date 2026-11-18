@@ -128,7 +128,9 @@ The worker applies two stages itself.
   * `v4l2` when it has no such portal (for example a window manager without
     `xdg-desktop-portal`);
   * a portal that refuses access is not a missing portal. The camera then
-    stays off with `Unavailable`. There is no fallback after a refusal.
+    stays off with `Unavailable`. There is no fallback after a refusal, and
+    the core sends no `SetCamera` for it. The worker closes a descriptor
+    that a camera-on does not use.
 * Portal path: when the camera turns on (or a list of cameras is asked
   for), the core calls `AccessCamera` and waits for its `Response` for at
   most 60 seconds. On success it calls `OpenPipeWireRemote` and sends the

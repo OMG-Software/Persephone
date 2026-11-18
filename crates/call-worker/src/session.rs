@@ -417,11 +417,18 @@ impl Call<'_> {
         if self.camera.is_none()
             && (self.stalled_running() || (!self.gate.opening() && camera::captures_running()))
         {
+            drop_unused_handle();
             return Some(CameraState::Unavailable);
         }
         let generation = match self.gate.request_on(self.camera.is_some()) {
-            OnRequest::AlreadyOn => return Some(CameraState::On),
-            OnRequest::Pending => return None,
+            OnRequest::AlreadyOn => {
+                drop_unused_handle();
+                return Some(CameraState::On);
+            }
+            OnRequest::Pending => {
+                drop_unused_handle();
+                return None;
+            }
             OnRequest::Start(generation) => generation,
         };
         let source = NativeVideoSource::new(
@@ -862,6 +869,15 @@ enum CameraStop {
     Released,
     /// The capture did not end in time. It is kept and supervised.
     Stalled,
+}
+
+/// A camera-on that starts no open closes the portal remote the core sent
+/// with it (Linux portal path), so that remote can never start a later
+/// capture. The core sends the remote before the on, so it is waiting now.
+/// Off the portal path there is none.
+fn drop_unused_handle() {
+    #[cfg(target_os = "linux")]
+    drop(crate::camera_channel::take_handle());
 }
 
 /// What a `SetCamera { on: true }` does.

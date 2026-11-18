@@ -1176,6 +1176,7 @@ impl CallController {
             camera_wanted: Arc::new(AtomicBool::new(scope.video)),
             portal: None,
             portal_capture: false,
+            portal_sent: false,
         })
     }
 
@@ -1473,6 +1474,11 @@ struct Call {
     /// set back to `On` after an off: only a camera-on while this holds may
     /// go to the worker without a new portal request.
     portal_capture: bool,
+    /// A portal remote went to the worker after the last camera-off command.
+    /// A worker `On` then belongs to a capture over that remote and sets
+    /// `portal_capture` again: a reply to the old capture (its `Off`) can
+    /// arrive after the new remote went and clear the flag.
+    portal_sent: bool,
 }
 
 /// The result of a camera portal access request: the PipeWire remote, or
@@ -1571,6 +1577,7 @@ impl Call {
             if !on {
                 // The worker stops the capture and closes its remote.
                 self.portal_capture = false;
+                self.portal_sent = false;
             }
             self.send_worker(ToWorker::SetCamera { on })?;
         }
@@ -1608,24 +1615,39 @@ impl Call {
     }
 
     /// The portal request ended. If the camera is still wanted, the remote
-    /// goes to the worker before the camera starts (ADR-0049). A refusal or
-    /// failure sends no remote: the worker then reports the camera
-    /// unavailable, and no other camera path is tried. If the camera was
-    /// turned off meanwhile, the remote is closed unused. "Wanted" is the
-    /// latest request that `set_camera` accepted, also one whose command is
-    /// still queued.
-    fn portal_finished(&mut self, remote: PortalRemote) -> Result<(), EndReason> {
+    /// goes to the worker before the camera starts (ADR-0049). After a
+    /// refusal, a failure, or a remote that could not go to the worker, no
+    /// camera-on goes to the worker, which may still hold an older remote
+    /// that it did not use: the camera is unavailable, and no other camera
+    /// path is tried. If the camera was turned off meanwhile, the remote is
+    /// closed unused. "Wanted" is the latest request that `set_camera`
+    /// accepted, also one whose command is still queued.
+    fn portal_finished(&mut self, inner: &Inner, remote: PortalRemote) -> Result<(), EndReason> {
         if !self.camera_wanted.load(Ordering::SeqCst) {
             return Ok(());
         }
-        #[cfg(target_os = "linux")]
-        if let Some(remote) = remote {
-            use std::os::fd::AsFd;
-            self.portal_capture = self.link.send_camera_handle(remote.as_fd()).is_ok();
+        if !self.send_portal_remote(remote) {
+            let refused = FromWorker::Camera {
+                state: CameraState::Unavailable,
+            };
+            return self.worker_event(inner, &refused);
         }
-        #[cfg(not(target_os = "linux"))]
-        let () = remote;
+        self.portal_capture = true;
+        self.portal_sent = true;
         self.send_worker(ToWorker::SetCamera { on: true })
+    }
+
+    /// Sends the portal's remote to the worker. Returns whether it went.
+    #[cfg(target_os = "linux")]
+    fn send_portal_remote(&self, remote: PortalRemote) -> bool {
+        use std::os::fd::AsFd;
+        remote.is_some_and(|remote| self.link.send_camera_handle(remote.as_fd()).is_ok())
+    }
+
+    /// No camera portal off Linux: nothing goes.
+    #[cfg(not(target_os = "linux"))]
+    fn send_portal_remote(&self, _: PortalRemote) -> bool {
+        false
     }
 
     /// Applies one worker event. For a tile's `VideoStarted` or
@@ -1636,10 +1658,13 @@ impl Call {
     /// participant.
     fn worker_event(&mut self, inner: &Inner, event: &FromWorker) -> Result<(), EndReason> {
         // A camera that is not on has no capture left: its remote is used up.
-        if let FromWorker::Camera { state } = event
-            && *state != CameraState::On
-        {
-            self.portal_capture = false;
+        // An `On` after a remote went (and no off since) is a capture over it.
+        if let FromWorker::Camera { state } = event {
+            if *state != CameraState::On {
+                self.portal_capture = false;
+            } else if self.portal_sent {
+                self.portal_capture = true;
+            }
         }
         match self.view.apply(event) {
             Applied::Same => {}
@@ -1758,7 +1783,7 @@ impl Call {
                     }
                     None => return Ok(()),
                 },
-                remote = portal_done(&mut self.portal) => self.portal_finished(remote)?,
+                remote = portal_done(&mut self.portal) => self.portal_finished(inner, remote)?,
                 event = self.link.events.recv() => {
                     let Some(event) = event else {
                         return Err(EndReason::WorkerStopped);
@@ -2429,6 +2454,7 @@ mod tests {
             camera_wanted: Arc::new(AtomicBool::new(false)),
             portal: None,
             portal_capture: false,
+            portal_sent: false,
         };
         TestCall {
             call,
@@ -2441,36 +2467,88 @@ mod tests {
     }
 
     /// Ends a portal request that produced no remote.
-    fn finish_without_remote(call: &mut Call) {
+    fn finish_without_remote(call: &mut Call, inner: &Inner) {
         #[cfg(target_os = "linux")]
-        call.portal_finished(None).unwrap();
+        call.portal_finished(inner, None).unwrap();
         #[cfg(not(target_os = "linux"))]
-        call.portal_finished(()).unwrap();
+        call.portal_finished(inner, ()).unwrap();
     }
 
-    /// GIVEN a portal request that ends WHEN the user's latest accepted
-    /// request is off (its command may still be queued) THEN nothing goes to
-    /// the worker; WHEN it is on THEN the worker is told to start the camera.
+    /// GIVEN a portal request that ends without a remote (a refusal or a
+    /// failure) WHEN the user's latest accepted request is off (its command
+    /// may still be queued) THEN nothing changes; WHEN it is on THEN no
+    /// camera-on goes to the worker, which could still hold an older unused
+    /// remote, and the camera shows unavailable.
     #[test]
-    fn given_a_finished_portal_request_then_only_a_wanted_camera_starts() {
+    fn given_a_refused_portal_request_then_no_camera_on_goes_to_the_worker() {
         let fixture = test_call(
             no_admission(),
             Arc::new(Flags::default()),
             Arc::new(AtomicBool::new(false)),
         );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
         let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
         call.camera_wanted.store(false, Ordering::SeqCst);
-        finish_without_remote(&mut call);
+        finish_without_remote(&mut call, &inner);
         assert!(
             to_worker.try_recv().is_err(),
             "an off already accepted wins"
         );
+        assert_eq!(call.view.camera, CallCamera::Off);
         call.camera_wanted.store(true, Ordering::SeqCst);
-        finish_without_remote(&mut call);
-        assert!(matches!(
-            to_worker.try_recv(),
-            Ok(ToWorker::SetCamera { on: true })
-        ));
+        call.view.request_camera(true);
+        finish_without_remote(&mut call, &inner);
+        assert!(
+            to_worker.try_recv().is_err(),
+            "no camera-on after a refusal"
+        );
+        assert_eq!(call.view.camera, CallCamera::Unavailable);
+        assert!(!call.portal_capture);
+    }
+
+    /// GIVEN a portal capture turned off and on again WHEN the old capture's
+    /// `Off` reply arrives after the new remote went THEN it clears the flag
+    /// only until the new capture reports `On`; then a repeated on reuses the
+    /// capture without a new portal request.
+    #[test]
+    fn given_an_old_off_after_a_new_remote_then_the_new_capture_is_reused() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let mut call = fixture.call;
+        call.link = std::mem::replace(
+            &mut call.link,
+            CallWorkerLink::from_parts(
+                mpsc::channel(1).0,
+                mpsc::channel(1).1,
+                Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+            ),
+        )
+        .with_camera_path(crate::calls::worker::CameraPath::Portal);
+        let camera = |state| FromWorker::Camera { state };
+        // Capture A runs; the camera is turned off.
+        call.portal_capture = true;
+        call.portal_sent = true;
+        call.camera_command(&inner, false, 0).unwrap();
+        // The camera is turned on; the new remote went (as `portal_finished`
+        // sets it) before A's `Off` arrives.
+        call.portal_capture = true;
+        call.portal_sent = true;
+        call.worker_event(&inner, &camera(CameraState::Off))
+            .unwrap();
+        assert!(
+            call.portal_needed(true),
+            "the flag waits for the new capture"
+        );
+        call.worker_event(&inner, &camera(CameraState::On)).unwrap();
+        assert!(!call.portal_needed(true), "the new capture is reused");
+        // A late `On` of a capture turned off sets nothing.
+        call.camera_command(&inner, false, 0).unwrap();
+        call.worker_event(&inner, &camera(CameraState::On)).unwrap();
+        assert!(call.portal_needed(true));
     }
 
     /// GIVEN the worker already reported the camera `On` while the own tile

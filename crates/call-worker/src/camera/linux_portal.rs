@@ -454,12 +454,25 @@ struct Shared {
     streaming: bool,
     /// The stream failed or ended after it had started.
     ended: bool,
+    /// The capture loop has ended. A stream callback that runs later (in the
+    /// registry drain) changes nothing: an open that was not reported by now
+    /// fails.
+    closed: bool,
 }
 
 impl Shared {
     fn report(&mut self, result: Result<(), CameraState>) {
         if let Some(sender) = self.open_result.take() {
             let _ = sender.send(result);
+        }
+    }
+
+    /// The stream reached `Streaming`. After the loop has ended it is too
+    /// late: the stream is being torn down and the open fails.
+    fn stream_started(&mut self) {
+        if !self.closed {
+            self.streaming = true;
+            self.report(Ok(()));
         }
     }
 
@@ -531,6 +544,9 @@ impl<F: FnMut(CapturedFrame<'_>)> StreamData<F> {
     }
 
     fn handle_process(&mut self, stream: &pw::stream::Stream) {
+        if self.shared.borrow().closed {
+            return;
+        }
         while let Some(mut buffer) = stream.dequeue_buffer() {
             let Some(negotiated) = self.negotiated else {
                 continue;
@@ -591,6 +607,7 @@ pub fn capture<F, E>(
         removal: Rc::default(),
         streaming: false,
         ended: false,
+        closed: false,
     }));
     run(device_id, stop, &shared, on_frame);
     let (ended, never_opened) = shared.borrow_mut().finish();
@@ -646,11 +663,7 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     let Ok(_listener) = stream
         .add_local_listener_with_user_data(data)
         .state_changed(|_, data, _, new| match new {
-            pw::stream::StreamState::Streaming => {
-                let mut shared = data.shared.borrow_mut();
-                shared.streaming = true;
-                shared.report(Ok(()));
-            }
+            pw::stream::StreamState::Streaming => data.shared.borrow_mut().stream_started(),
             pw::stream::StreamState::Error(_) => data.fail(),
             pw::stream::StreamState::Unconnected if data.shared.borrow().streaming => data.fail(),
             _ => {}
@@ -696,6 +709,9 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     });
     let _ = timer.update_timer(Some(STOP_POLL), Some(STOP_POLL));
     remote.mainloop.run();
+    // From here the stream callbacks change nothing; only the registry
+    // listener still acts.
+    shared.borrow_mut().closed = true;
     // A chosen camera's stream that never started: one round trip handles
     // every registry event the server sent before, so a removal of the
     // camera is seen whatever order it and the stream error came in. If the
@@ -767,6 +783,7 @@ mod tests {
                 removal: Rc::default(),
                 streaming: false,
                 ended: false,
+                closed: false,
             }));
             shared.borrow().removal.target.set(Some(3));
             // What `StreamData::fail` does before it ends the loop.
@@ -785,6 +802,27 @@ mod tests {
             };
             assert_eq!(rx.recv().expect("result"), Err(expected));
         }
+    }
+
+    /// GIVEN an open that the start timer gave up on WHEN `Streaming` comes
+    /// late, in the registry drain THEN it is not reported as success, and
+    /// the end of the capture reports the failure.
+    #[test]
+    fn given_a_late_streaming_after_the_loop_then_the_open_still_fails() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut shared = Shared {
+            open_result: Some(tx),
+            removal: Rc::default(),
+            streaming: false,
+            ended: false,
+            // The start timer ended the loop.
+            closed: true,
+        };
+        shared.stream_started();
+        assert!(rx.try_recv().is_err(), "no success after the loop");
+        let (ended, never_opened) = shared.finish();
+        assert!(!ended && never_opened);
+        assert_eq!(rx.recv().expect("result"), Err(CameraState::Unavailable));
     }
 
     /// GIVEN registry objects WHEN checked THEN only a named Video/Source
