@@ -82,6 +82,29 @@ fn camera_node<'a>(object: u32, get: impl Fn(&str) -> Option<&'a str>) -> Option
     })
 }
 
+/// The capture stream's properties. The stream links only to the chosen
+/// node: `node.dont-reconnect` destroys it when that node goes, and
+/// `node.dont-fallback` stops the session manager from linking it to another
+/// camera when the target cannot be linked. A lost camera then ends the
+/// capture; it never falls back to another one.
+fn stream_properties() -> pw::properties::PropertiesBox {
+    properties! {
+        *pw::keys::MEDIA_TYPE => "Video",
+        *pw::keys::MEDIA_CATEGORY => "Capture",
+        *pw::keys::MEDIA_ROLE => "Camera",
+        *pw::keys::NODE_DONT_RECONNECT => "true",
+        "node.dont-fallback" => "true",
+    }
+}
+
+/// The capture stream's connect flags: linked to the target at once, mapped
+/// buffers, and no reconnection to another node.
+fn stream_flags() -> pw::stream::StreamFlags {
+    pw::stream::StreamFlags::AUTOCONNECT
+        | pw::stream::StreamFlags::MAP_BUFFERS
+        | pw::stream::StreamFlags::DONT_RECONNECT
+}
+
 /// A PipeWire connection over the portal's descriptor.
 struct Remote {
     mainloop: MainLoopRc,
@@ -516,15 +539,9 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     let Some(node) = node else {
         return;
     };
-    let Ok(stream) = pw::stream::StreamBox::new(
-        &remote.core,
-        "persephone-camera",
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Video",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE => "Camera",
-        },
-    ) else {
+    let Ok(stream) =
+        pw::stream::StreamBox::new(&remote.core, "persephone-camera", stream_properties())
+    else {
         return;
     };
     let data = StreamData {
@@ -564,9 +581,13 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     let Some(format) = Pod::from_bytes(&format) else {
         return;
     };
-    let flags = pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS;
     if stream
-        .connect(Direction::Input, Some(node.object), flags, &mut [format])
+        .connect(
+            Direction::Input,
+            Some(node.object),
+            stream_flags(),
+            &mut [format],
+        )
         .is_err()
     {
         return;
@@ -597,6 +618,19 @@ mod tests {
 
     fn props<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<&'a str> {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+    }
+
+    /// GIVEN the capture stream's setup THEN it never reconnects or falls back
+    /// to another camera, and it still links to its target at once.
+    #[test]
+    fn given_the_capture_stream_then_it_cannot_fall_back_to_another_camera() {
+        let properties = stream_properties();
+        assert_eq!(properties.get("node.dont-reconnect"), Some("true"));
+        assert_eq!(properties.get("node.dont-fallback"), Some("true"));
+        assert_eq!(properties.get("media.role"), Some("Camera"));
+        let flags = stream_flags();
+        assert!(flags.contains(pw::stream::StreamFlags::DONT_RECONNECT));
+        assert!(flags.contains(pw::stream::StreamFlags::AUTOCONNECT));
     }
 
     /// GIVEN registry objects WHEN checked THEN only a named Video/Source

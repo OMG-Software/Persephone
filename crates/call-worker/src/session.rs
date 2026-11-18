@@ -481,8 +481,9 @@ impl Call<'_> {
                     Ok(opened) => self.release_capture(opened.capture).await,
                     Err(_) => true,
                 };
-                // Off only when no capture still holds the camera.
-                let state = if released && !self.stalled_running() {
+                // Off only when no capture still holds the camera: neither a
+                // stalled one nor the thread of an open that timed out.
+                let state = if released && !self.stalled_running() && !camera::captures_running() {
                     CameraState::Off
                 } else {
                     CameraState::Unavailable

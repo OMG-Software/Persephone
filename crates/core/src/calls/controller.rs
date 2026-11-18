@@ -1565,8 +1565,14 @@ impl Call {
         } else {
             self.send_worker(ToWorker::SetCamera { on })?;
         }
-        if self.view.request_camera(on) == Applied::Changed {
+        let changed = self.view.request_camera(on) == Applied::Changed;
+        // A camera-on may have lifted the own-tile block above while the
+        // view is already on (the worker reported `On` first), so the store
+        // is synced also when the view did not change.
+        if changed || on {
             self.sync_video();
+        }
+        if changed {
             self.publish(inner);
         }
         Ok(())
@@ -2438,6 +2444,39 @@ mod tests {
             to_worker.try_recv(),
             Ok(ToWorker::SetCamera { on: true })
         ));
+    }
+
+    /// GIVEN the worker already reported the camera `On` while the own tile
+    /// is blocked by an off WHEN the task takes the latest camera-on (the
+    /// view does not change) THEN the store is synced and the own picture is
+    /// kept; an older camera-on taken the same way keeps the tile shut.
+    #[test]
+    fn given_a_camera_on_taken_after_the_on_report_then_own_pictures_show() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let mut call = fixture.call;
+        let store = call.link.video();
+        call.worker_event(&inner, &FromWorker::Connected).unwrap();
+        let stale = store.camera_request(true);
+        store.camera_request(false);
+        let latest = store.camera_request(true);
+        call.view.request_camera(true);
+        call.worker_event(
+            &inner,
+            &FromWorker::Camera {
+                state: CameraState::On,
+            },
+        )
+        .unwrap();
+        assert_eq!(call.view.camera, CallCamera::On);
+        call.camera_command(&inner, true, stale).unwrap();
+        assert!(!store.insert(0, 0, 2, 2, vec![1; 16]), "a stale on");
+        call.camera_command(&inner, true, latest).unwrap();
+        assert!(store.insert(0, 0, 2, 2, vec![2; 16]), "the latest on");
     }
 
     /// GIVEN tile 1 shows member A WHEN the read thread has counted A's stop
