@@ -43,6 +43,10 @@ const SPA_LOG_LEVEL_NONE: u32 = 0;
 /// The longest wait for the remote to answer, and for a stream to start.
 const ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_START_TIMEOUT: Duration = Duration::from_secs(6);
+/// Longest wait for the round trip that handles pending registry events after
+/// a stream failed to start. It keeps the open within the 13 s open timeout
+/// (5 s enumeration + 6 s start + this) and below the 3 s stop wait.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often a running capture looks at the stop flag.
 const STOP_POLL: Duration = Duration::from_millis(100);
 /// Camera nodes read from one remote.
@@ -215,8 +219,26 @@ fn enumerate(remote: &Remote, removal: &Rc<Removal>) -> Result<(Vec<Node>, Watch
         })
         .register();
 
+    if !roundtrip(remote, ROUNDTRIP_TIMEOUT) {
+        return Err(CameraState::Unavailable);
+    }
+    Ok((
+        nodes.take(),
+        Watch {
+            _registry: registry,
+            _listener: registry_listener,
+        },
+    ))
+}
+
+/// Runs the loop until the remote answers a sync request, at most `timeout`. The server sends every event before its answer, so
+/// on success each event it sent earlier has been handled. Returns whether
+/// the answer came.
+fn roundtrip(remote: &Remote, timeout: Duration) -> bool {
     let done = Rc::new(Cell::new(false));
-    let pending = remote.core.sync(0).map_err(|_| CameraState::Unavailable)?;
+    let Ok(pending) = remote.core.sync(0) else {
+        return false;
+    };
     let (done_flag, done_loop) = (done.clone(), remote.mainloop.downgrade());
     let error_loop = remote.mainloop.downgrade();
     let _core_listener = remote
@@ -235,18 +257,9 @@ fn enumerate(remote: &Remote, removal: &Rc<Removal>) -> Result<(Vec<Node>, Watch
         .mainloop
         .loop_()
         .add_timer(move |_| quit(&timeout_loop));
-    let _ = timer.update_timer(Some(ROUNDTRIP_TIMEOUT), None);
+    let _ = timer.update_timer(Some(timeout), None);
     remote.mainloop.run();
-    if !done.get() {
-        return Err(CameraState::Unavailable);
-    }
-    Ok((
-        nodes.take(),
-        Watch {
-            _registry: registry,
-            _listener: registry_listener,
-        },
-    ))
+    done.get()
 }
 
 /// The cameras of the portal's remote, as (`node.name`, description). Empty
@@ -449,6 +462,25 @@ impl Shared {
             let _ = sender.send(result);
         }
     }
+
+    /// The stream failed. A started stream has ended. One that never started
+    /// reports nothing yet: [`Shared::finish`] does, once the registry events
+    /// that came before are handled.
+    fn stream_failed(&mut self) {
+        if self.streaming {
+            self.ended = true;
+        }
+    }
+
+    /// The capture loop ended. An open that was never reported fails now: a
+    /// chosen camera that went is `NotFound`, anything else `Unavailable`.
+    /// Returns whether the started stream ended and whether it never opened.
+    fn finish(&mut self) -> (bool, bool) {
+        let never_opened = self.open_result.is_some();
+        let state = self.removal.failure();
+        self.report(Err(state));
+        (self.ended, never_opened)
+    }
 }
 
 /// What the stream callbacks own.
@@ -461,17 +493,13 @@ struct StreamData<F> {
 }
 
 impl<F> StreamData<F> {
-    /// Ends the loop. Before the stream started, the opening fails.
+    /// Ends the loop. Before the stream started, the opening fails, but the
+    /// failure is reported only when the loop has ended and the registry
+    /// events that came before it are handled (`run`, then
+    /// [`Shared::finish`]): a stream error can arrive before the removal of
+    /// the camera that caused it.
     fn fail(&self) {
-        {
-            let mut shared = self.shared.borrow_mut();
-            if shared.streaming {
-                shared.ended = true;
-            } else {
-                let state = shared.removal.failure();
-                shared.report(Err(state));
-            }
-        }
+        self.shared.borrow_mut().stream_failed();
         quit(&self.mainloop);
     }
 }
@@ -565,15 +593,7 @@ pub fn capture<F, E>(
         ended: false,
     }));
     run(device_id, stop, &shared, on_frame);
-    let (ended, never_opened) = {
-        let mut shared = shared.borrow_mut();
-        let never_opened = shared.open_result.is_some();
-        // A stream that never started: a chosen camera that went is
-        // `NotFound`, anything else `Unavailable`.
-        let state = shared.removal.failure();
-        shared.report(Err(state));
-        (shared.ended, never_opened)
-    };
+    let (ended, never_opened) = shared.borrow_mut().finish();
     if ended && !never_opened && !stop.load(Ordering::Acquire) {
         on_end();
     }
@@ -676,6 +696,18 @@ fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     });
     let _ = timer.update_timer(Some(STOP_POLL), Some(STOP_POLL));
     remote.mainloop.run();
+    // A chosen camera's stream that never started: one round trip handles
+    // every registry event the server sent before, so a removal of the
+    // camera is seen whatever order it and the stream error came in.
+    let unreported = {
+        let shared = shared.borrow();
+        !shared.streaming && shared.open_result.is_some()
+    };
+    if unreported && removal.target.get().is_some() && !stop.load(Ordering::Acquire) {
+        // The start timer would end the round trip at once.
+        drop(timer);
+        let _ = roundtrip(&remote, DRAIN_TIMEOUT);
+    }
     let _ = stream.disconnect();
 }
 
@@ -714,6 +746,39 @@ mod tests {
         assert_eq!(removal.failure(), CameraState::Unavailable);
         removal.removed(7);
         assert_eq!(removal.failure(), CameraState::NotFound);
+    }
+
+    /// GIVEN a chosen camera's stream that fails before it starts WHEN the
+    /// stream error comes before the camera's removal THEN nothing is
+    /// reported at the error, and the end of the capture reports `NotFound`;
+    /// without a removal it reports `Unavailable`.
+    #[test]
+    fn given_a_stream_error_before_the_removal_then_not_found_is_reported() {
+        for removed in [true, false] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let shared = Rc::new(RefCell::new(Shared {
+                open_result: Some(tx),
+                removal: Rc::default(),
+                streaming: false,
+                ended: false,
+            }));
+            shared.borrow().removal.target.set(Some(3));
+            // What `StreamData::fail` does before it ends the loop.
+            shared.borrow_mut().stream_failed();
+            assert!(rx.try_recv().is_err(), "nothing at the stream error");
+            if removed {
+                // The removal is handled after the error (the round trip).
+                shared.borrow().removal.removed(3);
+            }
+            let (ended, never_opened) = shared.borrow_mut().finish();
+            assert!(!ended && never_opened);
+            let expected = if removed {
+                CameraState::NotFound
+            } else {
+                CameraState::Unavailable
+            };
+            assert_eq!(rx.recv().expect("result"), Err(expected));
+        }
     }
 
     /// GIVEN registry objects WHEN checked THEN only a named Video/Source
