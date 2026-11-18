@@ -208,6 +208,8 @@ pub fn pick_camera<'a>(
 }
 
 /// One format a camera offers.
+// macOS picks its format through AVFoundation; Windows and Linux use this.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CaptureMode {
     pub width: u32,
@@ -220,6 +222,7 @@ pub struct CaptureMode {
 /// 640x360 (360x640 when the camera is tall), else the largest picture. On a
 /// tie, the faster mode wins, counted up to 30 fps. A mode with a side of 0
 /// is skipped.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn pick_capture_mode(modes: &[CaptureMode]) -> Option<usize> {
     let area = |mode: &CaptureMode| u64::from(mode.width) * u64::from(mode.height);
     let big_enough = |mode: &CaptureMode| {

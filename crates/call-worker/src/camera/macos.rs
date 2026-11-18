@@ -21,10 +21,10 @@ use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession,
     AVCaptureDeviceInput, AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
-    AVCaptureDeviceTypeContinuityCamera, AVCaptureDeviceTypeExternalUnknown, AVCaptureOutput,
-    AVCaptureSession, AVCaptureSessionPreset, AVCaptureSessionPreset640x480,
-    AVCaptureSessionPreset960x540, AVCaptureSessionPreset1280x720, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaType, AVMediaTypeVideo,
+    AVCaptureDeviceTypeContinuityCamera, AVCaptureOutput, AVCaptureSession, AVCaptureSessionPreset,
+    AVCaptureSessionPreset640x480, AVCaptureSessionPreset960x540, AVCaptureSessionPreset1280x720,
+    AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaType,
+    AVMediaTypeVideo,
 };
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{
@@ -212,7 +212,7 @@ fn devices() -> Vec<Retained<AVCaptureDevice>> {
     let types = unsafe {
         NSArray::from_slice(&[
             AVCaptureDeviceTypeBuiltInWideAngleCamera,
-            AVCaptureDeviceTypeExternalUnknown,
+            objc2_av_foundation::AVCaptureDeviceTypeExternalUnknown,
             AVCaptureDeviceTypeContinuityCamera,
         ])
     };
