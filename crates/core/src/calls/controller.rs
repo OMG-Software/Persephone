@@ -1575,16 +1575,15 @@ impl Call {
             self.start_portal();
         } else if on && uses_portal(&self.link) {
             // A capture over a remote that went runs or opens: the worker
-            // needs no second on. On the portal path each camera-on goes
-            // with its own remote, so the worker closes a remote that an on
-            // does not use without taking another command's.
+            // needs no second on. On the portal path every camera-on goes
+            // with its own remote (`SetCamera { remote: true }`).
         } else {
             if !on {
                 // The worker stops the capture and closes its remote.
                 self.portal_capture = false;
                 self.portal_sent = false;
             }
-            self.send_worker(ToWorker::SetCamera { on })?;
+            self.send_worker(ToWorker::SetCamera { on, remote: false })?;
         }
         let changed = self.view.request_camera(on) == Applied::Changed;
         // A camera-on may have lifted the own-tile block above while the
@@ -1644,7 +1643,12 @@ impl Call {
         }
         self.portal_capture = true;
         self.portal_sent = true;
-        self.send_worker(ToWorker::SetCamera { on: true })
+        // The command says that its remote went first, so the worker takes
+        // that remote with it and with no other command.
+        self.send_worker(ToWorker::SetCamera {
+            on: true,
+            remote: true,
+        })
     }
 
     /// Sends the portal's remote to the worker. Returns whether it went.
@@ -2484,6 +2488,46 @@ mod tests {
         call.portal_finished(inner, ()).unwrap();
     }
 
+    /// GIVEN a granted portal request WHEN the camera is still wanted THEN
+    /// the remote goes over the camera channel first, and the camera-on that
+    /// follows says it carries a remote, so the worker takes that one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn given_a_granted_portal_request_then_the_camera_on_carries_its_remote() {
+        use std::io::Read;
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let (core_end, mut worker_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        call.link = std::mem::replace(
+            &mut call.link,
+            CallWorkerLink::from_parts(
+                mpsc::channel(1).0,
+                mpsc::channel(1).1,
+                Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+            ),
+        )
+        .with_camera_path(crate::calls::worker::CameraPath::Portal)
+        .with_camera_channel(core_end);
+        call.camera_wanted.store(true, Ordering::SeqCst);
+        let remote = std::os::fd::OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+        call.portal_finished(&inner, Some(remote)).unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(worker_end.read(&mut byte).unwrap(), 1, "the remote went");
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetCamera {
+                on: true,
+                remote: true
+            })
+        ));
+        assert!(call.portal_capture && call.portal_sent);
+    }
+
     /// GIVEN a portal request that ends without a remote (a refusal or a
     /// failure) WHEN the user's latest accepted request is off (its command
     /// may still be queued) THEN nothing changes; WHEN it is on THEN no
@@ -2682,7 +2726,7 @@ mod tests {
         call.camera_command(&inner, false, 0).unwrap();
         assert!(matches!(
             to_worker.try_recv(),
-            Ok(ToWorker::SetCamera { on: false })
+            Ok(ToWorker::SetCamera { on: false, .. })
         ));
         call.worker_event(&inner, &on).unwrap();
         assert_eq!(call.view.camera, CallCamera::On, "a late reply");

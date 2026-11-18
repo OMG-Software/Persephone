@@ -15,6 +15,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::io::Cursor;
+use std::os::fd::OwnedFd;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,9 +126,9 @@ struct Remote {
     core: pw::core::CoreRc,
 }
 
-/// Connects over the newest descriptor of the camera channel.
-fn connect() -> Result<Remote, CameraState> {
-    let fd = crate::camera_channel::take_handle().ok_or(CameraState::Unavailable)?;
+/// Connects over a portal remote. Without one the camera is unavailable.
+fn connect(remote: Option<OwnedFd>) -> Result<Remote, CameraState> {
+    let fd = remote.ok_or(CameraState::Unavailable)?;
     pw::init();
     // SAFETY: sets the library's log level; no pointers are involved.
     unsafe { pw::sys::pw_log_set_level(SPA_LOG_LEVEL_NONE) };
@@ -265,7 +266,8 @@ fn roundtrip(remote: &Remote, timeout: Duration) -> bool {
 /// The cameras of the portal's remote, as (`node.name`, description). Empty
 /// when no descriptor came from the core or the remote does not answer.
 pub fn list() -> Vec<(String, String)> {
-    let Ok(remote) = connect() else {
+    // The listing worker gets one remote before `ListDevices`.
+    let Ok(remote) = connect(crate::camera_channel::take_handle()) else {
         return Vec::new();
     };
     let nodes = enumerate(&remote, &Rc::default())
@@ -602,6 +604,7 @@ impl<F: FnMut(CapturedFrame<'_>)> StreamData<F> {
 /// camera's removal.
 pub fn capture<F, E>(
     device_id: &str,
+    remote: Option<OwnedFd>,
     stop: &Arc<AtomicBool>,
     open_result: Sender<Result<(), CameraState>>,
     on_frame: F,
@@ -617,7 +620,7 @@ pub fn capture<F, E>(
         ended: false,
         closed: false,
     }));
-    run(device_id, stop, &shared, on_frame);
+    run(device_id, remote, stop, &shared, on_frame);
     let (ended, never_opened) = shared.borrow_mut().finish();
     if ended && !never_opened && !stop.load(Ordering::Acquire) {
         on_end();
@@ -626,11 +629,12 @@ pub fn capture<F, E>(
 
 fn run<F: FnMut(CapturedFrame<'_>) + 'static>(
     device_id: &str,
+    remote: Option<OwnedFd>,
     stop: &Arc<AtomicBool>,
     shared: &Rc<RefCell<Shared>>,
     on_frame: F,
 ) {
-    let Ok(remote) = connect() else {
+    let Ok(remote) = connect(remote) else {
         return;
     };
     let removal = shared.borrow().removal.clone();
@@ -981,7 +985,14 @@ mod tests {
     fn given_no_handle_then_no_cameras_and_unavailable() {
         assert!(list().is_empty());
         let (tx, rx) = std::sync::mpsc::channel();
-        capture("cam", &Arc::new(AtomicBool::new(false)), tx, |_| {}, || {});
+        capture(
+            "cam",
+            None,
+            &Arc::new(AtomicBool::new(false)),
+            tx,
+            |_| {},
+            || {},
+        );
         assert_eq!(rx.recv().expect("result"), Err(CameraState::Unavailable));
     }
 }

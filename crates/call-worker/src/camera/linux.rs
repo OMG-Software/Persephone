@@ -4,6 +4,7 @@
 //! (`v4l2.rs`). None: no camera. The worker never falls from one path to the
 //! other.
 
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
@@ -28,8 +29,11 @@ pub fn list() -> Vec<(String, String)> {
 }
 
 /// `device_id` is the camera ID; on the portal path `""` means the first camera.
+/// `remote` is the portal remote that came with the camera-on; only the
+/// portal path uses it, and it is closed when the capture ends.
 pub fn capture<F, E>(
     device_id: &str,
+    remote: Option<OwnedFd>,
     stop: &Arc<AtomicBool>,
     open_result: Sender<Result<(), CameraState>>,
     on_frame: F,
@@ -39,7 +43,9 @@ pub fn capture<F, E>(
     E: FnOnce() + Send,
 {
     match mode() {
-        CameraMode::Portal => linux_portal::capture(device_id, stop, open_result, on_frame, on_end),
+        CameraMode::Portal => {
+            linux_portal::capture(device_id, remote, stop, open_result, on_frame, on_end);
+        }
         CameraMode::V4l2 => v4l2::capture(device_id, stop.as_ref(), open_result, on_frame, on_end),
         CameraMode::None => {
             let _ = open_result.send(Err(CameraState::Unavailable));
@@ -58,7 +64,14 @@ mod tests {
         assert!(!picks_in_capture());
         assert!(list().is_empty());
         let (tx, rx) = std::sync::mpsc::channel();
-        capture("x", &Arc::new(AtomicBool::new(false)), tx, |_| {}, || {});
+        capture(
+            "x",
+            None,
+            &Arc::new(AtomicBool::new(false)),
+            tx,
+            |_| {},
+            || {},
+        );
         assert_eq!(rx.recv().expect("result"), Err(CameraState::Unavailable));
     }
 }

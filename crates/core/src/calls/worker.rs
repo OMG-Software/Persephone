@@ -151,8 +151,8 @@ impl CallWorkerLink {
 
     /// Sends the PipeWire remote from the camera portal to the worker over
     /// the camera channel: one descriptor and one byte, without blocking.
-    /// Call it before `SetCamera` (and before `ListDevices` on the portal
-    /// path). `Err(WorkerGone)`: there is no channel, it is full, or the
+    /// Call it directly before `SetCamera { on: true, remote: true }` (and
+    /// before `ListDevices` on the portal path), once per command. `Err(WorkerGone)`: there is no channel, it is full, or the
     /// worker has gone. The caller's descriptor stays open; close it after
     /// the call.
     #[cfg(target_os = "linux")]

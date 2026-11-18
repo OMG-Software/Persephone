@@ -49,6 +49,28 @@ mod v4l2;
 #[cfg(any(target_os = "linux", test))]
 mod yuyv;
 
+/// What one camera-on brought for its open: on the Linux portal path, the
+/// PipeWire remote the core sent with it. Empty everywhere else. Dropping
+/// it closes the remote, so a camera-on that opens nothing uses up its own
+/// remote and no other.
+#[derive(Default)]
+pub struct Grant {
+    #[cfg(target_os = "linux")]
+    remote: Option<std::os::fd::OwnedFd>,
+}
+
+impl Grant {
+    /// Takes the remote of a camera-on that carries one: the oldest one the
+    /// camera channel holds, since the core sends each remote directly
+    /// before its camera-on. Call it once per such command, in order.
+    pub fn take() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            remote: crate::camera_channel::take_handle(),
+        }
+    }
+}
+
 /// Whether the backend lists and picks the camera inside its own capture (the
 /// portal's descriptor serves one connection only).
 #[cfg(target_os = "linux")]
@@ -275,9 +297,16 @@ pub fn list() -> Vec<MediaDevice> {
 /// Opens the camera with this ID (`None`: the first listed) and starts
 /// capturing. It waits until the camera is open. `on_frame` runs on the
 /// capture thread for every picture; `on_end` runs there when the capture ends
-/// by itself (not after `stop`). `Err(NotFound)`: the chosen ID is not listed,
-/// and no other camera is used. `Err(Unavailable)`: any other failure.
-pub fn open<F, E>(id: Option<&str>, on_frame: F, on_end: E) -> Result<Capture, CameraState>
+/// by itself (not after `stop`). `grant` is what the camera-on brought; the
+/// portal path connects only over its remote. `Err(NotFound)`: the chosen ID
+/// is not listed, and no other camera is used. `Err(Unavailable)`: any other
+/// failure.
+pub fn open<F, E>(
+    id: Option<&str>,
+    grant: Grant,
+    on_frame: F,
+    on_end: E,
+) -> Result<Capture, CameraState>
 where
     F: FnMut(CapturedFrame<'_>) + Send + 'static,
     E: FnOnce() + Send + 'static,
@@ -288,14 +317,19 @@ where
         if id == Some("") {
             return Err(CameraState::NotFound);
         }
-        return start(id.unwrap_or(""), on_frame, on_end);
+        return start(id.unwrap_or(""), grant, on_frame, on_end);
     }
     let devices = list();
     let chosen = pick_camera(id, devices.iter().map(|device| device.id.as_str()))?;
-    start(&chosen, on_frame, on_end)
+    start(&chosen, grant, on_frame, on_end)
 }
 
-fn start<F, E>(device_id: &str, on_frame: F, on_end: E) -> Result<Capture, CameraState>
+fn start<F, E>(
+    device_id: &str,
+    grant: Grant,
+    on_frame: F,
+    on_end: E,
+) -> Result<Capture, CameraState>
 where
     F: FnMut(CapturedFrame<'_>) + Send + 'static,
     E: FnOnce() + Send + 'static,
@@ -311,7 +345,13 @@ where
         .name("camera".to_owned())
         .spawn(move || {
             let _done = signal;
-            backend::capture(&id, &thread_stop, open_tx, on_frame, on_end);
+            #[cfg(target_os = "linux")]
+            backend::capture(&id, grant.remote, &thread_stop, open_tx, on_frame, on_end);
+            #[cfg(not(target_os = "linux"))]
+            {
+                let Grant {} = grant;
+                backend::capture(&id, &thread_stop, open_tx, on_frame, on_end);
+            }
         })
         .map_err(|_| CameraState::Unavailable)?;
     let capture = Capture {
@@ -481,7 +521,7 @@ mod tests {
     /// no thread is started.
     #[test]
     fn given_unknown_camera_when_opened_then_it_fails_without_fallback() {
-        let result = open(Some("no-such-camera"), |_| {}, || {});
+        let result = open(Some("no-such-camera"), Grant::default(), |_| {}, || {});
         assert_eq!(result.err(), Some(CameraState::NotFound));
     }
 
@@ -506,7 +546,7 @@ mod tests {
     fn given_no_camera_when_opened_without_choice_then_unavailable() {
         if list().is_empty() {
             assert_eq!(
-                open(None, |_| {}, || {}).err(),
+                open(None, Grant::default(), |_| {}, || {}).err(),
                 Some(CameraState::Unavailable)
             );
         }

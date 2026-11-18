@@ -165,6 +165,11 @@ pub enum ToWorker {
     /// [`FromWorker::Camera`].
     SetCamera {
         on: bool,
+        /// A camera portal remote went over the camera channel for this
+        /// camera-on, directly before it (Linux portal path). The worker
+        /// takes it with this command and closes it if the command opens
+        /// nothing. Only a camera-on carries one.
+        remote: bool,
     },
 }
 
@@ -208,7 +213,11 @@ impl std::fmt::Debug for ToWorker {
                 .finish(),
             Self::SetMuted { muted } => f.debug_struct("SetMuted").field("muted", muted).finish(),
             Self::Leave => f.write_str("Leave"),
-            Self::SetCamera { on } => f.debug_struct("SetCamera").field("on", on).finish(),
+            Self::SetCamera { on, remote } => f
+                .debug_struct("SetCamera")
+                .field("on", on)
+                .field("remote", remote)
+                .finish(),
         }
     }
 }
@@ -597,9 +606,10 @@ impl ToWorker {
                 out.push(u8::from(*muted));
             }
             Self::Leave => out.push(TO_LEAVE),
-            Self::SetCamera { on } => {
+            Self::SetCamera { on, remote } => {
                 out.push(TO_SET_CAMERA);
                 out.push(u8::from(*on));
+                out.push(u8::from(*remote));
             }
         }
         out
@@ -656,7 +666,15 @@ impl ToWorker {
                 muted: reader.bool()?,
             },
             TO_LEAVE => Self::Leave,
-            TO_SET_CAMERA => Self::SetCamera { on: reader.bool()? },
+            TO_SET_CAMERA => {
+                let on = reader.bool()?;
+                let remote = reader.bool()?;
+                // Only a camera-on carries a portal remote.
+                if remote && !on {
+                    return Err(DecodeError::InvalidValue);
+                }
+                Self::SetCamera { on, remote }
+            }
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -1110,8 +1128,18 @@ mod tests {
             ToWorker::SetMuted { muted: true },
             ToWorker::Leave,
             ToWorker::ListDevices,
-            ToWorker::SetCamera { on: true },
-            ToWorker::SetCamera { on: false },
+            ToWorker::SetCamera {
+                on: true,
+                remote: false,
+            },
+            ToWorker::SetCamera {
+                on: true,
+                remote: true,
+            },
+            ToWorker::SetCamera {
+                on: false,
+                remote: false,
+            },
         ]
     }
 
@@ -1906,9 +1934,25 @@ mod tests {
         for (body, expected) in cases {
             assert_eq!(FromWorker::decode(body), Err(expected), "{body:?}");
         }
-        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_CAMERA, 2]), Err(invalid));
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA, 2, 0]),
+            Err(invalid)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA, 1, 2]),
+            Err(invalid)
+        );
+        // A portal remote comes only with a camera-on.
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA, 0, 1]),
+            Err(invalid)
+        );
         assert_eq!(
             ToWorker::decode(&[VERSION, TO_SET_CAMERA]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA, 1]),
             Err(DecodeError::Truncated)
         );
         let long = FromWorker::VideoStarted {

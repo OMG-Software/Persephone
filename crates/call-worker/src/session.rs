@@ -193,7 +193,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     };
     let mut end = None;
     if camera_on
-        && let Some(state) = call.begin_camera()
+        && let Some(state) = call.begin_camera(camera::Grant::default())
         && output.send(FromWorker::Camera { state }).await.is_err()
     {
         end = Some(End::Failed(FailureCode::Internal));
@@ -410,25 +410,21 @@ impl Call<'_> {
     /// result arrives in the event loop (`camera_opened`). Returns a state to
     /// report now: `On` when the camera already runs, `Unavailable` when the
     /// open could not start, nothing while an open is in flight.
-    fn begin_camera(&mut self) -> Option<CameraState> {
+    ///
+    /// `grant` is what the camera-on brought. An open takes it; a camera-on
+    /// that opens nothing drops it, which closes its portal remote.
+    fn begin_camera(&mut self, grant: camera::Grant) -> Option<CameraState> {
         // A capture that did not stop still holds the camera: open no second
         // one. With no open in flight, any capture thread that still runs (a
         // stalled stop, or an open that timed out) holds a camera too.
         if self.camera.is_none()
             && (self.stalled_running() || (!self.gate.opening() && camera::captures_running()))
         {
-            drop_unused_handle();
             return Some(CameraState::Unavailable);
         }
         let generation = match self.gate.request_on(self.camera.is_some()) {
-            OnRequest::AlreadyOn => {
-                drop_unused_handle();
-                return Some(CameraState::On);
-            }
-            OnRequest::Pending => {
-                drop_unused_handle();
-                return None;
-            }
+            OnRequest::AlreadyOn => return Some(CameraState::On),
+            OnRequest::Pending => return None,
             OnRequest::Start(generation) => generation,
         };
         let source = NativeVideoSource::new(
@@ -452,6 +448,7 @@ impl Call<'_> {
         let started = spawn_open(self.open_tx.clone(), generation, move || {
             let capture = camera::open(
                 choice.as_deref(),
+                grant,
                 move |frame| feed.frame(frame),
                 move || {
                     let _ = failed.try_send(generation);
@@ -785,15 +782,23 @@ impl Call<'_> {
                 }
                 Ok(vec![FromWorker::Muted { muted }])
             }
-            ToWorker::SetCamera { on: true } => {
+            ToWorker::SetCamera { on: true, remote } => {
+                // The remote that came with this command, taken now so it
+                // cannot go to another one: the camera channel gives them
+                // out in the order the core sent them.
+                let grant = if remote {
+                    camera::Grant::take()
+                } else {
+                    camera::Grant::default()
+                };
                 // Never waits for the open: the loop keeps serving keys and Leave.
                 Ok(self
-                    .begin_camera()
+                    .begin_camera(grant)
                     .map(|state| FromWorker::Camera { state })
                     .into_iter()
                     .collect())
             }
-            ToWorker::SetCamera { on: false } => {
+            ToWorker::SetCamera { on: false, .. } => {
                 // A pending open is not wanted any more. Its completion
                 // releases the capture and reports the state then, so `Off`
                 // never comes before the open ended.
@@ -869,19 +874,6 @@ enum CameraStop {
     Released,
     /// The capture did not end in time. It is kept and supervised.
     Stalled,
-}
-
-/// A camera-on that starts no open closes the portal remote the core sent
-/// with it (Linux portal path), so that remote can never start a later
-/// capture. On the portal path the core sends each camera-on directly after
-/// its own remote and sends no other camera-on (`Call::camera_command` in
-/// the core), so the remote waiting now is this command's. If a newer remote
-/// came first (a race of microseconds against a desktop dialog), it is
-/// closed and its open reports `Unavailable`: the failure is closed. Off the
-/// portal path there is none.
-fn drop_unused_handle() {
-    #[cfg(target_os = "linux")]
-    drop(crate::camera_channel::take_handle());
 }
 
 /// What a `SetCamera { on: true }` does.

@@ -352,7 +352,10 @@ mod tests {
         for message in [
             ToWorker::Leave,
             ToWorker::SetMuted { muted: true },
-            ToWorker::SetCamera { on: true },
+            ToWorker::SetCamera {
+                on: true,
+                remote: false,
+            },
             ToWorker::SetOwnKey { key: key() },
             ToWorker::SetKey {
                 identity: "@a:example.org:D".to_owned(),

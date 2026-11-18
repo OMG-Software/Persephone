@@ -3,9 +3,13 @@
 //! path the core sends the PipeWire remote it got from the camera portal as
 //! one descriptor (`SCM_RIGHTS`) with exactly one data byte.
 //!
-//! The worker reads the channel without blocking, takes at most one
-//! descriptor per message and closes every other one, and keeps at most one
-//! pending descriptor: a newer one replaces and closes the older. Nothing
+//! The worker reads the channel without blocking and takes at most one
+//! descriptor per message, closing every other one. The core sends one
+//! descriptor directly before each camera-on that says it carries one
+//! (`SetCamera { remote: true }`), so the worker keeps the pending
+//! descriptors in order, and each such camera-on takes the oldest. At most
+//! `MAX_PENDING` wait; one more breaks the channel, which then closes every
+//! descriptor and gives out none (the camera stays unavailable). Nothing
 //! here opens a path or makes a socket, so it needs no containment
 //! allowance. The parsing rules are plain functions with unit tests; only
 //! the `recvmsg` part is Linux code.
@@ -21,6 +25,9 @@ pub const CHANNEL_FD: i32 = 3;
 /// The most descriptors one message may carry that the worker looks at. A
 /// message with more is refused as a whole (the kernel closes the rest).
 pub const MAX_FDS_PER_MESSAGE: usize = 4;
+/// The most descriptors that may wait for their camera-on. The core sends
+/// the next one only after a desktop dialog, so more than one is rare.
+pub const MAX_PENDING: usize = 4;
 
 /// What one received message means.
 #[derive(Debug, Eq, PartialEq)]
@@ -42,28 +49,42 @@ pub fn judge(data_len: usize, fd_count: usize, control_truncated: bool) -> Verdi
     }
 }
 
-/// At most one pending item. A newer item replaces the older one, which is
-/// dropped (for a descriptor: closed).
+/// The pending items, oldest first, at most `MAX_PENDING`. One more breaks
+/// the queue: it drops (for a descriptor: closes) every item and keeps none
+/// after, so no item can go to another item's command.
 #[derive(Debug)]
 pub struct Pending<T> {
-    slot: Option<T>,
+    items: std::collections::VecDeque<T>,
+    broken: bool,
 }
 
 impl<T> Default for Pending<T> {
     fn default() -> Self {
-        Self { slot: None }
+        Self {
+            items: std::collections::VecDeque::new(),
+            broken: false,
+        }
     }
 }
 
 impl<T> Pending<T> {
-    /// Stores `item`; returns whether it replaced an older one.
+    /// Stores `item` after the others. Returns false when it was dropped:
+    /// the queue was full (and is now broken) or already broken.
     pub fn put(&mut self, item: T) -> bool {
-        self.slot.replace(item).is_some()
+        if !self.broken && self.items.len() >= MAX_PENDING {
+            self.broken = true;
+            self.items.clear();
+        }
+        if self.broken {
+            return false;
+        }
+        self.items.push_back(item);
+        true
     }
 
-    /// Takes the pending item, if any.
+    /// Takes the oldest pending item, if any.
     pub fn take(&mut self) -> Option<T> {
-        self.slot.take()
+        self.items.pop_front()
     }
 }
 
@@ -84,7 +105,7 @@ mod linux {
     /// descriptors. An array of `u64` aligns it for `cmsghdr`.
     const CONTROL_BYTES: usize = 32;
 
-    /// The worker's end of the channel and its one pending descriptor.
+    /// The worker's end of the channel and its pending descriptors.
     pub struct CameraChannel {
         fd: OwnedFd,
         pending: Mutex<Pending<OwnedFd>>,
@@ -128,8 +149,8 @@ mod linux {
             })
         }
 
-        /// Reads every waiting message. A valid handle replaces the pending
-        /// one. Returns false once the core closed its end or the channel
+        /// Reads every waiting message. A valid handle joins the pending
+        /// ones. Returns false once the core closed its end or the channel
         /// failed.
         pub fn poll(&self) -> bool {
             let raw = self.fd.as_raw_fd();
@@ -140,7 +161,7 @@ mod linux {
                             .pending
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        // The replaced descriptor is dropped, so closed.
+                        // A refused descriptor is dropped, so closed.
                         pending.put(fd);
                     }
                     // A message that was not a valid handle; its descriptors
@@ -158,7 +179,7 @@ mod linux {
             }
         }
 
-        /// Reads the channel, then takes the newest pending descriptor.
+        /// Reads the channel, then takes the oldest pending descriptor.
         pub fn take(&self) -> Option<OwnedFd> {
             self.poll();
             self.pending
@@ -252,8 +273,9 @@ mod linux {
         });
     }
 
-    /// The newest descriptor the core sent and the worker has not taken, or
-    /// `None` (no message, no channel, or a channel the core closed).
+    /// The oldest descriptor the core sent and the worker has not taken, or
+    /// `None` (no message, no channel, or a broken queue). Call it once for
+    /// each command that carries one.
     pub fn take_handle() -> Option<OwnedFd> {
         CHANNEL.get()?.as_ref()?.take()
     }
@@ -362,28 +384,25 @@ mod linux {
             )
         }
 
-        /// GIVEN two handles before a take WHEN taken THEN only the newer
-        /// one is kept and the older one is closed.
+        /// GIVEN two handles before a take WHEN taken THEN each take gets
+        /// the oldest one left, so each command gets its own.
         #[test]
-        fn given_two_handles_then_the_older_is_closed() {
+        fn given_two_handles_then_they_are_taken_oldest_first() {
             let (channel, core) = channel();
             let (reader, writer) = pipe();
             send(&core, b"x", &[writer.as_raw_fd()]);
             // The test gives up its own copy: only the channel holds the write end.
             drop(writer);
-            // Read the first by hand so it is pending.
-            assert!(channel.poll());
-            let (n, error) = read_one(&reader);
-            assert_eq!(n, -1);
-            assert_eq!(error, libc::EAGAIN, "the write end is still open");
             let second = open_file();
             send(&core, b"x", &[second.as_raw_fd()]);
-            let newer = channel.take().expect("newer handle");
+            let first = channel.take().expect("the older handle");
+            let (n, error) = read_one(&reader);
+            assert_eq!(n, -1);
+            assert_eq!(error, libc::EAGAIN, "the first taken is the pipe's end");
+            drop(first);
             let (n, _) = read_one(&reader);
-            assert_eq!(
-                n, 0,
-                "the older descriptor is closed, so the pipe is at EOF"
-            );
+            assert_eq!(n, 0, "closed with its command, so the pipe is at EOF");
+            let newer = channel.take().expect("the newer handle");
             assert!(is_open(newer.as_raw_fd()));
             assert!(channel.take().is_none());
         }
@@ -451,19 +470,33 @@ mod tests {
         }
     }
 
-    /// GIVEN a pending item WHEN a newer one arrives THEN the older one is
-    /// dropped at once and only the newer one can be taken.
+    /// GIVEN pending items WHEN taken THEN they come oldest first.
     #[test]
-    fn given_a_pending_item_when_a_newer_one_arrives_then_the_older_is_closed() {
+    fn given_pending_items_then_they_are_taken_oldest_first() {
+        let mut pending = Pending::default();
+        for item in 1..=MAX_PENDING {
+            assert!(pending.put(item));
+        }
+        let taken: Vec<usize> = std::iter::from_fn(|| pending.take()).collect();
+        assert_eq!(taken, (1..=MAX_PENDING).collect::<Vec<_>>());
+    }
+
+    /// GIVEN a full queue WHEN one more item arrives THEN every item is
+    /// dropped at once, and the queue keeps no later item: none can go to
+    /// another item's command.
+    #[test]
+    fn given_a_full_queue_when_one_more_arrives_then_it_breaks_closed() {
         let closed = Arc::new(AtomicUsize::new(0));
         let mut pending = Pending::default();
-        assert!(!pending.put(Closes(closed.clone())));
+        for _ in 0..MAX_PENDING {
+            assert!(pending.put(Closes(closed.clone())));
+        }
         assert_eq!(closed.load(Ordering::SeqCst), 0);
-        assert!(pending.put(Closes(closed.clone())));
-        assert_eq!(closed.load(Ordering::SeqCst), 1);
-        let taken = pending.take().expect("the newer item");
+        assert!(!pending.put(Closes(closed.clone())));
+        assert_eq!(closed.load(Ordering::SeqCst), MAX_PENDING + 1);
         assert!(pending.take().is_none());
-        drop(taken);
-        assert_eq!(closed.load(Ordering::SeqCst), 2);
+        assert!(!pending.put(Closes(closed.clone())));
+        assert_eq!(closed.load(Ordering::SeqCst), MAX_PENDING + 2);
+        assert!(pending.take().is_none());
     }
 }
