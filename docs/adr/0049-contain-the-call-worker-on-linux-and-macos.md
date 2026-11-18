@@ -205,8 +205,10 @@ The worker applies two stages itself.
 * Linux: calls need Linux 6.2 or newer with Landlock turned on.
 * Linux V4L2 path: the worker can open any camera node, and there is no
   desktop permission dialog.
-* macOS: the Seatbelt profile is measured, not derived. A macOS update can
-  break calls until the profile is measured again.
+* macOS: the Seatbelt profile must be measured, not derived. That
+  measurement is still pending (see the service list above). After it is
+  recorded, a macOS update can break calls until the profile is measured
+  again.
 * macOS: the call worker gains two entitlements, and `docs/release.md` no
   longer says that the app uses no entitlements.
 * New dependencies: the `pipewire` crates and the system `libpipewire-0.3`

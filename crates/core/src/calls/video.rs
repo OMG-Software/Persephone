@@ -38,6 +38,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Tiles in a call: 0 is the own camera, 1 to 4 are remote.
 const TILES: usize = VIDEO_TILES as usize;
+/// The own camera's tile.
+const OWN_TILE: usize = 0;
 
 /// Largest picture number: the page reads it as a JavaScript number.
 const MAX_SEQ: u64 = 9_007_199_254_740_991;
@@ -83,8 +85,11 @@ pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 struct State {
     /// Which tiles may keep a picture now.
     allowed: [bool; TILES],
-    /// Tiles that no sync may allow until [`VideoStore::unblock_tile`].
+    /// Tiles that no sync may allow. Only the own tile is blocked: by a
+    /// camera-off, until [`VideoStore::camera_on_taken`].
     blocked: [bool; TILES],
+    /// The number of the user's latest camera request.
+    camera_requests: u64,
     /// Stream changes of each tile that the read thread has read.
     changed: [u64; TILES],
     /// Stream changes of each tile that the controller has applied.
@@ -219,23 +224,30 @@ impl VideoStore {
         }
     }
 
-    /// Drops the picture of `tile` and refuses later ones, also across later
-    /// syncs, until [`VideoStore::unblock_tile`]. A sync made from an older
-    /// view (the camera still on) then cannot let a late picture in.
-    pub fn disable_tile(&self, tile: u8) {
+    /// Records a camera request of the user and returns its number. An off
+    /// drops the own picture at once and refuses later ones, also across
+    /// later syncs: a sync made from an older view (the camera still on)
+    /// cannot let a late picture in. Only the camera-on request with the
+    /// latest number lifts the block ([`VideoStore::camera_on_taken`]).
+    pub fn camera_request(&self, on: bool) -> u64 {
         let mut state = self.state();
-        let index = usize::from(tile);
-        if index < TILES {
-            state.allowed[index] = false;
-            state.blocked[index] = true;
-            state.pictures[index] = None;
+        state.camera_requests = state.camera_requests.wrapping_add(1);
+        if !on {
+            state.allowed[OWN_TILE] = false;
+            state.blocked[OWN_TILE] = true;
+            state.pictures[OWN_TILE] = None;
         }
+        state.camera_requests
     }
 
-    /// Lets syncs allow `tile` again. It allows nothing by itself.
-    pub fn unblock_tile(&self, tile: u8) {
-        if let Some(blocked) = self.state().blocked.get_mut(usize::from(tile)) {
-            *blocked = false;
+    /// The call task took camera-on request `request`. If no later request
+    /// came, syncs may allow the own tile again; it allows nothing by itself.
+    /// An older request changes nothing, so a camera-on queued before an off
+    /// cannot undo that off.
+    pub fn camera_on_taken(&self, request: u64) {
+        let mut state = self.state();
+        if state.camera_requests == request {
+            state.blocked[OWN_TILE] = false;
         }
     }
 
@@ -385,25 +397,46 @@ mod tests {
         assert_eq!(store.newest(1, 0).unwrap().bytes()[0], 2);
     }
 
-    /// GIVEN a picture on the own tile WHEN the tile is disabled THEN it goes,
-    /// and later pictures are refused, also after a sync that would allow
-    /// the tile, until the tile is unblocked and synced again.
+    /// GIVEN a picture on the own tile WHEN the camera is turned off THEN it
+    /// goes, and later pictures are refused, also after a sync that would
+    /// allow the tile, until the latest camera-on is taken and synced.
     #[test]
-    fn given_a_disabled_tile_then_pictures_wait_for_unblock_and_sync() {
+    fn given_a_camera_off_then_pictures_wait_for_the_latest_on_and_a_sync() {
         let store = open_store();
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
-        store.disable_tile(0);
-        store.disable_tile(9);
+        let off = store.camera_request(false);
         assert!(store.newest(0, 0).is_none());
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 2)));
-        assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 2)));
+        assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 2)), "remote tiles stay");
         store.sync(true, [true; 4]);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 3)), "still blocked");
-        store.unblock_tile(0);
-        store.unblock_tile(9);
+        store.camera_on_taken(off);
+        let on = store.camera_request(true);
+        assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 3)), "not taken yet");
+        store.camera_on_taken(on);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 3)), "not allowed yet");
         store.sync(true, [true; 4]);
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 3)));
+    }
+
+    /// GIVEN a camera-on followed by an off before the task took either WHEN
+    /// the task takes the older on THEN the own tile stays blocked, also
+    /// across a sync from a view that still has the camera on.
+    #[test]
+    fn given_an_on_queued_before_an_off_then_it_cannot_lift_the_block() {
+        let store = open_store();
+        let on = store.camera_request(true);
+        let _off = store.camera_request(false);
+        store.camera_on_taken(on);
+        store.sync(true, [false; 4]);
+        assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
+        let again = store.camera_request(true);
+        store.camera_on_taken(again);
+        store.sync(true, [false; 4]);
+        assert!(
+            store.insert(0, 0, 2, 2, rgba(2, 2, 1)),
+            "a later on lifts it"
+        );
     }
 
     /// GIVEN a closed store WHEN pictures arrive or tiles sync THEN nothing

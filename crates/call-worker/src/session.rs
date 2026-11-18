@@ -2,8 +2,7 @@
 //! room fails. All LiveKit types stay in this module.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use livekit::{
@@ -330,9 +329,9 @@ struct LocalCamera {
     generation: u64,
     capture: camera::Capture,
     sid: TrackSid,
-    /// The feed's admission flag. False before a stop, so no picture leaves
+    /// The feed's admission. Closed before a stop, so no picture leaves
     /// after a blocked read returns.
-    live: Arc<AtomicBool>,
+    live: Arc<FrameAdmission>,
 }
 
 /// One remote video track: the participant's identity and the track's SID.
@@ -349,20 +348,50 @@ struct RemoteVideo {
     readers: [Option<JoinHandle<()>>; VIDEO_TILES as usize],
 }
 
+/// Whether camera frames may go out. A frame holds the read side for its
+/// whole callback, so [`FrameAdmission::close`] returns only when no frame is
+/// in progress, and no frame starts after it: a callback that passed the
+/// check cannot submit a picture after the stop.
+#[derive(Default)]
+struct FrameAdmission(RwLock<bool>);
+
+impl FrameAdmission {
+    /// Frames may go out from now on.
+    fn open(&self) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = true;
+    }
+
+    /// No frame goes out from now on. Waits for a frame in progress.
+    fn close(&self) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+
+    /// Admits one frame; the frame may go out while the guard lives.
+    fn admit(&self) -> Option<RwLockReadGuard<'_, bool>> {
+        let open = self.0.read().unwrap_or_else(|e| e.into_inner());
+        if *open { Some(open) } else { None }
+    }
+}
+
 /// The camera's frame callback: converts, scales and hands the picture to the
 /// SFU source and to the own preview.
 struct CameraFeed {
     source: NativeVideoSource,
-    /// False until the track is published and its key index is set, so no
-    /// picture goes out under a wrong key index.
-    live: Arc<AtomicBool>,
+    /// Closed until the track is published and its key index is set, so no
+    /// picture goes out under a wrong key index, and closed again before a
+    /// stop.
+    live: Arc<FrameAdmission>,
     pictures: PictureSink,
     limiter: RateLimiter,
 }
 
 impl CameraFeed {
     fn frame(&mut self, frame: CapturedFrame<'_>) {
-        if !self.live.load(Ordering::Acquire) || !self.limiter.admit(std::time::Instant::now()) {
+        // Held until the picture is handed on, so a stop waits for it.
+        let Some(_admitted) = self.live.admit() else {
+            return;
+        };
+        if !self.limiter.admit(std::time::Instant::now()) {
             return;
         }
         let Some(picture) = fitted_i420(&frame) else {
@@ -402,7 +431,7 @@ impl Call<'_> {
             },
             false,
         );
-        let live = Arc::new(AtomicBool::new(false));
+        let live = Arc::new(FrameAdmission::default());
         let mut feed = CameraFeed {
             source: source.clone(),
             live: live.clone(),
@@ -434,8 +463,9 @@ impl Call<'_> {
         None
     }
 
-    /// The open ended. A current result is published; a stale one (the camera
-    /// was turned off meanwhile) is released and not reported.
+    /// The open ended. A current result is published. One the camera was
+    /// turned off for meanwhile is released, and the deferred off is reported
+    /// now. A stale one is released and not reported.
     async fn camera_opened(&mut self, done: Opened<OpenedCamera>) -> Result<(), Closed> {
         let generation = done.generation;
         let decision = self.gate.complete(generation, done.result.is_ok());
@@ -445,6 +475,19 @@ impl Call<'_> {
                     self.release_capture(opened.capture).await;
                 }
                 Ok(())
+            }
+            (Completion::Cancelled, result) => {
+                let released = match result {
+                    Ok(opened) => self.release_capture(opened.capture).await,
+                    Err(_) => true,
+                };
+                // Off only when no capture still holds the camera.
+                let state = if released && !self.stalled_running() {
+                    CameraState::Off
+                } else {
+                    CameraState::Unavailable
+                };
+                self.output.send(FromWorker::Camera { state }).await
             }
             // The capture ended before this completion: it is dead, not on.
             (Completion::Ended, result) => {
@@ -507,7 +550,7 @@ impl Call<'_> {
             &self.own_sids,
             self.gate.own_index(),
         );
-        live.store(true, Ordering::Release);
+        live.open();
         self.camera = Some(LocalCamera {
             generation,
             capture,
@@ -525,7 +568,9 @@ impl Call<'_> {
         let Some(camera) = self.camera.take() else {
             return CameraStop::WasOff;
         };
-        camera.live.store(false, Ordering::Release);
+        // Off the runtime threads: the close waits for a frame in progress.
+        let live = camera.live.clone();
+        let _ = tokio::task::spawn_blocking(move || live.close()).await;
         let released = self.release_capture(camera.capture).await;
         self.output.clear_picture(OWN_TILE);
         self.own_sids.retain(|sid| *sid != camera.sid);
@@ -618,16 +663,19 @@ impl Call<'_> {
         identity: &str,
         track: RtcVideoTrack,
     ) -> Result<(), Closed> {
-        let stream = NativeVideoStream::new(track);
-        let pictures = self.output.pictures();
-        self.remote.readers[usize::from(tile)] =
-            Some(tokio::spawn(read_pictures(stream, tile, pictures)));
+        // `VideoStarted` is queued before the reader exists, so the core
+        // reads it before any picture of this stream.
         self.output
             .send(FromWorker::VideoStarted {
                 tile,
                 identity: identity.to_owned(),
             })
-            .await
+            .await?;
+        let stream = NativeVideoStream::new(track);
+        let pictures = self.output.pictures();
+        self.remote.readers[usize::from(tile)] =
+            Some(tokio::spawn(read_pictures(stream, tile, pictures)));
+        Ok(())
     }
 
     /// Frees the tiles of every track that `matches` and gives them on.
@@ -738,8 +786,13 @@ impl Call<'_> {
                     .collect())
             }
             ToWorker::SetCamera { on: false } => {
-                // A pending open is not wanted any more: its result is released.
+                // A pending open is not wanted any more. Its completion
+                // releases the capture and reports the state then, so `Off`
+                // never comes before the open ended.
                 self.gate.request_off();
+                if self.gate.opening() {
+                    return Ok(Vec::new());
+                }
                 let mut reply = Vec::new();
                 let stop = self.stop_camera(true).await;
                 if stop != CameraStop::WasOff {
@@ -773,7 +826,7 @@ struct Opened<T> {
 struct OpenedCamera {
     capture: camera::Capture,
     source: NativeVideoSource,
-    live: Arc<AtomicBool>,
+    live: Arc<FrameAdmission>,
 }
 
 /// Runs `open` on its own thread and sends the result to `tx`. The thread is
@@ -825,8 +878,11 @@ enum Completion {
     Publish,
     /// Report the open's error state.
     Report,
-    /// Nobody wants it: release a camera that opened, report nothing.
+    /// A stale open: release a camera that opened, report nothing.
     Release,
+    /// The camera was turned off while this open was in flight: release a
+    /// camera that opened, then report the off that waited for it.
+    Cancelled,
     /// The capture ended before the completion: release it and report
     /// `Unavailable`.
     Ended,
@@ -880,7 +936,7 @@ impl CameraGate {
         self.in_flight.is_some()
     }
 
-    /// The camera is not wanted. An open in flight stays and ends stale.
+    /// The camera is not wanted. An open in flight stays and ends cancelled.
     fn request_off(&mut self) {
         self.wanted = false;
     }
@@ -893,7 +949,7 @@ impl CameraGate {
         self.in_flight = None;
         let ended = self.ended_early.take() == Some(generation);
         if !self.wanted {
-            Completion::Release
+            Completion::Cancelled
         } else if opened && ended {
             self.wanted = false;
             Completion::Ended
@@ -1236,6 +1292,7 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     fn solid_i420(width: u32, height: u32, y: u8, u: u8, v: u8) -> I420Buffer {
         let mut buffer = I420Buffer::new(width, height);
@@ -1376,18 +1433,22 @@ mod tests {
         assert_eq!(gate.own_index(), 7);
     }
 
-    /// GIVEN a pending open WHEN the camera is turned off THEN the late
-    /// completion is released and reports nothing.
+    /// GIVEN a pending open WHEN the camera is turned off THEN the open stays
+    /// in flight (the off waits), and its completion, success or error, is
+    /// cancelled: released, then reported as the off.
     #[test]
-    fn given_pending_open_when_turned_off_then_late_result_is_released() {
+    fn given_pending_open_when_turned_off_then_completion_is_cancelled() {
         let mut gate = CameraGate::new(0);
         assert_eq!(gate.request_on(false), OnRequest::Start(1));
         gate.request_off();
-        assert_eq!(gate.complete(1, true), Completion::Release);
-        // An error after the camera was turned off is not reported either.
+        assert!(gate.opening(), "the off waits for the open");
+        assert_eq!(gate.complete(1, true), Completion::Cancelled);
+        assert!(!gate.opening());
         assert_eq!(gate.request_on(false), OnRequest::Start(2));
         gate.request_off();
-        assert_eq!(gate.complete(2, false), Completion::Release);
+        assert_eq!(gate.complete(2, false), Completion::Cancelled);
+        // A repeated completion of the same open is stale.
+        assert_eq!(gate.complete(2, true), Completion::Release);
     }
 
     /// GIVEN a pending open WHEN another on arrives THEN no second open
@@ -1453,18 +1514,71 @@ mod tests {
     }
 
     /// GIVEN a capture that ended early and a camera turned off WHEN the open
-    /// completes THEN it is released quietly, and a failed open still reports
-    /// its own error.
+    /// completes THEN it is cancelled (the off is reported), and a failed open
+    /// still reports its own error.
     #[test]
     fn given_ended_early_then_off_or_failed_open_keeps_its_rule() {
         let mut gate = CameraGate::new(0);
         assert_eq!(gate.request_on(false), OnRequest::Start(1));
         gate.capture_ended(1);
         gate.request_off();
-        assert_eq!(gate.complete(1, true), Completion::Release);
+        assert_eq!(gate.complete(1, true), Completion::Cancelled);
         assert_eq!(gate.request_on(false), OnRequest::Start(2));
         gate.capture_ended(2);
         assert_eq!(gate.complete(2, false), Completion::Report);
+    }
+
+    /// GIVEN a closed admission THEN no frame is admitted; once opened, frames
+    /// are admitted until it is closed again.
+    #[test]
+    fn given_frame_admission_then_frames_pass_only_while_open() {
+        let live = FrameAdmission::default();
+        assert!(live.admit().is_none(), "closed until the publish");
+        live.open();
+        assert!(live.admit().is_some());
+        live.close();
+        assert!(live.admit().is_none());
+    }
+
+    /// GIVEN a frame that passed admission WHEN a stop closes the admission
+    /// THEN the close waits until that frame is handed on, and no frame is
+    /// admitted after it.
+    #[test]
+    fn given_a_frame_in_progress_when_closed_then_the_close_waits_for_it() {
+        let live = Arc::new(FrameAdmission::default());
+        live.open();
+        let (admitted_tx, admitted) = std::sync::mpsc::channel();
+        let (finish, finish_rx) = std::sync::mpsc::channel::<()>();
+        let (handed_tx, handed) = std::sync::mpsc::channel();
+        let frame = {
+            let live = live.clone();
+            std::thread::spawn(move || {
+                let guard = live.admit().expect("open");
+                admitted_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                handed_tx.send(()).unwrap();
+                drop(guard);
+            })
+        };
+        admitted.recv().unwrap();
+        let (closed_tx, closed) = std::sync::mpsc::channel();
+        let stop = {
+            let live = live.clone();
+            std::thread::spawn(move || {
+                live.close();
+                closed_tx.send(()).unwrap();
+            })
+        };
+        assert!(
+            closed.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the close waits for the frame in progress"
+        );
+        finish.send(()).unwrap();
+        closed.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(handed.try_recv().is_ok(), "the frame was handed on first");
+        assert!(live.admit().is_none());
+        frame.join().unwrap();
+        stop.join().unwrap();
     }
 
     /// GIVEN a slow open WHEN a command arrives THEN a loop that selects over
