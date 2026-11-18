@@ -429,11 +429,7 @@ fn start_stream(fd: OwnedFd) -> Result<Stream, CameraState> {
     } else {
         format.pix.bytesperline
     };
-    if !yuyv::size_allowed(width, height)
-        || stride < row
-        || stride > 4 * 1280 * 2
-        || (negotiated == PixelFormat::Yuyv && !width.is_multiple_of(2))
-    {
+    if !yuyv::format_allowed(negotiated, width, height) || stride < row || stride > 4 * 1280 * 2 {
         return Err(CameraState::Unavailable);
     }
 

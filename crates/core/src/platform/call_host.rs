@@ -114,7 +114,10 @@ fn judge_first_message(first: Option<Result<FromWorker, ReadError>>) -> Result<(
 
 /// Reads the worker's messages. The first goes to `first`; the rest go to
 /// `events`, except video pictures: those go to `video`, which keeps the
-/// newest one per tile and never blocks this thread (ADR-0048). It stops on
+/// newest one per tile and never blocks this thread (ADR-0048). A tile's
+/// `VideoStarted` or `VideoStopped` is counted in `video` before it is
+/// passed on, so the tile's next pictures wait until the controller has
+/// applied it. It stops on
 /// any read error, including a bad or missing pixel frame, or when the
 /// receiver is gone, which drops `events` so the controller sees the end.
 fn read_loop<R: Read>(
@@ -137,6 +140,11 @@ fn read_loop<R: Read>(
     while let Ok(item) = read_worker_item(&mut reader, &budgets) {
         match item {
             WorkerItem::Message(message) => {
+                if let FromWorker::VideoStarted { tile, .. } | FromWorker::VideoStopped { tile } =
+                    &message
+                {
+                    video.stream_changed(*tile);
+                }
                 if events.blocking_send(message).is_err() {
                     return;
                 }
@@ -342,9 +350,52 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
         let picture = video.newest(1, 0).expect("kept picture");
         assert_eq!(
-            (picture.rotation, picture.width, picture.rgba[0]),
+            (picture.rotation, picture.width, picture.bytes()[0]),
             (2, 2, 7)
         );
+    }
+
+    /// GIVEN tile 1 changes from one stream to another WHEN the new stream's
+    /// picture arrives before the controller applies the changes THEN the
+    /// store refuses it, and the events still reach the controller in order.
+    #[test]
+    fn given_a_tile_change_when_read_then_new_pictures_wait_for_the_controller() {
+        let mut wire = Vec::new();
+        write_message(
+            &mut wire,
+            &FromWorker::Ready {
+                containment_bits: 0,
+            },
+        )
+        .unwrap();
+        write_message(&mut wire, &FromWorker::VideoStopped { tile: 1 }).unwrap();
+        write_message(
+            &mut wire,
+            &FromWorker::VideoStarted {
+                tile: 1,
+                identity: "@b:example.org:DEV".to_owned(),
+            },
+        )
+        .unwrap();
+        write_video_frame(&mut wire, 1, 0, 2, 2, &[7; 16]).unwrap();
+        let (first_tx, _first_rx) = std_mpsc::channel();
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_QUEUE);
+        let video = VideoStore::new();
+        video.sync(false, [true, false, false, false]);
+        read_loop(Cursor::new(wire), first_tx, event_tx, video.clone());
+        assert!(video.newest(1, 0).is_none(), "the picture waited");
+        assert_eq!(
+            event_rx.try_recv().unwrap(),
+            FromWorker::VideoStopped { tile: 1 }
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            FromWorker::VideoStarted { tile: 1, .. }
+        ));
+        // The controller applies both; the next picture is kept.
+        video.stream_applied(1);
+        video.stream_applied(1);
+        assert!(video.insert(1, 0, 2, 2, vec![8; 16]));
     }
 
     /// GIVEN a picture for a tile that may not show WHEN read THEN the reader

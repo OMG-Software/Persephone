@@ -464,10 +464,22 @@ fn other_family_rule() -> Result<SeccompRule, ()> {
     rule(conditions)
 }
 
+/// The signal calls that name the target thread group in argument 0. The
+/// worker may signal its own threads only. `kill` and `pidfd_send_signal` are
+/// in the deny list. `tkill` has no thread group, so a rule cannot tie it to
+/// this process; see [`stage1_errno_rules`]. Landlock ABI 3 to 5 has no signal
+/// scope and the worker has the core's UID, so this rule holds for every ABI.
+const OWN_GROUP_SIGNAL_CALLS: [i64; 3] = [
+    libc::SYS_tgkill,
+    libc::SYS_rt_tgsigqueueinfo,
+    libc::SYS_rt_sigqueueinfo,
+];
+
 /// The rules that kill in stage 1: the deny list, `clone` with a namespace
-/// flag and a socket of another family. `clone3` is not here (see
-/// [`stage1_errno_rules`]).
-fn stage1_kill_rules() -> Result<BTreeMap<i64, Vec<SeccompRule>>, ()> {
+/// flag, a socket of another family and a signal to another process.
+/// `pid` is the worker's own process ID. `clone3` and `tkill` are not here
+/// (see [`stage1_errno_rules`]).
+fn stage1_kill_rules(pid: u32) -> Result<BTreeMap<i64, Vec<SeccompRule>>, ()> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
     for (_, number) in deny_calls() {
         rules.insert(number, Vec::new());
@@ -480,13 +492,31 @@ fn stage1_kill_rules() -> Result<BTreeMap<i64, Vec<SeccompRule>>, ()> {
     rules.insert(libc::SYS_clone, clone);
     rules.insert(libc::SYS_socket, vec![other_family_rule()?]);
     rules.insert(libc::SYS_socketpair, vec![other_family_rule()?]);
+    for number in OWN_GROUP_SIGNAL_CALLS {
+        // The kernel reads the thread group ID as 32 bits; so does the rule.
+        rules.insert(
+            number,
+            vec![rule(vec![arg(0, SeccompCmpOp::Ne, u64::from(pid))?])?],
+        );
+    }
     Ok(rules)
 }
 
 /// `clone3` fails with `ENOSYS`, so that the C library falls back to `clone`,
-/// whose flags the filter can read (`clone3` passes them in memory).
+/// whose flags the filter can read (`clone3` passes them in memory). `tkill`
+/// fails with `ENOSYS` too: the C library and Rust use `tgkill`, and a rule
+/// cannot tie a bare thread ID to this process.
 fn stage1_errno_rules() -> BTreeMap<i64, Vec<SeccompRule>> {
-    BTreeMap::from([(libc::SYS_clone3, Vec::new())])
+    BTreeMap::from([
+        (libc::SYS_clone3, Vec::new()),
+        (libc::SYS_tkill, Vec::new()),
+    ])
+}
+
+/// The worker's own process ID, for the signal rules.
+fn own_pid() -> u32 {
+    // SAFETY: `getpid` has no arguments and cannot fail.
+    unsafe { libc::getpid() as u32 }
 }
 
 /// What stage 2 kills: the Landlock calls.
@@ -541,7 +571,7 @@ fn install(programs: &[BpfProgram]) -> Result<(), ()> {
 }
 
 fn install_stage1() -> Result<(), ()> {
-    let kill = compile(&stage1_kill_rules()?, SeccompAction::KillProcess)?;
+    let kill = compile(&stage1_kill_rules(own_pid())?, SeccompAction::KillProcess)?;
     let errno = compile(
         &stage1_errno_rules(),
         SeccompAction::Errno(libc::ENOSYS as u32),
@@ -553,6 +583,9 @@ fn install_stage1() -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixed process ID for the rule builder.
+    const TEST_PID: u32 = 4242;
 
     fn names() -> Vec<&'static str> {
         deny_calls().into_iter().map(|(name, _)| name).collect()
@@ -607,7 +640,7 @@ mod tests {
         ] {
             assert!(names.contains(&wanted), "{wanted} is not denied");
         }
-        let rules = stage1_kill_rules().expect("rules");
+        let rules = stage1_kill_rules(TEST_PID).expect("rules");
         for arch in [TargetArch::x86_64, TargetArch::aarch64] {
             let program = compile_for(&rules, SeccompAction::KillProcess, arch).expect("compiles");
             assert!(!program.is_empty());
@@ -624,7 +657,7 @@ mod tests {
     /// GIVEN the deny list THEN no call the worker needs is in it.
     #[test]
     fn given_deny_list_then_the_calls_the_worker_needs_are_allowed() {
-        let rules = stage1_kill_rules().expect("rules");
+        let rules = stage1_kill_rules(TEST_PID).expect("rules");
         for needed in [
             libc::SYS_read,
             libc::SYS_write,
@@ -637,19 +670,49 @@ mod tests {
             libc::SYS_recvmsg,
             libc::SYS_ioctl,
             libc::SYS_prctl,
-            libc::SYS_tgkill,
             libc::SYS_memfd_create,
             libc::SYS_landlock_restrict_self,
         ] {
             assert!(!rules.contains_key(&needed), "{needed} is denied");
         }
+        // `tgkill` stays allowed for the worker's own thread group only.
+        assert_eq!(rules[&libc::SYS_tgkill].len(), 1);
+    }
+
+    /// GIVEN the stage 1 rules THEN the four calls that signal another
+    /// process are covered: three conditional kills and `tkill` as ENOSYS.
+    /// The programs compile for both architectures.
+    #[test]
+    fn given_stage1_rules_then_every_signal_call_is_covered() {
+        let kill = stage1_kill_rules(TEST_PID).expect("rules");
+        for number in [
+            libc::SYS_tgkill,
+            libc::SYS_rt_tgsigqueueinfo,
+            libc::SYS_rt_sigqueueinfo,
+        ] {
+            assert_eq!(kill[&number].len(), 1, "{number} has one argument rule");
+        }
+        assert!(!kill.contains_key(&libc::SYS_tkill));
+        assert!(stage1_errno_rules().contains_key(&libc::SYS_tkill));
+        // `kill` and the pidfd call stay denied outright.
+        assert!(kill[&libc::SYS_kill].is_empty());
+        assert!(kill[&libc::SYS_pidfd_send_signal].is_empty());
+        for pid in [1, TEST_PID, u32::MAX] {
+            let rules = stage1_kill_rules(pid).expect("rules");
+            for arch in [TargetArch::x86_64, TargetArch::aarch64] {
+                let program =
+                    compile_for(&rules, SeccompAction::KillProcess, arch).expect("compiles");
+                assert!(!program.is_empty());
+            }
+        }
+        assert!(own_pid() > 0);
     }
 
     /// GIVEN the stage 1 rules THEN `clone3` is not killed but fails with
     /// ENOSYS, and `clone`, `socket` and `socketpair` have argument rules.
     #[test]
     fn given_stage1_rules_then_clone3_is_enosys_and_clone_and_socket_are_conditional() {
-        let kill = stage1_kill_rules().expect("rules");
+        let kill = stage1_kill_rules(TEST_PID).expect("rules");
         assert!(!kill.contains_key(&libc::SYS_clone3));
         assert!(stage1_errno_rules().contains_key(&libc::SYS_clone3));
         assert_eq!(kill[&libc::SYS_clone].len(), CLONE_NEW_FLAGS.len());

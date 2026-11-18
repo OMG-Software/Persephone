@@ -193,6 +193,22 @@ export function callAnnouncement(status: CallStatus, dismissed: boolean): string
   return PHASE_TEXT[status.phase];
 }
 
+/** Orders call operations, so a late reply cannot undo a later one. */
+export class CallOperations {
+  #latest = 0;
+
+  /** Starts an operation. The newest token is the only current one. */
+  begin(): number {
+    this.#latest += 1;
+    return this.#latest;
+  }
+
+  /** True while no later operation has started. */
+  isCurrent(token: number): boolean {
+    return token === this.#latest;
+  }
+}
+
 /**
  * Runs `fetch` for call status. A request that arrives while one is in
  * flight makes at most one more run after it. `reset` (a session change)

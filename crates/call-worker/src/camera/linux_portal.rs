@@ -217,9 +217,7 @@ struct Negotiated {
 fn accept(format: VideoFormat, size: Rectangle) -> Option<Negotiated> {
     let format = from_spa(format)?;
     let (width, height) = (size.width, size.height);
-    let ok = yuyv::size_allowed(width, height)
-        && (format != PixelFormat::Yuyv || width.is_multiple_of(2));
-    ok.then_some(Negotiated {
+    yuyv::format_allowed(format, width, height).then_some(Negotiated {
         format,
         width,
         height,
@@ -644,7 +642,8 @@ mod tests {
     }
 
     /// GIVEN negotiated formats WHEN checked THEN only NV12, I420 and YUY2 up
-    /// to 1280x720 pass, and an odd-width YUY2 does not.
+    /// to 1280x720 pass; an odd-width YUY2 and an odd-size NV12 do not, and
+    /// an odd-size I420 does.
     #[test]
     fn given_negotiated_formats_then_only_the_policy_ones_pass() {
         let size = |width, height| Rectangle { width, height };
@@ -665,7 +664,9 @@ mod tests {
         assert_eq!(accept(VideoFormat::NV12, size(1920, 1080)), None);
         assert_eq!(accept(VideoFormat::NV12, size(0, 0)), None);
         assert_eq!(accept(VideoFormat::YUY2, size(641, 360)), None);
-        assert!(accept(VideoFormat::NV12, size(641, 360)).is_some());
+        assert_eq!(accept(VideoFormat::NV12, size(641, 360)), None);
+        assert_eq!(accept(VideoFormat::NV12, size(640, 361)), None);
+        assert!(accept(VideoFormat::I420, size(641, 361)).is_some());
         // Not accepted formats: RGB, MJPEG-like encoded, UYVY.
         assert_eq!(accept(VideoFormat::RGB, size(640, 360)), None);
         assert_eq!(accept(VideoFormat::Encoded, size(640, 360)), None);

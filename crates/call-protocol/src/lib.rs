@@ -8,7 +8,7 @@
 use std::io::{self, Read, Write};
 
 use persephone_media_protocol::{
-    FrameError, FrameHeader, FrameKind, ResourceBudgets, read_frame, write_frame,
+    BudgetPermit, FrameError, FrameHeader, FrameKind, ResourceBudgets, read_frame, write_frame,
 };
 use zeroize::Zeroizing;
 
@@ -665,6 +665,42 @@ impl ToWorker {
 }
 
 impl FromWorker {
+    /// A [`FromWorker::Devices`] reply that fits one message. Each list may
+    /// hold [`MAX_DEVICES`] devices, but three full lists of the longest IDs
+    /// and names encode to more than [`MAX_MESSAGE_BYTES`], which the writer
+    /// refuses. Devices are therefore dropped from the end of the longest
+    /// list until the reply fits. Build every `Devices` reply with this.
+    pub fn devices(
+        mut recording: Vec<MediaDevice>,
+        mut playout: Vec<MediaDevice>,
+        mut cameras: Vec<MediaDevice>,
+    ) -> Self {
+        fn list_len(list: &[MediaDevice]) -> usize {
+            // The count, then each ID and name with its two-byte length.
+            1 + list
+                .iter()
+                .map(|device| 4 + device.id.len() + device.name.len())
+                .sum::<usize>()
+        }
+        loop {
+            // The version and the tag, then the three lists.
+            let size = 2 + list_len(&recording) + list_len(&playout) + list_len(&cameras);
+            if size <= MAX_MESSAGE_BYTES {
+                break;
+            }
+            let longest = [&mut recording, &mut playout, &mut cameras]
+                .into_iter()
+                .max_by_key(|list| list.len())
+                .expect("three lists");
+            longest.pop();
+        }
+        Self::Devices {
+            recording,
+            playout,
+            cameras,
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut out = vec![VERSION];
         match self {
@@ -834,8 +870,51 @@ pub enum WorkerItem {
         rotation: u8,
         width: u32,
         height: u32,
-        rgba: Vec<u8>,
+        rgba: Pixels,
     },
+}
+
+/// The RGBA bytes of one received picture and the budget reservation that
+/// covers them. The reservation ends only when the bytes are dropped, so a
+/// kept picture stays charged to the reader's [`ResourceBudgets`].
+pub struct Pixels {
+    bytes: Vec<u8>,
+    _permit: BudgetPermit,
+}
+
+impl Pixels {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl AsRef<[u8]> for Pixels {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl std::ops::Deref for Pixels {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// Pictures compare by their bytes; the reservation is not part of the value.
+impl PartialEq for Pixels {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+impl Eq for Pixels {}
+
+impl std::fmt::Debug for Pixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pixels({} bytes)", self.bytes.len())
+    }
 }
 
 /// Writes one message as a Control frame and flushes it.
@@ -905,13 +984,16 @@ pub fn read_worker_item<R: Read>(
     // The header was checked; give it back to the budgeted reader together
     // with the body that follows it.
     let frame = read_frame(&mut (&wire[..]).chain(reader), budgets).map_err(ReadError::Frame)?;
-    let (rgba, _permit) = frame.into_parts();
+    let (bytes, permit) = frame.into_parts();
     Ok(WorkerItem::Video {
         tile,
         rotation,
         width: header.width,
         height: header.height,
-        rgba,
+        rgba: Pixels {
+            bytes,
+            _permit: permit,
+        },
     })
 }
 
@@ -1470,6 +1552,61 @@ mod tests {
         }
     }
 
+    /// GIVEN three full device lists with the longest IDs and names
+    /// WHEN the reply is built
+    /// THEN it fits one message, keeps the most devices that fit, and
+    /// small lists are unchanged.
+    #[test]
+    fn given_three_full_device_lists_when_built_then_the_reply_fits() {
+        let full = |prefix: char| -> Vec<MediaDevice> {
+            (0..MAX_DEVICES)
+                .map(|n| {
+                    let id = format!("{prefix}{n:02}").repeat(MAX_DEVICE_ID_BYTES / 3);
+                    device(&id, &"n".repeat(MAX_DEVICE_NAME_BYTES))
+                })
+                .collect()
+        };
+        let unfitted = FromWorker::Devices {
+            recording: full('r'),
+            playout: full('p'),
+            cameras: full('c'),
+        };
+        assert!(unfitted.encode().len() > MAX_MESSAGE_BYTES);
+        let fitted = FromWorker::devices(full('r'), full('p'), full('c'));
+        let encoded = fitted.encode();
+        assert!(encoded.len() <= MAX_MESSAGE_BYTES);
+        assert!(write_message(&mut Vec::new(), &fitted).is_ok());
+        assert_eq!(FromWorker::decode(&encoded), Ok(fitted.clone()));
+        let FromWorker::Devices {
+            recording,
+            playout,
+            cameras,
+        } = fitted
+        else {
+            panic!("not a device list");
+        };
+        // Lists shrink evenly, and one more device would not fit.
+        let lens = [recording.len(), playout.len(), cameras.len()];
+        assert!(lens.iter().max().unwrap() - lens.iter().min().unwrap() <= 1);
+        assert!(
+            encoded.len() + 4 + MAX_DEVICE_ID_BYTES + MAX_DEVICE_NAME_BYTES > MAX_MESSAGE_BYTES
+        );
+        // Lists that fit are kept as they are.
+        let small = FromWorker::devices(
+            vec![device("r", "R")],
+            vec![device("p", "P")],
+            vec![device("c", "C")],
+        );
+        assert_eq!(
+            small,
+            FromWorker::Devices {
+                recording: vec![device("r", "R")],
+                playout: vec![device("p", "P")],
+                cameras: vec![device("c", "C")],
+            }
+        );
+    }
+
     /// GIVEN device lists or device IDs over their limits, or with a
     /// control character
     /// WHEN the messages are decoded
@@ -1592,7 +1729,12 @@ mod tests {
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
         let result = read_worker_item(&mut reader, &budgets);
-        assert_eq!(budgets.aggregate_used(), 0);
+        // A returned picture stays charged while it lives; nothing else does.
+        let held = match &result {
+            Ok(WorkerItem::Video { rgba, .. }) => rgba.len() as u64,
+            _ => 0,
+        };
+        assert_eq!(budgets.aggregate_used(), held);
         (result, reader.position())
     }
 
@@ -1620,18 +1762,44 @@ mod tests {
     fn given_video_frame_when_written_then_read_back_unchanged() {
         for (tile, rotation, width, height) in [(0, 0, 640, 360), (4, 3, 1, 1), (2, 1, 360, 640)] {
             let (item, _) = read_item(video_wire(tile, rotation, width, height));
+            let Ok(WorkerItem::Video {
+                tile: got_tile,
+                rotation: got_rotation,
+                width: got_width,
+                height: got_height,
+                rgba,
+            }) = item
+            else {
+                panic!("not a picture: {item:?}");
+            };
             assert_eq!(
-                item,
-                Ok(WorkerItem::Video {
-                    tile,
-                    rotation,
-                    width,
-                    height,
-                    rgba: picture(width, height),
-                })
+                (got_tile, got_rotation, got_width, got_height),
+                (tile, rotation, width, height)
             );
+            assert_eq!(rgba.as_slice(), picture(width, height).as_slice());
         }
         assert_eq!(MAX_VIDEO_BYTES, 921_600);
+    }
+
+    /// GIVEN a picture read from the worker
+    /// WHEN it is kept, then dropped
+    /// THEN its bytes stay charged to the budget while it is kept, and the
+    /// charge ends with the picture.
+    #[test]
+    fn given_kept_picture_then_its_reservation_lives_as_long_as_the_bytes() {
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(video_wire(1, 0, 4, 2));
+        let item = read_worker_item(&mut reader, &budgets).expect("a picture");
+        let Some(bytes) = (match &item {
+            WorkerItem::Video { rgba, .. } => Some(rgba.len() as u64),
+            WorkerItem::Message(_) => None,
+        }) else {
+            panic!("not a picture");
+        };
+        assert_eq!(bytes, 4 * 2 * 4);
+        assert_eq!(budgets.aggregate_used(), bytes);
+        drop(item);
+        assert_eq!(budgets.aggregate_used(), 0);
     }
 
     /// GIVEN a plain message

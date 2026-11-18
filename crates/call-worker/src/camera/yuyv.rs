@@ -31,6 +31,18 @@ pub fn size_allowed(width: u32, height: u32) -> bool {
         && width.min(height) <= MAX_SHORT_SIDE
 }
 
+/// Whether a camera may deliver this format at this size: the size is allowed,
+/// YUYV has an even width (its conversion needs it), and NV12 has even sides
+/// (the worker's I420 fitting rejects odd NV12 pictures).
+pub fn format_allowed(format: PixelFormat, width: u32, height: u32) -> bool {
+    size_allowed(width, height)
+        && match format {
+            PixelFormat::Yuyv => width.is_multiple_of(2),
+            PixelFormat::Nv12 => width.is_multiple_of(2) && height.is_multiple_of(2),
+            PixelFormat::I420 => true,
+        }
+}
+
 /// One format a camera offers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Offer {
@@ -45,15 +57,13 @@ pub struct Offer {
 /// (for example a camera that gives only MJPEG, which is not an `Offer`, or
 /// only pictures above 1280x720). Size and speed follow
 /// [`pick_capture_mode`]; on a tie the format that needs no conversion wins.
-/// YUYV needs even widths, so an odd-width YUYV offer is skipped.
+/// YUYV needs even widths and NV12 needs even sides, so other offers of those
+/// formats are skipped (see [`format_allowed`]).
 pub fn choose(offers: &[Offer]) -> Option<usize> {
     let mut allowed: Vec<(usize, &Offer)> = offers
         .iter()
         .enumerate()
-        .filter(|(_, offer)| {
-            size_allowed(offer.width, offer.height)
-                && (offer.format != PixelFormat::Yuyv || offer.width.is_multiple_of(2))
-        })
+        .filter(|(_, offer)| format_allowed(offer.format, offer.width, offer.height))
         .collect();
     // Stable sort: equal formats keep the camera's order.
     allowed.sort_by_key(|(_, offer)| offer.format);
@@ -232,7 +242,34 @@ mod tests {
     #[test]
     fn given_odd_width_yuyv_then_it_is_skipped() {
         assert_eq!(choose(&[offer(PixelFormat::Yuyv, 641, 360, 30)]), None);
-        assert_eq!(choose(&[offer(PixelFormat::Nv12, 641, 360, 30)]), Some(0));
+        assert_eq!(choose(&[offer(PixelFormat::I420, 641, 360, 30)]), Some(0));
+    }
+
+    /// GIVEN NV12 offers with an odd width or height WHEN chosen THEN they
+    /// are skipped, because the worker cannot fit an odd NV12 picture.
+    #[test]
+    fn given_odd_size_nv12_then_it_is_skipped() {
+        assert_eq!(choose(&[offer(PixelFormat::Nv12, 641, 360, 30)]), None);
+        assert_eq!(choose(&[offer(PixelFormat::Nv12, 640, 361, 30)]), None);
+        let offers = [
+            offer(PixelFormat::Nv12, 641, 360, 30),
+            offer(PixelFormat::I420, 642, 360, 30),
+        ];
+        assert_eq!(choose(&offers), Some(1));
+        assert_eq!(choose(&[offer(PixelFormat::Nv12, 640, 360, 30)]), Some(0));
+    }
+
+    /// GIVEN formats and sizes WHEN judged THEN odd NV12 and odd-width YUYV
+    /// fail and the rest pass.
+    #[test]
+    fn given_format_and_size_then_the_policy_judges_both() {
+        assert!(format_allowed(PixelFormat::Nv12, 640, 360));
+        assert!(!format_allowed(PixelFormat::Nv12, 641, 360));
+        assert!(!format_allowed(PixelFormat::Nv12, 640, 361));
+        assert!(format_allowed(PixelFormat::I420, 641, 361));
+        assert!(format_allowed(PixelFormat::Yuyv, 640, 361));
+        assert!(!format_allowed(PixelFormat::Yuyv, 641, 360));
+        assert!(!format_allowed(PixelFormat::Nv12, 1920, 1080));
     }
 
     /// GIVEN a 4x2 YUYV picture WHEN converted THEN the planes hold the luma

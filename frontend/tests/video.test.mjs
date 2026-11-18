@@ -241,7 +241,7 @@ test('GIVEN a tile that disappears WHEN its reply arrives THEN it is dropped and
   assert.deepEqual(shown, [[0, 9]], 'only the tile still wanted shows');
 });
 
-test('GIVEN another device taking a tile WHEN the list changes THEN the number restarts and the old reply is dropped', async () => {
+test('GIVEN another device taking a tile WHEN the old reply arrives last THEN it is dropped and the new picture stays', async () => {
   const gates = [];
   const shown = [];
   const asked = [];
@@ -255,14 +255,14 @@ test('GIVEN another device taking a tile WHEN the list changes THEN the number r
     (tile, next) => shown.push(next.seq)
   );
   fetcher.setTiles([{ tile: 1, key: 'a' }]);
+  fetcher.setTiles([{ tile: 1, key: 'b' }]);
+  assert.equal(gates.length, 2, 'one request for each device');
+  gates[1].resolve(picture(2));
+  await later();
   gates[0].resolve(picture(50));
   await later();
-  fetcher.setTiles([{ tile: 1, key: 'b' }]);
-  gates.at(-1).resolve(picture(2));
-  await later();
-  assert.equal(asked[0], 0);
-  assert.equal(asked.at(-1), 0, 'the new device starts again from 0');
-  assert.deepEqual(shown, [50, 2]);
+  assert.deepEqual(asked, [0, 0], 'the new device starts again from 0');
+  assert.deepEqual(shown, [2], 'the old picture is not shown');
 });
 
 test('GIVEN a stopped fetcher WHEN a reply or a poke arrives THEN nothing is shown or asked', async () => {

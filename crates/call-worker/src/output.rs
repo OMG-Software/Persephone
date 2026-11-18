@@ -279,16 +279,18 @@ mod tests {
             items[1],
             WorkerItem::Message(FromWorker::VideoStopped { tile: 3 })
         );
-        assert_eq!(
-            items[2],
-            WorkerItem::Video {
-                tile: 2,
-                rotation: 1,
-                width: 4,
-                height: 2,
-                rgba: picture(4, 2, 7),
-            }
-        );
+        let WorkerItem::Video {
+            tile,
+            rotation,
+            width,
+            height,
+            rgba,
+        } = &items[2]
+        else {
+            panic!("not a picture");
+        };
+        assert_eq!((*tile, *rotation, *width, *height), (2, 1, 4, 2));
+        assert_eq!(rgba.as_slice(), picture(4, 2, 7).as_slice());
     }
 
     /// GIVEN several pictures for one tile before the writer runs WHEN it runs
@@ -309,7 +311,7 @@ mod tests {
         let WorkerItem::Video { rgba, .. } = &items[0] else {
             panic!("not a picture");
         };
-        assert_eq!(rgba, &picture(2, 2, 50));
+        assert_eq!(rgba.as_slice(), picture(2, 2, 50).as_slice());
     }
 
     /// GIVEN a full control queue WHEN a picture is offered THEN the offer does

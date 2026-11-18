@@ -62,8 +62,18 @@ fn picks_in_capture() -> bool {
 
 /// The longest wait for the camera to open.
 /// macOS waits for the user's answer to the camera permission prompt, which
-/// the backend bounds at 60 seconds (ADR-0049).
-const OPEN_TIMEOUT: Duration = Duration::from_secs(if cfg!(target_os = "macos") { 65 } else { 8 });
+/// the backend bounds at 60 seconds (ADR-0049). The Linux portal backend
+/// waits up to 5 seconds to list cameras (`ROUNDTRIP_TIMEOUT`) and then up to
+/// 6 seconds for the stream to start (`STREAM_START_TIMEOUT`), so Linux
+/// allows 5 + 6 + 2 seconds of margin. Keep this above the sum of those
+/// constants in `linux_portal.rs`.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(if cfg!(target_os = "macos") {
+    65
+} else if cfg!(target_os = "linux") {
+    13
+} else {
+    8
+});
 /// The longest wait for a capture thread to end.
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 /// No camera frame is larger than this on either side, or this many pixels.
@@ -157,11 +167,34 @@ pub struct Capture {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Capture {
-    /// Asks the capture to end and waits for the thread, so the camera is
-    /// released. Returns false when the thread did not end in time; it is then
-    /// left to end on its own and the camera may stay busy until it does.
-    pub fn stop(mut self) -> bool {
-        self.end()
+    /// Asks the capture to end and waits up to `STOP_TIMEOUT` for the thread,
+    /// so the camera is released. Returns `None` when the thread ended. When it
+    /// did not end in time (a blocked read on a stalled camera), the capture
+    /// comes back still running and the camera may stay busy. The caller then
+    /// keeps it and polls it with [`Capture::try_finish`]. The thread is never
+    /// detached silently. Dropping the capture waits once more.
+    pub fn stop(mut self) -> Option<Capture> {
+        if self.end() { None } else { Some(self) }
+    }
+
+    /// Whether the thread has ended, without waiting. Joins it when it has.
+    /// Asks it to end first, so a capture that `stop` returned ends as soon as
+    /// its blocked call returns.
+    pub fn try_finish(&mut self) -> bool {
+        self.stop.store(true, Ordering::Release);
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+        match self.done.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => {
+                self.thread = Some(thread);
+                false
+            }
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = thread.join();
+                true
+            }
+        }
     }
 
     fn end(&mut self) -> bool {
@@ -172,6 +205,8 @@ impl Capture {
         let ended = self.done.recv_timeout(STOP_TIMEOUT) != Err(mpsc::RecvTimeoutError::Timeout);
         if ended {
             let _ = thread.join();
+        } else {
+            self.thread = Some(thread);
         }
         ended
     }
@@ -272,6 +307,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capture whose thread ignores `stop` until `release` is sent.
+    fn stuck_capture() -> (Capture, mpsc::Sender<()>) {
+        let (release, wait) = mpsc::channel::<()>();
+        let (done_tx, done) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _done = DoneSignal(done_tx);
+            let _ = wait.recv();
+        });
+        let capture = Capture {
+            stop: Arc::new(AtomicBool::new(false)),
+            done,
+            thread: Some(thread),
+        };
+        (capture, release)
+    }
+
+    /// GIVEN a capture whose thread ignores stop WHEN stopped THEN it comes
+    /// back still running, and it finishes once the thread returns.
+    #[test]
+    fn given_a_stuck_capture_when_stopped_then_it_comes_back_and_can_finish() {
+        let (capture, release) = stuck_capture();
+        let started = std::time::Instant::now();
+        let mut stalled = capture.stop().expect("the capture is still running");
+        assert!(started.elapsed() >= STOP_TIMEOUT);
+        assert!(!stalled.try_finish());
+        release.send(()).expect("the thread waits");
+        let limit = std::time::Instant::now() + Duration::from_secs(2);
+        while !stalled.try_finish() {
+            assert!(std::time::Instant::now() < limit, "the thread ends");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // A finished capture stays finished and drops at once.
+        assert!(stalled.try_finish());
+        assert!(stalled.stop().is_none());
+    }
+
+    /// GIVEN a capture whose thread ends at once WHEN stopped THEN nothing
+    /// comes back.
+    #[test]
+    fn given_a_capture_that_ends_when_stopped_then_nothing_comes_back() {
+        let (capture, release) = stuck_capture();
+        release.send(()).expect("the thread waits");
+        assert!(capture.stop().is_none());
+    }
 
     /// GIVEN frame sizes WHEN checked THEN only sizes inside the capture
     /// limits pass.

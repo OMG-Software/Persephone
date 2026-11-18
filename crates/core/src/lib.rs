@@ -3262,7 +3262,7 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                         // The picture's bytes are shared with the store, which
                         // is not locked here: only the pipe is.
                         Answer::Video(reply, picture) => {
-                            send_video_reply(&mut *lock(&output), &reply, &picture.rgba)
+                            send_video_reply(&mut *lock(&output), &reply, picture.bytes())
                         }
                         Answer::Later(id, call) => {
                             let output = &output;
@@ -3468,14 +3468,17 @@ mod tests {
 
     /// GIVEN a video event just taken WHEN pictures arrive again THEN the next
     /// video event waits out the gap (about 30 a second), and another event
-    /// does not wait for it.
+    /// does not wait for it. The time of the last video event is set by the
+    /// test, so a slow thread cannot change the result.
     #[test]
     fn given_video_events_then_they_are_spaced_and_do_not_hold_other_events() {
         let core = Core::default();
         core.hub.video_changed();
         assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
-        let taken = Instant::now();
 
+        // The last video event is in the future, so the gap cannot pass
+        // during this step.
+        lock(&core.hub.notifications).video_taken = Some(Instant::now() + Duration::from_secs(60));
         core.hub.video_changed();
         core.hub.calls_changed();
         assert_eq!(
@@ -3485,6 +3488,9 @@ mod tests {
         );
         assert!(lock(&core.hub.notifications).video_changed, "still pending");
 
+        // The last video event is now: the next one waits out the gap.
+        let taken = Instant::now();
+        lock(&core.hub.notifications).video_taken = Some(taken);
         assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
         assert!(
             taken.elapsed() >= VIDEO_EVENT_GAP,

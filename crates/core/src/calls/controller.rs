@@ -1129,6 +1129,10 @@ impl CallController {
         let own_keys = OwnKeys::new(Instant::now()).map_err(|_| CallError::Keys)?;
         let own_identity = participant_identity(&user_id, &device_id);
         let link = setup.link.take().ok_or(CallError::Keys)?;
+        // On the portal path the worker needs the PipeWire remote before its
+        // camera opens. The call task asks the portal first and then turns
+        // the camera on (`Call::start_portal`), so the join starts it off.
+        let portal_camera = uses_portal(&link);
         let join = ToWorker::Join {
             sfu_url: grant.url.to_string(),
             jwt: grant.jwt.clone(),
@@ -1139,7 +1143,7 @@ impl CallController {
             recording_device: scope.devices.recording.clone(),
             playout_device: scope.devices.playout.clone(),
             camera_device: scope.devices.camera.clone(),
-            camera_on: scope.video,
+            camera_on: scope.video && !portal_camera,
         };
         if link.send(join).is_err() {
             setup.link = Some(link);
@@ -1160,6 +1164,8 @@ impl CallController {
             failed,
             handles: std::mem::take(&mut setup.handles),
             tasks: std::mem::take(&mut setup.tasks),
+            camera_wanted: scope.video,
+            portal: None,
         })
     }
 
@@ -1209,14 +1215,18 @@ impl CallController {
         if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
             return Err(CallError::NotInCall);
         }
-        run.commands
-            .try_send(Command::Camera(on))
+        // A queue place is taken first, so a full queue changes nothing. The
+        // pending state is published before the command is queued, so the
+        // task's answer (which may be quick) always comes after it.
+        let permit = run
+            .commands
+            .try_reserve()
             .map_err(|_| CallError::NotInCall)?;
         if !on && let Some(store) = plain(&self.inner.video).clone() {
-            // Stale pictures stop at once, before the task takes the command.
-            store.clear_tile(0);
+            // The own picture stops at once, before the task takes the
+            // command; the next camera-on sync allows it again.
+            store.disable_tile(0);
         }
-        drop(slot);
         let changed = self.inner.state.send_if_modified(|state| {
             let CallState::Active { camera, video, .. } = state else {
                 return false;
@@ -1233,6 +1243,8 @@ impl CallController {
             video.retain(|tile| !tile.own || next == CallCamera::On);
             true
         });
+        permit.send(Command::Camera(on));
+        drop(slot);
         if changed {
             let listener = plain(&self.inner.listener).clone();
             if let Some(listener) = listener {
@@ -1437,6 +1449,34 @@ struct Call {
     failed: mpsc::Receiver<EndReason>,
     handles: Vec<EventHandlerHandle>,
     tasks: JoinSet<()>,
+    /// The user's latest camera request.
+    camera_wanted: bool,
+    /// The camera portal access request in flight (Linux portal path).
+    portal: Option<JoinHandle<PortalRemote>>,
+}
+
+/// The result of a camera portal access request: the PipeWire remote, or
+/// nothing after a refusal or a failure.
+#[cfg(target_os = "linux")]
+type PortalRemote = Option<std::os::fd::OwnedFd>;
+#[cfg(not(target_os = "linux"))]
+type PortalRemote = ();
+
+/// Whether the worker gets its camera through the camera portal (ADR-0049).
+fn uses_portal(link: &CallWorkerLink) -> bool {
+    link.camera_path() == super::worker::CameraPath::Portal
+}
+
+/// Waits for the portal request in `slot`, if any; otherwise it never ends.
+/// The request stays in `slot` when the wait is dropped, so the call loop
+/// can wait for it again.
+async fn portal_done(slot: &mut Option<JoinHandle<PortalRemote>>) -> PortalRemote {
+    let Some(task) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    let result = task.await;
+    *slot = None;
+    result.unwrap_or_default()
 }
 
 /// Frees the slot when the task ends, also after a panic.
@@ -1493,28 +1533,55 @@ async fn run_call(
 }
 
 impl Call {
-    /// On the portal camera path, asks the camera portal for access and sends
-    /// the PipeWire remote to the worker (ADR-0049). The wait for the user
-    /// runs off the runtime threads, up to 60 seconds. Returns false when the
-    /// call was asked to stop meanwhile. Any failure sends nothing: the worker
-    /// finds no remote and the camera stays unavailable. There is no fallback
-    /// to another camera path.
-    #[cfg(target_os = "linux")]
-    async fn send_portal_remote(&self, stop: &mut oneshot::Receiver<()>) -> bool {
-        use crate::platform::linux::camera_portal;
-        use std::os::fd::AsFd;
-        if self.link.camera_path() != super::worker::CameraPath::Portal {
-            return true;
+    /// Turns the camera on or off as the user asked. On the portal path
+    /// (Linux), a camera that is not on or starting first asks the camera
+    /// portal for access; [`Call::portal_finished`] then sends the remote and
+    /// turns the camera on. The request runs off the call loop, which goes on
+    /// with mute, keys and events while the desktop asks the user.
+    fn camera_command(&mut self, inner: &Inner, on: bool) -> Result<(), EndReason> {
+        self.camera_wanted = on;
+        let idle = !matches!(self.view.camera, CallCamera::On | CallCamera::Starting);
+        if on && uses_portal(&self.link) && (idle || self.portal.is_some()) {
+            self.start_portal();
+        } else {
+            self.send_worker(ToWorker::SetCamera { on })?;
         }
-        let task = tokio::task::spawn_blocking(camera_portal::open_remote);
-        let opened = tokio::select! {
-            _ = &mut *stop => return false,
-            joined = task => joined,
-        };
-        if let Ok(Ok(remote)) = opened {
+        if self.view.request_camera(on) == Applied::Changed {
+            self.sync_video();
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
+    /// Starts a camera portal access request unless one is in flight. The
+    /// wait for the user runs off the runtime threads, up to 60 seconds.
+    fn start_portal(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self.portal.is_none() {
+            use crate::platform::linux::camera_portal;
+            self.portal = Some(tokio::task::spawn_blocking(|| {
+                camera_portal::open_remote().ok()
+            }));
+        }
+    }
+
+    /// The portal request ended. If the camera is still wanted, the remote
+    /// goes to the worker before the camera starts (ADR-0049). A refusal or
+    /// failure sends no remote: the worker then reports the camera
+    /// unavailable, and no other camera path is tried. If the camera was
+    /// turned off meanwhile, the remote is closed unused.
+    fn portal_finished(&mut self, remote: PortalRemote) -> Result<(), EndReason> {
+        if !self.camera_wanted {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = remote {
+            use std::os::fd::AsFd;
             let _ = self.link.send_camera_handle(remote.as_fd());
         }
-        true
+        #[cfg(not(target_os = "linux"))]
+        let () = remote;
+        self.send_worker(ToWorker::SetCamera { on: true })
     }
 
     fn send_worker(&self, message: ToWorker) -> Result<(), EndReason> {
@@ -1604,37 +1671,32 @@ impl Call {
         let mut pending_own: Option<(Instant, FrameKeyMsg)> = None;
         let mut seen_self = false;
         self.start_keys(inner).await?;
+        // A video join on the portal path asks for the camera now (the join
+        // sent `camera_on: false`).
+        if self.camera_wanted && uses_portal(&self.link) {
+            self.start_portal();
+        }
         loop {
             let due = pending_own.as_ref().map(|(at, _)| *at);
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
                 command = commands.recv() => match command {
                     Some(Command::Mute(muted)) => self.send_worker(ToWorker::SetMuted { muted })?,
-                    Some(Command::Camera(on)) => {
-                        // Portal path (Linux): the remote goes to the worker
-                        // before the camera starts. A refusal sends nothing,
-                        // and the worker then reports the camera unavailable.
-                        #[cfg(target_os = "linux")]
-                        if on && !self.send_portal_remote(stop).await {
-                            return Ok(());
-                        }
-                        self.send_worker(ToWorker::SetCamera { on })?;
-                        if self.view.request_camera(on) == Applied::Changed {
-                            self.sync_video();
-                            self.publish(inner);
-                        }
-                    }
+                    Some(Command::Camera(on)) => self.camera_command(inner, on)?,
                     None => return Ok(()),
                 },
+                remote = portal_done(&mut self.portal) => self.portal_finished(remote)?,
                 event = self.link.events.recv() => {
                     let Some(event) = event else {
                         return Err(EndReason::WorkerStopped);
                     };
-                    // A tile whose stream starts or stops starts empty.
+                    // A tile whose stream starts or stops starts empty. The
+                    // read thread counted the change; pictures of the tile
+                    // are kept again once every counted change is applied.
                     if let FromWorker::VideoStarted { tile, .. }
                     | FromWorker::VideoStopped { tile } = &event
                     {
-                        self.link.video().clear_tile(*tile);
+                        self.link.video().stream_applied(*tile);
                     }
                     match self.view.apply(&event) {
                         Applied::Same => {}
@@ -2311,6 +2373,8 @@ mod tests {
             failed,
             handles: Vec::new(),
             tasks: JoinSet::new(),
+            camera_wanted: false,
+            portal: None,
         };
         let (stop, stop_rx) = oneshot::channel();
         let (commands, command_rx) = mpsc::channel(1);
@@ -2621,11 +2685,38 @@ mod tests {
         assert_eq!(calls.set_camera(false), Ok(()));
         assert_eq!(commands.try_recv().ok(), Some(Command::Camera(false)));
         assert!(calls.video_picture(0, 0).is_none(), "the picture is gone");
+        assert!(
+            !store.insert(0, 0, 2, 2, vec![2; 16]),
+            "a late own picture is refused before the task takes the command"
+        );
+        assert!(calls.video_picture(0, 0).is_none());
         let CallState::Active { camera, video, .. } = calls.state() else {
             panic!("active");
         };
         assert_eq!(camera, CallCamera::Off);
         assert!(video.is_empty());
+    }
+
+    /// GIVEN a connected call whose command queue is full WHEN the camera is
+    /// turned on or off THEN it is refused, the state does not change, and
+    /// the own picture stays.
+    #[tokio::test]
+    async fn given_a_full_command_queue_then_the_camera_state_does_not_change() {
+        let calls = controller(FakeHost::new(true, None));
+        let (store, _commands, _) = running_call(&calls, active_state());
+        store.sync(true, [false; 4]);
+        assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
+        {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            while run.commands.try_send(Command::Mute(true)).is_ok() {}
+        }
+        assert_eq!(calls.set_camera(true), Err(CallError::NotInCall));
+        assert_eq!(calls.state(), active_state());
+        assert_eq!(calls.set_camera(false), Err(CallError::NotInCall));
+        assert_eq!(calls.state(), active_state());
+        assert!(calls.video_picture(0, 0).is_some(), "the picture stays");
     }
 
     /// GIVEN a picture in the store WHEN the page asks THEN only a newer

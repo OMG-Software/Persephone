@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  CallOperations,
   CallRefresher,
   END_TEXT,
   IDLE_CALL,
@@ -230,4 +231,17 @@ test('GIVEN a call WHEN video tiles exist or not THEN the grid shows only during
   assert.equal(hasVideo(status({ phase: 'active', video: [tile] })), true);
   assert.equal(hasVideo(status({ phase: 'joining', video: [tile] })), true);
   assert.equal(hasVideo(status({ phase: 'ended', video: [tile] })), false);
+});
+
+test('GIVEN a camera request pending WHEN leave starts and finishes THEN the late camera reply is not current', () => {
+  const operations = new CallOperations();
+  const camera = operations.begin();
+  const leave = operations.begin();
+  assert.equal(operations.isCurrent(leave), true);
+  assert.equal(operations.isCurrent(camera), false, 'the late camera reply is ignored');
+});
+
+test('GIVEN one operation WHEN no later one starts THEN its reply is current', () => {
+  const operations = new CallOperations();
+  assert.equal(operations.isCurrent(operations.begin()), true);
 });

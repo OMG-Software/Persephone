@@ -243,9 +243,13 @@ pub fn open_remote() -> Result<OwnedFd, CameraError> {
         Err(error) => Err(error),
     };
     if granted.is_err() {
-        // End the request and the wait. Closing the connection ends the
-        // waiting thread, which would otherwise stay until the response.
-        let _ = connection.call_method(Some(PORTAL), path.as_str(), Some(REQUEST), "Close", &());
+        // End the request and the wait. `Close` waits for no reply: after a
+        // timeout the portal may not answer, and a reply wait would add the
+        // bus's own method timeout. Closing the connection ends the waiting
+        // thread, which would otherwise stay until the response.
+        if let Ok(close) = close_message(path.as_str()) {
+            let _ = connection.send(&close);
+        }
         let _ = connection.clone().close();
     }
     // The waiting thread ends with the connection or with the response; it is
@@ -294,6 +298,16 @@ fn failure(error: &zbus::Error) -> CameraError {
 }
 
 /// Waits for the `Response` message. Success only for code 0.
+/// The `Close` call of the request at `path`, marked so that the portal sends
+/// no reply and nothing waits for one.
+fn close_message(path: &str) -> zbus::Result<zbus::Message> {
+    zbus::Message::method_call(path, "Close")?
+        .destination(PORTAL)?
+        .interface(REQUEST)?
+        .with_flags(zbus::message::Flags::NoReplyExpected)?
+        .build(&())
+}
+
 fn wait_for_response(receiver: &mpsc::Receiver<Option<zbus::Message>>) -> Result<(), CameraError> {
     let message = match receiver.recv_timeout(ACCESS_TIMEOUT) {
         Ok(Some(message)) => message,
@@ -395,6 +409,25 @@ mod tests {
         assert_eq!(body.signature().to_string(), "(a{sv})");
         let empty = (HashMap::<&str, Value<'_>>::new(),);
         assert_eq!(empty.signature().to_string(), "(a{sv})");
+    }
+
+    /// GIVEN a request path WHEN its `Close` call is built THEN it goes to
+    /// the portal's request interface and expects no reply.
+    #[test]
+    fn given_a_request_path_then_close_expects_no_reply() {
+        let path = "/org/freedesktop/portal/desktop/request/1_1/persephone_x";
+        let message = close_message(path).expect("a message");
+        let header = message.header();
+        assert!(
+            header
+                .primary()
+                .flags()
+                .contains(zbus::message::Flags::NoReplyExpected)
+        );
+        assert_eq!(header.member().map(|m| m.as_str()), Some("Close"));
+        assert_eq!(header.interface().map(|i| i.as_str()), Some(REQUEST));
+        assert_eq!(header.destination().map(|d| d.as_str()), Some(PORTAL));
+        assert_eq!(header.path().map(|p| p.as_str()), Some(path));
     }
 
     /// GIVEN response codes THEN only 0 is a grant; a cancel, an end and an

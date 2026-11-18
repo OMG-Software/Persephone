@@ -14,7 +14,8 @@
     callButton,
     hasVideo,
     inCall,
-    videoCallButton
+    videoCallButton,
+    CallOperations
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
@@ -745,6 +746,7 @@
   let callNames = $state<ReadonlyMap<string, string>>(new Map());
   let readinessRequest = 0;
   let callNamesFor: string | null = null;
+  const callOperations = new CallOperations();
   const callRefresher = new CallRefresher(callStatus, (next) => {
     callState = next;
     if (next.phase !== 'ended') callDismissed = false;
@@ -823,9 +825,10 @@
     const generation = sessionGeneration;
     callPending = true;
     callJoinText = null;
+    const operation = callOperations.begin();
     try {
       const reply = await callJoin(roomId, video);
-      if (generation !== sessionGeneration) return;
+      if (generation !== sessionGeneration || !callOperations.isCurrent(operation)) return;
       callJoinText = reply.joinError === null ? null : JOIN_ERROR_TEXT[reply.joinError];
       callState = reply;
       if (reply.phase !== 'ended') callDismissed = false;
@@ -842,9 +845,10 @@
   async function toggleMute() {
     const generation = sessionGeneration;
     callBusy = true;
+    const operation = callOperations.begin();
     try {
       const reply = await callMute(!callState.muted);
-      if (generation === sessionGeneration) callState = reply;
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
     } catch {
       // The next call change shows the real state.
     } finally {
@@ -858,9 +862,10 @@
   async function toggleCamera() {
     const generation = sessionGeneration;
     cameraBusy = true;
+    const operation = callOperations.begin();
     try {
       const reply = await callCamera(callState.camera !== 'on' && callState.camera !== 'starting');
-      if (generation === sessionGeneration) callState = reply;
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
     } catch {
       // The next call change shows the real state.
     } finally {
@@ -873,9 +878,10 @@
 
   async function leaveCall() {
     const generation = sessionGeneration;
+    const operation = callOperations.begin();
     try {
       const reply = await callLeave();
-      if (generation === sessionGeneration) callState = reply;
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
     } catch {
       // The next call change shows the real state.
     } finally {

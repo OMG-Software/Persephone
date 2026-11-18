@@ -87,6 +87,12 @@ The worker applies two stages itself.
     than `AF_UNIX`, `AF_INET`, `AF_INET6` and `AF_NETLINK`. `clone3`
     returns `ENOSYS`, so that the C library falls back to `clone`, whose
     flags the filter can read.
+  * The same filter kills on `tgkill`, `rt_tgsigqueueinfo` and
+    `rt_sigqueueinfo` when the target thread group is not the worker's own
+    process. `tkill` returns `ENOSYS`, because a bare thread ID cannot be
+    tied to the worker. Landlock ABI 3 to 5 has no signal scope, and the
+    worker runs with the core's user ID, so without this rule the worker
+    could signal the core. The rule applies on every ABI.
   * Then the worker reports `Ready`. Its containment bits say which control
     is missing.
 * **Stage 2, after the sound server connection and before
@@ -156,7 +162,8 @@ The worker applies two stages itself.
   (ICE answers arrive on the bound socket); the microphone and
   camera devices; the I/O Kit and Mach services that Core Audio, Core Media
   IO, name resolution, `trustd` and TCC need. The exact service list is
-  measured on a Mac and recorded with the evidence. No file writes, no
+  not yet known. It must be measured on a Mac and recorded with the evidence
+  before this record can be accepted. No file writes, no
   process start, no Apple Events.
 * The broker sends input only when `sandbox_check` reports the worker as
   sandboxed. The worker's own bit says that the call profile, not another

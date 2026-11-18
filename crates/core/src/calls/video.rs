@@ -8,9 +8,12 @@
 //!
 //! Two threads share one [`VideoStore`]:
 //!
-//! * the worker read thread calls [`VideoStore::insert`] for each picture;
-//! * the controller task calls [`VideoStore::sync`], [`VideoStore::clear_tile`]
-//!   and [`VideoStore::close`], and the request loop calls
+//! * the worker read thread calls [`VideoStore::insert`] for each picture
+//!   and [`VideoStore::stream_changed`] for each `VideoStarted` and
+//!   `VideoStopped` it reads;
+//! * the controller task calls [`VideoStore::sync`],
+//!   [`VideoStore::stream_applied`], [`VideoStore::disable_tile`] and
+//!   [`VideoStore::close`], and the request loop calls
 //!   [`VideoStore::newest`].
 //!
 //! The store lock is held only to read or replace small values. Pixel bytes
@@ -22,6 +25,13 @@
 //! tile 0 while the camera is on, tiles 1 to 4 after the worker's
 //! `VideoStarted` for a current participant. [`VideoStore::close`] ends the
 //! store for good: it drops every picture and refuses later ones.
+//!
+//! A tile's stream can change (a freed tile goes to a waiting track) before
+//! the controller applies the change. The read thread counts the stream
+//! changes it reads, the controller counts the ones it applies, and a picture
+//! is kept only when the two counts agree. So a new stream's pixels never
+//! show under the old stream's participant. Pictures do not go through the
+//! controller's queue: they only need the counts to agree.
 
 use persephone_call_protocol::{MAX_VIDEO_PIXELS, MAX_VIDEO_ROTATION, MAX_VIDEO_SIDE, VIDEO_TILES};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,15 +42,38 @@ const TILES: usize = VIDEO_TILES as usize;
 /// Largest picture number: the page reads it as a JavaScript number.
 const MAX_SEQ: u64 = 9_007_199_254_740_991;
 
+/// The bytes of a picture, with any budget reservation that covers them
+/// (the worker reader's [`persephone_call_protocol::Pixels`]).
+pub type Rgba = Arc<dyn AsRef<[u8]> + Send + Sync>;
+
 /// One kept picture. Cloning shares the pixel bytes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Picture {
     /// Rises by one for each kept picture, across all tiles; the first is 1.
     pub seq: u64,
     pub rotation: u8,
     pub width: u32,
     pub height: u32,
-    pub rgba: Arc<Vec<u8>>,
+    pub rgba: Rgba,
+}
+
+impl Picture {
+    /// The RGBA bytes.
+    pub fn bytes(&self) -> &[u8] {
+        (*self.rgba).as_ref()
+    }
+}
+
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Picture")
+            .field("seq", &self.seq)
+            .field("rotation", &self.rotation)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.bytes().len())
+            .finish()
+    }
 }
 
 /// Tells the owner that a picture arrived. It must not block.
@@ -50,6 +83,10 @@ pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 struct State {
     /// Which tiles may keep a picture now.
     allowed: [bool; TILES],
+    /// Stream changes of each tile that the read thread has read.
+    changed: [u64; TILES],
+    /// Stream changes of each tile that the controller has applied.
+    applied: [u64; TILES],
     pictures: [Option<Picture>; TILES],
     seq: u64,
     closed: bool,
@@ -77,25 +114,38 @@ impl VideoStore {
         self.state().notifier = Some(notifier);
     }
 
-    /// Keeps `rgba` as the newest picture of `tile`, if the tile may show and
-    /// the picture is inside the video limits. Returns whether it was kept;
-    /// a refused picture is dropped.
-    pub fn insert(&self, tile: u8, rotation: u8, width: u32, height: u32, rgba: Vec<u8>) -> bool {
+    /// Keeps `rgba` as the newest picture of `tile`, if the tile may show,
+    /// the controller has applied every stream change of the tile, and the
+    /// picture is inside the video limits. Returns whether it was kept; a
+    /// refused picture is dropped.
+    pub fn insert(
+        &self,
+        tile: u8,
+        rotation: u8,
+        width: u32,
+        height: u32,
+        rgba: impl AsRef<[u8]> + Send + Sync + 'static,
+    ) -> bool {
         let pixels = u64::from(width) * u64::from(height);
         if usize::from(tile) >= TILES
             || rotation > MAX_VIDEO_ROTATION
             || !(1..=MAX_VIDEO_SIDE).contains(&width)
             || !(1..=MAX_VIDEO_SIDE).contains(&height)
             || pixels > u64::from(MAX_VIDEO_PIXELS)
-            || u64::try_from(rgba.len()).ok() != Some(pixels * 4)
+            || u64::try_from(rgba.as_ref().len()).ok() != Some(pixels * 4)
         {
             return false;
         }
         // The bytes are wrapped before the lock: only pointers move inside it.
-        let rgba = Arc::new(rgba);
+        let rgba: Rgba = Arc::new(rgba);
         let notifier = {
             let mut state = self.state();
-            if state.closed || !state.allowed[usize::from(tile)] || state.seq >= MAX_SEQ {
+            let index = usize::from(tile);
+            if state.closed
+                || !state.allowed[index]
+                || state.changed[index] != state.applied[index]
+                || state.seq >= MAX_SEQ
+            {
                 return false;
             }
             state.seq += 1;
@@ -142,10 +192,38 @@ impl VideoStore {
         }
     }
 
-    /// Drops the picture of `tile`, as when its stream stops or changes.
-    pub fn clear_tile(&self, tile: u8) {
-        if let Some(slot) = self.state().pictures.get_mut(usize::from(tile)) {
-            *slot = None;
+    /// The read thread read a `VideoStarted` or `VideoStopped` of `tile`. It
+    /// calls this before it passes the event on. Pictures of the tile are
+    /// refused until the controller has applied the change.
+    pub fn stream_changed(&self, tile: u8) {
+        let mut state = self.state();
+        let index = usize::from(tile);
+        if index < TILES {
+            state.changed[index] = state.changed[index].wrapping_add(1);
+            state.pictures[index] = None;
+        }
+    }
+
+    /// The controller applied a `VideoStarted` or `VideoStopped` of `tile`:
+    /// the tile starts empty, and pictures are kept again once every change
+    /// the read thread passed on is applied.
+    pub fn stream_applied(&self, tile: u8) {
+        let mut state = self.state();
+        let index = usize::from(tile);
+        if index < TILES {
+            state.applied[index] = state.applied[index].wrapping_add(1);
+            state.pictures[index] = None;
+        }
+    }
+
+    /// Drops the picture of `tile` and refuses later ones until a
+    /// [`VideoStore::sync`] allows the tile again.
+    pub fn disable_tile(&self, tile: u8) {
+        let mut state = self.state();
+        let index = usize::from(tile);
+        if index < TILES {
+            state.allowed[index] = false;
+            state.pictures[index] = None;
         }
     }
 
@@ -201,7 +279,7 @@ mod tests {
         assert!(store.insert(1, 3, 4, 2, rgba(4, 2, 2)));
         assert!(store.insert(0, 1, 2, 2, rgba(2, 2, 3)));
         let own = store.newest(0, 0).expect("own picture");
-        assert_eq!((own.seq, own.rotation, own.rgba[0]), (3, 1, 3));
+        assert_eq!((own.seq, own.rotation, own.bytes()[0]), (3, 1, 3));
         let remote = store.newest(1, 0).expect("remote picture");
         assert_eq!((remote.seq, remote.width, remote.height), (2, 4, 2));
         assert!(store.newest(0, 3).is_none(), "nothing newer than 3");
@@ -232,7 +310,7 @@ mod tests {
             );
         }
         let kept = store.newest(1, 0).expect("the first picture stays");
-        assert_eq!((kept.seq, kept.rgba[0]), (1, 7));
+        assert_eq!((kept.seq, kept.bytes()[0]), (1, 7));
         let largest = store.insert(1, 0, 640, 360, rgba(640, 360, 1));
         assert!(largest, "the largest allowed picture is kept");
     }
@@ -253,17 +331,61 @@ mod tests {
         assert_eq!(store.kept(), 1);
     }
 
-    /// GIVEN a stored picture WHEN its tile is cleared THEN it goes, the tile
-    /// still accepts the next picture, and the numbers keep rising.
+    /// GIVEN a stored picture WHEN its stream changes and the controller
+    /// applies the change THEN it goes, the tile accepts the next picture,
+    /// and the numbers keep rising; a tile out of range changes nothing.
     #[test]
-    fn given_a_cleared_tile_then_it_accepts_later_pictures_with_a_higher_number() {
+    fn given_an_applied_stream_change_then_the_tile_accepts_later_pictures() {
         let store = open_store();
         assert!(store.insert(3, 0, 2, 2, rgba(2, 2, 1)));
-        store.clear_tile(3);
-        store.clear_tile(9);
+        store.stream_changed(3);
+        store.stream_changed(9);
+        store.stream_applied(9);
         assert!(store.newest(3, 0).is_none());
+        store.stream_applied(3);
         assert!(store.insert(3, 0, 2, 2, rgba(2, 2, 1)));
         assert_eq!(store.newest(3, 0).unwrap().seq, 2);
+    }
+
+    /// GIVEN tile 1 shows stream A WHEN the read thread reads that A stopped
+    /// and B started, and B's pictures arrive before the controller applies
+    /// both changes THEN B's pictures are refused; after the second change
+    /// is applied they are kept. Other tiles are not affected.
+    #[test]
+    fn given_unapplied_stream_change_then_new_pictures_wait_for_the_controller() {
+        let store = open_store();
+        assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 1)));
+        store.stream_changed(1); // VideoStopped (A)
+        store.stream_changed(1); // VideoStarted (B)
+        assert!(store.newest(1, 0).is_none(), "A's picture goes at once");
+        assert!(!store.insert(1, 0, 2, 2, rgba(2, 2, 2)), "B waits");
+        assert!(
+            store.insert(2, 0, 2, 2, rgba(2, 2, 3)),
+            "tile 2 is not affected"
+        );
+        store.stream_applied(1);
+        assert!(
+            !store.insert(1, 0, 2, 2, rgba(2, 2, 2)),
+            "one change is left"
+        );
+        store.stream_applied(1);
+        assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 2)));
+        assert_eq!(store.newest(1, 0).unwrap().bytes()[0], 2);
+    }
+
+    /// GIVEN a picture on the own tile WHEN the tile is disabled THEN it goes
+    /// and later pictures are refused until a sync allows the tile again.
+    #[test]
+    fn given_a_disabled_tile_then_pictures_wait_for_the_next_sync() {
+        let store = open_store();
+        assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
+        store.disable_tile(0);
+        store.disable_tile(9);
+        assert!(store.newest(0, 0).is_none());
+        assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 2)));
+        assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 2)));
+        store.sync(true, [true; 4]);
+        assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 3)));
     }
 
     /// GIVEN a closed store WHEN pictures arrive or tiles sync THEN nothing
@@ -319,7 +441,7 @@ mod tests {
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         let held = store.newest(0, 0).unwrap();
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 2)));
-        assert_eq!(held.rgba[0], 1);
-        assert_eq!(store.newest(0, 0).unwrap().rgba[0], 2);
+        assert_eq!(held.bytes()[0], 1);
+        assert_eq!(store.newest(0, 0).unwrap().bytes()[0], 2);
     }
 }

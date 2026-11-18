@@ -334,27 +334,57 @@ mod linux {
             assert!(channel.take().is_none());
         }
 
+        /// A non-blocking pipe: the read end and the write end.
+        fn pipe() -> (OwnedFd, OwnedFd) {
+            let mut ends: [libc::c_int; 2] = [0; 2];
+            // SAFETY: `ends` has room for the two descriptors.
+            let made =
+                unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+            assert_eq!(made, 0);
+            // SAFETY: `pipe2` returned two new descriptors that nothing else owns.
+            unsafe {
+                (
+                    std::os::fd::FromRawFd::from_raw_fd(ends[0]),
+                    std::os::fd::FromRawFd::from_raw_fd(ends[1]),
+                )
+            }
+        }
+
+        /// Reads one byte from a non-blocking descriptor: the raw result of
+        /// `read` and the error number.
+        fn read_one(fd: &OwnedFd) -> (isize, i32) {
+            let mut byte = 0_u8;
+            // SAFETY: the buffer is one byte long.
+            let n = unsafe { libc::read(fd.as_raw_fd(), (&raw mut byte).cast(), 1) };
+            (
+                n,
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+            )
+        }
+
         /// GIVEN two handles before a take WHEN taken THEN only the newer
         /// one is kept and the older one is closed.
         #[test]
         fn given_two_handles_then_the_older_is_closed() {
             let (channel, core) = channel();
-            let (first, second) = (open_file(), open_file());
-            send(&core, b"x", &[first.as_raw_fd()]);
-            // Read the first by hand so its number is known.
+            let (reader, writer) = pipe();
+            send(&core, b"x", &[writer.as_raw_fd()]);
+            // The test gives up its own copy: only the channel holds the write end.
+            drop(writer);
+            // Read the first by hand so it is pending.
             assert!(channel.poll());
-            let older = channel
-                .pending
-                .lock()
-                .unwrap()
-                .take()
-                .expect("first pending");
-            let older_number = older.as_raw_fd();
-            channel.pending.lock().unwrap().put(older);
+            let (n, error) = read_one(&reader);
+            assert_eq!(n, -1);
+            assert_eq!(error, libc::EAGAIN, "the write end is still open");
+            let second = open_file();
             send(&core, b"x", &[second.as_raw_fd()]);
             let newer = channel.take().expect("newer handle");
-            assert_ne!(newer.as_raw_fd(), older_number);
-            assert!(!is_open(older_number), "the older descriptor is closed");
+            let (n, _) = read_one(&reader);
+            assert_eq!(
+                n, 0,
+                "the older descriptor is closed, so the pipe is at EOF"
+            );
+            assert!(is_open(newer.as_raw_fd()));
             assert!(channel.take().is_none());
         }
 

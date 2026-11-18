@@ -2210,6 +2210,7 @@ pub struct CallDevices {
     pub cameras: Vec<CallDevice>,
     pub selected_recording: Option<String>,
     pub selected_playout: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub selected_camera: Option<String>,
     pub unreadable: bool,
 }
@@ -2247,6 +2248,7 @@ pub struct CallParticipantRef {
 pub struct CallVideoTile {
     /// 0 to 4.
     pub tile: u8,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub participant: Option<CallParticipantRef>,
     pub own: bool,
 }

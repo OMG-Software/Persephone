@@ -186,6 +186,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         publication: &publication,
         camera_device,
         camera: None,
+        stalled: None,
         gate: CameraGate::new(own_index),
         camera_failed: camera_failed_tx,
         open_tx,
@@ -252,11 +253,7 @@ pub async fn list_devices(output: &Output) -> u8 {
         .await
         .unwrap_or_default();
     if output
-        .send(FromWorker::Devices {
-            recording,
-            playout,
-            cameras,
-        })
+        .send(FromWorker::devices(recording, playout, cameras))
         .await
         .is_err()
     {
@@ -314,6 +311,10 @@ struct Call<'a> {
     own_sids: Vec<TrackSid>,
     camera_device: Option<String>,
     camera: Option<LocalCamera>,
+    /// A capture that did not end in time after a stop (a blocked read on a
+    /// stalled camera). Its frames are already revoked. No new camera opens
+    /// while it runs.
+    stalled: Option<camera::Capture>,
     /// Decides what an open request and its completion do. It also holds the
     /// key index every own track encrypts with.
     gate: CameraGate,
@@ -329,6 +330,9 @@ struct LocalCamera {
     generation: u64,
     capture: camera::Capture,
     sid: TrackSid,
+    /// The feed's admission flag. False before a stop, so no picture leaves
+    /// after a blocked read returns.
+    live: Arc<AtomicBool>,
 }
 
 /// One remote video track: the participant's identity and the track's SID.
@@ -378,6 +382,10 @@ impl Call<'_> {
     /// report now: `On` when the camera already runs, `Unavailable` when the
     /// open could not start, nothing while an open is in flight.
     fn begin_camera(&mut self) -> Option<CameraState> {
+        // A capture that did not stop still holds the camera: open no second one.
+        if self.camera.is_none() && self.stalled_running() {
+            return Some(CameraState::Unavailable);
+        }
         let generation = match self.gate.request_on(self.camera.is_some()) {
             OnRequest::AlreadyOn => return Some(CameraState::On),
             OnRequest::Pending => return None,
@@ -430,9 +438,20 @@ impl Call<'_> {
         match (decision, done.result) {
             (Completion::Release, result) => {
                 if let Ok(opened) = result {
-                    stop_capture(opened.capture).await;
+                    self.release_capture(opened.capture).await;
                 }
                 Ok(())
+            }
+            // The capture ended before this completion: it is dead, not on.
+            (Completion::Ended, result) => {
+                if let Ok(opened) = result {
+                    self.release_capture(opened.capture).await;
+                }
+                self.output
+                    .send(FromWorker::Camera {
+                        state: CameraState::Unavailable,
+                    })
+                    .await
             }
             (Completion::Report, Err(state)) => {
                 self.output.send(FromWorker::Camera { state }).await
@@ -471,7 +490,7 @@ impl Call<'_> {
             .await;
         let Ok(publication) = published else {
             self.gate.failed_to_publish();
-            stop_capture(capture).await;
+            self.release_capture(capture).await;
             return CameraState::Unavailable;
         };
         let sid = publication.sid();
@@ -489,18 +508,21 @@ impl Call<'_> {
             generation,
             capture,
             sid,
+            live,
         });
         CameraState::On
     }
 
-    /// Turns the camera off: ends and joins the capture thread (the camera
-    /// light goes off), drops the waiting preview picture and unpublishes the
-    /// track. Returns whether the camera was on.
-    async fn stop_camera(&mut self, unpublish: bool) -> bool {
+    /// Turns the camera off: revokes frame admission, ends and joins the
+    /// capture thread (the camera light goes off), drops the waiting preview
+    /// picture and unpublishes the track. A capture that does not end in time
+    /// is kept in `stalled`; no picture can leave it.
+    async fn stop_camera(&mut self, unpublish: bool) -> CameraStop {
         let Some(camera) = self.camera.take() else {
-            return false;
+            return CameraStop::WasOff;
         };
-        stop_capture(camera.capture).await;
+        camera.live.store(false, Ordering::Release);
+        let released = self.release_capture(camera.capture).await;
         self.output.clear_picture(OWN_TILE);
         self.own_sids.retain(|sid| *sid != camera.sid);
         if unpublish {
@@ -510,7 +532,35 @@ impl Call<'_> {
                 .unpublish_track(&camera.sid)
                 .await;
         }
-        true
+        if released {
+            CameraStop::Released
+        } else {
+            CameraStop::Stalled
+        }
+    }
+
+    /// Stops a capture. One that does not end in time goes to `stalled`.
+    /// Returns whether the capture ended.
+    async fn release_capture(&mut self, capture: camera::Capture) -> bool {
+        let Some(stalled) = stop_capture(capture).await else {
+            return true;
+        };
+        if let Some(older) = self.stalled.replace(stalled) {
+            // Not expected: no camera opens while one is stalled. Drop the older
+            // one off the runtime threads, because its drop waits.
+            let _ = tokio::task::spawn_blocking(move || drop(older)).await;
+        }
+        false
+    }
+
+    /// Whether a stalled capture still runs. Joins one that has ended.
+    fn stalled_running(&mut self) -> bool {
+        if let Some(stalled) = self.stalled.as_mut()
+            && stalled.try_finish()
+        {
+            self.stalled = None;
+        }
+        self.stalled.is_some()
     }
 
     /// Ends every video task before the room closes. A finished open that
@@ -520,10 +570,14 @@ impl Call<'_> {
         open_done.close();
         while let Ok(done) = open_done.try_recv() {
             if let Ok(opened) = done.result {
-                stop_capture(opened.capture).await;
+                self.release_capture(opened.capture).await;
             }
         }
         self.stop_camera(false).await;
+        // The drop of a stalled capture waits up to the stop timeout.
+        if let Some(stalled) = self.stalled.take() {
+            let _ = tokio::task::spawn_blocking(move || drop(stalled)).await;
+        }
         for reader in self.remote.readers.iter_mut().filter_map(Option::take) {
             reader.abort();
             let _ = reader.await;
@@ -537,6 +591,9 @@ impl Call<'_> {
             .as_ref()
             .is_none_or(|camera| camera.generation != generation)
         {
+            // The open for this generation may not have completed yet. The gate
+            // remembers it, so the completion does not publish a dead capture.
+            self.gate.capture_ended(generation);
             return Ok(());
         }
         self.stop_camera(true).await;
@@ -680,11 +737,18 @@ impl Call<'_> {
                 // A pending open is not wanted any more: its result is released.
                 self.gate.request_off();
                 let mut reply = Vec::new();
-                if self.stop_camera(true).await {
+                let stop = self.stop_camera(true).await;
+                if stop != CameraStop::WasOff {
                     reply.push(FromWorker::VideoStopped { tile: OWN_TILE });
                 }
+                // Off only when no capture still holds the camera.
+                let held = stop == CameraStop::Stalled || self.stalled_running();
                 reply.push(FromWorker::Camera {
-                    state: CameraState::Off,
+                    state: if held {
+                        CameraState::Unavailable
+                    } else {
+                        CameraState::Off
+                    },
                 });
                 Ok(reply)
             }
@@ -728,6 +792,17 @@ fn spawn_open<T: Send + 'static>(
         .map(drop)
 }
 
+/// The result of turning the own camera off.
+#[derive(Debug, PartialEq, Eq)]
+enum CameraStop {
+    /// The camera was not on.
+    WasOff,
+    /// The capture ended and the camera is released.
+    Released,
+    /// The capture did not end in time. It is kept and supervised.
+    Stalled,
+}
+
 /// What a `SetCamera { on: true }` does.
 #[derive(Debug, PartialEq, Eq)]
 enum OnRequest {
@@ -748,6 +823,9 @@ enum Completion {
     Report,
     /// Nobody wants it: release a camera that opened, report nothing.
     Release,
+    /// The capture ended before the completion: release it and report
+    /// `Unavailable`.
+    Ended,
 }
 
 /// The I/O-free rules of one camera open: one open at a time, a stale result
@@ -763,6 +841,8 @@ struct CameraGate {
     /// Generation of the open in flight, if any.
     in_flight: Option<u64>,
     wanted: bool,
+    /// The open in flight whose capture already ended by itself.
+    ended_early: Option<u64>,
     own_index: i32,
 }
 
@@ -772,6 +852,7 @@ impl CameraGate {
             generation: 0,
             in_flight: None,
             wanted: false,
+            ended_early: None,
             own_index,
         }
     }
@@ -786,6 +867,7 @@ impl CameraGate {
         }
         self.generation += 1;
         self.in_flight = Some(self.generation);
+        self.ended_early = None;
         OnRequest::Start(self.generation)
     }
 
@@ -800,13 +882,25 @@ impl CameraGate {
             return Completion::Release;
         }
         self.in_flight = None;
+        let ended = self.ended_early.take() == Some(generation);
         if !self.wanted {
             Completion::Release
+        } else if opened && ended {
+            self.wanted = false;
+            Completion::Ended
         } else if opened {
             Completion::Publish
         } else {
             self.wanted = false;
             Completion::Report
+        }
+    }
+
+    /// The capture of `generation` ended by itself. Only the open in flight
+    /// is remembered; any other generation is not affected.
+    fn capture_ended(&mut self, generation: u64) {
+        if self.in_flight == Some(generation) {
+            self.ended_early = Some(generation);
         }
     }
 
@@ -826,8 +920,11 @@ impl CameraGate {
 }
 
 /// Stops a capture off the runtime threads: the join blocks.
-async fn stop_capture(capture: camera::Capture) {
-    let _ = tokio::task::spawn_blocking(move || capture.stop()).await;
+/// Returns the capture when it did not end in time.
+async fn stop_capture(capture: camera::Capture) -> Option<camera::Capture> {
+    tokio::task::spawn_blocking(move || capture.stop())
+        .await
+        .unwrap_or(None)
 }
 
 async fn event_loop(
@@ -1315,6 +1412,50 @@ mod tests {
         assert_eq!(gate.complete(1, false), Completion::Report);
         assert_eq!(gate.request_on(false), OnRequest::Start(2));
         assert_eq!(gate.request_on(true), OnRequest::AlreadyOn);
+    }
+
+    /// GIVEN a capture that ended before its open completed WHEN the open
+    /// completes THEN it is released as ended, not published, and the next
+    /// request starts a new open.
+    #[test]
+    fn given_capture_ended_before_completion_then_it_is_not_published() {
+        let mut gate = CameraGate::new(0);
+        assert_eq!(gate.request_on(false), OnRequest::Start(1));
+        gate.capture_ended(1);
+        assert_eq!(gate.complete(1, true), Completion::Ended);
+        assert_eq!(gate.request_on(false), OnRequest::Start(2));
+        assert_eq!(gate.complete(2, true), Completion::Publish);
+    }
+
+    /// GIVEN an end of another generation or without an open WHEN the open
+    /// completes THEN it is unaffected.
+    #[test]
+    fn given_unrelated_capture_end_then_the_open_is_unaffected() {
+        let mut gate = CameraGate::new(0);
+        gate.capture_ended(1);
+        assert_eq!(gate.request_on(false), OnRequest::Start(1));
+        gate.capture_ended(7);
+        assert_eq!(gate.complete(1, true), Completion::Publish);
+        // After a publish the old generation is no longer in flight.
+        gate.capture_ended(1);
+        gate.request_off();
+        assert_eq!(gate.request_on(false), OnRequest::Start(2));
+        assert_eq!(gate.complete(2, true), Completion::Publish);
+    }
+
+    /// GIVEN a capture that ended early and a camera turned off WHEN the open
+    /// completes THEN it is released quietly, and a failed open still reports
+    /// its own error.
+    #[test]
+    fn given_ended_early_then_off_or_failed_open_keeps_its_rule() {
+        let mut gate = CameraGate::new(0);
+        assert_eq!(gate.request_on(false), OnRequest::Start(1));
+        gate.capture_ended(1);
+        gate.request_off();
+        assert_eq!(gate.complete(1, true), Completion::Release);
+        assert_eq!(gate.request_on(false), OnRequest::Start(2));
+        gate.capture_ended(2);
+        assert_eq!(gate.complete(2, false), Completion::Report);
     }
 
     /// GIVEN a slow open WHEN a command arrives THEN a loop that selects over
