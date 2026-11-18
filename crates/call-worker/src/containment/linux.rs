@@ -584,6 +584,61 @@ fn install_stage1() -> Result<(), ()> {
 mod tests {
     use super::*;
 
+    /// Set in the child run of the signal test.
+    const SIGNAL_PROBE: &str = "PERSEPHONE_SIGNAL_PROBE";
+
+    /// GIVEN the stage 1 filters installed on the running kernel WHEN the
+    /// process signals its own thread, calls `tkill`, then signals its
+    /// parent THEN the own signal works, `tkill` fails with ENOSYS, and the
+    /// signal to the parent kills the process with SIGSYS. The filters run
+    /// in a child process (this test, started again), because they cannot
+    /// be removed.
+    #[test]
+    fn given_stage1_installed_then_only_own_signals_pass() {
+        if std::env::var_os(SIGNAL_PROBE).is_some() {
+            probe_signals();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "given_stage1_installed_then_only_own_signals_pass",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SIGNAL_PROBE, "1")
+            .output()
+            .expect("child run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("own signal: ok"), "{stdout}");
+        assert!(stdout.contains("tkill: ENOSYS"), "{stdout}");
+        assert!(!stdout.contains("parent signal: not killed"), "{stdout}");
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(output.status.signal(), Some(libc::SIGSYS), "{stdout}");
+    }
+
+    /// The child side: installs stage 1 and tries each signal. Signal 0
+    /// checks the target and delivers nothing.
+    fn probe_signals() {
+        use std::io::Write;
+        // SAFETY: prctl with integer arguments only.
+        let no_new_privs = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, NONE, NONE, NONE) };
+        assert_eq!(no_new_privs, 0);
+        install_stage1().expect("stage 1 installs");
+        // SAFETY: getpid, gettid and getppid take no arguments; tgkill and
+        // tkill with signal 0 only check their target.
+        let (pid, tid, parent) = unsafe { (libc::getpid(), libc::gettid(), libc::getppid()) };
+        let own = unsafe { libc::syscall(libc::SYS_tgkill, pid, tid, 0) };
+        println!("own signal: {}", if own == 0 { "ok" } else { "failed" });
+        let tkill = unsafe { libc::syscall(libc::SYS_tkill, tid, 0) };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        let refused = tkill == -1 && errno == Some(libc::ENOSYS);
+        println!("tkill: {}", if refused { "ENOSYS" } else { "allowed" });
+        let _ = std::io::stdout().flush();
+        // SAFETY: as above; the filter kills the process here.
+        unsafe { libc::syscall(libc::SYS_tgkill, parent, parent, 0) };
+        println!("parent signal: not killed");
+    }
+
     /// A fixed process ID for the rule builder.
     const TEST_PID: u32 = 4242;
 

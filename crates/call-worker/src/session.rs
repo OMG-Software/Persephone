@@ -382,8 +382,12 @@ impl Call<'_> {
     /// report now: `On` when the camera already runs, `Unavailable` when the
     /// open could not start, nothing while an open is in flight.
     fn begin_camera(&mut self) -> Option<CameraState> {
-        // A capture that did not stop still holds the camera: open no second one.
-        if self.camera.is_none() && self.stalled_running() {
+        // A capture that did not stop still holds the camera: open no second
+        // one. With no open in flight, any capture thread that still runs (a
+        // stalled stop, or an open that timed out) holds a camera too.
+        if self.camera.is_none()
+            && (self.stalled_running() || (!self.gate.opening() && camera::captures_running()))
+        {
             return Some(CameraState::Unavailable);
         }
         let generation = match self.gate.request_on(self.camera.is_some()) {
@@ -869,6 +873,11 @@ impl CameraGate {
         self.in_flight = Some(self.generation);
         self.ended_early = None;
         OnRequest::Start(self.generation)
+    }
+
+    /// Whether an open is in flight.
+    fn opening(&self) -> bool {
+        self.in_flight.is_some()
     }
 
     /// The camera is not wanted. An open in flight stays and ends stale.

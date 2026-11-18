@@ -83,6 +83,8 @@ pub type Notifier = Arc<dyn Fn() + Send + Sync>;
 struct State {
     /// Which tiles may keep a picture now.
     allowed: [bool; TILES],
+    /// Tiles that no sync may allow until [`VideoStore::unblock_tile`].
+    blocked: [bool; TILES],
     /// Stream changes of each tile that the read thread has read.
     changed: [u64; TILES],
     /// Stream changes of each tile that the controller has applied.
@@ -185,6 +187,7 @@ impl VideoStore {
         }
         let allowed = [own, remote[0], remote[1], remote[2], remote[3]];
         for (tile, allow) in allowed.into_iter().enumerate() {
+            let allow = allow && !state.blocked[tile];
             state.allowed[tile] = allow;
             if !allow {
                 state.pictures[tile] = None;
@@ -216,14 +219,23 @@ impl VideoStore {
         }
     }
 
-    /// Drops the picture of `tile` and refuses later ones until a
-    /// [`VideoStore::sync`] allows the tile again.
+    /// Drops the picture of `tile` and refuses later ones, also across later
+    /// syncs, until [`VideoStore::unblock_tile`]. A sync made from an older
+    /// view (the camera still on) then cannot let a late picture in.
     pub fn disable_tile(&self, tile: u8) {
         let mut state = self.state();
         let index = usize::from(tile);
         if index < TILES {
             state.allowed[index] = false;
+            state.blocked[index] = true;
             state.pictures[index] = None;
+        }
+    }
+
+    /// Lets syncs allow `tile` again. It allows nothing by itself.
+    pub fn unblock_tile(&self, tile: u8) {
+        if let Some(blocked) = self.state().blocked.get_mut(usize::from(tile)) {
+            *blocked = false;
         }
     }
 
@@ -373,10 +385,11 @@ mod tests {
         assert_eq!(store.newest(1, 0).unwrap().bytes()[0], 2);
     }
 
-    /// GIVEN a picture on the own tile WHEN the tile is disabled THEN it goes
-    /// and later pictures are refused until a sync allows the tile again.
+    /// GIVEN a picture on the own tile WHEN the tile is disabled THEN it goes,
+    /// and later pictures are refused, also after a sync that would allow
+    /// the tile, until the tile is unblocked and synced again.
     #[test]
-    fn given_a_disabled_tile_then_pictures_wait_for_the_next_sync() {
+    fn given_a_disabled_tile_then_pictures_wait_for_unblock_and_sync() {
         let store = open_store();
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         store.disable_tile(0);
@@ -384,6 +397,11 @@ mod tests {
         assert!(store.newest(0, 0).is_none());
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 2)));
         assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 2)));
+        store.sync(true, [true; 4]);
+        assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 3)), "still blocked");
+        store.unblock_tile(0);
+        store.unblock_tile(9);
+        assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 3)), "not allowed yet");
         store.sync(true, [true; 4]);
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 3)));
     }

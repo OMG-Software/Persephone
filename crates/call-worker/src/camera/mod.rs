@@ -9,7 +9,7 @@
 //! the camera is released when they return.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -218,14 +218,40 @@ impl Drop for Capture {
     }
 }
 
-/// Sends on drop, so the waiter in [`Capture::stop`] hears of every exit,
-/// including a panic.
+/// Capture threads that have not ended. A [`Capture`] that is dropped while
+/// its thread is still blocked lets go of the thread handle, but the thread
+/// stays counted here until it ends, so the camera is known to be busy.
+static CAPTURE_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether any capture thread still runs, including one whose capture was
+/// dropped while a camera call blocked it. While no capture is open or
+/// opening, a running thread still holds a camera: open no other one.
+pub fn captures_running() -> bool {
+    CAPTURE_THREADS.load(Ordering::Acquire) > 0
+}
+
+/// Counts its capture thread while it lives and sends on drop, so the waiter
+/// in [`Capture::stop`] hears of every exit, including a panic. It is made
+/// before the thread starts and moved into it.
 #[cfg_attr(not(windows), allow(dead_code))]
-struct DoneSignal(mpsc::Sender<()>);
+struct DoneSignal {
+    done: mpsc::Sender<()>,
+    count: &'static AtomicUsize,
+}
+
+impl DoneSignal {
+    fn new(done: mpsc::Sender<()>, count: &'static AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self { done, count }
+    }
+}
 
 impl Drop for DoneSignal {
     fn drop(&mut self) {
-        let _ = self.0.send(());
+        // Uncounted before the waiter hears of it, so a stop that saw the end
+        // never sees the thread as running.
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        let _ = self.done.send(());
     }
 }
 
@@ -279,10 +305,12 @@ where
     let (open_tx, open_rx) = mpsc::channel();
     let thread_stop = stop.clone();
     let id = device_id.to_owned();
+    // Counted from before the thread starts; a failed spawn drops it at once.
+    let signal = DoneSignal::new(done_tx, &CAPTURE_THREADS);
     let thread = std::thread::Builder::new()
         .name("camera".to_owned())
         .spawn(move || {
-            let _done = DoneSignal(done_tx);
+            let _done = signal;
             backend::capture(&id, &thread_stop, open_tx, on_frame, on_end);
         })
         .map_err(|_| CameraState::Unavailable)?;
@@ -308,12 +336,14 @@ where
 mod tests {
     use super::*;
 
-    /// A capture whose thread ignores `stop` until `release` is sent.
-    fn stuck_capture() -> (Capture, mpsc::Sender<()>) {
+    /// A capture whose thread ignores `stop` until `release` is sent. Its
+    /// thread is counted in `count`.
+    fn stuck_capture_counted(count: &'static AtomicUsize) -> (Capture, mpsc::Sender<()>) {
         let (release, wait) = mpsc::channel::<()>();
         let (done_tx, done) = mpsc::channel();
+        let signal = DoneSignal::new(done_tx, count);
         let thread = std::thread::spawn(move || {
-            let _done = DoneSignal(done_tx);
+            let _done = signal;
             let _ = wait.recv();
         });
         let capture = Capture {
@@ -322,6 +352,36 @@ mod tests {
             thread: Some(thread),
         };
         (capture, release)
+    }
+
+    fn stuck_capture() -> (Capture, mpsc::Sender<()>) {
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        stuck_capture_counted(&COUNT)
+    }
+
+    /// GIVEN a capture whose thread is blocked WHEN the capture is dropped
+    /// THEN the thread stays counted as running until it ends.
+    #[test]
+    fn given_a_dropped_stuck_capture_then_its_thread_stays_counted() {
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        let (capture, release) = stuck_capture_counted(&COUNT);
+        assert_eq!(COUNT.load(Ordering::SeqCst), 1);
+        drop(capture);
+        assert_eq!(
+            COUNT.load(Ordering::SeqCst),
+            1,
+            "the blocked thread still counts"
+        );
+        release.send(()).unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while COUNT.load(Ordering::SeqCst) != 0 && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            COUNT.load(Ordering::SeqCst),
+            0,
+            "the ended thread is uncounted"
+        );
     }
 
     /// GIVEN a capture whose thread ignores stop WHEN stopped THEN it comes

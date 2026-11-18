@@ -1540,6 +1540,11 @@ impl Call {
     /// with mute, keys and events while the desktop asks the user.
     fn camera_command(&mut self, inner: &Inner, on: bool) -> Result<(), EndReason> {
         self.camera_wanted = on;
+        if on {
+            // `set_camera(false)` blocked the own tile; this later camera-on
+            // lets the next sync allow it once the camera is on.
+            self.link.video().unblock_tile(0);
+        }
         let idle = !matches!(self.view.camera, CallCamera::On | CallCamera::Starting);
         if on && uses_portal(&self.link) && (idle || self.portal.is_some()) {
             self.start_portal();
@@ -2689,6 +2694,10 @@ mod tests {
             !store.insert(0, 0, 2, 2, vec![2; 16]),
             "a late own picture is refused before the task takes the command"
         );
+        // An unrelated event makes the task sync while its view still has
+        // the camera on: the own tile stays shut.
+        store.sync(true, [false; 4]);
+        assert!(!store.insert(0, 0, 2, 2, vec![3; 16]));
         assert!(calls.video_picture(0, 0).is_none());
         let CallState::Active { camera, video, .. } = calls.state() else {
             panic!("active");

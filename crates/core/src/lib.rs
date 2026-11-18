@@ -3476,9 +3476,10 @@ mod tests {
         core.hub.video_changed();
         assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
 
-        // The last video event is in the future, so the gap cannot pass
-        // during this step.
-        lock(&core.hub.notifications).video_taken = Some(Instant::now() + Duration::from_secs(60));
+        // The last video event is a day ahead, so the gap cannot pass during
+        // this step however slowly the thread runs.
+        lock(&core.hub.notifications).video_taken =
+            Some(Instant::now() + Duration::from_secs(24 * 60 * 60));
         core.hub.video_changed();
         core.hub.calls_changed();
         assert_eq!(
