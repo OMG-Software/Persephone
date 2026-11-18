@@ -232,7 +232,8 @@ mod tests {
     }
 
     /// A host that starts a fake worker. `reply` is what the worker sends;
-    /// `sent` collects what the core sent to it.
+    /// `sent` collects what the core sent to it; `recorded` is set when the
+    /// command queue has closed and `sent` is complete.
     struct Host {
         supported: bool,
         start: Result<(), StartError>,
@@ -240,6 +241,7 @@ mod tests {
         started: Arc<AtomicBool>,
         ended: Arc<AtomicBool>,
         sent: Arc<Mutex<Vec<ToWorker>>>,
+        recorded: Arc<AtomicBool>,
     }
 
     impl Host {
@@ -251,6 +253,7 @@ mod tests {
                 started: Arc::default(),
                 ended: Arc::default(),
                 sent: Arc::default(),
+                recorded: Arc::default(),
             }
         }
     }
@@ -267,10 +270,12 @@ mod tests {
             // A closed queue without an answer ends the wait at once.
             drop(event_tx);
             let sent = self.sent.clone();
+            let recorded = self.recorded.clone();
             std::thread::spawn(move || {
                 while let Some(message) = command_rx.blocking_recv() {
                     sent.lock().unwrap().push(message);
                 }
+                recorded.store(true, Ordering::SeqCst);
             });
             Ok(CallWorkerLink::from_parts(
                 commands,
@@ -441,13 +446,18 @@ mod tests {
         );
         assert!(host.ended.load(Ordering::SeqCst));
         // `finish` queues `Leave`; the fake worker's thread records it later.
-        // Wait for it, so the check below sees every command that was sent.
+        // The link is gone, so the queue is closed: wait until the thread has
+        // drained it, so the check below sees every command that was sent.
         for _ in 0..100 {
-            if !host.sent.lock().unwrap().is_empty() {
+            if host.recorded.load(Ordering::SeqCst) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(
+            host.recorded.load(Ordering::SeqCst),
+            "the recorder drained the closed queue"
+        );
         assert_eq!(
             *host.sent.lock().unwrap(),
             vec![ToWorker::Leave],
