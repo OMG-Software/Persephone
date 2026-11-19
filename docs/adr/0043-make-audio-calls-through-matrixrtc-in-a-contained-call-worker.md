@@ -105,6 +105,15 @@ Proposed option: "a contained call worker".
 * SFU discovery: `discover_rtc_transports()` (the unstable
   `rtc/transports` path, then the `.well-known` `rtc_foci` fallback).
   TURN credentials: `GET /_matrix/client/v3/voip/turnServer`.
+  Amendment, 2026-11-19: Synapse 1.161 and later deprecate
+  `{"type":"livekit","livekit_service_url":U}` in favour of
+  `{"type":"m.livekit","url":U}`. The core accepts both forms in discovery
+  and in other members' `foci_preferred`, and uses the first acceptable
+  entry in the sender's order. The same checks apply to both: `https://`
+  only (loopback `http://` only with the `dev-disposable-servers` feature),
+  no user information, and the length limit. The advertised string is kept
+  byte for byte. The core still writes the legacy form in its own
+  membership, because Element Call's compatibility mode reads that form.
 * SFU token: an OpenID token from the homeserver, sent to the
   transport's `/sfu/get`. The response URL must be `wss://`.
 * Frame keys: a new 32-byte random key for each rotation, with indices
