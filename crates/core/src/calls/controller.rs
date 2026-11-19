@@ -2074,7 +2074,11 @@ impl Call {
         Ok(())
     }
 
-    /// A screen command from the handle, numbered `request`.
+    /// A screen command from the handle, numbered `request`. The page kept
+    /// its screen state while the command was unread; once it is read, the
+    /// page is reconciled with the view, also when the command did not
+    /// change the view (a start of a share the worker already reports `On`).
+    /// `publish` skips an unchanged page.
     fn screen_request(
         &mut self,
         inner: &Inner,
@@ -2083,7 +2087,9 @@ impl Call {
         request: u64,
     ) -> Result<(), EndReason> {
         self.screen_seen_request = request;
-        self.screen_command(inner, on, stops)
+        self.screen_command(inner, on, stops)?;
+        self.publish(inner);
+        Ok(())
     }
 
     /// Starts or stops the screen share as the user asked (ADR-0053). A start
@@ -4871,6 +4877,72 @@ mod tests {
         ));
     }
 
+    /// What `set_screen` does under the control lock: the page shows the
+    /// command (a start keeps `Starting` or `On`) and the command is counted.
+    /// Returns the stop count and the command's number.
+    fn accept_command(control: &Mutex<ScreenControl>, inner: &Inner, on: bool) -> (u64, u64) {
+        let mut control = plain(control);
+        inner.state.send_modify(|state| {
+            if let CallState::Active { screen, .. } = state {
+                *screen = match (on, *screen) {
+                    (true, CallScreen::On | CallScreen::Starting) => *screen,
+                    (true, _) => CallScreen::Starting,
+                    (false, _) => CallScreen::Off,
+                };
+            }
+        });
+        if !on {
+            control.stops += 1;
+        }
+        control.requests += 1;
+        (control.stops, control.requests)
+    }
+
+    /// GIVEN a share starting (the page shows `Starting`) WHEN the handle
+    /// accepts a second start and the worker reports `On` before the task
+    /// reads it THEN the page keeps `Starting`; WHEN the task reads the
+    /// start, which does not change its view (already `On`) THEN the page
+    /// shows `On`.
+    #[tokio::test]
+    async fn given_a_second_start_read_after_on_then_the_page_shows_on() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        let (stops, request) = accept_command(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, request)
+            .unwrap();
+        let grant_dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&grant_dropped)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        assert_eq!(shown(&inner), CallScreen::Starting);
+
+        let (stops, second) = accept_command(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_eq!(shown(&inner), CallScreen::Starting, "the start is unread");
+        fixture
+            .call
+            .screen_request(&inner, true, stops, second)
+            .unwrap();
+        assert_eq!(shown(&inner), CallScreen::On);
+    }
+
     /// GIVEN a running share WHEN the handle accepts a stop and then a start
     /// (the page shows `Starting`) and the task reads only the stop THEN the
     /// stop's publication keeps `Starting`; WHEN the task reads the start
@@ -4883,24 +4955,7 @@ mod tests {
             CallState::Active { screen, .. } => *screen,
             other => panic!("{other:?}"),
         };
-        // What `set_screen` does under the control lock.
-        let accept = |control: &Mutex<ScreenControl>, inner: &Inner, on: bool| {
-            let mut control = plain(control);
-            inner.state.send_modify(|state| {
-                if let CallState::Active { screen, .. } = state {
-                    *screen = if on {
-                        CallScreen::Starting
-                    } else {
-                        CallScreen::Off
-                    };
-                }
-            });
-            if !on {
-                control.stops += 1;
-            }
-            control.requests += 1;
-            (control.stops, control.requests)
-        };
+        let accept = accept_command;
         let (stops, request) = accept(&fixture.call.screen_control, &inner, true);
         fixture
             .call
