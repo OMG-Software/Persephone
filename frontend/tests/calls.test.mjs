@@ -19,6 +19,8 @@ import {
   VIDEO_CALL_LABEL,
   callButton,
   cameraButton,
+  screenButton,
+  SCREEN_TEXT,
   hasVideo,
   videoCallButton,
   deviceChoice,
@@ -202,6 +204,20 @@ test('GIVEN each camera state WHEN the toggle is built THEN it offers to turn of
   for (const failed of ['not_found', 'unavailable']) {
     assert.deepEqual(cameraButton(failed), { label: 'Turn camera on', pressed: false });
   }
+});
+
+test('GIVEN each screen state WHEN the button is built THEN it offers to stop only a share that is on or starting', () => {
+  assert.deepEqual(screenButton('off'), { label: 'Share screen', pressed: false });
+  assert.deepEqual(screenButton('on'), { label: 'Stop sharing', pressed: true });
+  assert.deepEqual(screenButton('starting'), { label: 'Stop sharing', pressed: true });
+  for (const failed of ['not_found', 'unavailable', 'refused']) {
+    assert.deepEqual(screenButton(failed), { label: 'Share screen', pressed: false });
+  }
+  assert.equal(SCREEN_TEXT.off, '');
+  for (const state of ['starting', 'on', 'not_found', 'unavailable', 'refused']) {
+    assert.notEqual(SCREEN_TEXT[state], '', state);
+  }
+  assert.equal(IDLE_CALL.screen, 'off');
 });
 
 test('GIVEN the same room states WHEN both buttons are built THEN the video button follows the call button and only the label differs', () => {

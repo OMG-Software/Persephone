@@ -31,7 +31,8 @@
     | 'mic'
     | 'mic-off'
     | 'video'
-    | 'video-off';
+    | 'video-off'
+    | 'screen';
 </script>
 
 <script lang="ts">
@@ -91,6 +92,9 @@
   {:else if name === 'video'}
     <rect x="3" y="6" width="12" height="12" rx="2" />
     <path d="m15 10 6-3v10l-6-3" />
+  {:else if name === 'screen'}
+    <rect x="3" y="4" width="18" height="12" rx="2" />
+    <path d="M8 20h8M12 16v4" />
   {:else if name === 'video-off'}
     <path d="M10 6h3a2 2 0 0 1 2 2v3l6-4v10M15 15v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2M3 3l18 18" />
   {:else if name === 'chevron-left'}

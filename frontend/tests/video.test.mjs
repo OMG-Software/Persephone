@@ -6,6 +6,10 @@ import {
   BAD_VIDEO,
   VIDEO_PREFIX_BYTES,
   VideoFetcher,
+  SCREEN_TILE,
+  VIDEO_TILES,
+  maxPixels,
+  maxSide,
   parseVideoPicture,
   tileLayout
 } from '../src/video.ts';
@@ -60,29 +64,29 @@ function deferred() {
 }
 
 test('GIVEN an empty body WHEN it is parsed THEN there is no newer picture', () => {
-  assert.equal(parseVideoPicture(new ArrayBuffer(0)), null);
-  assert.equal(parseVideoPicture(new Uint8Array(0)), null);
+  assert.equal(parseVideoPicture(new ArrayBuffer(0), 0), null);
+  assert.equal(parseVideoPicture(new Uint8Array(0), 0), null);
 });
 
 test('GIVEN a whole picture WHEN it is parsed THEN the numbers and exactly its pixels come back', () => {
   const body = raw({ seq: 9007199254740991n, rotation: 3, width: 2, height: 1 });
   for (const input of [body, body.buffer, new DataView(body.buffer)]) {
-    const parsed = parseVideoPicture(input);
+    const parsed = parseVideoPicture(input, 0);
     assert.equal(parsed.seq, Number.MAX_SAFE_INTEGER);
     assert.deepEqual([parsed.rotation, parsed.width, parsed.height], [3, 2, 1]);
     assert.equal(parsed.pixels.length, 8);
     assert.deepEqual([...parsed.pixels], Array(8).fill(7));
   }
   // The largest pictures: 640 by 360, and the same turned.
-  assert.equal(parseVideoPicture(raw({ width: 640, height: 360 })).pixels.length, 640 * 360 * 4);
-  assert.equal(parseVideoPicture(raw({ width: 360, height: 640, rotation: 1 })).height, 640);
+  assert.equal(parseVideoPicture(raw({ width: 640, height: 360 }), 0).pixels.length, 640 * 360 * 4);
+  assert.equal(parseVideoPicture(raw({ width: 360, height: 640, rotation: 1 }), 0).height, 640);
 });
 
 test('GIVEN a picture read from the middle of a larger buffer WHEN it is parsed THEN offsets are kept', () => {
   const body = raw({ width: 1, height: 1 });
   const outer = new Uint8Array(body.length + 10);
   outer.set(body, 6);
-  const parsed = parseVideoPicture(outer.subarray(6, 6 + body.length));
+  const parsed = parseVideoPicture(outer.subarray(6, 6 + body.length), 0);
   assert.equal(parsed.pixels.byteOffset, 6 + VIDEO_PREFIX_BYTES);
   assert.deepEqual([...parsed.pixels], [7, 7, 7, 7]);
 });
@@ -104,11 +108,12 @@ test('GIVEN a body outside the contract WHEN it is parsed THEN it is refused', (
     ['width 641', raw({ width: 641, height: 1 })],
     ['height 641', raw({ width: 1, height: 641 })],
     ['over 230400 pixels', raw({ width: 640, height: 361 })],
+    ['a screen size on a camera tile', raw({ width: 1280, height: 720, length: 8 })],
     ['seq above the safe integers', raw({ ...good, seq: 9007199254740992n })],
     ['seq at the top', raw({ ...good, seq: 0xffffffffffffffffn })]
   ];
   for (const [name, input] of bad) {
-    assert.throws(() => parseVideoPicture(input), (reason) => reason === BAD_VIDEO, name);
+    assert.throws(() => parseVideoPicture(input, 0), (reason) => reason === BAD_VIDEO, name);
   }
 });
 
@@ -397,7 +402,7 @@ test('GIVEN a stopped fetcher WHEN a reply or a poke arrives THEN nothing is sho
   assert.deepEqual(fetcher.active, []);
 });
 
-test('GIVEN tiles outside 0 to 4 or repeated WHEN set THEN they are ignored', async () => {
+test('GIVEN tiles outside 0 to 5 or repeated WHEN set THEN they are ignored', async () => {
   const asked = [];
   const fetcher = new VideoFetcher(
     async (tile) => {
@@ -407,7 +412,7 @@ test('GIVEN tiles outside 0 to 4 or repeated WHEN set THEN they are ignored', as
     () => {}
   );
   fetcher.setTiles([
-    { tile: 5, key: 'x', stream: 0 },
+    { tile: 6, key: 'x', stream: 0 },
     { tile: -1, key: 'x', stream: 0 },
     { tile: 1.5, key: 'x', stream: 0 },
     { tile: 4, key: 'a', stream: 0 },
@@ -464,6 +469,7 @@ test('GIVEN each camera state WHEN the call bar is rendered THEN failures say so
     participants: [],
     ended: null,
     joinError: null,
+    screen: 'off',
     video: []
   };
   const bar = (camera) =>
@@ -475,8 +481,10 @@ test('GIVEN each camera state WHEN the call bar is rendered THEN failures say so
         names: new Map(),
         busy: false,
         cameraBusy: false,
+        screenBusy: false,
         onmute() {},
         oncamera() {},
+        onscreen() {},
         onleave() {},
         ondismiss() {}
       }
@@ -496,4 +504,148 @@ test('GIVEN the video source files WHEN read THEN they use no raw HTML insertion
     const source = await readFile(new URL(`../src/${file}`, import.meta.url), 'utf8');
     assert.doesNotMatch(source, /\{@html\b|\binnerHTML\b/, file);
   }
+});
+
+test('GIVEN the screen tile WHEN pictures are parsed THEN 1280 by 720 passes only there and larger ones are refused first', () => {
+  assert.deepEqual([VIDEO_TILES, SCREEN_TILE], [6, 5]);
+  assert.deepEqual([maxSide(0), maxSide(4), maxSide(5)], [640, 640, 1280]);
+  assert.deepEqual([maxPixels(0), maxPixels(5)], [640 * 360, 1280 * 720]);
+  const full = parseVideoPicture(raw({ width: 1280, height: 720 }), SCREEN_TILE);
+  assert.equal(full.pixels.length, 3686400);
+  assert.equal(parseVideoPicture(raw({ width: 720, height: 1280, rotation: 1 }), SCREEN_TILE).height, 1280);
+  // The size is checked from the prefix, before the pixels are viewed: a
+  // prefix that announces a bigger picture is refused even with a short body.
+  const refused = [
+    ['1281 wide', raw({ width: 1281, height: 1, length: 1281 * 4 })],
+    ['721 high at 1280', raw({ width: 1280, height: 721 })],
+    ['1 by 1281', raw({ width: 1, height: 1281, length: 1281 * 4 })]
+  ];
+  for (const [name, input] of refused) {
+    assert.throws(() => parseVideoPicture(input, SCREEN_TILE), (reason) => reason === BAD_VIDEO, name);
+  }
+  // The same sizes are refused on every camera tile.
+  for (const tile of [0, 1, 2, 3, 4]) {
+    assert.throws(() => parseVideoPicture(raw({ width: 1280, height: 720 }), tile), (reason) => reason === BAD_VIDEO, `tile ${tile}`);
+    assert.throws(() => parseVideoPicture(raw({ width: 641, height: 360 }), tile), (reason) => reason === BAD_VIDEO, `tile ${tile}`);
+  }
+  for (const tile of [6, -1, 1.5, NaN]) {
+    assert.throws(() => parseVideoPicture(raw({ width: 1, height: 1 }), tile), (reason) => reason === BAD_VIDEO, `tile ${tile}`);
+  }
+});
+
+test('GIVEN the screen tile WHEN the fetcher asks THEN it is asked like any other tile', async () => {
+  const asked = [];
+  const fetcher = new VideoFetcher(
+    async (tile) => {
+      asked.push(tile);
+      return null;
+    },
+    () => {}
+  );
+  fetcher.setTiles([{ tile: 5, key: 'a', stream: 1 }]);
+  await later();
+  assert.deepEqual(asked, [5]);
+  assert.deepEqual(fetcher.active, [5]);
+});
+
+test('GIVEN each screen state WHEN the call bar is rendered THEN the button and the note follow the state and nothing names a source', () => {
+  const base = {
+    phase: 'active',
+    roomId: '!r:s',
+    muted: false,
+    participants: [],
+    ended: null,
+    joinError: null,
+    camera: 'off',
+    video: []
+  };
+  const bar = (screen, over = {}) =>
+    render(CallBar, {
+      props: {
+        status: { ...base, screen },
+        dismissed: false,
+        roomName: 'Plans',
+        names: new Map(),
+        busy: false,
+        cameraBusy: false,
+        screenBusy: false,
+        onmute() {},
+        oncamera() {},
+        onscreen() {},
+        onleave() {},
+        ondismiss() {},
+        ...over
+      }
+    }).body;
+  assert.match(bar('off'), /Share screen/);
+  assert.match(bar('starting'), /Stop sharing/);
+  assert.match(bar('starting'), /Starting the screen share/);
+  assert.match(bar('on'), /Stop sharing/);
+  assert.match(bar('on'), /You are sharing your screen/);
+  assert.match(bar('not_found'), /Share screen/);
+  assert.match(bar('not_found'), /not available any more/);
+  assert.match(bar('unavailable'), /Screen sharing is not available here/);
+  assert.match(bar('refused'), /did not allow the screen share/);
+  assert.doesNotMatch(bar('off'), /not available|did not allow|You are sharing/);
+  assert.match(bar('off', { screenBusy: true }), /call-screen[^>]*disabled/);
+  assert.match(bar('refused'), /aria-pressed="false"/);
+  assert.match(bar('on'), /aria-pressed="true"/);
+});
+
+test('GIVEN a participant that shares WHEN the call bar is rendered THEN the mark is plain text, also for a hostile name', () => {
+  const person = (sharing) => ({
+    userId: '@a:s',
+    deviceId: 'D',
+    speaking: false,
+    reachable: true,
+    keyed: true,
+    sharing
+  });
+  const bar = (sharing, name) =>
+    render(CallBar, {
+      props: {
+        status: {
+          phase: 'active',
+          roomId: '!r:s',
+          muted: false,
+          participants: [person(sharing)],
+          ended: null,
+          joinError: null,
+          camera: 'off',
+          screen: 'off',
+          video: []
+        },
+        dismissed: false,
+        roomName: 'Plans',
+        names: new Map([['@a:s', name]]),
+        busy: false,
+        cameraBusy: false,
+        screenBusy: false,
+        onmute() {},
+        oncamera() {},
+        onscreen() {},
+        onleave() {},
+        ondismiss() {}
+      }
+    }).body;
+  assert.match(bar(true, 'Ann'), /is sharing their screen/);
+  assert.doesNotMatch(bar(false, 'Ann'), /is sharing their screen/);
+  const hostile = bar(true, '<img src=x onerror=alert(1)>');
+  assert.doesNotMatch(hostile, /<img/);
+  assert.match(hostile, /&lt;img/);
+});
+
+test('GIVEN the screen tile WHEN the video is rendered THEN it is a canvas labelled as a shared screen with the sharer as text', () => {
+  const tile = {
+    tile: 5,
+    own: false,
+    participant: { userId: '@a:s', deviceId: 'D' },
+    stream: 3
+  };
+  const { body } = render(CallVideo, {
+    props: { tiles: [tile], names: new Map([['@a:s', '<b>Ann</b>']]), ticks: 0 }
+  });
+  assert.match(body, /<canvas/);
+  assert.match(body, /Shared screen/);
+  assert.doesNotMatch(body, /<b>Ann/);
 });

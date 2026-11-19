@@ -10,12 +10,15 @@ import type {
   CallJoinError,
   CallPhase,
   CallReadiness,
+  CallScreen,
   CallStatus,
   CallUnavailable
 } from '../../crates/contracts/generated/contracts';
 
 /** Shown when a camera command fails before the core answers. */
 export const CAMERA_COMMAND_TEXT = 'The camera did not change. Try again.';
+/** Shown when a screen share command fails before the core answers. */
+export const SCREEN_COMMAND_TEXT = 'The screen share did not change. Try again.';
 
 export const UNAVAILABLE_TEXT: Record<CallUnavailable, string> = {
   unsupported_platform: 'Calls are not available on this system yet.',
@@ -79,6 +82,7 @@ export const IDLE_CALL: CallStatus = {
   ended: null,
   joinError: null,
   camera: 'off',
+  screen: 'off',
   video: []
 };
 
@@ -167,6 +171,45 @@ export function cameraButton(camera: CallCamera): CameraButtonView {
   const pressed = camera === 'on' || camera === 'starting';
   return { label: pressed ? CAMERA_OFF_LABEL : CAMERA_ON_LABEL, pressed };
 }
+
+export const SCREEN_ON_LABEL = 'Share screen';
+export const SCREEN_OFF_LABEL = 'Stop sharing';
+export const SCREEN_STARTING_TEXT = 'Starting the screen share…';
+export const SCREEN_SHARING_TEXT = 'You are sharing your screen';
+export const SCREEN_NOT_FOUND_TEXT = 'The chosen screen is not available any more';
+export const SCREEN_UNAVAILABLE_TEXT = 'Screen sharing is not available here';
+export const SCREEN_REFUSED_TEXT = 'Your system did not allow the screen share';
+
+/** The note beside the screen share button; empty when it needs none. */
+export const SCREEN_TEXT: Record<CallScreen, string> = {
+  off: '',
+  starting: SCREEN_STARTING_TEXT,
+  on: SCREEN_SHARING_TEXT,
+  not_found: SCREEN_NOT_FOUND_TEXT,
+  unavailable: SCREEN_UNAVAILABLE_TEXT,
+  refused: SCREEN_REFUSED_TEXT
+};
+
+export type ScreenButtonView = {
+  label: string;
+  // The share runs, or is starting.
+  pressed: boolean;
+};
+
+/**
+ * The screen share button in the call bar. A share that failed (`not_found`,
+ * `unavailable`, `refused`) is off, so the button offers to start it again.
+ * The button never says what is shared: the core and the desktop ask the user.
+ */
+export function screenButton(screen: CallScreen): ScreenButtonView {
+  const pressed = screen === 'on' || screen === 'starting';
+  return { label: pressed ? SCREEN_OFF_LABEL : SCREEN_ON_LABEL, pressed };
+}
+
+/** The mark beside a participant who shares a screen. Plain text. */
+export const SHARING_TEXT = 'is sharing their screen';
+/** The label of the remote screen tile. */
+export const SCREEN_TILE_LABEL = 'Shared screen';
 
 /** The label of the own tile. */
 export const OWN_TILE_LABEL = 'You';

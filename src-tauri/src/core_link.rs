@@ -150,7 +150,8 @@ fn route(waiting: &Mutex<Waiting>, from_core: FromCore, on_event: &EventSink) ->
             (reply.id, Answer::Band(reply.band, band))
         }
         FromCore::Video(VideoPicture { reply, pixels }) => {
-            // Copied out at once, like a band; at most `MAX_CALL_VIDEO_BYTES`.
+            // Copied out at once, like a band; at most the tile's limit (1280 x 720
+            // RGBA on the screen tile, 640 x 360 on the others).
             let video = Video {
                 tile: reply.tile,
                 seq: reply.seq,
@@ -820,7 +821,7 @@ mod tests {
             Err(CoreError::BadReply)
         );
         assert_eq!(
-            core.link.video_frame(5, 0, 0),
+            core.link.video_frame(6, 0, 0),
             Err(CoreError::Core(ErrorCode::InvalidArgument))
         );
         assert_eq!(

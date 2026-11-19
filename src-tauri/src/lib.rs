@@ -638,6 +638,14 @@ async fn call_camera(core: State<'_, CoreLink>, on: bool) -> Result<CallStatus, 
     relay(core.inner(), Call::CallCamera { on }).await
 }
 
+/// Starts or stops the screen share. The page names no screen and no window:
+/// the core shows its own warning or chooser, and the desktop's picker
+/// (ADR-0053). The worker's answer arrives as a call change.
+#[tauri::command]
+async fn call_screen(core: State<'_, CoreLink>, on: bool) -> Result<CallStatus, String> {
+    relay(core.inner(), Call::CallScreen { on }).await
+}
+
 /// The call as the page shows it. Codes, flags and bounded IDs only.
 #[tauri::command]
 async fn call_status(core: State<'_, CoreLink>) -> Result<CallStatus, String> {
@@ -1032,9 +1040,10 @@ async fn load_room_picture(
 pub const MAX_BANDS_IN_FLIGHT: usize = 4;
 
 /// Most `call_video_frame` calls the page may have running at once: one for
-/// each video tile. They are counted apart from the image bands, so a call
-/// does not starve an image and an image does not starve a call. Each holds at
-/// most one picture (`MAX_CALL_VIDEO_BYTES`, 900 KiB) while it runs.
+/// each video tile (five camera tiles and the screen tile). They are counted
+/// apart from the image bands, so a call does not starve an image and an
+/// image does not starve a call. Each holds at most one picture while it
+/// runs: 900 KiB for a camera tile, 3.5 MiB for the screen tile.
 pub const MAX_VIDEO_IN_FLIGHT: usize = CALL_VIDEO_TILES as usize;
 
 /// Counts running `image_band` calls, up to the return of their `Response`.
@@ -1862,6 +1871,7 @@ pub fn configure<R: Runtime>(
             call_leave,
             call_mute,
             call_camera,
+            call_screen,
             call_video_frame,
             call_status,
             set_up_encryption,
@@ -2105,7 +2115,7 @@ mod tests {
     /// THEN it gets no slot, and image bands keep their own slots.
     #[test]
     fn given_video_in_flight_then_only_one_per_tile_runs_and_bands_are_apart() {
-        assert_eq!(MAX_VIDEO_IN_FLIGHT, 5);
+        assert_eq!(MAX_VIDEO_IN_FLIGHT, 6);
         let video = VideoInFlight::default();
         let bands = BandsInFlight::default();
         let slots: Vec<_> = (0..MAX_VIDEO_IN_FLIGHT)

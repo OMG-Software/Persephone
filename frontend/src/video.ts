@@ -6,12 +6,26 @@
 
 /** The raw `call_video_frame` prefix: seq u64, rotation, width, height as u32, all little-endian. */
 export const VIDEO_PREFIX_BYTES = 20;
-/** The longest side of a picture, in pixels. */
+/** The longest side of a camera picture, in pixels. */
 export const MAX_VIDEO_SIDE = 640;
-/** The most pixels in one picture. */
+/** The most pixels in one camera picture. */
 export const MAX_VIDEO_PIXELS = 640 * 360;
-/** Video tiles in a call: tile 0 is the own camera, tiles 1 to 4 are remote. */
-export const VIDEO_TILES = 5;
+/** The longest side of a screen picture, in pixels (ADR-0053). */
+export const MAX_SCREEN_SIDE = 1280;
+/** The most pixels in one screen picture: 1280 by 720. */
+export const MAX_SCREEN_PIXELS = 1280 * 720;
+/**
+ * Video tiles in a call: tile 0 is the own camera, tiles 1 to 4 are remote
+ * cameras and tile 5 is the remote screen share.
+ */
+export const VIDEO_TILES = 6;
+/** The tile of the remote screen share. */
+export const SCREEN_TILE = 5;
+
+/** The longest side of a picture on this tile. */
+export const maxSide = (tile: number) => (tile === SCREEN_TILE ? MAX_SCREEN_SIDE : MAX_VIDEO_SIDE);
+/** The most pixels in a picture on this tile. */
+export const maxPixels = (tile: number) => (tile === SCREEN_TILE ? MAX_SCREEN_PIXELS : MAX_VIDEO_PIXELS);
 /** The largest rotation: quarter turns clockwise. */
 export const MAX_VIDEO_ROTATION = 3;
 
@@ -26,15 +40,19 @@ export type VideoPicture = {
   pixels: Uint8ClampedArray<ArrayBuffer>;
 };
 
-const isSide = (value: number) => Number.isInteger(value) && value >= 1 && value <= MAX_VIDEO_SIDE;
+const isSide = (value: number, tile: number) =>
+  Number.isInteger(value) && value >= 1 && value <= maxSide(tile);
 
 /**
- * Reads one raw `call_video_frame` response. An empty body means no newer
- * picture and gives null. Anything else must be exactly the prefix and
- * `width * height * 4` pixels inside the limits, with a rotation of 0 to 3 and
- * a picture number JavaScript holds exactly; otherwise this throws `BAD_VIDEO`.
+ * Reads one raw `call_video_frame` response for `tile`. An empty body means no
+ * newer picture and gives null. Anything else must be exactly the prefix and
+ * `width * height * 4` pixels inside the limits of that tile (640 by 360 for a
+ * camera, 1280 by 720 for the screen), checked before the pixels are viewed,
+ * with a rotation of 0 to 3 and a picture number JavaScript holds exactly;
+ * otherwise this throws `BAD_VIDEO`.
  */
-export function parseVideoPicture(raw: unknown): VideoPicture | null {
+export function parseVideoPicture(raw: unknown, tile: number): VideoPicture | null {
+  if (!Number.isInteger(tile) || tile < 0 || tile >= VIDEO_TILES) throw BAD_VIDEO;
   let bytes: Uint8Array;
   if (raw instanceof ArrayBuffer) {
     bytes = new Uint8Array(raw);
@@ -51,8 +69,8 @@ export function parseVideoPicture(raw: unknown): VideoPicture | null {
   const width = prefix.getUint32(12, true);
   const height = prefix.getUint32(16, true);
   if (seq > BigInt(Number.MAX_SAFE_INTEGER)) throw BAD_VIDEO;
-  if (rotation > MAX_VIDEO_ROTATION || !isSide(width) || !isSide(height)) throw BAD_VIDEO;
-  if (width * height > MAX_VIDEO_PIXELS) throw BAD_VIDEO;
+  if (rotation > MAX_VIDEO_ROTATION || !isSide(width, tile) || !isSide(height, tile)) throw BAD_VIDEO;
+  if (width * height > maxPixels(tile)) throw BAD_VIDEO;
   const length = width * height * 4;
   if (bytes.byteLength !== VIDEO_PREFIX_BYTES + length) throw BAD_VIDEO;
   // The buffer is an ArrayBuffer here: the response is never shared memory.
@@ -117,7 +135,7 @@ export class VideoFetcher {
   }
 
   /**
-   * Replaces the active tiles. Tiles outside 0 to 4, repeated tiles, and
+   * Replaces the active tiles. Tiles outside 0 to 5, repeated tiles, and
    * stream numbers that are not safe non-negative integers are ignored.
    */
   setTiles(tiles: readonly TileRef[]): void {

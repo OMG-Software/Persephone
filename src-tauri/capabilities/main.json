@@ -42,6 +42,7 @@
     "allow-call-leave",
     "allow-call-mute",
     "allow-call-camera",
+    "allow-call-screen",
     "allow-call-video-frame",
     "allow-call-status",
     "allow-set-up-encryption",

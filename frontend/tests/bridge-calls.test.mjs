@@ -193,6 +193,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.callJoin('!r:s', true), 'call_join', { roomId: '!r:s', video: true }],
     [() => bridge.callCamera(true), 'call_camera', { on: true }],
     [() => bridge.callCamera(false), 'call_camera', { on: false }],
+    [() => bridge.callScreen(true), 'call_screen', { on: true }],
+    [() => bridge.callScreen(false), 'call_screen', { on: false }],
     [() => bridge.callLeave(), 'call_leave', {}],
     [() => bridge.callMute(true), 'call_mute', { muted: true }],
     [() => bridge.callMute(false), 'call_mute', { muted: false }],
@@ -389,6 +391,9 @@ test('GIVEN the video frame call WHEN the host answers THEN an empty body is no 
   assert.ok(registered.has('call_video_frame') && registered.has('call_camera'));
   assert.deepEqual(hostArguments.get('call_video_frame'), ['after', 'stream', 'tile']);
   assert.deepEqual(hostArguments.get('call_camera'), ['on']);
+  // The page names no screen: the screen command takes the flag and nothing else.
+  assert.ok(registered.has('call_screen'));
+  assert.deepEqual(hostArguments.get('call_screen'), ['on']);
   assert.deepEqual(hostArguments.get('call_join'), ['roomId', 'video']);
   assert.deepEqual(hostArguments.get('set_call_devices'), ['camera', 'playout', 'recording']);
 
