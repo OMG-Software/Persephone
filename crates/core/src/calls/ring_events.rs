@@ -34,6 +34,9 @@ pub trait Env: Send + Sync {
     /// `Some(names)` while desktop notifications are on: whether they may
     /// name the room and the caller (ADR-0022).
     fn toast(&self) -> Option<bool>;
+    /// The generation of the open session, or `None` while it is not open.
+    /// A lock advances it, so a ring handled across a lock is dropped.
+    fn open_generation(&self) -> Option<u64>;
 }
 
 #[derive(Deserialize)]
@@ -95,6 +98,10 @@ pub fn register(client: &Client, env: Weak<dyn Env>) -> [EventHandlerHandle; 2] 
 
 /// A ring event: the checks, then the ring and its one notification.
 async fn ring_arrived(env: &dyn Env, room: &Room, event: Envelope) {
+    let Some(generation) = env.open_generation() else {
+        return;
+    };
+    let still_open = || env.open_generation() == Some(generation);
     let Some(listener) = env.listener() else {
         return;
     };
@@ -129,16 +136,24 @@ async fn ring_arrived(env: &dyn Env, room: &Room, event: Envelope) {
             // Unreadable ignore state refuses the ring.
             Err(_) => true,
         },
-        in_call: match read_members(room, now).await {
+        // A fresh time: the lookups above may have outlived a membership.
+        in_call: match read_members(room, now_ms()).await {
             Ok(members) => members.iter().any(|m| m.user_id == ring.sender),
             Err(_) => false,
         },
     };
-    if confirm(late).is_err() {
+    if confirm(late).is_err() || !still_open() {
         return;
     }
     let sender = ring.sender.clone();
+    let event_id = ring.event_id.clone();
     if rings.admit(ring, now_ms()).is_err() {
+        return;
+    }
+    // A lock between the check and the admission has cleared the rings
+    // already, or clears them next; either way this ring must not stay.
+    if !still_open() {
+        rings.retain(|ring| ring.event_id != event_id);
         return;
     }
     listener.rings_changed();
@@ -151,7 +166,9 @@ async fn ring_arrived(env: &dyn Env, room: &Room, event: Envelope) {
             (String::new(), String::new())
         };
         let (room_name, caller) = super::rings::toast_names(allowed, room_name, caller);
-        listener.notify_call(&room_name, &caller);
+        if still_open() {
+            listener.notify_call(&room_name, &caller);
+        }
     }
 }
 
@@ -303,6 +320,27 @@ mod tests {
     struct TestEnv {
         listener: Arc<Recorder>,
         toast: Option<bool>,
+        /// The generations the session reports, one for each ask; the last
+        /// one repeats. `None` is a locked session.
+        generations: Mutex<Vec<Option<u64>>>,
+    }
+
+    impl TestEnv {
+        fn new(listener: Arc<Recorder>, toast: Option<bool>) -> Self {
+            Self::with_generations(listener, toast, vec![Some(1)])
+        }
+
+        fn with_generations(
+            listener: Arc<Recorder>,
+            toast: Option<bool>,
+            generations: Vec<Option<u64>>,
+        ) -> Self {
+            Self {
+                listener,
+                toast,
+                generations: Mutex::new(generations),
+            }
+        }
     }
 
     impl Env for TestEnv {
@@ -311,6 +349,14 @@ mod tests {
         }
         fn toast(&self) -> Option<bool> {
             self.toast
+        }
+        fn open_generation(&self) -> Option<u64> {
+            let mut generations = self.generations.lock().unwrap();
+            if generations.len() > 1 {
+                generations.remove(0)
+            } else {
+                generations[0]
+            }
         }
     }
 
@@ -464,14 +510,20 @@ mod tests {
         toast: Option<bool>,
         prepare: impl FnOnce(&Recorder),
     ) -> Arc<Recorder> {
+        run_with(reply, toast, prepare, TestEnv::new).await
+    }
+
+    async fn run_with(
+        reply: Value,
+        toast: Option<bool>,
+        prepare: impl FnOnce(&Recorder),
+        make_env: impl FnOnce(Arc<Recorder>, Option<bool>) -> TestEnv,
+    ) -> Arc<Recorder> {
         let server = MockServer::builder().start().await;
         let client = client(&server).await;
         let listener = Arc::new(Recorder::default());
         prepare(&listener);
-        let env: Arc<dyn Env> = Arc::new(TestEnv {
-            listener: listener.clone(),
-            toast,
-        });
+        let env: Arc<dyn Env> = Arc::new(make_env(listener.clone(), toast));
         let handles = register(&client, Arc::downgrade(&env));
         sync(&server, &client, reply).await;
         for handle in handles {
@@ -571,6 +623,42 @@ mod tests {
         }
     }
 
+    /// GIVEN a locked session, or a lock while the ring is checked or its
+    /// names are read WHEN a ring syncs THEN it is not kept and no
+    /// notification is made.
+    #[tokio::test]
+    async fn given_a_lock_around_a_ring_then_it_is_dropped_without_a_notification() {
+        // The generation is asked at the start, before and after admission,
+        // and before the notification.
+        for (case, generations, kept) in [
+            ("locked", vec![None], false),
+            ("lock before admission", vec![Some(1), Some(2)], false),
+            ("lock at admission", vec![Some(1), Some(1), Some(2)], false),
+            (
+                "lock before the notification",
+                vec![Some(1), Some(1), Some(1), None],
+                true,
+            ),
+        ] {
+            let reply = sync_reply(
+                vec![in_call(CALLER, "BOB")],
+                vec![ring_event("$ring", CALLER)],
+                &[],
+            );
+            let recorder = run_with(
+                reply,
+                Some(true),
+                |_| {},
+                |listener, toast| TestEnv::with_generations(listener, toast, generations.clone()),
+            )
+            .await;
+            // A real lock clears the kept ring; this one only stops the
+            // notification.
+            assert_eq!(!live_ids(&recorder).is_empty(), kept, "{case}");
+            assert!(recorder.toasts.lock().unwrap().is_empty(), "{case}");
+        }
+    }
+
     /// GIVEN a ring in the room of the open call WHEN it syncs THEN it does
     /// not ring.
     #[tokio::test]
@@ -642,10 +730,7 @@ mod tests {
         let server = MockServer::builder().start().await;
         let client = client(&server).await;
         let listener = Arc::new(Recorder::default());
-        let env: Arc<dyn Env> = Arc::new(TestEnv {
-            listener: listener.clone(),
-            toast: Some(true),
-        });
+        let env: Arc<dyn Env> = Arc::new(TestEnv::new(listener.clone(), Some(true)));
         let _handles = register(&client, Arc::downgrade(&env));
         drop(env);
         let reply = sync_reply(

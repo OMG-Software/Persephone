@@ -3,6 +3,7 @@
     RING_TITLE,
     ringButtons,
     ringsAnnouncement,
+    ringsKey,
     type ShownRing
   } from './calls';
   import Icon from './Icon.svelte';
@@ -34,7 +35,7 @@
 </script>
 
 <div class="visually-hidden" aria-live="assertive" aria-atomic="true">
-  {ringsAnnouncement(rings)}
+  {#key ringsKey(rings)}<span>{ringsAnnouncement(rings)}</span>{/key}
 </div>
 {#if rings.length > 0}
   <section class="ring-prompt" aria-label={RING_TITLE}>

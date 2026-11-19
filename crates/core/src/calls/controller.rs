@@ -1271,8 +1271,8 @@ impl CallController {
                 let watch = Arc::new(Watch::new(contact.clone()));
                 setup
                     .handles
-                    .push(decline_handler(&room, &watch, decline_tx));
-                Some(watch)
+                    .push(decline_handler(&room, &watch, decline_tx.clone()));
+                Some((watch, decline_tx))
             }
             _ => None,
         };
@@ -1377,7 +1377,7 @@ impl CallController {
             portal: None,
             portal_capture: false,
             portal_sent: false,
-            ring: ring_watch,
+            ring: ring_watch.map(|(watch, _)| watch),
             screens: self.inner.host.screen_source(),
             screen_pick: None,
             screen_wanted: false,
@@ -1650,14 +1650,15 @@ async fn ring_plan(
 }
 
 /// Sends the ring once, as a normal room event (encrypted in an encrypted
-/// room), and tells `watch` the event it created. A failure is dropped.
+/// room), and tells `watch` the event it created; `wake` wakes the call
+/// task when a decline of it arrived first. A failure is dropped.
 async fn send_ring(
     access: Access,
     room_id: OwnedRoomId,
     plan: RingPlan,
     membership_event: OwnedEventId,
     video: bool,
-    watch: Option<Arc<Watch>>,
+    watch: Option<(Arc<Watch>, mpsc::Sender<()>)>,
 ) {
     let content = rings::notification_content(&plan, membership_event.as_str(), now_ms(), video);
     let sent = access
@@ -1673,8 +1674,11 @@ async fn send_ring(
             .map(|response| response.response.event_id)
         })
         .await;
-    if let (Ok(Some(event_id)), Some(watch)) = (sent, watch) {
-        watch.sent(event_id);
+    // A decline that came before this answer counts now.
+    if let (Ok(Some(event_id)), Some((watch, wake))) = (sent, watch)
+        && watch.sent(event_id)
+    {
+        let _ = wake.try_send(());
     }
 }
 
