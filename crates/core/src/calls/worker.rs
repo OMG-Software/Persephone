@@ -267,6 +267,22 @@ impl CallWorkerLink {
         !self.commands.is_closed() && self.commands.capacity() == 0
     }
 
+    /// Queues `message` without blocking. `Ok(false)` is a full queue: the
+    /// worker runs but has not read its commands yet. Only a closed queue
+    /// says the worker has gone.
+    pub fn try_queue(&self, message: ToWorker) -> Result<bool, WorkerGone> {
+        match self.commands.try_send(message) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(WorkerGone),
+        }
+    }
+
+    /// A sender for the command queue, to wait for room in it.
+    pub fn command_sender(&self) -> mpsc::Sender<ToWorker> {
+        self.commands.clone()
+    }
+
     /// Queues `message` for the worker without blocking.
     pub fn send(&self, message: ToWorker) -> Result<(), WorkerGone> {
         self.commands.try_send(message).map_err(|_| WorkerGone)

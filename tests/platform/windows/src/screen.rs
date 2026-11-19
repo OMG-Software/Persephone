@@ -255,7 +255,12 @@ fn parent() -> i32 {
                             )),
                             None => line.push_str(", HRESULT unknown: the failure changed"),
                         },
-                        _ => line.push_str(", HRESULT unknown: a repeat run failed"),
+                        // A capture failure is a result; a repeat that did
+                        // not launch is a failed measurement.
+                        _ => {
+                            line.push_str(", HRESULT unknown: a repeat run did not launch");
+                            failed = true;
+                        }
                     }
                 }
                 println!(

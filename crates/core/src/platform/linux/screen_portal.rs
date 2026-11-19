@@ -255,20 +255,35 @@ where
 }
 
 /// The cursor modes the portal offers, as a bit set; `0` when it says
-/// nothing (the option is then left out).
-fn available_cursor_modes(connection: &Connection) -> u32 {
-    connection
-        .call_method(
+/// nothing (the option is then left out). The lookup honours `cancel`.
+fn available_cursor_modes(
+    connection: &Connection,
+    cancel: &AtomicBool,
+) -> Result<u32, ScreenRefusal> {
+    cursor_modes(call_until(connection, cancel, |connection| {
+        connection.call_method(
             Some(PORTAL),
             PORTAL_PATH,
             Some(PROPERTIES),
             "Get",
             &(SCREEN_CAST, "AvailableCursorModes"),
         )
-        .ok()
-        .and_then(|reply| reply.body().deserialize::<OwnedValue>().ok())
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(0)
+    }))
+}
+
+/// The cursor modes in a `Properties.Get` reply. A cancel stays a cancel;
+/// a failed lookup or a value that is not a `u32` is `0`.
+fn cursor_modes(reply: Result<zbus::Message, ScreenRefusal>) -> Result<u32, ScreenRefusal> {
+    match reply {
+        Ok(reply) => Ok(reply
+            .body()
+            .deserialize::<OwnedValue>()
+            .ok()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0)),
+        Err(ScreenRefusal::Cancelled) => Err(ScreenRefusal::Cancelled),
+        Err(_) => Ok(0),
+    }
 }
 
 /// The node IDs of the streams in the `Start` answer.
@@ -333,7 +348,7 @@ fn share_on(connection: &Connection, cancel: &AtomicBool) -> Result<ScreenGrant,
     };
 
     // SelectSources: monitor or window, one source, nothing remembered.
-    let cursor = preferred_cursor_mode(available_cursor_modes(connection));
+    let cursor = preferred_cursor_mode(available_cursor_modes(connection, cancel)?);
     let session_for_select = session_path.clone();
     request(connection, cancel, move |connection, token| {
         let mut options: HashMap<&str, Value<'_>> = HashMap::from([
@@ -571,6 +586,27 @@ mod tests {
         // The stalled call returns (the connection closes) and its thread ends.
         release_tx.send(()).unwrap();
         assert!(ended_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+    }
+
+    /// GIVEN `Properties.Get` outcomes WHEN the cursor modes are read THEN a
+    /// `u32` value gives the modes, a value of another type or a failed
+    /// lookup gives none, and a cancelled lookup stays cancelled.
+    #[test]
+    fn given_cursor_mode_lookups_then_only_a_cancel_stops_the_share() {
+        let reply = |value: Value<'_>| {
+            zbus::Message::signal(PORTAL_PATH, PROPERTIES, "Get")
+                .unwrap()
+                .build(&(value,))
+                .unwrap()
+        };
+        assert_eq!(cursor_modes(Ok(reply(Value::from(7_u32)))), Ok(7));
+        assert_eq!(cursor_modes(Ok(reply(Value::from("7")))), Ok(0));
+        assert_eq!(cursor_modes(Err(ScreenRefusal::Refused)), Ok(0));
+        assert_eq!(cursor_modes(Err(ScreenRefusal::Unavailable)), Ok(0));
+        assert_eq!(
+            cursor_modes(Err(ScreenRefusal::Cancelled)),
+            Err(ScreenRefusal::Cancelled)
+        );
     }
 
     /// GIVEN `Response` signals WHEN read THEN code 0 gives the results,
