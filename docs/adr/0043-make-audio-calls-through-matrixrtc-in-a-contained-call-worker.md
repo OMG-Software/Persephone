@@ -152,7 +152,9 @@ Proposed option: "a contained call worker".
   record, play or connect.
 * A device is the libwebrtc device ID (on Windows the endpoint ID) and the
   OS name. IDs that LiveKit makes from a list position (`index:N`) are not
-  listed, because a hot-plug can move them to another device. Names are
+  listed, because a hot-plug can move them to another device. On Linux,
+  where libwebrtc has only such IDs, the worker lists sound server names
+  instead (`pulse:` IDs, ADR-0049). Names are
   untrusted text: the worker removes control characters and cuts them to
   256 bytes, the core normalizes them like display names (control and
   bidirectional formatting characters become U+FFFD), and the page shows

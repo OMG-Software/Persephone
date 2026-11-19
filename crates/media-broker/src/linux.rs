@@ -155,12 +155,38 @@ impl CallCamera {
     }
 }
 
+/// The sound server devices a call opens by name (ADR-0049): a source
+/// (microphone) and a sink (speaker). `None` keeps the server's default.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CallSound {
+    pub source: Option<String>,
+    pub sink: Option<String>,
+}
+
+/// The longest sound server name (`PA_NAME_MAX`).
+const MAX_SOUND_NAME_BYTES: usize = 128;
+
+/// The sound server's name rule (ASCII letters, digits, `.`, `-`, `_`) and
+/// `:`, at most [`MAX_SOUND_NAME_BYTES`]. The same rule as
+/// `persephone_call_protocol::valid_pulse_name`, checked again here because
+/// the value goes into the worker's environment.
+fn valid_sound_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_SOUND_NAME_BYTES
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
 /// The environment of the call worker: the sound server's socket directory
 /// and the home directory (its cookie), each only when it is an absolute
-/// path, and `LANG=C`. There is no `DBUS_SESSION_BUS_ADDRESS`.
+/// path, `LANG=C`, and the chosen sound server devices as `PULSE_SOURCE`
+/// and `PULSE_SINK`. A device name that breaks the name rule refuses the
+/// launch (`None`). There is no `DBUS_SESSION_BUS_ADDRESS`.
 fn call_environment(
     mut get: impl FnMut(&str) -> Option<OsString>,
-) -> Vec<(&'static str, OsString)> {
+    sound: &CallSound,
+) -> Option<Vec<(&'static str, OsString)>> {
     let mut vars = Vec::new();
     for name in ["XDG_RUNTIME_DIR", "HOME"] {
         if let Some(value) = get(name).filter(|value| Path::new(value).is_absolute()) {
@@ -168,7 +194,15 @@ fn call_environment(
         }
     }
     vars.push(("LANG", OsString::from("C")));
-    vars
+    for (name, value) in [("PULSE_SOURCE", &sound.source), ("PULSE_SINK", &sound.sink)] {
+        if let Some(value) = value {
+            if !valid_sound_name(value) {
+                return None;
+            }
+            vars.push((name, OsString::from(value)));
+        }
+    }
+    Some(vars)
 }
 
 /// Starts the call worker with the Linux launch rules of ADR-0049: the
@@ -177,13 +211,18 @@ fn call_environment(
 /// the environment of [`call_environment`], the `--camera` argument and the
 /// camera channel as descriptor 3. The worker contains itself and reports
 /// `Ready`; the caller then calls `confirm_contained` on the returned worker
-/// before it sends any input.
+/// before it sends any input. A sound device name that breaks the name rule
+/// starts nothing (`EINVAL`).
 pub fn start_call_worker(
     _profile: &SeccompContainment,
     exe: &Path,
     camera: CallCamera,
+    sound: &CallSound,
 ) -> Result<StartedCallWorker, LaunchError> {
-    let vars = call_environment(|name| env::var_os(name));
+    let vars = call_environment(|name| env::var_os(name), sound).ok_or(LaunchError::Api {
+        call: "sound device name",
+        code: libc::EINVAL as u32,
+    })?;
     spawn_call(exe, &[camera.argument()], &vars)
 }
 
@@ -459,22 +498,106 @@ mod tests {
     /// absolute `XDG_RUNTIME_DIR` and `HOME` and `LANG=C` pass.
     #[test]
     fn given_broker_environment_then_the_call_worker_gets_an_allowlist() {
-        let vars = call_environment(|name| match name {
-            "XDG_RUNTIME_DIR" => Some("/run/user/1000".into()),
-            "HOME" => Some("/home/a".into()),
-            _ => Some("leak".into()),
-        });
+        let vars = call_environment(
+            |name| match name {
+                "XDG_RUNTIME_DIR" => Some("/run/user/1000".into()),
+                "HOME" => Some("/home/a".into()),
+                // The broker's own sound settings never pass through.
+                _ => Some("leak".into()),
+            },
+            &CallSound::default(),
+        );
         assert_eq!(
             vars,
-            vec![
+            Some(vec![
                 ("XDG_RUNTIME_DIR", OsString::from("/run/user/1000")),
                 ("HOME", OsString::from("/home/a")),
                 ("LANG", OsString::from("C")),
-            ]
+            ])
         );
         // Relative or missing values are dropped.
-        let vars = call_environment(|name| (name == "HOME").then(|| "relative".into()));
-        assert_eq!(vars, vec![("LANG", OsString::from("C"))]);
+        let vars = call_environment(
+            |name| (name == "HOME").then(|| "relative".into()),
+            &CallSound::default(),
+        );
+        assert_eq!(vars, Some(vec![("LANG", OsString::from("C"))]));
+    }
+
+    /// GIVEN chosen sound server devices WHEN the environment is built THEN
+    /// each name is set as `PULSE_SOURCE` or `PULSE_SINK`.
+    #[test]
+    fn given_sound_devices_then_the_worker_gets_their_names() {
+        let sound = CallSound {
+            source: Some("alsa_input.usb-Mic_01-00.analog-stereo".into()),
+            sink: Some("vsink".into()),
+        };
+        assert_eq!(
+            call_environment(|_| None, &sound),
+            Some(vec![
+                ("LANG", OsString::from("C")),
+                (
+                    "PULSE_SOURCE",
+                    OsString::from("alsa_input.usb-Mic_01-00.analog-stereo")
+                ),
+                ("PULSE_SINK", OsString::from("vsink")),
+            ])
+        );
+        let sink_only = CallSound {
+            source: None,
+            sink: Some("vsink".into()),
+        };
+        assert_eq!(
+            call_environment(|_| None, &sink_only),
+            Some(vec![
+                ("LANG", OsString::from("C")),
+                ("PULSE_SINK", OsString::from("vsink")),
+            ])
+        );
+    }
+
+    /// GIVEN a sound device name that breaks the name rule WHEN the
+    /// environment is built or the worker starts THEN the launch is refused,
+    /// not cleaned up.
+    #[test]
+    fn given_an_unsafe_sound_name_then_the_launch_is_refused() {
+        let long = "a".repeat(MAX_SOUND_NAME_BYTES + 1);
+        for bad in [
+            "",
+            "a b",
+            "x\nPULSE_SERVER=tcp:evil",
+            "../pulse",
+            "tcp:host/x",
+            "name\u{0}",
+            long.as_str(),
+        ] {
+            let sink = CallSound {
+                source: None,
+                sink: Some(bad.to_owned()),
+            };
+            assert_eq!(call_environment(|_| None, &sink), None, "{bad:?}");
+            let source = CallSound {
+                source: Some(bad.to_owned()),
+                sink: None,
+            };
+            assert_eq!(call_environment(|_| None, &source), None, "{bad:?}");
+        }
+        assert!(valid_sound_name(&"a".repeat(MAX_SOUND_NAME_BYTES)));
+        let refused = start_call_worker(
+            &SeccompContainment::create_or_open("").unwrap(),
+            Path::new("/bin/true"),
+            CallCamera::None,
+            &CallSound {
+                source: Some("a b".into()),
+                sink: None,
+            },
+        );
+        assert!(matches!(
+            refused,
+            Err(LaunchError::Api {
+                code,
+                ..
+            }) if code == libc::EINVAL as u32
+        ));
     }
 
     fn run_sh(script: &str, vars: &[(&'static str, OsString)]) -> (String, StartedCallWorker) {

@@ -594,8 +594,16 @@ not a pass; repeat it.
 5. Settings, Preferences, call devices. On the portal path the desktop asks
    for camera access. Expected pass: after a grant the camera menu lists
    the cameras (`pipewire:` IDs); after a refusal it lists none and the
-   page shows no error. The microphone and speaker menus offer only
-   "System default" (see the device listing record below).
+   page shows no error. The microphone and speaker menus list the sound
+   server's sources (no monitors) and sinks with `pulse:` IDs, and "System
+   default".
+6. Choose a microphone and a speaker that are not the system default, then
+   join a call. Expected pass: `pactl list source-outputs` and `pactl list
+   sink-inputs` show the worker's streams on the chosen devices, and
+   `/proc/<pid>/environ` of the worker holds `PULSE_SOURCE` and
+   `PULSE_SINK` with those names. Unplug or unload the chosen microphone,
+   then join again. Expected refusal: the join stops with the device text
+   and never uses the default microphone.
 
 ### Linux device listing (measured 19 November 2026)
 
@@ -635,16 +643,59 @@ After the fixes (file limit 256 MiB, read rule on `$XDG_RUNTIME_DIR/pulse`,
 no camera without one. The build without `dev-uncontained` still refused
 to run without `no_new_privs` (`Failed(Containment)`, exit 3).
 
-One limit remains, by design: the microphone and speaker lists stay empty
-on Linux. With the `index:` filter turned off in a probe build, libwebrtc
-reported `index:0` "default: auto_null.monitor" for recording and `index:0`
-"default: Dummy Output" and `index:1` "Dummy Output" for playout. Its
-PulseAudio module gives no GUIDs, and ADR-0043 never lists or selects
-`index:` IDs, so a Linux call uses the system default devices.
+The microphone and speaker lists stayed empty: with the `index:` filter
+turned off in a probe build, libwebrtc reported `index:0` "default:
+auto_null.monitor" for recording and `index:0` "default: Dummy Output" and
+`index:1` "Dummy Output" for playout. Its PulseAudio module gives no GUIDs,
+and ADR-0043 never lists or selects `index:` IDs. The owner then chose
+sound server names set at launch (ADR-0049); see the next record.
 
 Not covered: the real camera portal and its dialog, a real camera or
 sound card, the full app (core, broker and page), a call, a desktop
 session, other distributions, and a kernel without Landlock.
+
+### Linux microphones and speakers by name (measured 19 November 2026)
+
+The owner chose sound server names set at launch (ADR-0049). This was a
+partial run on the same VM and driver as the record above: the device list
+and the start of a join, without the app, an SFU or a call.
+
+- Code: this branch on top of 3a40b30, debug build of
+  `persephone-call-worker` without `dev-uncontained`. Containment bits 0
+  in every run.
+- Devices: `pactl load-module module-null-sink sink_name=vsink` and
+  `module-remap-source master=vsink.monitor source_name=vmic` (a source
+  that is not a monitor). `pipewire-pulse` restarts by socket activation
+  and then drops such modules, so they were loaded just before each run.
+- Join runs: the driver sent `Join` with the chosen IDs to
+  `wss://127.0.0.1:9/x`, which refuses connections. `Network` (4) means
+  that the device check, audio start and stage 2 passed and only the SFU
+  connection failed.
+
+| Run | Result |
+| --- | --- |
+| `ListDevices` | Recording `pulse:vmic` "VirtualMic"; playout `pulse:vsink` "VirtualSpeaker". `vsink.monitor` is left out, so the `monitor_of_sink` field is read at the right place. Without the virtual devices: no recording device and `pulse:auto_null` "Dummy Output". |
+| `pulse:vmic`, `pulse:vsink`, environment `PULSE_SOURCE=vmic`, `PULSE_SINK=vsink` | `Failed(Network)` |
+| No choice, no names in the environment | `Failed(Network)` |
+| `pulse:vmic`, no `PULSE_SOURCE` | `Failed(Protocol)` |
+| `pulse:vmic`, `PULSE_SOURCE=vsink.monitor` | `Failed(Protocol)` |
+| No choice, `PULSE_SINK=vsink` | `Failed(Protocol)` |
+| `pulse:gone`, `PULSE_SOURCE=gone` | `Failed(DeviceNotFound)` |
+| `pulse:vsink.monitor` as microphone, matching `PULSE_SOURCE` | `Failed(DeviceNotFound)` (monitors are not microphones) |
+| `index:0` as microphone | `Failed(DeviceNotFound)` |
+
+The client library sends a stream without a device name to the names in
+the environment: with a second sink and source and `vsink` and `vmic` as
+the defaults, `PULSE_SINK=vsink2 pacat` played to `vsink2`,
+`PULSE_SOURCE=vmic2 parec` recorded from `vmic2`, and a plain `pacat`
+played to `vsink`. libwebrtc opens such a stream at position 0 (read from
+`audio_device_pulse_linux.cc`, m137); its own stream on the chosen device
+was not observed, because no call connected.
+
+Not covered: a connected call with audio on the chosen devices, the core
+and broker launch path (covered by unit tests only), the page, a real
+sound card, a device unplugged during a call, and PulseAudio without
+PipeWire.
 
 ### macOS
 

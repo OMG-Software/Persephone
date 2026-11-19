@@ -58,8 +58,9 @@ runs" for the Linux camera.
 * Descriptor 3 is one end of a Unix socket pair, the camera channel. It is
   the only extra descriptor.
 * The environment holds only `XDG_RUNTIME_DIR` and `HOME` (the sound
-  server's socket and cookie) and `LANG=C`. It has no
-  `DBUS_SESSION_BUS_ADDRESS`.
+  server's socket and cookie), `LANG=C`, and for a call with a chosen
+  microphone or speaker `PULSE_SOURCE` or `PULSE_SINK` (see "Linux:
+  microphones and speakers"). It has no `DBUS_SESSION_BUS_ADDRESS`.
 * One argument, `--camera=portal`, `--camera=v4l2` or `--camera=none`,
   tells the worker which camera path it may use (see "Linux: camera"). The
   worker refuses any other argument.
@@ -270,11 +271,35 @@ The worker applies two stages itself.
   worker calls `webrtc::InitializePipeWire()` before its first PipeWire
   call (19 November 2026). A libwebrtc update must keep that function or
   replace this step.
-* Linux: libwebrtc's PulseAudio device module (also used with
-  `pipewire-pulse`) reports no device GUIDs, so each Linux microphone and
-  speaker has an `index:N` ID, which ADR-0043 never lists or selects
-  (measured 19 November 2026). On Linux the call uses the system default
-  microphone and speaker; the device menus offer only that.
+* Linux: microphones and speakers. libwebrtc's PulseAudio device module
+  (also used with `pipewire-pulse`) reports no device GUIDs, only list
+  positions (`index:N`), which ADR-0043 never lists or selects (measured
+  19 November 2026). The owner chose sound server names set at launch
+  (19 November 2026):
+  * The worker lists the sound server's sinks and sources itself, through
+    the PulseAudio client library that libwebrtc already loads (`dlopen`,
+    one short connection before stage 2, read only; `pulse.rs`). Monitor
+    sources are left out. Each ID is `pulse:` and the name; a name must be
+    1 to 128 bytes of ASCII letters, digits, `.`, `-`, `_` or `:`. No
+    Landlock or seccomp rule changes.
+  * A `pulse:` choice goes to the launch: the core gives the names to the
+    broker, which checks the name rule again and sets `PULSE_SOURCE` and
+    `PULSE_SINK`. libwebrtc then opens its default stream (position 0, no
+    device name), and the client library sends it to that name. The
+    worker never calls libwebrtc's device selection for these IDs.
+  * The sound server quietly uses its default for a name it does not have
+    (measured with `pipewire-pulse`: `PULSE_SINK=no_such_sink pacat` and
+    `pacat -d no_such_sink` both played to the default with exit code 0).
+    So the worker checks, before audio starts, that the `Join` choice
+    matches the environment (`Protocol` if not) and that the server has
+    the device now (`DeviceNotFound` if not). A device that goes away
+    after this check, or during the call, is moved by the sound server to
+    its default; the worker cannot see that. This differs from Windows,
+    where the endpoint ID stays bound.
+  * If the server cannot be asked (no library, no server, 3 s passed),
+    the lists keep the system default only, and a `pulse:` choice is
+    `DeviceNotFound`. Windows and macOS launchers ignore the names; a
+    `pulse:` choice there is `DeviceNotFound` too.
 
 ## Pros and Cons of the Options
 

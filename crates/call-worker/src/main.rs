@@ -16,6 +16,8 @@ mod camera_channel;
 mod containment;
 mod mapping;
 mod output;
+#[cfg(target_os = "linux")]
+mod pulse;
 mod screen;
 mod session;
 mod video;

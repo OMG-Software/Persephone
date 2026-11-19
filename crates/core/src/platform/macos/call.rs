@@ -6,7 +6,7 @@
 //! machine; CI builds it.
 
 use super::credentials::NativePrompt;
-use crate::calls::worker::{CameraPath, StartError};
+use crate::calls::worker::{CameraPath, StartError, WorkerAudio};
 use crate::credentials::CredentialSource;
 use crate::platform::call_host::{
     ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher, other_sfu_text,
@@ -29,7 +29,13 @@ impl ContainedCallHost {
 }
 
 impl Launcher for MacLauncher {
-    fn launch(&self, exe: &Path, _camera: CameraPath) -> Result<Launched, StartError> {
+    /// macOS has no sound server names (ADR-0049); `audio` is ignored.
+    fn launch(
+        &self,
+        exe: &Path,
+        _camera: CameraPath,
+        _audio: &WorkerAudio,
+    ) -> Result<Launched, StartError> {
         let profile = SeatbeltContainment::create_or_open("").map_err(|_| StartError::Launch)?;
         start_call_worker(&profile, exe)
             .map(launched)

@@ -4,7 +4,7 @@
 //! write loops and the `Ready` gate are shared (`platform/call_host.rs`).
 
 use crate::calls::worker::{
-    CALL_WORKER_PROFILE, CameraPath, StartError, WorkerExit, WorkerProcess,
+    CALL_WORKER_PROFILE, CameraPath, StartError, WorkerAudio, WorkerExit, WorkerProcess,
 };
 use crate::platform::call_host::{
     ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher, other_sfu_text,
@@ -105,7 +105,14 @@ fn ask_yes_no(message: &str) -> bool {
 }
 
 impl Launcher for WindowsLauncher {
-    fn launch(&self, exe: &Path, _camera: CameraPath) -> Result<Launched, StartError> {
+    /// Windows devices have GUIDs; there are no sound server names, so
+    /// `audio` is ignored.
+    fn launch(
+        &self,
+        exe: &Path,
+        _camera: CameraPath,
+        _audio: &WorkerAudio,
+    ) -> Result<Launched, StartError> {
         let profile = self.profile()?;
         let StartedCallWorker {
             worker,
@@ -155,7 +162,7 @@ mod tests {
             .find(|path| path.is_file())
             .expect("persephone-call-worker.exe not found under .local/build");
         let link = ContainedCallHost::at(exe)
-            .start()
+            .start(&WorkerAudio::default())
             .expect("the contained worker reports Ready with bits 0");
         link.finish(Duration::from_secs(5));
     }

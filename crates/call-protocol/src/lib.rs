@@ -180,6 +180,38 @@ impl MediaDevice {
     }
 }
 
+/// The start of a Linux sound server device ID (ADR-0049): `pulse:` and then
+/// the PulseAudio sink or source name. libwebrtc's own Linux IDs are list
+/// positions (`index:N`), which are never listed; these names are stable.
+pub const PULSE_PREFIX: &str = "pulse:";
+/// The longest sound server device name taken (PulseAudio's `PA_NAME_MAX`).
+pub const MAX_PULSE_NAME_BYTES: usize = 128;
+
+/// Whether `name` can be a sound server device name: 1 to
+/// [`MAX_PULSE_NAME_BYTES`] ASCII letters, digits, `.`, `-`, `_` or `:`. The
+/// name goes into the worker's environment, so nothing else is taken. A
+/// device with another name is not listed.
+pub fn valid_pulse_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_PULSE_NAME_BYTES
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
+/// The sound server name inside a device ID, or `None` when `id` is not a
+/// `pulse:` ID with a valid name.
+pub fn pulse_name(id: &str) -> Option<&str> {
+    id.strip_prefix(PULSE_PREFIX)
+        .filter(|name| valid_pulse_name(name))
+}
+
+/// The device ID of the sound server device `name`, or `None` for an invalid
+/// name.
+pub fn pulse_id(name: &str) -> Option<String> {
+    valid_pulse_name(name).then(|| format!("{PULSE_PREFIX}{name}"))
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum ToWorker {
     Join {
@@ -1357,6 +1389,44 @@ mod tests {
             id: id.to_owned(),
             name: name.to_owned(),
         }
+    }
+
+    /// GIVEN sound server device names WHEN checked THEN real PulseAudio and
+    /// PipeWire names pass, and empty, long, spaced, `=`, NUL, slash and
+    /// non-ASCII names do not; an ID round-trips only with the prefix.
+    #[test]
+    fn given_pulse_names_then_only_safe_names_make_ids() {
+        for good in [
+            "alsa_output.pci-0000_00_1f.3.analog-stereo",
+            "alsa_input.usb-Logitech_USB_Headset-00.mono-fallback",
+            "bluez_output.00_1B_66_A1_B2_C3.1",
+            "auto_null",
+            "a:b",
+            &"x".repeat(MAX_PULSE_NAME_BYTES),
+        ] {
+            assert!(valid_pulse_name(good), "{good}");
+            let id = pulse_id(good).expect(good);
+            assert_eq!(pulse_name(&id), Some(good));
+        }
+        for bad in [
+            "",
+            "two words",
+            "a=b",
+            "a\0b",
+            "../x",
+            "café",
+            "a\nb",
+            &"x".repeat(MAX_PULSE_NAME_BYTES + 1),
+        ] {
+            assert!(!valid_pulse_name(bad), "{bad:?}");
+            assert_eq!(pulse_id(bad), None, "{bad:?}");
+        }
+        assert_eq!(pulse_name("auto_null"), None, "no prefix");
+        assert_eq!(pulse_name("pulse:"), None, "no name");
+        assert_eq!(pulse_name("index:0"), None);
+        assert_eq!(pulse_name("pulse:a b"), None);
+        // The longest ID fits the wire.
+        assert!(PULSE_PREFIX.len() + MAX_PULSE_NAME_BYTES <= MAX_DEVICE_ID_BYTES);
     }
 
     fn turn(uri: &str) -> TurnServer {
