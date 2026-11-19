@@ -24,8 +24,17 @@ const POLL_SLEEP: Duration = Duration::from_millis(33);
 /// the rate at 5 per second; frames in between are dropped before the copy.
 const MIN_COPY_GAP: Duration = Duration::from_millis(150);
 
+/// Whether Windows.Graphics.Capture runs in the call worker's AppContainer.
+/// The measurement of 19 November 2026 says it does not: `CreateForMonitor`
+/// fails with `E_ACCESSDENIED` with the worker's capabilities and with each
+/// candidate capability (`docs/evidence/screen-share-windows.md`). So
+/// Windows reports screen sharing as unavailable (ADR-0053). The capture code
+/// stays, because the containment gate runs it; set this to `true` only for
+/// a capability set that the gate shows to work, and record it there.
+const CAPTURE_IN_CONTAINER: bool = false;
+
 pub fn accepts(target: &ScreenTarget) -> bool {
-    matches!(target, ScreenTarget::Monitor { .. })
+    CAPTURE_IN_CONTAINER && matches!(target, ScreenTarget::Monitor { .. })
 }
 
 /// What a failed start means for the share.
@@ -133,20 +142,42 @@ mod tests {
         }
     }
 
-    /// GIVEN a monitor at an index nobody has WHEN a capture opens THEN the
-    /// open reports `NotFound` and no other monitor is taken.
+    /// GIVEN the measurement that capture does not run in the worker's
+    /// AppContainer WHEN any monitor is opened THEN the share is unavailable
+    /// and no capture thread starts.
+    #[test]
+    fn given_capture_not_measured_to_work_in_the_container_then_it_is_unavailable() {
+        let result = super::super::open(
+            ScreenTarget::Monitor {
+                index: 0,
+                width: 1920,
+                height: 1080,
+            },
+            Grant::default(),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(result.err(), Some(ScreenState::Unavailable));
+    }
+
+    /// GIVEN a monitor at an index nobody has WHEN the capture code opens it
+    /// THEN it reports `NotFound` and no other monitor is taken.
     #[test]
     fn given_an_unknown_monitor_when_opened_then_it_is_not_found() {
-        let result = super::super::open(
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        capture(
             ScreenTarget::Monitor {
                 index: 15,
                 width: 1,
                 height: 1,
             },
             Grant::default(),
+            &stop,
+            open_tx,
             |_| {},
             |_| {},
         );
-        assert_eq!(result.err(), Some(ScreenState::NotFound));
+        assert_eq!(open_rx.recv().ok(), Some(Err(ScreenState::NotFound)));
     }
 }

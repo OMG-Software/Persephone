@@ -4709,6 +4709,7 @@ dependencies = [
 name = "persephone-test-windows"
 version = "0.0.1"
 dependencies = [
+ "windows",
  "windows-sys 0.61.2",
 ]
 

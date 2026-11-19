@@ -190,6 +190,24 @@ impl Drop for ComGuard {
     }
 }
 
+thread_local! {
+    /// The `HRESULT` of the last failure on this thread, for the gate's
+    /// probe. The worker never reads it, and it is never sent anywhere.
+    static LAST_ERROR: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// Records the error of a failed call and names where it failed.
+fn note(stage: Stage, error: windows::core::Error) -> Stage {
+    LAST_ERROR.with(|last| last.set(error.code().0));
+    stage
+}
+
+/// The `HRESULT` of the last failure on this thread (0: none).
+#[allow(dead_code)] // read by the containment gate's probe only
+pub fn last_error() -> i32 {
+    LAST_ERROR.with(std::cell::Cell::get)
+}
+
 /// Receives one frame: `(width, height, stride, bytes)`.
 pub type Deliver<'a> = dyn FnMut(u32, u32, u32, &[u8]) + 'a;
 
@@ -216,11 +234,11 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
         return Err(Stage::SizeChanged);
     }
     let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-        .map_err(|_| Stage::Interop)?;
+        .map_err(|error| note(Stage::Interop, error))?;
     // SAFETY: `monitor.handle` came from `EnumDisplayMonitors` just now.
-    let item: GraphicsCaptureItem =
-        unsafe { interop.CreateForMonitor(monitor.handle) }.map_err(|_| Stage::Item)?;
-    let size = item.Size().map_err(|_| Stage::Item)?;
+    let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor.handle) }
+        .map_err(|error| note(Stage::Item, error))?;
+    let size = item.Size().map_err(|error| note(Stage::Item, error))?;
     if size.Width < 2 || size.Height < 2 {
         return Err(Stage::BadSize);
     }
@@ -242,13 +260,17 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
             Some(&mut context),
         )
     }
-    .map_err(|_| Stage::Device)?;
+    .map_err(|error| note(Stage::Device, error))?;
     let (device, context) = device.zip(context).ok_or(Stage::Device)?;
-    let dxgi: IDXGIDevice = device.cast().map_err(|_| Stage::WinrtDevice)?;
+    let dxgi: IDXGIDevice = device
+        .cast()
+        .map_err(|error| note(Stage::WinrtDevice, error))?;
     // SAFETY: `dxgi` is a live DXGI device.
-    let inspectable =
-        unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.map_err(|_| Stage::WinrtDevice)?;
-    let winrt_device: IDirect3DDevice = inspectable.cast().map_err(|_| Stage::WinrtDevice)?;
+    let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
+        .map_err(|error| note(Stage::WinrtDevice, error))?;
+    let winrt_device: IDirect3DDevice = inspectable
+        .cast()
+        .map_err(|error| note(Stage::WinrtDevice, error))?;
 
     let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         &winrt_device,
@@ -256,10 +278,10 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
         POOL_BUFFERS,
         size,
     )
-    .map_err(|_| Stage::Pool)?;
+    .map_err(|error| note(Stage::Pool, error))?;
     let session = pool
         .CreateCaptureSession(&item)
-        .map_err(|_| Stage::Session)?;
+        .map_err(|error| note(Stage::Session, error))?;
     let closed = Arc::new(AtomicBool::new(false));
     let flag = closed.clone();
     item.Closed(
@@ -268,8 +290,10 @@ pub fn open(index: usize, expected: Option<(u32, u32)>) -> Result<Capture, Stage
             Ok(())
         }),
     )
-    .map_err(|_| Stage::Session)?;
-    session.StartCapture().map_err(|_| Stage::Start)?;
+    .map_err(|error| note(Stage::Session, error))?;
+    session
+        .StartCapture()
+        .map_err(|error| note(Stage::Start, error))?;
     Ok(Capture {
         device,
         context,
@@ -301,7 +325,9 @@ impl Capture {
         let Ok(frame) = self.pool.TryGetNextFrame() else {
             return Ok(false);
         };
-        let content = frame.ContentSize().map_err(|_| Stage::Texture)?;
+        let content = frame
+            .ContentSize()
+            .map_err(|error| note(Stage::Texture, error))?;
         if content.Width != self.size.Width || content.Height != self.size.Height {
             // The monitor changed size: the next frames use the new size.
             if content.Width < 2 || content.Height < 2 {
@@ -314,18 +340,22 @@ impl Capture {
                     POOL_BUFFERS,
                     content,
                 )
-                .map_err(|_| Stage::Pool)?;
+                .map_err(|error| note(Stage::Pool, error))?;
             self.size = content;
             return Ok(true);
         }
         if !admit() {
             return Ok(true);
         }
-        let surface = frame.Surface().map_err(|_| Stage::Texture)?;
-        let access: IDirect3DDxgiInterfaceAccess = surface.cast().map_err(|_| Stage::Texture)?;
+        let surface = frame
+            .Surface()
+            .map_err(|error| note(Stage::Texture, error))?;
+        let access: IDirect3DDxgiInterfaceAccess = surface
+            .cast()
+            .map_err(|error| note(Stage::Texture, error))?;
         // SAFETY: the surface of a capture frame is a Direct3D 11 texture.
         let texture: ID3D11Texture2D =
-            unsafe { access.GetInterface() }.map_err(|_| Stage::Texture)?;
+            unsafe { access.GetInterface() }.map_err(|error| note(Stage::Texture, error))?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: `desc` is a valid out value.
         unsafe { texture.GetDesc(&mut desc) };
@@ -344,7 +374,7 @@ impl Capture {
             self.context
                 .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
-        .map_err(|_| Stage::Map)?;
+        .map_err(|error| note(Stage::Map, error))?;
         let stride = mapped.RowPitch;
         let length = (stride as usize).saturating_mul(height as usize);
         if !mapped.pData.is_null() && stride >= width.saturating_mul(4) {
@@ -377,7 +407,7 @@ impl Capture {
             self.device
                 .CreateTexture2D(&staging_desc, None, Some(&mut texture))
         }
-        .map_err(|_| Stage::Texture)?;
+        .map_err(|error| note(Stage::Texture, error))?;
         let texture = texture.ok_or(Stage::Texture)?;
         self.staging = Some((texture.clone(), desc.Width, desc.Height));
         Ok(texture)

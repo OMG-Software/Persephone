@@ -7,3 +7,4 @@
 - Preserve the AppContainer and LPAC distinction. A comparative LPAC observation must not override a failed AppContainer gate.
 - Keep canaries and process state synthetic. Retain handle ownership, process/thread waits, and cleanup on failed launch or timeout. Do not change firewall policy or other host security settings to make the probe pass.
 - Consult `docs/evidence/windows-sandbox.md` and the feasibility workbench before changing acceptance claims. Preserve nonzero gate failures; record unresolved results explicitly.
+- The screen capture probe (`--screen-probe`, ADR-0053) measures Windows.Graphics.Capture inside the call worker's AppContainer with candidate capabilities. It compiles the worker's `crates/call-worker/src/screen/wgc.rs`. Its launch repeats the call launcher's capabilities and mitigations; keep them in step. Record results in `docs/evidence/screen-share-windows.md`. A set that cannot capture is a measurement, not a gate pass.
