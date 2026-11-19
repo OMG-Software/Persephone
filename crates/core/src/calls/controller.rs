@@ -934,10 +934,15 @@ impl Inner {
             }
         });
         if changed {
-            let listener = plain(&self.listener).clone();
-            if let Some(listener) = listener {
-                listener();
-            }
+            self.notify();
+        }
+    }
+
+    /// Tells the listener that the state changed. Called with no lock held.
+    fn notify(&self) {
+        let listener = plain(&self.listener).clone();
+        if let Some(listener) = listener {
+            listener();
         }
     }
 
@@ -1418,6 +1423,7 @@ impl CallController {
             grants_tx,
             screen_control: Arc::default(),
             screen_pick_stops: 0,
+            screen_seen_stops: 0,
             screen_share: 0,
             screen_stop_pending: None,
         })
@@ -1530,6 +1536,11 @@ impl CallController {
             .commands
             .try_reserve()
             .map_err(|_| CallError::NotInCall)?;
+        // The page's screen changes and a stop is counted under the lock
+        // that the call task holds while it publishes (`Call::publish`). So
+        // a task publication either comes first, and this `Off` replaces it,
+        // or it sees the stop and keeps this `Off`.
+        let mut control = plain(&run.screen_control);
         let changed = self.inner.state.send_if_modified(|state| {
             let CallState::Active { screen, .. } = state else {
                 return false;
@@ -1552,23 +1563,18 @@ impl CallController {
         // start and stops it. The stop also takes the portal session: it
         // closes here, so capture is revoked at once, also while the call
         // task waits for a key send. `Off` is then true when it shows.
-        let (stops, revoked) = {
-            let mut control = plain(&run.screen_control);
-            if !on {
-                control.stops = control.stops.wrapping_add(1);
-            }
-            let revoked = if on { None } else { control.session.take() };
-            (control.stops, revoked)
-        };
+        if !on {
+            control.stops = control.stops.wrapping_add(1);
+        }
+        let revoked = if on { None } else { control.session.take() };
+        let stops = control.stops;
+        drop(control);
         // Closing the session talks to the bus; not under the lock.
         drop(revoked);
         permit.send(Command::Screen { on, stops });
         drop(slot);
         if changed {
-            let listener = plain(&self.inner.listener).clone();
-            if let Some(listener) = listener {
-                listener();
-            }
+            self.inner.notify();
         }
         Ok(())
     }
@@ -1915,6 +1921,10 @@ struct Call {
     /// The stop count when the start of the pick in flight was accepted. A
     /// pick that ends after a later stop was accepted is closed unused.
     screen_pick_stops: u64,
+    /// The stop count of the last screen command this task read. A higher
+    /// count is a stop the handle accepted and showed, which this task has
+    /// not read yet: until it does, the page's screen state stands.
+    screen_seen_stops: u64,
     /// The number of the last share that went to the worker. A worker state
     /// of another share is an older one's and is ignored.
     screen_share: u32,
@@ -2175,6 +2185,7 @@ impl Call {
     /// closes the portal session and stops the worker's capture.
     fn screen_command(&mut self, inner: &Inner, on: bool, stops: u64) -> Result<(), EndReason> {
         self.screen_wanted = on;
+        self.screen_seen_stops = stops;
         if on {
             if !self.screens.available() {
                 // The handle already shows `Starting`. The refusal is
@@ -2378,9 +2389,10 @@ impl Call {
         }
         let running = matches!(state, ScreenState::Starting | ScreenState::On);
         // The handle accepted a stop that this task has not read yet: the
-        // page already shows `Off`, so a running state must not show over
-        // it. A later start carries the new count and shows again.
-        if running && plain(&self.screen_control).stops != self.screen_pick_stops {
+        // share is about to stop, so the view does not take a running state.
+        // (`publish` is what keeps the page's `Off`; this keeps the view
+        // from holding a stale `On`.) A later start shows again.
+        if running && plain(&self.screen_control).stops != self.screen_seen_stops {
             return false;
         }
         if !running {
@@ -2662,8 +2674,36 @@ impl Call {
             .map_err(|_| EndReason::WorkerStopped)
     }
 
+    /// Publishes the view. The check for an unread stop and the page write
+    /// are one step under the lock that `set_screen` holds while it shows a
+    /// stop and counts it. While the handle has a stop this task has not
+    /// read, the page keeps its screen state (`Off`, or `Starting` for a
+    /// start after it): a stale `On` never shows over it, also when an
+    /// unrelated change publishes. Never called with that lock held.
     fn publish(&self, inner: &Inner) {
-        inner.publish(self.view.state());
+        let mut next = self.view.state();
+        let changed = {
+            let control = plain(&self.screen_control);
+            let stop_unread = control.stops != self.screen_seen_stops;
+            inner.state.send_if_modified(move |current| {
+                if stop_unread
+                    && let (
+                        CallState::Active { screen: shown, .. },
+                        CallState::Active { screen, .. },
+                    ) = (&*current, &mut next)
+                {
+                    *screen = *shown;
+                }
+                if *current == next {
+                    return false;
+                }
+                *current = next;
+                true
+            })
+        };
+        if changed {
+            inner.notify();
+        }
     }
 
     /// Tells the picture store which tiles may show now.
@@ -3591,6 +3631,7 @@ mod tests {
             grants_tx,
             screen_control: Arc::default(),
             screen_pick_stops: 0,
+            screen_seen_stops: 0,
             screen_share: 0,
             screen_stop_pending: None,
         };
@@ -4957,6 +4998,164 @@ mod tests {
             .unwrap();
         assert_eq!(fixture.call.view.screen, CallScreen::On);
         assert_eq!(shown(&inner), CallScreen::On);
+    }
+
+    /// What `set_screen(false)` does under the control lock: the page shows
+    /// `Off` and the stop is counted.
+    fn accept_stop(control: &Mutex<ScreenControl>, inner: &Inner) {
+        let mut control = plain(control);
+        inner.state.send_modify(|state| {
+            if let CallState::Active { screen, .. } = state {
+                *screen = CallScreen::Off;
+            }
+        });
+        control.stops += 1;
+    }
+
+    /// GIVEN a running share the page shows `On` WHEN a stop is accepted
+    /// after that publication THEN the page shows `Off`; WHEN an unrelated
+    /// change (mute) and a late `On` publish before the task reads the stop
+    /// THEN the mute shows and `Off` stays; WHEN the task reads the stop and
+    /// a later share starts THEN its `On` shows.
+    #[tokio::test]
+    async fn given_an_unread_stop_when_unrelated_changes_publish_then_off_stays() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, muted, .. } => (*screen, *muted),
+            other => panic!("{other:?}"),
+        };
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        let on = FromWorker::Screen {
+            state: ScreenState::On,
+            share,
+        };
+        fixture.call.worker_event(&inner, &on).unwrap();
+        assert_eq!(shown(&inner), (CallScreen::On, false));
+
+        accept_stop(&fixture.call.screen_control, &inner);
+        assert_eq!(shown(&inner), (CallScreen::Off, false));
+        fixture
+            .call
+            .worker_event(&inner, &FromWorker::Muted { muted: true })
+            .unwrap();
+        assert_eq!(
+            shown(&inner),
+            (CallScreen::Off, true),
+            "mute shows, Off stays"
+        );
+        fixture.call.worker_event(&inner, &on).unwrap();
+        assert_eq!(shown(&inner), (CallScreen::Off, true));
+
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert_eq!(shown(&inner), (CallScreen::Off, true));
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&second)))
+            .unwrap();
+        let later = fixture.call.screen_share;
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share: later,
+                },
+            )
+            .unwrap();
+        assert_eq!(shown(&inner), (CallScreen::On, true));
+    }
+
+    /// GIVEN a stop accepted and then a new start accepted (the page shows
+    /// `Starting`) WHEN the task publishes before it reads either THEN the
+    /// page keeps `Starting`: neither the stale `On` nor an `Off` shows.
+    #[tokio::test]
+    async fn given_an_unread_stop_and_start_when_the_task_publishes_then_starting_stays() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share,
+                },
+            )
+            .unwrap();
+        accept_stop(&fixture.call.screen_control, &inner);
+        inner.state.send_modify(|state| {
+            if let CallState::Active { screen, .. } = state {
+                *screen = CallScreen::Starting;
+            }
+        });
+        fixture
+            .call
+            .worker_event(&inner, &FromWorker::Muted { muted: true })
+            .unwrap();
+        assert!(matches!(
+            &*inner.state.borrow(),
+            CallState::Active {
+                screen: CallScreen::Starting,
+                muted: true,
+                ..
+            }
+        ));
+    }
+
+    /// GIVEN a call whose task holds the screen control lock (it publishes)
+    /// WHEN the page stops the share THEN `Off` does not show until the lock
+    /// is released, and then shows with the stop counted: page change and
+    /// count are one step for the task's publication.
+    #[tokio::test]
+    async fn given_a_task_publication_when_the_page_stops_then_off_waits_for_the_lock() {
+        let calls = Arc::new(controller(FakeHost::new(true, None)));
+        let (_store, _commands, _) = running_call(&calls, active_state());
+        let control = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            run.screen_control.clone()
+        };
+        assert_eq!(calls.set_screen(true), Ok(()));
+        let shown = |calls: &CallController| match &*calls.inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(shown(&calls), CallScreen::Starting);
+
+        let held = plain(&control);
+        let stopper = {
+            let calls = calls.clone();
+            std::thread::spawn(move || calls.set_screen(false))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            shown(&calls),
+            CallScreen::Starting,
+            "Off waits for the lock"
+        );
+        assert_eq!(held.stops, 0);
+        drop(held);
+        assert_eq!(stopper.join().unwrap(), Ok(()));
+        assert_eq!(shown(&calls), CallScreen::Off);
+        assert_eq!(plain(&control).stops, 1);
     }
 
     /// GIVEN a share whose portal session is open WHEN the page stops it
