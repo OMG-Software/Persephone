@@ -27,6 +27,9 @@ use crate::credentials::{
 use crate::prompt_text;
 use gtk::glib::translate::ToGlibPtr;
 use gtk::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use std::{ffi::CStr, path::PathBuf};
 use zeroize::Zeroizing;
 
@@ -40,6 +43,8 @@ pub const COPY_HINT: &str = "Select the key and press Ctrl+C to copy it.";
 const TITLE: &str = "Persephone";
 /// Width of the message, in characters.
 const MESSAGE_WIDTH_CHARS: i32 = 60;
+/// How often a window shown by [`prompt_until`] looks at its cancel flag.
+const CANCEL_CHECK: Duration = Duration::from_millis(100);
 
 /// The core's prompts on Linux.
 pub struct NativePrompt;
@@ -266,11 +271,36 @@ fn read_entry(entry: &gtk::Entry) -> Result<Zeroizing<String>, PromptError> {
 /// `Unsupported`; a stopped GTK thread is `Failed`.
 pub fn prompt(alert: Alert) -> Result<Answer, PromptError> {
     gtk_thread()
-        .run(move || show(&alert))
+        .run(move || show_until(&alert, None))
         .map_err(|error| match error {
             GtkError::NoDisplay => PromptError::Unsupported,
             GtkError::Stopped => PromptError::Failed,
         })
+}
+
+/// Shows `alert` like [`prompt`] until `cancel` is set. A set flag closes
+/// the window within [`CANCEL_CHECK`], and an alert still queued when the
+/// flag is set is never shown; both answer [`Response::Closed`], so the
+/// GTK thread does not stay held for a request nobody waits for.
+pub fn prompt_until(alert: Alert, cancel: Arc<AtomicBool>) -> Result<Answer, PromptError> {
+    gtk_thread()
+        .run(move || show_unless_cancelled(&alert, &cancel))
+        .map_err(|error| match error {
+            GtkError::NoDisplay => PromptError::Unsupported,
+            GtkError::Stopped => PromptError::Failed,
+        })
+}
+
+/// The job of [`prompt_until`]: nothing when `cancel` is already set,
+/// otherwise the window, closed when `cancel` is set.
+fn show_unless_cancelled(alert: &Alert, cancel: &Arc<AtomicBool>) -> Answer {
+    if cancel.load(Ordering::SeqCst) {
+        return Answer {
+            response: Response::Closed,
+            fields: Ok(Vec::new()),
+        };
+    }
+    show_until(alert, Some(cancel))
 }
 
 /// Shows `alert` without waiting for it (a notice); `false` when no window
@@ -278,7 +308,7 @@ pub fn prompt(alert: Alert) -> Result<Answer, PromptError> {
 pub fn post(alert: Alert) -> bool {
     gtk_thread()
         .post(move || {
-            show(&alert);
+            show_until(&alert, None);
         })
         .is_ok()
 }
@@ -294,8 +324,9 @@ fn hidden_entry(placeholder: Option<&str>, max_chars: usize) -> gtk::Entry {
 }
 
 /// Builds `request` as a GTK dialog, runs it modally, reads its entries
-/// and destroys it. Runs on the `core-gtk` thread only.
-fn show(request: &Alert) -> Answer {
+/// and destroys it. A set `cancel` closes it like the window's close
+/// button. Runs on the `core-gtk` thread only.
+fn show_until(request: &Alert, cancel: Option<&Arc<AtomicBool>>) -> Answer {
     let failed = Answer {
         response: Response::Other,
         fields: Err(PromptError::Failed),
@@ -372,7 +403,28 @@ fn show(request: &Alert) -> Answer {
         }
     }
     dialog.present();
-    let response = match dialog.run() {
+    // The timer runs while the dialog's own loop runs; it is removed below,
+    // never by itself, so the removal cannot miss.
+    let watch = cancel.map(|cancel| {
+        let cancel = cancel.clone();
+        let weak = dialog.downgrade();
+        let mut closed = false;
+        gtk::glib::timeout_add_local(CANCEL_CHECK, move || {
+            if !closed
+                && cancel.load(Ordering::SeqCst)
+                && let Some(dialog) = weak.upgrade()
+            {
+                closed = true;
+                dialog.response(gtk::ResponseType::DeleteEvent);
+            }
+            gtk::glib::ControlFlow::Continue
+        })
+    });
+    let ran = dialog.run();
+    if let Some(watch) = watch {
+        watch.remove();
+    }
+    let response = match ran {
         gtk::ResponseType::Other(id) => Response::Button(usize::from(id)),
         gtk::ResponseType::DeleteEvent => Response::Closed,
         _ => Response::Other,
@@ -678,6 +730,20 @@ mod tests {
             alert.message.as_str(),
             "https://a.example/\u{FFFD}https://b.example/"
         );
+    }
+
+    /// GIVEN a screen warning whose pick was cancelled while it waited in the
+    /// GTK queue WHEN its turn comes THEN no window is built and the answer
+    /// is a closed window, which is "No": the share does not go on.
+    #[test]
+    fn given_a_cancelled_queued_warning_then_no_window_runs_and_it_answers_no() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        // A window here, off the GTK thread and maybe without a display,
+        // would fail; the cancelled job never reaches GTK.
+        let answer = show_unless_cancelled(&screen_warning_alert(), &cancel);
+        assert_eq!(answer.response, Response::Closed);
+        assert_eq!(yes(answer.response), Ok(false));
+        assert!(answer.fields.is_ok_and(|fields| fields.is_empty()));
     }
 
     /// GIVEN an address that fails the core's link check, or differs from

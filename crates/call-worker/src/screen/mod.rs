@@ -7,8 +7,12 @@
 //! unavailable until its own decision). A backend offers `capture()`; this
 //! module wraps it in [`open`]. The core names the screen: the worker never
 //! lists screens to the user and never picks another one. A capture runs on
-//! its own thread; [`Capture::stop`] (and `Drop`) ends it and waits for it,
-//! so the screen is released when they return.
+//! its own thread. [`Capture::stop`] and `Drop` ask it to end and wait for
+//! it, but only for a bounded time: `stop` can return `Some(capture)` with
+//! the thread still running, and `Drop` can return before the thread exits.
+//! The thread may then still hold the screen source, so a return is no proof
+//! that the screen was released. [`captures_running`] tells whether any
+//! capture thread still runs.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize};

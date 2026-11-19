@@ -98,11 +98,16 @@ pub fn rgba_len(tile: u8, width: u32, height: u32) -> Option<usize> {
 
 /// Lets through at most the tile's pictures per second (15 for a camera, 5
 /// for the screen), on a fixed schedule. A picture that comes a little late
-/// does not move the schedule; a long gap restarts it.
+/// does not move the schedule; a long gap restarts it. The screen tile also
+/// keeps a full interval after each picture, so no one-second window holds
+/// more than 5.
 #[derive(Debug)]
 pub struct RateLimiter {
     due: Option<Instant>,
     interval: Duration,
+    /// The screen tile: the time of the last picture let through, when each
+    /// picture must come a full interval after it.
+    strict_last: Option<Option<Instant>>,
 }
 
 impl Default for RateLimiter {
@@ -118,6 +123,7 @@ impl RateLimiter {
         Self {
             due: None,
             interval: Duration::from_nanos(1_000_000_000 / u64::from(max_fps(tile))),
+            strict_last: (tile == SCREEN_TILE).then_some(None),
         }
     }
     /// A picture may come this much before its time, so that the jitter of a
@@ -126,6 +132,22 @@ impl RateLimiter {
     const EARLY: Duration = Duration::from_millis(8);
 
     pub fn admit(&mut self, now: Instant) -> bool {
+        if let Some(Some(last)) = self.strict_last
+            && now.saturating_duration_since(last) < self.interval
+        {
+            return false;
+        }
+        if !self.scheduled(now) {
+            return false;
+        }
+        if let Some(last) = self.strict_last.as_mut() {
+            *last = Some(now);
+        }
+        true
+    }
+
+    /// The fixed schedule: whether `now` is on time, and the next time.
+    fn scheduled(&mut self, now: Instant) -> bool {
         let Some(due) = self.due else {
             self.due = Some(now + self.interval);
             return true;
@@ -514,6 +536,44 @@ mod tests {
             .filter(|frame| camera.admit(at(start, frame * 1000 / 60)))
             .count();
         assert!((14..=16).contains(&passed), "{passed}");
+    }
+
+    /// GIVEN screen pictures that come a little before each schedule time
+    /// WHEN limited for the screen tile THEN no one-second window holds more
+    /// than 5, while a camera keeps its early allowance.
+    #[test]
+    fn given_early_screen_pictures_when_limited_then_no_second_holds_more_than_five() {
+        let start = Instant::now();
+        let mut limiter = RateLimiter::for_tile(SCREEN_TILE);
+        let times = [0, 192, 392, 592, 792, 992];
+        let passed: Vec<u64> = times
+            .into_iter()
+            .filter(|millis| limiter.admit(at(start, *millis)))
+            .collect();
+        assert!(passed.len() <= 5, "{passed:?}");
+
+        // A jittery 30 per second source for ten seconds.
+        let mut limiter = RateLimiter::for_tile(SCREEN_TILE);
+        let mut passed = Vec::new();
+        for frame in 0..300_u64 {
+            let millis = frame * 1000 / 30 + [0, 7, 3, 9][(frame % 4) as usize];
+            if limiter.admit(at(start, millis)) {
+                passed.push(millis);
+            }
+        }
+        for (index, first) in passed.iter().enumerate() {
+            let in_window = passed[index..]
+                .iter()
+                .take_while(|millis| **millis < first + 1000)
+                .count();
+            assert!(in_window <= 5, "{first}: {in_window}");
+        }
+        assert!(passed.len() >= 40, "only {}", passed.len());
+
+        // The camera is not strict: a picture 8 ms early still passes.
+        let mut camera = RateLimiter::for_tile(0);
+        assert!(camera.admit(start));
+        assert!(camera.admit(at(start, 59)));
     }
 
     /// GIVEN two screen shares WHEN they start THEN the first is decoded and

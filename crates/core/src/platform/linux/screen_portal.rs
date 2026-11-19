@@ -22,7 +22,7 @@
 
 use super::bus::{self, BusError};
 use super::camera_portal::{close_message, is_socket, new_token, request_path};
-use super::credentials::{prompt, screen_warning_alert, yes};
+use super::credentials::{prompt_until, screen_warning_alert, yes};
 use crate::calls::screen::{
     Remote, SOURCE_TYPES, ScreenGrant, ScreenRefusal, ScreenSource, pick_node,
     preferred_cursor_mode,
@@ -30,6 +30,7 @@ use crate::calls::screen::{
 use persephone_call_protocol::ScreenTarget;
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -59,12 +60,15 @@ impl ScreenSource for PortalScreen {
     }
 
     /// Warns, then asks the portal. The warning is the core's own window; a
-    /// "Cancel" or a closed window ends the request before the bus is used.
-    fn choose(&self, cancel: &AtomicBool) -> Result<ScreenGrant, ScreenRefusal> {
+    /// "Cancel", a closed window or a cancel of the pick ends the request
+    /// before the bus is used. Only the user's "Share" goes on.
+    fn choose(&self, cancel: &Arc<AtomicBool>) -> Result<ScreenGrant, ScreenRefusal> {
         if cancel.load(Ordering::SeqCst) {
             return Err(ScreenRefusal::Cancelled);
         }
-        match prompt(screen_warning_alert()).and_then(|answer| yes(answer.response)) {
+        match prompt_until(screen_warning_alert(), cancel.clone())
+            .and_then(|answer| yes(answer.response))
+        {
             Ok(true) => {}
             Ok(false) => return Err(ScreenRefusal::Cancelled),
             // No display, or a window that did not run.
@@ -141,16 +145,9 @@ fn request(
         })
         .map_err(|_| ScreenRefusal::Refused)?;
 
-    let (call_tx, call_rx) = mpsc::channel();
-    let call_connection = connection.clone();
-    std::thread::Builder::new()
-        .name("screen-portal-call".to_owned())
-        .spawn(move || {
-            let result = call(&call_connection, &token).map_err(|error| refusal(&error));
-            let _ = call_tx.send(result);
-        })
-        .map_err(|_| ScreenRefusal::Refused)?;
-    let handle = wait(&call_rx, cancel).and_then(|outcome| outcome)?;
+    let handle = call_until(connection, cancel, move |connection| {
+        call(connection, &token)
+    })?;
     // The portal must have made the request at the path that was listened on.
     let reply_path: OwnedObjectPath = handle
         .body()
@@ -167,6 +164,26 @@ fn request(
         }
     }
     outcome
+}
+
+/// Makes one method call on its own thread and waits for its reply until
+/// `cancel` is set. A cancelled call's thread ends when the reply comes or
+/// the connection closes ([`open_share`] closes it on every failure).
+fn call_until(
+    connection: &Connection,
+    cancel: &AtomicBool,
+    call: impl FnOnce(&Connection) -> zbus::Result<zbus::Message> + Send + 'static,
+) -> Result<zbus::Message, ScreenRefusal> {
+    let (call_tx, call_rx) = mpsc::channel();
+    let call_connection = connection.clone();
+    std::thread::Builder::new()
+        .name("screen-portal-call".to_owned())
+        .spawn(move || {
+            let result = call(&call_connection).map_err(|error| refusal(&error));
+            let _ = call_tx.send(result);
+        })
+        .map_err(|_| ScreenRefusal::Refused)?;
+    wait(&call_rx, cancel).and_then(|outcome| outcome)
 }
 
 /// Waits for one result on `receiver` until `cancel` is set.
@@ -336,19 +353,19 @@ fn share_on(connection: &Connection, cancel: &AtomicBool) -> Result<ScreenGrant,
     })?;
     let node = pick_node(&stream_nodes(&started))?;
 
-    // The remote, then the signal for a session the desktop closes.
-    let reply = connection
-        .call_method(
-            Some(PORTAL),
-            PORTAL_PATH,
-            Some(SCREEN_CAST),
+    // The remote, then the signal for a session the desktop closes. A
+    // portal that does not answer cannot hold a cancelled pick.
+    let session_for_remote = session_path.clone();
+    let reply = call_until(connection, cancel, move |connection| {
+        cast_call(
+            connection,
             "OpenPipeWireRemote",
             &(
-                ObjectPath::from(&session_path),
+                ObjectPath::from(&session_for_remote),
                 HashMap::<&str, Value<'_>>::new(),
             ),
         )
-        .map_err(|error| refusal(&error))?;
+    })?;
     let fd: zbus::zvariant::OwnedFd = reply
         .body()
         .deserialize()
@@ -472,7 +489,7 @@ mod tests {
     #[test]
     fn given_a_cancel_before_the_warning_then_the_choice_is_cancelled() {
         assert!(PortalScreen.available());
-        let cancel = AtomicBool::new(true);
+        let cancel = Arc::new(AtomicBool::new(true));
         assert!(matches!(
             PortalScreen.choose(&cancel),
             Err(ScreenRefusal::Cancelled)
