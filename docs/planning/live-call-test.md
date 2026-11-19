@@ -692,10 +692,23 @@ played to `vsink`. libwebrtc opens such a stream at position 0 (read from
 `audio_device_pulse_linux.cc`, m137); its own stream on the chosen device
 was not observed, because no call connected.
 
+Read-only `/dev/shm` (after review, same day): the worker's Landlock rule
+for `/dev/shm` became read only, so no file it grows outlives it. With
+that build, the contained worker listed the same devices, a
+`pulse:vmic`/`pulse:vsink2` join reached `Failed(Network)`, and the
+PipeWire remote listed `pipewire:persephone-testcam`. Because the worker
+cannot stream without an SFU, `pacat` and `parec` ran under a Landlock
+wrapper with the worker's path rules and `/dev/shm` read only: playback to
+`vsink2` ran until stopped, and `parec` recorded 196608 bytes from `vmic`
+in 3 s. `/dev/shm` stayed empty; PipeWire and the client library used
+memfds.
+
 Not covered: a connected call with audio on the chosen devices, the core
 and broker launch path (covered by unit tests only), the page, a real
-sound card, a device unplugged during a call, and PulseAudio without
-PipeWire.
+sound card, a device unplugged during a call, PulseAudio without PipeWire
+(its pool may use `/dev/shm` files; the client then falls back to copying
+over the socket, not measured), and the Landlock wrapper is not the
+worker's seccomp filter.
 
 ### macOS
 

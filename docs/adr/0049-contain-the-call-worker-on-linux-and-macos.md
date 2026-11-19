@@ -54,7 +54,11 @@ runs" for the Linux camera.
   library sizes its 64 MiB shared-memory pool, a memfd, with `ftruncate`,
   and Linux counts memfd and `/dev/shm` files against `RLIMIT_FSIZE`. With
   0 the kernel killed the worker with `SIGXFSZ` before it reached the sound
-  server. Landlock still allows file writes only under `/dev/shm`.
+  server. Landlock gives the worker no writable path (without V4L2), so
+  the only files it can grow are memfds, which go away with the worker.
+  The limit is per file: while the worker runs, it can hold up to 256
+  memfds of 256 MiB each in memory. This is not bounded in total, as CPU
+  use is not.
 * Descriptor 3 is one end of a Unix socket pair, the camera channel. It is
   the only extra descriptor.
 * The environment holds only `XDG_RUNTIME_DIR` and `HOME` (the sound
@@ -79,8 +83,11 @@ The worker applies two stages itself.
     restricts nothing, so it cannot block the sound server's socket by
     surprise. Read and execute: `/usr`, `/lib`, `/lib64`, `/etc`,
     `/run/systemd/resolve`, `/proc/self`. Read: `$HOME/.config/pulse`,
-    `$XDG_RUNTIME_DIR/pulse`, `/dev/urandom`, `/dev/null`. Read and write:
-    `/dev/shm`. The client library opens `$XDG_RUNTIME_DIR/pulse` and checks
+    `$XDG_RUNTIME_DIR/pulse`, `/dev/urandom`, `/dev/null`, `/dev/shm`
+    (amended 19 November 2026: read only, so no file the worker writes
+    outlives it; the sound server's pool may be a file there, the worker's
+    pools are memfds, and recording, playback and the PipeWire camera
+    worked without write access). The client library opens `$XDG_RUNTIME_DIR/pulse` and checks
     its owner before it connects to the socket in it (amended 19 November
     2026: without the rule the check failed and no sound server was
     reached). The rest of `$XDG_RUNTIME_DIR` (the session bus, PipeWire and

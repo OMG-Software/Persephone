@@ -129,7 +129,9 @@ const CALL_ADDRESS_SPACE: u64 = 4 * 1024 * 1024 * 1024;
 /// of 64 MiB, with `ftruncate`, and Linux counts memfd and `/dev/shm` files
 /// against this limit. Above the limit the kernel sends `SIGXFSZ`, which
 /// killed the worker before it reached the sound server, so no call and no
-/// device list worked. Landlock still allows writes only under `/dev/shm`.
+/// device list worked. The worker's Landlock table has no writable path
+/// (`/dev/shm` is read only), so the files it grows are memfds, which go
+/// away with it.
 const CALL_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Which camera path the call worker may use (ADR-0049). The core decides it

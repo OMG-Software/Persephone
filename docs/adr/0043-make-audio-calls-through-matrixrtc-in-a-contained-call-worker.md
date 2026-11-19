@@ -169,7 +169,10 @@ Proposed option: "a contained call worker".
 * A chosen device that is not connected stops the join with
   `DeviceNotFound`. The worker never falls back to another device, because
   that device could be a microphone the user did not choose. A record that
-  cannot be read stops the join too.
+  cannot be read stops the join too. On Linux the worker checks the device
+  before audio starts; if it goes away after that check or during the
+  call, the sound server moves the stream to its default, which the worker
+  cannot see (ADR-0049).
 
 ### Session lifecycle
 

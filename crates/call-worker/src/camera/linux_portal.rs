@@ -1009,17 +1009,18 @@ mod tests {
     }
 
     /// GIVEN the worker linked with libwebrtc's weak `pw_*` stubs WHEN
-    /// PipeWire is loaded as `connect` does THEN `pw_init`, a main loop and a
-    /// context (all stubbed functions) work. Without the load, `pw::init`
-    /// called a null stub and the worker died with SIGSEGV on the first
-    /// portal camera list or screen share (seen on Linux Mint 22.3).
+    /// PipeWire is loaded as `connect` does THEN `pw_init` and a main loop
+    /// (stubbed functions) work. Without the load, `pw::init` called a null
+    /// stub and the worker died with SIGSEGV on the first portal camera list
+    /// or screen share (seen on Linux Mint 22.3). A context is not created
+    /// here: it needs PipeWire's configuration files, which a host with
+    /// only the library (CI) does not have.
     #[test]
     fn given_libwebrtc_stubs_when_pipewire_is_loaded_then_it_initialises() {
         assert!(load_pipewire(), "libwebrtc found libpipewire-0.3");
         assert!(load_pipewire(), "a second load is harmless");
         pw::init();
-        let mainloop = MainLoopRc::new(None).expect("main loop");
-        pw::context::ContextRc::new(&mainloop, None).expect("context");
+        MainLoopRc::new(None).expect("main loop");
     }
 
     /// GIVEN no descriptor from the core WHEN cameras are listed or a capture

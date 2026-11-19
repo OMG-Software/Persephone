@@ -92,7 +92,9 @@ const FS_EXECUTE: u64 = 1 << 0;
 const FS_WRITE_FILE: u64 = 1 << 1;
 const FS_READ_FILE: u64 = 1 << 2;
 const FS_READ_DIR: u64 = 1 << 3;
+#[cfg(test)]
 const FS_REMOVE_FILE: u64 = 1 << 5;
+#[cfg(test)]
 const FS_MAKE_REG: u64 = 1 << 8;
 /// ABI 1 has the rights of bits 0 to 12.
 const FS_ABI1_ALL: u64 = (1 << 13) - 1;
@@ -153,8 +155,6 @@ fn abi_ok(abi: i64) -> bool {
 /// What a rule on a directory grants.
 const DIR_READ_EXEC: u64 = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR;
 const DIR_READ: u64 = FS_READ_FILE | FS_READ_DIR;
-const DIR_SHM: u64 =
-    FS_READ_FILE | FS_READ_DIR | FS_WRITE_FILE | FS_TRUNCATE | FS_MAKE_REG | FS_REMOVE_FILE;
 /// What a rule on a file grants. A rule on a file may hold only these.
 const FILE_RIGHTS: u64 = FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE | FS_TRUNCATE | FS_IOCTL_DEV;
 const FILE_READ: u64 = FS_READ_FILE;
@@ -190,7 +190,7 @@ fn path_table(
         rule("/proc/self", DIR_READ_EXEC),
         rule("/dev/urandom", FILE_READ),
         rule("/dev/null", FILE_READ),
-        rule("/dev/shm", DIR_SHM),
+        rule("/dev/shm", DIR_READ),
     ];
     if let Some(home) = home.filter(|home| home.is_absolute()) {
         table.push(PathRule {
@@ -899,16 +899,15 @@ mod tests {
             rule_for(&table, "/dev/null").expect("null").access,
             FILE_READ
         );
-        let shm = rule_for(&table, "/dev/shm").expect("shm");
-        assert_ne!(shm.access & FS_WRITE_FILE, 0);
-        assert_eq!(shm.access & FS_EXECUTE, 0);
+        // /dev/shm is read only: the sound server's own pool may be a file
+        // there, and the worker's pools are memfds. No file the worker
+        // writes outlives it.
+        assert_eq!(rule_for(&table, "/dev/shm").expect("shm").access, DIR_READ);
         assert!(rule_for(&table, "/dev/video0").is_none());
-        // No writable path other than /dev/shm, and no execute right outside
-        // the library and system directories.
+        // No writable path at all without V4L2.
         for rule in &table {
-            if rule.path != Path::new("/dev/shm") {
-                assert_eq!(rule.access & FS_WRITE_FILE, 0, "{:?}", rule.path);
-            }
+            let write = FS_WRITE_FILE | FS_TRUNCATE | FS_MAKE_REG | FS_REMOVE_FILE;
+            assert_eq!(rule.access & write, 0, "{:?}", rule.path);
         }
     }
 
