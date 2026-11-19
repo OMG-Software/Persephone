@@ -136,9 +136,10 @@ async fn ring_arrived(env: &dyn Env, room: &Room, event: Envelope) {
             // Unreadable ignore state refuses the ring.
             Err(_) => true,
         },
-        // A fresh time: the lookups above may have outlived a membership.
+        // The lookups above, and the state read itself, may outlive a
+        // membership, so its end is checked again after the read.
         in_call: match read_members(room, now_ms()).await {
-            Ok(members) => members.iter().any(|m| m.user_id == ring.sender),
+            Ok(members) => sender_in_call(&members, &ring.sender, now_ms()),
             Err(_) => false,
         },
     };
@@ -170,6 +171,17 @@ async fn ring_arrived(env: &dyn Env, room: &Room, event: Envelope) {
             listener.notify_call(&room_name, &caller);
         }
     }
+}
+
+/// Whether `sender` has a membership that is still current at `now`.
+fn sender_in_call(
+    members: &[super::membership::ActiveMember],
+    sender: &OwnedUserId,
+    now: u64,
+) -> bool {
+    members
+        .iter()
+        .any(|m| m.user_id == *sender && m.expires_ts > now)
 }
 
 async fn joined_member(room: &Room, sender: &OwnedUserId) -> bool {
@@ -657,6 +669,31 @@ mod tests {
             assert_eq!(!live_ids(&recorder).is_empty(), kept, "{case}");
             assert!(recorder.toasts.lock().unwrap().is_empty(), "{case}");
         }
+    }
+
+    /// GIVEN memberships read just before WHEN the sender's membership ended
+    /// during the read THEN the sender is not in the call; another member's
+    /// current membership does not count for the sender.
+    #[test]
+    fn given_a_membership_that_ended_during_the_read_then_the_sender_is_not_in_the_call() {
+        let member = |user: &str, expires_ts: u64| super::super::membership::ActiveMember {
+            user_id: OwnedUserId::try_from(user).unwrap(),
+            device_id: "DEVICE".into(),
+            identity: format!("{user}:DEVICE"),
+            service_url: "https://sfu.synthetic.test".parse().unwrap(),
+            joined_ts: 1_000,
+            expires_ts,
+        };
+        let caller = OwnedUserId::try_from(CALLER).unwrap();
+        let read_at = 10_000;
+        let members = [
+            member(CALLER, read_at + 5),
+            member(STRANGER, read_at + 60_000),
+        ];
+        assert!(sender_in_call(&members, &caller, read_at));
+        assert!(sender_in_call(&members, &caller, read_at + 4));
+        assert!(!sender_in_call(&members, &caller, read_at + 5));
+        assert!(!sender_in_call(&members[1..], &caller, read_at));
     }
 
     /// GIVEN a ring in the room of the open call WHEN it syncs THEN it does
