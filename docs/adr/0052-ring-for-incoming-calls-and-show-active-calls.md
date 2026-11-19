@@ -80,8 +80,9 @@ check stops rings that no call supports.
   the same as a membership would.
 * Expiry: the start is `sender_ts`, unless it is more than 20 s after
   `origin_server_ts`; then the start is `origin_server_ts`. The ring ends at
-  start plus `lifetime`, and at most 120 s after the core received it. A
-  ring that ends before it arrives is dropped.
+  start plus `lifetime`, with `lifetime` at most 120 s, and at most 120 s
+  after the core received it. A ring that ends before it arrives is dropped.
+  The `lifetime` cap stops an old ring from ringing again after a restart.
 * A ring ends when it expires, when this user joins a call in that room,
   when this user declines it, when the sender's membership ends, or when the
   user leaves the room.

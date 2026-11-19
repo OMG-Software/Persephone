@@ -102,8 +102,9 @@ pub fn parse_notice(content: &Value) -> Option<Notice> {
 
 /// When a ring ends, in Unix milliseconds. The start is `sender_ts`, unless
 /// that is more than 20 s after `origin_server_ts`; then it is
-/// `origin_server_ts`. The end is the start plus the lifetime, and at most
-/// 120 s after `received_ms`.
+/// `origin_server_ts`. The end is the start plus the lifetime, with the
+/// lifetime at most 120 s, and at most 120 s after `received_ms`. The
+/// lifetime cap stops an old ring from ringing again after a restart.
 pub fn ends_at(notice: &Notice, origin_server_ts: u64, received_ms: u64) -> u64 {
     let start = if notice.sender_ts > origin_server_ts.saturating_add(MAX_SKEW_MS) {
         origin_server_ts
@@ -111,7 +112,7 @@ pub fn ends_at(notice: &Notice, origin_server_ts: u64, received_ms: u64) -> u64 
         notice.sender_ts
     };
     start
-        .saturating_add(notice.lifetime_ms)
+        .saturating_add(notice.lifetime_ms.min(MAX_LIFE_MS))
         .min(received_ms.saturating_add(MAX_LIFE_MS))
 }
 
@@ -651,13 +652,21 @@ mod tests {
     }
 
     #[test]
-    fn given_a_long_lifetime_then_the_ring_ends_120_seconds_after_it_arrived() {
+    fn given_a_long_lifetime_then_the_ring_ends_at_most_120_seconds_after_its_start() {
         let event = incoming(content("ring", NOW, u64::MAX), NOW);
         let ring = screen(&event, early(), NOW + 5_000).unwrap();
-        assert_eq!(ring.ends_ms, NOW + 5_000 + 120_000);
+        assert_eq!(ring.ends_ms, NOW + 120_000);
         let event = incoming(content("ring", NOW, 600_000), NOW);
         let ring = screen(&event, early(), NOW).unwrap();
         assert_eq!(ring.ends_ms, NOW + 120_000);
+    }
+
+    /// GIVEN an old ring with a long lifetime, as a restart's sync gives it
+    /// WHEN it is screened THEN it has expired and does not ring again.
+    #[test]
+    fn given_an_old_ring_with_a_long_lifetime_then_it_does_not_ring_again() {
+        let event = incoming(content("ring", NOW - 600_000, u64::MAX), NOW - 600_000);
+        assert!(screen(&event, early(), NOW).is_err());
     }
 
     #[test]
