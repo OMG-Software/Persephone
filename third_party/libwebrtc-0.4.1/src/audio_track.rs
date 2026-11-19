@@ -28,7 +28,7 @@ impl RtcAudioTrack {
     media_stream_track!();
 
     /// PERSEPHONE PATCH (ADR-0055): sets the playout gain of a remote audio
-    /// track, 0.0 (silent) to 1.0 (as received). Values outside are clamped.
+    /// track, 0.0 (silent) to 1.0 (as received). Values outside are clamped, and NaN is silent.
     /// A local track ignores it.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_volume(&self, volume: f64) {

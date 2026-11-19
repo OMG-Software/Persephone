@@ -85,11 +85,17 @@ and `libwebrtc` 0.4.1 get one marked addition each (see each crate's
 `PERSEPHONE-PATCH.md`):
 
 * `webrtc-sys`: `AudioTrack::set_volume(double)` clamps the value to 0..1
-  and calls `SetVolume` on the track's source on the signaling thread, where
-  `AudioRtpReceiver::OnSetVolume` expects it.
+  (NaN becomes 0) and calls `SetVolume` on the track's source on the
+  signaling thread, where `AudioRtpReceiver::OnSetVolume` expects it.
 * `libwebrtc`: `RtcAudioTrack::set_volume(f64)` calls it.
 
-The patch adds no new native object, thread, callback or observer.
+The patch adds no new native object, thread, callback or observer. A test in
+the call worker (`native_volume_tests.rs`) runs the lifecycle workload that
+`webrtc-sys`'s `AGENTS.md` asks for: a factory, a loopback pair of peer
+connections and their local and remote audio tracks, used with in and out of
+range volumes, closed, used again and dropped, 26 times. It checks that the
+process's handles (Windows) or threads and descriptors (Linux) come back to
+their level after the warm-up. macOS runs the workload without the count.
 
 ### Wire and storage
 
@@ -114,7 +120,9 @@ The patch adds no new native object, thread, callback or observer.
   The call task sends the worker only the newest value, so a fast slider
   cannot fill the bounded command queue.
 * A volume change applies to the running call before it is saved. If the
-  save fails, the call keeps the new volume and the page shows the error.
+  save fails, the call keeps the new volume and the page shows the error,
+  in the call bar as in Settings. Only the last value's outcome counts: a
+  failure that a later saved value replaced shows nothing.
 
 ### Controls
 

@@ -423,13 +423,15 @@ test('GIVEN a send that waits WHEN values arrive meanwhile THEN only the newest 
   const sent = [];
   const gates = [];
   let settled = 0;
+  let lastFailed = null;
   const latest = new LatestOnly(
     (value) => {
       sent.push(value);
       return new Promise((resolve) => gates.push(resolve));
     },
-    () => {
+    (failed) => {
       settled += 1;
+      lastFailed = failed;
     }
   );
   latest.set(10);
@@ -444,6 +446,7 @@ test('GIVEN a send that waits WHEN values arrive meanwhile THEN only the newest 
   gates.shift()();
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(settled, 1);
+  assert.equal(lastFailed, false, 'the last value was sent');
   assert.equal(latest.busy, false);
 });
 
@@ -466,4 +469,33 @@ test('GIVEN a failing send or a cleared value WHEN the sender runs THEN it goes 
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(sent, [1, 2], 'a failure does not stop it, and 3 was cleared');
   assert.equal(latest.busy, false);
+});
+
+test('GIVEN sends that fail WHEN they settle THEN only a failure of the last value is reported, and a later success clears an earlier failure', async () => {
+  const outcomes = [];
+  const gates = [];
+  const latest = new LatestOnly(
+    (value) =>
+      new Promise((resolve, reject) => {
+        gates.push(() => (value < 0 ? reject(new Error('unavailable')) : resolve()));
+      }),
+    (failed) => outcomes.push(failed)
+  );
+  const settle = async () => {
+    gates.shift()();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  latest.set(-1);
+  await settle();
+  assert.deepEqual(outcomes, [true], 'the last value failed');
+  latest.set(-2);
+  latest.set(40);
+  await settle();
+  await settle();
+  assert.deepEqual(outcomes, [true, false], 'the failure was replaced by a saved value');
+  latest.set(50);
+  latest.set(-3);
+  await settle();
+  await settle();
+  assert.deepEqual(outcomes, [true, false, true], 'a saved value before a failed last one does not hide it');
 });

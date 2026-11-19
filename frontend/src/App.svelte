@@ -24,6 +24,7 @@
     videoCallButton,
     CallOperations,
     LatestOnly,
+    VOLUME_SAVE_TEXT,
     type ShownRing
   } from './calls';
   import RoomTools from './RoomTools.svelte';
@@ -800,7 +801,12 @@
     () => callOperations.completed
   );
 
-  // Sends the newest call volume only, one at a time (ADR-0055).
+  // Shown when the last volume from the call bar was not saved. The running
+  // call may already use it, but the next call would not (ADR-0055).
+  let volumeSaveText = $state<string | null>(null);
+
+  // Sends the newest call volume only, one at a time (ADR-0055). A failure
+  // goes to `LatestOnly`, which reports only the last value's outcome.
   const volumeSender = new LatestOnly<number>(
     async (percent) => {
       const generation = sessionGeneration;
@@ -808,14 +814,13 @@
       try {
         const reply = await callVolume(percent);
         if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
-      } catch {
-        // The next call change shows the real volume.
       } finally {
         if (generation === sessionGeneration) callOperations.complete(operation);
       }
     },
-    () => {
+    (failed) => {
       volumeDraft = null;
+      volumeSaveText = failed ? VOLUME_SAVE_TEXT : null;
       callRefresher.request();
     }
   );
@@ -1154,6 +1159,7 @@
     screenBusy = false;
     volumeSender.clear();
     volumeDraft = null;
+    volumeSaveText = null;
     callJoinText = null;
     cameraText = null;
     cameraRequest += 1;
@@ -2957,6 +2963,12 @@
           <p class="call-notice camera-notice error" role="alert">
             <span>{cameraText}</span>
             <button type="button" class="secondary" onclick={() => (cameraText = null)}>Dismiss</button>
+          </p>
+        {/if}
+        {#if volumeSaveText}
+          <p class="call-notice volume-notice error" role="alert">
+            <span>{volumeSaveText}</span>
+            <button type="button" class="secondary" onclick={() => (volumeSaveText = null)}>Dismiss</button>
           </p>
         {/if}
         {#if screenText}

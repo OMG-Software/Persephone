@@ -18,7 +18,7 @@ crate clamps the ring size again in C++. The prebuilt libwebrtc allows 256
 
 - `src/native/audio_track.rs` and `src/audio_track.rs`:
   `RtcAudioTrack::set_volume(f64)` calls `webrtc-sys`'s
-  `AudioTrack::set_volume`, which clamps to 0.0..1.0. The call worker uses
+  `AudioTrack::set_volume`, which clamps to 0.0..1.0 (NaN becomes 0.0). The call worker uses
   it for the call volume and deafen of remote tracks.
 
 Each change is marked `PERSEPHONE PATCH (ADR-0055)`.

@@ -413,15 +413,17 @@ export function volumeText(percent: number): string {
  * Sends only the newest value. While one send waits, later values replace
  * each other, and the last one goes when the send ends. So a slider that
  * moves fast sends at most one value per round trip, and its final position
- * is always sent. `settled` runs when no send waits and none is due.
+ * is always sent. `settled` runs when no send waits and none is due. It is
+ * told whether the last send failed: a failure that a later send replaced
+ * does not count, because the later value is the one that matters.
  */
 export class LatestOnly<T> {
   #send: (value: T) => Promise<void>;
-  #settled: () => void;
+  #settled: (failed: boolean) => void;
   #sending = false;
   #next: { value: T } | null = null;
 
-  constructor(send: (value: T) => Promise<void>, settled: () => void = () => {}) {
+  constructor(send: (value: T) => Promise<void>, settled: (failed: boolean) => void = () => {}) {
     this.#send = send;
     this.#settled = settled;
   }
@@ -444,17 +446,19 @@ export class LatestOnly<T> {
 
   async #run(): Promise<void> {
     this.#sending = true;
+    let failed = false;
     while (this.#next !== null) {
       const { value } = this.#next;
       this.#next = null;
       try {
         await this.#send(value);
+        failed = false;
       } catch {
-        // The caller's send reports its own failure.
+        failed = true;
       }
     }
     this.#sending = false;
-    this.#settled();
+    this.#settled(failed);
   }
 }
 
