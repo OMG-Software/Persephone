@@ -242,3 +242,458 @@ pub async fn send_decline(
         Ok(Ok(_))
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! These tests run a mocked `/sync` through the registered handlers, so
+    //! the SDK delivers the events as in a live session.
+    use super::*;
+    use crate::calls::rings::{CallRooms, Intent, Ring, decline_content};
+    use matrix_sdk::{
+        SessionMeta, SessionTokens,
+        authentication::matrix::MatrixSession,
+        config::{RequestConfig, SyncSettings},
+        ruma::{RoomId, event_id, room_id, user_id},
+    };
+    use serde_json::json;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, path_regex},
+    };
+
+    const ROOM: &str = "!call:synthetic.test";
+    const ME: &str = "@alice:synthetic.test";
+    const CALLER: &str = "@bob:synthetic.test";
+    const STRANGER: &str = "@carol:synthetic.test";
+
+    #[derive(Default)]
+    struct Recorder {
+        rings: Rings,
+        call_rooms: CallRooms,
+        rings_changed: AtomicUsize,
+        room_calls: Mutex<Vec<String>>,
+        toasts: Mutex<Vec<(String, String)>>,
+    }
+
+    impl SessionListener for Recorder {
+        fn rooms_changed(&self, _rooms: &[String]) {}
+        fn session_changed(&self) {}
+        fn rings(&self) -> Option<&Rings> {
+            Some(&self.rings)
+        }
+        fn call_rooms(&self) -> Option<&CallRooms> {
+            Some(&self.call_rooms)
+        }
+        fn rings_changed(&self) {
+            self.rings_changed.fetch_add(1, Ordering::SeqCst);
+        }
+        fn room_call_changed(&self, room: &str) {
+            self.room_calls.lock().unwrap().push(room.to_owned());
+        }
+        fn notify_call(&self, room: &str, sender: &str) {
+            self.toasts
+                .lock()
+                .unwrap()
+                .push((room.to_owned(), sender.to_owned()));
+        }
+    }
+
+    struct TestEnv {
+        listener: Arc<Recorder>,
+        toast: Option<bool>,
+    }
+
+    impl Env for TestEnv {
+        fn listener(&self) -> Option<Arc<dyn SessionListener>> {
+            Some(self.listener.clone())
+        }
+        fn toast(&self) -> Option<bool> {
+            self.toast
+        }
+    }
+
+    fn state_event(kind: &str, key: &str, sender: &str, content: Value) -> Value {
+        json!({
+            "type": kind, "state_key": key, "sender": sender, "content": content,
+            "event_id": format!("${kind}-{}", key.len()), "origin_server_ts": now_ms()
+        })
+    }
+
+    fn joined(user: &str, name: &str) -> Value {
+        json!({
+            "type": "m.room.member", "state_key": user, "sender": user,
+            "content": { "membership": "join", "displayname": name },
+            "event_id": format!("$join-{name}"), "origin_server_ts": 1
+        })
+    }
+
+    /// A current call membership of `user` with device `device`.
+    fn in_call(user: &str, device: &str) -> Value {
+        let mut event = state_event(
+            MEMBERSHIP_TYPE,
+            &format!("_{user}_{device}_m.call"),
+            user,
+            json!({
+                "application": "m.call", "scope": "m.room", "call_id": "",
+                "device_id": device, "expires": 3_600_000, "created_ts": now_ms(),
+                "foci_preferred": [{
+                    "type": "livekit",
+                    "livekit_service_url": "https://sfu.synthetic.test",
+                    "livekit_alias": ROOM
+                }],
+                "focus_active": { "type": "livekit", "focus_selection": "oldest_membership" }
+            }),
+        );
+        event["event_id"] = json!(format!("$call-{device}"));
+        event
+    }
+
+    fn timeline_event(kind: &str, id: &str, sender: &str, content: Value) -> Value {
+        json!({
+            "type": kind, "event_id": id, "sender": sender,
+            "origin_server_ts": now_ms(), "content": content
+        })
+    }
+
+    fn ring_content() -> Value {
+        json!({
+            "notification_type": "ring", "sender_ts": now_ms(), "lifetime": 30_000,
+            "m.call.intent": "video", "m.mentions": { "user_ids": [ME] }
+        })
+    }
+
+    fn ring_event(id: &str, sender: &str) -> Value {
+        timeline_event(NOTIFICATION_TYPE, id, sender, ring_content())
+    }
+
+    /// A sync with room `ROOM`, named "Planning", with Alice and Bob joined.
+    fn sync_reply(state: Vec<Value>, timeline: Vec<Value>, ignored: &[&str]) -> Value {
+        let mut all = vec![
+            state_event("m.room.create", "", ME, json!({ "room_version": "11" })),
+            state_event("m.room.name", "", ME, json!({ "name": "Planning" })),
+            joined(ME, "Alice"),
+            joined(CALLER, "Bob"),
+        ];
+        all.extend(state);
+        let ignored: serde_json::Map<String, Value> = ignored
+            .iter()
+            .map(|user| ((*user).to_owned(), json!({})))
+            .collect();
+        json!({
+            "next_batch": "s1",
+            "account_data": { "events": [{
+                "type": "m.ignored_user_list",
+                "content": { "ignored_users": ignored }
+            }]},
+            "rooms": { "join": { ROOM: {
+                "summary": { "m.joined_member_count": 2, "m.invited_member_count": 0 },
+                "state": { "events": all },
+                "timeline": { "events": timeline, "limited": false }
+            }}}
+        })
+    }
+
+    /// A signed-in client of a mocked homeserver, before its first sync.
+    async fn client(server: &MockServer) -> Client {
+        let routes = [
+            (
+                "GET",
+                "/_matrix/client/versions",
+                json!({ "versions": ["v1.11"] }),
+            ),
+            (
+                "POST",
+                "/_matrix/client/v3/keys/upload",
+                json!({ "one_time_key_counts": { "signed_curve25519": 50 } }),
+            ),
+            (
+                "POST",
+                "/_matrix/client/v3/keys/query",
+                json!({ "device_keys": {} }),
+            ),
+            (
+                "GET",
+                "/_matrix/client/v3/rooms/!call:synthetic.test/members",
+                json!({ "chunk": [joined(ME, "Alice"), joined(CALLER, "Bob")] }),
+            ),
+        ];
+        for (verb, route, body) in routes {
+            Mock::given(method(verb))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(server)
+                .await;
+        }
+        let client = Client::builder()
+            .homeserver_url(server.uri())
+            .request_config(RequestConfig::new().disable_retry())
+            .build()
+            .await
+            .unwrap();
+        client
+            .restore_session(MatrixSession {
+                meta: SessionMeta {
+                    user_id: user_id!("@alice:synthetic.test").to_owned(),
+                    device_id: "PERSEPHONE".into(),
+                },
+                tokens: SessionTokens {
+                    access_token: "token".into(),
+                    refresh_token: None,
+                },
+            })
+            .await
+            .unwrap();
+        client
+    }
+
+    async fn sync(server: &MockServer, client: &Client, reply: Value) {
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/v3/sync"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+            .mount(server)
+            .await;
+        client.sync_once(SyncSettings::default()).await.unwrap();
+    }
+
+    /// Registers the handlers with a fresh recorder, which `prepare` may
+    /// fill, then syncs `reply`.
+    async fn run(
+        reply: Value,
+        toast: Option<bool>,
+        prepare: impl FnOnce(&Recorder),
+    ) -> Arc<Recorder> {
+        let server = MockServer::builder().start().await;
+        let client = client(&server).await;
+        let listener = Arc::new(Recorder::default());
+        prepare(&listener);
+        let env: Arc<dyn Env> = Arc::new(TestEnv {
+            listener: listener.clone(),
+            toast,
+        });
+        let handles = register(&client, Arc::downgrade(&env));
+        sync(&server, &client, reply).await;
+        for handle in handles {
+            client.remove_event_handler(handle);
+        }
+        listener
+    }
+
+    fn ring_from(sender: &str, event: &str) -> Ring {
+        Ring {
+            room_id: room_id!("!call:synthetic.test").to_owned(),
+            event_id: OwnedEventId::try_from(event).unwrap(),
+            sender: OwnedUserId::try_from(sender).unwrap(),
+            intent: Intent::Audio,
+            ends_ms: now_ms() + 60_000,
+        }
+    }
+
+    fn live_ids(recorder: &Recorder) -> Vec<OwnedEventId> {
+        recorder
+            .rings
+            .live(now_ms())
+            .into_iter()
+            .map(|ring| ring.event_id)
+            .collect()
+    }
+
+    /// GIVEN a ring from a joined member who is in the call WHEN it syncs
+    /// THEN it rings once, and the notification has names only when they are
+    /// allowed.
+    #[tokio::test]
+    async fn given_a_ring_from_a_member_in_the_call_then_it_rings_and_notifies() {
+        for (toast, expected) in [
+            (Some(true), vec![("Planning".to_owned(), "Bob".to_owned())]),
+            (Some(false), vec![(String::new(), String::new())]),
+            (None, vec![]),
+        ] {
+            let reply = sync_reply(
+                vec![in_call(CALLER, "BOB")],
+                vec![ring_event("$ring", CALLER)],
+                &[],
+            );
+            let recorder = run(reply, toast, |_| {}).await;
+            let rings = recorder.rings.live(now_ms());
+            assert_eq!(rings.len(), 1, "{toast:?}");
+            assert_eq!(rings[0].event_id, event_id!("$ring"));
+            assert_eq!(rings[0].intent, Intent::Video);
+            assert!(recorder.rings_changed.load(Ordering::SeqCst) >= 1);
+            assert_eq!(*recorder.toasts.lock().unwrap(), expected, "{toast:?}");
+        }
+    }
+
+    /// GIVEN rings that fail a check WHEN they sync THEN none rings and no
+    /// notification is made.
+    #[tokio::test]
+    async fn given_a_refused_ring_then_nothing_rings() {
+        let mut padded = ring_content();
+        padded["padding"] = json!("x".repeat(MAX_EVENT_BYTES));
+        let malformed = json!({ "notification_type": "ring" });
+        let cases: [(&str, Vec<Value>, Value, &[&str]); 6] = [
+            ("not in the call", vec![], ring_event("$a", CALLER), &[]),
+            (
+                "own ring",
+                vec![in_call(ME, "OTHER")],
+                ring_event("$b", ME),
+                &[],
+            ),
+            (
+                "ignored caller",
+                vec![in_call(CALLER, "BOB")],
+                ring_event("$c", CALLER),
+                &[CALLER],
+            ),
+            (
+                "malformed",
+                vec![in_call(CALLER, "BOB")],
+                timeline_event(NOTIFICATION_TYPE, "$d", CALLER, malformed),
+                &[],
+            ),
+            (
+                "over the size bound",
+                vec![in_call(CALLER, "BOB")],
+                timeline_event(NOTIFICATION_TYPE, "$e", CALLER, padded),
+                &[],
+            ),
+            (
+                "not a joined member",
+                vec![in_call(STRANGER, "CAROL")],
+                ring_event("$f", STRANGER),
+                &[],
+            ),
+        ];
+        for (case, state, event, ignored) in cases {
+            let recorder = run(sync_reply(state, vec![event], ignored), Some(true), |_| {}).await;
+            assert!(live_ids(&recorder).is_empty(), "{case}");
+            assert!(recorder.toasts.lock().unwrap().is_empty(), "{case}");
+        }
+    }
+
+    /// GIVEN a ring in the room of the open call WHEN it syncs THEN it does
+    /// not ring.
+    #[tokio::test]
+    async fn given_a_ring_in_the_open_call_room_then_it_does_not_ring() {
+        let reply = sync_reply(
+            vec![in_call(CALLER, "BOB")],
+            vec![ring_event("$ring", CALLER)],
+            &[],
+        );
+        let recorder = run(reply, Some(true), |r| {
+            r.rings
+                .set_open_room(Some(room_id!("!call:synthetic.test")));
+        })
+        .await;
+        assert!(live_ids(&recorder).is_empty());
+        assert!(recorder.toasts.lock().unwrap().is_empty());
+    }
+
+    /// GIVEN a live ring WHEN a decline of it syncs THEN only a decline by
+    /// this user, from another device, ends it here.
+    #[tokio::test]
+    async fn given_a_decline_then_only_this_users_own_ends_the_ring() {
+        for (sender, ends) in [(ME, true), (CALLER, false)] {
+            let decline = timeline_event(DECLINE_TYPE, "$no", sender, decline_content("$ring"));
+            let reply = sync_reply(vec![in_call(CALLER, "BOB")], vec![decline], &[]);
+            let recorder = run(reply, None, |r| {
+                r.rings.admit(ring_from(CALLER, "$ring"), now_ms()).unwrap();
+            })
+            .await;
+            assert_eq!(live_ids(&recorder).is_empty(), ends, "{sender}");
+        }
+    }
+
+    /// GIVEN call memberships WHEN they sync THEN the room's call flag counts
+    /// only other devices, and a ring whose sender is not in the call ends.
+    #[tokio::test]
+    async fn given_call_memberships_then_the_flag_is_set_and_rings_of_absent_callers_end() {
+        let room = room_id!("!call:synthetic.test");
+        // One ring per room, so each caller's ring needs its own run.
+        let reply = sync_reply(vec![in_call(CALLER, "BOB")], vec![], &[]);
+        let recorder = run(reply.clone(), None, |r| {
+            r.rings
+                .admit(ring_from(STRANGER, "$carol"), now_ms())
+                .unwrap();
+        })
+        .await;
+        assert!(recorder.call_rooms.active(room, now_ms()));
+        assert_eq!(*recorder.room_calls.lock().unwrap(), vec![ROOM.to_owned()]);
+        assert!(live_ids(&recorder).is_empty());
+        assert_eq!(recorder.rings_changed.load(Ordering::SeqCst), 1);
+
+        let recorder = run(reply, None, |r| {
+            r.rings.admit(ring_from(CALLER, "$bob"), now_ms()).unwrap();
+        })
+        .await;
+        assert_eq!(live_ids(&recorder), vec![event_id!("$bob").to_owned()]);
+        assert_eq!(recorder.rings_changed.load(Ordering::SeqCst), 0);
+
+        let reply = sync_reply(vec![in_call(ME, "PERSEPHONE")], vec![], &[]);
+        let recorder = run(reply, None, |_| {}).await;
+        assert!(!recorder.call_rooms.active(room, now_ms()));
+        assert!(recorder.room_calls.lock().unwrap().is_empty());
+    }
+
+    /// GIVEN the session's environment has gone WHEN a ring and a membership
+    /// sync THEN the handlers do nothing.
+    #[tokio::test]
+    async fn given_a_dropped_environment_then_the_handlers_do_nothing() {
+        let server = MockServer::builder().start().await;
+        let client = client(&server).await;
+        let listener = Arc::new(Recorder::default());
+        let env: Arc<dyn Env> = Arc::new(TestEnv {
+            listener: listener.clone(),
+            toast: Some(true),
+        });
+        let _handles = register(&client, Arc::downgrade(&env));
+        drop(env);
+        let reply = sync_reply(
+            vec![in_call(CALLER, "BOB")],
+            vec![ring_event("$ring", CALLER)],
+            &[],
+        );
+        sync(&server, &client, reply).await;
+        assert!(live_ids(&listener).is_empty());
+        assert!(listener.room_calls.lock().unwrap().is_empty());
+        assert_eq!(listener.rings_changed.load(Ordering::SeqCst), 0);
+    }
+
+    /// GIVEN a joined room WHEN a decline is sent THEN it is one PUT of the
+    /// decline type and the result follows the homeserver's answer; an
+    /// unknown room sends nothing.
+    #[tokio::test]
+    async fn given_a_decline_send_then_the_result_follows_the_homeserver() {
+        for (status, accepted) in [(200, true), (500, false)] {
+            let server = MockServer::builder().start().await;
+            let client = client(&server).await;
+            sync(&server, &client, sync_reply(vec![], vec![], &[])).await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"/state/m\.room\.encryption"))
+                .respond_with(
+                    ResponseTemplate::new(404)
+                        .set_body_json(json!({ "errcode": "M_NOT_FOUND", "error": "none" })),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path_regex(
+                    r"/rooms/!call:synthetic\.test/send/org\.matrix\.msc4310\.rtc\.decline/",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(json!({ "event_id": "$sent" })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let room = RoomId::parse(ROOM).unwrap();
+            assert_eq!(
+                send_decline(&client, &room, event_id!("$ring")).await,
+                accepted,
+                "{status}"
+            );
+            let unknown = room_id!("!other:synthetic.test");
+            assert!(!send_decline(&client, unknown, event_id!("$ring")).await);
+        }
+    }
+}
