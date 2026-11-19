@@ -113,22 +113,28 @@ pub struct SfuService {
 ///
 /// The legacy form is `{"type":"livekit","livekit_service_url":U}`. The
 /// newer form (Synapse 1.161 and later) is `{"type":"m.livekit","url":U}`.
+/// A URL longer than [`MAX_URL_BYTES`] is refused before it is copied.
 fn livekit_url(transport: &RtcTransport) -> Option<String> {
     match transport {
-        RtcTransport::LiveKit(livekit) => Some(livekit.service_url.clone()),
+        RtcTransport::LiveKit(livekit) => bounded_copy(&livekit.service_url),
         other if other.transport_type() == "m.livekit" => other
             .data()
             .get("url")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+            .and_then(bounded_copy),
         _ => None,
     }
+}
+
+/// A copy of `url` when it is at most [`MAX_URL_BYTES`] long.
+fn bounded_copy(url: &str) -> Option<String> {
+    (url.len() <= MAX_URL_BYTES).then(|| url.to_owned())
 }
 
 /// The first LiveKit service URL that is safe to use, in server order.
 fn first_livekit(transports: &[RtcTransport]) -> Option<SfuService> {
     transports.iter().find_map(|transport| {
-        let advertised = livekit_url(transport).filter(|u| u.len() <= MAX_URL_BYTES)?;
+        let advertised = livekit_url(transport)?;
         Url::parse(&advertised)
             .ok()
             .filter(|url| is_service_url(url, "https", "http"))
@@ -339,6 +345,25 @@ pub(super) mod tests {
         if !cfg!(feature = "dev-disposable-servers") {
             assert!(first_livekit(&[make(json!({ "url": "http://sfu.example.org" }))]).is_none());
         }
+    }
+
+    /// GIVEN advertised URLs at and over the limit WHEN either form is read THEN only the one at the limit is kept.
+    #[test]
+    fn given_a_url_at_and_over_the_limit_then_only_the_one_at_the_limit_is_read() {
+        let base = "https://sfu.example.org/";
+        let at = format!("{base}{}", "a".repeat(MAX_URL_BYTES - base.len()));
+        let over = format!("{at}a");
+        let newer = |url: &str| {
+            let data = json!({ "url": url });
+            RtcTransport::new("m.livekit", data.as_object().unwrap().clone()).unwrap()
+        };
+        assert_eq!(
+            livekit_url(&RtcTransport::livekit(at.clone())),
+            Some(at.clone())
+        );
+        assert_eq!(livekit_url(&newer(&at)), Some(at.clone()));
+        assert_eq!(livekit_url(&RtcTransport::livekit(over.clone())), None);
+        assert_eq!(livekit_url(&newer(&over)), None);
     }
 
     /// GIVEN a service advertised as a bare origin, with or without a final

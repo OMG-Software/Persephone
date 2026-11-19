@@ -200,15 +200,21 @@ Proposed option: "a contained call worker".
     frames.
   * TURN over TLS (`turns:` URIs from the homeserver). libwebrtc makes
     this TLS connection with its own stack, so Persephone's TLS version
-    and certificate rules do not apply to it. Plain `turn:` over UDP or
-    TCP has no TLS. The relayed packets are DTLS-SRTP with frame
-    encryption either way, but the TURN credentials and the relay
-    allocation are exposed to the path when no TLS 1.3 protects them.
+    and certificate rules do not apply to it. Its negotiated TLS version
+    and its certificate checks are not measured. A `turns:` connection
+    with an encrypted, certificate-checked TLS 1.2 session still protects
+    the TURN exchange from the path; it breaks only the TLS 1.3 rule.
+    Plain `turn:` over UDP or TCP has no TLS at all, so the path sees the
+    TURN username and the relay allocation. With Synapse's shared-secret
+    TURN credentials the username contains the Matrix user ID. TURN sends
+    a message integrity value, not the password. The relayed packets
+    are DTLS-SRTP with frame encryption in every case.
   * This is an exception to the "TLS 1.3 with certificate checks on every
     TLS connection" driver above. It stays open until a live run records
-    the negotiated DTLS and `turns:` TLS versions with a packet capture.
-    Then a decision either accepts it or restricts it, for example by
-    passing only `turn:` URIs to the worker.
+    the negotiated DTLS and `turns:` TLS versions with a packet capture,
+    and a test records whether `turns:` refuses a bad certificate. Then a
+    decision either accepts it or restricts it, for example by passing
+    the worker only `turns:` URIs, or no TURN URIs.
 * libwebrtc: `tools/dev.py` downloads the pinned prebuilt archive into
   `.local/`, checks its SHA-256 against a committed value, and gives its
   path to the build in `LK_CUSTOM_WEBRTC`. A wrong hash stops the build.
