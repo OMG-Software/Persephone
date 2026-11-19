@@ -13,6 +13,8 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
+#[cfg(test)]
+use persephone_call_protocol::SCREEN_TILE;
 use persephone_call_protocol::{FromWorker, VIDEO_TILES, write_message, write_video_frame};
 use tokio::sync::mpsc::{self, WeakSender, error::TryRecvError};
 
@@ -96,7 +98,7 @@ impl VideoSlots {
     fn put(&self, tile: u8, rotation: u8, width: u32, height: u32, rgba: Vec<u8>) -> bool {
         let valid = tile < VIDEO_TILES
             && rotation <= persephone_call_protocol::MAX_VIDEO_ROTATION
-            && rgba_len(width, height) == Some(rgba.len());
+            && rgba_len(tile, width, height) == Some(rgba.len());
         if valid {
             self.lock().pictures[usize::from(tile)] = Some(Picture {
                 rotation,
@@ -320,7 +322,7 @@ mod tests {
     use super::*;
 
     fn picture(width: u32, height: u32, fill: u8) -> Vec<u8> {
-        vec![fill; rgba_len(width, height).unwrap()]
+        vec![fill; rgba_len(0, width, height).unwrap()]
     }
 
     /// Queues `message` and writes it at once.
@@ -542,6 +544,23 @@ mod tests {
         assert!(!slots.put(0, 0, 641, 1, vec![0; 641 * 4]));
         assert!(!slots.put(0, 0, 0, 1, Vec::new()));
         assert!(slots.take().is_none());
+    }
+
+    /// GIVEN a screen picture WHEN it is offered to a camera tile or over the
+    /// screen limit THEN none is kept; on the screen tile 1280x720 is kept,
+    /// once the tile is open.
+    #[test]
+    fn given_screen_pictures_when_offered_then_the_tile_limit_decides() {
+        let slots = VideoSlots::default();
+        let screen = vec![9; 1280 * 720 * 4];
+        assert!(!slots.put(1, 0, 1280, 720, screen.clone()));
+        assert!(!slots.put(0, 0, 1280, 720, screen.clone()));
+        assert!(!slots.put(SCREEN_TILE, 0, 1281, 720, vec![0; 1281 * 720 * 4]));
+        assert!(!slots.put(SCREEN_TILE, 0, 1280, 721, vec![0; 1280 * 721 * 4]));
+        assert!(slots.put(SCREEN_TILE, 0, 1280, 720, screen));
+        assert!(slots.take().is_none(), "the tile is not open yet");
+        wrote(&slots, started(SCREEN_TILE));
+        assert!(slots.take().is_some());
     }
 
     /// GIVEN a waiting picture WHEN its tile is cleared THEN it is not written.

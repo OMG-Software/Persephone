@@ -356,6 +356,10 @@ mod tests {
                 on: true,
                 remote: false,
             },
+            ToWorker::SetScreen { target: None },
+            ToWorker::SetScreen {
+                target: Some(persephone_call_protocol::ScreenTarget::Portal { node: 7 }),
+            },
             ToWorker::SetOwnKey { key: key() },
             ToWorker::SetKey {
                 identity: "@a:example.org:D".to_owned(),

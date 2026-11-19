@@ -43,7 +43,7 @@ mod backend;
 // Linux camera paths (ADR-0049). `yuyv` holds the format policy and the YUYV
 // conversion; it has no OS code, so its tests run on every OS.
 #[cfg(target_os = "linux")]
-mod linux_portal;
+pub(crate) mod linux_portal;
 #[cfg(target_os = "linux")]
 mod v4l2;
 #[cfg(any(target_os = "linux", test))]
@@ -66,7 +66,7 @@ impl Grant {
     pub fn take() -> Self {
         Self {
             #[cfg(target_os = "linux")]
-            remote: crate::camera_channel::take_handle(),
+            remote: crate::camera_channel::take_handle(crate::camera_channel::Kind::Camera),
         }
     }
 }
@@ -189,6 +189,20 @@ pub struct Capture {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl Capture {
+    /// A capture over a running thread. The screen backends (ADR-0053) make
+    /// theirs this way, so they share the stop and join rules.
+    pub(crate) fn from_parts(
+        stop: Arc<AtomicBool>,
+        done: mpsc::Receiver<()>,
+        thread: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            stop,
+            done,
+            thread: Some(thread),
+        }
+    }
+
     /// Asks the capture to end and waits up to `STOP_TIMEOUT` for the thread,
     /// so the camera is released. Returns `None` when the thread ended. When it
     /// did not end in time (a blocked read on a stalled camera), the capture
@@ -256,13 +270,13 @@ pub fn captures_running() -> bool {
 /// in [`Capture::stop`] hears of every exit, including a panic. It is made
 /// before the thread starts and moved into it.
 #[cfg_attr(not(windows), allow(dead_code))]
-struct DoneSignal {
+pub(crate) struct DoneSignal {
     done: mpsc::Sender<()>,
     count: &'static AtomicUsize,
 }
 
 impl DoneSignal {
-    fn new(done: mpsc::Sender<()>, count: &'static AtomicUsize) -> Self {
+    pub(crate) fn new(done: mpsc::Sender<()>, count: &'static AtomicUsize) -> Self {
         count.fetch_add(1, Ordering::AcqRel);
         Self { done, count }
     }

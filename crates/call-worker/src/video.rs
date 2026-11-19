@@ -6,31 +6,61 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{
-    CameraState, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_ROTATION, MAX_VIDEO_SIDE, VIDEO_TILES,
+    CameraState, MAX_VIDEO_PIXELS, MAX_VIDEO_ROTATION, MAX_VIDEO_SIDE, SCREEN_TILE, max_fps,
+    picture_fits,
 };
 
 /// The tile of the own camera.
 pub const OWN_TILE: u8 = 0;
-/// Remote video tiles: 1 up to and including `VIDEO_TILES - 1`.
-const REMOTE_TILES: usize = (VIDEO_TILES - 1) as usize;
+/// Remote camera tiles: 1 up to and including `SCREEN_TILE - 1`.
+const REMOTE_TILES: usize = (SCREEN_TILE - 1) as usize;
 /// Remote tracks that may wait for a free tile.
 pub const MAX_WAITING: usize = 32;
 /// The long side of the picture box. The short side is [`BOX_SHORT`].
 const BOX_LONG: u32 = MAX_VIDEO_SIDE;
 const BOX_SHORT: u32 = MAX_VIDEO_PIXELS / MAX_VIDEO_SIDE;
+/// The box of a published screen share (ADR-0053): 1920x1080.
+const PUBLISH_LONG: u32 = 1920;
+const PUBLISH_SHORT: u32 = 1080;
 
 /// The size to send for a picture of `width` x `height`: the largest size that
 /// fits 640x360 (360x640 for a tall picture) with the same aspect. A picture
 /// that already fits keeps its size, so a small camera is never enlarged.
 /// Both sides are at least 1. Returns `None` for an empty picture.
 pub fn fit_within_box(width: u32, height: u32) -> Option<(u32, u32)> {
+    fit_in(width, height, BOX_LONG, BOX_SHORT)
+}
+
+/// The size to publish for a screen capture of `width` x `height`: the
+/// largest size that fits 1920x1080 (1080x1920 for a tall screen) with the
+/// same aspect. A capture that already fits keeps its size.
+pub fn fit_publish_box(width: u32, height: u32) -> Option<(u32, u32)> {
+    fit_in(width, height, PUBLISH_LONG, PUBLISH_SHORT)
+}
+
+/// The size to keep for a received picture on `tile`: the camera box, or for
+/// the screen tile the 1280x720 screen box (720x1280 for a tall one).
+pub fn fit_for_tile(tile: u8, width: u32, height: u32) -> Option<(u32, u32)> {
+    if tile == SCREEN_TILE {
+        fit_in(
+            width,
+            height,
+            persephone_call_protocol::MAX_SCREEN_SIDE,
+            persephone_call_protocol::MAX_SCREEN_PIXELS / persephone_call_protocol::MAX_SCREEN_SIDE,
+        )
+    } else {
+        fit_within_box(width, height)
+    }
+}
+
+fn fit_in(width: u32, height: u32, long: u32, short: u32) -> Option<(u32, u32)> {
     if width == 0 || height == 0 {
         return None;
     }
     let (box_w, box_h) = if height > width {
-        (BOX_SHORT, BOX_LONG)
+        (short, long)
     } else {
-        (BOX_LONG, BOX_SHORT)
+        (long, short)
     };
     if width <= box_w && height <= box_h {
         return Some((width, height));
@@ -60,25 +90,36 @@ pub fn quarter_turns(degrees: u32) -> Option<u8> {
     Some(turns)
 }
 
-/// The bytes in an RGBA picture, or `None` when the size is outside the video
-/// limits of the wire.
-pub fn rgba_len(width: u32, height: u32) -> Option<usize> {
-    let inside = (1..=MAX_VIDEO_SIDE).contains(&width)
-        && (1..=MAX_VIDEO_SIDE).contains(&height)
-        && u64::from(width) * u64::from(height) <= u64::from(MAX_VIDEO_PIXELS);
-    inside.then(|| width as usize * height as usize * 4)
+/// The bytes in an RGBA picture on `tile`, or `None` when the size is outside
+/// the limits of that tile (checked before any buffer is made).
+pub fn rgba_len(tile: u8, width: u32, height: u32) -> Option<usize> {
+    picture_fits(tile, width, height).then(|| width as usize * height as usize * 4)
 }
 
-/// Lets through at most [`MAX_VIDEO_FPS`] pictures per second, on a fixed
-/// schedule. A picture that comes a little late does not move the schedule; a
-/// long gap restarts it.
-#[derive(Debug, Default)]
+/// Lets through at most the tile's pictures per second (15 for a camera, 5
+/// for the screen), on a fixed schedule. A picture that comes a little late
+/// does not move the schedule; a long gap restarts it.
+#[derive(Debug)]
 pub struct RateLimiter {
     due: Option<Instant>,
+    interval: Duration,
+}
+
+impl Default for RateLimiter {
+    /// The camera limit.
+    fn default() -> Self {
+        Self::for_tile(OWN_TILE)
+    }
 }
 
 impl RateLimiter {
-    const INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / MAX_VIDEO_FPS as u64);
+    /// The limit of `tile`.
+    pub fn for_tile(tile: u8) -> Self {
+        Self {
+            due: None,
+            interval: Duration::from_nanos(1_000_000_000 / u64::from(max_fps(tile))),
+        }
+    }
     /// A picture may come this much before its time, so that the jitter of a
     /// 30 fps source does not push the rate far below 15 fps. The schedule does
     /// not move, so the average rate never exceeds the limit.
@@ -86,7 +127,7 @@ impl RateLimiter {
 
     pub fn admit(&mut self, now: Instant) -> bool {
         let Some(due) = self.due else {
-            self.due = Some(now + Self::INTERVAL);
+            self.due = Some(now + self.interval);
             return true;
         };
         if now + Self::EARLY < due {
@@ -94,7 +135,7 @@ impl RateLimiter {
         }
         // On time or slightly late: keep the schedule, but never fall so far
         // behind that a burst could follow.
-        self.due = Some((due + Self::INTERVAL).max(now + Self::INTERVAL / 2));
+        self.due = Some((due + self.interval).max(now + self.interval / 2));
         true
     }
 }
@@ -176,6 +217,91 @@ impl<K: Clone + Eq> TileAssigner<K> {
     pub fn on_tile(&self, tile: u8) -> Option<&K> {
         let slot = usize::from(tile).checked_sub(1)?;
         self.tiles.get(slot)?.as_ref()
+    }
+
+    #[cfg(test)]
+    pub fn waiting_len(&self) -> usize {
+        self.waiting.len()
+    }
+}
+
+/// The one decoded remote screen share (ADR-0053). The first track that a
+/// member publishes takes the screen tile; the others wait, up to
+/// [`MAX_WAITING`], and the longest-waiting one takes the tile when the
+/// decoded one ends.
+#[derive(Debug)]
+pub struct ScreenQueue<K> {
+    current: Option<K>,
+    waiting: VecDeque<K>,
+}
+
+impl<K> Default for ScreenQueue<K> {
+    fn default() -> Self {
+        Self {
+            current: None,
+            waiting: VecDeque::new(),
+        }
+    }
+}
+
+/// What a removal took out of a [`ScreenQueue`].
+#[derive(Debug, Eq, PartialEq)]
+pub struct ScreenRemoved<K> {
+    /// Every track that matched, decoded or waiting.
+    pub removed: Vec<K>,
+    /// The decoded one ended: the track that took the tile, if any.
+    pub freed: Option<Freed<K>>,
+}
+
+impl<K: Clone + Eq> ScreenQueue<K> {
+    pub fn add(&mut self, key: K) -> Added {
+        if self.current.as_ref() == Some(&key) || self.waiting.contains(&key) {
+            return Added::Refused;
+        }
+        if self.current.is_none() {
+            self.current = Some(key);
+            return Added::Tile(SCREEN_TILE);
+        }
+        if self.waiting.len() >= MAX_WAITING {
+            return Added::Refused;
+        }
+        self.waiting.push_back(key);
+        Added::Queued
+    }
+
+    /// Removes every track that `matches`.
+    pub fn remove_where(&mut self, matches: impl Fn(&K) -> bool) -> ScreenRemoved<K> {
+        let mut removed = Vec::new();
+        let mut kept = VecDeque::new();
+        for key in self.waiting.drain(..) {
+            if matches(&key) {
+                removed.push(key);
+            } else {
+                kept.push_back(key);
+            }
+        }
+        self.waiting = kept;
+        let freed = if self.current.as_ref().is_some_and(&matches) {
+            removed.extend(self.current.take());
+            self.current = self.waiting.pop_front();
+            Some(Freed {
+                tile: SCREEN_TILE,
+                promoted: self.current.clone(),
+            })
+        } else {
+            None
+        };
+        ScreenRemoved { removed, freed }
+    }
+
+    /// Whether any track, decoded or waiting, `matches`.
+    pub fn any(&self, matches: impl Fn(&K) -> bool) -> bool {
+        self.current.iter().chain(self.waiting.iter()).any(matches)
+    }
+
+    #[cfg(test)]
+    pub fn current(&self) -> Option<&K> {
+        self.current.as_ref()
     }
 
     #[cfg(test)]
@@ -282,7 +408,10 @@ mod tests {
         for ((w, h), want) in cases {
             assert_eq!(fit_within_box(w, h), Some(want), "{w}x{h}");
             let (fw, fh) = want;
-            assert!(rgba_len(fw, fh).is_some(), "{w}x{h} inside wire limits");
+            assert!(
+                rgba_len(OWN_TILE, fw, fh).is_some(),
+                "{w}x{h} inside wire limits"
+            );
         }
     }
 
@@ -298,7 +427,7 @@ mod tests {
     #[test]
     fn given_huge_picture_when_fitted_then_there_is_no_overflow() {
         let (w, h) = fit_within_box(u32::MAX, u32::MAX).unwrap();
-        assert!(rgba_len(w, h).is_some());
+        assert!(rgba_len(OWN_TILE, w, h).is_some());
         let (w, h) = fit_within_box(u32::MAX, 1).unwrap();
         assert_eq!((w, h), (640, 1));
     }
@@ -307,9 +436,9 @@ mod tests {
     /// there is none.
     #[test]
     fn given_sizes_outside_the_limits_when_counted_then_they_are_refused() {
-        assert_eq!(rgba_len(640, 360), Some(921_600));
-        assert_eq!(rgba_len(360, 640), Some(921_600));
-        assert_eq!(rgba_len(1, 1), Some(4));
+        assert_eq!(rgba_len(OWN_TILE, 640, 360), Some(921_600));
+        assert_eq!(rgba_len(OWN_TILE, 360, 640), Some(921_600));
+        assert_eq!(rgba_len(OWN_TILE, 1, 1), Some(4));
         for (w, h) in [
             (0, 1),
             (1, 0),
@@ -318,8 +447,134 @@ mod tests {
             (640, 361),
             (u32::MAX, 1),
         ] {
-            assert_eq!(rgba_len(w, h), None, "{w}x{h}");
+            assert_eq!(rgba_len(OWN_TILE, w, h), None, "{w}x{h}");
         }
+    }
+
+    /// GIVEN the screen tile WHEN sizes are counted THEN 1280x720 passes (and
+    /// 720x1280), larger ones are refused, and the same size is refused on a
+    /// camera tile.
+    #[test]
+    fn given_screen_sizes_when_counted_then_the_tile_decides() {
+        assert_eq!(rgba_len(SCREEN_TILE, 1280, 720), Some(3_686_400));
+        assert_eq!(rgba_len(SCREEN_TILE, 720, 1280), Some(3_686_400));
+        for (w, h) in [(1281, 720), (1280, 721), (0, 1), (1, 0), (u32::MAX, 1)] {
+            assert_eq!(rgba_len(SCREEN_TILE, w, h), None, "{w}x{h}");
+        }
+        for tile in 0..SCREEN_TILE {
+            assert_eq!(rgba_len(tile, 1280, 720), None, "tile {tile}");
+        }
+        assert_eq!(rgba_len(persephone_call_protocol::VIDEO_TILES, 1, 1), None);
+    }
+
+    /// GIVEN screens of many sizes WHEN fitted for the screen tile and for
+    /// publishing THEN they keep the aspect, are never enlarged and fit.
+    #[test]
+    fn given_screens_when_fitted_then_they_fit_their_boxes() {
+        let tile_cases = [
+            ((3840, 2160), (1280, 720)),
+            ((1920, 1080), (1280, 720)),
+            ((1280, 720), (1280, 720)),
+            ((800, 600), (800, 600)),
+            ((1080, 1920), (720, 1280)),
+            ((720, 1280), (720, 1280)),
+            ((u32::MAX, 1), (1280, 1)),
+        ];
+        for ((w, h), want) in tile_cases {
+            assert_eq!(fit_for_tile(SCREEN_TILE, w, h), Some(want), "{w}x{h}");
+            assert!(rgba_len(SCREEN_TILE, want.0, want.1).is_some());
+        }
+        assert_eq!(fit_for_tile(1, 1920, 1080), Some((640, 360)));
+        let publish_cases = [
+            ((3840, 2160), (1920, 1080)),
+            ((2560, 1440), (1920, 1080)),
+            ((1920, 1080), (1920, 1080)),
+            ((1366, 768), (1366, 768)),
+            ((2160, 3840), (1080, 1920)),
+            ((5120, 1440), (1920, 540)),
+        ];
+        for ((w, h), want) in publish_cases {
+            assert_eq!(fit_publish_box(w, h), Some(want), "{w}x{h}");
+        }
+        assert_eq!(fit_publish_box(0, 1080), None);
+    }
+
+    /// GIVEN screen pictures arriving at 60 per second WHEN limited for the
+    /// screen tile THEN at most 5 pass in one second.
+    #[test]
+    fn given_a_fast_screen_when_limited_then_five_per_second_pass() {
+        let start = Instant::now();
+        let mut limiter = RateLimiter::for_tile(SCREEN_TILE);
+        let passed = (0..120)
+            .filter(|frame| limiter.admit(at(start, frame * 1000 / 60)))
+            .count();
+        assert_eq!(passed, 10, "two seconds of 60 per second");
+        let mut camera = RateLimiter::for_tile(0);
+        let passed = (0..60)
+            .filter(|frame| camera.admit(at(start, frame * 1000 / 60)))
+            .count();
+        assert!((14..=16).contains(&passed), "{passed}");
+    }
+
+    /// GIVEN two screen shares WHEN they start THEN the first is decoded and
+    /// the second waits; when the first ends the second takes the tile.
+    #[test]
+    fn given_two_screen_shares_then_one_is_decoded_and_the_other_waits() {
+        let mut queue = ScreenQueue::default();
+        assert_eq!(queue.add("a"), Added::Tile(SCREEN_TILE));
+        assert_eq!(queue.add("b"), Added::Queued);
+        assert_eq!(queue.add("c"), Added::Queued);
+        assert_eq!(queue.add("a"), Added::Refused);
+        assert_eq!(queue.add("b"), Added::Refused);
+        assert_eq!(queue.current(), Some(&"a"));
+        let ended = queue.remove_where(|key| *key == "a");
+        assert_eq!(ended.removed, vec!["a"]);
+        assert_eq!(
+            ended.freed,
+            Some(Freed {
+                tile: SCREEN_TILE,
+                promoted: Some("b")
+            })
+        );
+        assert_eq!(queue.current(), Some(&"b"));
+        assert_eq!(queue.waiting_len(), 1);
+    }
+
+    /// GIVEN a waiting share WHEN it ends THEN nothing changes for the decoded
+    /// one; and when the last one ends the tile is free.
+    #[test]
+    fn given_waiting_share_ends_then_the_decoded_one_stays() {
+        let mut queue = ScreenQueue::default();
+        queue.add("a");
+        queue.add("b");
+        let ended = queue.remove_where(|key| *key == "b");
+        assert_eq!(ended.removed, vec!["b"]);
+        assert_eq!(ended.freed, None);
+        assert_eq!(queue.current(), Some(&"a"));
+        let ended = queue.remove_where(|key| *key == "a");
+        assert_eq!(
+            ended.freed,
+            Some(Freed {
+                tile: SCREEN_TILE,
+                promoted: None
+            })
+        );
+        assert_eq!(queue.current(), None);
+        assert_eq!(queue.add("c"), Added::Tile(SCREEN_TILE));
+    }
+
+    /// GIVEN a full waiting queue WHEN one more share arrives THEN it is
+    /// refused.
+    #[test]
+    fn given_a_full_screen_queue_then_one_more_is_refused() {
+        let mut queue = ScreenQueue::default();
+        assert_eq!(queue.add(0_usize), Added::Tile(SCREEN_TILE));
+        for key in 1..=MAX_WAITING {
+            assert_eq!(queue.add(key), Added::Queued);
+        }
+        assert_eq!(queue.add(MAX_WAITING + 1), Added::Refused);
+        assert!(queue.any(|key| *key == 3));
+        assert!(!queue.any(|key| *key == MAX_WAITING + 1));
     }
 
     /// GIVEN the four right angles WHEN mapped THEN they are quarter turns;

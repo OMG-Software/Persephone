@@ -22,6 +22,7 @@ use livekit::{
     },
     rtc_engine::EngineError,
     webrtc::{
+        native::yuv_helper,
         peer_connection_factory::{IceServer, IceTransportsType, RtcConfiguration},
         video_frame::{
             I420Buffer, NV12Buffer, VideoBuffer, VideoFormatType, VideoFrame, VideoRotation,
@@ -34,8 +35,9 @@ use livekit::{
 };
 use livekit_signaling::SignalError;
 use persephone_call_protocol::{
-    CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS,
-    MAX_VIDEO_SIDE, ToWorker, VIDEO_TILES,
+    CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_SCREEN_FPS, MAX_VIDEO_FPS,
+    MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE, ScreenState, ScreenTarget, ToWorker,
+    VIDEO_TILES,
 };
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::task::JoinHandle;
@@ -49,8 +51,10 @@ use crate::mapping::{
     failure_for_connect, valid_identity,
 };
 use crate::output::{Closed, Output, PictureSink};
+use crate::screen;
 use crate::video::{
-    Added, OWN_TILE, RateLimiter, TileAssigner, fit_within_box, quarter_turns, rgba_len,
+    Added, OWN_TILE, RateLimiter, ScreenQueue, TileAssigner, fit_for_tile, fit_publish_box,
+    fit_within_box, quarter_turns, rgba_len,
 };
 use crate::{EXIT_DONE, EXIT_FAILED, Input};
 
@@ -60,6 +64,8 @@ const KEY_RING_SIZE: i32 = 256;
 const RATCHET_WINDOW_SIZE: i32 = 10;
 /// No tolerance for decryption failures before a key is marked bad (-1).
 const FAILURE_TOLERANCE: i32 = -1;
+/// The most a published screen share encodes, in bits per second.
+const SCREEN_MAX_BITRATE: u64 = 1_500_000;
 /// How often deferred Speaking changes are looked at.
 const SPEAKING_TICK: Duration = Duration::from_millis(100);
 
@@ -175,7 +181,14 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
 
     let (camera_failed_tx, mut camera_failed) = mpsc::channel::<u64>(1);
     // At most one camera open is in flight, so one slot is enough.
-    let (open_tx, mut open_done) = mpsc::channel::<Opened<OpenedCamera>>(1);
+    let (open_tx, mut open_done) = mpsc::channel::<Opened<OpenedCamera, CameraState>>(1);
+    // The same for the screen share (ADR-0053).
+    let (screen_failed_tx, screen_failed) = mpsc::channel::<(u64, screen::Ended)>(1);
+    let (screen_open_tx, screen_open_done) = mpsc::channel::<Opened<OpenedScreen, ScreenState>>(1);
+    let mut screens = ScreenInbox {
+        failed: screen_failed,
+        opened: screen_open_done,
+    };
     let mut call = Call {
         room: &room,
         provider: &provider,
@@ -189,6 +202,11 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         gate: CameraGate::new(own_index),
         camera_failed: camera_failed_tx,
         open_tx,
+        screen: None,
+        screen_stalled: None,
+        screen_gate: CameraGate::new(own_index),
+        screen_failed: screen_failed_tx,
+        screen_open_tx,
         remote: RemoteVideo::default(),
     };
     let mut end = None;
@@ -208,12 +226,13 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
                 &mut call,
                 &mut camera_failed,
                 &mut open_done,
+                &mut screens,
                 &mut tracker,
             )
             .await
         }
     };
-    call.shutdown(&mut open_done).await;
+    call.shutdown(&mut open_done, &mut screens).await;
     let _ = room.close().await;
     drop(audio);
     match end {
@@ -320,8 +339,38 @@ struct Call<'a> {
     /// The capture thread reports its generation here when it ends by itself.
     camera_failed: mpsc::Sender<u64>,
     /// The open thread reports its result here.
-    open_tx: mpsc::Sender<Opened<OpenedCamera>>,
+    open_tx: mpsc::Sender<Opened<OpenedCamera, CameraState>>,
+    /// The own screen share while it is on (ADR-0053).
+    screen: Option<LocalScreen>,
+    /// A screen capture that did not end in time after a stop.
+    screen_stalled: Option<camera::Capture>,
+    /// The same open rules as the camera, for the screen share.
+    screen_gate: CameraGate,
+    screen_failed: mpsc::Sender<(u64, screen::Ended)>,
+    screen_open_tx: mpsc::Sender<Opened<OpenedScreen, ScreenState>>,
     remote: RemoteVideo,
+}
+
+/// What the event loop waits for about the screen share.
+struct ScreenInbox {
+    /// A capture thread reports its generation and why it ended.
+    failed: Receiver<(u64, screen::Ended)>,
+    opened: Receiver<Opened<OpenedScreen, ScreenState>>,
+}
+
+/// The own screen share while it is on.
+struct LocalScreen {
+    generation: u64,
+    capture: camera::Capture,
+    sid: TrackSid,
+    live: Arc<FrameAdmission>,
+}
+
+/// An open screen capture that is not yet published.
+struct OpenedScreen {
+    capture: camera::Capture,
+    source: NativeVideoSource,
+    live: Arc<FrameAdmission>,
 }
 
 /// The own camera while it is on.
@@ -342,6 +391,8 @@ type TrackKey = (String, String);
 #[derive(Default)]
 struct RemoteVideo {
     tiles: TileAssigner<TrackKey>,
+    /// The screen shares: one is decoded on the screen tile, the rest wait.
+    screens: ScreenQueue<TrackKey>,
     /// Tracks that wait for a tile.
     waiting: HashMap<TrackKey, RtcVideoTrack>,
     /// The picture reader of each tile (index 0 is never used).
@@ -397,9 +448,34 @@ impl CameraFeed {
         let Some(picture) = fitted_i420(&frame) else {
             return;
         };
-        if let Some((width, height, rgba)) = to_rgba(&picture) {
+        if let Some((width, height, rgba)) = to_rgba(OWN_TILE, &picture) {
             self.pictures.put(OWN_TILE, 0, width, height, rgba);
         }
+        self.source
+            .capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, picture));
+    }
+}
+
+/// The screen capture's frame callback: converts, scales and hands the
+/// picture to the SFU source. There is no own preview.
+struct ScreenFeed {
+    source: NativeVideoSource,
+    live: Arc<FrameAdmission>,
+    limiter: RateLimiter,
+}
+
+impl ScreenFeed {
+    fn frame(&mut self, frame: screen::CapturedFrame<'_>) {
+        // Held until the picture is handed on, so a stop waits for it.
+        let Some(_admitted) = self.live.admit() else {
+            return;
+        };
+        if !self.limiter.admit(std::time::Instant::now()) {
+            return;
+        }
+        let Some(picture) = screen_i420(&frame) else {
+            return;
+        };
         self.source
             .capture_frame(&VideoFrame::new(VideoRotation::VideoRotation0, picture));
     }
@@ -445,21 +521,26 @@ impl Call<'_> {
         let choice = self.camera_device.clone();
         // Opening blocks: the platform calls and the wait for the first frame
         // (up to `OPEN_TIMEOUT`, which includes a permission dialog on macOS).
-        let started = spawn_open(self.open_tx.clone(), generation, move || {
-            let capture = camera::open(
-                choice.as_deref(),
-                grant,
-                move |frame| feed.frame(frame),
-                move || {
-                    let _ = failed.try_send(generation);
-                },
-            )?;
-            Ok(OpenedCamera {
-                capture,
-                source,
-                live,
-            })
-        });
+        let started = spawn_open(
+            self.open_tx.clone(),
+            generation,
+            CameraState::Unavailable,
+            move || {
+                let capture = camera::open(
+                    choice.as_deref(),
+                    grant,
+                    move |frame| feed.frame(frame),
+                    move || {
+                        let _ = failed.try_send(generation);
+                    },
+                )?;
+                Ok(OpenedCamera {
+                    capture,
+                    source,
+                    live,
+                })
+            },
+        );
         if started.is_err() {
             self.gate.complete(generation, false);
             return Some(CameraState::Unavailable);
@@ -470,7 +551,10 @@ impl Call<'_> {
     /// The open ended. A current result is published. One the camera was
     /// turned off for meanwhile is released, and the deferred off is reported
     /// now. A stale one is released and not reported.
-    async fn camera_opened(&mut self, done: Opened<OpenedCamera>) -> Result<(), Closed> {
+    async fn camera_opened(
+        &mut self,
+        done: Opened<OpenedCamera, CameraState>,
+    ) -> Result<(), Closed> {
         let generation = done.generation;
         let decision = self.gate.complete(generation, done.result.is_ok());
         match (decision, done.result) {
@@ -620,16 +704,30 @@ impl Call<'_> {
     /// Ends every video task before the room closes. A finished open that
     /// nobody took is released. An open still running ends on its own: its
     /// result goes nowhere and is dropped, which releases the camera.
-    async fn shutdown(&mut self, open_done: &mut Receiver<Opened<OpenedCamera>>) {
+    async fn shutdown(
+        &mut self,
+        open_done: &mut Receiver<Opened<OpenedCamera, CameraState>>,
+        screens: &mut ScreenInbox,
+    ) {
         open_done.close();
         while let Ok(done) = open_done.try_recv() {
             if let Ok(opened) = done.result {
                 self.release_capture(opened.capture).await;
             }
         }
+        screens.opened.close();
+        while let Ok(done) = screens.opened.try_recv() {
+            if let Ok(opened) = done.result {
+                self.release_screen_capture(opened.capture).await;
+            }
+        }
         self.stop_camera(false).await;
+        self.stop_screen(false).await;
         // The drop of a stalled capture waits up to the stop timeout.
         if let Some(stalled) = self.stalled.take() {
+            let _ = tokio::task::spawn_blocking(move || drop(stalled)).await;
+        }
+        if let Some(stalled) = self.screen_stalled.take() {
             let _ = tokio::task::spawn_blocking(move || drop(stalled)).await;
         }
         for reader in self.remote.readers.iter_mut().filter_map(Option::take) {
@@ -661,6 +759,270 @@ impl Call<'_> {
             .await
     }
 
+    /// Starts turning the screen share on. The open runs on its own thread;
+    /// the result arrives in the event loop (`screen_opened`). Returns a
+    /// state to report now: `On` when the share already runs, `Unavailable`
+    /// when the open could not start, nothing while an open is in flight.
+    fn begin_screen(&mut self, target: ScreenTarget, grant: screen::Grant) -> Option<ScreenState> {
+        // A capture that did not stop still holds the screen: start no
+        // second one.
+        if self.screen.is_none()
+            && (self.screen_stalled_running()
+                || (!self.screen_gate.opening() && screen::captures_running()))
+        {
+            return Some(ScreenState::Unavailable);
+        }
+        let generation = match self.screen_gate.request_on(self.screen.is_some()) {
+            OnRequest::AlreadyOn => return Some(ScreenState::On),
+            OnRequest::Pending => return None,
+            OnRequest::Start(generation) => generation,
+        };
+        let source = NativeVideoSource::new(
+            VideoResolution {
+                width: 1920,
+                height: 1080,
+            },
+            // The screencast flag: the encoder keeps text sharp.
+            true,
+        );
+        let live = Arc::new(FrameAdmission::default());
+        let mut feed = ScreenFeed {
+            source: source.clone(),
+            live: live.clone(),
+            limiter: RateLimiter::for_tile(SCREEN_TILE),
+        };
+        let failed = self.screen_failed.clone();
+        let started = spawn_open(
+            self.screen_open_tx.clone(),
+            generation,
+            ScreenState::Unavailable,
+            move || {
+                let capture = screen::open(
+                    target,
+                    grant,
+                    move |frame| feed.frame(frame),
+                    move |ended| {
+                        let _ = failed.try_send((generation, ended));
+                    },
+                )?;
+                Ok(OpenedScreen {
+                    capture,
+                    source,
+                    live,
+                })
+            },
+        );
+        if started.is_err() {
+            self.screen_gate.complete(generation, false);
+            return Some(ScreenState::Unavailable);
+        }
+        None
+    }
+
+    /// The screen open ended. A current result is published; a stale one is
+    /// released.
+    async fn screen_opened(
+        &mut self,
+        done: Opened<OpenedScreen, ScreenState>,
+    ) -> Result<(), Closed> {
+        let generation = done.generation;
+        let decision = self.screen_gate.complete(generation, done.result.is_ok());
+        match (decision, done.result) {
+            (Completion::Release, result) => {
+                if let Ok(opened) = result {
+                    self.release_screen_capture(opened.capture).await;
+                }
+                Ok(())
+            }
+            (Completion::Cancelled, result) => {
+                let released = match result {
+                    Ok(opened) => self.release_screen_capture(opened.capture).await,
+                    Err(_) => true,
+                };
+                let state =
+                    if released && !self.screen_stalled_running() && !screen::captures_running() {
+                        ScreenState::Off
+                    } else {
+                        ScreenState::Unavailable
+                    };
+                self.output.send(FromWorker::Screen { state }).await
+            }
+            // The capture ended before this completion: it is dead, not on.
+            (Completion::Ended, result) => {
+                if let Ok(opened) = result {
+                    self.release_screen_capture(opened.capture).await;
+                }
+                self.output
+                    .send(FromWorker::Screen {
+                        state: ScreenState::Off,
+                    })
+                    .await
+            }
+            (Completion::Report, Err(state)) => {
+                self.output.send(FromWorker::Screen { state }).await
+            }
+            (Completion::Publish, Ok(opened)) => {
+                let state = self.publish_screen(generation, opened).await;
+                self.output.send(FromWorker::Screen { state }).await
+            }
+            // `complete` pairs `Publish` with `Ok` and `Report` with `Err`.
+            _ => Ok(()),
+        }
+    }
+
+    /// Publishes the opened screen share and sets its key index.
+    async fn publish_screen(&mut self, generation: u64, opened: OpenedScreen) -> ScreenState {
+        let OpenedScreen {
+            capture,
+            source,
+            live,
+        } = opened;
+        let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source));
+        let options = TrackPublishOptions {
+            source: TrackSource::Screenshare,
+            video_codec: VideoCodec::VP8,
+            // One layer only.
+            simulcast: false,
+            video_encoding: Some(VideoEncoding {
+                max_bitrate: SCREEN_MAX_BITRATE,
+                max_framerate: f64::from(MAX_SCREEN_FPS),
+            }),
+            ..TrackPublishOptions::default()
+        };
+        let published = self
+            .room
+            .local_participant()
+            .publish_track(LocalTrack::Video(track), options)
+            .await;
+        let Ok(publication) = published else {
+            self.screen_gate.failed_to_publish();
+            self.release_screen_capture(capture).await;
+            return ScreenState::Unavailable;
+        };
+        let sid = publication.sid();
+        self.own_sids.push(sid.clone());
+        // The sender's frame cryptor exists once `publish_track` returns.
+        // Every key command up to now was handled, so this is the latest
+        // index. No frame goes out before it is set.
+        use_own_key_index(
+            self.room.e2ee_manager(),
+            &self.own_sids,
+            self.screen_gate.own_index(),
+        );
+        live.open();
+        self.screen = Some(LocalScreen {
+            generation,
+            capture,
+            sid,
+            live,
+        });
+        ScreenState::On
+    }
+
+    /// Turns the screen share off: revokes frame admission, ends and joins
+    /// the capture thread, and unpublishes the track.
+    async fn stop_screen(&mut self, unpublish: bool) -> CameraStop {
+        let Some(screen) = self.screen.take() else {
+            return CameraStop::WasOff;
+        };
+        let live = screen.live.clone();
+        let _ = tokio::task::spawn_blocking(move || live.close()).await;
+        let released = self.release_screen_capture(screen.capture).await;
+        self.own_sids.retain(|sid| *sid != screen.sid);
+        if unpublish {
+            let _ = self
+                .room
+                .local_participant()
+                .unpublish_track(&screen.sid)
+                .await;
+        }
+        if released {
+            CameraStop::Released
+        } else {
+            CameraStop::Stalled
+        }
+    }
+
+    /// Stops a screen capture. One that does not end in time goes to
+    /// `screen_stalled`. Returns whether the capture ended.
+    async fn release_screen_capture(&mut self, capture: camera::Capture) -> bool {
+        let Some(stalled) = stop_capture(capture).await else {
+            return true;
+        };
+        if let Some(older) = self.screen_stalled.replace(stalled) {
+            let _ = tokio::task::spawn_blocking(move || drop(older)).await;
+        }
+        false
+    }
+
+    /// Whether a stalled screen capture still runs. Joins one that ended.
+    fn screen_stalled_running(&mut self) -> bool {
+        if let Some(stalled) = self.screen_stalled.as_mut()
+            && stalled.try_finish()
+        {
+            self.screen_stalled = None;
+        }
+        self.screen_stalled.is_some()
+    }
+
+    /// The screen capture thread ended by itself: the source went (`Off`)
+    /// or capture failed (`Unavailable`). The share never ends the call.
+    async fn screen_ended(&mut self, generation: u64, ended: screen::Ended) -> Result<(), Closed> {
+        if self
+            .screen
+            .as_ref()
+            .is_none_or(|screen| screen.generation != generation)
+        {
+            self.screen_gate.capture_ended(generation);
+            return Ok(());
+        }
+        self.stop_screen(true).await;
+        let state = match ended {
+            screen::Ended::Source => ScreenState::Off,
+            screen::Ended::Failed => ScreenState::Unavailable,
+        };
+        self.output.send(FromWorker::Screen { state }).await
+    }
+
+    /// The commands of a screen start: `Starting` first, then what the open
+    /// says at once (an `On` that already ran, or a refusal).
+    fn screen_on(&mut self, target: ScreenTarget) -> Vec<FromWorker> {
+        // The remote that came with this command, taken now so it cannot go
+        // to another one. A Windows monitor has none.
+        let grant = match target {
+            ScreenTarget::Portal { .. } => screen::Grant::take(),
+            ScreenTarget::Monitor { .. } => screen::Grant::default(),
+        };
+        let mut reply = vec![FromWorker::Screen {
+            state: ScreenState::Starting,
+        }];
+        // Never waits for the open: the loop keeps serving keys and Leave.
+        reply.extend(
+            self.begin_screen(target, grant)
+                .map(|state| FromWorker::Screen { state }),
+        );
+        reply
+    }
+
+    /// A stop of the share (`SetScreen { target: None }`).
+    async fn screen_off(&mut self) -> Vec<FromWorker> {
+        // A pending open is not wanted any more. Its completion releases the
+        // capture and reports the state then.
+        self.screen_gate.request_off();
+        if self.screen_gate.opening() {
+            return Vec::new();
+        }
+        self.stop_screen(true).await;
+        let held = self.screen_stalled_running() || screen::captures_running();
+        vec![FromWorker::Screen {
+            state: if held {
+                ScreenState::Unavailable
+            } else {
+                ScreenState::Off
+            },
+        }]
+    }
+
     /// Starts reading the pictures of a track into a tile and says so.
     async fn start_reader(
         &mut self,
@@ -686,6 +1048,34 @@ impl Call<'_> {
     /// Frees the tiles of every track that `matches` and gives them on.
     async fn remove_tracks(&mut self, matches: impl Fn(&TrackKey) -> bool) -> Result<(), Closed> {
         self.remote.waiting.retain(|key, _| !matches(key));
+        let screens = self.remote.screens.remove_where(&matches);
+        for removed in &screens.removed {
+            // A member that still shares another track stays marked.
+            let identity = &removed.0;
+            if !self.remote.screens.any(|key| key.0 == *identity) {
+                self.output
+                    .send(FromWorker::ScreenSharer {
+                        identity: identity.clone(),
+                        sharing: false,
+                    })
+                    .await?;
+            }
+        }
+        if let Some(freed) = screens.freed {
+            if let Some(reader) = self.remote.readers[usize::from(freed.tile)].take() {
+                reader.abort();
+                let _ = reader.await;
+            }
+            self.output.clear_picture(freed.tile);
+            self.output
+                .send(FromWorker::VideoStopped { tile: freed.tile })
+                .await?;
+            if let Some(key) = freed.promoted
+                && let Some(track) = self.remote.waiting.remove(&key)
+            {
+                self.start_reader(freed.tile, &key.0, track).await?;
+            }
+        }
         for freed in self.remote.tiles.remove_where(&matches) {
             if let Some(reader) = self.remote.readers[usize::from(freed.tile)].take() {
                 reader.abort();
@@ -712,7 +1102,42 @@ impl Call<'_> {
                 track: RemoteTrack::Video(track),
                 publication,
                 participant,
-            } if publication.source() != TrackSource::Screenshare => {
+            } if publication.source() == TrackSource::Screenshare => {
+                // Only the sender's source says it is a screen share, and
+                // that is only a display hint.
+                let identity = participant.identity().to_string();
+                if !valid_identity(&identity) {
+                    return Ok(());
+                }
+                let key = (identity, publication.sid().to_string());
+                match self.remote.screens.add(key.clone()) {
+                    Added::Tile(tile) => {
+                        self.output
+                            .send(FromWorker::ScreenSharer {
+                                identity: key.0.clone(),
+                                sharing: true,
+                            })
+                            .await?;
+                        self.start_reader(tile, &key.0, track.rtc_track()).await
+                    }
+                    Added::Queued => {
+                        self.output
+                            .send(FromWorker::ScreenSharer {
+                                identity: key.0.clone(),
+                                sharing: true,
+                            })
+                            .await?;
+                        self.remote.waiting.insert(key, track.rtc_track());
+                        Ok(())
+                    }
+                    Added::Refused => Ok(()),
+                }
+            }
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Video(track),
+                publication,
+                participant,
+            } => {
                 let identity = participant.identity().to_string();
                 if !valid_identity(&identity) {
                     return Ok(());
@@ -768,6 +1193,7 @@ impl Call<'_> {
                 // under an index whose ring slot still holds an older key.
                 if set_key(self.provider, self.identity, &mut key) {
                     self.gate.set_own_index(index);
+                    self.screen_gate.set_own_index(index);
                     use_own_key_index(self.room.e2ee_manager(), &self.own_sids, index);
                 }
                 Ok(Vec::new())
@@ -825,6 +1251,10 @@ impl Call<'_> {
                 });
                 Ok(reply)
             }
+            ToWorker::SetScreen {
+                target: Some(target),
+            } => Ok(self.screen_on(target)),
+            ToWorker::SetScreen { target: None } => Ok(self.screen_off().await),
             ToWorker::Join { .. } | ToWorker::ListDevices | ToWorker::Leave => {
                 Err(FailureCode::Protocol)
             }
@@ -832,10 +1262,10 @@ impl Call<'_> {
     }
 }
 
-/// The result of one camera open.
-struct Opened<T> {
+/// The result of one camera or screen open.
+struct Opened<T, E> {
     generation: u64,
-    result: Result<T, CameraState>,
+    result: Result<T, E>,
 }
 
 /// An open camera that is not yet published.
@@ -850,16 +1280,17 @@ struct OpenedCamera {
 /// delays the end of the process. When the call is over, `tx` has no receiver
 /// and the result is dropped on that thread, which releases the camera. The
 /// caller keeps at most one open in flight, so the send never waits.
-fn spawn_open<T: Send + 'static>(
-    tx: mpsc::Sender<Opened<T>>,
+fn spawn_open<T: Send + 'static, E: Send + 'static>(
+    tx: mpsc::Sender<Opened<T, E>>,
     generation: u64,
-    open: impl FnOnce() -> Result<T, CameraState> + Send + 'static,
+    on_panic: E,
+    open: impl FnOnce() -> Result<T, E> + Send + 'static,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
-        .name("camera-open".to_owned())
+        .name("capture-open".to_owned())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(open))
-                .unwrap_or(Err(CameraState::Unavailable));
+                .unwrap_or(Err(on_panic));
             let _ = tx.blocking_send(Opened { generation, result });
         })
         .map(drop)
@@ -1008,13 +1439,15 @@ async fn stop_capture(capture: camera::Capture) -> Option<camera::Capture> {
         .unwrap_or(None)
 }
 
+#[allow(clippy::too_many_arguments)] // the loop waits on every source of events
 async fn event_loop(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<RoomEvent>,
     input: &mut Receiver<Input>,
     output: &Output,
     call: &mut Call<'_>,
     camera_failed: &mut Receiver<u64>,
-    open_done: &mut Receiver<Opened<OpenedCamera>>,
+    open_done: &mut Receiver<Opened<OpenedCamera, CameraState>>,
+    screens: &mut ScreenInbox,
     tracker: &mut SpeakingTracker,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
@@ -1053,6 +1486,16 @@ async fn event_loop(
             }
             Some(done) = open_done.recv() => {
                 if call.camera_opened(done).await.is_err() {
+                    return End::Failed(FailureCode::Internal);
+                }
+            }
+            Some((generation, ended)) = screens.failed.recv() => {
+                if call.screen_ended(generation, ended).await.is_err() {
+                    return End::Failed(FailureCode::Internal);
+                }
+            }
+            Some(done) = screens.opened.recv() => {
+                if call.screen_opened(done).await.is_err() {
                     return End::Failed(FailureCode::Internal);
                 }
             }
@@ -1153,15 +1596,57 @@ fn fitted_i420(frame: &CapturedFrame<'_>) -> Option<I420Buffer> {
     Some(picture)
 }
 
+/// A screen picture as I420, scaled to fit 1920x1080 (no enlarging). The
+/// alpha or padding byte is ignored. libyuv names its formats by the order of
+/// a little-endian 32-bit word: B, G, R, A in memory is its "ARGB", and R, G,
+/// B, A in memory is its "ABGR".
+fn screen_i420(frame: &screen::CapturedFrame<'_>) -> Option<I420Buffer> {
+    let (width, height) = (frame.width, frame.height);
+    // The size is checked again here, before any buffer is made.
+    if !screen::capture_size_ok(width, height) {
+        return None;
+    }
+    let needed = screen::CapturedFrame::expected_len(width, height, frame.stride)?;
+    if frame.data.len() < needed {
+        return None;
+    }
+    let (fit_w, fit_h) = fit_publish_box(width, height)?;
+    let mut buffer = I420Buffer::new(width, height);
+    let (stride_y, stride_u, stride_v) = buffer.strides();
+    let (y, u, v) = buffer.data_mut();
+    let convert = match frame.format {
+        screen::Format::Bgra => yuv_helper::argb_to_i420,
+        screen::Format::Rgba => yuv_helper::abgr_to_i420,
+    };
+    convert(
+        frame.data,
+        frame.stride,
+        y,
+        stride_y,
+        u,
+        stride_u,
+        v,
+        stride_v,
+        width as i32,
+        height as i32,
+    );
+    Some(if (fit_w, fit_h) == (width, height) {
+        buffer
+    } else {
+        buffer.scale(fit_w as i32, fit_h as i32)
+    })
+}
+
 /// An I420 picture as RGBA in memory order R, G, B, A.
 ///
 /// libyuv names its formats by the order of a little-endian 32-bit word, so
 /// libyuv's "ABGR" is the byte order R, G, B, A in memory. That is
 /// `VideoFormatType::ABGR` here (see the test below). `VideoFormatType::RGBA`
 /// would give A, B, G, R in memory.
-fn to_rgba(picture: &I420Buffer) -> Option<(u32, u32, Vec<u8>)> {
+fn to_rgba(tile: u8, picture: &I420Buffer) -> Option<(u32, u32, Vec<u8>)> {
     let (width, height) = (picture.width(), picture.height());
-    let mut rgba = vec![0_u8; rgba_len(width, height)?];
+    // The size is checked against the tile's limits before the buffer exists.
+    let mut rgba = vec![0_u8; rgba_len(tile, width, height)?];
     VideoFrameBufferExt::to_argb(
         picture,
         VideoFormatType::ABGR,
@@ -1196,11 +1681,11 @@ fn buffer_to_i420(buffer: &dyn VideoBuffer) -> Option<I420Buffer> {
     buffer.as_native().map(VideoFrameBufferExt::to_i420)
 }
 
-/// Reads the pictures of one remote track, at most 15 per second, and puts the
-/// newest into the tile's slot. It ends when the track ends or when it is
-/// aborted; it holds no state that needs a clean-up.
+/// Reads the pictures of one remote track, at most 15 per second (5 for the
+/// screen tile), and puts the newest into the tile's slot. It ends when the
+/// track ends or when it is aborted; it holds no state that needs a clean-up.
 async fn read_pictures(mut stream: NativeVideoStream, tile: u8, pictures: PictureSink) {
-    let mut limiter = RateLimiter::default();
+    let mut limiter = RateLimiter::for_tile(tile);
     while let Some(frame) = stream.next().await {
         if !limiter.admit(std::time::Instant::now()) {
             continue;
@@ -1208,7 +1693,7 @@ async fn read_pictures(mut stream: NativeVideoStream, tile: u8, pictures: Pictur
         let Some(mut picture) = buffer_to_i420(&*frame.buffer) else {
             continue;
         };
-        let Some((fit_w, fit_h)) = fit_within_box(picture.width(), picture.height()) else {
+        let Some((fit_w, fit_h)) = fit_for_tile(tile, picture.width(), picture.height()) else {
             continue;
         };
         if (fit_w, fit_h) != (picture.width(), picture.height()) {
@@ -1221,7 +1706,7 @@ async fn read_pictures(mut stream: NativeVideoStream, tile: u8, pictures: Pictur
             VideoRotation::VideoRotation270 => 270,
         };
         let rotation = quarter_turns(degrees).unwrap_or(0);
-        if let Some((width, height, rgba)) = to_rgba(&picture) {
+        if let Some((width, height, rgba)) = to_rgba(tile, &picture) {
             pictures.put(tile, rotation, width, height, rgba);
         }
     }
@@ -1319,12 +1804,129 @@ mod tests {
         buffer
     }
 
+    /// A solid screen picture of 4-byte pixels `pixel`.
+    fn solid_screen(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
+        pixel.repeat(width as usize * height as usize)
+    }
+
+    /// GIVEN a red screen picture in B, G, R, A and in R, G, B, A order
+    /// WHEN it is made I420 THEN both give the same red (BT.601 Y 81) and the
+    /// alpha byte does not matter.
+    #[test]
+    fn given_red_screen_in_both_byte_orders_when_made_i420_then_the_colour_matches() {
+        for (format, pixel) in [
+            (screen::Format::Bgra, [0, 0, 255, 0]),
+            (screen::Format::Bgra, [0, 0, 255, 255]),
+            (screen::Format::Rgba, [255, 0, 0, 0]),
+        ] {
+            let data = solid_screen(16, 8, pixel);
+            let frame = screen::CapturedFrame::checked(format, 16, 8, 64, &data).expect("frame");
+            let mut picture = screen_i420(&frame).expect("picture");
+            assert_eq!((picture.width(), picture.height()), (16, 8));
+            let (y, u, v) = picture.data_mut();
+            assert!(
+                y.iter().all(|&value| (79..=83).contains(&value)),
+                "{pixel:?}"
+            );
+            assert!(
+                u.iter().all(|&value| (88..=92).contains(&value)),
+                "{pixel:?}"
+            );
+            assert!(
+                v.iter().all(|&value| (238..=242).contains(&value)),
+                "{pixel:?}"
+            );
+        }
+    }
+
+    /// GIVEN screens above, at and below 1920x1080 WHEN made I420 THEN the
+    /// result fits 1920x1080 with the aspect, and a small one is not
+    /// enlarged.
+    #[test]
+    fn given_screens_when_made_i420_then_they_fit_1920_by_1080() {
+        for ((width, height), want) in [
+            ((3840, 2160), (1920, 1080)),
+            ((2560, 1440), (1920, 1080)),
+            ((1920, 1080), (1920, 1080)),
+            ((800, 600), (800, 600)),
+            ((1080, 1920), (1080, 1920)),
+        ] {
+            let data = solid_screen(width, height, [10, 20, 30, 255]);
+            let frame = screen::CapturedFrame::checked(
+                screen::Format::Bgra,
+                width,
+                height,
+                width * 4,
+                &data,
+            )
+            .expect("frame");
+            let picture = screen_i420(&frame).expect("picture");
+            assert_eq!(
+                (picture.width(), picture.height()),
+                want,
+                "{width}x{height}"
+            );
+        }
+    }
+
+    /// GIVEN a screen frame whose size is outside the capture limits or whose
+    /// data is short WHEN it is made I420 THEN there is no picture.
+    #[test]
+    fn given_bad_screen_frames_when_made_i420_then_there_is_no_picture() {
+        let data = vec![0_u8; 64];
+        let oversize = screen::CapturedFrame {
+            format: screen::Format::Bgra,
+            width: 7681,
+            height: 2,
+            stride: 7681 * 4,
+            data: &data,
+        };
+        assert!(screen_i420(&oversize).is_none());
+        let short = screen::CapturedFrame {
+            format: screen::Format::Bgra,
+            width: 8,
+            height: 8,
+            stride: 32,
+            data: &data,
+        };
+        assert!(screen_i420(&short).is_none());
+    }
+
+    /// GIVEN a screen open that succeeded WHEN it completes THEN it is
+    /// published and reports `On`; a failed open reports its own state; a
+    /// stop during the open reports `Off`; a source that ended during the
+    /// open is not published.
+    #[test]
+    fn given_screen_open_outcomes_then_the_gate_decides_what_is_reported() {
+        let mut gate = CameraGate::new(0);
+        let OnRequest::Start(first) = gate.request_on(false) else {
+            panic!("start");
+        };
+        assert_eq!(gate.request_on(false), OnRequest::Pending);
+        assert_eq!(gate.complete(first, true), Completion::Publish);
+        let mut gate = CameraGate::new(0);
+        let OnRequest::Start(first) = gate.request_on(false) else {
+            panic!("start");
+        };
+        assert_eq!(gate.complete(first, false), Completion::Report);
+        let OnRequest::Start(second) = gate.request_on(false) else {
+            panic!("start");
+        };
+        gate.request_off();
+        assert_eq!(gate.complete(second, true), Completion::Cancelled);
+        let OnRequest::Start(third) = gate.request_on(false) else {
+            panic!("start");
+        };
+        gate.capture_ended(third);
+        assert_eq!(gate.complete(third, true), Completion::Ended);
+    }
+
     /// GIVEN a red I420 picture WHEN it is made RGBA THEN the bytes in memory
     /// are R, G, B, A (libyuv "ABGR"), with full alpha.
     #[test]
     fn given_red_picture_when_made_rgba_then_bytes_are_r_g_b_a() {
         // BT.601 limited range red: Y 81, U 90, V 240.
-        let (width, height, rgba) = to_rgba(&solid_i420(4, 2, 81, 90, 240)).expect("size ok");
+        let (width, height, rgba) = to_rgba(0, &solid_i420(4, 2, 81, 90, 240)).expect("size ok");
         assert_eq!((width, height), (4, 2));
         assert_eq!(rgba.len(), 4 * 2 * 4);
         for pixel in rgba.chunks(4) {
@@ -1333,7 +1935,7 @@ mod tests {
             assert_eq!(pixel[3], 255);
         }
         // Blue: Y 41, U 240, V 110 puts the big byte third.
-        let (_, _, rgba) = to_rgba(&solid_i420(2, 2, 41, 240, 110)).expect("size ok");
+        let (_, _, rgba) = to_rgba(0, &solid_i420(2, 2, 41, 240, 110)).expect("size ok");
         assert!(rgba[2] > 200 && rgba[0] < 40, "{:?}", &rgba[..4]);
     }
 
@@ -1341,7 +1943,7 @@ mod tests {
     /// is no picture.
     #[test]
     fn given_oversized_picture_when_made_rgba_then_it_is_refused() {
-        assert!(to_rgba(&solid_i420(641, 2, 0, 128, 128)).is_none());
+        assert!(to_rgba(0, &solid_i420(641, 2, 0, 128, 128)).is_none());
     }
 
     fn nv12_data(height: u32, stride: u32) -> Vec<u8> {
@@ -1602,9 +2204,9 @@ mod tests {
     /// arrives with its generation.
     #[tokio::test]
     async fn given_slow_open_when_command_arrives_then_loop_serves_it_first() {
-        let (tx, mut done) = mpsc::channel::<Opened<u8>>(1);
+        let (tx, mut done) = mpsc::channel::<Opened<u8, CameraState>>(1);
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        spawn_open(tx, 3, move || {
+        spawn_open(tx, 3, CameraState::Unavailable, move || {
             let _ = release_rx.recv();
             Ok(42)
         })
@@ -1632,10 +2234,10 @@ mod tests {
     #[tokio::test]
     async fn given_open_ending_after_call_when_it_sends_then_result_is_released() {
         let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (tx, done) = mpsc::channel::<Opened<Released>>(1);
+        let (tx, done) = mpsc::channel::<Opened<Released, CameraState>>(1);
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let held = Released(drops.clone());
-        spawn_open(tx, 1, move || {
+        spawn_open(tx, 1, CameraState::Unavailable, move || {
             let _ = release_rx.recv();
             Ok(held)
         })
@@ -1656,8 +2258,9 @@ mod tests {
     /// and the gate is not stuck.
     #[tokio::test]
     async fn given_open_that_panics_when_it_ends_then_result_is_unavailable() {
-        let (tx, mut done) = mpsc::channel::<Opened<u8>>(1);
-        spawn_open(tx, 1, || panic!("backend fault")).expect("thread starts");
+        let (tx, mut done) = mpsc::channel::<Opened<u8, CameraState>>(1);
+        spawn_open(tx, 1, CameraState::Unavailable, || panic!("backend fault"))
+            .expect("thread starts");
         let opened = done.recv().await.expect("a result arrives");
         assert_eq!(opened.result.err(), Some(CameraState::Unavailable));
     }

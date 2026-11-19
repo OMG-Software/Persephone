@@ -1,15 +1,20 @@
-//! The camera channel, worker side (ADR-0049, Linux). Descriptor 3 is one end
-//! of a Unix socket pair; the core holds the other end. On the portal camera
-//! path the core sends the PipeWire remote it got from the camera portal as
-//! one descriptor (`SCM_RIGHTS`) with exactly one data byte.
+//! The camera channel, worker side (ADR-0049 and ADR-0053, Linux).
+//! Descriptor 3 is one end of a Unix socket pair; the core holds the other
+//! end. On the portal paths the core sends the PipeWire remote it got from
+//! the camera or the screen cast portal as one descriptor (`SCM_RIGHTS`)
+//! with exactly one data byte. The byte names the kind: `c` for a camera,
+//! `s` for a screen. A one-byte message with any other value closes the
+//! whole channel: every pending descriptor closes and none is given out
+//! after it.
 //!
 //! The worker reads the channel without blocking and takes at most one
 //! descriptor per message, closing every other one. The core sends one
-//! descriptor directly before each camera-on that says it carries one
-//! (`SetCamera { remote: true }`), so the worker keeps the pending
-//! descriptors in order, and each such camera-on takes the oldest. At most
-//! `MAX_PENDING` wait; one more breaks the channel, which then closes every
-//! descriptor and gives out none (the camera stays unavailable). Nothing
+//! descriptor directly before each camera-on (`SetCamera { remote: true }`)
+//! or screen start (`SetScreen { target: Portal }`), so the worker keeps the
+//! pending descriptors of each kind in order, and each such command takes
+//! the oldest of its kind. At most `MAX_PENDING` of each kind wait; one more
+//! of a kind breaks that kind, which then closes its descriptors and gives
+//! out none (the camera or screen stays unavailable). Nothing
 //! here opens a path or makes a socket, so it needs no containment
 //! allowance. The parsing rules are plain functions with unit tests; only
 //! the `recvmsg` part is Linux code.
@@ -25,25 +30,50 @@ pub const CHANNEL_FD: i32 = 3;
 /// The most descriptors one message may carry that the worker looks at. A
 /// message with more is refused as a whole (the kernel closes the rest).
 pub const MAX_FDS_PER_MESSAGE: usize = 4;
-/// The most descriptors that may wait for their camera-on. The core sends
-/// the next one only after a desktop dialog, so more than one is rare.
+/// The most descriptors of one kind that may wait for their command. The
+/// core sends the next one only after a desktop dialog, so more than one is
+/// rare.
 pub const MAX_PENDING: usize = 4;
+/// The data byte of a camera descriptor.
+pub const KIND_CAMERA: u8 = b'c';
+/// The data byte of a screen descriptor.
+pub const KIND_SCREEN: u8 = b's';
+
+/// What a descriptor is for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Kind {
+    Camera,
+    Screen,
+}
 
 /// What one received message means.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Verdict {
-    /// Keep the descriptor at this index; close every other one.
-    Keep(usize),
+    /// Keep the descriptor at this index for this kind; close every other
+    /// one.
+    Keep(usize, Kind),
     /// Close every descriptor. The message is not a valid handle message.
     Reject,
+    /// The kind byte is neither `c` nor `s`: close every descriptor and the
+    /// whole channel.
+    Close,
 }
 
 /// Decides on one message: exactly one data byte, no truncated control
-/// data, and at least one descriptor. The first descriptor is the handle;
-/// any extra descriptors are closed.
-pub fn judge(data_len: usize, fd_count: usize, control_truncated: bool) -> Verdict {
-    if data_len == 1 && fd_count >= 1 && !control_truncated {
-        Verdict::Keep(0)
+/// data, and at least one descriptor. The byte names the kind. The first
+/// descriptor is the handle; any extra descriptors are closed. A single data
+/// byte of another value is a protocol violation and closes the channel.
+pub fn judge(data: &[u8], fd_count: usize, control_truncated: bool) -> Verdict {
+    let [byte] = data else {
+        return Verdict::Reject;
+    };
+    let kind = match *byte {
+        KIND_CAMERA => Kind::Camera,
+        KIND_SCREEN => Kind::Screen,
+        _ => return Verdict::Close,
+    };
+    if fd_count >= 1 && !control_truncated {
+        Verdict::Keep(0, kind)
     } else {
         Verdict::Reject
     }
@@ -88,13 +118,65 @@ impl<T> Pending<T> {
     }
 }
 
+/// The pending items of both kinds. A byte of another value closes the
+/// whole thing: every item drops and none is stored or given out after.
+#[derive(Debug)]
+pub struct Channels<T> {
+    camera: Pending<T>,
+    screen: Pending<T>,
+    closed: bool,
+}
+
+impl<T> Default for Channels<T> {
+    fn default() -> Self {
+        Self {
+            camera: Pending::default(),
+            screen: Pending::default(),
+            closed: false,
+        }
+    }
+}
+
+impl<T> Channels<T> {
+    fn queue(&mut self, kind: Kind) -> &mut Pending<T> {
+        match kind {
+            Kind::Camera => &mut self.camera,
+            Kind::Screen => &mut self.screen,
+        }
+    }
+
+    /// Stores `item` for `kind`. Returns false when it was dropped.
+    pub fn put(&mut self, kind: Kind, item: T) -> bool {
+        !self.closed && self.queue(kind).put(item)
+    }
+
+    /// Takes the oldest pending item of `kind`.
+    pub fn take(&mut self, kind: Kind) -> Option<T> {
+        if self.closed {
+            return None;
+        }
+        self.queue(kind).take()
+    }
+
+    /// Closes the channel: drops every item and refuses all later ones.
+    pub fn close(&mut self) {
+        self.closed = true;
+        self.camera = Pending::default();
+        self.screen = Pending::default();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+}
+
 #[cfg(target_os = "linux")]
-#[allow(unused_imports)] // the portal backend uses `take_handle` (Phase 3b)
+#[allow(unused_imports)] // the portal backends use `take_handle`
 pub use linux::{CameraChannel, init, take_handle};
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{CHANNEL_FD, MAX_FDS_PER_MESSAGE, Pending, Verdict, judge};
+    use super::{CHANNEL_FD, Channels, Kind, MAX_FDS_PER_MESSAGE, Verdict, judge};
     use std::io;
     use std::mem::{size_of, zeroed};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -108,7 +190,7 @@ mod linux {
     /// The worker's end of the channel and its pending descriptors.
     pub struct CameraChannel {
         fd: OwnedFd,
-        pending: Mutex<Pending<OwnedFd>>,
+        pending: Mutex<Channels<OwnedFd>>,
         closed: AtomicBool,
     }
 
@@ -144,7 +226,7 @@ mod linux {
             }
             Some(Self {
                 fd,
-                pending: Mutex::new(Pending::default()),
+                pending: Mutex::new(Channels::default()),
                 closed: AtomicBool::new(false),
             })
         }
@@ -156,17 +238,27 @@ mod linux {
             let raw = self.fd.as_raw_fd();
             loop {
                 match receive(raw) {
-                    Ok(Some(fd)) => {
+                    Ok(Received::Handle(kind, fd)) => {
                         let mut pending = self
                             .pending
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         // A refused descriptor is dropped, so closed.
-                        pending.put(fd);
+                        pending.put(kind, fd);
+                    }
+                    // Another kind byte: the channel and every pending
+                    // descriptor close.
+                    Ok(Received::Violation) => {
+                        self.pending
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .close();
+                        self.closed.store(true, Ordering::Release);
+                        return false;
                     }
                     // A message that was not a valid handle; its descriptors
                     // are already closed.
-                    Ok(None) => {}
+                    Ok(Received::Ignored) => {}
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         return !self.closed.load(Ordering::Acquire);
                     }
@@ -179,20 +271,30 @@ mod linux {
             }
         }
 
-        /// Reads the channel, then takes the oldest pending descriptor.
-        pub fn take(&self) -> Option<OwnedFd> {
+        /// Reads the channel, then takes the oldest pending descriptor of
+        /// `kind`.
+        pub fn take(&self, kind: Kind) -> Option<OwnedFd> {
             self.poll();
             self.pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
+                .take(kind)
         }
     }
 
-    /// One `recvmsg`. `Ok(Some(fd))`: a valid handle message. `Ok(None)`:
-    /// a message that was not one (its descriptors are closed). `WouldBlock`:
-    /// nothing waits. End of stream is `UnexpectedEof`.
-    fn receive(raw: RawFd) -> io::Result<Option<OwnedFd>> {
+    /// What one `recvmsg` gave.
+    enum Received {
+        /// A valid handle message.
+        Handle(Kind, OwnedFd),
+        /// A message that was not one (its descriptors are closed).
+        Ignored,
+        /// A one-byte message with a kind byte of another value.
+        Violation,
+    }
+
+    /// One `recvmsg`. `WouldBlock`: nothing waits. End of stream is
+    /// `UnexpectedEof`.
+    fn receive(raw: RawFd) -> io::Result<Received> {
         let mut byte = [0_u8; 1];
         let mut iov = libc::iovec {
             iov_base: byte.as_mut_ptr().cast(),
@@ -227,10 +329,12 @@ mod linux {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }
         let truncated = message.msg_flags & libc::MSG_CTRUNC != 0;
-        match judge(received as usize, fds.len(), truncated) {
+        let length = (received as usize).min(byte.len());
+        match judge(&byte[..length], fds.len(), truncated) {
             // Every other descriptor is closed when `fds` drops.
-            Verdict::Keep(index) => Ok(Some(fds.swap_remove(index))),
-            Verdict::Reject => Ok(None),
+            Verdict::Keep(index, kind) => Ok(Received::Handle(kind, fds.swap_remove(index))),
+            Verdict::Reject => Ok(Received::Ignored),
+            Verdict::Close => Ok(Received::Violation),
         }
     }
 
@@ -273,11 +377,11 @@ mod linux {
         });
     }
 
-    /// The oldest descriptor the core sent and the worker has not taken, or
-    /// `None` (no message, no channel, or a broken queue). Call it once for
-    /// each command that carries one.
-    pub fn take_handle() -> Option<OwnedFd> {
-        CHANNEL.get()?.as_ref()?.take()
+    /// The oldest descriptor of `kind` the core sent and the worker has not
+    /// taken, or `None` (no message, no channel, or a broken queue). Call it
+    /// once for each command that carries one.
+    pub fn take_handle(kind: Kind) -> Option<OwnedFd> {
+        CHANNEL.get()?.as_ref()?.take(kind)
     }
 
     #[cfg(test)]
@@ -341,7 +445,7 @@ mod linux {
         #[test]
         fn given_no_message_when_polled_then_nothing_is_pending() {
             let (channel, _core) = channel();
-            assert!(channel.take().is_none());
+            assert!(channel.take(Kind::Camera).is_none());
         }
 
         /// GIVEN one byte with one descriptor WHEN taken THEN the worker
@@ -350,10 +454,10 @@ mod linux {
         fn given_one_byte_and_one_descriptor_then_it_is_taken() {
             let (channel, core) = channel();
             let file = open_file();
-            send(&core, b"x", &[file.as_raw_fd()]);
-            let fd = channel.take().expect("the handle");
+            send(&core, b"c", &[file.as_raw_fd()]);
+            let fd = channel.take(Kind::Camera).expect("the handle");
             assert!(is_open(fd.as_raw_fd()));
-            assert!(channel.take().is_none());
+            assert!(channel.take(Kind::Camera).is_none());
         }
 
         /// A non-blocking pipe: the read end and the write end.
@@ -390,21 +494,21 @@ mod linux {
         fn given_two_handles_then_they_are_taken_oldest_first() {
             let (channel, core) = channel();
             let (reader, writer) = pipe();
-            send(&core, b"x", &[writer.as_raw_fd()]);
+            send(&core, b"c", &[writer.as_raw_fd()]);
             // The test gives up its own copy: only the channel holds the write end.
             drop(writer);
             let second = open_file();
-            send(&core, b"x", &[second.as_raw_fd()]);
-            let first = channel.take().expect("the older handle");
+            send(&core, b"c", &[second.as_raw_fd()]);
+            let first = channel.take(Kind::Camera).expect("the older handle");
             let (n, error) = read_one(&reader);
             assert_eq!(n, -1);
             assert_eq!(error, libc::EAGAIN, "the first taken is the pipe's end");
             drop(first);
             let (n, _) = read_one(&reader);
             assert_eq!(n, 0, "closed with its command, so the pipe is at EOF");
-            let newer = channel.take().expect("the newer handle");
+            let newer = channel.take(Kind::Camera).expect("the newer handle");
             assert!(is_open(newer.as_raw_fd()));
-            assert!(channel.take().is_none());
+            assert!(channel.take(Kind::Camera).is_none());
         }
 
         /// GIVEN a message with a wrong length, no descriptor, or extra
@@ -415,16 +519,58 @@ mod linux {
             let (channel, core) = channel();
             let file = open_file();
             // No descriptor.
-            send(&core, b"x", &[]);
-            assert!(channel.take().is_none());
+            send(&core, b"c", &[]);
+            assert!(channel.take(Kind::Camera).is_none());
             // Two descriptors in one message: the first is kept.
-            send(&core, b"x", &[file.as_raw_fd(), file.as_raw_fd()]);
-            let kept = channel.take().expect("first descriptor");
+            send(&core, b"c", &[file.as_raw_fd(), file.as_raw_fd()]);
+            let kept = channel.take(Kind::Camera).expect("first descriptor");
             drop(kept);
             // More than the buffer holds: refused whole.
             let many = vec![file.as_raw_fd(); MAX_FDS_PER_MESSAGE + 4];
-            send(&core, b"x", &many);
-            assert!(channel.take().is_none());
+            send(&core, b"c", &many);
+            assert!(channel.take(Kind::Camera).is_none());
+        }
+
+        /// GIVEN a camera and a screen descriptor WHEN taken by kind THEN
+        /// each command gets the descriptor of its own kind.
+        #[test]
+        fn given_both_kinds_then_each_is_taken_by_its_kind() {
+            let (channel, core) = channel();
+            let (reader, writer) = pipe();
+            send(&core, b"s", &[writer.as_raw_fd()]);
+            drop(writer);
+            let file = open_file();
+            send(&core, b"c", &[file.as_raw_fd()]);
+            let camera = channel.take(Kind::Camera).expect("the camera handle");
+            assert!(is_open(camera.as_raw_fd()));
+            let (n, error) = read_one(&reader);
+            assert_eq!((n, error), (-1, libc::EAGAIN), "the screen end is held");
+            assert!(channel.take(Kind::Camera).is_none());
+            let screen = channel.take(Kind::Screen).expect("the screen handle");
+            drop(screen);
+            assert_eq!(read_one(&reader).0, 0, "closed with its command");
+        }
+
+        /// GIVEN pending descriptors WHEN a message has another kind byte
+        /// THEN the channel closes: every pending descriptor closes and
+        /// none is given out, even one sent after.
+        #[test]
+        fn given_another_kind_byte_then_the_whole_channel_closes() {
+            let (channel, core) = channel();
+            let (reader, writer) = pipe();
+            send(&core, b"s", &[writer.as_raw_fd()]);
+            drop(writer);
+            let file = open_file();
+            send(&core, b"x", &[file.as_raw_fd()]);
+            send(&core, b"c", &[file.as_raw_fd()]);
+            assert!(channel.take(Kind::Screen).is_none());
+            assert!(channel.take(Kind::Camera).is_none());
+            assert!(!channel.poll());
+            assert_eq!(
+                read_one(&reader).0,
+                0,
+                "the pending screen descriptor closed"
+            );
         }
 
         /// GIVEN the core closed its end WHEN polled THEN the channel
@@ -433,10 +579,10 @@ mod linux {
         fn given_closed_core_end_then_poll_reports_it() {
             let (channel, core) = channel();
             let file = open_file();
-            send(&core, b"x", &[file.as_raw_fd()]);
+            send(&core, b"c", &[file.as_raw_fd()]);
             drop(core);
             assert!(!channel.poll());
-            assert!(channel.take().is_some());
+            assert!(channel.take(Kind::Camera).is_some());
             assert!(!channel.poll());
         }
     }
@@ -448,18 +594,80 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// GIVEN a message WHEN judged THEN only exactly one byte with a
-    /// descriptor and whole control data is kept.
+    /// GIVEN a message WHEN judged THEN only exactly one `c` or `s` byte
+    /// with a descriptor and whole control data is kept, with its kind.
     #[test]
-    fn given_messages_then_only_one_byte_with_a_descriptor_is_kept() {
-        assert_eq!(judge(1, 1, false), Verdict::Keep(0));
+    fn given_messages_then_only_one_kind_byte_with_a_descriptor_is_kept() {
+        assert_eq!(judge(b"c", 1, false), Verdict::Keep(0, Kind::Camera));
+        assert_eq!(judge(b"s", 1, false), Verdict::Keep(0, Kind::Screen));
         // Extra descriptors are closed, the first is kept.
-        assert_eq!(judge(1, 3, false), Verdict::Keep(0));
-        assert_eq!(judge(0, 1, false), Verdict::Reject);
-        assert_eq!(judge(2, 1, false), Verdict::Reject);
-        assert_eq!(judge(1, 0, false), Verdict::Reject);
-        assert_eq!(judge(1, 1, true), Verdict::Reject);
-        assert_eq!(judge(0, 0, false), Verdict::Reject);
+        assert_eq!(judge(b"s", 3, false), Verdict::Keep(0, Kind::Screen));
+        assert_eq!(judge(b"", 1, false), Verdict::Reject);
+        assert_eq!(judge(b"cc", 1, false), Verdict::Reject);
+        assert_eq!(judge(b"c", 0, false), Verdict::Reject);
+        assert_eq!(judge(b"s", 1, true), Verdict::Reject);
+        assert_eq!(judge(b"", 0, false), Verdict::Reject);
+    }
+
+    /// GIVEN a one-byte message with any other value than `c` or `s`
+    /// WHEN judged THEN it closes the channel, with or without a descriptor.
+    #[test]
+    fn given_any_other_kind_byte_then_the_channel_closes() {
+        for byte in (0..=u8::MAX).filter(|byte| !matches!(byte, b'c' | b's')) {
+            assert_eq!(judge(&[byte], 1, false), Verdict::Close, "{byte}");
+            assert_eq!(judge(&[byte], 0, false), Verdict::Close, "{byte}");
+        }
+    }
+
+    /// GIVEN descriptors of both kinds WHEN taken THEN each kind has its own
+    /// queue, oldest first, and one kind never takes the other's.
+    #[test]
+    fn given_two_kinds_then_each_has_its_own_queue() {
+        let mut channels = Channels::default();
+        assert!(channels.put(Kind::Camera, 1));
+        assert!(channels.put(Kind::Screen, 10));
+        assert!(channels.put(Kind::Camera, 2));
+        assert_eq!(channels.take(Kind::Screen), Some(10));
+        assert_eq!(channels.take(Kind::Screen), None);
+        assert_eq!(channels.take(Kind::Camera), Some(1));
+        assert_eq!(channels.take(Kind::Camera), Some(2));
+        assert_eq!(channels.take(Kind::Camera), None);
+    }
+
+    /// GIVEN four pending of each kind WHEN a fifth arrives for one kind
+    /// THEN that kind breaks and closes its items; the other kind is kept.
+    #[test]
+    fn given_a_full_kind_when_one_more_arrives_then_only_that_kind_breaks() {
+        let closed = Arc::new(AtomicUsize::new(0));
+        let mut channels = Channels::default();
+        for _ in 0..MAX_PENDING {
+            assert!(channels.put(Kind::Camera, Closes(closed.clone())));
+            assert!(channels.put(Kind::Screen, Closes(closed.clone())));
+        }
+        assert!(!channels.put(Kind::Screen, Closes(closed.clone())));
+        assert_eq!(closed.load(Ordering::SeqCst), MAX_PENDING + 1);
+        assert!(channels.take(Kind::Screen).is_none());
+        assert!(channels.take(Kind::Camera).is_some());
+    }
+
+    /// GIVEN pending descriptors of both kinds WHEN the channel closes
+    /// THEN all of them close at once and none is given out or stored after.
+    #[test]
+    fn given_a_closed_channel_then_everything_is_dropped_and_nothing_follows() {
+        let closed = Arc::new(AtomicUsize::new(0));
+        let mut channels = Channels::default();
+        for kind in [Kind::Camera, Kind::Screen] {
+            assert!(channels.put(kind, Closes(closed.clone())));
+            assert!(channels.put(kind, Closes(closed.clone())));
+        }
+        channels.close();
+        assert_eq!(closed.load(Ordering::SeqCst), 4);
+        assert!(channels.is_closed());
+        for kind in [Kind::Camera, Kind::Screen] {
+            assert!(channels.take(kind).is_none());
+            assert!(!channels.put(kind, Closes(closed.clone())));
+        }
+        assert_eq!(closed.load(Ordering::SeqCst), 6);
     }
 
     struct Closes(Arc<AtomicUsize>);
