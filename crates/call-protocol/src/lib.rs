@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
@@ -219,6 +219,11 @@ pub enum ToWorker {
     /// never names a source.
     SetScreen {
         target: Option<ScreenTarget>,
+        /// The core's number for the share: a new one for each start, the
+        /// stopped share's for a stop. Every `Screen` state carries the
+        /// number of the share it describes, so a late state of an older
+        /// share is never taken for the newer one.
+        share: u32,
     },
     /// Turn the camera on or off. The worker answers with
     /// [`FromWorker::Camera`].
@@ -286,9 +291,11 @@ impl std::fmt::Debug for ToWorker {
                 .field("on", on)
                 .field("remote", remote)
                 .finish(),
-            Self::SetScreen { target } => {
-                f.debug_struct("SetScreen").field("target", target).finish()
-            }
+            Self::SetScreen { target, share } => f
+                .debug_struct("SetScreen")
+                .field("target", target)
+                .field("share", share)
+                .finish(),
             Self::Subscribe { index, url, jwt } => f
                 .debug_struct("Subscribe")
                 .field("index", index)
@@ -450,6 +457,8 @@ pub enum FromWorker {
     /// ends by itself, and when capture fails during a call.
     Screen {
         state: ScreenState,
+        /// The `SetScreen` number of the share this state describes.
+        share: u32,
     },
     /// A remote participant started or stopped a screen share that is not
     /// shown on tile 5. It is only a display hint (ADR-0053).
@@ -785,8 +794,9 @@ impl ToWorker {
                 put_str(&mut out, url);
                 put_str(&mut out, jwt);
             }
-            Self::SetScreen { target } => {
+            Self::SetScreen { target, share } => {
                 out.push(TO_SET_SCREEN);
+                out.extend_from_slice(&share.to_be_bytes());
                 match target {
                     None => out.push(0),
                     Some(ScreenTarget::Portal { node }) => {
@@ -881,6 +891,7 @@ impl ToWorker {
                 }
             }
             TO_SET_SCREEN => {
+                let share = reader.u32()?;
                 let target = match reader.u8()? {
                     0 => None,
                     1 => Some(ScreenTarget::Portal {
@@ -904,7 +915,7 @@ impl ToWorker {
                     }
                     _ => return Err(DecodeError::InvalidValue),
                 };
-                Self::SetScreen { target }
+                Self::SetScreen { target, share }
             }
             _ => return Err(DecodeError::UnknownTag),
         };
@@ -1007,9 +1018,10 @@ impl FromWorker {
                 out.push(FROM_CAMERA);
                 out.push(*state as u8);
             }
-            Self::Screen { state } => {
+            Self::Screen { state, share } => {
                 out.push(FROM_SCREEN);
                 out.push(*state as u8);
+                out.extend_from_slice(&share.to_be_bytes());
             }
             Self::ScreenSharer {
                 connection,
@@ -1086,6 +1098,7 @@ impl FromWorker {
             },
             FROM_SCREEN => Self::Screen {
                 state: ScreenState::try_from(reader.u8()?)?,
+                share: reader.u32()?,
             },
             FROM_SCREEN_SHARER => Self::ScreenSharer {
                 connection: reader.connection()?,
@@ -1432,11 +1445,15 @@ mod tests {
                 on: false,
                 remote: false,
             },
-            ToWorker::SetScreen { target: None },
+            ToWorker::SetScreen {
+                target: None,
+                share: 0,
+            },
             ToWorker::SetScreen {
                 target: Some(ScreenTarget::Portal {
                     node: 4_294_967_295,
                 }),
+                share: 4_294_967_295,
             },
             ToWorker::SetScreen {
                 target: Some(ScreenTarget::Monitor {
@@ -1444,6 +1461,7 @@ mod tests {
                     width: 16_384,
                     height: 1,
                 }),
+                share: 7,
             },
         ]
     }
@@ -1493,21 +1511,27 @@ mod tests {
             },
             FromWorker::Screen {
                 state: ScreenState::Off,
+                share: 3,
             },
             FromWorker::Screen {
                 state: ScreenState::Starting,
+                share: 3,
             },
             FromWorker::Screen {
                 state: ScreenState::On,
+                share: 3,
             },
             FromWorker::Screen {
                 state: ScreenState::NotFound,
+                share: 3,
             },
             FromWorker::Screen {
                 state: ScreenState::Unavailable,
+                share: 3,
             },
             FromWorker::Screen {
                 state: ScreenState::Refused,
+                share: 3,
             },
             FromWorker::ScreenSharer {
                 connection: 0,
@@ -2394,7 +2418,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 5));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 6));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -2476,23 +2500,34 @@ mod tests {
     fn given_bad_set_screen_when_decoded_then_it_is_rejected() {
         let invalid = DecodeError::InvalidValue;
         let monitor = |index: u8, width: u32, height: u32| {
-            let mut body = vec![VERSION, TO_SET_SCREEN, 2, index];
+            let mut body = vec![VERSION, TO_SET_SCREEN, 0, 0, 0, 9, 2, index];
             body.extend(width.to_be_bytes());
             body.extend(height.to_be_bytes());
             body
         };
-        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_SCREEN, 3]), Err(invalid));
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 0, 1, 3]),
+            Err(invalid)
+        );
         assert_eq!(
             ToWorker::decode(&[VERSION, TO_SET_SCREEN]),
             Err(DecodeError::Truncated)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 1, 0, 0]),
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 1]),
             Err(DecodeError::Truncated)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0]),
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 0, 1, 1, 0, 0]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 0, 1, 0, 0]),
             Err(DecodeError::TrailingBytes)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_SCREEN, 0, 0, 0]),
+            Err(DecodeError::Truncated)
         );
         assert_eq!(ToWorker::decode(&monitor(16, 1920, 1080)), Err(invalid));
         assert_eq!(ToWorker::decode(&monitor(0, 0, 1080)), Err(invalid));
@@ -2506,22 +2541,23 @@ mod tests {
                     index: 0,
                     width: 1920,
                     height: 1080
-                })
+                }),
+                share: 9,
             })
         );
     }
 
-    /// GIVEN a message made for wire version 3
+    /// GIVEN a message made for wire version 4
     /// WHEN it is decoded
     /// THEN the version is refused.
     #[test]
     fn given_old_wire_version_when_decoded_then_it_is_refused() {
         assert_eq!(
-            ToWorker::decode(&[3, TO_LEAVE]),
+            ToWorker::decode(&[4, TO_LEAVE]),
             Err(DecodeError::UnknownVersion)
         );
         assert_eq!(
-            FromWorker::decode(&[3, FROM_LEFT]),
+            FromWorker::decode(&[4, FROM_LEFT]),
             Err(DecodeError::UnknownVersion)
         );
     }
@@ -2749,18 +2785,18 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire version (4)
+    /// GIVEN a message of the previous wire version (5)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
-    fn given_wire_version_4_when_decoded_then_it_is_refused() {
-        assert_eq!(VERSION, 5);
+    fn given_wire_version_5_when_decoded_then_it_is_refused() {
+        assert_eq!(VERSION, 6);
         assert_eq!(
-            ToWorker::decode(&[4, TO_LEAVE]),
+            ToWorker::decode(&[5, TO_LEAVE]),
             Err(DecodeError::UnknownVersion)
         );
         assert_eq!(
-            FromWorker::decode(&[4, FROM_CONNECTED]),
+            FromWorker::decode(&[5, FROM_CONNECTED]),
             Err(DecodeError::UnknownVersion)
         );
     }

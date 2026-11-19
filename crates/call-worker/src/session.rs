@@ -188,10 +188,10 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     // At most one camera open is in flight, so one slot is enough.
     let (open_tx, mut open_done) = mpsc::channel::<Opened<OpenedCamera, CameraState>>(1);
     // The same for the screen share (ADR-0053).
-    let (screen_failed_tx, screen_failed) = mpsc::channel::<(u64, screen::Ended)>(1);
+    let screen_ends = Arc::new(ScreenEnd::default());
     let (screen_open_tx, screen_open_done) = mpsc::channel::<Opened<OpenedScreen, ScreenState>>(1);
     let mut screens = ScreenInbox {
-        failed: screen_failed,
+        ended: screen_ends.clone(),
         opened: screen_open_done,
     };
     // At most one connect is in flight for each other SFU, so this many
@@ -217,7 +217,10 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         screen: None,
         screen_stalled: None,
         screen_gate: CameraGate::new(own_index),
-        screen_failed: screen_failed_tx,
+        screen_ends,
+        screen_end_reason: None,
+        screen_next: None,
+        screen_share: 0,
         screen_open_tx,
         remote: RemoteVideo::default(),
         other_options,
@@ -364,7 +367,18 @@ struct Call<'a> {
     screen_stalled: Option<camera::Capture>,
     /// The same open rules as the camera, for the screen share.
     screen_gate: CameraGate,
-    screen_failed: mpsc::Sender<(u64, screen::Ended)>,
+    /// A capture thread reports its generation and why it ended here.
+    screen_ends: Arc<ScreenEnd>,
+    /// Why the capture of the open in flight ended before the open
+    /// completed, with its generation.
+    screen_end_reason: Option<(u64, screen::Ended)>,
+    /// A start that came while a stopped open was still in flight, with its
+    /// share number. It runs when that open ends, so its replies follow the
+    /// stop's.
+    screen_next: Option<(ScreenTarget, screen::Grant, u32)>,
+    /// The core's number for the share that runs or opens now. Every
+    /// `Screen` state about it carries this number.
+    screen_share: u32,
     screen_open_tx: mpsc::Sender<Opened<OpenedScreen, ScreenState>>,
     remote: RemoteVideo,
     /// The room options for a connection to another SFU (ADR-0054).
@@ -445,8 +459,53 @@ struct OtherInbox {
 /// What the event loop waits for about the screen share.
 struct ScreenInbox {
     /// A capture thread reports its generation and why it ended.
-    failed: Receiver<(u64, screen::Ended)>,
+    ended: Arc<ScreenEnd>,
     opened: Receiver<Opened<OpenedScreen, ScreenState>>,
+}
+
+/// The end of a screen capture: one slot that keeps the newest generation.
+/// A stale end never takes the place of the current capture's end, and the
+/// slot never grows. Only the newest generation can still matter: a new
+/// open starts only when no capture runs.
+#[derive(Default)]
+struct ScreenEnd {
+    latest: std::sync::Mutex<Option<(u64, screen::Ended)>>,
+    ready: tokio::sync::Notify,
+}
+
+impl ScreenEnd {
+    /// The capture of `generation` ended. Called on the capture thread.
+    fn report(&self, generation: u64, ended: screen::Ended) {
+        {
+            let mut latest = self
+                .latest
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if latest.is_none_or(|(kept, _)| kept < generation) {
+                *latest = Some((generation, ended));
+            }
+        }
+        self.ready.notify_one();
+    }
+
+    /// The end in the slot, if any; the slot is then empty.
+    fn take(&self) -> Option<(u64, screen::Ended)> {
+        self.latest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Waits for the next end. The slot is read before each wait, so an end
+    /// reported while no one waited is not lost.
+    async fn next(&self) -> (u64, screen::Ended) {
+        loop {
+            if let Some(end) = self.take() {
+                return end;
+            }
+            self.ready.notified().await;
+        }
+    }
 }
 
 /// The own screen share while it is on.
@@ -882,7 +941,7 @@ impl Call<'_> {
             live: live.clone(),
             limiter: RateLimiter::for_tile(SCREEN_TILE),
         };
-        let failed = self.screen_failed.clone();
+        let ends = self.screen_ends.clone();
         let started = spawn_open(
             self.screen_open_tx.clone(),
             generation,
@@ -892,9 +951,7 @@ impl Call<'_> {
                     target,
                     grant,
                     move |frame| feed.frame(frame),
-                    move |ended| {
-                        let _ = failed.try_send((generation, ended));
-                    },
+                    move |ended| ends.report(generation, ended),
                 )?;
                 Ok(OpenedScreen {
                     capture,
@@ -917,6 +974,7 @@ impl Call<'_> {
         done: Opened<OpenedScreen, ScreenState>,
     ) -> Result<(), Closed> {
         let generation = done.generation;
+        let share = self.screen_share;
         let decision = self.screen_gate.complete(generation, done.result.is_ok());
         match (decision, done.result) {
             (Completion::Release, result) => {
@@ -936,25 +994,38 @@ impl Call<'_> {
                     } else {
                         ScreenState::Unavailable
                     };
-                self.output.send(FromWorker::Screen { state }).await
+                self.output
+                    .send(FromWorker::Screen { state, share })
+                    .await?;
+                // A start that waited for this stopped open runs now, after
+                // the stop's state.
+                if let Some((target, grant, next)) = self.screen_next.take() {
+                    for message in self.screen_start(target, grant, next) {
+                        self.output.send(message).await?;
+                    }
+                }
+                Ok(())
             }
             // The capture ended before this completion: it is dead, not on.
+            // The state says why, as it would after a completion.
             (Completion::Ended, result) => {
                 if let Ok(opened) = result {
                     self.release_screen_capture(opened.capture).await;
                 }
-                self.output
-                    .send(FromWorker::Screen {
-                        state: ScreenState::Off,
-                    })
-                    .await
+                let state = match self.screen_end_reason.take() {
+                    Some((ended, screen::Ended::Failed)) if ended == generation => {
+                        ScreenState::Unavailable
+                    }
+                    _ => ScreenState::Off,
+                };
+                self.output.send(FromWorker::Screen { state, share }).await
             }
             (Completion::Report, Err(state)) => {
-                self.output.send(FromWorker::Screen { state }).await
+                self.output.send(FromWorker::Screen { state, share }).await
             }
             (Completion::Publish, Ok(opened)) => {
                 let state = self.publish_screen(generation, opened).await;
-                self.output.send(FromWorker::Screen { state }).await
+                self.output.send(FromWorker::Screen { state, share }).await
             }
             // `complete` pairs `Publish` with `Ok` and `Report` with `Err`.
             _ => Ok(()),
@@ -1065,6 +1136,7 @@ impl Call<'_> {
             .is_none_or(|screen| screen.generation != generation)
         {
             self.screen_gate.capture_ended(generation);
+            self.screen_end_reason = Some((generation, ended));
             return Ok(());
         }
         self.stop_screen(true).await;
@@ -1072,33 +1144,62 @@ impl Call<'_> {
             screen::Ended::Source => ScreenState::Off,
             screen::Ended::Failed => ScreenState::Unavailable,
         };
-        self.output.send(FromWorker::Screen { state }).await
+        self.output
+            .send(FromWorker::Screen {
+                state,
+                share: self.screen_share,
+            })
+            .await
     }
 
-    /// The commands of a screen start: `Starting` first, then what the open
-    /// says at once (an `On` that already ran, or a refusal).
-    fn screen_on(&mut self, target: ScreenTarget) -> Vec<FromWorker> {
+    /// A screen start. While an open that a stop cancelled is still in
+    /// flight, the start waits for it (`screen_next`): it never makes that
+    /// open, of another source, current again, and its `Starting` comes
+    /// after the stop's state.
+    fn screen_on(&mut self, target: ScreenTarget, share: u32) -> Vec<FromWorker> {
         // The remote that came with this command, taken now so it cannot go
         // to another one. A Windows monitor has none.
         let grant = match target {
             ScreenTarget::Portal { .. } => screen::Grant::take(),
             ScreenTarget::Monitor { .. } => screen::Grant::default(),
         };
+        if self.screen_gate.opening() && !self.screen_gate.wanted() {
+            // A start that waited already is replaced; its grant drops.
+            self.screen_next = Some((target, grant, share));
+            return Vec::new();
+        }
+        self.screen_start(target, grant, share)
+    }
+
+    /// The commands of a screen start: `Starting` first, then what the open
+    /// says at once (an `On` that already ran, or a refusal). From here on
+    /// the states of the share that runs or opens carry `share`: a repeated
+    /// start of the same share takes the new number.
+    fn screen_start(
+        &mut self,
+        target: ScreenTarget,
+        grant: screen::Grant,
+        share: u32,
+    ) -> Vec<FromWorker> {
+        self.screen_share = share;
         let mut reply = vec![FromWorker::Screen {
             state: ScreenState::Starting,
+            share,
         }];
         // Never waits for the open: the loop keeps serving keys and Leave.
         reply.extend(
             self.begin_screen(target, grant)
-                .map(|state| FromWorker::Screen { state }),
+                .map(|state| FromWorker::Screen { state, share }),
         );
         reply
     }
 
-    /// A stop of the share (`SetScreen { target: None }`).
-    async fn screen_off(&mut self) -> Vec<FromWorker> {
+    /// A stop of the share (`SetScreen { target: None }`) numbered `share`.
+    async fn screen_off(&mut self, share: u32) -> Vec<FromWorker> {
         // A pending open is not wanted any more. Its completion releases the
-        // capture and reports the state then.
+        // capture and reports the state then. A start that waited for it is
+        // dropped with its grant.
+        self.screen_next = None;
         self.screen_gate.request_off();
         if self.screen_gate.opening() {
             return Vec::new();
@@ -1111,6 +1212,7 @@ impl Call<'_> {
             } else {
                 ScreenState::Off
             },
+            share,
         }]
     }
 
@@ -1470,8 +1572,12 @@ impl Call<'_> {
             }
             ToWorker::SetScreen {
                 target: Some(target),
-            } => Ok(self.screen_on(target)),
-            ToWorker::SetScreen { target: None } => Ok(self.screen_off().await),
+                share,
+            } => Ok(self.screen_on(target, share)),
+            ToWorker::SetScreen {
+                target: None,
+                share,
+            } => Ok(self.screen_off(share).await),
             ToWorker::Subscribe { index, url, jwt } => self.begin_other(index, url, jwt),
             ToWorker::Join { .. } | ToWorker::ListDevices | ToWorker::Leave => {
                 Err(FailureCode::Protocol)
@@ -1599,6 +1705,11 @@ impl CameraGate {
     /// Whether an open is in flight.
     fn opening(&self) -> bool {
         self.in_flight.is_some()
+    }
+
+    /// Whether the device is wanted: from `request_on` until `request_off`.
+    fn wanted(&self) -> bool {
+        self.wanted
     }
 
     /// The camera is not wanted. An open in flight stays and ends cancelled.
@@ -1737,7 +1848,7 @@ async fn event_loop(
                     return End::Failed(FailureCode::Internal);
                 }
             }
-            Some((generation, ended)) = screens.failed.recv() => {
+            (generation, ended) = screens.ended.next() => {
                 if call.screen_ended(generation, ended).await.is_err() {
                     return End::Failed(FailureCode::Internal);
                 }
@@ -2170,6 +2281,61 @@ mod tests {
         };
         gate.capture_ended(third);
         assert_eq!(gate.complete(third, true), Completion::Ended);
+    }
+
+    /// GIVEN a screen open in flight WHEN it is stopped THEN the gate still
+    /// shows the open and no longer wants the device, which is when a new
+    /// start must wait; WHEN started again THEN it is wanted again.
+    #[test]
+    fn given_a_stopped_open_then_the_gate_is_opening_but_not_wanted() {
+        let mut gate = CameraGate::new(0);
+        assert!(!gate.wanted());
+        let OnRequest::Start(first) = gate.request_on(false) else {
+            panic!("start");
+        };
+        assert!(gate.opening() && gate.wanted());
+        gate.request_off();
+        assert!(gate.opening() && !gate.wanted());
+        assert_eq!(gate.request_on(false), OnRequest::Pending);
+        assert!(gate.wanted());
+        assert_eq!(gate.complete(first, true), Completion::Publish);
+    }
+
+    /// GIVEN capture ends of several generations WHEN they are reported out
+    /// of order THEN the slot keeps only the newest; an older end reported
+    /// after it does not replace it, and a taken slot is empty.
+    #[test]
+    fn given_capture_ends_out_of_order_then_the_newest_is_kept() {
+        let ends = ScreenEnd::default();
+        assert_eq!(ends.take(), None);
+        ends.report(2, screen::Ended::Failed);
+        ends.report(1, screen::Ended::Source);
+        assert_eq!(ends.take(), Some((2, screen::Ended::Failed)));
+        assert_eq!(ends.take(), None);
+        ends.report(3, screen::Ended::Source);
+        ends.report(4, screen::Ended::Failed);
+        assert_eq!(ends.take(), Some((4, screen::Ended::Failed)));
+    }
+
+    /// GIVEN an end reported before anyone waits THEN the wait returns it at
+    /// once; GIVEN a wait in progress WHEN a capture thread reports an end
+    /// THEN the wait wakes with it. No end is lost and the slot stays one.
+    #[tokio::test]
+    async fn given_a_capture_end_then_the_wait_gets_it_whenever_it_came() {
+        let ends = Arc::new(ScreenEnd::default());
+        ends.report(1, screen::Ended::Source);
+        assert_eq!(ends.next().await, (1, screen::Ended::Source));
+
+        let reporter = ends.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            reporter.report(2, screen::Ended::Failed);
+        });
+        let end = tokio::time::timeout(std::time::Duration::from_secs(5), ends.next())
+            .await
+            .expect("the wait wakes");
+        assert_eq!(end, (2, screen::Ended::Failed));
+        thread.join().unwrap();
     }
 
     /// GIVEN a red I420 picture WHEN it is made RGBA THEN the bytes in memory

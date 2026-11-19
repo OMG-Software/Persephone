@@ -344,16 +344,18 @@ def main():
         environment["PERSEPHONE_PROBE_DIR"] = str(ROOT / ".local/runs" / f"windows-{time.time_ns()}-{os.getpid()}")
         probe = ROOT / ".local/build/rust/release/persephone-test-windows.exe"
         # Preserve the native probe's nonzero gate result; never turn it into a pass.
-        # The screen capture measurement below runs either way and is kept apart:
-        # a gate failure is raised after it.
+        # The screen capture measurement below runs either way and is kept apart.
+        # The native status wins when both fail.
         print("+ " + str(probe), flush=True)
         gate = subprocess.run([str(probe)], cwd=ROOT, env=environment, check=False)
         # The screen capture measurement (ADR-0053): whether Windows.Graphics.Capture
         # runs in the call worker's AppContainer. It reports a result for each
         # capability set; a nonzero status means the control or a launch failed.
-        run([probe, "--screen-probe"], environment)
-        if gate.returncode != 0:
-            raise subprocess.CalledProcessError(gate.returncode, [str(probe)])
+        print("+ " + str(probe) + " --screen-probe", flush=True)
+        screen = subprocess.run([str(probe), "--screen-probe"], cwd=ROOT, env=environment, check=False)
+        for result in (gate, screen):
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, result.args)
     if args.command == "webrtc":
         try:
             print(webrtc.ensure(ROOT, offline=args.offline))

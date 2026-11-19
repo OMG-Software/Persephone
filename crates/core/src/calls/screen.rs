@@ -121,7 +121,7 @@ pub trait ScreenSource: Send + Sync {
     /// Asks the user, in a window the core or the desktop draws, and gives
     /// the pick. Blocks until answered; call it from a blocking task.
     /// Setting `cancel` ends the wait and closes any window.
-    fn choose(&self, cancel: &AtomicBool) -> Result<ScreenGrant, ScreenRefusal>;
+    fn choose(&self, cancel: &Arc<AtomicBool>) -> Result<ScreenGrant, ScreenRefusal>;
 }
 
 /// A platform without screen sharing: Windows until a capability makes the
@@ -133,7 +133,7 @@ impl ScreenSource for Unavailable {
         false
     }
 
-    fn choose(&self, _cancel: &AtomicBool) -> Result<ScreenGrant, ScreenRefusal> {
+    fn choose(&self, _cancel: &Arc<AtomicBool>) -> Result<ScreenGrant, ScreenRefusal> {
         Err(ScreenRefusal::Unavailable)
     }
 }
@@ -163,7 +163,7 @@ mod tests {
     fn given_an_unavailable_platform_then_no_screen_is_picked() {
         let source = unavailable();
         assert!(!source.available());
-        let cancel = AtomicBool::new(false);
+        let cancel = Arc::new(AtomicBool::new(false));
         assert_eq!(
             source.choose(&cancel).err(),
             Some(ScreenRefusal::Unavailable)

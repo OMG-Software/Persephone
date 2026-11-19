@@ -260,6 +260,13 @@ impl CallWorkerLink {
         Arc::clone(&self.process)
     }
 
+    /// Whether the command queue is full now: the worker runs but has not
+    /// read its commands yet. A closed queue is not full; `send` then says
+    /// the worker has gone.
+    pub fn queue_full(&self) -> bool {
+        !self.commands.is_closed() && self.commands.capacity() == 0
+    }
+
     /// Queues `message` for the worker without blocking.
     pub fn send(&self, message: ToWorker) -> Result<(), WorkerGone> {
         self.commands.try_send(message).map_err(|_| WorkerGone)

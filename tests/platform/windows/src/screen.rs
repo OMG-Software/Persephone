@@ -101,19 +101,41 @@ pub fn dispatch() -> Option<i32> {
             .and_then(|arg| arg.to_str().and_then(|text| text.parse::<u32>().ok()))
             .unwrap_or(0);
         let stage = child(index);
-        // Exit codes are the only channel out of the container. Part 1 and 2
-        // return the two halves of the last HRESULT.
+        // Exit codes are the only channel out of the container, and 32 bits
+        // cannot hold a stage and a whole HRESULT. Part 1 and 2 return the
+        // stage of this run with one half of its last HRESULT.
         let hresult = wgc::last_error() as u32;
-        return Some(match part {
-            1 => hresult >> 16,
-            2 => hresult & 0xFFFF,
-            _ => stage,
-        } as i32);
+        return Some(encode(stage, hresult, part) as i32);
     }
     if first == OsStr::new(PARENT_ARG) {
         return Some(parent());
     }
     None
+}
+
+/// The exit code of a child run. Part 0 is the stage alone. Part 1 and 2 hold
+/// the stage in bits 16 and up and the high or low half of the HRESULT below.
+fn encode(stage: u32, hresult: u32, part: u32) -> u32 {
+    match part {
+        1 => (stage << 16) | (hresult >> 16),
+        2 => (stage << 16) | (hresult & 0xFFFF),
+        _ => stage,
+    }
+}
+
+/// The stage and the HRESULT half of a part 1 or 2 exit code. `None` when the
+/// code cannot come from `encode` (for example `NOT_STARTED`).
+fn decode(code: u32) -> Option<(u32, u32)> {
+    let stage = code >> 16;
+    (stage <= 0xFF).then_some((stage, code & 0xFFFF))
+}
+
+/// The HRESULT of one failure, built only from two runs that report the same
+/// stage as the first run. `None` when the failure changed between the runs.
+fn combine(stage: u32, high: u32, low: u32) -> Option<u32> {
+    let (high_stage, high) = decode(high)?;
+    let (low_stage, low) = decode(low)?;
+    (high_stage == stage && low_stage == stage).then_some((high << 16) | low)
 }
 
 /// The capture attempt: 0 when a frame arrived, else the stage that failed
@@ -214,14 +236,19 @@ fn parent() -> i32 {
             Ok(code) => {
                 let mut line = describe(code);
                 if code != 0 {
-                    // The error code of the failed call, in two runs.
+                    // The error code of the failed call, in two more runs. Each
+                    // run reports its own stage. Use the halves only when both
+                    // runs failed at the stage of the first run.
                     let high = run_in_container(&container, &exe, caps, 1);
                     let low = run_in_container(&container, &exe, caps, 2);
-                    if let (Ok(high), Ok(low)) = (high, low) {
-                        line.push_str(&format!(
-                            ", HRESULT {:#010x}",
-                            (high << 16) | (low & 0xFFFF)
-                        ));
+                    match (high, low) {
+                        (Ok(high), Ok(low)) => match combine(code, high, low) {
+                            Some(hresult) => line.push_str(&format!(
+                                ", HRESULT {hresult:#010x} (halves of two repeat runs, same stage)"
+                            )),
+                            None => line.push_str(", HRESULT unknown: the failure changed"),
+                        },
+                        _ => line.push_str(", HRESULT unknown: a repeat run failed"),
                     }
                 }
                 println!(
@@ -345,8 +372,22 @@ impl Drop for Owned {
     }
 }
 
+/// Ends the Job's process and waits for it to exit, so that the AppContainer
+/// profile is not deleted under a running child. Termination is asynchronous.
+fn end_and_wait(job: HANDLE, process: HANDLE) -> bool {
+    // SAFETY: both handles are valid. The Job ends every process it holds.
+    unsafe { TerminateJobObject(job, 1) };
+    wait_for_exit(process)
+}
+
+/// Waits, bounded, for a process to exit.
+fn wait_for_exit(process: HANDLE) -> bool {
+    // SAFETY: waits on a process handle the caller owns.
+    unsafe { WaitForSingleObject(process, RUN_TIMEOUT.as_millis() as u32) == WAIT_OBJECT_0 }
+}
+
 /// The capture attempt in the container. `part` 0 returns the stage, 1 and 2
-/// the halves of the failure's HRESULT.
+/// the stage with one half of the failure's HRESULT (see `encode`).
 fn run_in_container(
     container: &Container,
     exe: &Path,
@@ -506,18 +547,22 @@ fn run_in_container(
     // The probe must not run a single instruction outside the Job.
     // SAFETY: both handles are valid.
     if unsafe { AssignProcessToJobObject(job.0, process.0) } == 0 {
+        // The process is not in the Job, so end it directly.
         unsafe { TerminateProcess(process.0, 1) };
+        wait_for_exit(process.0);
         return Err("AssignProcessToJobObject".into());
     }
     // SAFETY: resumes the probe's primary thread.
     if unsafe { ResumeThread(thread.0) } == u32::MAX {
-        unsafe { TerminateJobObject(job.0, 1) };
+        end_and_wait(job.0, process.0);
         return Err("ResumeThread".into());
     }
     // SAFETY: waits on the process handle this function owns.
     let waited = unsafe { WaitForSingleObject(process.0, RUN_TIMEOUT.as_millis() as u32) };
     if waited == WAIT_TIMEOUT {
-        unsafe { TerminateJobObject(job.0, 1) };
+        if !end_and_wait(job.0, process.0) {
+            return Err("the probe did not finish in time and did not end".into());
+        }
         return Err("the probe did not finish in time".into());
     }
     if waited != WAIT_OBJECT_0 {
@@ -544,6 +589,26 @@ mod tests {
         }
         assert!(describe(0xC000_0005).contains("another code"));
         assert!(describe(NOT_STARTED).contains("did not run"));
+    }
+
+    /// GIVEN two runs that failed at the stage of the first run WHEN the
+    /// halves are combined THEN the HRESULT is the one the runs reported.
+    #[test]
+    fn given_runs_with_the_same_stage_when_combined_then_the_hresult_is_whole() {
+        let hresult = 0x8007_0005_u32;
+        let high = encode(10, hresult, 1);
+        let low = encode(10, hresult, 2);
+        assert_eq!(combine(10, high, low), Some(hresult));
+    }
+
+    /// GIVEN runs where the failure changed WHEN the halves are combined THEN
+    /// no HRESULT is reported.
+    #[test]
+    fn given_runs_with_another_stage_when_combined_then_no_hresult() {
+        let high = encode(10, 0x8007_0005, 1);
+        let low = encode(5, 0x8007_0005, 2);
+        assert_eq!(combine(10, high, low), None);
+        assert_eq!(combine(10, NOT_STARTED, low), None);
     }
 
     /// GIVEN the call worker's capabilities and the candidates WHEN the
