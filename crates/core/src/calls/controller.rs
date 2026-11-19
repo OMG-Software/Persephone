@@ -24,18 +24,23 @@ use super::membership::{
     own_membership, own_state_key, participant_identity, read_members,
 };
 use super::readiness::{TurnServers, sfu_transport, turn_servers};
+use super::rings::{self, Plan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError};
 use super::video::{Notifier, Picture, VideoStore};
-use super::worker::{CallHost, CallWorkerLink, StartError, WorkerProcess};
+use super::worker::{
+    CallHost, CallWorkerLink, StartError, WorkerExit, WorkerProcess, exit_is_crash,
+};
 use super::{MAX_CALL_MEMBERS, keys::FrameKey};
 use crate::session::Admission;
 use matrix_sdk::{
     Client, RoomState,
     event_handler::EventHandlerHandle,
     ruma::{
-        OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId,
-        api::client::account::request_openid_token, events::AnySyncStateEvent, serde::Raw,
+        OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId,
+        api::client::account::request_openid_token,
+        events::{AnySyncMessageLikeEvent, AnySyncStateEvent},
+        serde::Raw,
     },
 };
 use persephone_call_protocol::{
@@ -122,6 +127,9 @@ pub enum EndReason {
     WorkerFailed(FailureCode),
     /// The worker exited or its channel closed.
     WorkerStopped,
+    /// The worker ended with an internal failure: a panic, an abort or a
+    /// crash.
+    WorkerCrashed,
     /// The delayed leave could not be kept alive, or this device's
     /// membership disappeared.
     MembershipLost,
@@ -164,6 +172,9 @@ pub enum CallState {
         screen: CallScreen,
         /// The active video tiles, at most [`VIDEO_TILES`].
         video: Vec<CallVideoTile>,
+        /// The other member of a direct chat declined this call's ring
+        /// (ADR-0052). The call goes on.
+        ring_declined: bool,
     },
     Ended {
         room_id: OwnedRoomId,
@@ -289,6 +300,8 @@ struct View {
     /// gave it when the controller applied the tile's latest change. The
     /// page asks for pictures of this stream only.
     video_streams: [u64; VIDEO_TILES as usize],
+    /// The ring this call sent was declined (ADR-0052).
+    ring_declined: bool,
 }
 
 /// Remote video tiles: tiles 1 to 4 are cameras, tile 5 is the screen share.
@@ -315,6 +328,7 @@ impl View {
             sharing: HashSet::new(),
             remote_video: Default::default(),
             video_streams: Default::default(),
+            ring_declined: false,
         }
     }
 
@@ -579,11 +593,12 @@ impl View {
             camera: self.camera,
             screen: self.screen,
             video: self.video_tiles(),
+            ring_declined: self.ring_declined,
         }
     }
 }
 
-pub(super) fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1135,6 +1150,7 @@ impl CallController {
         flags.halt()?;
 
         let (change_tx, changes) = mpsc::channel(1);
+        let decline_tx = change_tx.clone();
         let (key_tx, incoming) = mpsc::channel(incoming::QUEUE);
         let (failed_tx, failed) = mpsc::channel(1);
         setup
@@ -1185,6 +1201,21 @@ impl CallController {
             &scope.runtime,
         );
 
+        // 5b. Whether to ring: only when no other member is in the call yet,
+        // read before the own membership exists (ADR-0052).
+        let plan = ring_plan(&room, &user_id, &device_id).await;
+        let ring_watch = match &plan {
+            Some(Plan::Ring(contact)) => {
+                let watch = Arc::new(Watch::new(contact.clone()));
+                setup
+                    .handles
+                    .push(decline_handler(&room, &watch, decline_tx));
+                Some(watch)
+            }
+            _ => None,
+        };
+        flags.halt()?;
+
         // 6. Own membership.
         let content = own_membership(
             room_id.as_str(),
@@ -1194,15 +1225,38 @@ impl CallController {
             Some(created_ts),
             scope.video,
         );
+        // Set before the send: a timeout or a lost answer may hide a write.
         setup.membership_sent = true;
-        time::timeout(
+        let membership = time::timeout(
             SEND_TIMEOUT,
             room.send_state_event_raw(EVENT_TYPE, &state_key, content),
         )
         .await
         .map_err(|_| CallError::Membership)?
-        .map_err(|_| CallError::Membership)?;
+        .map_err(|error| {
+            if membership_refused(&error) {
+                // Nothing was written, so the cleanup cancels the delayed
+                // leave instead of sending it.
+                setup.membership_sent = false;
+            }
+            CallError::Membership
+        })?;
         flags.halt()?;
+        // The ring follows the membership. It runs beside the join, and its
+        // failure does not end the call.
+        if let Some(plan) = plan {
+            setup.tasks.spawn_on(
+                send_ring(
+                    access.clone(),
+                    room_id.to_owned(),
+                    plan,
+                    membership.event_id,
+                    scope.video,
+                    ring_watch.clone(),
+                ),
+                &scope.runtime,
+            );
+        }
 
         // 7. The SFU grant.
         let openid = client
@@ -1260,6 +1314,7 @@ impl CallController {
             portal: None,
             portal_capture: false,
             portal_sent: false,
+            ring: ring_watch,
             screens: self.inner.host.screen_source(),
             screen_pick: None,
             screen_wanted: false,
@@ -1499,6 +1554,93 @@ impl Setup {
     }
 }
 
+/// How this device rings, or `None` when it must not: another member is in
+/// the call, the members cannot be read, or the room cannot take the ring
+/// (ADR-0052).
+async fn ring_plan(
+    room: &matrix_sdk::Room,
+    own_user: &matrix_sdk::ruma::UserId,
+    own_device: &matrix_sdk::ruma::DeviceId,
+) -> Option<Plan> {
+    let members = read_members(room, now_ms()).await.ok()?;
+    if members
+        .iter()
+        .any(|m| m.user_id != own_user || m.device_id != own_device)
+    {
+        return None;
+    }
+    let contact = crate::contacts::contact_of(&room.client(), room);
+    // Without the own member event the power to notify the room is unknown:
+    // no notification then.
+    let may_notify = match room.get_member_no_sync(own_user).await {
+        Ok(Some(member)) => member.can_trigger_room_notification(),
+        _ => false,
+    };
+    rings::plan_ring(contact, room.joined_members_count(), may_notify)
+}
+
+/// Sends the ring once, as a normal room event (encrypted in an encrypted
+/// room), and tells `watch` the event it created. A failure is dropped.
+async fn send_ring(
+    access: Access,
+    room_id: OwnedRoomId,
+    plan: Plan,
+    membership_event: OwnedEventId,
+    video: bool,
+    watch: Option<Arc<Watch>>,
+) {
+    let content = rings::notification_content(&plan, membership_event.as_str(), now_ms(), video);
+    let sent = access
+        .run(|client| async move {
+            let room = client.get_room(&room_id)?;
+            time::timeout(
+                SEND_TIMEOUT,
+                room.send_raw(rings::NOTIFICATION_TYPE, content),
+            )
+            .await
+            .ok()?
+            .ok()
+            .map(|response| response.response.event_id)
+        })
+        .await;
+    if let (Ok(Some(event_id)), Some(watch)) = (sent, watch) {
+        watch.sent(event_id);
+    }
+}
+
+/// Watches the room for the decline of the ring this call sent. A match
+/// sets the watch and wakes the call task.
+fn decline_handler(
+    room: &matrix_sdk::Room,
+    watch: &Arc<Watch>,
+    wake: mpsc::Sender<()>,
+) -> EventHandlerHandle {
+    #[derive(serde::Deserialize)]
+    struct Decline {
+        #[serde(rename = "type")]
+        kind: String,
+        sender: OwnedUserId,
+        content: serde_json::Value,
+    }
+    let watch = watch.clone();
+    room.add_event_handler(move |raw: Raw<AnySyncMessageLikeEvent>| {
+        let watch = watch.clone();
+        let wake = wake.clone();
+        async move {
+            if raw.json().get().len() > rings::MAX_EVENT_BYTES {
+                return;
+            }
+            let Ok(event) = serde_json::from_str::<Decline>(raw.json().get()) else {
+                return;
+            };
+            if event.kind == rings::DECLINE_TYPE && watch.observe(&event.sender, &event.content) {
+                // A full queue already holds a pending change.
+                let _ = wake.try_send(());
+            }
+        }
+    })
+}
+
 struct KeeperMembership {
     room_id: OwnedRoomId,
     state_key: String,
@@ -1613,6 +1755,8 @@ struct Call {
     /// `portal_capture` again: a reply to the old capture (its `Off`) can
     /// arrive after the new remote went and clear the flag.
     portal_sent: bool,
+    /// The ring this call sent, when it sent one to a direct chat.
+    ring: Option<Arc<Watch>>,
     /// Who lets the user pick a screen to share (ADR-0053).
     screens: Arc<dyn ScreenSource>,
     /// The pick in flight: the user's answer to the core's own window or the
@@ -1727,6 +1871,40 @@ impl Drop for EndGuard {
     }
 }
 
+/// Whether the homeserver refused a membership send for certain: it answered
+/// with a client error. A timeout, a network failure or a server error may
+/// hide a write, so those are not refusals.
+fn membership_refused(error: &matrix_sdk::Error) -> bool {
+    error
+        .as_client_api_error()
+        .is_some_and(|api| api.status_code.is_client_error())
+}
+
+/// How long the core waits for an ended worker to show its exit status.
+const EXIT_STATUS_WAIT: Duration = Duration::from_millis(500);
+
+/// The end reason for a worker that stopped: a crash when its exit status
+/// shows an internal failure, else a plain stop.
+fn stop_reason(exit: Option<WorkerExit>) -> EndReason {
+    match exit {
+        Some(exit) if exit_is_crash(exit) => EndReason::WorkerCrashed,
+        _ => EndReason::WorkerStopped,
+    }
+}
+
+async fn refine_worker_stop(call: &Call) -> EndReason {
+    let process = call.link.kill_handle();
+    let exit = tokio::task::spawn_blocking(move || {
+        process
+            .wait_exit(EXIT_STATUS_WAIT)
+            .then(|| process.exit_status())
+            .flatten()
+    })
+    .await
+    .unwrap_or(None);
+    stop_reason(exit)
+}
+
 async fn run_call(
     inner: Arc<Inner>,
     id: u64,
@@ -1745,6 +1923,11 @@ async fn run_call(
     let reason = match call.run(&inner, &mut stop, &mut commands).await {
         Ok(()) => EndReason::Left,
         Err(reason) => reason,
+    };
+    let reason = if reason == EndReason::WorkerStopped {
+        refine_worker_stop(&call).await
+    } else {
+        reason
     };
     if reason == EndReason::SessionEnded {
         flags.ended.store(true, Ordering::SeqCst);
@@ -2198,6 +2381,11 @@ impl Call {
         pending_own: &mut Option<(Instant, FrameKeyMsg)>,
         seen_self: &mut bool,
     ) -> Result<(), EndReason> {
+        // A decline of the ring shows even when the members cannot be read.
+        if self.ring.as_ref().is_some_and(|ring| ring.declined()) && !self.view.ring_declined {
+            self.view.ring_declined = true;
+            self.publish(inner);
+        }
         let Some(all) = self.read_members().await? else {
             return Ok(());
         };
@@ -2348,6 +2536,43 @@ mod tests {
     use matrix_sdk::ruma::{owned_device_id, owned_user_id, room_id};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    /// GIVEN a homeserver answer to a request WHEN the failure is classified
+    /// THEN a 4xx refusal is certain (the cleanup cancels the delayed leave),
+    /// and a 5xx may hide a write (the cleanup sends it).
+    #[tokio::test]
+    async fn given_membership_failures_then_only_a_client_error_is_a_refusal() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for (status, errcode, refused) in [
+            (403, "M_FORBIDDEN", true),
+            (400, "M_BAD_JSON", true),
+            (429, "M_LIMIT_EXCEEDED", true),
+            (500, "M_UNKNOWN", false),
+        ] {
+            let server = MockServer::start().await;
+            let client = crate::calls::readiness::tests::signed_in(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/voip/turnServer"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({ "errcode": errcode, "error": "no" })),
+                )
+                .mount(&server)
+                .await;
+            let error = client
+                .send(matrix_sdk::ruma::api::client::voip::get_turn_server_info::v3::Request::new())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                membership_refused(&matrix_sdk::Error::from(error)),
+                refused,
+                "{status}"
+            );
+        }
+    }
+
     fn member(user: &str, device: &str, sfu: &str) -> ActiveMember {
         let user_id = OwnedUserId::try_from(user).unwrap();
         let device_id = OwnedDeviceId::from(device);
@@ -2470,6 +2695,23 @@ mod tests {
         assert!(participants.iter().all(|p| !p.keyed && !p.speaking));
     }
 
+    /// GIVEN a connected call WHEN its ring was declined THEN the active state
+    /// shows it and the call goes on.
+    #[test]
+    fn given_a_declined_ring_then_the_call_shows_it_and_goes_on() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        let CallState::Active { ring_declined, .. } = view.state() else {
+            panic!("active");
+        };
+        assert!(!ring_declined);
+        view.ring_declined = true;
+        let CallState::Active { ring_declined, .. } = view.state() else {
+            panic!("active");
+        };
+        assert!(ring_declined);
+    }
+
     /// GIVEN speaking reports WHEN they name a member or a stranger THEN only
     /// a member is shown, and a member who leaves stops speaking.
     #[test]
@@ -2494,6 +2736,26 @@ mod tests {
         assert!(participants[0].speaking);
         view.set_members(vec![member("@b:example.org", "B", "https://x.example.org")]);
         assert!(view.speaking.is_empty());
+    }
+
+    /// GIVEN a stopped worker WHEN its exit status is read THEN a crash status
+    /// ends the call as crashed, and a clean exit, a kill or an unknown status
+    /// ends it as stopped.
+    #[test]
+    fn given_worker_exit_then_the_stop_reason_names_crashes() {
+        assert_eq!(
+            stop_reason(Some(WorkerExit::Code(101))),
+            EndReason::WorkerCrashed
+        );
+        assert_eq!(
+            stop_reason(Some(WorkerExit::Code(0))),
+            EndReason::WorkerStopped
+        );
+        assert_eq!(
+            stop_reason(Some(WorkerExit::Code(1))),
+            EndReason::WorkerStopped
+        );
+        assert_eq!(stop_reason(None), EndReason::WorkerStopped);
     }
 
     /// GIVEN a worker failure, close or mute report WHEN applied THEN they end
@@ -2848,6 +3110,7 @@ mod tests {
             portal: None,
             portal_capture: false,
             portal_sent: false,
+            ring: None,
             screens: crate::calls::screen::unavailable(),
             screen_pick: None,
             screen_wanted: false,
@@ -3528,6 +3791,7 @@ mod tests {
             camera: CallCamera::Off,
             screen: CallScreen::Off,
             video: Vec::new(),
+            ring_declined: false,
         }
     }
 
@@ -3597,6 +3861,7 @@ mod tests {
                 own: true,
                 stream: 0,
             }],
+            ring_declined: false,
         });
         assert!(calls.video_picture(0, 0, store.stream(0)).is_some());
         assert_eq!(calls.set_camera(false), Ok(()));

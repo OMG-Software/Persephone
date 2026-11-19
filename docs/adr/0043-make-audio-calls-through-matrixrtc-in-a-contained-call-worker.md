@@ -105,6 +105,15 @@ Proposed option: "a contained call worker".
 * SFU discovery: `discover_rtc_transports()` (the unstable
   `rtc/transports` path, then the `.well-known` `rtc_foci` fallback).
   TURN credentials: `GET /_matrix/client/v3/voip/turnServer`.
+  Amendment, 2026-11-19: Synapse 1.161 and later deprecate
+  `{"type":"livekit","livekit_service_url":U}` in favour of
+  `{"type":"m.livekit","url":U}`. The core accepts both forms in discovery
+  and in other members' `foci_preferred`, and uses the first acceptable
+  entry in the sender's order. The same checks apply to both: `https://`
+  only (loopback `http://` only with the `dev-disposable-servers` feature),
+  no user information, and the length limit. The advertised string is kept
+  byte for byte. The core still writes the legacy form in its own
+  membership, because Element Call's compatibility mode reads that form.
 * SFU token: an OpenID token from the homeserver, sent to the
   transport's `/sfu/get`. The response URL must be `wss://`.
 * Frame keys: a new 32-byte random key for each rotation, with indices
@@ -179,6 +188,27 @@ Proposed option: "a contained call worker".
   certificate checks. The vendored Rust `libwebrtc` crate raises the
   frame key ring from 255 to 256 slots, so that Element Call's key index
   255 works. Each patch is small and is reapplied for each LiveKit update.
+  Amendment, 2026-11-19: the TLS 1.3 rule covers the core's homeserver
+  client, the core's `/sfu/get` request and the worker's LiveKit
+  signalling. Two connections that libwebrtc makes are outside it:
+  * Media: DTLS-SRTP to the SFU. libwebrtc's own BoringSSL negotiates the
+    DTLS version, and Persephone has no setting for it. The version that
+    the pinned build uses is not measured; DTLS 1.2 is assumed. The SFU
+    ends DTLS, so DTLS never protected the media from the SFU. The frame
+    encryption does that. A weaker DTLS exposes only what the network
+    path can already see: addresses, timing and the sizes of encrypted
+    frames.
+  * TURN over TLS (`turns:` URIs from the homeserver). libwebrtc makes
+    this TLS connection with its own stack, so Persephone's TLS version
+    and certificate rules do not apply to it. Plain `turn:` over UDP or
+    TCP has no TLS. The relayed packets are DTLS-SRTP with frame
+    encryption either way, but the TURN credentials and the relay
+    allocation are exposed to the path when no TLS 1.3 protects them.
+  * This is an exception to the "TLS 1.3 with certificate checks on every
+    TLS connection" driver above. It stays open until a live run records
+    the negotiated DTLS and `turns:` TLS versions with a packet capture.
+    Then a decision either accepts it or restricts it, for example by
+    passing only `turn:` URIs to the worker.
 * libwebrtc: `tools/dev.py` downloads the pinned prebuilt archive into
   `.local/`, checks its SHA-256 against a committed value, and gives its
   path to the build in `LK_CUSTOM_WEBRTC`. A wrong hash stops the build.
@@ -205,6 +235,9 @@ Proposed option: "a contained call worker".
 * A large native dependency: Google's WebRTC through LiveKit's fork, as a
   prebuilt static library. Its security fixes reach Persephone only through
   LiveKit releases.
+* DTLS-SRTP and TURN over TLS are made by libwebrtc and are outside the
+  TLS 1.3 rule (amendment of 2026-11-19 under "Owner choices"). Their
+  versions are not measured.
 * The worker can reach any network address. A compromised worker could
   send the call's audio and keys anywhere.
 * Opus audio is decoded in native code, outside the WebAssembly guest of

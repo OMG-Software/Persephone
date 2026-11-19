@@ -6,6 +6,7 @@
   import Composer from './Composer.svelte';
   import CallBar from './CallBar.svelte';
   import CallVideo from './CallVideo.svelte';
+  import RingPrompt from './RingPrompt.svelte';
   import {
     CAMERA_COMMAND_TEXT,
     SCREEN_COMMAND_TEXT,
@@ -14,14 +15,19 @@
     JOIN_ERROR_TEXT,
     STARTING_TEXT,
     callButton,
+    cameraAvailable,
     hasVideo,
     inCall,
+    liveRings,
+    nextRingEnd,
+    shownRings,
     videoCallButton,
-    CallOperations
+    CallOperations,
+    type ShownRing
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callCamera, callScreen, callJoin, callLeave, callMute, callReadiness, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -854,7 +860,12 @@
 
   async function startCall(video: boolean) {
     if (!selected || callPending || callView?.disabled) return;
-    const roomId = selected;
+    await runJoin(selected, video);
+  }
+
+  // Joins the call in `roomId`: from the header's buttons, or by answering a
+  // ring. The core runs every join check either way.
+  async function runJoin(roomId: string, video: boolean) {
     const generation = sessionGeneration;
     callPending = true;
     callJoinText = null;
@@ -876,6 +887,115 @@
       }
     }
   }
+
+  // Incoming call rings (ADR-0052). The core lists them; this page stamps
+  // each with its end and drops it when the time passes. Nothing here joins
+  // a call except an answer button.
+  let rings = $state<ShownRing[]>([]);
+  let ringCamera = $state(false);
+  let ringBusy = $state<ReadonlySet<string>>(new Set());
+  // Goes up when a newer list arrives, so an older read cannot replace it.
+  let ringRequest = 0;
+  let ringsRunning = false;
+  let ringsAgain = false;
+  let ringDevicesAsked = false;
+
+  async function refreshRings() {
+    if (ringsRunning) {
+      ringsAgain = true;
+      return;
+    }
+    ringsRunning = true;
+    try {
+      do {
+        ringsAgain = false;
+        const generation = sessionGeneration;
+        const request = ringRequest;
+        try {
+          const reply = await callRings();
+          if (generation === sessionGeneration && request === ringRequest) {
+            rings = shownRings(reply, Date.now());
+          }
+        } catch {
+          // Keep what is shown; the next change asks again.
+        }
+      } while (ringsAgain);
+    } finally {
+      ringsRunning = false;
+    }
+  }
+
+  function markRingBusy(roomId: string, on: boolean) {
+    const next = new Set(ringBusy);
+    if (on) next.add(roomId);
+    else next.delete(roomId);
+    ringBusy = next;
+  }
+
+  async function answerRing(roomId: string, video: boolean) {
+    if (callPending || ringBusy.has(roomId)) return;
+    const generation = sessionGeneration;
+    markRingBusy(roomId, true);
+    try {
+      await runJoin(roomId, video);
+    } finally {
+      if (generation === sessionGeneration) {
+        markRingBusy(roomId, false);
+        refreshRings();
+      }
+    }
+  }
+
+  async function declineRing(roomId: string) {
+    if (ringBusy.has(roomId)) return;
+    const generation = sessionGeneration;
+    markRingBusy(roomId, true);
+    try {
+      const reply = await callDeclineRing(roomId);
+      if (generation === sessionGeneration) {
+        ringRequest += 1;
+        rings = shownRings(reply, Date.now());
+      }
+    } catch {
+      // The next read shows what the core still holds.
+    } finally {
+      if (generation === sessionGeneration) {
+        markRingBusy(roomId, false);
+        refreshRings();
+      }
+    }
+  }
+
+  // A ring leaves the page when its time is up, even before the core says so.
+  $effect(() => {
+    const wait = nextRingEnd(rings, Date.now());
+    if (wait === null) return;
+    const timer = setTimeout(() => (rings = liveRings(rings, Date.now())), wait + 1);
+    return () => clearTimeout(timer);
+  });
+
+  // Answering with video is offered only when a camera is connected. The
+  // device list is read once each time rings appear, and not during a call.
+  $effect(() => {
+    if (rings.length === 0) {
+      ringDevicesAsked = false;
+      ringCamera = false;
+      return;
+    }
+    if (ringDevicesAsked || inCall(callState)) return;
+    ringDevicesAsked = true;
+    const generation = sessionGeneration;
+    callDevices().then(
+      (devices) => {
+        if (generation === sessionGeneration) ringCamera = cameraAvailable(devices);
+      },
+      () => {}
+    );
+  });
+
+  const ringRoomNames = $derived(
+    new Map((rooms?.rooms ?? []).map((room) => [room.roomId, room.displayName ?? room.roomId]))
+  );
 
   async function toggleMute() {
     const generation = sessionGeneration;
@@ -986,6 +1106,12 @@
     callNames = new Map();
     callNamesFor = null;
     callRefresher.request();
+    rings = [];
+    ringRequest += 1;
+    ringBusy = new Set();
+    ringCamera = false;
+    ringDevicesAsked = false;
+    refreshRings();
     cancelContext?.(); cancelContext = null;
     sessionGeneration += 1;
     roomOpenRequest += 1;
@@ -1446,12 +1572,13 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1));
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings);
     } catch {
       unavailable = true;
       return;
     }
     callRefresher.request();
+    refreshRings();
     load();
     refreshModules();
     if (platform === 'linux') {
@@ -2682,6 +2809,14 @@
             <button type="button" class="secondary" disabled={modulesBusy} onclick={reviewModules}>{unreviewed(modules).length > 1 ? 'Mark all as reviewed' : 'Mark as reviewed'}</button>
           </div>
         {/if}
+        <RingPrompt
+          {rings}
+          roomNames={ringRoomNames}
+          camera={ringCamera}
+          busy={ringBusy}
+          onanswer={answerRing}
+          ondecline={declineRing}
+        />
         <CallBar
           status={callState}
           dismissed={callDismissed}

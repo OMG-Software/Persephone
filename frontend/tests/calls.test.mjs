@@ -18,6 +18,7 @@ import {
   CAMERA_TEXT,
   VIDEO_CALL_LABEL,
   callButton,
+  STARTING_TEXT,
   cameraButton,
   screenButton,
   SCREEN_TEXT,
@@ -27,7 +28,18 @@ import {
   deviceOptions,
   deviceValue,
   devicesNote,
-  showCallBar
+  showCallBar,
+  MAX_RINGS,
+  RING_ANSWER_LABEL,
+  RING_ANSWER_VIDEO_LABEL,
+  RING_DECLINE_LABEL,
+  RING_TITLE,
+  cameraAvailable,
+  liveRings,
+  nextRingEnd,
+  ringButtons,
+  ringsAnnouncement,
+  shownRings
 } from '../src/calls.ts';
 
 const status = (over) => ({ ...IDLE_CALL, ...over });
@@ -35,9 +47,9 @@ const ready = (over) => ({ available: true, reason: null, activeMembers: 0, ...o
 
 test('GIVEN every call code in the contract WHEN its text is read THEN each is plain, non-empty text, except a normal leave', () => {
   const codes = {
-    unavailable: ['unsupported_platform', 'not_joined', 'not_encrypted', 'no_call_server', 'server_unreachable'],
+    unavailable: ['unsupported_platform', 'not_joined', 'not_encrypted', 'not_permitted', 'no_call_server', 'server_unreachable'],
     join: ['already_in_call', 'not_joined', 'not_encrypted', 'no_call_server', 'declined', 'unsupported_platform', 'containment', 'no_worker', 'no_delayed_events', 'membership', 'call_server', 'keys', 'proxy_unreadable', 'device_setting_unreadable'],
-    end: ['connection_failed', 'audio_device', 'device_not_found', 'containment', 'worker_stopped', 'membership_lost', 'keys_unavailable', 'session_ended', 'internal']
+    end: ['connection_failed', 'audio_device', 'device_not_found', 'containment', 'worker_stopped', 'worker_crashed', 'membership_lost', 'keys_unavailable', 'session_ended', 'internal']
   };
   for (const [table, list] of [[UNAVAILABLE_TEXT, codes.unavailable], [JOIN_ERROR_TEXT, codes.join], [END_TEXT, codes.end]]) {
     assert.deepEqual(Object.keys(table).filter((key) => key !== 'left').sort(), [...list].sort());
@@ -60,10 +72,15 @@ test('GIVEN an unavailable room WHEN the button is built THEN it is disabled wit
   assert.equal(view.label, 'Join call (2)');
 });
 
-test('GIVEN readiness not yet known or a join waiting WHEN the button is built THEN it is disabled without a reason', () => {
+test('GIVEN readiness not yet known WHEN the button is built THEN it is disabled without a reason', () => {
   assert.deepEqual([callButton('!r:s', null, IDLE_CALL, false).disabled, callButton('!r:s', null, IDLE_CALL, false).reason], [true, null]);
-  const pending = callButton('!r:s', ready(), IDLE_CALL, true);
-  assert.deepEqual([pending.disabled, pending.reason], [true, null]);
+});
+
+test('GIVEN a join waiting for the core WHEN the buttons are built THEN they are disabled and say that a proxy warning may be waiting', () => {
+  for (const view of [callButton('!r:s', ready(), IDLE_CALL, true), videoCallButton('!r:s', ready(), IDLE_CALL, true)]) {
+    assert.deepEqual([view.disabled, view.reason], [true, STARTING_TEXT]);
+  }
+  assert.match(STARTING_TEXT, /proxy warning/);
 });
 
 test('GIVEN this account is in a call WHEN buttons are built THEN that room hides it and other rooms are disabled', () => {
@@ -318,4 +335,56 @@ test('GIVEN a command of the old session WHEN it finishes while the new session 
 test('GIVEN one operation WHEN no later one starts THEN its reply is current', () => {
   const operations = new CallOperations();
   assert.equal(operations.isCurrent(operations.begin()), true);
+});
+
+const ring = (over) => ({ roomId: '!r:s', caller: '@alice:s', intent: 'audio', secondsLeft: 30, ...over });
+
+test('GIVEN the core\'s list of rings WHEN the page stamps them THEN each ends at its seconds left, newest first as sent', () => {
+  const list = { rings: [ring({ roomId: '!a:s', secondsLeft: 10 }), ring({ roomId: '!b:s', secondsLeft: 90, intent: 'video' })] };
+  const shown = shownRings(list, 1_000);
+  assert.deepEqual(shown.map((r) => [r.roomId, r.endsAt, r.intent]), [['!a:s', 11_000, 'audio'], ['!b:s', 91_000, 'video']]);
+});
+
+test('GIVEN a list with too many, repeated or timeless rings WHEN stamped THEN at most four remain, one for each room, each with time left', () => {
+  const many = { rings: ['!1:s', '!2:s', '!3:s', '!4:s', '!5:s'].map((roomId) => ring({ roomId })) };
+  assert.equal(shownRings(many, 0).length, MAX_RINGS);
+  const repeated = { rings: [ring({ roomId: '!a:s' }), ring({ roomId: '!a:s', caller: '@mallory:s' })] };
+  const shown = shownRings(repeated, 0);
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].caller, '@alice:s');
+  const timeless = { rings: [ring({ secondsLeft: 0 }), ring({ roomId: '!n:s', secondsLeft: -3 }), ring({ roomId: '!x:s', secondsLeft: Number.NaN })] };
+  assert.deepEqual(shownRings(timeless, 0), []);
+  assert.deepEqual(shownRings({ rings: [] }, 0), []);
+});
+
+test('GIVEN rings with different ends WHEN time passes THEN an ended ring is removed and the next end is the nearest one', () => {
+  const rings = shownRings({ rings: [ring({ roomId: '!a:s', secondsLeft: 5 }), ring({ roomId: '!b:s', secondsLeft: 20 })] }, 0);
+  assert.equal(nextRingEnd(rings, 0), 5_000);
+  assert.equal(nextRingEnd(rings, 4_000), 1_000);
+  assert.equal(nextRingEnd(rings, 9_000), 0);
+  assert.equal(nextRingEnd([], 0), null);
+  assert.deepEqual(liveRings(rings, 4_999).map((r) => r.roomId), ['!a:s', '!b:s']);
+  assert.deepEqual(liveRings(rings, 5_000).map((r) => r.roomId), ['!b:s']);
+  assert.deepEqual(liveRings(rings, 20_000), []);
+});
+
+test('GIVEN a camera or none WHEN the prompt buttons are built THEN answer and decline always show and answer with video only with a camera', () => {
+  assert.deepEqual(ringButtons(true), { answer: RING_ANSWER_LABEL, video: RING_ANSWER_VIDEO_LABEL, decline: RING_DECLINE_LABEL });
+  assert.deepEqual(ringButtons(false), { answer: 'Answer', video: null, decline: 'Decline' });
+  const devices = { supported: true, recording: [], playout: [], cameras: [{ id: 'c', name: 'Camera' }], selectedRecording: null, selectedPlayout: null, selectedCamera: null, unreadable: false };
+  assert.equal(cameraAvailable(devices), true);
+  assert.equal(cameraAvailable({ ...devices, cameras: [] }), false);
+  assert.equal(cameraAvailable({ ...devices, supported: false }), false);
+  assert.equal(cameraAvailable(null), false);
+});
+
+test('GIVEN rings or none WHEN announced THEN a ring says only Incoming call, never a name', () => {
+  assert.equal(ringsAnnouncement([]), '');
+  const rings = shownRings({ rings: [ring({ caller: '@<script>:s' })] }, 0);
+  assert.equal(ringsAnnouncement(rings), RING_TITLE);
+  assert.equal(RING_TITLE, 'Incoming call');
+});
+
+test('GIVEN the idle call WHEN read THEN the ring was not declined', () => {
+  assert.equal(IDLE_CALL.ringDeclined, false);
 });

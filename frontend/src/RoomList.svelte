@@ -57,6 +57,9 @@
             <Icon name="hash" class="hash" />
           </RoomPicture>
           <bdi class="room-name">{room.displayName ?? room.roomId}</bdi>
+          {#if room.hasCall}
+            <span class="call-mark" role="img" aria-label="Call in progress"><Icon name="phone" /></span>
+          {/if}
           {#if room.unreadCount > 0}
             <span class="badge" aria-label={unreadLabel(room.unreadCount) + ' unread'}
               >{unreadLabel(room.unreadCount)}</span

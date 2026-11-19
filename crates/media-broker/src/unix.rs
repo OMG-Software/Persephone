@@ -380,6 +380,20 @@ impl LongLivedWorker {
         }
     }
 
+    /// How the process ended. `None` while it runs or when the OS cannot say.
+    pub fn exit_status(&self) -> Option<crate::WorkerExit> {
+        let worker = self.lock();
+        worker.reap(false).ok()?;
+        let (status, _) = worker.reaped.get()?;
+        if libc::WIFEXITED(status) {
+            Some(crate::WorkerExit::Code(libc::WEXITSTATUS(status) as u32))
+        } else if libc::WIFSIGNALED(status) {
+            Some(crate::WorkerExit::Signal(libc::WTERMSIG(status) as u32))
+        } else {
+            None
+        }
+    }
+
     /// Whether the OS shows the worker as contained (Linux:
     /// `/proc/<pid>/status`; macOS: `sandbox_check`). Call it after the
     /// worker's `Ready` message and before any input goes to it.

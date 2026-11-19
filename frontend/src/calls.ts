@@ -11,6 +11,8 @@ import type {
   CallPhase,
   CallReadiness,
   CallScreen,
+  CallRing,
+  CallRings,
   CallStatus,
   CallUnavailable
 } from '../../crates/contracts/generated/contracts';
@@ -24,6 +26,7 @@ export const UNAVAILABLE_TEXT: Record<CallUnavailable, string> = {
   unsupported_platform: 'Calls are not available on this system yet.',
   not_joined: 'Join the room to start a call.',
   not_encrypted: 'Calls need an encrypted room.',
+  not_permitted: 'You do not have permission to start a call in this room.',
   no_call_server: 'Your homeserver has no call service.',
   server_unreachable: 'Cannot reach your homeserver to check for calls.'
 };
@@ -56,6 +59,7 @@ export const END_TEXT: Record<CallEnd, string> = {
     'The chosen microphone or speaker is not connected. Choose another in Preferences.',
   containment: 'The call stopped: its process was not contained.',
   worker_stopped: 'The call process stopped.',
+  worker_crashed: 'The call process failed with an internal error.',
   membership_lost: 'Your homeserver ended your call membership.',
   keys_unavailable: 'The call keys are not available.',
   session_ended: 'The call ended because Persephone locked.',
@@ -70,7 +74,12 @@ export const PHASE_TEXT: Record<CallPhase, string> = {
 };
 
 export const IN_CALL_TEXT = 'You are already in a call.';
-export const STARTING_TEXT = 'Starting the call…';
+/**
+ * Shown while a join waits for the core. A profile with a proxy makes the
+ * core open its own warning window first, and the page cannot see that
+ * window, so the text names it.
+ */
+export const STARTING_TEXT = 'Starting the call… If a proxy warning window is open, answer it to go on.';
 export const NO_KEY_TEXT = 'Cannot hear yet: no key';
 export const UNREACHABLE_TEXT = 'On another call server: not reachable';
 
@@ -83,7 +92,8 @@ export const IDLE_CALL: CallStatus = {
   joinError: null,
   camera: 'off',
   screen: 'off',
-  video: []
+  video: [],
+  ringDeclined: false
 };
 
 /** This account is in a call, or joining one. */
@@ -115,7 +125,7 @@ export function callButton(
     const here = status.roomId === roomId;
     return { hidden: here, disabled: true, label, reason: here ? null : IN_CALL_TEXT };
   }
-  if (pending) return { hidden: false, disabled: true, label, reason: null };
+  if (pending) return { hidden: false, disabled: true, label, reason: STARTING_TEXT };
   if (readiness === null) return { hidden: false, disabled: true, label, reason: null };
   if (!readiness.available) {
     const reason = readiness.reason === null ? null : UNAVAILABLE_TEXT[readiness.reason];
@@ -382,4 +392,74 @@ export const DEVICES_NOTE_TEXT = 'Changes apply from the next call.';
 export function devicesNote(devices: CallDevices): string {
   if (!devices.supported) return DEVICES_UNSUPPORTED_TEXT;
   return devices.unreadable ? DEVICES_UNREADABLE_TEXT : DEVICES_NOTE_TEXT;
+}
+
+// Incoming call rings (ADR-0052). The core sends the room ID, the caller's
+// user ID, the intent and the seconds left. The page keeps at most four, shows
+// each until it ends and never joins by itself: only the answer buttons do.
+
+/** Most rings the page shows at once. The core keeps no more. */
+export const MAX_RINGS = 4;
+
+export const RING_TITLE = 'Incoming call';
+export const RING_ANSWER_LABEL = 'Answer';
+export const RING_ANSWER_VIDEO_LABEL = 'Answer with video';
+export const RING_DECLINE_LABEL = 'Decline';
+export const RING_DECLINED_TEXT = 'Declined';
+
+/** A ring and the time, in milliseconds since the epoch, at which it ends. */
+export type ShownRing = CallRing & { endsAt: number };
+
+/**
+ * The rings the core listed, stamped with their end on this page's clock.
+ * At most [`MAX_RINGS`], one for each room, and none without time left.
+ * The core's list is the whole truth: a ring not in it has ended.
+ */
+export function shownRings(list: CallRings, now: number): ShownRing[] {
+  const seen = new Set<string>();
+  const shown: ShownRing[] = [];
+  for (const ring of list.rings) {
+    if (shown.length >= MAX_RINGS) break;
+    if (seen.has(ring.roomId) || !(ring.secondsLeft >= 1)) continue;
+    seen.add(ring.roomId);
+    shown.push({ ...ring, endsAt: now + ring.secondsLeft * 1000 });
+  }
+  return shown;
+}
+
+/** The rings that have not ended at `now`. */
+export function liveRings(rings: readonly ShownRing[], now: number): ShownRing[] {
+  return rings.filter((ring) => ring.endsAt > now);
+}
+
+/** Milliseconds until the first ring ends, or `null` for no rings. */
+export function nextRingEnd(rings: readonly ShownRing[], now: number): number | null {
+  if (rings.length === 0) return null;
+  return Math.max(0, Math.min(...rings.map((ring) => ring.endsAt)) - now);
+}
+
+/** Whether the devices listing shows a camera. Without a listing, none. */
+export function cameraAvailable(devices: CallDevices | null): boolean {
+  return devices !== null && devices.supported && devices.cameras.length > 0;
+}
+
+export type RingButtons = {
+  answer: string;
+  // `null` hides the button: no camera is available.
+  video: string | null;
+  decline: string;
+};
+
+/** The buttons of a ring's prompt. Answering with video needs a camera. */
+export function ringButtons(camera: boolean): RingButtons {
+  return {
+    answer: RING_ANSWER_LABEL,
+    video: camera ? RING_ANSWER_VIDEO_LABEL : null,
+    decline: RING_DECLINE_LABEL
+  };
+}
+
+/** What a screen reader hears when the rings change; empty for none. */
+export function ringsAnnouncement(rings: readonly ShownRing[]): string {
+  return rings.length === 0 ? '' : RING_TITLE;
 }
