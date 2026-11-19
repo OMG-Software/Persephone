@@ -284,7 +284,10 @@ impl Rings {
             return Err(Refusal::TooManySenders);
         }
         state.senders.push((ring.sender.clone(), now_ms));
-        state.rings.retain(|kept| kept.room_id != ring.room_id);
+        // Expired rings go first, so they never push out a live one.
+        state
+            .rings
+            .retain(|kept| kept.room_id != ring.room_id && kept.ends_ms > now_ms);
         if state.rings.len() >= MAX_RINGS {
             state.rings.remove(0);
         }
@@ -474,21 +477,36 @@ pub fn declined_event(content: &Value) -> Option<OwnedEventId> {
 pub struct Watch {
     contact: OwnedUserId,
     event_id: Mutex<Option<OwnedEventId>>,
+    /// Declines from the contact that arrived before the send's answer gave
+    /// the ring's event ID. At most [`MAX_EARLY_DECLINES`], oldest dropped.
+    early: Mutex<Vec<OwnedEventId>>,
     declined: AtomicBool,
 }
+
+/// How many early declines a [`Watch`] keeps.
+const MAX_EARLY_DECLINES: usize = 4;
 
 impl Watch {
     pub fn new(contact: OwnedUserId) -> Self {
         Self {
             contact,
             event_id: Mutex::new(None),
+            early: Mutex::new(Vec::new()),
             declined: AtomicBool::new(false),
         }
     }
 
-    /// Records the event ID the homeserver gave the sent ring.
-    pub fn sent(&self, event_id: OwnedEventId) {
-        *self.event_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(event_id);
+    /// Records the event ID the homeserver gave the sent ring. Whether an
+    /// early decline names it, so the ring is declined now.
+    pub fn sent(&self, event_id: OwnedEventId) -> bool {
+        let mut own = self.event_id.lock().unwrap_or_else(|e| e.into_inner());
+        let early = std::mem::take(&mut *self.early.lock().unwrap_or_else(|e| e.into_inner()));
+        let declined = early.contains(&event_id);
+        *own = Some(event_id);
+        if declined {
+            self.declined.store(true, Ordering::SeqCst);
+        }
+        declined
     }
 
     /// Looks at a decline event. Whether it declined this ring.
@@ -500,11 +518,21 @@ impl Watch {
             return false;
         };
         let own = self.event_id.lock().unwrap_or_else(|e| e.into_inner());
-        if own.as_ref() == Some(&target) {
-            self.declined.store(true, Ordering::SeqCst);
-            true
-        } else {
-            false
+        match own.as_ref() {
+            Some(own) if *own == target => {
+                self.declined.store(true, Ordering::SeqCst);
+                true
+            }
+            Some(_) => false,
+            // The send has not answered yet: keep it for `sent`.
+            None => {
+                let mut early = self.early.lock().unwrap_or_else(|e| e.into_inner());
+                if early.len() >= MAX_EARLY_DECLINES {
+                    early.remove(0);
+                }
+                early.push(target);
+                false
+            }
         }
     }
 
@@ -905,15 +933,67 @@ mod tests {
     #[test]
     fn given_a_declined_own_ring_then_only_the_contacts_decline_of_it_counts() {
         let watch = Watch::new(user_id!("@bob:s").to_owned());
-        // Before the homeserver named the ring, nothing can match.
-        assert!(!watch.observe(user_id!("@bob:s"), &decline_content("$ring:s")));
-        watch.sent(event_id!("$ring:s").to_owned());
+        assert!(!watch.sent(event_id!("$ring:s").to_owned()));
         assert!(!watch.observe(user_id!("@carol:s"), &decline_content("$ring:s")));
         assert!(!watch.observe(user_id!("@bob:s"), &decline_content("$other:s")));
         assert!(!watch.observe(user_id!("@bob:s"), &json!({})));
         assert!(!watch.declined());
         assert!(watch.observe(user_id!("@bob:s"), &decline_content("$ring:s")));
         assert!(watch.declined());
+    }
+
+    /// GIVEN declines that arrive before the send's answer WHEN the ring's
+    /// event ID is known THEN only the contact's decline of that ring
+    /// declines it, and only the newest four are kept.
+    #[test]
+    fn given_an_early_decline_then_it_counts_when_the_ring_is_named() {
+        let watch = Watch::new(user_id!("@bob:s").to_owned());
+        assert!(!watch.observe(user_id!("@bob:s"), &decline_content("$ring:s")));
+        assert!(!watch.observe(user_id!("@carol:s"), &decline_content("$mine:s")));
+        assert!(!watch.declined());
+        assert!(watch.sent(event_id!("$ring:s").to_owned()));
+        assert!(watch.declined());
+
+        let other = Watch::new(user_id!("@bob:s").to_owned());
+        assert!(!other.observe(user_id!("@carol:s"), &decline_content("$ring:s")));
+        assert!(!other.observe(user_id!("@bob:s"), &decline_content("$other:s")));
+        assert!(!other.sent(event_id!("$ring:s").to_owned()));
+        assert!(!other.declined());
+
+        let bounded = Watch::new(user_id!("@bob:s").to_owned());
+        assert!(!bounded.observe(user_id!("@bob:s"), &decline_content("$ring:s")));
+        for n in 0..MAX_EARLY_DECLINES {
+            let id = format!("$x{n}:s");
+            assert!(!bounded.observe(user_id!("@bob:s"), &decline_content(&id)));
+        }
+        assert!(!bounded.sent(event_id!("$ring:s").to_owned()));
+    }
+
+    /// GIVEN four stored rings of which three expired WHEN a fifth arrives
+    /// THEN the live one stays and the expired ones make room.
+    #[test]
+    fn given_expired_rings_then_they_do_not_push_out_a_live_one() {
+        let rings = Rings::default();
+        rings
+            .admit(ring("!a:s", "@a:s", NOW + 60_000), NOW)
+            .unwrap();
+        for n in 0..3 {
+            rings
+                .admit(
+                    ring(&format!("!r{n}:s"), &format!("@u{n}:s"), NOW + 1_000),
+                    NOW,
+                )
+                .unwrap();
+        }
+        rings
+            .admit(ring("!e:s", "@e:s", NOW + 60_000), NOW + 2_000)
+            .unwrap();
+        let rooms: Vec<_> = rings
+            .live(NOW + 2_000)
+            .into_iter()
+            .map(|ring| ring.room_id)
+            .collect();
+        assert_eq!(rooms, vec![room_id!("!e:s"), room_id!("!a:s")]);
     }
 
     #[test]

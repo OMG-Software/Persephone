@@ -219,10 +219,15 @@ impl Hub {
         notifications.toast_call = false;
         notifications.rings_changed = false;
         notifications.session_changed = true;
-        // A lock or sign-out drops every ring and flag.
+        self.changed.notify_all();
+    }
+
+    /// Drops every ring and call flag: on a lock, an unlock, a profile reset
+    /// and when the signed-in account ends or changes. A sync error does not
+    /// come here, so a short outage keeps them.
+    fn clear_calls(&self) {
         self.rings.clear();
         self.call_rooms.clear();
-        self.changed.notify_all();
     }
 
     /// Queues one call event; changes before the UI reads coalesce.
@@ -308,6 +313,10 @@ impl SessionListener for Hub {
 
     fn session_changed(&self) {
         self.announce_session_change();
+    }
+
+    fn account_ended(&self) {
+        self.clear_calls();
     }
 
     fn direct_rooms_changed(&self) {
@@ -1029,6 +1038,7 @@ impl Core {
                 let before = self.session.state();
                 let state = self.session.unlock();
                 if state != before {
+                    self.hub.clear_calls();
                     self.hub.announce_session_change();
                 }
                 ok(&state)
@@ -1037,6 +1047,7 @@ impl Core {
                 let before = self.session.state();
                 let state = self.session.reset_profile();
                 if state != before {
+                    self.hub.clear_calls();
                     self.hub.announce_session_change();
                 }
                 ok(&state)
@@ -2186,6 +2197,7 @@ impl Core {
         self.calls.stop_for_session_end();
         self.media.purge();
         lock(&self.modules).clear_reviewed();
+        self.hub.clear_calls();
         self.hub.announce_session_change();
     }
 
@@ -2542,7 +2554,8 @@ impl Core {
             drop(client);
         }
         drop(lease);
-        if self.hub.rings.end_room(room_id) {
+        // Only the declined ring ends: a newer ring in the room stays.
+        if self.hub.rings.retain(|ring| ring.event_id != event_id) {
             self.hub.mark_rings_changed();
         }
         Ok(self.ring_list())
@@ -3838,7 +3851,8 @@ mod tests {
     }
 
     /// GIVEN rings and flags WHEN a sync round shows the rooms are left, or
-    /// the session changes THEN they end, and the UI is told once.
+    /// the account ends THEN they end, and the UI is told once; a status
+    /// change of the same account keeps them.
     #[test]
     fn given_left_rooms_or_a_session_change_then_rings_and_flags_end() {
         let core = Core::default();
@@ -3860,7 +3874,13 @@ mod tests {
         SessionListener::check_rooms(&**hub, &|id| id != room);
         assert!(!lock(&hub.notifications).rings_changed);
         hub.call_rooms.set(room, Some(now + 60_000));
-        hub.announce_session_change();
+        // A status change of the same account, such as a sync error, keeps
+        // them.
+        SessionListener::session_changed(&**hub);
+        assert_eq!(hub.rings.live(now).len(), 1);
+        assert!(hub.call_rooms.active(room, now));
+        // The end of the account drops them.
+        SessionListener::account_ended(&**hub);
         assert!(hub.rings.live(now).is_empty());
         assert!(!hub.call_rooms.active(room, now));
     }

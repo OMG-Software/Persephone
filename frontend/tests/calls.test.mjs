@@ -37,6 +37,7 @@ import {
   nextRingEnd,
   ringButtons,
   ringsAnnouncement,
+  ringsKey,
   shownRings
 } from '../src/calls.ts';
 
@@ -367,6 +368,17 @@ test('GIVEN rings or none WHEN announced THEN a ring says only Incoming call, ne
   const rings = shownRings({ rings: [ring({ caller: '@<script>:s' })] }, 0);
   assert.equal(ringsAnnouncement(rings), RING_TITLE);
   assert.equal(RING_TITLE, 'Incoming call');
+});
+
+test('GIVEN shown rings WHEN a ring is added or replaced THEN the announcement key changes, and the time left does not change it', () => {
+  const first = shownRings({ rings: [ring({ roomId: '!a:s', caller: '@bob:s', secondsLeft: 30 })] }, 0);
+  const later = shownRings({ rings: [ring({ roomId: '!a:s', caller: '@bob:s', secondsLeft: 12 })] }, 5_000);
+  const replaced = shownRings({ rings: [ring({ roomId: '!a:s', caller: '@carol:s' })] }, 0);
+  const added = shownRings({ rings: [ring({ roomId: '!a:s', caller: '@bob:s' }), ring({ roomId: '!b:s', caller: '@dan:s' })] }, 0);
+  assert.equal(ringsKey(later), ringsKey(first));
+  assert.notEqual(ringsKey(replaced), ringsKey(first));
+  assert.notEqual(ringsKey(added), ringsKey(first));
+  assert.notEqual(ringsKey([]), ringsKey(first));
 });
 
 test('GIVEN the idle call WHEN read THEN the ring was not declined', () => {

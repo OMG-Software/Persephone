@@ -172,6 +172,10 @@ pub trait SessionListener: Send + Sync {
     /// names are empty when the account's settings leave names out. It makes
     /// the "Incoming call" desktop notification (ADR-0052).
     fn notify_call(&self, _room: &str, _sender: &str) {}
+    /// The signed-in account ended or changed: a sign-out, a failed sign-in
+    /// or another user. Not called when a sync error or its recovery keeps
+    /// the same account. The call handlers' rings and flags end.
+    fn account_ended(&self) {}
     /// Called after each sync round with the rooms this account has joined,
     /// so rings and flags of a left room end.
     fn check_rooms(&self, _joined: &dyn Fn(&matrix_sdk::ruma::RoomId) -> bool) {}
@@ -354,6 +358,10 @@ impl crate::calls::ring_events::Env for Shared {
             .load(Ordering::SeqCst)
             .then(|| self.toast_names.load(Ordering::SeqCst))
     }
+
+    fn open_generation(&self) -> Option<u64> {
+        Shared::open_generation(self)
+    }
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -433,8 +441,16 @@ impl Shared {
     }
 
     fn set_status(&self, status: AccountStatus) {
-        *guard(&self.status) = status;
+        let same_account = {
+            let mut current = guard(&self.status);
+            let same = same_signed_in_account(&current, &status);
+            *current = status;
+            same
+        };
         if let Some(listener) = self.listener() {
+            if !same_account {
+                listener.account_ended();
+            }
             listener.session_changed();
         }
     }
@@ -518,6 +534,15 @@ fn failed(error: SignInError) -> AccountStatus {
         user_id: None,
         error: Some(error),
     }
+}
+
+/// Whether both statuses are signed in to the same account, as before and
+/// after a sync error or its recovery.
+fn same_signed_in_account(before: &AccountStatus, after: &AccountStatus) -> bool {
+    before.state == AccountState::SignedIn
+        && after.state == AccountState::SignedIn
+        && before.user_id.is_some()
+        && before.user_id == after.user_id
 }
 
 fn signed_in(user_id: &str, error: Option<SignInError>) -> AccountStatus {
@@ -2957,6 +2982,32 @@ fn not_revoked() -> AccountStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN status changes WHEN compared THEN only a change that keeps the
+    /// same signed-in account, such as a sync error or its recovery, keeps
+    /// the account; a sign-out, a failure or another user ends it.
+    #[test]
+    fn given_status_changes_then_only_the_same_signed_in_account_continues() {
+        let alice = signed_in("@alice:s", None);
+        let alice_error = signed_in("@alice:s", Some(SignInError::Failed));
+        assert!(same_signed_in_account(&alice, &alice_error));
+        assert!(same_signed_in_account(&alice_error, &alice));
+        for after in [
+            AccountStatus::signed_out(),
+            failed(SignInError::Failed),
+            not_revoked(),
+            signed_in("@bob:s", None),
+        ] {
+            assert!(!same_signed_in_account(&alice, &after), "{after:?}");
+        }
+        assert!(!same_signed_in_account(
+            &AccountStatus::signed_out(),
+            &alice
+        ));
+        // A user ID that cannot be shown is not proof of the same account.
+        let hidden = signed_in(&"x".repeat(256), None);
+        assert!(!same_signed_in_account(&hidden, &hidden));
+    }
 
     fn unverified() -> SecurityShared {
         let mut security = SecurityShared::default();
