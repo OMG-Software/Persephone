@@ -5261,8 +5261,8 @@ mod tests {
     /// WHEN the page stops the share THEN `Off` does not show until the lock
     /// is released, and then shows with the stop counted: page change and
     /// count are one step for the task's publication.
-    #[tokio::test]
-    async fn given_a_task_publication_when_the_page_stops_then_off_waits_for_the_lock() {
+    #[test]
+    fn given_a_task_publication_when_the_page_stops_then_off_waits_for_the_lock() {
         let calls = Arc::new(controller(FakeHost::new(true, None)));
         let (_store, _commands, _) = running_call(&calls, active_state());
         let control = {
