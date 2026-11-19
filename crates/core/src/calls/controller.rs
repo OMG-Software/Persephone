@@ -787,7 +787,7 @@ struct RunHandle {
     /// The user's latest camera request, shared with the call task.
     camera_wanted: Arc<AtomicBool>,
     /// The screen stops accepted, shared with the call task.
-    screen_stops: Arc<AtomicU64>,
+    screen_stops: Arc<Mutex<u64>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -1332,7 +1332,7 @@ impl CallController {
             screen_session: None,
             screen_closed: None,
             screen_sent: false,
-            screen_stops: Arc::new(AtomicU64::new(0)),
+            screen_stops: Arc::new(Mutex::new(0)),
             screen_pick_stops: 0,
             screen_share: 0,
         })
@@ -1460,14 +1460,17 @@ impl CallController {
             *screen = next;
             true
         });
-        // A stop is counted before it is queued, so a pick that ends while
-        // the stop waits in the queue is closed unused.
-        let stops = if on {
-            run.screen_stops.load(Ordering::SeqCst)
-        } else {
-            run.screen_stops
-                .fetch_add(1, Ordering::SeqCst)
-                .wrapping_add(1)
+        // A stop is counted before it is queued, under the lock that the
+        // call task holds from its check of a finished pick until the
+        // pick's start is queued for the worker. So a stop is either seen by
+        // that check, and the pick is closed unused, or it comes after the
+        // start and stops it.
+        let stops = {
+            let mut count = plain(&run.screen_stops);
+            if !on {
+                *count = count.wrapping_add(1);
+            }
+            *count
         };
         permit.send(Command::Screen { on, stops });
         drop(slot);
@@ -1802,8 +1805,9 @@ struct Call {
     /// A `SetScreen` start went to the worker and no stop or end since.
     screen_sent: bool,
     /// The screen stops the handle accepted. `set_screen` counts a stop
-    /// before it queues it; the task only reads it.
-    screen_stops: Arc<AtomicU64>,
+    /// before it queues it; the task only reads it, and holds the lock from
+    /// its check of a finished pick until the pick's start is queued.
+    screen_stops: Arc<Mutex<u64>>,
     /// `screen_stops` when the start of the pick in flight was accepted. A
     /// pick that ends after a later stop was accepted is closed unused.
     screen_pick_stops: u64,
@@ -2104,14 +2108,19 @@ impl Call {
         picked: Result<ScreenGrant, ScreenRefusal>,
     ) -> Result<(), EndReason> {
         // A stop accepted after this pick's start, even one still queued,
-        // makes the pick stale.
-        let current = self.screen_wanted
-            && self.screen_pick_stops == self.screen_stops.load(Ordering::SeqCst);
+        // makes the pick stale. The lock stays held until the start is
+        // queued, so no stop is accepted between the check and the handoff.
+        // It is released before any publish: `set_screen` takes the slot
+        // first and this lock second.
+        let stops = self.screen_stops.clone();
+        let accepted = plain(&stops);
+        let current = self.screen_wanted && self.screen_pick_stops == *accepted;
         let grant = match picked {
             Ok(grant) if current => grant,
             // A stop came meanwhile: the grant (and its session) is dropped.
             Ok(_) => return Ok(()),
             Err(refusal) => {
+                drop(accepted);
                 if current && self.view.set_screen(refusal.shown()) == Applied::Changed {
                     self.publish(inner);
                 }
@@ -2123,10 +2132,8 @@ impl Call {
         // yet, not one that stopped: the share alone fails, the call runs on.
         // The grant drops here, which closes its session.
         if self.link.queue_full() {
-            self.screen_wanted = false;
-            if self.view.set_screen(CallScreen::Unavailable) == Applied::Changed {
-                self.publish(inner);
-            }
+            drop(accepted);
+            self.screen_failed(inner);
             return Ok(());
         }
         let ScreenGrant {
@@ -2138,20 +2145,28 @@ impl Call {
         // The remote goes first and the command says so by its target: the
         // worker takes the oldest screen remote with it.
         if !self.send_screen_remote(remote, &target) {
-            self.screen_wanted = false;
-            if self.view.set_screen(CallScreen::Unavailable) == Applied::Changed {
-                self.publish(inner);
-            }
+            drop(accepted);
+            self.screen_failed(inner);
             return Ok(());
         }
         self.screen_session = session;
         self.screen_closed = closed;
         self.screen_sent = true;
         self.screen_share = self.screen_share.wrapping_add(1);
-        self.send_worker(ToWorker::SetScreen {
+        let sent = self.send_worker(ToWorker::SetScreen {
             target: Some(target),
             share: self.screen_share,
-        })
+        });
+        drop(accepted);
+        sent
+    }
+
+    /// A share that could not start: unavailable, and the call runs on.
+    fn screen_failed(&mut self, inner: &Inner) {
+        self.screen_wanted = false;
+        if self.view.set_screen(CallScreen::Unavailable) == Applied::Changed {
+            self.publish(inner);
+        }
     }
 
     /// Sends the portal's remote when the target needs one. Returns whether
@@ -2210,14 +2225,16 @@ impl Call {
     /// A state of an older share than the last one sent is ignored: it must
     /// not close the newer share's portal session or show over it. For the
     /// last share, any state but `Starting` and `On` ends it and closes its
-    /// session. A state of the last share after its stop shows only while no
-    /// new start waits for its pick.
+    /// session. After the last share's stop, only its end state shows, and
+    /// only while no new start waits for its pick: a late `Starting` or `On`
+    /// of a stopped share never shows.
     fn screen_state_from_worker(&mut self, state: ScreenState, share: u32) -> bool {
         if share != self.screen_share {
             return false;
         }
         if !self.screen_sent {
-            return !self.screen_wanted;
+            return !self.screen_wanted
+                && !matches!(state, ScreenState::Starting | ScreenState::On);
         }
         if !matches!(state, ScreenState::Starting | ScreenState::On) {
             self.screen_sent = false;
@@ -3050,7 +3067,7 @@ mod tests {
             stop: Some(stop),
             commands,
             camera_wanted: Arc::new(AtomicBool::new(false)),
-            screen_stops: Arc::new(AtomicU64::new(0)),
+            screen_stops: Arc::new(Mutex::new(0)),
             task: None,
         });
         calls.stop_for_session_end();
@@ -3230,7 +3247,7 @@ mod tests {
             screen_session: None,
             screen_closed: None,
             screen_sent: false,
-            screen_stops: Arc::new(AtomicU64::new(0)),
+            screen_stops: Arc::new(Mutex::new(0)),
             screen_pick_stops: 0,
             screen_share: 0,
         };
@@ -3894,7 +3911,7 @@ mod tests {
             stop: None,
             commands,
             camera_wanted: Arc::new(AtomicBool::new(false)),
-            screen_stops: Arc::new(AtomicU64::new(0)),
+            screen_stops: Arc::new(Mutex::new(0)),
             task: None,
         });
         calls.inner.publish(state);
@@ -4443,7 +4460,7 @@ mod tests {
         let (mut fixture, inner, _) = call_with_source(true);
         fixture.call.screen_command(&inner, true, 0).unwrap();
         // `set_screen(false)` counts the stop before it queues it.
-        fixture.call.screen_stops.fetch_add(1, Ordering::SeqCst);
+        *plain(&fixture.call.screen_stops) += 1;
         let dropped = Arc::new(AtomicBool::new(false));
         fixture
             .call
@@ -4452,6 +4469,76 @@ mod tests {
         assert!(dropped.load(Ordering::SeqCst), "the session closed");
         assert!(fixture.to_worker.try_recv().is_err());
         assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a stop that the handle is accepting (it holds the stop lock)
+    /// WHEN a pick ends at that moment THEN the pick's check waits for the
+    /// stop, sees it, and closes the grant unused: nothing goes to the
+    /// worker.
+    #[tokio::test]
+    async fn given_a_stop_accepted_while_a_pick_ends_then_the_check_waits_and_sees_it() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let stops = fixture.call.screen_stops.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            let mut count = plain(&stops);
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            *count += 1;
+        });
+        held_rx.recv().unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        stopper.join().unwrap();
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a share whose start went to the worker WHEN a stop is accepted
+    /// just after THEN the stop names that share and closes its session, and
+    /// the share's late `Starting` and `On` do not show over the stop; its
+    /// end state does.
+    #[tokio::test]
+    async fn given_a_stop_just_after_the_handoff_then_late_states_do_not_show_it_running() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+        *plain(&fixture.call.screen_stops) += 1;
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None, share: stopped }) if stopped == share
+        ));
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        for state in [ScreenState::Starting, ScreenState::On] {
+            fixture
+                .call
+                .worker_event(&inner, &FromWorker::Screen { state, share })
+                .unwrap();
+            assert_eq!(fixture.call.view.screen, CallScreen::Off, "{state:?}");
+        }
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::Unavailable,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
     }
 
     /// GIVEN a worker whose command queue is full WHEN a pick ends THEN the
@@ -4494,7 +4581,7 @@ mod tests {
         let _ = fixture.to_worker.try_recv();
         let older = fixture.call.screen_share;
         // As `set_screen(false)` does: counted, then queued.
-        fixture.call.screen_stops.fetch_add(1, Ordering::SeqCst);
+        *plain(&fixture.call.screen_stops) += 1;
         fixture.call.screen_command(&inner, false, 1).unwrap();
         let _ = fixture.to_worker.try_recv();
         fixture.call.screen_command(&inner, true, 1).unwrap();
@@ -4538,7 +4625,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fixture.call.view.screen, CallScreen::On);
-        fixture.call.screen_stops.fetch_add(1, Ordering::SeqCst);
+        *plain(&fixture.call.screen_stops) += 1;
         fixture.call.screen_command(&inner, false, 2).unwrap();
         assert!(matches!(
             fixture.to_worker.try_recv(),

@@ -207,7 +207,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         screen_gate: CameraGate::new(own_index),
         screen_ends,
         screen_end_reason: None,
-        screen_next: None,
+        screen_next: NextStart::default(),
         screen_share: 0,
         screen_open_tx,
         remote: RemoteVideo::default(),
@@ -357,7 +357,7 @@ struct Call<'a> {
     /// A start that came while a stopped open was still in flight, with its
     /// share number. It runs when that open ends, so its replies follow the
     /// stop's.
-    screen_next: Option<(ScreenTarget, screen::Grant, u32)>,
+    screen_next: NextStart<screen::Grant>,
     /// The core's number for the share that runs or opens now. Every
     /// `Screen` state about it carries this number.
     screen_share: u32,
@@ -414,6 +414,48 @@ impl ScreenEnd {
             }
             self.ready.notified().await;
         }
+    }
+}
+
+/// A screen start that waits for an open that a stop cancelled. It keeps
+/// its own target, grant and share number: it never takes the stopped
+/// open's, and the stopped open never takes its grant.
+struct NextStart<G> {
+    waiting: Option<(ScreenTarget, G, u32)>,
+}
+
+impl<G> Default for NextStart<G> {
+    fn default() -> Self {
+        Self { waiting: None }
+    }
+}
+
+impl<G> NextStart<G> {
+    /// The start to run now, or `None` when an open that a stop cancelled
+    /// is still in flight: the start then waits here until that open ends.
+    /// A start that waited already is replaced, and its grant drops.
+    fn admit(
+        &mut self,
+        gate: &CameraGate,
+        target: ScreenTarget,
+        grant: G,
+        share: u32,
+    ) -> Option<(ScreenTarget, G, u32)> {
+        if gate.opening() && !gate.wanted() {
+            self.waiting = Some((target, grant, share));
+            return None;
+        }
+        Some((target, grant, share))
+    }
+
+    /// The start that waited, once the stopped open has ended.
+    fn take(&mut self) -> Option<(ScreenTarget, G, u32)> {
+        self.waiting.take()
+    }
+
+    /// A stop drops the start that waited, with its grant.
+    fn clear(&mut self) {
+        self.waiting = None;
     }
 }
 
@@ -1072,12 +1114,13 @@ impl Call<'_> {
             ScreenTarget::Portal { .. } => screen::Grant::take(),
             ScreenTarget::Monitor { .. } => screen::Grant::default(),
         };
-        if self.screen_gate.opening() && !self.screen_gate.wanted() {
-            // A start that waited already is replaced; its grant drops.
-            self.screen_next = Some((target, grant, share));
-            return Vec::new();
+        match self
+            .screen_next
+            .admit(&self.screen_gate, target, grant, share)
+        {
+            Some((target, grant, share)) => self.screen_start(target, grant, share),
+            None => Vec::new(),
         }
-        self.screen_start(target, grant, share)
     }
 
     /// The commands of a screen start: `Starting` first, then what the open
@@ -1108,7 +1151,7 @@ impl Call<'_> {
         // A pending open is not wanted any more. Its completion releases the
         // capture and reports the state then. A start that waited for it is
         // dropped with its grant.
-        self.screen_next = None;
+        self.screen_next.clear();
         self.screen_gate.request_off();
         if self.screen_gate.opening() {
             return Vec::new();
@@ -2048,6 +2091,61 @@ mod tests {
         assert_eq!(gate.request_on(false), OnRequest::Pending);
         assert!(gate.wanted());
         assert_eq!(gate.complete(first, true), Completion::Publish);
+    }
+
+    /// A grant that counts its drops.
+    struct Counted(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// GIVEN share A's open in flight WHEN A is stopped and B, then C, start
+    /// before A's open ends THEN neither starts beside A's open, B's grant
+    /// drops when C replaces it, and once A's open ends cancelled the start
+    /// that runs is C's, with C's own target, grant and share number. A stop
+    /// drops a waiting start with its grant. With no open in flight a start
+    /// runs at once.
+    #[test]
+    fn given_a_start_during_a_stopped_open_then_it_waits_with_its_own_grant() {
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let grant = || Counted(drops.clone());
+        let portal = |node| ScreenTarget::Portal { node };
+        let mut gate = CameraGate::new(0);
+        let mut next = NextStart::default();
+
+        let first = next.admit(&gate, portal(1), grant(), 1).expect("A runs");
+        let OnRequest::Start(open) = gate.request_on(false) else {
+            panic!("start");
+        };
+        drop(first);
+        gate.request_off();
+        assert!(
+            next.admit(&gate, portal(2), grant(), 2).is_none(),
+            "B waits"
+        );
+        assert!(
+            next.admit(&gate, portal(3), grant(), 3).is_none(),
+            "C waits"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 2, "A's and B's grants");
+        assert_eq!(gate.complete(open, true), Completion::Cancelled);
+        let (target, waiting, share) = next.take().expect("C runs now");
+        assert_eq!((target, share), (portal(3), 3));
+        assert_eq!(drops.load(Ordering::SeqCst), 2, "C keeps its own grant");
+        drop(waiting);
+        assert!(next.take().is_none());
+
+        let OnRequest::Start(_) = gate.request_on(false) else {
+            panic!("start");
+        };
+        gate.request_off();
+        assert!(next.admit(&gate, portal(4), grant(), 4).is_none());
+        next.clear();
+        assert_eq!(drops.load(Ordering::SeqCst), 4, "the stop dropped it");
+        assert!(next.take().is_none());
     }
 
     /// GIVEN capture ends of several generations WHEN they are reported out

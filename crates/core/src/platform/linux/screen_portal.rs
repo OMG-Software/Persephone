@@ -174,16 +174,27 @@ fn call_until(
     cancel: &AtomicBool,
     call: impl FnOnce(&Connection) -> zbus::Result<zbus::Message> + Send + 'static,
 ) -> Result<zbus::Message, ScreenRefusal> {
-    let (call_tx, call_rx) = mpsc::channel();
     let call_connection = connection.clone();
+    run_until(cancel, move || {
+        call(&call_connection).map_err(|error| refusal(&error))
+    })
+}
+
+/// Runs `work` on its own thread and waits for its result until `cancel` is
+/// set. A cancel ends the wait within [`CANCEL_CHECK`] even while `work`
+/// blocks; the thread ends when `work` returns.
+fn run_until<T: Send + 'static>(
+    cancel: &AtomicBool,
+    work: impl FnOnce() -> Result<T, ScreenRefusal> + Send + 'static,
+) -> Result<T, ScreenRefusal> {
+    let (done_tx, done_rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("screen-portal-call".to_owned())
         .spawn(move || {
-            let result = call(&call_connection).map_err(|error| refusal(&error));
-            let _ = call_tx.send(result);
+            let _ = done_tx.send(work());
         })
         .map_err(|_| ScreenRefusal::Refused)?;
-    wait(&call_rx, cancel).and_then(|outcome| outcome)
+    wait(&done_rx, cancel).and_then(|outcome| outcome)
 }
 
 /// Waits for one result on `receiver` until `cancel` is set.
@@ -520,6 +531,46 @@ mod tests {
             wait(&pending, &AtomicBool::new(true)),
             Err(ScreenRefusal::Cancelled)
         );
+    }
+
+    /// GIVEN a portal call that does not answer (like a stalled
+    /// `OpenPipeWireRemote`) WHEN the pick is cancelled THEN the wait ends
+    /// as cancelled within a few checks, and the call's thread ends once the
+    /// call returns; GIVEN a call that answers THEN its result comes back.
+    #[test]
+    fn given_a_stalled_portal_call_when_cancelled_then_the_wait_ends_promptly() {
+        assert_eq!(run_until(&AtomicBool::new(false), || Ok(5)), Ok(5));
+        assert_eq!(
+            run_until::<u8>(&AtomicBool::new(false), || Err(ScreenRefusal::Refused)),
+            Err(ScreenRefusal::Refused)
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (ended_tx, ended_rx) = mpsc::channel::<()>();
+        let canceller = {
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(CANCEL_CHECK / 2);
+                cancel.store(true, Ordering::SeqCst);
+            })
+        };
+        let started = Instant::now();
+        let outcome = run_until(&cancel, move || {
+            let _ = release_rx.recv();
+            let _ = ended_tx.send(());
+            Ok(1_u8)
+        });
+        assert_eq!(outcome, Err(ScreenRefusal::Cancelled));
+        assert!(
+            started.elapsed() < CANCEL_CHECK * 10,
+            "{:?}",
+            started.elapsed()
+        );
+        canceller.join().unwrap();
+        // The stalled call returns (the connection closes) and its thread ends.
+        release_tx.send(()).unwrap();
+        assert!(ended_rx.recv_timeout(Duration::from_secs(5)).is_ok());
     }
 
     /// GIVEN `Response` signals WHEN read THEN code 0 gives the results,
