@@ -2698,10 +2698,7 @@ mod tests {
         }
         let mut padded = full.to_vec();
         padded.push(0);
-        assert_eq!(
-            ToWorker::decode(&padded),
-            Err(DecodeError::TrailingBytes)
-        );
+        assert_eq!(ToWorker::decode(&padded), Err(DecodeError::TrailingBytes));
     }
 
     /// GIVEN a Subscribe

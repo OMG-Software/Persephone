@@ -1,11 +1,11 @@
 //! The pure parts of the worker: no LiveKit types, no I/O, no clock reads.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{
-    FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_PARTICIPANTS, MediaDevice,
-    ToWorker,
+    FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_OTHER_CONNECTIONS,
+    MAX_PARTICIPANTS, MediaDevice, ToWorker,
 };
 
 /// The most `Speaking` messages sent in any one second.
@@ -72,12 +72,14 @@ pub fn bounded_device_list<'a>(
 /// What the worker saw in the room, reduced to what it reports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RoomChange {
-    Joined(String),
-    Left(String),
-    /// The complete set of current speakers.
-    Speakers(Vec<String>),
-    /// The room ended without a request from the core.
-    Disconnected,
+    Joined(u8, String),
+    Left(u8, String),
+    /// The complete set of current speakers of one connection.
+    Speakers(u8, Vec<String>),
+    /// The room of this connection ended without a request from the core.
+    /// The own SFU (0) ends the call; another SFU (1 to 3) only ends that
+    /// connection (ADR-0054).
+    Disconnected(u8),
 }
 
 /// Turns Speaking changes into at most [`MAX_SPEAKING_PER_SECOND`] messages
@@ -85,24 +87,36 @@ pub enum RoomChange {
 /// core's view still ends up correct.
 #[derive(Debug, Default)]
 pub struct SpeakingTracker {
-    reported: BTreeSet<String>,
-    wanted: BTreeSet<String>,
+    reported: BTreeSet<(u8, String)>,
+    wanted: BTreeSet<(u8, String)>,
     sent: VecDeque<Instant>,
 }
 
 impl SpeakingTracker {
-    pub fn set_speakers(&mut self, identities: impl IntoIterator<Item = String>) {
-        self.wanted = identities
-            .into_iter()
-            .filter(|identity| valid_identity(identity))
-            .take(MAX_PARTICIPANTS)
-            .collect();
+    /// Replaces the speakers of one connection; the others stay.
+    pub fn set_speakers(&mut self, connection: u8, identities: impl IntoIterator<Item = String>) {
+        self.wanted.retain(|(known, _)| *known != connection);
+        self.wanted.extend(
+            identities
+                .into_iter()
+                .filter(|identity| valid_identity(identity))
+                .take(MAX_PARTICIPANTS)
+                .map(|identity| (connection, identity)),
+        );
     }
 
     /// A participant left: nothing more is said about them.
-    pub fn forget(&mut self, identity: &str) {
-        self.wanted.remove(identity);
-        self.reported.remove(identity);
+    pub fn forget(&mut self, connection: u8, identity: &str) {
+        let key = (connection, identity.to_owned());
+        self.wanted.remove(&key);
+        self.reported.remove(&key);
+    }
+
+    /// A connection ended: every speaker of it stops without a message
+    /// (its participants are gone for the core as well).
+    pub fn forget_connection(&mut self, connection: u8) {
+        self.wanted.retain(|(known, _)| *known != connection);
+        self.reported.retain(|(known, _)| *known != connection);
     }
 
     /// Returns the messages that may be sent at `now`. Stops come first.
@@ -117,20 +131,25 @@ impl SpeakingTracker {
         let budget = MAX_SPEAKING_PER_SECOND.saturating_sub(self.sent.len());
         let stops = self.reported.difference(&self.wanted).cloned();
         let starts = self.wanted.difference(&self.reported).cloned();
-        let due: Vec<(String, bool)> = stops
-            .map(|identity| (identity, false))
-            .chain(starts.map(|identity| (identity, true)))
+        let due: Vec<((u8, String), bool)> = stops
+            .map(|key| (key, false))
+            .chain(starts.map(|key| (key, true)))
             .take(budget)
             .collect();
         let mut messages = Vec::with_capacity(due.len());
-        for (identity, speaking) in due {
+        for (key, speaking) in due {
             if speaking {
-                self.reported.insert(identity.clone());
+                self.reported.insert(key.clone());
             } else {
-                self.reported.remove(&identity);
+                self.reported.remove(&key);
             }
             self.sent.push_back(now);
-            messages.push(FromWorker::Speaking { identity, speaking });
+            let (connection, identity) = key;
+            messages.push(FromWorker::Speaking {
+                connection,
+                identity,
+                speaking,
+            });
         }
         messages
     }
@@ -147,21 +166,87 @@ impl SpeakingTracker {
 /// [`valid_identity`] are ignored.
 pub fn apply(change: RoomChange, tracker: &mut SpeakingTracker) -> Vec<FromWorker> {
     match change {
-        RoomChange::Joined(identity) if valid_identity(&identity) => {
-            vec![FromWorker::ParticipantJoined { identity }]
+        RoomChange::Joined(connection, identity) if valid_identity(&identity) => {
+            vec![FromWorker::ParticipantJoined {
+                connection,
+                identity,
+            }]
         }
-        RoomChange::Left(identity) if valid_identity(&identity) => {
-            tracker.forget(&identity);
-            vec![FromWorker::ParticipantLeft { identity }]
+        RoomChange::Left(connection, identity) if valid_identity(&identity) => {
+            tracker.forget(connection, &identity);
+            vec![FromWorker::ParticipantLeft {
+                connection,
+                identity,
+            }]
         }
-        RoomChange::Speakers(identities) => {
-            tracker.set_speakers(identities);
+        RoomChange::Speakers(connection, identities) => {
+            tracker.set_speakers(connection, identities);
             Vec::new()
         }
-        RoomChange::Disconnected => vec![FromWorker::Failed {
+        // The own SFU ending ends the call. Another SFU ending only ends its
+        // connection: the core marks those members not reachable.
+        RoomChange::Disconnected(0) => vec![FromWorker::Failed {
             code: FailureCode::Network,
         }],
-        RoomChange::Joined(_) | RoomChange::Left(_) => Vec::new(),
+        RoomChange::Disconnected(connection) => {
+            tracker.forget_connection(connection);
+            vec![FromWorker::Connection {
+                connection,
+                up: false,
+            }]
+        }
+        RoomChange::Joined(..) | RoomChange::Left(..) => Vec::new(),
+    }
+}
+
+/// One connection to another SFU (ADR-0054): `C` is the connect in flight,
+/// `U` the open connection.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Slot<C, U> {
+    Connecting(C),
+    Up(U),
+    /// Failed or ended. The index stays used: it is never reopened.
+    Ended,
+}
+
+/// The connections to other SFUs by index, 1 to [`MAX_OTHER_CONNECTIONS`].
+#[derive(Debug)]
+pub struct Slots<C, U>(HashMap<u8, Slot<C, U>>);
+
+impl<C, U> Default for Slots<C, U> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
+}
+
+impl<C, U> Slots<C, U> {
+    /// Starts a connection at `index`. An index outside 1 to 3, or one used
+    /// before (also after a failure), gives `connecting` back.
+    pub fn begin(&mut self, index: u8, connecting: C) -> Result<(), C> {
+        if !(1..=MAX_OTHER_CONNECTIONS).contains(&index) || self.0.contains_key(&index) {
+            return Err(connecting);
+        }
+        self.0.insert(index, Slot::Connecting(connecting));
+        Ok(())
+    }
+
+    pub fn is_connecting(&self, index: u8) -> bool {
+        matches!(self.0.get(&index), Some(Slot::Connecting(_)))
+    }
+
+    /// The connect at `index` finished with an open connection.
+    pub fn up(&mut self, index: u8, open: U) {
+        self.0.insert(index, Slot::Up(open));
+    }
+
+    /// The connection at `index` failed or ended. Returns what it held.
+    pub fn end(&mut self, index: u8) -> Option<Slot<C, U>> {
+        self.0.insert(index, Slot::Ended)
+    }
+
+    /// Takes every connection out, for the end of the call.
+    pub fn take_all(&mut self) -> Vec<Slot<C, U>> {
+        self.0.drain().map(|(_, slot)| slot).collect()
     }
 }
 
@@ -223,7 +308,9 @@ mod tests {
         messages
             .iter()
             .map(|message| match message {
-                FromWorker::Speaking { identity, speaking } => (identity.clone(), *speaking),
+                FromWorker::Speaking {
+                    identity, speaking, ..
+                } => (identity.clone(), *speaking),
                 other => panic!("not a Speaking message: {other:?}"),
             })
             .collect()
@@ -368,6 +455,11 @@ mod tests {
             ToWorker::RemoveParticipant {
                 identity: "@a:example.org:D".to_owned(),
             },
+            ToWorker::Subscribe {
+                index: 1,
+                url: "wss://sfu.other.example".to_owned(),
+                jwt: Zeroizing::new("a.b.c".to_owned()),
+            },
         ] {
             assert!(!is_first_message_allowed(&message), "{message:?}");
         }
@@ -390,18 +482,146 @@ mod tests {
         // THEN the valid ones map to messages and the invalid one is ignored.
         let mut tracker = SpeakingTracker::default();
         assert_eq!(
-            apply(RoomChange::Joined("@a:example.org:D".into()), &mut tracker),
+            apply(
+                RoomChange::Joined(0, "@a:example.org:D".into()),
+                &mut tracker
+            ),
             vec![FromWorker::ParticipantJoined {
+                connection: 0,
                 identity: "@a:example.org:D".into()
             }]
         );
         assert_eq!(
-            apply(RoomChange::Left("@a:example.org:D".into()), &mut tracker),
+            apply(RoomChange::Left(0, "@a:example.org:D".into()), &mut tracker),
             vec![FromWorker::ParticipantLeft {
+                connection: 0,
                 identity: "@a:example.org:D".into()
             }]
         );
-        assert!(apply(RoomChange::Joined("bad\u{7}".into()), &mut tracker).is_empty());
+        assert!(apply(RoomChange::Joined(0, "bad\u{7}".into()), &mut tracker).is_empty());
+    }
+
+    #[test]
+    fn given_participants_of_other_connections_when_applied_then_messages_carry_the_index() {
+        // GIVEN a tracker, WHEN a join and a leave arrive on connection 2,
+        // THEN each message names connection 2.
+        let mut tracker = SpeakingTracker::default();
+        assert_eq!(
+            apply(
+                RoomChange::Joined(2, "@c:other.example:D".into()),
+                &mut tracker
+            ),
+            vec![FromWorker::ParticipantJoined {
+                connection: 2,
+                identity: "@c:other.example:D".into()
+            }]
+        );
+        assert_eq!(
+            apply(
+                RoomChange::Left(2, "@c:other.example:D".into()),
+                &mut tracker
+            ),
+            vec![FromWorker::ParticipantLeft {
+                connection: 2,
+                identity: "@c:other.example:D".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn given_another_sfu_disconnects_then_only_its_connection_ends() {
+        // GIVEN speakers on connections 0 and 1, WHEN connection 1 disconnects,
+        // THEN the message is Connection down (not a failure of the call) and
+        // the speakers of connection 0 stay.
+        let start = Instant::now();
+        let mut tracker = SpeakingTracker::default();
+        tracker.set_speakers(0, names(1));
+        tracker.set_speakers(1, names(2));
+        assert_eq!(tracker.poll(start).len(), 3);
+        assert_eq!(
+            apply(RoomChange::Disconnected(1), &mut tracker),
+            vec![FromWorker::Connection {
+                connection: 1,
+                up: false
+            }]
+        );
+        tracker.set_speakers(0, names(1));
+        assert!(tracker.poll(at(start, 2000)).is_empty());
+        assert!(!tracker.has_pending());
+        // WHEN the own SFU disconnects, THEN the call fails with Network.
+        assert_eq!(
+            apply(RoomChange::Disconnected(0), &mut tracker),
+            vec![FromWorker::Failed {
+                code: FailureCode::Network
+            }]
+        );
+    }
+
+    #[test]
+    fn given_speakers_of_two_connections_then_each_set_is_kept_apart() {
+        // GIVEN speakers on connection 0, WHEN connection 2 reports its own
+        // set, THEN connection 0's speakers are not replaced, and each
+        // Speaking message names its connection.
+        let start = Instant::now();
+        let mut tracker = SpeakingTracker::default();
+        tracker.set_speakers(0, vec!["@a:x:D".into()]);
+        tracker.set_speakers(2, vec!["@b:y:D".into()]);
+        let sent = tracker.poll(start);
+        assert!(sent.contains(&FromWorker::Speaking {
+            connection: 0,
+            identity: "@a:x:D".into(),
+            speaking: true
+        }));
+        assert!(sent.contains(&FromWorker::Speaking {
+            connection: 2,
+            identity: "@b:y:D".into(),
+            speaking: true
+        }));
+        tracker.set_speakers(2, Vec::new());
+        let sent = tracker.poll(at(start, 2000));
+        assert_eq!(
+            sent,
+            vec![FromWorker::Speaking {
+                connection: 2,
+                identity: "@b:y:D".into(),
+                speaking: false
+            }]
+        );
+    }
+
+    #[test]
+    fn given_connection_slots_then_an_index_opens_once_and_only_1_to_3() {
+        // GIVEN empty slots, WHEN indices 0 and 4 are begun, THEN they are
+        // refused; WHEN 1 is begun twice, THEN the second is refused, also
+        // after the first failed.
+        let mut slots: Slots<&str, &str> = Slots::default();
+        assert_eq!(slots.begin(0, "c"), Err("c"));
+        assert_eq!(slots.begin(4, "c"), Err("c"));
+        assert_eq!(slots.begin(1, "c"), Ok(()));
+        assert!(slots.is_connecting(1));
+        assert_eq!(slots.begin(1, "d"), Err("d"));
+        assert_eq!(slots.end(1), Some(Slot::Connecting("c")));
+        assert_eq!(slots.begin(1, "e"), Err("e"));
+        assert!(!slots.is_connecting(1));
+    }
+
+    #[test]
+    fn given_open_and_pending_connections_when_the_call_ends_then_all_are_taken() {
+        // GIVEN one open, one pending and one failed connection, WHEN the
+        // call ends, THEN every one is handed over to be closed or stopped.
+        let mut slots: Slots<&str, &str> = Slots::default();
+        slots.begin(1, "c1").unwrap();
+        slots.up(1, "u1");
+        slots.begin(2, "c2").unwrap();
+        slots.begin(3, "c3").unwrap();
+        slots.end(3);
+        let mut all = slots.take_all();
+        all.sort_by_key(|slot| format!("{slot:?}"));
+        assert_eq!(
+            all,
+            vec![Slot::Connecting("c2"), Slot::Ended, Slot::Up("u1")]
+        );
+        assert!(slots.take_all().is_empty());
     }
 
     #[test]
@@ -409,7 +629,7 @@ mod tests {
         // GIVEN a room that ends by itself, WHEN applied, THEN Failed(Network) results.
         let mut tracker = SpeakingTracker::default();
         assert_eq!(
-            apply(RoomChange::Disconnected, &mut tracker),
+            apply(RoomChange::Disconnected(0), &mut tracker),
             vec![FromWorker::Failed {
                 code: FailureCode::Network
             }]
@@ -423,10 +643,10 @@ mod tests {
         let start = Instant::now();
         let mut tracker = SpeakingTracker::default();
         let ids = names(3);
-        tracker.set_speakers(ids[..2].to_vec());
+        tracker.set_speakers(0, ids[..2].to_vec());
         assert_eq!(speaking(&tracker.poll(start)).len(), 2);
         assert!(tracker.poll(at(start, 10)).is_empty());
-        tracker.set_speakers(vec![ids[1].clone(), ids[2].clone()]);
+        tracker.set_speakers(0, vec![ids[1].clone(), ids[2].clone()]);
         assert_eq!(
             speaking(&tracker.poll(at(start, 20))),
             vec![(ids[0].clone(), false), (ids[2].clone(), true)]
@@ -439,7 +659,7 @@ mod tests {
         // THEN each second carries at most 10 messages and all arrive in the end.
         let start = Instant::now();
         let mut tracker = SpeakingTracker::default();
-        tracker.set_speakers(names(25));
+        tracker.set_speakers(0, names(25));
         assert_eq!(tracker.poll(start).len(), 10);
         assert!(tracker.has_pending());
         assert!(tracker.poll(at(start, 500)).is_empty());
@@ -453,10 +673,10 @@ mod tests {
         // GIVEN a reported speaker, WHEN they leave, THEN no Speaking message follows.
         let start = Instant::now();
         let mut tracker = SpeakingTracker::default();
-        tracker.set_speakers(names(1));
+        tracker.set_speakers(0, names(1));
         tracker.poll(start);
-        apply(RoomChange::Left(names(1).remove(0)), &mut tracker);
-        tracker.set_speakers(Vec::new());
+        apply(RoomChange::Left(0, names(1).remove(0)), &mut tracker);
+        tracker.set_speakers(0, Vec::new());
         assert!(tracker.poll(at(start, 2000)).is_empty());
     }
 
@@ -468,7 +688,7 @@ mod tests {
         let mut tracker = SpeakingTracker::default();
         let mut ids = names(40);
         ids.push("bad\u{1}".to_owned());
-        tracker.set_speakers(ids);
+        tracker.set_speakers(0, ids);
         let mut total = 0;
         for second in 0..5 {
             let messages = tracker.poll(start + Duration::from_secs(second * 2));

@@ -336,6 +336,7 @@ mod tests {
     fn started(tile: u8) -> FromWorker {
         FromWorker::VideoStarted {
             tile,
+            connection: 0,
             identity: "@a:example.org:A".to_owned(),
         }
     }
