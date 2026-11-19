@@ -10,6 +10,8 @@ import type {
   CallJoinError,
   CallPhase,
   CallReadiness,
+  CallRing,
+  CallRings,
   CallStatus,
   CallUnavailable
 } from '../../crates/contracts/generated/contracts';
@@ -86,7 +88,8 @@ export const IDLE_CALL: CallStatus = {
   ended: null,
   joinError: null,
   camera: 'off',
-  video: []
+  video: [],
+  ringDeclined: false
 };
 
 /** This account is in a call, or joining one. */
@@ -346,4 +349,74 @@ export const DEVICES_NOTE_TEXT = 'Changes apply from the next call.';
 export function devicesNote(devices: CallDevices): string {
   if (!devices.supported) return DEVICES_UNSUPPORTED_TEXT;
   return devices.unreadable ? DEVICES_UNREADABLE_TEXT : DEVICES_NOTE_TEXT;
+}
+
+// Incoming call rings (ADR-0052). The core sends the room ID, the caller's
+// user ID, the intent and the seconds left. The page keeps at most four, shows
+// each until it ends and never joins by itself: only the answer buttons do.
+
+/** Most rings the page shows at once. The core keeps no more. */
+export const MAX_RINGS = 4;
+
+export const RING_TITLE = 'Incoming call';
+export const RING_ANSWER_LABEL = 'Answer';
+export const RING_ANSWER_VIDEO_LABEL = 'Answer with video';
+export const RING_DECLINE_LABEL = 'Decline';
+export const RING_DECLINED_TEXT = 'Declined';
+
+/** A ring and the time, in milliseconds since the epoch, at which it ends. */
+export type ShownRing = CallRing & { endsAt: number };
+
+/**
+ * The rings the core listed, stamped with their end on this page's clock.
+ * At most [`MAX_RINGS`], one for each room, and none without time left.
+ * The core's list is the whole truth: a ring not in it has ended.
+ */
+export function shownRings(list: CallRings, now: number): ShownRing[] {
+  const seen = new Set<string>();
+  const shown: ShownRing[] = [];
+  for (const ring of list.rings) {
+    if (shown.length >= MAX_RINGS) break;
+    if (seen.has(ring.roomId) || !(ring.secondsLeft >= 1)) continue;
+    seen.add(ring.roomId);
+    shown.push({ ...ring, endsAt: now + ring.secondsLeft * 1000 });
+  }
+  return shown;
+}
+
+/** The rings that have not ended at `now`. */
+export function liveRings(rings: readonly ShownRing[], now: number): ShownRing[] {
+  return rings.filter((ring) => ring.endsAt > now);
+}
+
+/** Milliseconds until the first ring ends, or `null` for no rings. */
+export function nextRingEnd(rings: readonly ShownRing[], now: number): number | null {
+  if (rings.length === 0) return null;
+  return Math.max(0, Math.min(...rings.map((ring) => ring.endsAt)) - now);
+}
+
+/** Whether the devices listing shows a camera. Without a listing, none. */
+export function cameraAvailable(devices: CallDevices | null): boolean {
+  return devices !== null && devices.supported && devices.cameras.length > 0;
+}
+
+export type RingButtons = {
+  answer: string;
+  // `null` hides the button: no camera is available.
+  video: string | null;
+  decline: string;
+};
+
+/** The buttons of a ring's prompt. Answering with video needs a camera. */
+export function ringButtons(camera: boolean): RingButtons {
+  return {
+    answer: RING_ANSWER_LABEL,
+    video: camera ? RING_ANSWER_VIDEO_LABEL : null,
+    decline: RING_DECLINE_LABEL
+  };
+}
+
+/** What a screen reader hears when the rings change; empty for none. */
+export function ringsAnnouncement(rings: readonly ShownRing[]): string {
+  return rings.length === 0 ? '' : RING_TITLE;
 }

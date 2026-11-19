@@ -15,6 +15,8 @@ import type {
   CallParticipant,
   CallPhase,
   CallReadiness,
+  CallRing,
+  CallRings,
   CallStatus,
   CallUnavailable,
   CallVideoTile,
@@ -106,6 +108,8 @@ export type {
   CallParticipant,
   CallPhase,
   CallReadiness,
+  CallRing,
+  CallRings,
   CallStatus,
   CallUnavailable,
   CallVideoTile,
@@ -295,7 +299,8 @@ export async function subscribeRoom(
  * nothing either), and `onCalls` when the call changed state or participants
  * (ask `callStatus`; it clears nothing), and `onCallVideo` when a new video
  * picture is waiting (ask `callVideoFrame` for each active tile; it clears
- * nothing). Anything else counts as a session change, which clears the page.
+ * nothing), and `onRings` when an incoming call ring started, ended or
+ * changed (ask `callRings`; it clears nothing). Anything else counts as a session change, which clears the page.
  */
 export async function watchSession(
   onSession: () => void,
@@ -303,7 +308,8 @@ export async function watchSession(
   onSecurity: () => void,
   onModules: () => void,
   onCalls: () => void,
-  onCallVideo: () => void
+  onCallVideo: () => void,
+  onRings: () => void
 ): Promise<void> {
   const channel = new Channel<string>((message) =>
     message === 'rooms'
@@ -316,7 +322,9 @@ export async function watchSession(
             ? onCalls()
             : message === 'callVideo'
               ? onCallVideo()
-              : onSession()
+              : message === 'rings'
+                ? onRings()
+                : onSession()
   );
   await invoke<null>('watch_session', { onChange: channel });
 }
@@ -428,6 +436,23 @@ export function callCamera(on: boolean): Promise<CallStatus> {
  */
 export async function callVideoFrame(tile: number, after: number, stream: number): Promise<VideoPicture | null> {
   return parseVideoPicture(await invoke<unknown>('call_video_frame', { tile, after, stream }));
+}
+
+/**
+ * The incoming call rings now running (ADR-0052), newest first, at most four.
+ * Caller IDs are untrusted text. Answering is `callJoin`; nothing here starts
+ * a call. A change arrives as `watchSession`'s `onRings`.
+ */
+export function callRings(): Promise<CallRings> {
+  return invoke<CallRings>('call_rings');
+}
+
+/**
+ * Declines the ring in this room (ADR-0052). The core sends the decline once
+ * and ends the ring either way. The reply is the rings now running.
+ */
+export function callDeclineRing(roomId: string): Promise<CallRings> {
+  return invoke<CallRings>('call_decline_ring', { roomId });
 }
 
 /** Leaves the call, or cancels a join in progress. Codes only. */

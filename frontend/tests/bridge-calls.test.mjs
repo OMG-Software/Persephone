@@ -197,6 +197,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.callMute(true), 'call_mute', { muted: true }],
     [() => bridge.callMute(false), 'call_mute', { muted: false }],
     [() => bridge.callStatus(), 'call_status', {}],
+    [() => bridge.callRings(), 'call_rings', {}],
+    [() => bridge.callDeclineRing('!r:s'), 'call_decline_ring', { roomId: '!r:s' }],
     [() => bridge.changeRecoveryKey(), 'change_recovery_key', {}],
     [() => bridge.setProfilePassphrase(true), 'set_profile_passphrase', { on: true }],
     [() => bridge.setProfilePassphrase(false), 'set_profile_passphrase', { on: false }],
@@ -356,12 +358,13 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
     () => seen.push('security'),
     () => seen.push('modules'),
     () => seen.push('calls'),
-    () => seen.push('callVideo')
+    () => seen.push('callVideo'),
+    () => seen.push('rings')
   );
-  for (const message of ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls', 'callvideo']) {
+  for (const message of ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls', 'callvideo', 'rings', 'Rings']) {
     channel.onmessage(message);
   }
-  assert.deepEqual(seen, ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'session', 'calls', 'session']);
+  assert.deepEqual(seen, ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'session', 'calls', 'session', 'rings', 'session']);
 });
 
 test('GIVEN the video frame call WHEN the host answers THEN an empty body is no picture, a whole picture is parsed and anything else is refused', async () => {
@@ -390,6 +393,9 @@ test('GIVEN the video frame call WHEN the host answers THEN an empty body is no 
   assert.deepEqual(hostArguments.get('call_video_frame'), ['after', 'stream', 'tile']);
   assert.deepEqual(hostArguments.get('call_camera'), ['on']);
   assert.deepEqual(hostArguments.get('call_join'), ['roomId', 'video']);
+  assert.ok(registered.has('call_rings') && registered.has('call_decline_ring'));
+  assert.deepEqual(hostArguments.get('call_rings'), []);
+  assert.deepEqual(hostArguments.get('call_decline_ring'), ['roomId']);
   assert.deepEqual(hostArguments.get('set_call_devices'), ['camera', 'playout', 'recording']);
 
   for (const bad of [null, { seq: 1 }, 'x', body.slice(0, 27), new Uint8Array(21)]) {
