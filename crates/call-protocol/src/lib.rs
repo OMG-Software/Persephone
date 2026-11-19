@@ -1633,7 +1633,7 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 14]),
+            FromWorker::decode(&[VERSION, 16]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
