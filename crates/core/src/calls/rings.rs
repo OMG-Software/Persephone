@@ -311,6 +311,15 @@ impl Rings {
         state.rings.iter().rev().cloned().collect()
     }
 
+    /// Whether the ring of `event_id` is still kept and has not expired.
+    /// False once it was answered, declined, replaced or cleared.
+    pub fn is_live(&self, event_id: &OwnedEventId, now_ms: u64) -> bool {
+        self.state()
+            .rings
+            .iter()
+            .any(|ring| ring.event_id == *event_id && ring.ends_ms > now_ms)
+    }
+
     /// The ring in `room` that has not expired: its event and its sender.
     pub fn target(&self, room: &RoomId, now_ms: u64) -> Option<(OwnedEventId, OwnedUserId)> {
         self.state()
@@ -755,6 +764,29 @@ mod tests {
         assert_eq!(live.len(), 1);
         assert_ne!(first, 0);
         assert_ne!(live[0].id, first);
+    }
+
+    /// GIVEN an admitted ring WHEN it is asked about THEN it is live until it
+    /// expires, is replaced or is ended, and an unknown event is never live.
+    #[test]
+    fn given_a_ring_then_it_is_live_only_while_it_is_kept_and_running() {
+        let rings = Rings::default();
+        let first = ring("!r:s", "@a:s", NOW + 60_000);
+        let first_id = first.event_id.clone();
+        rings.admit(first, NOW).unwrap();
+        assert!(rings.is_live(&first_id, NOW));
+        assert!(!rings.is_live(&first_id, NOW + 60_000));
+        let unknown = OwnedEventId::try_from("$unknown").unwrap();
+        assert!(!rings.is_live(&unknown, NOW));
+
+        let mut second = ring("!r:s", "@b:s", NOW + 90_000);
+        second.event_id = OwnedEventId::try_from("$second").unwrap();
+        let second_id = second.event_id.clone();
+        rings.admit(second, NOW).unwrap();
+        assert!(!rings.is_live(&first_id, NOW), "replaced");
+        assert!(rings.is_live(&second_id, NOW));
+        rings.retain(|ring| ring.event_id != second_id);
+        assert!(!rings.is_live(&second_id, NOW), "ended");
     }
 
     #[test]
