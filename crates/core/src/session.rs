@@ -3191,6 +3191,31 @@ mod tests {
         assert_eq!(health.last_error, None);
     }
 
+    /// GIVEN an open session WHEN a ring notification is queued through
+    /// `while_open` before, during and after a lock THEN it runs only before:
+    /// the lock's `announce`, which clears the UI's notifications, already
+    /// sees the new generation, and nothing runs after it.
+    #[test]
+    fn given_a_lock_then_while_open_runs_only_in_the_open_generation() {
+        use crate::calls::ring_events::Env;
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        assert_eq!(settled(&session), StoreState::Protected);
+        let shared = session.shared.clone();
+        let generation = Env::open_generation(&*shared).unwrap();
+        let mut runs = 0;
+        shared.while_open(generation, &mut || runs += 1);
+        assert_eq!(runs, 1);
+        let mut during = 0;
+        session.lock(Duration::ZERO, || {
+            shared.while_open(generation, &mut || during += 1);
+        });
+        assert_eq!(during, 0);
+        shared.while_open(generation, &mut || runs += 1);
+        assert_eq!(runs, 1);
+        assert_eq!(Env::open_generation(&*shared), None);
+    }
+
     #[test]
     /// Prevent a sync round from publishing health after its session generation ends.
     fn given_lock_during_sync_then_health_reset_rejects_stale_round_commit() {
