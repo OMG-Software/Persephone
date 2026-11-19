@@ -62,6 +62,10 @@ pub struct RoomSummary {
     /// when the picture changes. None when the room has no picture. The page
     /// loads the picture only through `load_room_picture` (ADR-0041).
     pub picture_id: Option<String>,
+    /// Another device is in this room's call now (ADR-0052). A flag only:
+    /// no names.
+    #[serde(default)]
+    pub has_call: bool,
 }
 
 /// The length of a [`RoomSummary::picture_id`], in hex characters.
@@ -2306,6 +2310,44 @@ pub struct CallStatus {
     pub camera: CallCamera,
     /// The active video tiles, at most [`CALL_VIDEO_TILES_MAX`].
     pub video: Vec<CallVideoTile>,
+    /// The other member of a direct chat declined this call's ring
+    /// (ADR-0052). The call goes on until the user leaves.
+    #[serde(default)]
+    pub ring_declined: bool,
+}
+
+/// Most incoming rings at once (ADR-0052).
+pub const CALL_RINGS_MAX: usize = 4;
+
+/// What the caller meant: a soft hint for the camera.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallIntent {
+    Audio,
+    Video,
+}
+
+/// One incoming call ring (ADR-0052). `caller` is a validated user ID; the
+/// page shows it as inert text. `seconds_left` is whole seconds until the
+/// ring ends, at least 1 and at most 120.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallRing {
+    /// A number the core gives each ring, so a new ring with the same room
+    /// and caller can be told apart. It names nothing in Matrix.
+    pub ring_id: u32,
+    pub room_id: String,
+    pub caller: String,
+    pub intent: CallIntent,
+    pub seconds_left: u32,
+}
+
+/// Reply of `call_rings` and `call_decline_ring`: the rings now running,
+/// newest first, at most [`CALL_RINGS_MAX`].
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallRings {
+    pub rings: Vec<CallRing>,
 }
 
 impl CallStatus {
@@ -2319,6 +2361,7 @@ impl CallStatus {
             join_error: None,
             camera: CallCamera::Off,
             video: Vec::new(),
+            ring_declined: false,
         }
     }
 }
@@ -2331,6 +2374,7 @@ pub fn sample_room_summary() -> RoomSummary {
         encryption: RoomEncryption::Encrypted,
         contact: Some("@alice:server.invalid".into()),
         picture_id: Some("0123456789abcdef".into()),
+        has_call: true,
     }
 }
 
@@ -2462,6 +2506,9 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallParticipantRef::decl(&config)),
         format!("export {}", CallVideoTile::decl(&config)),
         format!("export {}", CallStatus::decl(&config)),
+        format!("export {}", CallIntent::decl(&config)),
+        format!("export {}", CallRing::decl(&config)),
+        format!("export {}", CallRings::decl(&config)),
         format!("export {}", CallDevice::decl(&config)),
         format!("export {}", CallDevices::decl(&config)),
         format!("export {}", ContactTrust::decl(&config)),
@@ -2626,6 +2673,7 @@ mod personal_contract_tests {
         fixture::<ConnectionHealth>(include_str!("../fixtures/connection-health.json"));
         fixture::<CallReadiness>(include_str!("../fixtures/call-readiness.json"));
         fixture::<CallStatus>(include_str!("../fixtures/call-status.json"));
+        fixture::<CallRings>(include_str!("../fixtures/call-rings.json"));
         fixture::<LocalSearchFilters>(include_str!("../fixtures/local-search-filters.json"));
         let mut focused: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/focused-timeline.json")).unwrap();
@@ -2641,7 +2689,7 @@ mod personal_contract_tests {
     fn call_contracts_refuse_unknown_fields_and_codes() {
         assert_eq!(
             serde_json::to_string(&CallStatus::idle()).unwrap(),
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[]}"#
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[],"ringDeclined":false}"#
         );
         for wire in [
             r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[],"token":"x"}"#,
@@ -2676,6 +2724,34 @@ mod personal_contract_tests {
                 "{wire}"
             );
         }
+    }
+
+    /// GIVEN the ring DTOs WHEN given an unknown field, intent or a wrong
+    /// type THEN they are refused; a status without the flag reads as not
+    /// declined, and a room summary without it as having no call.
+    #[test]
+    fn ring_contracts_refuse_unknown_fields_and_intents() {
+        for wire in [
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"video","secondsLeft":5,"name":"x"}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"hologram","secondsLeft":5}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":-1}]}"#,
+            r#"{"rings":[{"ringId":-1,"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":5}]}"#,
+            r#"{"rings":[{"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":5}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"audio"}]}"#,
+            r#"{"rings":[],"token":"x"}"#,
+        ] {
+            assert!(serde_json::from_str::<CallRings>(wire).is_err(), "{wire}");
+        }
+        let status: CallStatus = serde_json::from_str(
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[]}"#,
+        )
+        .unwrap();
+        assert!(!status.ring_declined);
+        let summary: RoomSummary = serde_json::from_str(
+            r#"{"roomId":"!r:s","displayName":null,"unreadCount":0,"encryption":"encrypted"}"#,
+        )
+        .unwrap();
+        assert!(!summary.has_call);
     }
 
     /// Reject missing, duplicate, or invalid nullable fields and unsafe timestamps.

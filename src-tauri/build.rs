@@ -54,6 +54,8 @@ fn main() {
             "call_camera",
             "call_video_frame",
             "call_status",
+            "call_rings",
+            "call_decline_ring",
             "set_up_encryption",
             "recover_with_key",
             "send_message",

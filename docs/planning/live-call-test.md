@@ -491,6 +491,39 @@ Pass criteria are in brackets. Each step records its observed result.
     Media Foundation in the AppContainer, and the worker's peak memory with
     four remote videos against its 512 MiB Job limit.
 
+## Ringing checks (ADR-0052, implemented, not yet run live)
+
+The core code, the contracts and the page exist and have unit and IPC tests.
+No run against a live homeserver or Element client has happened. Each step
+needs a live Element Call or Element Web client beside Persephone, on
+Synapse and on Merovingian.
+
+23. **Incoming ring.** Start a call from Element in a direct chat with the
+    Persephone user. Record whether Persephone shows "Incoming call" and the
+    caller, and one desktop notification with the text "Incoming call". Record
+    whether the notification names the caller only when notification names are
+    on. [one prompt, one notification, no sound from Persephone, no join, no
+    device on]
+24. **Group room.** Start a call from Element in a group room. Record that
+    Persephone does not ring (type `notification`) and that the room shows the
+    call mark in the room list.
+25. **Answer.** Answer with and without video. Record that every join check
+    runs (readiness, proxy question, cross-signed keys) and that the prompt
+    goes away on the join.
+26. **Decline.** Decline from Persephone. Record that Element shows the
+    decline and that the prompt goes away. Decline from Element in a ring that
+    Persephone sent and record "Declined" in Persephone's call bar while the
+    call goes on.
+27. **Send.** Start a call from Persephone in a direct chat and in a group
+    room. Record the events on the homeserver: type, `notification_type`,
+    `m.mentions`, `m.relates_to`, `lifetime` 90000, `m.call.intent`, and that
+    it is encrypted in an encrypted room.
+28. **Sticky only.** Record whether any Element version sends only the sticky
+    (MSC4354) notification; Persephone does not read it.
+29. **Bounds.** Record that a second ring from the same user within 30 s, a
+    ring with an old `sender_ts` and a ring from a room the user left do not
+    show a prompt.
+
 ## Linux and macOS containment checks (ADR-0049, not yet run)
 
 ADR-0049 keeps calls on Linux and macOS unverified until a live run like the

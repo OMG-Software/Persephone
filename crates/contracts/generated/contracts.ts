@@ -133,7 +133,23 @@ joinError: CallJoinError | null, camera: CallCamera,
 /**
  * The active video tiles, at most [`CALL_VIDEO_TILES_MAX`].
  */
-video: Array<CallVideoTile>, };
+video: Array<CallVideoTile>, 
+/**
+ * The other member of a direct chat declined this call's ring
+ * (ADR-0052). The call goes on until the user leaves.
+ */
+ringDeclined: boolean, };
+
+export type CallIntent = "audio" | "video";
+
+export type CallRing = { 
+/**
+ * A number the core gives each ring, so a new ring with the same room
+ * and caller can be told apart. It names nothing in Matrix.
+ */
+ringId: number, roomId: string, caller: string, intent: CallIntent, secondsLeft: number, };
+
+export type CallRings = { rings: Array<CallRing>, };
 
 export type CallDevice = { id: string, name: string, };
 
@@ -182,7 +198,12 @@ contact: string | null,
  * when the picture changes. None when the room has no picture. The page
  * loads the picture only through `load_room_picture` (ADR-0041).
  */
-pictureId: string | null, };
+pictureId: string | null, 
+/**
+ * Another device is in this room's call now (ADR-0052). A flag only:
+ * no names.
+ */
+hasCall: boolean, };
 
 export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
@@ -702,7 +723,8 @@ export const roomSummaryFixture = {
   "unreadCount": 4294967295,
   "encryption": "encrypted",
   "contact": "@alice:server.invalid",
-  "pictureId": "0123456789abcdef"
+  "pictureId": "0123456789abcdef",
+  "hasCall": true
 } as const satisfies RoomSummary;
 
 export const timelinePageFixture = {

@@ -204,3 +204,44 @@ test('GIVEN identical pinned messages WHEN controls render THEN both action name
     assert.ok(rendered[index].includes(`aria-label="Unpin: Message from @alice:example.org: Same text; event ${id}"`));
   }
 });
+
+test('GIVEN hostile caller and room names WHEN the ring prompt renders THEN they stay inert and isolated, and video needs a camera', async () => {
+  const { default: RingPrompt } = await vite.ssrLoadModule('/src/RingPrompt.svelte');
+  const hostile = '<img src=x onerror=alert(1)><script>alert(2)</script>';
+  const rings = [{ ringId: 1, roomId: '!r:s', caller: hostile, intent: 'video', secondsLeft: 30, endsAt: 30_000 }];
+  const props = { rings, roomNames: new Map([['!r:s', hostile]]), busy: new Set(), onanswer() {}, ondecline() {} };
+  const { body: withCamera } = render(RingPrompt, { props: { ...props, camera: true } });
+  assert.match(withCamera, /Incoming call/);
+  assert.match(withCamera, /<bdi>&lt;img/);
+  assert.doesNotMatch(withCamera, /<(?:img|script)\b/i);
+  assert.match(withCamera, />Answer</);
+  assert.match(withCamera, />Answer with video</);
+  assert.match(withCamera, />Decline</);
+  const { body: noCamera } = render(RingPrompt, { props: { ...props, camera: false } });
+  assert.match(noCamera, />Answer</);
+  assert.doesNotMatch(noCamera, /Answer with video/);
+  const { body: busy } = render(RingPrompt, { props: { ...props, camera: true, busy: new Set(['!r:s']) } });
+  assert.equal((busy.match(/disabled/g) ?? []).length, 3);
+  const { body: none } = render(RingPrompt, { props: { ...props, rings: [], camera: true } });
+  assert.doesNotMatch(none, /Answer|Decline/);
+});
+
+test('GIVEN a room with a call and one without WHEN the room list renders THEN only the first shows the call mark', async () => {
+  const { default: RoomList } = await vite.ssrLoadModule('/src/RoomList.svelte');
+  const room = (roomId, hasCall) => ({ roomId, displayName: roomId, unreadCount: 0, encryption: 'encrypted', contact: null, pictureId: null, hasCall });
+  const { body: html } = render(RoomList, { props: {
+    rooms: [room('!a:s', true), room('!b:s', false)], selected: null, truncated: false, onselect() {}
+  } });
+  assert.equal((html.match(/Call in progress/g) ?? []).length, 1);
+});
+
+test('GIVEN a call whose ring was declined WHEN the call bar renders THEN it says Declined and the call goes on', async () => {
+  const { default: CallBar } = await vite.ssrLoadModule('/src/CallBar.svelte');
+  const status = { phase: 'active', roomId: '!r:s', muted: false, participants: [], ended: null, joinError: null, camera: 'off', video: [], ringDeclined: true };
+  const props = { dismissed: false, roomName: 'Plans', names: new Map(), busy: false, cameraBusy: false, onmute() {}, oncamera() {}, onleave() {}, ondismiss() {} };
+  const { body: declined } = render(CallBar, { props: { ...props, status } });
+  assert.match(declined, />Declined</);
+  assert.match(declined, />Leave</);
+  const { body: plain } = render(CallBar, { props: { ...props, status: { ...status, ringDeclined: false } } });
+  assert.doesNotMatch(plain, /Declined/);
+});

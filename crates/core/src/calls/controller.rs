@@ -24,6 +24,7 @@ use super::membership::{
     own_membership, own_state_key, participant_identity, read_members,
 };
 use super::readiness::{TurnServers, sfu_transport, turn_servers};
+use super::rings::{self, Plan, Watch};
 use super::sfu::{self, OpenIdToken, SfuError};
 use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
@@ -35,8 +36,10 @@ use matrix_sdk::{
     Client, RoomState,
     event_handler::EventHandlerHandle,
     ruma::{
-        OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId,
-        api::client::account::request_openid_token, events::AnySyncStateEvent, serde::Raw,
+        OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId,
+        api::client::account::request_openid_token,
+        events::{AnySyncMessageLikeEvent, AnySyncStateEvent},
+        serde::Raw,
     },
 };
 use persephone_call_protocol::{
@@ -163,6 +166,9 @@ pub enum CallState {
         camera: CallCamera,
         /// The active video tiles, at most [`VIDEO_TILES`].
         video: Vec<CallVideoTile>,
+        /// The other member of a direct chat declined this call's ring
+        /// (ADR-0052). The call goes on.
+        ring_declined: bool,
     },
     Ended {
         room_id: OwnedRoomId,
@@ -283,6 +289,8 @@ struct View {
     /// gave it when the controller applied the tile's latest change. The
     /// page asks for pictures of this stream only.
     video_streams: [u64; VIDEO_TILES as usize],
+    /// The ring this call sent was declined (ADR-0052).
+    ring_declined: bool,
 }
 
 /// Remote video tiles: tiles 1 to 4.
@@ -307,6 +315,7 @@ impl View {
             },
             remote_video: Default::default(),
             video_streams: Default::default(),
+            ring_declined: false,
         }
     }
 
@@ -525,11 +534,12 @@ impl View {
                 .collect(),
             camera: self.camera,
             video: self.video_tiles(),
+            ring_declined: self.ring_declined,
         }
     }
 }
 
-pub(super) fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1079,6 +1089,7 @@ impl CallController {
         flags.halt()?;
 
         let (change_tx, changes) = mpsc::channel(1);
+        let decline_tx = change_tx.clone();
         let (key_tx, incoming) = mpsc::channel(incoming::QUEUE);
         let (failed_tx, failed) = mpsc::channel(1);
         setup
@@ -1129,6 +1140,21 @@ impl CallController {
             &scope.runtime,
         );
 
+        // 5b. Whether to ring: only when no other member is in the call yet,
+        // read before the own membership exists (ADR-0052).
+        let plan = ring_plan(&room, &user_id, &device_id).await;
+        let ring_watch = match &plan {
+            Some(Plan::Ring(contact)) => {
+                let watch = Arc::new(Watch::new(contact.clone()));
+                setup
+                    .handles
+                    .push(decline_handler(&room, &watch, decline_tx.clone()));
+                Some((watch, decline_tx))
+            }
+            _ => None,
+        };
+        flags.halt()?;
+
         // 6. Own membership.
         let content = own_membership(
             room_id.as_str(),
@@ -1140,7 +1166,7 @@ impl CallController {
         );
         // Set before the send: a timeout or a lost answer may hide a write.
         setup.membership_sent = true;
-        time::timeout(
+        let membership = time::timeout(
             SEND_TIMEOUT,
             room.send_state_event_raw(EVENT_TYPE, &state_key, content),
         )
@@ -1155,6 +1181,21 @@ impl CallController {
             CallError::Membership
         })?;
         flags.halt()?;
+        // The ring follows the membership. It runs beside the join, and its
+        // failure does not end the call.
+        if let Some(plan) = plan {
+            setup.tasks.spawn_on(
+                send_ring(
+                    access.clone(),
+                    room_id.to_owned(),
+                    plan,
+                    membership.event_id,
+                    scope.video,
+                    ring_watch.clone(),
+                ),
+                &scope.runtime,
+            );
+        }
 
         // 7. The SFU grant.
         let openid = client
@@ -1212,6 +1253,7 @@ impl CallController {
             portal: None,
             portal_capture: false,
             portal_sent: false,
+            ring: ring_watch.map(|(watch, _)| watch),
         })
     }
 
@@ -1401,6 +1443,97 @@ impl Setup {
     }
 }
 
+/// How this device rings, or `None` when it must not: another member is in
+/// the call, the members cannot be read, or the room cannot take the ring
+/// (ADR-0052).
+async fn ring_plan(
+    room: &matrix_sdk::Room,
+    own_user: &matrix_sdk::ruma::UserId,
+    own_device: &matrix_sdk::ruma::DeviceId,
+) -> Option<Plan> {
+    let members = read_members(room, now_ms()).await.ok()?;
+    if members
+        .iter()
+        .any(|m| m.user_id != own_user || m.device_id != own_device)
+    {
+        return None;
+    }
+    let contact = crate::contacts::contact_of(&room.client(), room);
+    // Without the own member event the power to notify the room is unknown:
+    // no notification then.
+    let may_notify = match room.get_member_no_sync(own_user).await {
+        Ok(Some(member)) => member.can_trigger_room_notification(),
+        _ => false,
+    };
+    rings::plan_ring(contact, room.joined_members_count(), may_notify)
+}
+
+/// Sends the ring once, as a normal room event (encrypted in an encrypted
+/// room), and tells `watch` the event it created; `wake` wakes the call
+/// task when a decline of it arrived first. A failure is dropped.
+async fn send_ring(
+    access: Access,
+    room_id: OwnedRoomId,
+    plan: Plan,
+    membership_event: OwnedEventId,
+    video: bool,
+    watch: Option<(Arc<Watch>, mpsc::Sender<()>)>,
+) {
+    let content = rings::notification_content(&plan, membership_event.as_str(), now_ms(), video);
+    let sent = access
+        .run(|client| async move {
+            let room = client.get_room(&room_id)?;
+            time::timeout(
+                SEND_TIMEOUT,
+                room.send_raw(rings::NOTIFICATION_TYPE, content),
+            )
+            .await
+            .ok()?
+            .ok()
+            .map(|response| response.response.event_id)
+        })
+        .await;
+    // A decline that came before this answer counts now.
+    if let (Ok(Some(event_id)), Some((watch, wake))) = (sent, watch)
+        && watch.sent(event_id)
+    {
+        let _ = wake.try_send(());
+    }
+}
+
+/// Watches the room for the decline of the ring this call sent. A match
+/// sets the watch and wakes the call task.
+fn decline_handler(
+    room: &matrix_sdk::Room,
+    watch: &Arc<Watch>,
+    wake: mpsc::Sender<()>,
+) -> EventHandlerHandle {
+    #[derive(serde::Deserialize)]
+    struct Decline {
+        #[serde(rename = "type")]
+        kind: String,
+        sender: OwnedUserId,
+        content: serde_json::Value,
+    }
+    let watch = watch.clone();
+    room.add_event_handler(move |raw: Raw<AnySyncMessageLikeEvent>| {
+        let watch = watch.clone();
+        let wake = wake.clone();
+        async move {
+            if raw.json().get().len() > rings::MAX_EVENT_BYTES {
+                return;
+            }
+            let Ok(event) = serde_json::from_str::<Decline>(raw.json().get()) else {
+                return;
+            };
+            if event.kind == rings::DECLINE_TYPE && watch.observe(&event.sender, &event.content) {
+                // A full queue already holds a pending change.
+                let _ = wake.try_send(());
+            }
+        }
+    })
+}
+
 struct KeeperMembership {
     room_id: OwnedRoomId,
     state_key: String,
@@ -1515,6 +1648,8 @@ struct Call {
     /// `portal_capture` again: a reply to the old capture (its `Off`) can
     /// arrive after the new remote went and clear the flag.
     portal_sent: bool,
+    /// The ring this call sent, when it sent one to a direct chat.
+    ring: Option<Arc<Watch>>,
 }
 
 /// The result of a camera portal access request: the PipeWire remote, or
@@ -1936,6 +2071,11 @@ impl Call {
         pending_own: &mut Option<(Instant, FrameKeyMsg)>,
         seen_self: &mut bool,
     ) -> Result<(), EndReason> {
+        // A decline of the ring shows even when the members cannot be read.
+        if self.ring.as_ref().is_some_and(|ring| ring.declined()) && !self.view.ring_declined {
+            self.view.ring_declined = true;
+            self.publish(inner);
+        }
         let Some(all) = self.read_members().await? else {
             return Ok(());
         };
@@ -2236,6 +2376,23 @@ mod tests {
         assert!(!muted);
         assert!(participants[0].reachable && !participants[1].reachable);
         assert!(participants.iter().all(|p| !p.keyed && !p.speaking));
+    }
+
+    /// GIVEN a connected call WHEN its ring was declined THEN the active state
+    /// shows it and the call goes on.
+    #[test]
+    fn given_a_declined_ring_then_the_call_shows_it_and_goes_on() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        let CallState::Active { ring_declined, .. } = view.state() else {
+            panic!("active");
+        };
+        assert!(!ring_declined);
+        view.ring_declined = true;
+        let CallState::Active { ring_declined, .. } = view.state() else {
+            panic!("active");
+        };
+        assert!(ring_declined);
     }
 
     /// GIVEN speaking reports WHEN they name a member or a stranger THEN only
@@ -2636,6 +2793,7 @@ mod tests {
             portal: None,
             portal_capture: false,
             portal_sent: false,
+            ring: None,
         };
         TestCall {
             call,
@@ -3306,6 +3464,7 @@ mod tests {
             participants: Vec::new(),
             camera: CallCamera::Off,
             video: Vec::new(),
+            ring_declined: false,
         }
     }
 
@@ -3374,6 +3533,7 @@ mod tests {
                 own: true,
                 stream: 0,
             }],
+            ring_declined: false,
         });
         assert!(calls.video_picture(0, 0, store.stream(0)).is_some());
         assert_eq!(calls.set_camera(false), Ok(()));

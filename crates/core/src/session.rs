@@ -157,6 +157,28 @@ pub trait SessionListener: Send + Sync {
     /// room's and sender's projected names, never its text. Called only while
     /// desktop notifications are on.
     fn notify(&self, _room: &str, _sender: &str) {}
+    /// The rings and call flags the call handlers keep (ADR-0052).
+    fn rings(&self) -> Option<&crate::calls::rings::Rings> {
+        None
+    }
+    fn call_rooms(&self) -> Option<&crate::calls::rings::CallRooms> {
+        None
+    }
+    /// A ring was accepted, ended or replaced.
+    fn rings_changed(&self) {}
+    /// A room's call flag changed.
+    fn room_call_changed(&self, _room: &str) {}
+    /// An incoming call ring arrived and desktop notifications are on. Both
+    /// names are empty when the account's settings leave names out. It makes
+    /// the "Incoming call" desktop notification (ADR-0052).
+    fn notify_call(&self, _room: &str, _sender: &str) {}
+    /// The signed-in account ended or changed: a sign-out, a failed sign-in
+    /// or another user. Not called when a sync error or its recovery keeps
+    /// the same account. The call handlers' rings and flags end.
+    fn account_ended(&self) {}
+    /// Called after each sync round with the rooms this account has joined,
+    /// so rings and flags of a left room end.
+    fn check_rooms(&self, _joined: &dyn Fn(&matrix_sdk::ruma::RoomId) -> bool) {}
     /// The homeserver ended the session; [`Session::finish_ended`] deletes
     /// the profile. Called on the sync thread, which then stops.
     fn session_ended(&self) {}
@@ -326,6 +348,32 @@ struct Shared {
     outbox: Mutex<Outbox>,
 }
 
+impl crate::calls::ring_events::Env for Shared {
+    fn listener(&self) -> Option<Arc<dyn SessionListener>> {
+        Shared::listener(self)
+    }
+
+    fn toast(&self) -> Option<bool> {
+        self.toasts
+            .load(Ordering::SeqCst)
+            .then(|| self.toast_names.load(Ordering::SeqCst))
+    }
+
+    fn open_generation(&self) -> Option<u64> {
+        Shared::open_generation(self)
+    }
+
+    fn while_open(&self, generation: u64, action: &mut dyn FnMut()) {
+        // `close_admission` advances the generation under this lock and
+        // clears the UI's notifications after it, so whatever `action`
+        // queues here is either cleared by that lock or never queued.
+        let inner = lock(self);
+        if inner.generation == generation && inner.state == StoreState::Protected {
+            action();
+        }
+    }
+}
+
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -403,8 +451,16 @@ impl Shared {
     }
 
     fn set_status(&self, status: AccountStatus) {
-        *guard(&self.status) = status;
+        let same_account = {
+            let mut current = guard(&self.status);
+            let same = same_signed_in_account(&current, &status);
+            *current = status;
+            same
+        };
         if let Some(listener) = self.listener() {
+            if !same_account {
+                listener.account_ended();
+            }
             listener.session_changed();
         }
     }
@@ -488,6 +544,15 @@ fn failed(error: SignInError) -> AccountStatus {
         user_id: None,
         error: Some(error),
     }
+}
+
+/// Whether both statuses are signed in to the same account, as before and
+/// after a sync error or its recovery.
+fn same_signed_in_account(before: &AccountStatus, after: &AccountStatus) -> bool {
+    before.state == AccountState::SignedIn
+        && after.state == AccountState::SignedIn
+        && before.user_id.is_some()
+        && before.user_id == after.user_id
 }
 
 fn signed_in(user_id: &str, error: Option<SignInError>) -> AccountStatus {
@@ -746,6 +811,12 @@ fn run_sync(
             std::future::ready(())
         })
     };
+    // Incoming call rings and call flags (ADR-0052).
+    let ring_handlers = {
+        let _context = runtime.enter();
+        let env: Arc<dyn crate::calls::ring_events::Env> = shared.clone();
+        crate::calls::ring_events::register(&client, Arc::downgrade(&env))
+    };
     // Sliding Sync asks only for this account's own member event, and the
     // SDK reads room state from `required_state` alone, never from the
     // timeline. So once the member list is loaded, another person's join,
@@ -907,6 +978,11 @@ fn run_sync(
                     if identities_changed {
                         listener.security_changed();
                     }
+                    listener.check_rooms(&|room| {
+                        client
+                            .get_room(room)
+                            .is_some_and(|room| room.state() == matrix_sdk::RoomState::Joined)
+                    });
                     if let Some(keyed) = keyed.filter(|keyed| !keyed.is_empty()) {
                         listener.room_keys_arrived(&keyed);
                     }
@@ -932,6 +1008,9 @@ fn run_sync(
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
     client.remove_event_handler(typing_handler);
+    for handler in ring_handlers {
+        client.remove_event_handler(handler);
+    }
     client.remove_event_handler(members_handler);
     drop(changes);
     drop(identities);
@@ -2914,6 +2993,32 @@ fn not_revoked() -> AccountStatus {
 mod tests {
     use super::*;
 
+    /// GIVEN status changes WHEN compared THEN only a change that keeps the
+    /// same signed-in account, such as a sync error or its recovery, keeps
+    /// the account; a sign-out, a failure or another user ends it.
+    #[test]
+    fn given_status_changes_then_only_the_same_signed_in_account_continues() {
+        let alice = signed_in("@alice:s", None);
+        let alice_error = signed_in("@alice:s", Some(SignInError::Failed));
+        assert!(same_signed_in_account(&alice, &alice_error));
+        assert!(same_signed_in_account(&alice_error, &alice));
+        for after in [
+            AccountStatus::signed_out(),
+            failed(SignInError::Failed),
+            not_revoked(),
+            signed_in("@bob:s", None),
+        ] {
+            assert!(!same_signed_in_account(&alice, &after), "{after:?}");
+        }
+        assert!(!same_signed_in_account(
+            &AccountStatus::signed_out(),
+            &alice
+        ));
+        // A user ID that cannot be shown is not proof of the same account.
+        let hidden = signed_in(&"x".repeat(256), None);
+        assert!(!same_signed_in_account(&hidden, &hidden));
+    }
+
     fn unverified() -> SecurityShared {
         let mut security = SecurityShared::default();
         security.status.identity = IdentityState::Unverified;
@@ -3084,6 +3189,31 @@ mod tests {
         assert_eq!(health.consecutive_failures, 0);
         assert_eq!(health.retry_delay_ms, 0);
         assert_eq!(health.last_error, None);
+    }
+
+    /// GIVEN an open session WHEN a ring notification is queued through
+    /// `while_open` before, during and after a lock THEN it runs only before:
+    /// the lock's `announce`, which clears the UI's notifications, already
+    /// sees the new generation, and nothing runs after it.
+    #[test]
+    fn given_a_lock_then_while_open_runs_only_in_the_open_generation() {
+        use crate::calls::ring_events::Env;
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        assert_eq!(settled(&session), StoreState::Protected);
+        let shared = session.shared.clone();
+        let generation = Env::open_generation(&*shared).unwrap();
+        let mut runs = 0;
+        shared.while_open(generation, &mut || runs += 1);
+        assert_eq!(runs, 1);
+        let mut during = 0;
+        session.lock(Duration::ZERO, || {
+            shared.while_open(generation, &mut || during += 1);
+        });
+        assert_eq!(during, 0);
+        shared.while_open(generation, &mut || runs += 1);
+        assert_eq!(runs, 1);
+        assert_eq!(Env::open_generation(&*shared), None);
     }
 
     #[test]

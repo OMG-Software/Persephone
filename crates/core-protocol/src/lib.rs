@@ -695,6 +695,13 @@ pub enum Call {
     },
     /// The call as the page shows it. Replies `CallStatus`.
     CallStatus {},
+    /// The incoming call rings now running (ADR-0052). Replies `CallRings`.
+    CallRings {},
+    /// Decline the ring in this room (ADR-0052): the core sends the decline
+    /// event once, without a retry, and ends the ring. Replies `CallRings`.
+    CallDeclineRing {
+        room_id: String,
+    },
     /// Open a direct-message conversation with this user: an existing room
     /// with just them, or a new encrypted room they are invited to. Refused
     /// when they have no cross-signing identity (ADR-0005).
@@ -950,6 +957,9 @@ pub enum Event {
     /// A new video picture is waiting: ask for `call_video_frame` on each
     /// active tile. Content-free and coalesced like `CallChanged`.
     CallVideo {},
+    /// An incoming call ring started, ended or changed (ADR-0052): ask for
+    /// `call_rings`. Content-free and coalesced like `CallChanged`.
+    RingsChanged {},
     /// The list of third-party modules changed: ask for `third_party_modules`.
     /// Content-free and coalesced like `SecurityChanged`.
     ModulesChanged {},
@@ -958,10 +968,14 @@ pub enum Event {
     /// desktop notification with these names and never forwards it to the
     /// page. Names only, never message text; each is projected and at most
     /// [`MAX_NOTIFICATION_NAME_BYTES`]. Both are empty when the account's
-    /// settings leave names out. Coalesced: only the latest waits.
+    /// settings leave names out. Coalesced: only the latest waits. `call` is
+    /// true for an incoming call ring (ADR-0052): the text is then "Incoming
+    /// call", with the caller's name only when `sender` is not empty.
     Notification {
         room: String,
         sender: String,
+        #[serde(default)]
+        call: bool,
     },
 }
 
@@ -1927,6 +1941,16 @@ mod tests {
                 Call::CallStatus {},
                 r#"{"id":1,"call":{"command":"call_status"}}"#,
             ),
+            (
+                Call::CallRings {},
+                r#"{"id":1,"call":{"command":"call_rings"}}"#,
+            ),
+            (
+                Call::CallDeclineRing {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"call_decline_ring","room_id":"!r:s"}}"#,
+            ),
         ] {
             let request = Request { id: 1, call };
             let mut sent = Vec::new();
@@ -2099,12 +2123,31 @@ mod tests {
         let event = CoreMessage::Event(Event::Notification {
             room: "Plans".into(),
             sender: "Bob".into(),
+            call: false,
         });
         let mut sent = Vec::new();
         send(&mut sent, &event).unwrap();
         assert_eq!(
             String::from_utf8(sent[17..].to_vec()).unwrap(),
-            r#"{"event":{"notification":{"room":"Plans","sender":"Bob"}}}"#
+            r#"{"event":{"notification":{"room":"Plans","sender":"Bob","call":false}}}"#
+        );
+        // A ring's notification and its coalesced page event (ADR-0052).
+        let event = CoreMessage::Event(Event::Notification {
+            room: String::new(),
+            sender: String::new(),
+            call: true,
+        });
+        let mut sent = Vec::new();
+        send(&mut sent, &event).unwrap();
+        assert_eq!(
+            String::from_utf8(sent[17..].to_vec()).unwrap(),
+            r#"{"event":{"notification":{"room":"","sender":"","call":true}}}"#
+        );
+        let mut sent = Vec::new();
+        send(&mut sent, &CoreMessage::Event(Event::RingsChanged {})).unwrap();
+        assert_eq!(
+            String::from_utf8(sent[17..].to_vec()).unwrap(),
+            r#"{"event":{"rings_changed":{}}}"#
         );
     }
 
@@ -2348,6 +2391,10 @@ mod tests {
             br#"{"id":1,"call":{"command":"call_mute","muted":"yes"}}"#,
             br#"{"id":1,"call":{"command":"call_mute","muted":true,"user":"@a:s"}}"#,
             br#"{"id":1,"call":{"command":"call_status","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_rings","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_decline_ring"}}"#,
+            br#"{"id":1,"call":{"command":"call_decline_ring","room_id":"!r:s","event_id":"$e"}}"#,
+            br#"{"id":1,"call":{"command":"call_decline_ring","room_id":7}}"#,
             br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"recover_with_key","recovery_key":"x"}}"#,
             br#"{"id":1,"call":{"command":"export_room_keys"}}"#,

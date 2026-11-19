@@ -158,6 +158,10 @@ struct Notifications {
     /// The latest desktop notification waiting to be sent (ADR-0022): room
     /// and sender names. A newer one replaces it.
     toast: Option<(String, String)>,
+    /// The waiting desktop notification is for an incoming call (ADR-0052).
+    toast_call: bool,
+    /// The incoming call rings changed since the last notification.
+    rings_changed: bool,
     /// The UI sent a valid request on this connection, so its page runs.
     ready: bool,
     closed: bool,
@@ -176,6 +180,10 @@ struct Hub {
     /// The UI connection has closed. Long calls that wait for the user (the
     /// camera portal of a device listing) end when it is set.
     closing: AtomicBool,
+    /// Incoming call rings, in memory only (ADR-0052).
+    rings: calls::rings::Rings,
+    /// The rooms that have another device in their call (ADR-0052).
+    call_rooms: calls::rings::CallRooms,
 }
 
 /// The largest JSON reply of a device listing, below the UI pipe's control
@@ -208,8 +216,18 @@ impl Hub {
         notifications.pending.clear();
         notifications.room_list_changed = false;
         notifications.toast = None;
+        notifications.toast_call = false;
+        notifications.rings_changed = false;
         notifications.session_changed = true;
         self.changed.notify_all();
+    }
+
+    /// Drops every ring and call flag: on a lock, an unlock, a profile reset
+    /// and when the signed-in account ends or changes. A sync error does not
+    /// come here, so a short outage keeps them.
+    fn clear_calls(&self) {
+        self.rings.clear();
+        self.call_rooms.clear();
     }
 
     /// Queues one call event; changes before the UI reads coalesce.
@@ -217,6 +235,36 @@ impl Hub {
         let mut notifications = lock(&self.notifications);
         if !notifications.calls_changed {
             notifications.calls_changed = true;
+            self.changed.notify_all();
+        }
+    }
+
+    /// The call controller's room is the one that takes no rings (ADR-0052):
+    /// a join in progress counts. A ring in that room ends.
+    fn open_call_changed(&self) {
+        use calls::controller::CallState;
+        let state = self
+            .calls
+            .get()
+            .and_then(Weak::upgrade)
+            .map(|calls| calls.state());
+        let room = match &state {
+            Some(CallState::Joining { room_id } | CallState::Active { room_id, .. }) => {
+                Some(room_id.as_ref())
+            }
+            _ => None,
+        };
+        if self.rings.set_open_room(room) {
+            self.mark_rings_changed();
+        }
+    }
+
+    /// Queues one content-free `rings_changed` event; changes before the UI
+    /// reads coalesce.
+    fn mark_rings_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.rings_changed {
+            notifications.rings_changed = true;
             self.changed.notify_all();
         }
     }
@@ -267,6 +315,10 @@ impl SessionListener for Hub {
         self.announce_session_change();
     }
 
+    fn account_ended(&self) {
+        self.clear_calls();
+    }
+
     fn direct_rooms_changed(&self) {
         self.mark_list_changed(&[], true);
     }
@@ -302,7 +354,38 @@ impl SessionListener for Hub {
     fn notify(&self, room: &str, sender: &str) {
         let mut notifications = lock(&self.notifications);
         notifications.toast = Some((room.to_owned(), sender.to_owned()));
+        notifications.toast_call = false;
         self.changed.notify_all();
+    }
+
+    fn notify_call(&self, room: &str, sender: &str) {
+        let mut notifications = lock(&self.notifications);
+        notifications.toast = Some((room.to_owned(), sender.to_owned()));
+        notifications.toast_call = true;
+        self.changed.notify_all();
+    }
+
+    fn rings(&self) -> Option<&calls::rings::Rings> {
+        Some(&self.rings)
+    }
+
+    fn call_rooms(&self) -> Option<&calls::rings::CallRooms> {
+        Some(&self.call_rooms)
+    }
+
+    fn rings_changed(&self) {
+        self.mark_rings_changed();
+    }
+
+    fn room_call_changed(&self, room: &str) {
+        self.mark_changed(&[room.to_owned()], true);
+    }
+
+    fn check_rooms(&self, joined: &dyn Fn(&matrix_sdk::ruma::RoomId) -> bool) {
+        self.call_rooms.retain(joined);
+        if self.rings.retain(|ring| joined(&ring.room_id)) {
+            self.mark_rings_changed();
+        }
     }
 
     /// Wakes the watch in [`serve`], which finishes the ended session. A
@@ -367,6 +450,7 @@ pub struct Core {
     call_readiness: conversations::Busy,
     call_join: conversations::Busy,
     call_leave: conversations::Busy,
+    call_decline: conversations::Busy,
     call_device_list: conversations::Busy,
     /// One device-list request at a time.
     devices: conversations::Busy,
@@ -578,6 +662,7 @@ impl Core {
         calls.set_listener(Arc::new(move || {
             if let Some(hub) = tell.upgrade() {
                 hub.calls_changed();
+                hub.open_call_changed();
             }
         }));
         let tell = Arc::downgrade(&hub);
@@ -612,6 +697,7 @@ impl Core {
             call_readiness: conversations::Busy::default(),
             call_join: conversations::Busy::default(),
             call_leave: conversations::Busy::default(),
+            call_decline: conversations::Busy::default(),
             call_device_list: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             room_settings: conversations::Busy::default(),
@@ -753,12 +839,13 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
-            Call::CallReadiness { .. } | Call::CallJoin { .. } | Call::CallLeave {} => {
-                match self.call_work(&request.call) {
-                    Ok(call) => Answer::Later(id, call),
-                    Err(code) => error(code),
-                }
-            }
+            Call::CallReadiness { .. }
+            | Call::CallJoin { .. }
+            | Call::CallLeave {}
+            | Call::CallDeclineRing { .. } => match self.call_work(&request.call) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::CallDevices {} => match self.call_devices() {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
@@ -915,7 +1002,9 @@ impl Core {
                 Source::Fixtures => ok(&lock(&self.fixtures).room_list()),
                 Source::Locked => Outcome::Error(ErrorCode::Locked),
                 Source::SignedOut => ok(&empty_rooms()),
-                Source::Matrix(_lease, client) => ok(&MatrixViews::room_list(&client)),
+                Source::Matrix(_lease, client) => {
+                    ok(&MatrixViews::room_list(&client, &self.hub.call_rooms))
+                }
             },
             Call::TimelinePage { room_id, cursor } => {
                 let page = match self.source() {
@@ -949,6 +1038,7 @@ impl Core {
                 let before = self.session.state();
                 let state = self.session.unlock();
                 if state != before {
+                    self.hub.clear_calls();
                     self.hub.announce_session_change();
                 }
                 ok(&state)
@@ -957,6 +1047,7 @@ impl Core {
                 let before = self.session.state();
                 let state = self.session.reset_profile();
                 if state != before {
+                    self.hub.clear_calls();
                     self.hub.announce_session_change();
                 }
                 ok(&state)
@@ -1118,12 +1209,13 @@ impl Core {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
-            Call::CallReadiness { .. } | Call::CallJoin { .. } | Call::CallLeave {} => {
-                match self.call_work(call) {
-                    Ok(call) => call(),
-                    Err(code) => Outcome::Error(code),
-                }
-            }
+            Call::CallReadiness { .. }
+            | Call::CallJoin { .. }
+            | Call::CallLeave {}
+            | Call::CallDeclineRing { .. } => match self.call_work(call) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
             Call::CallDevices {} => match self.call_devices() {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
@@ -1142,6 +1234,10 @@ impl Core {
             Call::CallCamera { on } => self.call_camera(*on),
             // Its picture reaches only `serve`.
             Call::CallVideoFrame { .. } => Outcome::Error(ErrorCode::Unavailable),
+            Call::CallRings {} => match self.calls_open() {
+                Ok(()) => ok(&self.ring_list()),
+                Err(code) => Outcome::Error(code),
+            },
             Call::CallStatus {} => match self.calls_open() {
                 Ok(()) => ok(&calls::status::status(&self.calls.state())),
                 Err(code) => Outcome::Error(code),
@@ -2101,6 +2197,7 @@ impl Core {
         self.calls.stop_for_session_end();
         self.media.purge();
         lock(&self.modules).clear_reviewed();
+        self.hub.clear_calls();
         self.hub.announce_session_change();
     }
 
@@ -2165,6 +2262,7 @@ impl Core {
             Readiness(matrix_sdk::ruma::OwnedRoomId),
             Join(matrix_sdk::ruma::OwnedRoomId, bool),
             Leave,
+            Decline(matrix_sdk::ruma::OwnedRoomId),
         }
         let room = |room_id: &str| {
             if valid_room_id(room_id) {
@@ -2178,12 +2276,14 @@ impl Core {
             Call::CallReadiness { room_id } => Work::Readiness(room(room_id)?),
             Call::CallJoin { room_id, video } => Work::Join(room(room_id)?, *video),
             Call::CallLeave {} => Work::Leave,
+            Call::CallDeclineRing { room_id } => Work::Decline(room(room_id)?),
             _ => return Err(ErrorCode::InvalidArgument),
         };
         // Synthetic data has no homeserver and no call to leave.
         if !self.session.is_configured() {
             return match work {
                 Work::Leave => Ok(Box::new(|| ok(&persephone_contracts::CallStatus::idle()))),
+                Work::Decline(_) => Ok(Box::new(|| ok(&self.ring_list()))),
                 _ => Err(ErrorCode::NotFound),
             };
         }
@@ -2192,6 +2292,7 @@ impl Core {
             Work::Readiness(_) => self.call_readiness.begin()?,
             Work::Join(..) => self.call_join.begin()?,
             Work::Leave => self.call_leave.begin()?,
+            Work::Decline(_) => self.call_decline.begin()?,
         };
         Ok(Box::new(move || {
             let _slot = slot;
@@ -2199,6 +2300,7 @@ impl Core {
                 Work::Readiness(room_id) => refused(self.finish_call_readiness(&room_id)),
                 Work::Join(room_id, video) => refused(self.finish_call_join(&room_id, video)),
                 Work::Leave => refused(self.finish_call_leave()),
+                Work::Decline(room_id) => refused(self.finish_call_decline(&room_id)),
             }
         }))
     }
@@ -2396,9 +2498,68 @@ impl Core {
         }
         drop(lease);
         match joined {
-            Ok(()) => Ok(calls::status::status(&self.calls.state())),
+            Ok(()) => {
+                // A join ends the room's ring (ADR-0052).
+                if self.hub.rings.end_room(room_id) {
+                    self.hub.mark_rings_changed();
+                }
+                Ok(calls::status::status(&self.calls.state()))
+            }
             Err(error) => refuse(error),
         }
+    }
+
+    /// The incoming rings now running, newest first, as the page shows them.
+    fn ring_list(&self) -> persephone_contracts::CallRings {
+        use persephone_contracts::{CALL_RINGS_MAX, CallIntent, CallRing, CallRings};
+        let now = calls::controller::now_ms();
+        CallRings {
+            rings: self
+                .hub
+                .rings
+                .live(now)
+                .into_iter()
+                .take(CALL_RINGS_MAX)
+                .map(|ring| CallRing {
+                    ring_id: ring.id,
+                    room_id: ring.room_id.to_string(),
+                    caller: ring.sender.to_string(),
+                    intent: match ring.intent {
+                        calls::rings::Intent::Audio => CallIntent::Audio,
+                        calls::rings::Intent::Video => CallIntent::Video,
+                    },
+                    seconds_left: u32::try_from(ring.ends_ms.saturating_sub(now).div_ceil(1000))
+                        .unwrap_or(u32::MAX),
+                })
+                .collect(),
+        }
+    }
+
+    /// Declines the ring in `room_id` (ADR-0052): one decline event, sent as
+    /// a normal room event, never retried. The ring ends whether or not the
+    /// send worked. No ring is not an error: the reply is the list.
+    fn finish_call_decline(
+        &self,
+        room_id: &matrix_sdk::ruma::RoomId,
+    ) -> Result<persephone_contracts::CallRings, ErrorCode> {
+        let Some((event_id, _caller)) = self.hub.rings.target(room_id, calls::controller::now_ms())
+        else {
+            return Ok(self.ring_list());
+        };
+        let (lease, client) = self.call_lease()?;
+        let _ = lease.stores().block_on(calls::ring_events::send_decline(
+            &client, room_id, &event_id,
+        ));
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        // Only the declined ring ends: a newer ring in the room stays.
+        if self.hub.rings.retain(|ring| ring.event_id != event_id) {
+            self.hub.mark_rings_changed();
+        }
+        Ok(self.ring_list())
     }
 
     /// Leaves the call, or cancels a join in progress. No call is not an
@@ -3145,6 +3306,7 @@ impl Core {
                 && !notifications.room_list_changed
                 && !notifications.security_changed
                 && !notifications.calls_changed
+                && !notifications.rings_changed
                 && !notifications.modules_changed
                 && notifications.toast.is_none()
                 && !video_due
@@ -3191,12 +3353,19 @@ impl Core {
             .then_some(Event::SecurityChanged {});
         let call =
             std::mem::take(&mut notifications.calls_changed).then_some(Event::CallChanged {});
+        let rings =
+            std::mem::take(&mut notifications.rings_changed).then_some(Event::RingsChanged {});
         let modules =
             std::mem::take(&mut notifications.modules_changed).then_some(Event::ModulesChanged {});
+        let for_call = std::mem::take(&mut notifications.toast_call);
         let toast = notifications
             .toast
             .take()
-            .map(|(room, sender)| Event::Notification { room, sender });
+            .map(|(room, sender)| Event::Notification {
+                room,
+                sender,
+                call: for_call,
+            });
         let rooms = std::mem::take(&mut notifications.pending);
         Some(
             session
@@ -3204,6 +3373,7 @@ impl Core {
                 .chain(list)
                 .chain(security)
                 .chain(call)
+                .chain(rings)
                 .chain(video)
                 .chain(modules)
                 .chain(toast)
@@ -3554,6 +3724,167 @@ mod tests {
         }
         assert_eq!(core.take_events(), Some(vec![Event::CallChanged {}]));
         assert!(!lock(&core.hub.notifications).calls_changed);
+    }
+
+    fn test_ring(room: &str, sender: &str, ends_ms: u64) -> calls::rings::Ring {
+        calls::rings::Ring {
+            id: 0,
+            room_id: matrix_sdk::ruma::OwnedRoomId::try_from(room).unwrap(),
+            event_id: matrix_sdk::ruma::OwnedEventId::try_from("$n:example.org").unwrap(),
+            sender: matrix_sdk::ruma::OwnedUserId::try_from(sender).unwrap(),
+            intent: calls::rings::Intent::Video,
+            ends_ms,
+        }
+    }
+
+    /// GIVEN many ring changes before the UI reads WHEN the events are taken
+    /// THEN one content-free event carries them, and none stays pending.
+    #[test]
+    fn given_many_ring_changes_then_one_rings_event_is_taken() {
+        let core = Core::default();
+        for _ in 0..5 {
+            SessionListener::rings_changed(&*core.hub);
+        }
+        assert_eq!(core.take_events(), Some(vec![Event::RingsChanged {}]));
+        assert!(!lock(&core.hub.notifications).rings_changed);
+    }
+
+    /// GIVEN a ring notification and a message notification WHEN taken THEN
+    /// the first is marked as a call and the other is not; the latest wins.
+    #[test]
+    fn given_a_call_notification_then_the_event_is_marked_as_a_call() {
+        let core = Core::default();
+        SessionListener::notify_call(&*core.hub, "", "");
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::Notification {
+                room: String::new(),
+                sender: String::new(),
+                call: true,
+            }])
+        );
+        SessionListener::notify_call(&*core.hub, "Plans", "Bob");
+        SessionListener::notify(&*core.hub, "Plans", "Bob");
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::Notification {
+                room: "Plans".into(),
+                sender: "Bob".into(),
+                call: false,
+            }])
+        );
+    }
+
+    /// GIVEN rings WHEN the UI asks for them THEN each has its room, caller,
+    /// intent and whole seconds left, newest first, and expired ones are
+    /// absent.
+    #[test]
+    fn given_rings_then_the_list_shows_whole_seconds_and_drops_expired_rings() {
+        let core = Core::default();
+        let now = calls::controller::now_ms();
+        let rings = &core.hub.rings;
+        rings
+            .admit(test_ring("!old:s", "@a:s", now + 1_500), now)
+            .unwrap();
+        rings
+            .admit(test_ring("!new:s", "@b:s", now + 60_000), now)
+            .unwrap();
+        let Outcome::Ok(value) = core
+            .handle(&Request {
+                id: 1,
+                call: Call::CallRings {},
+            })
+            .outcome
+        else {
+            panic!("rings");
+        };
+        let listed: persephone_contracts::CallRings = serde_json::from_value(value).unwrap();
+        assert_eq!(listed.rings.len(), 2);
+        assert_eq!(listed.rings[0].room_id, "!new:s");
+        assert_eq!(listed.rings[0].caller, "@b:s");
+        assert_eq!(
+            listed.rings[0].intent,
+            persephone_contracts::CallIntent::Video
+        );
+        assert!((59..=60).contains(&listed.rings[0].seconds_left));
+        assert!((1..=2).contains(&listed.rings[1].seconds_left));
+        rings.end_room(matrix_sdk::ruma::room_id!("!new:s"));
+        let Outcome::Ok(value) = core
+            .handle(&Request {
+                id: 1,
+                call: Call::CallRings {},
+            })
+            .outcome
+        else {
+            panic!("rings");
+        };
+        let listed: persephone_contracts::CallRings = serde_json::from_value(value).unwrap();
+        assert_eq!(listed.rings.len(), 1);
+    }
+
+    /// GIVEN a decline for no ring or for a bad room ID THEN the list comes
+    /// back for no ring, and a bad ID is refused before any work.
+    #[test]
+    fn given_a_decline_without_a_ring_or_with_a_bad_room_then_nothing_is_sent() {
+        let core = Core::default();
+        let reply = core.handle(&Request {
+            id: 1,
+            call: Call::CallDeclineRing {
+                room_id: "!none:s".into(),
+            },
+        });
+        let Outcome::Ok(value) = reply.outcome else {
+            panic!("list");
+        };
+        assert_eq!(value, serde_json::json!({"rings": []}));
+        for bad in ["room", "", "#alias:s", "$event:s"] {
+            assert_eq!(
+                core.handle(&Request {
+                    id: 1,
+                    call: Call::CallDeclineRing {
+                        room_id: bad.into()
+                    },
+                })
+                .outcome,
+                Outcome::Error(ErrorCode::InvalidArgument),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// GIVEN rings and flags WHEN a sync round shows the rooms are left, or
+    /// the account ends THEN they end, and the UI is told once; a status
+    /// change of the same account keeps them.
+    #[test]
+    fn given_left_rooms_or_a_session_change_then_rings_and_flags_end() {
+        let core = Core::default();
+        let now = calls::controller::now_ms();
+        let hub = &core.hub;
+        let room = matrix_sdk::ruma::room_id!("!r:s");
+        hub.rings
+            .admit(test_ring("!r:s", "@a:s", now + 60_000), now)
+            .unwrap();
+        hub.rings
+            .admit(test_ring("!kept:s", "@b:s", now + 60_000), now)
+            .unwrap();
+        hub.call_rooms.set(room, Some(now + 60_000));
+        SessionListener::check_rooms(&**hub, &|id| id != room);
+        assert_eq!(hub.rings.live(now).len(), 1);
+        assert!(!hub.call_rooms.active(room, now));
+        assert_eq!(core.take_events(), Some(vec![Event::RingsChanged {}]));
+        // Nothing left that changed: no event.
+        SessionListener::check_rooms(&**hub, &|id| id != room);
+        assert!(!lock(&hub.notifications).rings_changed);
+        hub.call_rooms.set(room, Some(now + 60_000));
+        // A status change of the same account, such as a sync error, keeps
+        // them.
+        SessionListener::session_changed(&**hub);
+        assert_eq!(hub.rings.live(now).len(), 1);
+        assert!(hub.call_rooms.active(room, now));
+        // The end of the account drops them.
+        SessionListener::account_ended(&**hub);
+        assert!(hub.rings.live(now).is_empty());
+        assert!(!hub.call_rooms.active(room, now));
     }
 
     /// GIVEN many pictures before the UI reads WHEN the events are taken THEN

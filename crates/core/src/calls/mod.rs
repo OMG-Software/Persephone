@@ -28,6 +28,8 @@
 //!   core stops restarting it.
 //! * [`incoming`]: the bounded to-device handler for other members' keys and
 //!   the one decision that accepts or drops each.
+//! * [`rings`]: incoming call rings, the rooms that have a call, and the
+//!   events this core sends to ring and to decline (ADR-0052).
 //! * [`status`]: the page's view of a call: readiness, state, and the codes for
 //!   an end or a refused join. Codes, flags and bounded IDs only.
 //! * [`controller`]: the one running call. It starts the worker first, writes
@@ -45,6 +47,8 @@ pub mod incoming;
 pub mod keys;
 pub mod membership;
 pub mod readiness;
+pub mod ring_events;
+pub mod rings;
 pub mod sfu;
 pub mod status;
 pub mod video;
