@@ -232,15 +232,22 @@ fn parent() -> i32 {
         sets.push((name.to_owned(), caps));
     }
     for (name, caps) in &sets {
-        match run_in_container(&container, &exe, caps, 0) {
+        let run = |part| run_in_container(&container, &exe, caps, part);
+        match run(0) {
             Ok(code) => {
                 let mut line = describe(code);
                 if code != 0 {
                     // The error code of the failed call, in two more runs. Each
                     // run reports its own stage. Use the halves only when both
                     // runs failed at the stage of the first run.
-                    let high = run_in_container(&container, &exe, caps, 1);
-                    let low = run_in_container(&container, &exe, caps, 2);
+                    let high = run(1);
+                    if let Err(RunError::Unconfirmed(error)) = high {
+                        return abandon(container, name, &error);
+                    }
+                    let low = run(2);
+                    if let Err(RunError::Unconfirmed(error)) = low {
+                        return abandon(container, name, &error);
+                    }
                     match (high, low) {
                         (Ok(high), Ok(low)) => match combine(code, high, low) {
                             Some(hresult) => line.push_str(&format!(
@@ -256,13 +263,53 @@ fn parent() -> i32 {
                     caps.join(", ")
                 );
             }
-            Err(error) => {
+            Err(RunError::Failed(error)) => {
                 println!("screen-probe: AppContainer ({name}): launch failed: {error}");
                 failed = true;
             }
+            Err(RunError::Unconfirmed(error)) => return abandon(container, name, &error),
         }
     }
     i32::from(failed)
+}
+
+/// Stops the probe after a run whose child may still be running. The
+/// AppContainer profile is kept, not deleted under the child.
+fn abandon(container: Container, name: &str, error: &str) -> i32 {
+    println!(
+        "screen-probe: AppContainer ({name}): {error}; the probe stops and keeps the AppContainer profile"
+    );
+    std::mem::forget(container);
+    1
+}
+
+/// Why a container run gave no exit code.
+enum RunError {
+    /// The run failed, and its child has exited or never started.
+    Failed(String),
+    /// The child may still run. Its handles stay open (they are never
+    /// closed by this process) and the profile must not be deleted.
+    Unconfirmed(String),
+}
+
+impl From<&str> for RunError {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.to_owned())
+    }
+}
+
+impl From<String> for RunError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// The child of `handles` (its Job, process and thread) did not confirm its
+/// exit. The handles are kept open, so the process cannot be mistaken for
+/// another and the Job keeps its limits.
+fn unconfirmed(what: &str, handles: [Owned; 3]) -> RunError {
+    std::mem::forget(handles);
+    RunError::Unconfirmed(format!("{what}, and the probe's exit was not confirmed"))
 }
 
 /// A named AppContainer profile, deleted when dropped.
@@ -393,7 +440,7 @@ fn run_in_container(
     exe: &Path,
     capabilities: &[&str],
     part: u32,
-) -> Result<u32, String> {
+) -> Result<u32, RunError> {
     let sid = container
         .sid()
         .ok_or("DeriveAppContainerSidFromAppContainerName")?;
@@ -540,7 +587,7 @@ fn run_in_container(
     if created == 0 {
         // SAFETY: reads this thread's last error.
         let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-        return Err(format!("CreateProcessW error {code}"));
+        return Err(format!("CreateProcessW error {code}").into());
     }
     let process = Owned(info.hProcess);
     let thread = Owned(info.hThread);
@@ -549,24 +596,33 @@ fn run_in_container(
     if unsafe { AssignProcessToJobObject(job.0, process.0) } == 0 {
         // The process is not in the Job, so end it directly.
         unsafe { TerminateProcess(process.0, 1) };
-        wait_for_exit(process.0);
+        if !wait_for_exit(process.0) {
+            return Err(unconfirmed(
+                "AssignProcessToJobObject",
+                [job, process, thread],
+            ));
+        }
         return Err("AssignProcessToJobObject".into());
     }
     // SAFETY: resumes the probe's primary thread.
     if unsafe { ResumeThread(thread.0) } == u32::MAX {
-        end_and_wait(job.0, process.0);
+        if !end_and_wait(job.0, process.0) {
+            return Err(unconfirmed("ResumeThread", [job, process, thread]));
+        }
         return Err("ResumeThread".into());
     }
     // SAFETY: waits on the process handle this function owns.
     let waited = unsafe { WaitForSingleObject(process.0, RUN_TIMEOUT.as_millis() as u32) };
-    if waited == WAIT_TIMEOUT {
-        if !end_and_wait(job.0, process.0) {
-            return Err("the probe did not finish in time and did not end".into());
-        }
-        return Err("the probe did not finish in time".into());
-    }
     if waited != WAIT_OBJECT_0 {
-        return Err("WaitForSingleObject".into());
+        let what = if waited == WAIT_TIMEOUT {
+            "the probe did not finish in time"
+        } else {
+            "WaitForSingleObject failed"
+        };
+        if !end_and_wait(job.0, process.0) {
+            return Err(unconfirmed(what, [job, process, thread]));
+        }
+        return Err(what.into());
     }
     let mut code = NOT_STARTED;
     // SAFETY: the process has ended.
