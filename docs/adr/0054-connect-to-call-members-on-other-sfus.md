@@ -63,40 +63,60 @@ for other members.
 * Another SFU is the first acceptable transport in a member's
   `foci_preferred` whose service URL string differs from the own one. The
   ADR-0043 checks apply (`https://`, length, the advertised string kept as
-  it is). In addition, the host must be a DNS name, not an IP address
-  literal.
+  it is; the comparison uses the parsed URL string, so a trailing slash
+  alone does not make another SFU). The core keeps at most 8 acceptable
+  transports for each member.
+* The host of another SFU must be a public-looking DNS name. The core
+  refuses IP address literals (IPv4 and IPv6), `localhost` and names that
+  end in `.localhost`, names with no dot, and names that end in `.local`,
+  `.home.arpa` or `.internal`. Case and one trailing dot are ignored. The
+  same rule applies to the `wss://` host in that SFU's `/sfu/get` answer.
+  This rule does not stop a public name that resolves to a private
+  address.
 * At most 3 other SFUs for each call. Members on further SFUs stay "not
   reachable". The first 3 by the members' order in room state are used.
-* A member whose identity is also present on the own SFU is taken from the
-  own SFU only.
+* A member whose membership names the own SFU is received from the own SFU
+  only. Element Call members also join other SFUs as silent subscribers, so
+  the core accepts a participant, a speaker, a screen share or a video
+  track from a connection only when that member's membership names the SFU
+  of that connection.
 
 ### Consent
 
 * Before the core contacts another SFU's service, it asks in its own window:
   the call has members on another call server, the server's host name, and
   that the server will see this computer's IP address and the user's Matrix
-  ID. The buttons are "Connect" and "Not now".
-* It asks once for each host in each call. "Not now" leaves those members
-  "not reachable" for the rest of the call. Nothing is remembered after the
-  call.
-* With a profile proxy, the same window also says that the connection does
-  not use the proxy (ADR-0043 exception to ADR-0028). No other SFU is
-  contacted without this consent.
+  ID. The answers are "Connect" and "Not now", and "Not now" is the
+  default. On Linux the buttons have these names. On Windows the window is
+  a Yes/No message box whose text says that Yes connects and No means not
+  now.
+* It asks once for each host in each call, one window at a time. "Not now"
+  leaves those members "not reachable" for the rest of the call. Nothing is
+  remembered after the call.
+* With a profile proxy, the same window also says that the request for a
+  call token uses the proxy, but the call connection to that server does
+  not (ADR-0043 exception to ADR-0028). No other SFU is contacted without
+  this consent.
 * While a consent window is open, the call goes on with the members it can
-  reach.
+  reach. The core cannot close the window when the call ends; an answer
+  given after the end is ignored.
 
 ### Tokens and connection
 
 * The core requests one OpenID token for each other SFU, when it connects,
   and posts it to that service's `/sfu/get` with the same body as for the
-  own SFU. It follows no redirect. The response `url` must be `wss://` and
-  the response is bounded as for the own SFU.
+  own SFU. It follows no redirect. The response `url` must be `wss://`, its
+  host must pass the host rule above, and the response is bounded as for
+  the own SFU. A refused answer is handled like a failed token.
 * The core sends the worker a new `Subscribe` command with an index (1 to 3),
   the `wss://` URL and the JWT. The worker connects as subscriber only: it
   publishes no track on that connection.
 * The worker uses the same key provider and the same participant rules on
-  every connection. It reports each remote participant with its connection
-  index.
+  every connection. It reports each remote participant, speaker, screen
+  share and video track with its connection index (0 for the own SFU).
+  The worker still plays and decodes tracks from a connection that the core
+  ignores; the frame keys, not a worker filter, stop media under another
+  member's identity.
 * The core accepts a participant from connection *n* only when its
   membership names that SFU. Others are ignored.
 * The video tile limits of ADR-0048 and ADR-0053 are for the whole call, not
