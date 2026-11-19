@@ -28,7 +28,7 @@
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
   import { callCamera, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
-  import { LEAVE_NOT_DONE, LEAVE_QUESTION, leaveAfterDraftFlush } from './roomLeave';
+  import { LEAVE_NOT_DONE, LEAVE_QUESTION, LEAVING_TEXT, leaveAfterDraftFlush } from './roomLeave';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -230,6 +230,7 @@
   // and whether the leave is being sent.
   let confirmingLeave = $state<string | null>(null);
   let leavingRoom = $state(false);
+  let leaveQuestion = $state<HTMLElement | null>(null);
   // Where the "New messages" line goes in the selected room, fixed when it
   // opens, and the event this room was last marked read at.
   let unreadFrom = $state<string | null>(null);
@@ -1823,9 +1824,26 @@
     }
   }
 
+  // Asks before leaving. The menu gives focus back to its button, so the
+  // question takes it after it shows.
+  async function askLeave(roomId: string) {
+    confirmingLeave = roomId;
+    await tick();
+    leaveQuestion?.focus();
+  }
+
+  // Closes the question and gives focus back to the room menu.
+  async function stayInRoom() {
+    confirmingLeave = null;
+    await tick();
+    document.getElementById('room-menu-button')?.focus();
+  }
+
   // Leaves the room waiting for confirmation. The unsaved draft is saved
-  // first, as before an account switch; the room view clears only after
-  // the homeserver accepted the leave.
+  // first, as before an account switch, and the composer stays disabled
+  // until the leave ends, so no later text is lost. The room view clears
+  // only after the homeserver accepted the leave, and only when the same
+  // room is still selected when this code runs again.
   async function confirmLeave() {
     const roomId = confirmingLeave;
     if (!roomId || leavingRoom) return;
@@ -1838,13 +1856,10 @@
         () => changeRoom(roomId, { kind: 'leave' }),
         valid
       );
-      if (left) {
-        confirmingLeave = null;
-        leftRoom();
-      } else if (valid()) {
-        confirmingLeave = null;
-        error = LEAVE_NOT_DONE;
-      }
+      if (!valid()) return;
+      confirmingLeave = null;
+      if (left) leftRoom();
+      else error = LEAVE_NOT_DONE;
     } catch (reason) {
       if (valid()) {
         confirmingLeave = null;
@@ -2485,7 +2500,7 @@
         members: () => (membersShown = !membersShown),
         group: () => (sectionOpen = true),
         settings: () => (roomSettingsOf = roomId),
-        leave: () => (confirmingLeave = roomId)
+        leave: () => void askLeave(roomId)
       }
     );
   }
@@ -2925,11 +2940,11 @@
             onfavourite={signedIn ? () => toggleFavourite(selectedRoom.roomId) : undefined}
             favouriteBusy={favouriteBusy || groupsBusy}
             menu={signedIn ? roomMenuButton : undefined}
-            onreply={sendBlocked === null && draftReady && !textSending
+            onreply={sendBlocked === null && draftReady && !textSending && !leavingRoom
               ? replyToMessage
               : undefined}
             ownUserId={signedIn ? status.account.userId : null}
-            onedit={sendBlocked === null ? startEdit : undefined}
+            onedit={sendBlocked === null && !leavingRoom ? startEdit : undefined}
             onreport={signedIn ? (eventId, sender) => (reportTarget = { roomId: selectedRoom.roomId, eventId, sender }) : undefined}
             onpin={signedIn && !pinBusy ? pinMessage : undefined}
             {focusEvent}
@@ -3021,7 +3036,7 @@
           {#if signedIn}
             {#if confirmingLeave === selectedRoom.roomId}
               <div class="confirm" role="alertdialog" aria-labelledby="leave-question">
-                <p id="leave-question">{LEAVE_QUESTION}</p>
+                <p id="leave-question" tabindex="-1" bind:this={leaveQuestion}>{LEAVE_QUESTION}</p>
                 <button type="button" class="danger" disabled={leavingRoom} onclick={confirmLeave}>
                   Leave room
                 </button>
@@ -3029,7 +3044,7 @@
                   type="button"
                   class="secondary"
                   disabled={leavingRoom}
-                  onclick={() => (confirmingLeave = null)}
+                  onclick={stayInRoom}
                 >
                   Stay
                 </button>
@@ -3072,7 +3087,7 @@
             {/if}
             <Composer
               pending={visiblePending}
-              blocked={draftReady ? sendBlocked : 'Loading the saved draft…'}
+              blocked={leavingRoom ? LEAVING_TEXT : draftReady ? sendBlocked : 'Loading the saved draft…'}
               roomId={selectedRoom.roomId}
               encryption={selectedRoom.encryption}
               roomName={selectedRoom.displayName ?? selectedRoom.roomId}

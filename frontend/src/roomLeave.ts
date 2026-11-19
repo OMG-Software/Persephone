@@ -16,5 +16,8 @@ export async function leaveAfterDraftFlush(
 export const LEAVE_QUESTION =
   'Leave this room? You will stop receiving its messages. Unless anyone can join it, you will need a new invitation to come back.';
 
+/** Shown in the composer, which is disabled while the leave is sent. */
+export const LEAVING_TEXT = 'Leaving the room…';
+
 /** Shown when the unsaved draft could not be kept, so the room was not left. */
 export const LEAVE_NOT_DONE = 'The room was not left. Retry, or discard the unsaved draft first.';
