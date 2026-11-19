@@ -108,6 +108,12 @@ keeps the choice in the process that owns authority.
   is relaxed for screen sharing without a new decision.
 * Frames are BGRA. The worker converts them to I420 with the libyuv
   functions in libwebrtc.
+* Measured on 19 November 2026
+  ([evidence](../evidence/screen-share-windows.md)): `CreateForMonitor` fails
+  with access denied in the worker's AppContainer, with its capabilities and
+  with `graphicsCaptureProgrammatic` and `graphicsCapture`. The worker gets no
+  new capability. Windows reports screen sharing as unavailable, the core shows
+  no Windows chooser, and the capture code stays for the gate's probe.
 
 ### Linux capture
 
