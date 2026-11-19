@@ -465,10 +465,11 @@ export function ringsAnnouncement(rings: readonly ShownRing[]): string {
 }
 
 /**
- * Which rings are shown: their rooms and callers, never the time left. The
- * prompt renders the announcement again when this changes, so a new or a
- * replacing ring is announced although the text names nobody.
+ * Which rings are shown: the core's number for each, never the time left.
+ * The prompt renders the announcement again when this changes, so a new or
+ * a replacing ring is announced although the text names nobody. A new ring
+ * from the same caller in the same room has a new number.
  */
 export function ringsKey(rings: readonly ShownRing[]): string {
-  return JSON.stringify(rings.map((ring) => [ring.roomId, ring.caller]));
+  return rings.map((ring) => ring.ringId).join(',');
 }

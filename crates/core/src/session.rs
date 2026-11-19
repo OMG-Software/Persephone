@@ -362,6 +362,16 @@ impl crate::calls::ring_events::Env for Shared {
     fn open_generation(&self) -> Option<u64> {
         Shared::open_generation(self)
     }
+
+    fn while_open(&self, generation: u64, action: &mut dyn FnMut()) {
+        // `close_admission` advances the generation under this lock and
+        // clears the UI's notifications after it, so whatever `action`
+        // queues here is either cleared by that lock or never queued.
+        let inner = lock(self);
+        if inner.generation == generation && inner.state == StoreState::Protected {
+            action();
+        }
+    }
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
