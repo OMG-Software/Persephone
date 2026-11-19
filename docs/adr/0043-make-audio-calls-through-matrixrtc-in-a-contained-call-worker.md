@@ -188,9 +188,10 @@ Proposed option: "a contained call worker".
   certificate checks. The vendored Rust `libwebrtc` crate raises the
   frame key ring from 255 to 256 slots, so that Element Call's key index
   255 works. Each patch is small and is reapplied for each LiveKit update.
-  Amendment, 2026-11-19: the TLS 1.3 rule covers the core's homeserver
-  client, the core's `/sfu/get` request and the worker's LiveKit
-  signalling. Two connections that libwebrtc makes are outside it:
+  Amendment, 2026-11-19: Persephone enforces the TLS 1.3 rule on the
+  core's homeserver client, the core's `/sfu/get` request and the
+  worker's LiveKit signalling. Persephone cannot enforce it on two
+  connections that libwebrtc makes, and neither is shown to meet it:
   * Media: DTLS-SRTP to the SFU. libwebrtc's own BoringSSL negotiates the
     DTLS version, and Persephone has no setting for it. The version that
     the pinned build uses is not measured; DTLS 1.2 is assumed. The SFU
@@ -209,8 +210,11 @@ Proposed option: "a contained call worker".
     TURN credentials the username contains the Matrix user ID. TURN sends
     a message integrity value, not the password. The relayed packets
     are DTLS-SRTP with frame encryption in every case.
-  * This is an exception to the "TLS 1.3 with certificate checks on every
-    TLS connection" driver above. It stays open until a live run records
+  * This is a recorded gap, not an approved exception. The owner decision
+    of 20 October 2026 (`docs/planning/project-plan.md`) requires TLS 1.3
+    on every network connection, and no owner decision approves these two
+    connections. The requirement stays in force and is unmet for them.
+    The gap stays open until a live run records
     the negotiated DTLS and `turns:` TLS versions with a packet capture,
     and a test records whether `turns:` refuses a bad certificate. Then a
     decision either accepts it or restricts it, for example by passing
@@ -241,9 +245,10 @@ Proposed option: "a contained call worker".
 * A large native dependency: Google's WebRTC through LiveKit's fork, as a
   prebuilt static library. Its security fixes reach Persephone only through
   LiveKit releases.
-* DTLS-SRTP and TURN over TLS are made by libwebrtc and are outside the
-  TLS 1.3 rule (amendment of 2026-11-19 under "Owner choices"). Their
-  versions are not measured.
+* DTLS-SRTP and TURN over TLS are made by libwebrtc and are not shown to
+  meet the TLS 1.3 requirement, which stays unmet for them (the recorded
+  gap in the amendment of 2026-11-19 under "Owner choices"; no owner
+  decision approves it). Their versions are not measured.
 * The worker can reach any network address. A compromised worker could
   send the call's audio and keys anywhere.
 * Opus audio is decoded in native code, outside the WebAssembly guest of

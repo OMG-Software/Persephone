@@ -896,6 +896,8 @@
   let ringBusy = $state<ReadonlySet<string>>(new Set());
   // Goes up when a newer list arrives, so an older read cannot replace it.
   let ringRequest = 0;
+  // Goes up when a decline starts; only the newest decline's reply is shown.
+  let declineRequest = 0;
   let ringsRunning = false;
   let ringsAgain = false;
   let ringDevicesAsked = false;
@@ -949,10 +951,11 @@
   async function declineRing(roomId: string) {
     if (ringBusy.has(roomId)) return;
     const generation = sessionGeneration;
+    const request = ++declineRequest;
     markRingBusy(roomId, true);
     try {
       const reply = await callDeclineRing(roomId);
-      if (generation === sessionGeneration) {
+      if (generation === sessionGeneration && request === declineRequest) {
         ringRequest += 1;
         rings = shownRings(reply, Date.now());
       }
@@ -2817,6 +2820,18 @@
           onanswer={answerRing}
           ondecline={declineRing}
         />
+        {#if !selected}
+          <!-- An answer with no room open shows its progress and failure
+               here; with a room open, the room header shows them. -->
+          {#if callPending}
+            <p class="call-notice note" role="status">{STARTING_TEXT}</p>
+          {:else if callJoinText}
+            <p class="call-notice error" role="alert">
+              <span>{callJoinText}</span>
+              <button type="button" class="secondary" onclick={() => (callJoinText = null)}>Dismiss</button>
+            </p>
+          {/if}
+        {/if}
         <CallBar
           status={callState}
           dismissed={callDismissed}

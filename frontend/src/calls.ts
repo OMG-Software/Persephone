@@ -463,3 +463,12 @@ export function ringButtons(camera: boolean): RingButtons {
 export function ringsAnnouncement(rings: readonly ShownRing[]): string {
   return rings.length === 0 ? '' : RING_TITLE;
 }
+
+/**
+ * Which rings are shown: their rooms and callers, never the time left. The
+ * prompt renders the announcement again when this changes, so a new or a
+ * replacing ring is announced although the text names nobody.
+ */
+export function ringsKey(rings: readonly ShownRing[]): string {
+  return JSON.stringify(rings.map((ring) => [ring.roomId, ring.caller]));
+}
