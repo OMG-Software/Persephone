@@ -396,21 +396,215 @@ fn watch_closed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zbus::names::ErrorName;
 
-    /// GIVEN a `Start` answer with streams WHEN the nodes are read THEN each
-    /// stream's node ID comes out, and an answer without streams gives none.
+    /// A `Response` signal of a portal request with `code` and `results`.
+    fn response(code: u32, results: HashMap<&str, Value<'_>>) -> zbus::Message {
+        zbus::Message::signal(
+            "/org/freedesktop/portal/desktop/request/1_1/t",
+            REQUEST,
+            "Response",
+        )
+        .unwrap()
+        .build(&(code, results))
+        .unwrap()
+    }
+
+    /// A method error from the bus with the D-Bus error `name`.
+    fn method_error(name: &str) -> zbus::Error {
+        let call = zbus::Message::method_call(PORTAL_PATH, "Start")
+            .unwrap()
+            .build(&())
+            .unwrap();
+        zbus::Error::MethodError(ErrorName::try_from(name).unwrap().into(), None, call)
+    }
+
+    /// GIVEN `Start` answers WHEN the nodes are read THEN each stream's node
+    /// ID comes out, and an answer without streams, or with streams of
+    /// another shape, gives none.
     #[test]
     fn given_a_start_answer_then_the_node_ids_are_read() {
         assert!(stream_nodes(&HashMap::new()).is_empty());
         let wrong = HashMap::from([("streams".to_owned(), OwnedValue::from(7_u32))]);
         assert!(stream_nodes(&wrong).is_empty());
+
+        let streams = |value: Value<'_>| {
+            HashMap::from([("streams".to_owned(), OwnedValue::try_from(value).unwrap())])
+        };
+        let two = streams(Value::from(vec![
+            (41_u32, HashMap::<String, Value<'_>>::new()),
+            (42_u32, HashMap::<String, Value<'_>>::new()),
+        ]));
+        assert_eq!(stream_nodes(&two), [41, 42]);
+        // The node must be the structure's first field, and a `u32`.
+        let named = streams(Value::from(vec![("41".to_owned(), 41_u32)]));
+        assert!(stream_nodes(&named).is_empty());
+        let bare = streams(Value::from(vec![41_u32, 42_u32]));
+        assert!(stream_nodes(&bare).is_empty());
     }
 
     /// GIVEN the portal's refusal and absence errors WHEN mapped THEN access
-    /// denied is a refusal and a missing service is unavailable.
+    /// denied is a refusal, a missing service is unavailable and any other
+    /// failure is a refusal, never a reason to say the portal is absent.
     #[test]
     fn given_portal_errors_then_the_refusal_names_the_cause() {
         let denied = zbus::Error::FDO(Box::new(zbus::fdo::Error::AccessDenied("x".into())));
         assert_eq!(refusal(&denied), ScreenRefusal::Refused);
+        assert_eq!(
+            refusal(&method_error("org.freedesktop.DBus.Error.AccessDenied")),
+            ScreenRefusal::Refused
+        );
+        assert_eq!(
+            refusal(&method_error("org.freedesktop.DBus.Error.ServiceUnknown")),
+            ScreenRefusal::Unavailable
+        );
+        let unknown = zbus::Error::FDO(Box::new(zbus::fdo::Error::ServiceUnknown("x".into())));
+        assert_eq!(refusal(&unknown), ScreenRefusal::Unavailable);
+        assert_eq!(
+            refusal(&method_error("org.freedesktop.DBus.Error.UnknownMethod")),
+            ScreenRefusal::Refused
+        );
+        assert_eq!(refusal(&zbus::Error::InvalidReply), ScreenRefusal::Refused);
+    }
+
+    /// GIVEN a request cancelled before the warning WHEN a source is chosen
+    /// THEN it ends as cancelled and neither the warning nor the bus runs.
+    #[test]
+    fn given_a_cancel_before_the_warning_then_the_choice_is_cancelled() {
+        assert!(PortalScreen.available());
+        let cancel = AtomicBool::new(true);
+        assert!(matches!(
+            PortalScreen.choose(&cancel),
+            Err(ScreenRefusal::Cancelled)
+        ));
+    }
+
+    /// GIVEN a wait for a call's result WHEN the result arrives, also after
+    /// a cancel check, THEN it is returned; WHEN the request is cancelled
+    /// THEN the wait ends as cancelled; WHEN the call's thread ends without
+    /// a result THEN it is a refusal.
+    #[test]
+    fn given_a_wait_then_a_result_a_cancel_or_a_lost_call_ends_it() {
+        let open = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel();
+        tx.send(7).unwrap();
+        assert_eq!(wait(&rx, &open), Ok(7));
+
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(CANCEL_CHECK * 2);
+            tx.send(8).unwrap();
+        });
+        assert_eq!(wait(&rx, &open), Ok(8));
+        late.join().unwrap();
+        assert_eq!(wait(&rx, &open), Err(ScreenRefusal::Refused));
+
+        let (_tx, pending) = mpsc::channel::<u8>();
+        assert_eq!(
+            wait(&pending, &AtomicBool::new(true)),
+            Err(ScreenRefusal::Cancelled)
+        );
+    }
+
+    /// GIVEN `Response` signals WHEN read THEN code 0 gives the results,
+    /// code 1 is the user's cancel and any other code is a refusal; a body of
+    /// another shape, an ended signal stream and a lost listener are
+    /// refusals, and a cancel ends the wait.
+    #[test]
+    fn given_portal_responses_then_only_code_zero_gives_the_results() {
+        let open = AtomicBool::new(false);
+        let read = |message: Option<zbus::Message>| {
+            let (tx, rx) = mpsc::channel();
+            tx.send(message).unwrap();
+            wait_response(&rx, &open)
+        };
+        let results = read(Some(response(
+            0,
+            HashMap::from([("session_handle", Value::from("/x/session"))]),
+        )))
+        .unwrap();
+        assert_eq!(
+            results
+                .get("session_handle")
+                .and_then(|value| <&str>::try_from(&**value).ok()),
+            Some("/x/session")
+        );
+        assert_eq!(
+            read(Some(response(1, HashMap::new()))).err(),
+            Some(ScreenRefusal::Cancelled)
+        );
+        assert_eq!(
+            read(Some(response(2, HashMap::new()))).err(),
+            Some(ScreenRefusal::Refused)
+        );
+        let shapeless = zbus::Message::signal(PORTAL_PATH, REQUEST, "Response")
+            .unwrap()
+            .build(&("0",))
+            .unwrap();
+        assert_eq!(read(Some(shapeless)).err(), Some(ScreenRefusal::Refused));
+        assert_eq!(read(None).err(), Some(ScreenRefusal::Refused));
+
+        let (tx, lost) = mpsc::channel::<Option<zbus::Message>>();
+        drop(tx);
+        assert_eq!(
+            wait_response(&lost, &open).err(),
+            Some(ScreenRefusal::Refused)
+        );
+        let (_tx, pending) = mpsc::channel::<Option<zbus::Message>>();
+        assert_eq!(
+            wait_response(&pending, &AtomicBool::new(true)).err(),
+            Some(ScreenRefusal::Cancelled)
+        );
+    }
+
+    /// The variable that tells [`share_in_a_child`] what to expect.
+    const EXPECT: &str = "PERSEPHONE_TEST_SCREEN_BUS";
+
+    /// GIVEN no session bus WHEN a share opens THEN screen sharing is
+    /// unavailable; GIVEN a session bus setting that cannot be read THEN it
+    /// is refused. Each case runs in a child copy of this test program, so
+    /// no test changes this process's environment.
+    #[test]
+    fn given_no_usable_session_bus_then_the_share_does_not_open() {
+        use std::process::Command;
+        let runtime = tempfile::tempdir().unwrap();
+        let run = |setting: Option<&str>, expect: &str| {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "platform::linux::screen_portal::tests::share_in_a_child",
+                    "--ignored",
+                ])
+                .env(EXPECT, expect)
+                .env("XDG_RUNTIME_DIR", runtime.path());
+            match setting {
+                Some(value) => command.env("DBUS_SESSION_BUS_ADDRESS", value),
+                None => command.env_remove("DBUS_SESSION_BUS_ADDRESS"),
+            };
+            let output = command.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{expect}: {stdout}");
+            assert!(stdout.contains("1 passed"), "{expect}: {stdout}");
+        };
+        run(None, "unavailable");
+        run(Some(""), "refused");
+    }
+
+    /// Run only by [`given_no_usable_session_bus_then_the_share_does_not_open`],
+    /// in a child process whose environment it set.
+    #[test]
+    #[ignore = "run in a child process by given_no_usable_session_bus_then_the_share_does_not_open"]
+    fn share_in_a_child() {
+        let expected = match std::env::var(EXPECT).as_deref() {
+            Ok("unavailable") => ScreenRefusal::Unavailable,
+            Ok("refused") => ScreenRefusal::Refused,
+            _ => return,
+        };
+        let outcome = open_share(&AtomicBool::new(false));
+        assert!(
+            matches!(&outcome, Err(refusal) if *refusal == expected),
+            "{:?}",
+            outcome.err()
+        );
     }
 }
