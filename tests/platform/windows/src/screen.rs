@@ -42,7 +42,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetProcessId,
     InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW,
     TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
@@ -291,19 +291,31 @@ fn parent() -> i32 {
 
 /// Stops the probe after a run whose child may still be running. The probe
 /// keeps owning the child and waits longer for its exit. Only a confirmed
-/// exit releases the handles and deletes the AppContainer profile. Otherwise
-/// the profile is kept; the handles close when the probe exits, and the
-/// Job's kill-on-close limit ends a child that is in the Job.
+/// exit releases the handles and deletes the AppContainer profile.
+///
+/// Otherwise the profile is kept and the probe reports the child by process
+/// id, so that its end can be checked; the sandbox command stays bounded and
+/// fails. Holding the handles longer would not end the child. A child in
+/// the Job ends when the probe exits (kill on Job close). A child outside
+/// the Job (its assignment failed) was created suspended and never resumed,
+/// so it runs no instruction.
 fn abandon(container: Container, name: &str, error: &str, child: Unexited) -> i32 {
     println!("screen-probe: AppContainer ({name}): {error}; the probe stops");
     if child.end_and_wait_longer() {
         println!("screen-probe: the child exited; the AppContainer profile is deleted");
-    } else {
-        println!(
-            "screen-probe: the child's exit was not confirmed; the AppContainer profile is kept"
-        );
-        container.keep();
+        return 1;
     }
+    // SAFETY: the process handle is owned and valid.
+    let id = unsafe { GetProcessId(child.process.0) };
+    let held = if child.in_job {
+        "in the probe's Job, which ends it when the probe exits"
+    } else {
+        "outside the Job, suspended and never resumed"
+    };
+    println!(
+        "screen-probe: the exit of child process {id} ({held}) was not confirmed; check that it has ended. The AppContainer profile is kept"
+    );
+    container.keep();
     1
 }
 
@@ -331,13 +343,14 @@ impl From<String> for RunError {
 /// The child (its Job, process and thread) did not confirm its exit. The
 /// handles go to the caller, so the process cannot be mistaken for another
 /// and the Job keeps its limits while the caller waits.
-fn unconfirmed(what: &str, job: Owned, process: Owned, thread: Owned) -> RunError {
+fn unconfirmed(what: &str, in_job: bool, job: Owned, process: Owned, thread: Owned) -> RunError {
     RunError::Unconfirmed(
         format!("{what}, and the probe's exit was not confirmed"),
         Unexited {
             job,
             process,
             thread,
+            in_job,
         },
     )
 }
@@ -349,6 +362,9 @@ struct Unexited {
     // Held, not used: kept open until the exit is confirmed.
     #[allow(dead_code)]
     thread: Owned,
+    /// The process is in the Job. False only when its assignment failed:
+    /// the process was then never resumed.
+    in_job: bool,
 }
 
 impl Unexited {
@@ -679,6 +695,7 @@ fn run_in_container(
         if !wait_for_exit(process.0) {
             return Err(unconfirmed(
                 "AssignProcessToJobObject",
+                false,
                 job,
                 process,
                 thread,
@@ -689,7 +706,7 @@ fn run_in_container(
     // SAFETY: resumes the probe's primary thread.
     if unsafe { ResumeThread(thread.0) } == u32::MAX {
         if !end_and_wait(job.0, process.0) {
-            return Err(unconfirmed("ResumeThread", job, process, thread));
+            return Err(unconfirmed("ResumeThread", true, job, process, thread));
         }
         return Err("ResumeThread".into());
     }
@@ -701,7 +718,7 @@ fn run_in_container(
             "WaitForSingleObject failed"
         };
         if !end_and_wait(job.0, process.0) {
-            return Err(unconfirmed(what, job, process, thread));
+            return Err(unconfirmed(what, true, job, process, thread));
         }
         return Err(what.into());
     }
