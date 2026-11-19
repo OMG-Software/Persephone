@@ -1075,7 +1075,7 @@ test('GIVEN a room header with a favourite action WHEN it shows THEN a star togg
 
 test('GIVEN the room settings WHEN they open THEN the room name is isolated text, the tabs show and nothing is changeable before they load', () => {
   const html = render(RoomSettings, {
-    props: { roomId: '!r:example.invalid', roomName: hostileName, changes: 0, onleft: () => {}, onclose: () => {} }
+    props: { roomId: '!r:example.invalid', roomName: hostileName, changes: 0, onclose: () => {} }
   }).body;
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /<dialog class="room-settings" aria-labelledby="room-settings-heading"/);

@@ -3244,6 +3244,7 @@ mark {
 .chat-header .header-action {
   display: flex;
   flex: none;
+  gap: 8px;
   margin-left: auto;
 }
 

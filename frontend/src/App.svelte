@@ -27,7 +27,8 @@
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callCamera, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { LEAVE_NOT_DONE, LEAVE_QUESTION, LEAVING_TEXT, leaveAfterDraftFlush } from './roomLeave';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -44,7 +45,7 @@
   import Icon from './Icon.svelte';
   import IconAction from './IconAction.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
-  import { mainMenuItems } from './menu.ts';
+  import { mainMenuItems, roomMenuItems } from './menu.ts';
   import MemberPanel from './MemberPanel.svelte';
   import {
     MEMBERS,
@@ -225,6 +226,11 @@
   // One of this account's messages waiting for "Delete" to be confirmed,
   // and whether the deletion is being sent.
   let confirmingDelete = $state<{ roomId: string; eventId: string } | null>(null);
+  // The room waiting for "Leave room" to be confirmed from the room menu,
+  // and whether the leave is being sent.
+  let confirmingLeave = $state<string | null>(null);
+  let leavingRoom = $state(false);
+  let leaveQuestion = $state<HTMLElement | null>(null);
   // Where the "New messages" line goes in the selected room, fixed when it
   // opens, and the event this room was last marked read at.
   let unreadFrom = $state<string | null>(null);
@@ -1167,6 +1173,7 @@
     replyingTo = null;
     editingMessage = null;
     confirmingDelete = null;
+    confirmingLeave = null;
     // The core dropped every image handle with the session.
     imageDraft = null;
     attaching = false;
@@ -1654,6 +1661,7 @@
     confirmingPlain = null;
     replyingTo = null;
     confirmingDelete = null;
+    confirmingLeave = null;
     unreadFrom = null;
     markedRead = null;
     activity = null;
@@ -1813,6 +1821,52 @@
       return false;
     } finally {
       if (generation === sessionGeneration) textSending = false;
+    }
+  }
+
+  // Asks before leaving. The menu gives focus back to its button, so the
+  // question takes it after it shows.
+  async function askLeave(roomId: string) {
+    confirmingLeave = roomId;
+    await tick();
+    leaveQuestion?.focus();
+  }
+
+  // Closes the question and gives focus back to the room menu.
+  async function stayInRoom() {
+    confirmingLeave = null;
+    await tick();
+    document.getElementById('room-menu-button')?.focus();
+  }
+
+  // Leaves the room waiting for confirmation. The unsaved draft is saved
+  // first, as before an account switch, and the composer stays disabled
+  // until the leave ends, so no later text is lost. The room view clears
+  // only after the homeserver accepted the leave, and only when the same
+  // room is still selected when this code runs again.
+  async function confirmLeave() {
+    const roomId = confirmingLeave;
+    if (!roomId || leavingRoom) return;
+    const generation = sessionGeneration;
+    const valid = () => current(roomId, generation);
+    leavingRoom = true;
+    try {
+      const left = await leaveAfterDraftFlush(
+        prepareAccountSwitch,
+        () => changeRoom(roomId, { kind: 'leave' }),
+        valid
+      );
+      if (!valid()) return;
+      confirmingLeave = null;
+      if (left) leftRoom();
+      else error = LEAVE_NOT_DONE;
+    } catch (reason) {
+      if (valid()) {
+        confirmingLeave = null;
+        error = describe(reason);
+      }
+    } finally {
+      leavingRoom = false;
     }
   }
 
@@ -2436,17 +2490,19 @@
 
   /** The selected room's menu: what used to be buttons at the top of the room. */
   function roomMenu(roomId: string, direct: boolean): MenuItem[] {
-    return [
-      ...(direct ? [] : [{ label: 'Invite people', onselect: () => (invitingTo = roomId) }]),
-      { label: 'Jump to date', onselect: () => (roomTool = 'jump') },
-      { label: 'Pinned messages', onselect: () => (roomTool = 'pins') },
-      { label: 'Attachments', onselect: () => (roomTool = 'attachments') },
-      membersRoom
-        ? { label: membersShown ? 'Hide members' : 'Show members', onselect: () => (membersShown = !membersShown), separated: true }
-        : { label: 'Members need a wider window', onselect: () => {}, disabled: true, separated: true },
-      { label: 'Room group', onselect: () => (sectionOpen = true) },
-      { label: 'Room settings', onselect: () => (roomSettingsOf = roomId), separated: true }
-    ];
+    return roomMenuItems(
+      { direct, membersRoom, membersShown, leaving: leavingRoom },
+      {
+        invite: () => (invitingTo = roomId),
+        jump: () => (roomTool = 'jump'),
+        pins: () => (roomTool = 'pins'),
+        attachments: () => (roomTool = 'attachments'),
+        members: () => (membersShown = !membersShown),
+        group: () => (sectionOpen = true),
+        settings: () => (roomSettingsOf = roomId),
+        leave: () => void askLeave(roomId)
+      }
+    );
   }
 
   /** Pin through the core; reopen the panel only for the original room request. */
@@ -2884,11 +2940,11 @@
             onfavourite={signedIn ? () => toggleFavourite(selectedRoom.roomId) : undefined}
             favouriteBusy={favouriteBusy || groupsBusy}
             menu={signedIn ? roomMenuButton : undefined}
-            onreply={sendBlocked === null && draftReady && !textSending
+            onreply={sendBlocked === null && draftReady && !textSending && !leavingRoom
               ? replyToMessage
               : undefined}
             ownUserId={signedIn ? status.account.userId : null}
-            onedit={sendBlocked === null ? startEdit : undefined}
+            onedit={sendBlocked === null && !leavingRoom ? startEdit : undefined}
             onreport={signedIn ? (eventId, sender) => (reportTarget = { roomId: selectedRoom.roomId, eventId, sender }) : undefined}
             onpin={signedIn && !pinBusy ? pinMessage : undefined}
             {focusEvent}
@@ -2978,6 +3034,22 @@
             />
           {/if}
           {#if signedIn}
+            {#if confirmingLeave === selectedRoom.roomId}
+              <div class="confirm" role="alertdialog" aria-labelledby="leave-question">
+                <p id="leave-question" tabindex="-1" bind:this={leaveQuestion}>{LEAVE_QUESTION}</p>
+                <button type="button" class="danger" disabled={leavingRoom} onclick={confirmLeave}>
+                  Leave room
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  disabled={leavingRoom}
+                  onclick={stayInRoom}
+                >
+                  Stay
+                </button>
+              </div>
+            {/if}
             {#if confirmingDelete}
               <div class="confirm" role="alertdialog" aria-labelledby="delete-question">
                 <p id="delete-question">
@@ -3015,7 +3087,7 @@
             {/if}
             <Composer
               pending={visiblePending}
-              blocked={draftReady ? sendBlocked : 'Loading the saved draft…'}
+              blocked={leavingRoom ? LEAVING_TEXT : draftReady ? sendBlocked : 'Loading the saved draft…'}
               roomId={selectedRoom.roomId}
               encryption={selectedRoom.encryption}
               roomName={selectedRoom.displayName ?? selectedRoom.roomId}
@@ -3178,8 +3250,6 @@
           roomId={roomSettingsOf}
           roomName={selectedRoom.displayName ?? selectedRoom.roomId}
           changes={roomChanges}
-          beforeleave={prepareAccountSwitch}
-          onleft={leftRoom}
           onclose={() => (roomSettingsOf = null)}
         />
       {/if}

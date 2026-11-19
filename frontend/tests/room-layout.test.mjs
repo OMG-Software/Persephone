@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { mainMenuItems, menuTarget } from '../src/menu.ts';
+import { mainMenuItems, menuTarget, roomMenuItems } from '../src/menu.ts';
 import {
   SIDEBAR_DEFAULT,
   SIDEBAR_MAX,
@@ -74,6 +74,41 @@ test('GIVEN the session is changing or the sign-out question is open WHEN the ma
   assert.deepEqual([working.label, working.disabled], ['Working…', true]);
   const asking = mainMenu({ confirmingSignOut: true }).at(-1);
   assert.deepEqual([asking.label, asking.disabled], ['Lock Persephone', true]);
+});
+
+const roomChosen = [];
+const roomActions = Object.fromEntries(
+  ['invite', 'jump', 'pins', 'attachments', 'members', 'group', 'settings', 'leave'].map((name) => [name, () => roomChosen.push(name)])
+);
+const roomMenu = (state) =>
+  roomMenuItems({ direct: false, membersRoom: true, membersShown: true, leaving: false, ...state }, roomActions);
+
+test('GIVEN a joined room WHEN its menu opens THEN Leave room is the last command, set apart, and asks to leave', () => {
+  const items = roomMenu({});
+  assert.deepEqual(items.map((item) => item.label), [
+    'Invite people', 'Jump to date', 'Pinned messages', 'Attachments', 'Hide members', 'Room group', 'Room settings', 'Leave room'
+  ]);
+  const leave = items.at(-1);
+  assert.equal(leave.separated, true, 'a line sets Leave room apart from Room settings');
+  assert.equal(leave.disabled, false);
+  roomChosen.length = 0;
+  leave.onselect();
+  assert.deepEqual(roomChosen, ['leave'], 'choosing it only asks; it does not leave by itself');
+});
+
+test('GIVEN a direct conversation or a leave being sent WHEN the room menu opens THEN Invite people is absent and Leave room is disabled', () => {
+  const direct = roomMenu({ direct: true });
+  assert.equal(direct.some((item) => item.label === 'Invite people'), false);
+  assert.equal(direct.at(-1).label, 'Leave room', 'a direct conversation can be left too');
+  assert.equal(roomMenu({ leaving: true }).at(-1).disabled, true);
+});
+
+test('GIVEN a narrow window WHEN the room menu opens THEN the member command is disabled and does nothing', () => {
+  const members = roomMenu({ membersRoom: false }).find((item) => item.label === 'Members need a wider window');
+  assert.equal(members.disabled, true);
+  roomChosen.length = 0;
+  members.onselect();
+  assert.deepEqual(roomChosen, []);
 });
 
 test('GIVEN a room list width WHEN it is clamped THEN it stays in range and a value that is not a number gives the default', () => {
