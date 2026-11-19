@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{
     FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_OTHER_CONNECTIONS,
-    MAX_PARTICIPANTS, MediaDevice, ToWorker,
+    MAX_PARTICIPANTS, MAX_VOLUME_PERCENT, MediaDevice, ToWorker,
 };
 
 /// The most `Speaking` messages sent in any one second.
@@ -244,6 +244,14 @@ impl<C, U> Slots<C, U> {
         self.0.insert(index, Slot::Ended)
     }
 
+    /// The open connections, in no set order.
+    pub fn open(&self) -> impl Iterator<Item = &U> {
+        self.0.values().filter_map(|slot| match slot {
+            Slot::Up(open) => Some(open),
+            Slot::Connecting(_) | Slot::Ended => None,
+        })
+    }
+
     /// Takes every connection out, for the end of the call.
     pub fn take_all(&mut self) -> Vec<Slot<C, U>> {
         self.0.drain().map(|(_, slot)| slot).collect()
@@ -285,6 +293,37 @@ pub fn failure_for_connect(fault: ConnectFault, text: &str) -> FailureCode {
             }
         }
         ConnectFault::Other => FailureCode::Internal,
+    }
+}
+
+/// How every remote audio track plays (ADR-0055): the volume and whether
+/// the user deafened the call. Each remote audio track gets it when it is
+/// subscribed and again on every change.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Playout {
+    pub deafened: bool,
+    /// 0 to [`MAX_VOLUME_PERCENT`].
+    pub volume: u8,
+}
+
+impl Playout {
+    /// The playout at the start of a call: not deafened, at `volume`. A
+    /// volume over the limit is cut to it (the protocol refuses one anyway).
+    pub fn new(volume: u8) -> Self {
+        Self {
+            deafened: false,
+            volume: volume.min(MAX_VOLUME_PERCENT),
+        }
+    }
+
+    /// The gain WebRTC applies: 0.0 (silent) to 1.0 (as received).
+    pub fn gain(&self) -> f64 {
+        f64::from(self.volume.min(MAX_VOLUME_PERCENT)) / f64::from(MAX_VOLUME_PERCENT)
+    }
+
+    /// Whether remote audio tracks play at all.
+    pub fn enabled(&self) -> bool {
+        !self.deafened
     }
 }
 
@@ -337,6 +376,7 @@ mod tests {
             playout_device: None,
             camera_device: None,
             camera_on: false,
+            volume: 100,
         };
         assert!(is_first_message_allowed(&join));
     }
@@ -439,6 +479,8 @@ mod tests {
         for message in [
             ToWorker::Leave,
             ToWorker::SetMuted { muted: true },
+            ToWorker::SetDeafened { deafened: true },
+            ToWorker::SetVolume { percent: 50 },
             ToWorker::SetCamera {
                 on: true,
                 remote: false,
@@ -629,6 +671,21 @@ mod tests {
     }
 
     #[test]
+    fn given_mixed_connections_then_only_open_ones_get_the_playout() {
+        // GIVEN one open, one pending and one failed connection, WHEN the
+        // open ones are listed for the call's playout (ADR-0055), THEN only
+        // the open one is listed, and the slots are unchanged.
+        let mut slots: Slots<&str, &str> = Slots::default();
+        slots.begin(1, "c1").unwrap();
+        slots.up(1, "u1");
+        slots.begin(2, "c2").unwrap();
+        slots.begin(3, "c3").unwrap();
+        slots.end(3);
+        assert_eq!(slots.open().copied().collect::<Vec<_>>(), vec!["u1"]);
+        assert!(slots.is_connecting(2));
+    }
+
+    #[test]
     fn given_room_disconnect_when_applied_then_the_call_fails_with_network() {
         // GIVEN a room that ends by itself, WHEN applied, THEN Failed(Network) results.
         let mut tracker = SpeakingTracker::default();
@@ -728,5 +785,31 @@ mod tests {
             failure_for_connect(Transport, "received fatal alert: ProtocolVersion"),
             FailureCode::Tls
         );
+    }
+
+    /// GIVEN a call's playout at 0, 50, 100 and an over-limit volume
+    /// WHEN the gain is read
+    /// THEN it runs from 0.0 to 1.0, and an over-limit volume is cut to 1.0.
+    #[test]
+    fn given_volume_when_gain_is_read_then_it_is_between_zero_and_one() {
+        assert_eq!(Playout::new(0).gain(), 0.0);
+        assert_eq!(Playout::new(50).gain(), 0.5);
+        assert_eq!(Playout::new(100).gain(), 1.0);
+        let over = Playout::new(200);
+        assert_eq!(over.volume, MAX_VOLUME_PERCENT);
+        assert_eq!(over.gain(), 1.0);
+    }
+
+    /// GIVEN a new call WHEN it is deafened and undeafened THEN tracks are
+    /// disabled only while deafened, and the volume is kept.
+    #[test]
+    fn given_deafen_when_toggled_then_tracks_follow_and_volume_stays() {
+        let mut playout = Playout::new(40);
+        assert!(playout.enabled());
+        playout.deafened = true;
+        assert!(!playout.enabled());
+        assert_eq!(playout.volume, 40);
+        playout.deafened = false;
+        assert!(playout.enabled());
     }
 }

@@ -30,6 +30,9 @@
     | 'phone'
     | 'mic'
     | 'mic-off'
+    | 'headphones'
+    | 'headphones-off'
+    | 'volume'
     | 'video'
     | 'video-off'
     | 'screen';
@@ -89,6 +92,15 @@
     <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
   {:else if name === 'mic-off'}
     <path d="M9 9v2a3 3 0 0 0 5 2.2M15 9.3V6a3 3 0 0 0-5.9-.7M5 11a7 7 0 0 0 11.3 5.5M19 11a7 7 0 0 1-.6 2.8M12 18v3M3 3l18 18" />
+  {:else if name === 'headphones'}
+    <path d="M3 18v-6a9 9 0 0 1 18 0v6" />
+    <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3ZM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3Z" />
+  {:else if name === 'headphones-off'}
+    <path d="M3 18v-6a9 9 0 0 1 15.4-6.4M21 12v6" />
+    <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3ZM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3ZM3 3l18 18" />
+  {:else if name === 'volume'}
+    <path d="M11 5 6 9H2v6h4l5 4V5Z" />
+    <path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" />
   {:else if name === 'video'}
     <rect x="3" y="6" width="12" height="12" rx="2" />
     <path d="m15 10 6-3v10l-6-3" />

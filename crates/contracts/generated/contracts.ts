@@ -125,7 +125,20 @@ tile: number, participant: CallParticipantRef | null, own: boolean,
  */
 stream: number, };
 
-export type CallStatus = { phase: CallPhase, roomId: string | null, muted: boolean, 
+export type CallStatus = { phase: CallPhase, roomId: string | null, 
+/**
+ * The microphone is muted. Always true while `deafened`.
+ */
+muted: boolean, 
+/**
+ * All remote call audio is off and the microphone is muted (ADR-0055).
+ */
+deafened: boolean, 
+/**
+ * The playout volume of the call, 0 to [`CALL_VOLUME_MAX`] percent. 100
+ * when there is no call.
+ */
+volume: number, 
 /**
  * At most [`CALL_PARTICIPANTS_MAX`], other devices only.
  */
@@ -165,7 +178,7 @@ export type CallRings = { rings: Array<CallRing>, };
 
 export type CallDevice = { id: string, name: string, };
 
-export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, unreadable: boolean, };
+export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, volume: number, unreadable: boolean, };
 
 export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
 

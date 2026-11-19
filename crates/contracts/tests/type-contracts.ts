@@ -223,7 +223,7 @@ void bigintFilter;
 void unknownAttachment;
 void unknownSync;
 void missingHealth;
-const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false };
+const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false };
 const readyCall: CallReadiness = { available: false, reason: "no_call_server", activeMembers: 0 };
 // @ts-expect-error a status carries codes, never a token or URL
 const callWithToken: CallStatus = { ...idleCall, token: "secret" };
@@ -233,11 +233,11 @@ const unknownReason: CallUnavailable = "no_microphone";
 const unknownEnd: CallEnd = "crashed";
 // @ts-expect-error only the defined join errors are accepted
 const unknownJoin: CallJoinError = "busy";
-const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "Microphone" }], playout: [], cameras: [{ id: "c", name: "Camera" }], selectedRecording: null, selectedPlayout: null, selectedCamera: null, unreadable: false };
+const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "Microphone" }], playout: [], cameras: [{ id: "c", name: "Camera" }], selectedRecording: null, selectedPlayout: null, selectedCamera: null, volume: 100, unreadable: false };
 // @ts-expect-error a device list carries IDs and names, nothing else
 const deviceWithPath: CallDevices = { ...noDevices, recording: [{ id: "a", name: "b", path: "c" }] };
 // @ts-expect-error the saved choice must be explicit null, not missing
-const missingChoice: CallDevices = { supported: true, recording: [], playout: [], cameras: [], selectedRecording: null, selectedPlayout: null, unreadable: false };
+const missingChoice: CallDevices = { supported: true, recording: [], playout: [], cameras: [], selectedRecording: null, selectedPlayout: null, volume: 100, unreadable: false };
 const ringList: CallRings = { rings: [{ ringId: 1, roomId: "!r:s", caller: "@a:s", intent: "video", secondsLeft: 5 }] };
 // @ts-expect-error a ring carries no name or text, only IDs, the intent and the time left
 const ringWithName: CallRings = { rings: [{ ...ringList.rings[0], name: "x" }] };
@@ -245,6 +245,10 @@ const ringWithName: CallRings = { rings: [{ ...ringList.rings[0], name: "x" }] }
 const unknownIntent: CallIntent = "hologram";
 // @ts-expect-error the declined flag is required
 const missingDeclined: CallStatus = { ...idleCall, ringDeclined: undefined };
+// @ts-expect-error the deafen flag is required
+const missingDeafened: CallStatus = { ...idleCall, deafened: undefined };
+// @ts-expect-error the volume is a number
+const textVolume: CallStatus = { ...idleCall, volume: "100" };
 // @ts-expect-error only the defined camera states are accepted
 const unknownCamera: CallCamera = "notFound";
 // @ts-expect-error only the defined screen states are accepted
@@ -254,7 +258,7 @@ const missingScreen: CallStatus = { phase: "idle", roomId: null, muted: false, p
 const sharingScreen: CallScreen = "starting";
 void sharingScreen;
 // @ts-expect-error the camera state is required
-const missingCamera: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, screen: "off", video: [] };
+const missingCamera: CallStatus = { phase: "idle", roomId: null, muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, screen: "off", video: [] };
 // @ts-expect-error a tile names its participant explicitly, or null
 const tileWithoutParticipant: CallVideoTile = { tile: 0, own: true, stream: 0 };
 // @ts-expect-error a tile carries no picture data or URL
@@ -266,6 +270,8 @@ void unknownCamera;
 void missingCamera;
 void unknownScreen;
 void missingScreen;
+void missingDeafened;
+void textVolume;
 void tileWithoutParticipant;
 void tileWithoutStream;
 void tileWithUrl;

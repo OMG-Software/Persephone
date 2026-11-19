@@ -586,9 +586,10 @@ fn answer<T: serde::de::DeserializeOwned>(core: &Core, call: Call) -> Result<T, 
     }
 }
 
-/// GIVEN a core with no call WHEN the page asks for the call status, leaves
-/// or mutes THEN each is answered with an idle status and no error, and
-/// nothing crosses but codes.
+/// GIVEN a core with no call WHEN the page asks for the call status, leaves,
+/// mutes, deafens or sets the volume THEN each is answered with an idle
+/// status and no error, and nothing crosses but codes; a volume over 100
+/// percent is refused.
 #[test]
 fn given_no_call_then_status_leave_and_mute_answer_idle() {
     use persephone_contracts::CallStatus;
@@ -598,6 +599,10 @@ fn given_no_call_then_status_leave_and_mute_answer_idle() {
         Call::CallLeave {},
         Call::CallMute { muted: true },
         Call::CallMute { muted: false },
+        Call::CallDeafen { deafened: true },
+        Call::CallDeafen { deafened: false },
+        Call::CallVolume { percent: 0 },
+        Call::CallVolume { percent: 100 },
     ] {
         assert_eq!(
             answer::<CallStatus>(&core, call.clone()),
@@ -605,6 +610,62 @@ fn given_no_call_then_status_leave_and_mute_answer_idle() {
             "{call:?}"
         );
     }
+    for percent in [101, 255] {
+        assert_eq!(
+            answer::<CallStatus>(&core, Call::CallVolume { percent }),
+            Err(ErrorCode::InvalidArgument)
+        );
+    }
+}
+
+/// GIVEN an open profile WHEN the page sets the call volume THEN it is saved
+/// in the call device record and kept when the devices are saved again, and
+/// the volume keeps the saved devices; no call is not an error.
+#[test]
+fn given_a_profile_when_the_call_volume_is_set_then_it_is_saved_with_the_devices() {
+    use persephone_contracts::CallStatus;
+    use persephone_core::calls::devices::{Selection, load};
+    let dir = tempfile::TempDir::new().unwrap();
+    let core = Core::default().with_session(common::open_session(dir.path()));
+    let saved = |core: &Core| -> Selection {
+        let lease = core.session().admit().unwrap();
+        lease.stores().block_on(load(lease.stores())).unwrap()
+    };
+    assert_eq!(saved(&core).volume(), 100, "no record is full volume");
+    assert_eq!(
+        answer::<CallStatus>(&core, Call::CallVolume { percent: 40 }),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(saved(&core).volume, Some(40));
+    assert_eq!(
+        answer::<serde_json::Value>(
+            &core,
+            Call::SetCallDevices {
+                recording: Some("mic".into()),
+                playout: None,
+                camera: None,
+            },
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let record = saved(&core);
+    assert_eq!(
+        record.volume,
+        Some(40),
+        "saving the devices keeps the volume"
+    );
+    assert_eq!(record.recording.as_deref(), Some("mic"));
+    assert_eq!(
+        answer::<CallStatus>(&core, Call::CallVolume { percent: 0 }),
+        Ok(CallStatus::idle())
+    );
+    let record = saved(&core);
+    assert_eq!(record.volume, Some(0));
+    assert_eq!(
+        record.recording.as_deref(),
+        Some("mic"),
+        "the volume keeps the devices"
+    );
 }
 
 /// GIVEN a malformed room ID WHEN the page asks for readiness or a join THEN
@@ -705,6 +766,8 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         Call::CallStatus {},
         Call::CallLeave {},
         Call::CallMute { muted: true },
+        Call::CallDeafen { deafened: true },
+        Call::CallVolume { percent: 50 },
         Call::CallReadiness {
             room_id: room.into(),
         },

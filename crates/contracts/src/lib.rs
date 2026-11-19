@@ -45,6 +45,19 @@ fn safe_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error>
     }
 }
 
+/// The highest call playout volume, in percent: the sound as received
+/// (ADR-0055).
+pub const CALL_VOLUME_MAX: u8 = 100;
+
+fn call_volume<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    let value = u8::deserialize(deserializer)?;
+    if value <= CALL_VOLUME_MAX {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("call volume over 100 percent"))
+    }
+}
+
 /// Deliberately small frontend projection; never expose SDK, authentication, or key types here.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2238,7 +2251,9 @@ pub struct CallDevice {
 /// (ADR-0043, ADR-0048). `supported` is false where calls have no reviewed
 /// containment; the lists are then empty. A saved choice may name a device
 /// that is not connected now. `unreadable` is true when the saved record
-/// could not be read; all choices are then null.
+/// could not be read; all choices are then null and the volume is 100.
+/// `volume` is the saved playout volume, 0 to [`CALL_VOLUME_MAX`]
+/// (ADR-0055).
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallDevices {
@@ -2250,6 +2265,8 @@ pub struct CallDevices {
     pub selected_playout: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub selected_camera: Option<String>,
+    #[serde(deserialize_with = "call_volume")]
+    pub volume: u8,
     pub unreadable: bool,
 }
 
@@ -2324,7 +2341,14 @@ pub struct CallVideoTile {
 pub struct CallStatus {
     pub phase: CallPhase,
     pub room_id: Option<String>,
+    /// The microphone is muted. Always true while `deafened`.
     pub muted: bool,
+    /// All remote call audio is off and the microphone is muted (ADR-0055).
+    pub deafened: bool,
+    /// The playout volume of the call, 0 to [`CALL_VOLUME_MAX`] percent. 100
+    /// when there is no call.
+    #[serde(deserialize_with = "call_volume")]
+    pub volume: u8,
     /// At most [`CALL_PARTICIPANTS_MAX`], other devices only.
     pub participants: Vec<CallParticipant>,
     /// Set while `phase` is `ended`.
@@ -2382,6 +2406,8 @@ impl CallStatus {
             phase: CallPhase::Idle,
             room_id: None,
             muted: false,
+            deafened: false,
+            volume: CALL_VOLUME_MAX,
             participants: Vec::new(),
             ended: None,
             join_error: None,
@@ -2717,29 +2743,49 @@ mod personal_contract_tests {
     fn call_contracts_refuse_unknown_fields_and_codes() {
         assert_eq!(
             serde_json::to_string(&CallStatus::idle()).unwrap(),
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#
         );
         for wire in [
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"token":"x"}"#,
-            r#"{"phase":"paused","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
-            r#"{"phase":"ended","roomId":null,"muted":false,"participants":[],"ended":"crashed","joinError":null,"camera":"off","screen":"off","video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":"busy","camera":"off","screen":"off","video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":"no","participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
-            r#"{"phase":"active","roomId":null,"muted":false,"participants":[{"userId":"@a:s","deviceId":"D","speaking":false,"reachable":true,"keyed":true,"sharing":false,"url":"x"}],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"token":"x"}"#,
+            r#"{"phase":"paused","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"ended","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":"crashed","joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":"busy","camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":"no","deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"active","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[{"userId":"@a:s","deviceId":"D","speaking":false,"reachable":true,"keyed":true,"sharing":false,"url":"x"}],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
             // The camera and video fields are required, and the camera is a closed set.
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off"}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"notFound","video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"broken","video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":true,"video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":256,"participant":null,"own":true}]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":-1,"participant":null,"own":true}]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":0,"participant":null,"own":true,"url":"x"}]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":1,"participant":{"userId":"@a:s"},"own":false}]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":1,"participant":{"userId":"@a:s","deviceId":"D","x":1},"own":false}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off"}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"notFound","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"broken","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":true,"video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":256,"participant":null,"own":true}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":-1,"participant":null,"own":true}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":0,"participant":null,"own":true,"url":"x"}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":1,"participant":{"userId":"@a:s"},"own":false}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":1,"participant":{"userId":"@a:s","deviceId":"D","x":1},"own":false}]}"#,
+            // The deafen flag and the volume are required, and the volume is 0 to 100.
+            r#"{"phase":"idle","roomId":null,"muted":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":"no","volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":101,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":-1,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":50.5,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
         ] {
             assert!(serde_json::from_str::<CallStatus>(wire).is_err(), "{wire}");
+        }
+        let devices = |volume: &str| {
+            format!(
+                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":{volume},"unreadable":false}}"#
+            )
+        };
+        assert!(serde_json::from_str::<CallDevices>(&devices("0")).is_ok());
+        assert!(serde_json::from_str::<CallDevices>(&devices("100")).is_ok());
+        for volume in ["101", "-1", "255", "50.5", "null", "\"50\""] {
+            assert!(
+                serde_json::from_str::<CallDevices>(&devices(volume)).is_err(),
+                "{volume}"
+            );
         }
         for wire in [
             r#"{"available":true,"reason":null,"activeMembers":256}"#,
@@ -2771,7 +2817,7 @@ mod personal_contract_tests {
             assert!(serde_json::from_str::<CallRings>(wire).is_err(), "{wire}");
         }
         let status: CallStatus = serde_json::from_str(
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
         )
         .unwrap();
         assert!(!status.ring_declined);

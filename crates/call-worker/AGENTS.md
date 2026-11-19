@@ -20,13 +20,14 @@ The contained process that runs one call (ADR-0043). It joins one LiveKit room w
 - A camera error never ends the call: report `CameraState`. A chosen camera that is absent is `NotFound`; never fall back to another camera. Turning the camera off revokes frame admission, stops and joins the capture thread (at most 3 s), then unpublishes the track. A capture that does not stop in time is kept and polled; no new camera opens while it runs, and the state is `Unavailable`, not `Off`.
 - Every own track (microphone and camera) needs its frame cryptor set to the current own key index. `SetOwnKey` updates all of them. The camera sends no picture before that.
 - Never await a camera open in the event loop. `begin_camera` opens on its own thread, and the result comes back through a bounded channel to `camera_opened`. `CameraGate` allows one open at a time, drops a stale result and releases its camera. `SetOwnKey`, `SetKey` and `Leave` are served while an open waits.
+- Remote audio follows one `Playout` (deafened and volume, ADR-0055). Apply it to every subscribed remote audio track on every connection (the own room and each open room in `others`) when it changes, when another SFU's room opens, and to each new track in `TrackSubscribed`. Set the volume before enabling a track. Deafen never changes the microphone: the core sends `SetMuted` itself, before `SetDeafened(true)`.
 - Pictures never use the control queue. `output.rs` keeps at most one waiting picture per tile (newest wins), and control messages always go out first. Pictures are RGBA in byte order R, G, B, A, at most 640x360 and 15 per second per camera tile, and at most 1280x720 and 5 per second on the screen tile (5), checked by tile index before allocation.
 
 ## Build
 
 - The pinned libwebrtc must be verified first: `python tools/dev.py webrtc`. Set `LK_CUSTOM_WEBRTC` to the directory it prints for every cargo command. The build must never download libwebrtc.
 - On Windows the prebuilt libwebrtc uses the static C runtime. Build and test this package with `RUSTFLAGS=-C target-feature=+crt-static`. `tools/dev.py` does this and builds the package apart from the rest of the workspace.
-- `third_party/` holds vendored LiveKit crates with small marked patches (TLS 1.3 only and no proxy variables in `livekit-net`; key ring of 256 in `libwebrtc` and `webrtc-sys`). Read each `PERSEPHONE-PATCH.md`. They are patch sources, not workspace members.
+- `third_party/` holds vendored LiveKit crates with small marked patches (TLS 1.3 only and no proxy variables in `livekit-net`; key ring of 256 and a remote audio volume in `libwebrtc` and `webrtc-sys`). Read each `PERSEPHONE-PATCH.md`. They are patch sources, not workspace members.
 
 ## Checks
 

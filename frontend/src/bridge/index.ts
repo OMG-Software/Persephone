@@ -481,6 +481,23 @@ export function callMute(muted: boolean): Promise<CallStatus> {
 }
 
 /**
+ * Deafens or undeafens the call (ADR-0055): all call sound and the
+ * microphone go off, or come back with the microphone as it was before.
+ * Unmuting also undeafens. The worker's answer arrives as a call change.
+ */
+export function callDeafen(deafened: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_deafen', { deafened });
+}
+
+/**
+ * Sets the call volume, a whole number from 0 to 100 percent (ADR-0055). It
+ * applies at once to a running call and is saved for later calls.
+ */
+export function callVolume(percent: number): Promise<CallStatus> {
+  return invoke<CallStatus>('call_volume', { percent });
+}
+
+/**
  * The call microphones and speakers now connected, and the saved choice
  * (ADR-0043). The core lists them through a contained worker, so it can take
  * a few seconds. Names are untrusted text: render them as plain text only.

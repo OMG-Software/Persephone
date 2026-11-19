@@ -677,6 +677,20 @@ pub enum Call {
     CallMute {
         muted: bool,
     },
+    /// Deafen or undeafen the call (ADR-0055): all remote audio goes off and
+    /// the microphone mutes, or remote audio comes back and the microphone
+    /// returns to the user's own mute choice. Unmuting with [`Call::CallMute`]
+    /// also undeafens. Replies `CallStatus`; the worker's answer arrives as
+    /// [`Event::CallChanged`].
+    CallDeafen {
+        deafened: bool,
+    },
+    /// Set the call playout volume, 0 to [`MAX_CALL_VOLUME_PERCENT`]
+    /// (ADR-0055). It is saved for later calls and applies at once to a
+    /// running call. Replies `CallStatus`.
+    CallVolume {
+        percent: u8,
+    },
     /// Turn the camera on or off during a call. Replies `CallStatus`, with the
     /// camera `starting` when turned on; the worker's answer arrives as
     /// [`Event::CallChanged`]. Refused when no call is connected.
@@ -919,6 +933,8 @@ pub const MAX_CALL_DEVICE_ID_BYTES: usize = 512;
 /// Video tiles in a call: tile 0 is the own camera, tiles 1 to 4 are remote
 /// cameras, tile 5 is the remote screen share (ADR-0053).
 pub const CALL_VIDEO_TILES: u8 = 6;
+/// The highest call playout volume, in percent (ADR-0055).
+pub const MAX_CALL_VOLUME_PERCENT: u8 = 100;
 
 /// The tile of the remote screen share.
 pub const CALL_SCREEN_TILE: u8 = 5;
@@ -1160,8 +1176,9 @@ pub struct VideoPicture {
 /// commands: [`Call::CallVideoFrame`] needs a tile below [`CALL_VIDEO_TILES`]
 /// and a JavaScript-safe `after` and `stream`; a camera ID in [`Call::SetCallDevices`]
 /// must be non-empty, at most [`MAX_CALL_DEVICE_ID_BYTES`] and free of
-/// control characters. Any other call is not constrained here and gives
-/// `true`.
+/// control characters; [`Call::CallVolume`] is at most
+/// [`MAX_CALL_VOLUME_PERCENT`]. Any other call is not constrained here and
+/// gives `true`.
 pub fn call_video_within_limits(call: &Call) -> bool {
     match call {
         Call::CallVideoFrame {
@@ -1178,6 +1195,7 @@ pub fn call_video_within_limits(call: &Call) -> bool {
                 && id.len() <= MAX_CALL_DEVICE_ID_BYTES
                 && !id.chars().any(char::is_control)
         }),
+        Call::CallVolume { percent } => *percent <= MAX_CALL_VOLUME_PERCENT,
         _ => true,
     }
 }
@@ -1983,6 +2001,14 @@ mod tests {
                 r#"{"id":1,"call":{"command":"call_mute","muted":true}}"#,
             ),
             (
+                Call::CallDeafen { deafened: true },
+                r#"{"id":1,"call":{"command":"call_deafen","deafened":true}}"#,
+            ),
+            (
+                Call::CallVolume { percent: 35 },
+                r#"{"id":1,"call":{"command":"call_volume","percent":35}}"#,
+            ),
+            (
                 Call::CallStatus {},
                 r#"{"id":1,"call":{"command":"call_status"}}"#,
             ),
@@ -2435,6 +2461,14 @@ mod tests {
             br#"{"id":1,"call":{"command":"call_mute"}}"#,
             br#"{"id":1,"call":{"command":"call_mute","muted":"yes"}}"#,
             br#"{"id":1,"call":{"command":"call_mute","muted":true,"user":"@a:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_deafen"}}"#,
+            br#"{"id":1,"call":{"command":"call_deafen","deafened":1}}"#,
+            br#"{"id":1,"call":{"command":"call_deafen","deafened":true,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"call_volume"}}"#,
+            br#"{"id":1,"call":{"command":"call_volume","percent":256}}"#,
+            br#"{"id":1,"call":{"command":"call_volume","percent":-1}}"#,
+            br#"{"id":1,"call":{"command":"call_volume","percent":50.5}}"#,
+            br#"{"id":1,"call":{"command":"call_volume","percent":"50"}}"#,
             br#"{"id":1,"call":{"command":"call_status","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_rings","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_decline_ring"}}"#,
@@ -3182,6 +3216,17 @@ mod tests {
         assert!(!call_video_within_limits(&devices(Some("a\nb".into()))));
         assert!(call_video_within_limits(&Call::CallCamera { on: true }));
         assert!(call_video_within_limits(&Call::CallScreen { on: true }));
+        // The volume is 0 to 100; the wire type already refuses 256 and up.
+        assert!(call_video_within_limits(&Call::CallVolume { percent: 0 }));
+        assert!(call_video_within_limits(&Call::CallVolume {
+            percent: MAX_CALL_VOLUME_PERCENT
+        }));
+        assert!(!call_video_within_limits(&Call::CallVolume {
+            percent: MAX_CALL_VOLUME_PERCENT + 1
+        }));
+        assert!(!call_video_within_limits(&Call::CallVolume {
+            percent: 255
+        }));
     }
 
     /// GIVEN video replies of many sizes on camera tiles and the screen tile

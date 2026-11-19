@@ -19,7 +19,7 @@ use livekit::{
     options::{TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{
         AudioProcessingOptions, LocalAudioTrack, LocalTrack, LocalTrackPublication,
-        LocalVideoTrack, PlatformAudio, RemoteTrack, TrackSid, TrackSource,
+        LocalVideoTrack, PlatformAudio, RemoteAudioTrack, RemoteTrack, TrackSid, TrackSource,
     },
     rtc_engine::EngineError,
     webrtc::{
@@ -49,7 +49,7 @@ use zeroize::Zeroizing;
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
-    ConnectFault, RoomChange, Slot, Slots, SpeakingTracker, apply, bounded_device_list,
+    ConnectFault, Playout, RoomChange, Slot, Slots, SpeakingTracker, apply, bounded_device_list,
     choose_device, failure_for_connect, valid_identity,
 };
 use crate::output::{Closed, Output, PictureSink};
@@ -90,6 +90,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         playout_device,
         camera_device,
         camera_on,
+        volume,
     } = first
     else {
         return fail(output, FailureCode::Protocol).await;
@@ -226,7 +227,11 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         other_options,
         connect_tx,
         others: Others::default(),
+        playout: Playout::new(volume),
     };
+    // Tracks subscribed during the connect get the volume now; later ones
+    // when their subscription is handled.
+    call.apply_playout();
     let mut end = None;
     if camera_on
         && let Some(state) = call.begin_camera(camera::Grant::default())
@@ -388,6 +393,9 @@ struct Call<'a> {
     /// The connections to other SFUs by index (1 to 3). An index is used
     /// once: a failed or ended connection is never reopened.
     others: Others,
+    /// The volume and deafen state of every remote audio track, on every
+    /// connection (ADR-0055).
+    playout: Playout,
 }
 
 /// The connections to other SFUs (ADR-0054). They subscribe only: nothing
@@ -563,6 +571,17 @@ struct OpenedScreen {
     capture: camera::Capture,
     source: NativeVideoSource,
     live: Arc<FrameAdmission>,
+}
+
+/// Gives one remote audio track the call's playout. The gain is set first,
+/// so a track that is enabled here never plays at the old volume.
+fn play_remote_audio(track: &RemoteAudioTrack, playout: Playout) {
+    track.rtc_track().set_volume(playout.gain());
+    if playout.enabled() {
+        track.enable();
+    } else {
+        track.disable();
+    }
 }
 
 /// The own camera while it is on.
@@ -1404,6 +1423,9 @@ impl Call<'_> {
                 }
                 events.insert(index, receiver);
                 self.others.up(index, room);
+                // Tracks subscribed during the connect get the playout now;
+                // later ones when their subscription is handled.
+                self.apply_playout();
                 Ok(())
             }
             Err(()) => {
@@ -1414,6 +1436,18 @@ impl Call<'_> {
                         up: false,
                     })
                     .await
+            }
+        }
+    }
+
+    /// Gives every subscribed remote audio track the call's playout.
+    fn apply_playout(&self) {
+        let rooms = std::iter::once(self.room).chain(self.others.open());
+        for participant in rooms.flat_map(|room| room.remote_participants().into_values()) {
+            for publication in participant.track_publications().values() {
+                if let Some(RemoteTrack::Audio(track)) = publication.track() {
+                    play_remote_audio(&track, self.playout);
+                }
             }
         }
     }
@@ -1449,9 +1483,17 @@ impl Call<'_> {
         }
     }
 
-    /// Follows the video tracks of remote participants.
+    /// Follows the remote tracks of any connection: audio gets the call's
+    /// playout, video a tile.
     async fn on_event(&mut self, connection: u8, event: &RoomEvent) -> Result<(), Closed> {
         match event {
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(track),
+                ..
+            } => {
+                play_remote_audio(track, self.playout);
+                Ok(())
+            }
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Video(track),
                 publication,
@@ -1569,6 +1611,19 @@ impl Call<'_> {
                     self.publication.unmute();
                 }
                 Ok(vec![FromWorker::Muted { muted }])
+            }
+            ToWorker::SetDeafened { deafened } => {
+                self.playout.deafened = deafened;
+                self.apply_playout();
+                Ok(vec![FromWorker::Deafened { deafened }])
+            }
+            ToWorker::SetVolume { percent } => {
+                self.playout = Playout {
+                    volume: percent,
+                    ..self.playout
+                };
+                self.apply_playout();
+                Ok(Vec::new())
             }
             ToWorker::SetCamera { on: true, remote } => {
                 // The remote that came with this command, taken now so it

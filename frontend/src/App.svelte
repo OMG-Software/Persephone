@@ -23,11 +23,12 @@
     shownRings,
     videoCallButton,
     CallOperations,
+    LatestOnly,
     type ShownRing
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callCamera, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import { LEAVE_NOT_DONE, LEAVE_QUESTION, LEAVING_TEXT, leaveAfterDraftFlush } from './roomLeave';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
@@ -760,6 +761,8 @@
   let callBusy = $state(false);
   let cameraBusy = $state(false);
   let screenBusy = $state(false);
+  // The volume the slider is moving to, until the core has the last value.
+  let volumeDraft = $state<number | null>(null);
   // Goes up each time the core says a new video picture is waiting.
   let callVideoTicks = $state(0);
   let callJoinText = $state<string | null>(null);
@@ -796,6 +799,31 @@
     },
     () => callOperations.completed
   );
+
+  // Sends the newest call volume only, one at a time (ADR-0055).
+  const volumeSender = new LatestOnly<number>(
+    async (percent) => {
+      const generation = sessionGeneration;
+      const operation = callOperations.begin();
+      try {
+        const reply = await callVolume(percent);
+        if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
+      } catch {
+        // The next call change shows the real volume.
+      } finally {
+        if (generation === sessionGeneration) callOperations.complete(operation);
+      }
+    },
+    () => {
+      volumeDraft = null;
+      callRefresher.request();
+    }
+  );
+
+  function changeVolume(percent: number) {
+    volumeDraft = percent;
+    volumeSender.set(percent);
+  }
 
   const callRoomName = $derived(
     callState.roomId === null
@@ -1049,6 +1077,24 @@
     }
   }
 
+  async function toggleDeafen() {
+    const generation = sessionGeneration;
+    callBusy = true;
+    const operation = callOperations.begin();
+    try {
+      const reply = await callDeafen(!callState.deafened);
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
+    } catch {
+      // The next call change shows the real state.
+    } finally {
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        callBusy = false;
+        callRefresher.request();
+      }
+    }
+  }
+
   async function toggleCamera() {
     const generation = sessionGeneration;
     cameraBusy = true;
@@ -1106,6 +1152,8 @@
     callBusy = false;
     cameraBusy = false;
     screenBusy = false;
+    volumeSender.clear();
+    volumeDraft = null;
     callJoinText = null;
     cameraText = null;
     cameraRequest += 1;
@@ -2896,7 +2944,10 @@
           busy={callBusy}
           {cameraBusy}
           {screenBusy}
+          volume={volumeDraft ?? callState.volume}
           onmute={toggleMute}
+          ondeafen={toggleDeafen}
+          onvolume={changeVolume}
           oncamera={toggleCamera}
           onscreen={toggleScreen}
           onleave={leaveCall}

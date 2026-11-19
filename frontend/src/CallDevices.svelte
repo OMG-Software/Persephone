@@ -1,16 +1,29 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { CallDevices } from '../../crates/contracts/generated/contracts';
-  import { callDevices, setCallDevices } from './bridge';
-  import { deviceChoice, deviceOptions, deviceValue, devicesNote } from './calls';
+  import { callDevices, callVolume, setCallDevices } from './bridge';
+  import {
+    deviceChoice,
+    deviceOptions,
+    deviceValue,
+    devicesNote,
+    VOLUME_LABEL,
+    VOLUME_MAX,
+    VOLUME_SAVE_TEXT,
+    volumeText,
+    volumeValue
+  } from './calls';
 
-  // The call microphone, speaker and camera (ADR-0043, ADR-0048). The core lists them through a
+  // The call microphone, speaker, camera and volume (ADR-0043, ADR-0048,
+  // ADR-0055). The core lists the devices through a
   // contained worker and keeps the choice with the profile. Device names come
   // from the operating system: they are shown as plain text only.
   let devices = $state<CallDevices | null>(null);
   let recording = $state('');
   let playout = $state('');
   let camera = $state('');
+  let volume = $state(VOLUME_MAX);
+  let volumeSaving = $state(false);
   let loading = $state(false);
   let saving = $state(false);
   let failure = $state<string | null>(null);
@@ -35,6 +48,7 @@
       recording = deviceValue(next.selectedRecording);
       playout = deviceValue(next.selectedPlayout);
       camera = deviceValue(next.selectedCamera);
+      volume = next.volume;
     } catch (reason) {
       if (mine === generation) failure = failures[String(reason)] ?? 'The call devices could not be listed.';
     } finally {
@@ -56,6 +70,24 @@
       failure = failures[String(reason)] ?? 'The call devices could not be saved.';
     } finally {
       saving = false;
+    }
+  }
+
+  // Saves the volume when the slider is let go. It also applies at once to a
+  // call that runs. On failure the slider goes back to the saved value.
+  async function saveVolume() {
+    if (volumeSaving || !devices) return;
+    volumeSaving = true;
+    failure = null;
+    const wanted = volume;
+    try {
+      await callVolume(wanted);
+      if (devices) devices = { ...devices, volume: wanted };
+    } catch (reason) {
+      failure = failures[String(reason)] ?? VOLUME_SAVE_TEXT;
+      if (devices) volume = devices.volume;
+    } finally {
+      volumeSaving = false;
     }
   }
 
@@ -104,6 +136,19 @@
         <option value={option.value}>{option.label}</option>
       {/each}
     </select>
+    <label for="call-volume">{VOLUME_LABEL}: <output for="call-volume">{volumeText(volume)}</output></label>
+    <input
+      id="call-volume"
+      type="range"
+      min="0"
+      max={VOLUME_MAX}
+      step="5"
+      disabled={!devices || devices.unreadable || loading || volumeSaving}
+      value={volume}
+      aria-valuetext={volumeText(volume)}
+      oninput={(event) => (volume = volumeValue(Number(event.currentTarget.value)))}
+      onchange={saveVolume}
+    />
     {#if devices}
       <p class="note">{devicesNote(devices)}</p>
     {/if}

@@ -87,6 +87,8 @@ export const IDLE_CALL: CallStatus = {
   phase: 'idle',
   roomId: null,
   muted: false,
+  deafened: false,
+  volume: 100,
   participants: [],
   ended: null,
   joinError: null,
@@ -384,9 +386,81 @@ export function deviceChoice(value: string): string | null {
   return value === '' ? null : value;
 }
 
+/** The highest call volume: the sound as received (ADR-0055). */
+export const VOLUME_MAX = 100;
+export const VOLUME_LABEL = 'Call volume';
+export const DEAFEN_LABEL = 'Deafen';
+export const UNDEAFEN_LABEL = 'Undeafen';
+/** The accessible description of the deafen button: what it does besides silencing the call. */
+export const DEAFEN_TEXT = 'Turns off all call sound and mutes your microphone';
+export const VOLUME_SAVE_TEXT = 'The call volume could not be saved.';
+
+/**
+ * A slider value as a volume: a whole number from 0 to 100. Anything that is
+ * not a finite number is full volume, so a bad value never silences a call.
+ */
+export function volumeValue(value: number): number {
+  if (!Number.isFinite(value)) return VOLUME_MAX;
+  return Math.min(VOLUME_MAX, Math.max(0, Math.round(value)));
+}
+
+/** The text a volume is read and shown as. */
+export function volumeText(percent: number): string {
+  return `${volumeValue(percent)}%`;
+}
+
+/**
+ * Sends only the newest value. While one send waits, later values replace
+ * each other, and the last one goes when the send ends. So a slider that
+ * moves fast sends at most one value per round trip, and its final position
+ * is always sent. `settled` runs when no send waits and none is due.
+ */
+export class LatestOnly<T> {
+  #send: (value: T) => Promise<void>;
+  #settled: () => void;
+  #sending = false;
+  #next: { value: T } | null = null;
+
+  constructor(send: (value: T) => Promise<void>, settled: () => void = () => {}) {
+    this.#send = send;
+    this.#settled = settled;
+  }
+
+  /** Sends `value` now, or after the send that waits. */
+  set(value: T): void {
+    this.#next = { value };
+    if (!this.#sending) void this.#run();
+  }
+
+  /** Drops a value that has not gone yet (a session change). */
+  clear(): void {
+    this.#next = null;
+  }
+
+  /** True while a send waits or a value is due. */
+  get busy(): boolean {
+    return this.#sending || this.#next !== null;
+  }
+
+  async #run(): Promise<void> {
+    this.#sending = true;
+    while (this.#next !== null) {
+      const { value } = this.#next;
+      this.#next = null;
+      try {
+        await this.#send(value);
+      } catch {
+        // The caller's send reports its own failure.
+      }
+    }
+    this.#sending = false;
+    this.#settled();
+  }
+}
+
 export const DEVICES_UNSUPPORTED_TEXT = 'Calls are not available on this system yet.';
 export const DEVICES_UNREADABLE_TEXT = 'The saved call devices could not be read. Choose them again.';
-export const DEVICES_NOTE_TEXT = 'Changes apply from the next call.';
+export const DEVICES_NOTE_TEXT = 'Device changes apply from the next call. The volume changes at once.';
 
 /** The note under the menus, for a device reply. */
 export function devicesNote(devices: CallDevices): string {

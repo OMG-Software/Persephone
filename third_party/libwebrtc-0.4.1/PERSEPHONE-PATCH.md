@@ -13,3 +13,12 @@ license file; `LICENSE-APACHE` is the standard Apache-2.0 text, copied from the
 The same change is needed in `webrtc-sys` (see its PERSEPHONE-PATCH.md): that
 crate clamps the ring size again in C++. The prebuilt libwebrtc allows 256
 (`MAX_KEYRING_SIZE` in `api/crypto/frame_crypto_transformer.h`).
+
+## Remote audio volume (ADR-0055)
+
+- `src/native/audio_track.rs` and `src/audio_track.rs`:
+  `RtcAudioTrack::set_volume(f64)` calls `webrtc-sys`'s
+  `AudioTrack::set_volume`, which clamps to 0.0..1.0. The call worker uses
+  it for the call volume and deafen of remote tracks.
+
+Each change is marked `PERSEPHONE PATCH (ADR-0055)`.

@@ -40,7 +40,10 @@ import {
   ringButtons,
   ringsAnnouncement,
   ringsKey,
-  shownRings
+  shownRings,
+  LatestOnly,
+  volumeText,
+  volumeValue
 } from '../src/calls.ts';
 
 const status = (over) => ({ ...IDLE_CALL, ...over });
@@ -401,4 +404,66 @@ test('GIVEN shown rings WHEN a ring is added or replaced THEN the announcement k
 
 test('GIVEN the idle call WHEN read THEN the ring was not declined', () => {
   assert.equal(IDLE_CALL.ringDeclined, false);
+});
+
+test('GIVEN slider values WHEN read as a volume THEN they are whole numbers from 0 to 100, and a bad value is full volume', () => {
+  assert.equal(volumeValue(0), 0);
+  assert.equal(volumeValue(42.4), 42);
+  assert.equal(volumeValue(100), 100);
+  assert.equal(volumeValue(140), 100);
+  assert.equal(volumeValue(-5), 0);
+  assert.equal(volumeValue(Number.NaN), 100);
+  assert.equal(volumeValue(Number.POSITIVE_INFINITY), 100);
+  assert.equal(volumeText(35), '35%');
+  assert.equal(IDLE_CALL.volume, 100);
+  assert.equal(IDLE_CALL.deafened, false);
+});
+
+test('GIVEN a send that waits WHEN values arrive meanwhile THEN only the newest goes next, and settled runs once at the end', async () => {
+  const sent = [];
+  const gates = [];
+  let settled = 0;
+  const latest = new LatestOnly(
+    (value) => {
+      sent.push(value);
+      return new Promise((resolve) => gates.push(resolve));
+    },
+    () => {
+      settled += 1;
+    }
+  );
+  latest.set(10);
+  latest.set(20);
+  latest.set(30);
+  assert.deepEqual(sent, [10]);
+  assert.equal(latest.busy, true);
+  gates.shift()();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(sent, [10, 30], 'the values in between are dropped');
+  assert.equal(settled, 0);
+  gates.shift()();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(settled, 1);
+  assert.equal(latest.busy, false);
+});
+
+test('GIVEN a failing send or a cleared value WHEN the sender runs THEN it goes on, and a cleared value is not sent', async () => {
+  const sent = [];
+  let release;
+  const latest = new LatestOnly((value) => {
+    sent.push(value);
+    if (value === 1) return Promise.reject(new Error('locked'));
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  });
+  latest.set(1);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  latest.set(2);
+  latest.set(3);
+  latest.clear();
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(sent, [1, 2], 'a failure does not stop it, and 3 was cleared');
+  assert.equal(latest.busy, false);
 });

@@ -168,6 +168,8 @@ Proposed option: "a contained call worker".
   `DeviceNotFound`. The worker never falls back to another device, because
   that device could be a microphone the user did not choose. A record that
   cannot be read stops the join too.
+* The same record keeps the call volume, which applies at once to a
+  running call. Deafen and the volume are in [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md).
 
 ### Session lifecycle
 
@@ -257,7 +259,8 @@ Proposed option: "a contained call worker".
   send the call's audio and keys anywhere.
 * Opus audio is decoded in native code, outside the WebAssembly guest of
   ADR-0003. ADR-0003 keeps governing images.
-* Two vendored patches to maintain.
+* Two vendored patches to maintain. [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md) adds a remote
+  audio volume to `libwebrtc` and `webrtc-sys`.
 * The SFU and TURN operators see who is in a call, when, from which IP
   address, and the size and timing of the packets. They do not see the
   audio.
@@ -300,3 +303,4 @@ Proposed option: "a contained call worker".
 * [ADR-0028](0028-route-every-connection-through-the-profiles-socks5-proxy.md)
 * [Windows sandbox evidence](../evidence/windows-sandbox.md)
 * [Live call run with Element Call](../evidence/live-calls.md)
+* [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md)
