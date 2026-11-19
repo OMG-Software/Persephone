@@ -108,6 +108,17 @@ impl CoreTransport for FakeCore {
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false}),
             ),
             Call::CallStatus {} | Call::CallLeave {} => Ok(call_idle()),
+            Call::CallRings {} => Ok(serde_json::json!({"rings": [
+                {"roomId": "!r:example.invalid", "caller": "@bob:example.invalid", "intent": "video", "secondsLeft": 42}
+            ]})),
+            Call::CallDeclineRing { room_id } => match room_id.as_str() {
+                "!r:example.invalid" => Ok(serde_json::json!({"rings": []})),
+                // A ring with a field outside the contract must not reach the page.
+                "!leaky:example.invalid" => Ok(serde_json::json!({"rings": [
+                    {"roomId": "!r:example.invalid", "caller": "@bob:example.invalid", "intent": "audio", "secondsLeft": 1, "body": "hi"}
+                ]})),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
             Call::CallReadiness { room_id } => match room_id.as_str() {
                 "!r:example.invalid" => {
                     Ok(serde_json::json!({"available": true, "reason": null, "activeMembers": 1}))
@@ -690,7 +701,7 @@ impl CoreTransport for FakeCore {
 /// A well-formed image handle the fake core knows.
 /// The call status when no call exists.
 fn call_idle() -> serde_json::Value {
-    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "video": []})
+    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "video": [], "ringDeclined": false})
 }
 
 const HANDLE: &str = "0123456789abcdef0123456789abcdef";
@@ -928,6 +939,8 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-camera",
             "allow-call-video-frame",
             "allow-call-status",
+            "allow-call-rings",
+            "allow-call-decline-ring",
             "allow-set-up-encryption",
             "allow-recover-with-key",
             "allow-send-message",
@@ -1430,6 +1443,22 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
     assert_eq!(muted["muted"], true);
     assert_eq!(muted["participants"][0]["userId"], "@bob:example.invalid");
 
+    // The rings are listed without arguments, and a decline names one room.
+    let rings = invoke("call_rings", serde_json::json!({})).unwrap();
+    assert_eq!(rings["rings"][0]["caller"], "@bob:example.invalid");
+    assert_eq!(rings["rings"][0]["secondsLeft"], 42);
+    assert_eq!(
+        invoke("call_decline_ring", room("!r:example.invalid")).unwrap(),
+        serde_json::json!({"rings": []})
+    );
+    assert_eq!(
+        invoke("call_decline_ring", room("!nope:example.invalid")).unwrap_err(),
+        "not_found"
+    );
+    assert!(invoke("call_decline_ring", room("!leaky:example.invalid")).is_err());
+    assert!(invoke("call_decline_ring", serde_json::json!({})).is_err());
+    assert!(invoke("call_decline_ring", serde_json::json!({"roomId": 5})).is_err());
+
     let before = core.calls.load(Ordering::SeqCst);
     let long = "!".to_owned() + &"r".repeat(MAX_ROOM_ID_BYTES);
     assert_eq!(
@@ -1446,6 +1475,10 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
     assert!(invoke("call_mute", serde_json::json!({})).is_err());
     assert!(invoke("call_camera", serde_json::json!({"on": 1})).is_err());
     assert!(invoke("call_camera", serde_json::json!({})).is_err());
+    assert_eq!(
+        invoke("call_decline_ring", room(&long)).unwrap_err(),
+        "invalid_argument"
+    );
     assert_eq!(core.calls.load(Ordering::SeqCst), before);
 }
 
@@ -2409,26 +2442,38 @@ fn given_a_notification_event_then_only_the_toaster_sees_it() {
         subscriptions.dispatch(Event::Notification {
             room: room.into(),
             sender: "Bob".into(),
+            call: false,
         });
     }
-    let toasts: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let toasts: Arc<Mutex<Vec<(String, String, bool)>>> = Arc::default();
     let shown = toasts.clone();
-    subscriptions.set_toaster(Box::new(move |room, sender| {
-        shown.lock().unwrap().push((room.into(), sender.into()));
+    subscriptions.set_toaster(Box::new(move |room, sender, call| {
+        shown
+            .lock()
+            .unwrap()
+            .push((room.into(), sender.into(), call));
     }));
     subscriptions.dispatch(Event::Notification {
         room: "Later".into(),
         sender: "Ann".into(),
+        call: false,
     });
     subscriptions.dispatch(Event::Notification {
         room: "x".repeat(513),
         sender: "Bob".into(),
+        call: false,
+    });
+    subscriptions.dispatch(Event::Notification {
+        room: String::new(),
+        sender: "Cy".into(),
+        call: true,
     });
     assert_eq!(
         *toasts.lock().unwrap(),
         vec![
-            ("Plans".to_owned(), "Bob".to_owned()),
-            ("Later".to_owned(), "Ann".to_owned())
+            ("Plans".to_owned(), "Bob".to_owned(), false),
+            ("Later".to_owned(), "Ann".to_owned(), false),
+            (String::new(), "Cy".to_owned(), true)
         ]
     );
     assert!(
@@ -3169,6 +3214,24 @@ fn given_notifications_with_and_without_names_then_only_named_ones_show_names() 
     assert_eq!(
         persephone_desktop::toast_text("", ""),
         ("Persephone".to_owned(), "New message".to_owned())
+    );
+}
+
+/// GIVEN an incoming call notification WHEN its text is made THEN it says
+/// "Incoming call" and names the caller only when the core sent a name; it
+/// never carries the room or message text (ADR-0052).
+#[test]
+fn given_call_notifications_then_the_text_is_incoming_call_and_names_only_when_sent() {
+    assert_eq!(
+        persephone_desktop::call_toast_text("@bob:example.invalid"),
+        (
+            "Incoming call".to_owned(),
+            "@bob:example.invalid".to_owned()
+        )
+    );
+    assert_eq!(
+        persephone_desktop::call_toast_text(""),
+        ("Incoming call".to_owned(), "Persephone".to_owned())
     );
 }
 

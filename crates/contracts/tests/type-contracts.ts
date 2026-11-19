@@ -2,6 +2,8 @@ import type {
   AppStatus,
   CallCamera,
   CallDevices,
+  CallIntent,
+  CallRings,
   CallEnd,
   CallJoinError,
   CallReadiness,
@@ -48,6 +50,7 @@ const invalidName: RoomSummary = {
   encryption: "encrypted",
   contact: null,
   pictureId: null,
+  hasCall: false,
 };
 
 const pictureWithUrl: RoomPicture = {
@@ -219,7 +222,7 @@ void bigintFilter;
 void unknownAttachment;
 void unknownSync;
 void missingHealth;
-const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, camera: "off", video: [] };
+const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, camera: "off", video: [], ringDeclined: false };
 const readyCall: CallReadiness = { available: false, reason: "no_call_server", activeMembers: 0 };
 // @ts-expect-error a status carries codes, never a token or URL
 const callWithToken: CallStatus = { ...idleCall, token: "secret" };
@@ -234,6 +237,13 @@ const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "
 const deviceWithPath: CallDevices = { ...noDevices, recording: [{ id: "a", name: "b", path: "c" }] };
 // @ts-expect-error the saved choice must be explicit null, not missing
 const missingChoice: CallDevices = { supported: true, recording: [], playout: [], cameras: [], selectedRecording: null, selectedPlayout: null, unreadable: false };
+const ringList: CallRings = { rings: [{ roomId: "!r:s", caller: "@a:s", intent: "video", secondsLeft: 5 }] };
+// @ts-expect-error a ring carries no name or text, only IDs, the intent and the time left
+const ringWithName: CallRings = { rings: [{ ...ringList.rings[0], name: "x" }] };
+// @ts-expect-error only audio and video are intents
+const unknownIntent: CallIntent = "hologram";
+// @ts-expect-error the declined flag is required
+const missingDeclined: CallStatus = { ...idleCall, ringDeclined: undefined };
 // @ts-expect-error only the defined camera states are accepted
 const unknownCamera: CallCamera = "notFound";
 // @ts-expect-error the camera state is required
@@ -260,3 +270,7 @@ void callWithToken;
 void unknownReason;
 void unknownEnd;
 void unknownJoin;
+void ringList;
+void ringWithName;
+void unknownIntent;
+void missingDeclined;

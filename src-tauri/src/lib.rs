@@ -43,8 +43,8 @@ pub mod launcher;
 use core_link::{Band, CoreError, CoreLink, Video};
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountStatus, AppStatus, CallDevices, CallReadiness,
-    CallStatus, ContactStatus, ConversationStart, DeviceList, DisplayName, HomeserverFound,
-    ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
+    CallRings, CallStatus, ContactStatus, ConversationStart, DeviceList, DisplayName,
+    HomeserverFound, ImagePick, ImageView, InviteList, JoinedRoom, NewSessions, NotificationLevel,
     NotificationSettings, PendingMessage, ProfileList, ProxySetting, PublicRoomPage, RoomActivity,
     RoomChange, RoomCreation, RoomIdentityChanges, RoomInvite, RoomList, RoomMembers, RoomPicture,
     RoomReaders, RoomServers, RoomSettings, SecurityStatus, StoreState, ThreePidList,
@@ -339,8 +339,9 @@ async fn timeline_page(
     relay(core.inner(), Call::TimelinePage { room_id, cursor }).await
 }
 
-/// Shows one desktop notification: the room's name, then the sender's.
-pub type Toaster = Box<dyn Fn(&str, &str) + Send + Sync>;
+/// Shows one desktop notification: the room's name, then the sender's, and
+/// whether it announces an incoming call (ADR-0052).
+pub type Toaster = Box<dyn Fn(&str, &str, bool) + Send + Sync>;
 
 /// What shows desktop notifications once `setup` installs it, and the latest
 /// notification that arrived before then (the core can send one as soon as
@@ -348,7 +349,7 @@ pub type Toaster = Box<dyn Fn(&str, &str) + Send + Sync>;
 #[derive(Default)]
 struct Toasts {
     show: Option<Toaster>,
-    waiting: Option<(String, String)>,
+    waiting: Option<(String, String, bool)>,
 }
 
 /// The page's channel for each room it subscribed to, and its one session
@@ -392,8 +393,8 @@ impl Subscriptions {
     /// arrived before it; until then only that one is kept.
     pub fn set_toaster(&self, toaster: Toaster) {
         let mut toasts = self.toasts();
-        if let Some((room, sender)) = toasts.waiting.take() {
-            toaster(&room, &sender);
+        if let Some((room, sender, call)) = toasts.waiting.take() {
+            toaster(&room, &sender, call);
         }
         toasts.show = Some(toaster);
     }
@@ -436,13 +437,18 @@ impl Subscriptions {
                     let _ = channel.send("callVideo");
                 }
             }
+            Event::RingsChanged {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("rings");
+                }
+            }
             Event::ModulesChanged {} => {
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("modules");
                 }
             }
             // Names only; the core bounds them, and so does this check.
-            Event::Notification { room, sender } => {
+            Event::Notification { room, sender, call } => {
                 if room.len() > MAX_NOTIFICATION_NAME_BYTES
                     || sender.len() > MAX_NOTIFICATION_NAME_BYTES
                 {
@@ -450,8 +456,8 @@ impl Subscriptions {
                 }
                 let mut toasts = self.toasts();
                 match &toasts.show {
-                    Some(toaster) => toaster(&room, &sender),
-                    None => toasts.waiting = Some((room, sender)),
+                    Some(toaster) => toaster(&room, &sender, call),
+                    None => toasts.waiting = Some((room, sender, call)),
                 }
             }
         }
@@ -642,6 +648,26 @@ async fn call_camera(core: State<'_, CoreLink>, on: bool) -> Result<CallStatus, 
 #[tauri::command]
 async fn call_status(core: State<'_, CoreLink>) -> Result<CallStatus, String> {
     relay(core.inner(), Call::CallStatus {}).await
+}
+
+/// The incoming call rings now running (ADR-0052): room ID, caller's user ID,
+/// intent and seconds left. Untrusted text; the page shows it as plain text.
+#[tauri::command]
+async fn call_rings(core: State<'_, CoreLink>) -> Result<CallRings, String> {
+    relay(core.inner(), Call::CallRings {}).await
+}
+
+/// Declines the ring in this room (ADR-0052). The core sends the decline
+/// once and ends the ring. Answering is `call_join`.
+#[tauri::command]
+async fn call_decline_ring(
+    core: State<'_, CoreLink>,
+    room_id: String,
+) -> Result<CallRings, String> {
+    if room_id.len() > MAX_ROOM_ID_BYTES {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), Call::CallDeclineRing { room_id }).await
 }
 
 /// Starts setting up encryption. Nothing crosses: the core asks for the
@@ -1864,6 +1890,8 @@ pub fn configure<R: Runtime>(
             call_camera,
             call_video_frame,
             call_status,
+            call_rings,
+            call_decline_ring,
             set_up_encryption,
             recover_with_key,
             send_message,
@@ -1961,7 +1989,9 @@ pub fn configure<R: Runtime>(
             let _ = window;
             let handle = app.handle().clone();
             app.state::<Arc<Subscriptions>>()
-                .set_toaster(Box::new(move |room, sender| toast(&handle, room, sender)));
+                .set_toaster(Box::new(move |room, sender, call| {
+                    toast(&handle, room, sender, call)
+                }));
             Ok(())
         })
 }
@@ -1995,7 +2025,7 @@ fn hide_from_capture<R: Runtime>(
 /// sender in the body, never message text, or only that a message arrived
 /// when the core sent no names. Skipped while the main window has the focus,
 /// since the page shows the message then.
-fn toast<R: Runtime>(app: &tauri::AppHandle<R>, room: &str, sender: &str) {
+fn toast<R: Runtime>(app: &tauri::AppHandle<R>, room: &str, sender: &str, call: bool) {
     use tauri_plugin_notification::NotificationExt;
     let focused = app
         .get_webview_window(MAIN_WINDOW)
@@ -2004,8 +2034,23 @@ fn toast<R: Runtime>(app: &tauri::AppHandle<R>, room: &str, sender: &str) {
     if focused {
         return;
     }
-    let (title, body) = toast_text(room, sender);
+    let (title, body) = if call {
+        call_toast_text(sender)
+    } else {
+        toast_text(room, sender)
+    };
     let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// The text of an incoming call notification (ADR-0052): "Incoming call",
+/// and the caller's name only when the core sent one. No room, no message,
+/// no buttons.
+pub fn call_toast_text(sender: &str) -> (String, String) {
+    if sender.is_empty() {
+        ("Incoming call".to_owned(), "Persephone".to_owned())
+    } else {
+        ("Incoming call".to_owned(), sender.to_owned())
+    }
 }
 
 /// A notification's title and body: named, or plain when the core sent no

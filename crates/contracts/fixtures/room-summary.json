@@ -4,5 +4,6 @@
   "unreadCount": 4294967295,
   "encryption": "encrypted",
   "contact": "@alice:server.invalid",
-  "pictureId": "0123456789abcdef"
+  "pictureId": "0123456789abcdef",
+  "hasCall": true
 }

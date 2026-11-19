@@ -44,6 +44,8 @@
     "allow-call-camera",
     "allow-call-video-frame",
     "allow-call-status",
+    "allow-call-rings",
+    "allow-call-decline-ring",
     "allow-set-up-encryption",
     "allow-recover-with-key",
     "allow-send-message",

@@ -82,6 +82,7 @@ pub fn status(state: &CallState) -> CallStatus {
             participants,
             camera,
             video,
+            ring_declined,
         } => CallStatus {
             phase: CallPhase::Active,
             room_id: Some(room_id.to_string()),
@@ -101,6 +102,7 @@ pub fn status(state: &CallState) -> CallStatus {
             join_error: None,
             camera: *camera,
             video: video.iter().take(CALL_VIDEO_TILES_MAX).cloned().collect(),
+            ring_declined: *ring_declined,
         },
         CallState::Ended { room_id, reason } => CallStatus {
             phase: CallPhase::Ended,
@@ -446,6 +448,7 @@ mod tests {
             participants: Vec::new(),
             camera: CallCamera::Off,
             video: Vec::new(),
+            ring_declined: false,
         };
         let refused = join_reply(CallError::Declined, &CallState::Idle);
         assert_eq!(refused.phase, CallPhase::Idle);
@@ -501,7 +504,10 @@ mod tests {
                 };
                 CALL_VIDEO_TILES_MAX + 3
             ],
+            ring_declined: true,
         });
+        assert!(active.ring_declined);
+        assert!(!CallStatus::idle().ring_declined);
         assert_eq!(active.camera, CallCamera::On);
         assert_eq!(active.video.len(), CALL_VIDEO_TILES_MAX);
         assert_eq!(active.phase, CallPhase::Active);

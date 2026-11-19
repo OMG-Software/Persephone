@@ -253,6 +253,7 @@ impl Fixtures {
                 encryption: RoomEncryption::Unknown,
                 contact: None,
                 picture_id: None,
+                has_call: false,
             })
             .collect();
         RoomList {
