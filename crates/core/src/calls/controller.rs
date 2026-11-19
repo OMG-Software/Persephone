@@ -1556,27 +1556,23 @@ impl CallController {
             Err(mpsc::error::TrySendError::Full(())) if !on => None,
             Err(_) => return Err(CallError::NotInCall),
         };
-        // 1. The command is counted first, under the lock that the call task
-        // holds from its check of a finished pick until the pick's start is
-        // queued, and while it publishes. So a pick that ends after a stop is
-        // closed unused, and a task publication from now on keeps the page's
-        // screen state. A stop takes the portal session.
-        let (stops, request, revoked) = {
+        // One step under the screen control lock, which the call task holds
+        // from its check of a finished pick until the pick's start is
+        // queued, while it publishes, and while it closes the session:
+        // 1. The command is counted, so a pick that ends after a stop is
+        //    closed unused and a task publication keeps the page's state.
+        // 2. A stop closes the portal session (`close_session`), so capture
+        //    is revoked before `Off` shows. A close by the task that is under
+        //    way has finished: it holds the lock until `Close` is sent.
+        // 3. The page shows the command.
+        let (stops, request, changed) = {
             let mut control = plain(&run.screen_control);
             if !on {
                 control.stops = control.stops.wrapping_add(1);
+                close_session(&mut control);
             }
             control.requests = control.requests.wrapping_add(1);
-            let revoked = if on { None } else { control.session.take() };
-            (control.stops, control.requests, revoked)
-        };
-        // 2. The session closes, so capture is revoked before `Off` shows.
-        // Closing talks to the bus; not under the lock.
-        drop(revoked);
-        // 3. The page shows the command. No other screen command comes in
-        // between: the slot lock is held throughout.
-        let changed = {
-            let mut control = plain(&run.screen_control);
+            let (stops, request) = (control.stops, control.requests);
             let changed = self.inner.state.send_if_modified(|state| {
                 let CallState::Active { screen, .. } = state else {
                     return false;
@@ -1596,7 +1592,7 @@ impl CallController {
                 control.stop_waiting = Some((stops, request));
                 control.wake.notify_one();
             }
-            changed
+            (stops, request, changed)
         };
         if let Some(permit) = permit {
             permit.send(Command::Screen { on, stops, request });
@@ -2055,6 +2051,14 @@ struct ScreenControl {
     wake: Arc<Notify>,
 }
 
+/// Closes the share's portal session, if open, with the screen control
+/// lock held. Dropping the session sends `Close` and waits for no reply, so
+/// the lock is held only briefly. A stop that comes meanwhile waits for the
+/// lock: its `Off` never shows before the close has gone out.
+fn close_session(control: &mut ScreenControl) {
+    control.session = None;
+}
+
 /// Waits for room in the worker's command queue while `sender` is given (a
 /// screen stop waits); otherwise it never ends. `None` is a closed queue.
 async fn screen_stop_room(
@@ -2496,10 +2500,10 @@ impl Call {
         true
     }
 
-    /// Closes the share's portal session, if open, outside the lock.
+    /// Closes the share's portal session, if open, under the screen control
+    /// lock (`close_session`).
     fn close_screen_session(&self) {
-        let session = plain(&self.screen_control).session.take();
-        drop(session);
+        close_session(&mut plain(&self.screen_control));
     }
 
     /// Sends the stop of the current share. A full queue keeps it as the one
@@ -3078,8 +3082,7 @@ impl Call {
         drop(portal);
         drop(screen_pick);
         drop(screen_closed);
-        let session = plain(&screen_control).session.take();
-        drop(session);
+        close_session(&mut plain(&screen_control));
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
         if session_ended {
@@ -5355,6 +5358,63 @@ mod tests {
             *plain(&seen),
             Some(CallScreen::Starting),
             "the page did not show Off yet"
+        );
+        assert!(matches!(
+            calls.state(),
+            CallState::Active {
+                screen: CallScreen::Off,
+                ..
+            }
+        ));
+    }
+
+    /// GIVEN the call task closing the portal session (a worker end state),
+    /// paused inside the close WHEN the page stops the share meanwhile THEN
+    /// the stop waits for the close: the page shows `Off` only after it.
+    #[test]
+    fn given_a_close_under_way_when_the_page_stops_then_off_waits_for_it() {
+        struct SlowClose {
+            started: std::sync::mpsc::Sender<()>,
+            page: watch::Receiver<CallState>,
+            seen: Arc<Mutex<Option<CallScreen>>>,
+        }
+        impl Drop for SlowClose {
+            fn drop(&mut self) {
+                let _ = self.started.send(());
+                std::thread::sleep(Duration::from_millis(50));
+                if let CallState::Active { screen, .. } = &*self.page.borrow() {
+                    *plain(&self.seen) = Some(*screen);
+                }
+            }
+        }
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _) = running_call(&calls, active_state());
+        let control = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            run.screen_control.clone()
+        };
+        assert_eq!(calls.set_screen(true), Ok(()));
+        let (started, closing) = std::sync::mpsc::channel();
+        let seen = Arc::new(Mutex::new(None));
+        plain(&control).session = Some(Box::new(SlowClose {
+            started,
+            page: calls.inner.state.subscribe(),
+            seen: seen.clone(),
+        }));
+        // What the call task's `close_screen_session` does.
+        let task = {
+            let control = control.clone();
+            std::thread::spawn(move || close_session(&mut plain(&control)))
+        };
+        closing.recv().unwrap();
+        assert_eq!(calls.set_screen(false), Ok(()));
+        task.join().unwrap();
+        assert_eq!(
+            *plain(&seen),
+            Some(CallScreen::Starting),
+            "Off did not show during the close"
         );
         assert!(matches!(
             calls.state(),
