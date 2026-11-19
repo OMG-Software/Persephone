@@ -4,7 +4,10 @@ Checked 19 November 2026 on Windows 11 Pro x64 (build 26300), release build of
 the containment gate, rustc 1.99.1, two 2560x1440 monitors, one interactive
 session. Source: branch `claude/call-screen-share`, worktree
 `.local/wt-call-screen`, `--locked --offline`. `Cargo.lock` gained one line
-(the gate package now depends on the already locked `windows 0.62.2`).
+(the gate package now depends on the already locked `windows 0.62.2`). This
+first run did not record its source revision or lockfile hash. A later run
+from an identified commit gave the same results; see
+[Rerun from an identified commit](#rerun-from-an-identified-commit).
 **Result: Windows.Graphics.Capture does not run in the call worker's
 AppContainer. `CreateForMonitor` fails with `E_ACCESSDENIED` (`0x80070005`)
 with the worker's current capabilities and with each candidate capability.
@@ -64,6 +67,31 @@ status. Raw output: `.local/screen-sandbox-run.txt` (not committed).
   did not touch it, and a wrapper that fails there is unchanged from before:
   the screen probe now runs before the failure is raised so its result is not
   lost. The gate failure is not a pass and is not part of this report.
+
+## Rerun from an identified commit
+
+Run 19 November 2026, same machine, OS build, toolchain and command
+(`python tools/dev.py sandbox --offline`), after review changes to the probe.
+
+* Source: commit `d1f66b4ddff0f996d39786e790a912230e7638d3`, checked out
+  with no local changes.
+* `Cargo.lock` SHA-256:
+  `2d598294b873b5bc5d4ec67acef8591061f1638d47f9326fb23f4933de37efb4`.
+* The probe listed one 2560x1440 monitor (the first run listed two).
+* Control: exit `0x0`, captured a frame.
+* All four capability sets: exit `0x5`, `CreateForMonitor` failed,
+  `HRESULT 0x80070005`. At this commit the probe joins the two halves only when
+  both repeat runs fail at the stage of the first run, and labels the value so.
+  All four sets met that condition.
+* The screen probe ran to the end through the wrapper. It was not run alone
+  this time.
+* The wrapper exit status: **1**, from the same containment gate failure
+  (`probe error: one or more sandbox assertions failed`,
+  `network_denial[appcontainer]: NOT_ESTABLISHED`). At this commit the wrapper
+  raises the gate's status before the probe's.
+
+Raw output: `.local/screen-sandbox-run.txt` in that worktree (not committed;
+the first run's raw output was no longer in that folder at the rerun).
 
 ## What this does and does not show
 
