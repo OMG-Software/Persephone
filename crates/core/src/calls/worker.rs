@@ -104,14 +104,15 @@ const EXIT_UNREPORTABLE: u32 = 2;
 /// A panic that unwinds out of `main` exits with 101 on every OS. This
 /// workspace sets no `panic = "abort"`; if it did, an abort ends the process
 /// with `SIGABRT` on Linux and macOS and with `0xC0000409` on Windows. On
-/// Windows any `NTSTATUS` error code (`0xC0000000..`) is a crash, such as an
-/// access violation. A kill by the core (`SIGKILL`; Job termination, exit
+/// Windows any status code of error severity (top two bits set) is a crash:
+/// a system one such as an access violation (`0xC0000005`), or a customer
+/// one such as an unhandled C++ exception from libwebrtc (`0xE06D7363`). A kill by the core (`SIGKILL`; Job termination, exit
 /// code 1), a stop by the user (`SIGTERM`) and the worker's own codes 0, 1
 /// and 3 are not crashes.
 pub fn exit_is_crash(exit: WorkerExit) -> bool {
     match exit {
         WorkerExit::Code(code) => {
-            code == EXIT_PANIC || code == EXIT_UNREPORTABLE || code & 0xF000_0000 == 0xC000_0000
+            code == EXIT_PANIC || code == EXIT_UNREPORTABLE || code & 0xC000_0000 == 0xC000_0000
         }
         WorkerExit::Signal(signal) => crash_signal(signal),
     }
@@ -331,6 +332,7 @@ mod tests {
             WorkerExit::Code(2),
             WorkerExit::Code(0xC000_0005),
             WorkerExit::Code(0xC000_0409),
+            WorkerExit::Code(0xE06D_7363),
         ] {
             assert!(exit_is_crash(crash), "{crash:?}");
         }
