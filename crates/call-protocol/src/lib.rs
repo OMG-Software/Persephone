@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
@@ -36,10 +36,60 @@ pub const MAX_VIDEO_SIDE: u32 = 640;
 pub const MAX_VIDEO_PIXELS: u32 = 640 * 360;
 /// The most bytes in one video picture: RGBA, four bytes per pixel.
 pub const MAX_VIDEO_BYTES: usize = MAX_VIDEO_PIXELS as usize * 4;
-/// Video tiles in a call. Tile 0 is the own camera; tiles 1 to 4 are remote.
-pub const VIDEO_TILES: u8 = 5;
-/// The most pictures per second for one tile.
+/// Video tiles in a call. Tile 0 is the own camera; tiles 1 to 4 are remote
+/// cameras; tile 5 is the one decoded remote screen share (ADR-0053).
+pub const VIDEO_TILES: u8 = 6;
+/// The tile of the remote screen share.
+pub const SCREEN_TILE: u8 = 5;
+/// The most pictures per second for one camera tile.
 pub const MAX_VIDEO_FPS: u32 = 15;
+/// The longest side of a screen picture, in pixels (ADR-0053).
+pub const MAX_SCREEN_SIDE: u32 = 1280;
+/// The most pixels in one screen picture: 1280 x 720.
+pub const MAX_SCREEN_PIXELS: u32 = 1280 * 720;
+/// The most bytes in one screen picture: RGBA, four bytes per pixel.
+pub const MAX_SCREEN_BYTES: usize = MAX_SCREEN_PIXELS as usize * 4;
+/// The most pictures per second for the screen tile.
+pub const MAX_SCREEN_FPS: u32 = 5;
+/// The most monitors the core can name to the worker.
+pub const MAX_SCREEN_MONITORS: u8 = 16;
+/// The largest side of a monitor the core names, in pixels.
+pub const MAX_MONITOR_SIDE: u32 = 16_384;
+
+/// The longest side of a picture on this tile.
+pub const fn max_side(tile: u8) -> u32 {
+    if tile == SCREEN_TILE {
+        MAX_SCREEN_SIDE
+    } else {
+        MAX_VIDEO_SIDE
+    }
+}
+
+/// The most pixels in one picture on this tile.
+pub const fn max_pixels(tile: u8) -> u32 {
+    if tile == SCREEN_TILE {
+        MAX_SCREEN_PIXELS
+    } else {
+        MAX_VIDEO_PIXELS
+    }
+}
+
+/// The most pictures per second on this tile.
+pub const fn max_fps(tile: u8) -> u32 {
+    if tile == SCREEN_TILE {
+        MAX_SCREEN_FPS
+    } else {
+        MAX_VIDEO_FPS
+    }
+}
+
+/// A picture of `width` x `height` pixels is inside the limits of `tile`.
+pub fn picture_fits(tile: u8, width: u32, height: u32) -> bool {
+    tile < VIDEO_TILES
+        && (1..=max_side(tile)).contains(&width)
+        && (1..=max_side(tile)).contains(&height)
+        && u64::from(width) * u64::from(height) <= u64::from(max_pixels(tile))
+}
 /// The largest rotation: quarter turns clockwise, 0 to 3.
 pub const MAX_VIDEO_ROTATION: u8 = 3;
 /// The fixed length of a media-protocol frame header.
@@ -161,6 +211,12 @@ pub enum ToWorker {
         muted: bool,
     },
     Leave,
+    /// Start or stop the screen share (ADR-0053). The worker answers with
+    /// [`FromWorker::Screen`]. A start carries what the core chose; the page
+    /// never names a source.
+    SetScreen {
+        target: Option<ScreenTarget>,
+    },
     /// Turn the camera on or off. The worker answers with
     /// [`FromWorker::Camera`].
     SetCamera {
@@ -218,6 +274,9 @@ impl std::fmt::Debug for ToWorker {
                 .field("on", on)
                 .field("remote", remote)
                 .finish(),
+            Self::SetScreen { target } => {
+                f.debug_struct("SetScreen").field("target", target).finish()
+            }
         }
     }
 }
@@ -252,6 +311,50 @@ impl TryFrom<u8> for FailureCode {
             7 => Self::Protocol,
             8 => Self::Internal,
             9 => Self::DeviceNotFound,
+            _ => return Err(DecodeError::InvalidValue),
+        })
+    }
+}
+
+/// What the core grants for one screen share (ADR-0053).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScreenTarget {
+    /// Linux: the portal remote went over the camera channel with kind `s`,
+    /// directly before this command. `node` is the PipeWire node ID.
+    Portal { node: u32 },
+    /// Windows: the monitor's index in display order and its size in pixels
+    /// when the user chose it. The worker reads its own list when the share
+    /// starts; another size at that index is "not found".
+    Monitor { index: u8, width: u32, height: u32 },
+}
+
+/// The state of the screen share, as the worker reports it. A closed set
+/// with no text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ScreenState {
+    Off = 0,
+    Starting = 1,
+    On = 2,
+    /// The chosen screen is gone, or has another size.
+    NotFound = 3,
+    /// Screen capture cannot run here, or capture failed.
+    Unavailable = 4,
+    /// The OS or the portal refused the capture.
+    Refused = 5,
+}
+
+impl TryFrom<u8> for ScreenState {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, DecodeError> {
+        Ok(match value {
+            0 => Self::Off,
+            1 => Self::Starting,
+            2 => Self::On,
+            3 => Self::NotFound,
+            4 => Self::Unavailable,
+            5 => Self::Refused,
             _ => return Err(DecodeError::InvalidValue),
         })
     }
@@ -320,16 +423,27 @@ pub enum FromWorker {
     Camera {
         state: CameraState,
     },
-    /// A remote participant's video arrived on this tile (1 to 4).
+    /// The screen share state. Sent after every `SetScreen`, when the share
+    /// ends by itself, and when capture fails during a call.
+    Screen {
+        state: ScreenState,
+    },
+    /// A remote participant started or stopped a screen share that is not
+    /// shown on tile 5. It is only a display hint (ADR-0053).
+    ScreenSharer {
+        identity: String,
+        sharing: bool,
+    },
+    /// A remote participant's video arrived on this tile (1 to 5).
     VideoStarted {
         tile: u8,
         identity: String,
     },
-    /// The video on this tile (0 to 4) ended.
+    /// The video on this tile (0 to 5) ended.
     VideoStopped {
         tile: u8,
     },
-    /// Announces one picture for this tile (0 to 4). Always followed at once
+    /// Announces one picture for this tile (0 to 5). Always followed at once
     /// by exactly one `RgbaPixels` frame: use [`read_worker_item`] and
     /// [`write_video_frame`]. `rotation` is quarter turns clockwise, 0 to 3.
     VideoFrame {
@@ -347,6 +461,7 @@ const TO_SET_MUTED: u8 = 5;
 const TO_LEAVE: u8 = 6;
 const TO_LIST_DEVICES: u8 = 7;
 const TO_SET_CAMERA: u8 = 8;
+const TO_SET_SCREEN: u8 = 9;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -362,6 +477,8 @@ const FROM_CAMERA: u8 = 10;
 const FROM_VIDEO_STARTED: u8 = 11;
 const FROM_VIDEO_STOPPED: u8 = 12;
 const FROM_VIDEO_FRAME: u8 = 13;
+const FROM_SCREEN: u8 = 14;
+const FROM_SCREEN_SHARER: u8 = 15;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -611,6 +728,26 @@ impl ToWorker {
                 out.push(u8::from(*on));
                 out.push(u8::from(*remote));
             }
+            Self::SetScreen { target } => {
+                out.push(TO_SET_SCREEN);
+                match target {
+                    None => out.push(0),
+                    Some(ScreenTarget::Portal { node }) => {
+                        out.push(1);
+                        out.extend_from_slice(&node.to_be_bytes());
+                    }
+                    Some(ScreenTarget::Monitor {
+                        index,
+                        width,
+                        height,
+                    }) => {
+                        out.push(2);
+                        out.push(*index);
+                        out.extend_from_slice(&width.to_be_bytes());
+                        out.extend_from_slice(&height.to_be_bytes());
+                    }
+                }
+            }
         }
         out
     }
@@ -674,6 +811,32 @@ impl ToWorker {
                     return Err(DecodeError::InvalidValue);
                 }
                 Self::SetCamera { on, remote }
+            }
+            TO_SET_SCREEN => {
+                let target = match reader.u8()? {
+                    0 => None,
+                    1 => Some(ScreenTarget::Portal {
+                        node: reader.u32()?,
+                    }),
+                    2 => {
+                        let index = reader.u8()?;
+                        let width = reader.u32()?;
+                        let height = reader.u32()?;
+                        if index >= MAX_SCREEN_MONITORS
+                            || !(1..=MAX_MONITOR_SIDE).contains(&width)
+                            || !(1..=MAX_MONITOR_SIDE).contains(&height)
+                        {
+                            return Err(DecodeError::InvalidValue);
+                        }
+                        Some(ScreenTarget::Monitor {
+                            index,
+                            width,
+                            height,
+                        })
+                    }
+                    _ => return Err(DecodeError::InvalidValue),
+                };
+                Self::SetScreen { target }
             }
             _ => return Err(DecodeError::UnknownTag),
         };
@@ -763,6 +926,15 @@ impl FromWorker {
                 out.push(FROM_CAMERA);
                 out.push(*state as u8);
             }
+            Self::Screen { state } => {
+                out.push(FROM_SCREEN);
+                out.push(*state as u8);
+            }
+            Self::ScreenSharer { identity, sharing } => {
+                out.push(FROM_SCREEN_SHARER);
+                put_str(&mut out, identity);
+                out.push(u8::from(*sharing));
+            }
             Self::VideoStarted { tile, identity } => {
                 out.push(FROM_VIDEO_STARTED);
                 out.push(*tile);
@@ -812,6 +984,13 @@ impl FromWorker {
             },
             FROM_CAMERA => Self::Camera {
                 state: CameraState::try_from(reader.u8()?)?,
+            },
+            FROM_SCREEN => Self::Screen {
+                state: ScreenState::try_from(reader.u8()?)?,
+            },
+            FROM_SCREEN_SHARER => Self::ScreenSharer {
+                identity: reader.identity()?,
+                sharing: reader.bool()?,
             },
             FROM_VIDEO_STARTED => Self::VideoStarted {
                 tile: reader.tile(1)?,
@@ -966,12 +1145,10 @@ pub fn read_message<R: Read, M: Message>(
     M::from_body(frame.body()).map_err(ReadError::Decode)
 }
 
-/// The header of a video pixel frame is inside the video limits.
-fn video_header_fits(header: &FrameHeader) -> bool {
+/// The header of a pixel frame is inside the limits of its tile.
+fn video_header_fits(tile: u8, header: &FrameHeader) -> bool {
     header.kind == FrameKind::RgbaPixels
-        && (1..=MAX_VIDEO_SIDE).contains(&header.width)
-        && (1..=MAX_VIDEO_SIDE).contains(&header.height)
-        && u64::from(header.width) * u64::from(header.height) <= u64::from(MAX_VIDEO_PIXELS)
+        && picture_fits(tile, header.width, header.height)
         && header.length == u64::from(header.width) * u64::from(header.height) * 4
 }
 
@@ -996,7 +1173,7 @@ pub fn read_worker_item<R: Read>(
     if header.kind != FrameKind::RgbaPixels {
         return Err(ReadError::NotPixels);
     }
-    if !video_header_fits(&header) {
+    if !video_header_fits(tile, &header) {
         return Err(ReadError::VideoLimit);
     }
     // The header was checked; give it back to the budgeted reader together
@@ -1038,7 +1215,7 @@ pub fn write_video_frame<W: Write>(
         width,
         height,
     };
-    if !video_header_fits(&header) {
+    if !video_header_fits(tile, &header) {
         return Err(invalid("video picture outside the video limits"));
     }
     write_message(writer, &FromWorker::VideoFrame { tile, rotation })?;
@@ -1140,6 +1317,19 @@ mod tests {
                 on: false,
                 remote: false,
             },
+            ToWorker::SetScreen { target: None },
+            ToWorker::SetScreen {
+                target: Some(ScreenTarget::Portal {
+                    node: 4_294_967_295,
+                }),
+            },
+            ToWorker::SetScreen {
+                target: Some(ScreenTarget::Monitor {
+                    index: 15,
+                    width: 16_384,
+                    height: 1,
+                }),
+            },
         ]
     }
 
@@ -1183,6 +1373,32 @@ mod tests {
             FromWorker::Camera {
                 state: CameraState::Unavailable,
             },
+            FromWorker::Screen {
+                state: ScreenState::Off,
+            },
+            FromWorker::Screen {
+                state: ScreenState::Starting,
+            },
+            FromWorker::Screen {
+                state: ScreenState::On,
+            },
+            FromWorker::Screen {
+                state: ScreenState::NotFound,
+            },
+            FromWorker::Screen {
+                state: ScreenState::Unavailable,
+            },
+            FromWorker::Screen {
+                state: ScreenState::Refused,
+            },
+            FromWorker::ScreenSharer {
+                identity: "@bob:example.org:D".to_owned(),
+                sharing: true,
+            },
+            FromWorker::ScreenSharer {
+                identity: "ünï".to_owned(),
+                sharing: false,
+            },
             FromWorker::VideoStarted {
                 tile: 1,
                 identity: "@bob:example.org:D".to_owned(),
@@ -1191,8 +1407,13 @@ mod tests {
                 tile: 4,
                 identity: "ünï".to_owned(),
             },
+            FromWorker::VideoStarted {
+                tile: SCREEN_TILE,
+                identity: "@bob:example.org:D".to_owned(),
+            },
             FromWorker::VideoStopped { tile: 0 },
             FromWorker::VideoStopped { tile: 4 },
+            FromWorker::VideoStopped { tile: SCREEN_TILE },
             FromWorker::VideoFrame {
                 tile: 0,
                 rotation: 0,
@@ -1200,6 +1421,10 @@ mod tests {
             FromWorker::VideoFrame {
                 tile: 4,
                 rotation: 3,
+            },
+            FromWorker::VideoFrame {
+                tile: SCREEN_TILE,
+                rotation: 0,
             },
         ];
         for code in 1..=9 {
@@ -1404,7 +1629,7 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 9]),
+            ToWorker::decode(&[VERSION, 10]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
@@ -1788,7 +2013,13 @@ mod tests {
     /// THEN the tile, rotation, size and every pixel byte are unchanged.
     #[test]
     fn given_video_frame_when_written_then_read_back_unchanged() {
-        for (tile, rotation, width, height) in [(0, 0, 640, 360), (4, 3, 1, 1), (2, 1, 360, 640)] {
+        for (tile, rotation, width, height) in [
+            (0, 0, 640, 360),
+            (4, 3, 1, 1),
+            (2, 1, 360, 640),
+            (SCREEN_TILE, 0, 1280, 720),
+            (SCREEN_TILE, 0, 720, 1280),
+        ] {
             let (item, _) = read_item(video_wire(tile, rotation, width, height));
             let Ok(WorkerItem::Video {
                 tile: got_tile,
@@ -1918,13 +2149,24 @@ mod tests {
     #[test]
     fn given_bad_tile_or_rotation_when_decoded_then_it_is_rejected() {
         let invalid = DecodeError::InvalidValue;
-        let cases: [(&[u8], DecodeError); 8] = [
-            (&[VERSION, FROM_VIDEO_FRAME, 5, 0], invalid),
+        let cases: [(&[u8], DecodeError); 13] = [
+            (&[VERSION, FROM_VIDEO_FRAME, 6, 0], invalid),
             (&[VERSION, FROM_VIDEO_FRAME, 0, 4], invalid),
             (&[VERSION, FROM_VIDEO_FRAME, 0], DecodeError::Truncated),
-            (&[VERSION, FROM_VIDEO_STOPPED, 5], invalid),
+            (&[VERSION, FROM_VIDEO_STOPPED, 6], invalid),
             (&[VERSION, FROM_VIDEO_STARTED, 0, 0, 1, 97], invalid),
-            (&[VERSION, FROM_VIDEO_STARTED, 5, 0, 1, 97], invalid),
+            (&[VERSION, FROM_VIDEO_STARTED, 6, 0, 1, 97], invalid),
+            (&[VERSION, FROM_SCREEN, 6], invalid),
+            (&[VERSION, FROM_SCREEN], DecodeError::Truncated),
+            (&[VERSION, FROM_SCREEN_SHARER, 0, 1, 97, 2], invalid),
+            (
+                &[VERSION, FROM_SCREEN_SHARER, 0, 0, 1],
+                DecodeError::TooShort,
+            ),
+            (
+                &[VERSION, FROM_SCREEN_SHARER, 0, 1, 97],
+                DecodeError::Truncated,
+            ),
             (
                 &[VERSION, FROM_VIDEO_STARTED, 1, 0, 0],
                 DecodeError::TooShort,
@@ -1981,7 +2223,7 @@ mod tests {
         let ok = picture(2, 2);
         let big = vec![0; 641 * 640 * 4];
         let cases: [(u8, u8, u32, u32, &[u8]); 8] = [
-            (5, 0, 2, 2, &ok),
+            (6, 0, 2, 2, &ok),
             (0, 4, 2, 2, &ok),
             (0, 0, 0, 2, &[]),
             (0, 0, 2, 2, &ok[..15]),
@@ -1995,6 +2237,144 @@ mod tests {
             assert!(write_video_frame(&mut wire, tile, rotation, width, height, body).is_err());
             assert!(wire.is_empty(), "{tile} {rotation} {width}x{height}");
         }
+    }
+
+    /// GIVEN the screen tile and a camera tile
+    /// WHEN their limits are asked
+    /// THEN the screen tile allows 1280x720 at 5 per second, and cameras keep
+    /// 640x360 at 15 per second.
+    #[test]
+    fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 4));
+        assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
+        assert_eq!(MAX_SCREEN_PIXELS, 921_600);
+        for tile in 0..SCREEN_TILE {
+            assert_eq!(
+                (max_side(tile), max_pixels(tile), max_fps(tile)),
+                (640, 640 * 360, 15)
+            );
+        }
+        assert_eq!(
+            (
+                max_side(SCREEN_TILE),
+                max_pixels(SCREEN_TILE),
+                max_fps(SCREEN_TILE)
+            ),
+            (1280, 1280 * 720, 5)
+        );
+        assert!(picture_fits(SCREEN_TILE, 1280, 720));
+        assert!(!picture_fits(SCREEN_TILE, 1281, 720));
+        assert!(!picture_fits(SCREEN_TILE, 1280, 721));
+        assert!(!picture_fits(0, 1280, 720));
+        assert!(!picture_fits(VIDEO_TILES, 1, 1));
+        assert!(!picture_fits(SCREEN_TILE, 0, 1));
+    }
+
+    /// GIVEN a screen-size picture announced for a camera tile, and a
+    /// picture over the screen limit announced for the screen tile
+    /// WHEN each is read from the worker
+    /// THEN both stop at the header with `VideoLimit` and no body is read.
+    #[test]
+    fn given_picture_over_the_limit_of_its_tile_then_it_is_refused_before_the_body() {
+        for (tile, width, height) in [
+            (1, 1280, 720),
+            (0, 641, 1),
+            (SCREEN_TILE, 1281, 1),
+            (SCREEN_TILE, 1280, 721),
+            (SCREEN_TILE, 1, 1281),
+        ] {
+            let mut wire = control_wire(&FromWorker::VideoFrame { tile, rotation: 0 });
+            let end = wire.len() as u64;
+            wire.extend(pixel_header(
+                width,
+                height,
+                u64::from(width) * u64::from(height) * 4,
+            ));
+            wire.extend(vec![0; 64]);
+            let (result, position) = read_item(wire);
+            assert_eq!(
+                result,
+                Err(ReadError::VideoLimit),
+                "{tile} {width}x{height}"
+            );
+            assert_eq!(position, end + FRAME_HEADER_LEN as u64);
+        }
+    }
+
+    /// GIVEN a screen-size picture for a camera tile or one over the screen
+    /// limit for the screen tile
+    /// WHEN the worker tries to write it
+    /// THEN nothing is written; a 1280x720 screen picture is written.
+    #[test]
+    fn given_screen_size_picture_when_written_then_the_tile_limit_decides() {
+        for (tile, width, height) in [(0, 1280, 720), (4, 641, 360), (SCREEN_TILE, 1281, 720)] {
+            let body = vec![0; width as usize * height as usize * 4];
+            let mut wire = Vec::new();
+            assert!(write_video_frame(&mut wire, tile, 0, width, height, &body).is_err());
+            assert!(wire.is_empty(), "{tile} {width}x{height}");
+        }
+        let mut wire = Vec::new();
+        let body = vec![7; MAX_SCREEN_BYTES];
+        write_video_frame(&mut wire, SCREEN_TILE, 0, 1280, 720, &body).unwrap();
+        assert!(!wire.is_empty());
+    }
+
+    /// GIVEN bad values in a SetScreen
+    /// WHEN it is decoded
+    /// THEN a bad kind, monitor index or monitor size is rejected, and a cut
+    /// message is truncated.
+    #[test]
+    fn given_bad_set_screen_when_decoded_then_it_is_rejected() {
+        let invalid = DecodeError::InvalidValue;
+        let monitor = |index: u8, width: u32, height: u32| {
+            let mut body = vec![VERSION, TO_SET_SCREEN, 2, index];
+            body.extend(width.to_be_bytes());
+            body.extend(height.to_be_bytes());
+            body
+        };
+        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_SCREEN, 3]), Err(invalid));
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 1, 0, 0]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0]),
+            Err(DecodeError::TrailingBytes)
+        );
+        assert_eq!(ToWorker::decode(&monitor(16, 1920, 1080)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(0, 0, 1080)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(0, 1920, 0)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(0, 16_385, 1)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(0, 1, 16_385)), Err(invalid));
+        assert_eq!(
+            ToWorker::decode(&monitor(0, 1920, 1080)),
+            Ok(ToWorker::SetScreen {
+                target: Some(ScreenTarget::Monitor {
+                    index: 0,
+                    width: 1920,
+                    height: 1080
+                })
+            })
+        );
+    }
+
+    /// GIVEN a message made for wire version 3
+    /// WHEN it is decoded
+    /// THEN the version is refused.
+    #[test]
+    fn given_old_wire_version_when_decoded_then_it_is_refused() {
+        assert_eq!(
+            ToWorker::decode(&[3, TO_LEAVE]),
+            Err(DecodeError::UnknownVersion)
+        );
+        assert_eq!(
+            FromWorker::decode(&[3, FROM_LEFT]),
+            Err(DecodeError::UnknownVersion)
+        );
     }
 
     /// GIVEN a Join with a camera chosen, or none
