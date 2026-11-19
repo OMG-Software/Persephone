@@ -46,10 +46,15 @@ runs" for the Linux camera.
 
 * The broker starts the call worker as it starts the media worker
   (ADR-0010): a new session, every descriptor above 2 closed, a parent-death
-  `SIGKILL`, `no_new_privs`, no core dumps, no file writes (`RLIMIT_FSIZE`
-  0), at most 256 descriptors and an address-space limit of 4 GiB. The
-  address-space limit is a bound, not the 512 MiB of the Windows Job:
-  libwebrtc reserves much more address space than it uses.
+  `SIGKILL`, `no_new_privs`, no core dumps, files of at most 256 MiB
+  (`RLIMIT_FSIZE`), at most 256 descriptors and an address-space limit of
+  4 GiB. The address-space limit is a bound, not the 512 MiB of the Windows
+  Job: libwebrtc reserves much more address space than it uses. The file
+  limit is not 0 (amended 19 November 2026): the sound server's client
+  library sizes its 64 MiB shared-memory pool, a memfd, with `ftruncate`,
+  and Linux counts memfd and `/dev/shm` files against `RLIMIT_FSIZE`. With
+  0 the kernel killed the worker with `SIGXFSZ` before it reached the sound
+  server. Landlock still allows file writes only under `/dev/shm`.
 * Descriptor 3 is one end of a Unix socket pair, the camera channel. It is
   the only extra descriptor.
 * The environment holds only `XDG_RUNTIME_DIR` and `HOME` (the sound
@@ -73,7 +78,12 @@ The worker applies two stages itself.
     restricts nothing, so it cannot block the sound server's socket by
     surprise. Read and execute: `/usr`, `/lib`, `/lib64`, `/etc`,
     `/run/systemd/resolve`, `/proc/self`. Read: `$HOME/.config/pulse`,
-    `/dev/urandom`, `/dev/null`. Read and write: `/dev/shm`. With
+    `$XDG_RUNTIME_DIR/pulse`, `/dev/urandom`, `/dev/null`. Read and write:
+    `/dev/shm`. The client library opens `$XDG_RUNTIME_DIR/pulse` and checks
+    its owner before it connects to the socket in it (amended 19 November
+    2026: without the rule the check failed and no sound server was
+    reached). The rest of `$XDG_RUNTIME_DIR` (the session bus, PipeWire and
+    other sockets) gets no rule. With
     `--camera=v4l2` only: read and write on the `/dev/video*` nodes (and
     their device ioctls, ABI 5 or newer). No other path. Where the ABI
     has them, abstract Unix sockets and signals are scoped to the worker
@@ -254,6 +264,17 @@ The worker applies two stages itself.
 * Linux: the call worker links `libpipewire-0.3.so.0`, so the `.deb` and
   `.rpm` packages depend on it. Without it the worker does not start and
   audio calls fail too. The AppImage relies on the system's copy.
+* Linux: the statically linked libwebrtc defines weak `pw_*` stubs for its
+  own screen capture, and the worker's `pipewire` crate binds to them. The
+  stubs call through null pointers until libwebrtc loads PipeWire, so the
+  worker calls `webrtc::InitializePipeWire()` before its first PipeWire
+  call (19 November 2026). A libwebrtc update must keep that function or
+  replace this step.
+* Linux: libwebrtc's PulseAudio device module (also used with
+  `pipewire-pulse`) reports no device GUIDs, so each Linux microphone and
+  speaker has an `index:N` ID, which ADR-0043 never lists or selects
+  (measured 19 November 2026). On Linux the call uses the system default
+  microphone and speaker; the device menus offer only that.
 
 ## Pros and Cons of the Options
 

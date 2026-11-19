@@ -166,11 +166,17 @@ struct PathRule {
     access: u64,
 }
 
-/// The path table of ADR-0049 for a camera mode. `home` is `$HOME`;
+/// The path table of ADR-0049 for a camera mode. `home` is `$HOME` and
+/// `runtime` is `$XDG_RUNTIME_DIR`; each is used only when absolute.
 /// `video_nodes` are the `/dev/video*` character devices found before the
 /// rules apply (used with `--camera=v4l2` only). Rights are cut to the file
 /// or directory kind and to the handled set when the rules are added.
-fn path_table(mode: CameraMode, home: Option<&Path>, video_nodes: &[PathBuf]) -> Vec<PathRule> {
+fn path_table(
+    mode: CameraMode,
+    home: Option<&Path>,
+    runtime: Option<&Path>,
+    video_nodes: &[PathBuf],
+) -> Vec<PathRule> {
     let rule = |path: &str, access| PathRule {
         path: PathBuf::from(path),
         access,
@@ -189,6 +195,16 @@ fn path_table(mode: CameraMode, home: Option<&Path>, video_nodes: &[PathBuf]) ->
     if let Some(home) = home.filter(|home| home.is_absolute()) {
         table.push(PathRule {
             path: home.join(".config/pulse"),
+            access: DIR_READ,
+        });
+    }
+    // The sound server's client library opens this directory and checks its
+    // owner before it connects to the socket in it; without the rule the
+    // check fails and no sound server is reached. Read only: the connect
+    // itself needs no Landlock right on the ABIs this code handles.
+    if let Some(runtime) = runtime.filter(|runtime| runtime.is_absolute()) {
+        table.push(PathRule {
+            path: runtime.join("pulse"),
             access: DIR_READ,
         });
     }
@@ -295,12 +311,13 @@ fn landlock(mode: CameraMode) -> Result<(), ()> {
     // SAFETY: the kernel returned a new descriptor that nothing else owns.
     let ruleset = unsafe { OwnedFd::from_raw_fd(raw as i32) };
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let nodes = if mode == CameraMode::V4l2 {
         find_video_nodes()
     } else {
         Vec::new()
     };
-    for rule in path_table(mode, home.as_deref(), &nodes) {
+    for rule in path_table(mode, home.as_deref(), runtime.as_deref(), &nodes) {
         // A path that does not exist or cannot be opened gets no rule. Rules
         // only allow, so the process ends up with less access, never more.
         let Some((fd, is_dir)) = open_path(&rule.path) else {
@@ -842,7 +859,12 @@ mod tests {
     #[test]
     fn given_portal_mode_then_the_table_has_the_adr_paths_and_no_camera() {
         let nodes = [PathBuf::from("/dev/video0")];
-        let table = path_table(CameraMode::Portal, Some(Path::new("/home/user")), &nodes);
+        let table = path_table(
+            CameraMode::Portal,
+            Some(Path::new("/home/user")),
+            Some(Path::new("/run/user/1000")),
+            &nodes,
+        );
         for dir in [
             "/usr",
             "/lib",
@@ -860,6 +882,15 @@ mod tests {
                 .access,
             DIR_READ
         );
+        assert_eq!(
+            rule_for(&table, "/run/user/1000/pulse")
+                .expect("sound server directory")
+                .access,
+            DIR_READ
+        );
+        // Only the sound server's directory, not the rest of the runtime
+        // directory (the session bus, PipeWire and other sockets live there).
+        assert!(rule_for(&table, "/run/user/1000").is_none());
         assert_eq!(
             rule_for(&table, "/dev/urandom").expect("urandom").access,
             FILE_READ
@@ -886,28 +917,26 @@ mod tests {
     #[test]
     fn given_v4l2_mode_then_camera_nodes_get_device_rights() {
         let nodes = [PathBuf::from("/dev/video0"), PathBuf::from("/dev/video2")];
-        let table = path_table(CameraMode::V4l2, None, &nodes);
+        let table = path_table(CameraMode::V4l2, None, None, &nodes);
         for node in ["/dev/video0", "/dev/video2"] {
             assert_eq!(
                 rule_for(&table, node).expect(node).access,
                 FS_READ_FILE | FS_WRITE_FILE | FS_IOCTL_DEV
             );
         }
-        let none = path_table(CameraMode::None, None, &nodes);
+        let none = path_table(CameraMode::None, None, None, &nodes);
         assert!(rule_for(&none, "/dev/video0").is_none());
     }
 
-    /// GIVEN a missing or relative HOME THEN the sound server cookie path is
-    /// left out.
+    /// GIVEN a missing or relative HOME or XDG_RUNTIME_DIR THEN the sound
+    /// server's cookie and socket directory rules are left out.
     #[test]
-    fn given_bad_home_then_the_pulse_rule_is_left_out() {
-        for home in [None, Some(Path::new("relative/home")), Some(Path::new(""))] {
-            let table = path_table(CameraMode::None, home, &[]);
+    fn given_bad_home_or_runtime_then_the_pulse_rules_are_left_out() {
+        for dir in [None, Some(Path::new("relative/dir")), Some(Path::new(""))] {
+            let table = path_table(CameraMode::None, dir, dir, &[]);
             assert!(
-                table
-                    .iter()
-                    .all(|rule| !rule.path.ends_with(".config/pulse")),
-                "{home:?}"
+                table.iter().all(|rule| !rule.path.ends_with("pulse")),
+                "{dir:?}"
             );
         }
     }
@@ -966,7 +995,12 @@ mod tests {
             0
         );
         let nodes = [PathBuf::from("/dev/video0")];
-        for rule in path_table(CameraMode::V4l2, Some(Path::new("/h")), &nodes) {
+        for rule in path_table(
+            CameraMode::V4l2,
+            Some(Path::new("/h")),
+            Some(Path::new("/run/user/1")),
+            &nodes,
+        ) {
             assert_eq!(rule.access & !handled_fs(5), 0, "{:?}", rule.path);
         }
     }

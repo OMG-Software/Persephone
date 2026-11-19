@@ -124,16 +124,16 @@ pub(crate) fn set_limits(limits: Limits) -> io::Result<()> {
     set_limit(libc::RLIMIT_NOFILE, WORKER_MAX_FILES)
 }
 
-/// The rlimits of a call worker (ADR-0049): no file writes, no core dumps,
-/// at most 256 descriptors and, where the OS enforces it, `address_space`
-/// bytes of address space. There is no CPU limit (a call runs for hours) and
-/// no process limit (libwebrtc starts threads, and `RLIMIT_NPROC` counts
-/// them). Async-signal-safe: system calls only.
-pub(crate) fn set_call_limits(address_space: Option<u64>) -> io::Result<()> {
+/// The rlimits of a call worker (ADR-0049): files of at most `file_size`
+/// bytes, no core dumps, at most 256 descriptors and, where the OS enforces
+/// it, `address_space` bytes of address space. There is no CPU limit (a call
+/// runs for hours) and no process limit (libwebrtc starts threads, and
+/// `RLIMIT_NPROC` counts them). Async-signal-safe: system calls only.
+pub(crate) fn set_call_limits(address_space: Option<u64>, file_size: u64) -> io::Result<()> {
     if let Some(bytes) = address_space {
         set_limit(libc::RLIMIT_AS, bytes)?;
     }
-    set_limit(libc::RLIMIT_FSIZE, 0)?;
+    set_limit(libc::RLIMIT_FSIZE, file_size)?;
     set_limit(libc::RLIMIT_CORE, 0)?;
     set_limit(libc::RLIMIT_NOFILE, CALL_MAX_FILES)
 }

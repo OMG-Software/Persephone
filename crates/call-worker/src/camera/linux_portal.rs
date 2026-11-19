@@ -128,9 +128,34 @@ pub(crate) struct Remote {
     pub(crate) core: pw::core::CoreRc,
 }
 
-/// Connects over a portal remote. Without one the camera is unavailable.
+/// Makes the worker's `pw_*` functions reach `libpipewire-0.3`.
+///
+/// The statically linked libwebrtc defines weak `pw_*` stubs for its own
+/// screen capture. They take the place of the shared library's functions in
+/// the worker, so the `pipewire` crate calls them too. Each stub calls
+/// through a pointer that stays null until libwebrtc loads the library: the
+/// first `pw_init` then jumps to address 0 and the worker dies with SIGSEGV.
+/// `webrtc::InitializePipeWire` loads `libpipewire-0.3.so.0` (already mapped:
+/// the worker links it) and fills every pointer. It runs once and returns
+/// whether every function was found; `false` leaves PipeWire unusable.
+fn load_pipewire() -> bool {
+    unsafe extern "C" {
+        // `bool webrtc::InitializePipeWire()` (modules/portal/pipewire_utils.h).
+        #[link_name = "_ZN6webrtc18InitializePipeWireEv"]
+        fn webrtc_initialize_pipewire() -> bool;
+    }
+    // SAFETY: a function without arguments; libwebrtc guards it with a
+    // function-local static, so concurrent and repeated calls are safe.
+    unsafe { webrtc_initialize_pipewire() }
+}
+
+/// Connects over a portal remote. Without one, or when PipeWire cannot be
+/// loaded, the camera is unavailable.
 pub(crate) fn connect(remote: Option<OwnedFd>) -> Result<Remote, CameraState> {
     let fd = remote.ok_or(CameraState::Unavailable)?;
+    if !load_pipewire() {
+        return Err(CameraState::Unavailable);
+    }
     pw::init();
     // SAFETY: sets the library's log level; no pointers are involved.
     unsafe { pw::sys::pw_log_set_level(SPA_LOG_LEVEL_NONE) };
@@ -981,6 +1006,20 @@ mod tests {
         // The data-type mask holds MemPtr and MemFd and not DmaBuf.
         let mask = (1_u32 << DataType::MemPtr.as_raw()) | (1_u32 << DataType::MemFd.as_raw());
         assert_eq!(mask & (1_u32 << DataType::DmaBuf.as_raw()), 0);
+    }
+
+    /// GIVEN the worker linked with libwebrtc's weak `pw_*` stubs WHEN
+    /// PipeWire is loaded as `connect` does THEN `pw_init`, a main loop and a
+    /// context (all stubbed functions) work. Without the load, `pw::init`
+    /// called a null stub and the worker died with SIGSEGV on the first
+    /// portal camera list or screen share (seen on Linux Mint 22.3).
+    #[test]
+    fn given_libwebrtc_stubs_when_pipewire_is_loaded_then_it_initialises() {
+        assert!(load_pipewire(), "libwebrtc found libpipewire-0.3");
+        assert!(load_pipewire(), "a second load is harmless");
+        pw::init();
+        let mainloop = MainLoopRc::new(None).expect("main loop");
+        pw::context::ContextRc::new(&mainloop, None).expect("context");
     }
 
     /// GIVEN no descriptor from the core WHEN cameras are listed or a capture

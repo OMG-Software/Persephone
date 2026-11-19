@@ -591,6 +591,60 @@ not a pass; repeat it.
    turned off, the join is refused with the containment text ("The call did
    not start: its process could not be contained."). No worker stays
    running.
+5. Settings, Preferences, call devices. On the portal path the desktop asks
+   for camera access. Expected pass: after a grant the camera menu lists
+   the cameras (`pipewire:` IDs); after a refusal it lists none and the
+   page shows no error. The microphone and speaker menus offer only
+   "System default" (see the device listing record below).
+
+### Linux device listing (measured 19 November 2026)
+
+The owner reported that Preferences showed no call devices on Linux after
+the camera portal's access dialog. This was a partial run: the device
+listing only, without the app, a call or the portal. It is not the live
+containment run above.
+
+- Host: Linux Mint 22.3 VM, kernel 6.14.0-37 (LSMs `landlock`, `yama`,
+  `apparmor` and others), headless PipeWire 1.0.5 with `pipewire-pulse`
+  (`libpulse0` 16.1), no sound card and no camera.
+- Code: `origin/main` 3a40b30, then the fixes on this branch. Debug
+  builds of `persephone-call-worker` with `CXX=clang++-21` and the pinned
+  libwebrtc, with and without `dev-uncontained`.
+- Method: a Python driver started the worker as
+  `crates/media-broker/src/linux.rs` does (new session, `no_new_privs`,
+  the call rlimits, descriptor 3 as the camera channel, only
+  `XDG_RUNTIME_DIR`, `HOME` and `LANG=C`), sent `ListDevices` and decoded
+  the answer. A connected socket to the user's own `pipewire-0` stood in for
+  the portal's `OpenPipeWireRemote` (sent as the core does, byte `c`). A
+  GStreamer `videotestsrc` node with media class `Video/Source` stood in
+  for a camera. The driver and logs stayed on the VM; gdb gave the
+  backtrace.
+
+Before the fixes (3a40b30), each of these stops the listing on its own:
+
+| Cause | Observed | What the page gets |
+| --- | --- | --- |
+| `RLIMIT_FSIZE` 0 from the broker | libpulse sizes its 64 MiB memfd pool with `ftruncate`; the worker dies with `SIGXFSZ` before `Devices`. `prlimit --fsize=0 pactl info` dies the same way. | "The call devices could not be listed." |
+| No Landlock rule for `$XDG_RUNTIME_DIR/pulse` | With the file limit lifted, libpulse reports "Failed to create secure directory (/run/user/1001/pulse): Permission denied"; the worker sends `Failed(AudioDevice)`. | The same error |
+| libwebrtc's weak `pw_*` stubs | With both lifted and a PipeWire remote, the worker dies with `SIGSEGV`: `pipewire::init` calls libwebrtc's `pw_init` stub, whose pointer is null. Also seen uncontained. Screen sharing (ADR-0053) uses the same connection code, so it was affected too (not run). | The same error |
+
+After the fixes (file limit 256 MiB, read rule on `$XDG_RUNTIME_DIR/pulse`,
+`webrtc::InitializePipeWire()` before `pw::init`), the contained worker
+(containment bits 0) answered `Devices` and exited 0. It listed
+`pipewire:persephone-testcam` ("TestCamera") over the PipeWire remote, and
+no camera without one. The build without `dev-uncontained` still refused
+to run without `no_new_privs` (`Failed(Containment)`, exit 3).
+
+One limit remains, by design: the microphone and speaker lists stay empty
+on Linux. With the `index:` filter turned off in a probe build, libwebrtc
+reported `index:0` "default: auto_null.monitor" for recording and `index:0`
+"default: Dummy Output" and `index:1` "Dummy Output" for playout. Its
+PulseAudio module gives no GUIDs, and ADR-0043 never lists or selects
+`index:` IDs, so a Linux call uses the system default devices.
+
+Not covered: the real camera portal and its dialog, a real camera or
+sound card, the full app (core, broker and page), a call, a desktop
+session, other distributions, and a kernel without Landlock.
 
 ### macOS
 

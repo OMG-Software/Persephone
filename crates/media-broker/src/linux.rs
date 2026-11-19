@@ -124,6 +124,14 @@ fn cloexec_above_stderr() -> io::Result<()> {
 /// space than it uses.
 const CALL_ADDRESS_SPACE: u64 = 4 * 1024 * 1024 * 1024;
 
+/// The largest file the call worker may grow (`RLIMIT_FSIZE`). It is not 0:
+/// the sound server's client library sizes its shared-memory pool, a memfd
+/// of 64 MiB, with `ftruncate`, and Linux counts memfd and `/dev/shm` files
+/// against this limit. Above the limit the kernel sends `SIGXFSZ`, which
+/// killed the worker before it reached the sound server, so no call and no
+/// device list worked. Landlock still allows writes only under `/dev/shm`.
+const CALL_FILE_SIZE: u64 = 256 * 1024 * 1024;
+
 /// Which camera path the call worker may use (ADR-0049). The core decides it
 /// before it starts the worker; the worker gets it as one argument.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,7 +229,7 @@ fn call_child_setup(broker: libc::pid_t, child_fd: libc::c_int) -> io::Result<()
     prctl(libc::PR_SET_NO_NEW_PRIVS, 1)?;
     // After the close-on-exec marking, so that only descriptor 3 survives.
     unix::inherit_as_fd3(child_fd)?;
-    unix::set_call_limits(Some(CALL_ADDRESS_SPACE))
+    unix::set_call_limits(Some(CALL_ADDRESS_SPACE), CALL_FILE_SIZE)
 }
 
 /// The data byte of a camera descriptor on the camera channel (ADR-0053).
@@ -513,12 +521,36 @@ mod tests {
             words[at.expect(name)].to_owned()
         };
         assert_eq!(soft("address space"), "4294967296", "{out}");
-        assert_eq!(soft("file size"), "0", "{out}");
+        // "Max file size" is in bytes.
+        assert_eq!(soft("file size"), CALL_FILE_SIZE.to_string(), "{out}");
         assert_eq!(soft("core file size"), "0", "{out}");
         assert_eq!(soft("open files"), "256", "{out}");
         // The process limit is the broker's, not 0: the call worker starts
         // threads.
         assert_ne!(soft("processes"), "0", "{out}");
+        drop(started);
+    }
+
+    /// GIVEN a launched call worker WHEN it grows a file to the size of the
+    /// sound server client's shared-memory pool (64 MiB, as libpulse does
+    /// with `ftruncate`) THEN it lives; WHEN it grows one past the call
+    /// limit THEN the kernel refuses it. With a limit of 0 the first step
+    /// killed the worker with SIGXFSZ (Linux Mint 22.3, pipewire-pulse).
+    #[test]
+    fn given_a_call_worker_then_the_sound_pool_fits_and_larger_files_do_not() {
+        let pool = 64 * 1024 * 1024;
+        let over = CALL_FILE_SIZE + 1;
+        // Sparse files: nothing is written. Each step reports its status;
+        // a signal ends `truncate` with 128 plus the signal number.
+        let script = format!(
+            "f=$(mktemp) || exit 9; \
+             truncate -s {pool} \"$f\"; echo pool=$?; \
+             truncate -s {over} \"$f\"; echo over=$?; \
+             rm -f \"$f\""
+        );
+        let (out, started) = run_sh(&script, &[]);
+        assert!(out.contains("pool=0"), "{out}");
+        assert!(!out.contains("over=0"), "{out}");
         drop(started);
     }
 
