@@ -33,6 +33,9 @@ pub const MEMBERSHIP_REFRESH: Duration = Duration::from_secs(55 * 60);
 /// Longest `expires` accepted from another member.
 const MAX_EXPIRES_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
+/// Most `foci_preferred` entries examined for one member.
+pub const MAX_FOCI: usize = 8;
+
 /// Longest device ID accepted from another member, in bytes.
 const MAX_DEVICE_ID_BYTES: usize = 128;
 
@@ -93,7 +96,14 @@ pub struct ActiveMember {
     pub device_id: OwnedDeviceId,
     /// The LiveKit participant identity.
     pub identity: String,
+    /// The first acceptable LiveKit transport of the member, which is where
+    /// it publishes (ADR-0043). It is `transports[0]`.
     pub service_url: Url,
+    /// Every acceptable LiveKit transport in `foci_preferred`, in the
+    /// member's order, at most [`MAX_FOCI`] examined. An acceptable one has
+    /// an `https` URL of at most [`MAX_URL_BYTES`] bytes and no user
+    /// information. ADR-0054 picks another SFU from here.
+    pub transports: Vec<Url>,
     pub joined_ts: u64,
     pub expires_ts: u64,
 }
@@ -174,19 +184,24 @@ fn parse_member(event: &MemberEvent, now_ms: u64) -> Option<ActiveMember> {
     if expires_ts <= now_ms {
         return None;
     }
-    let focus = content
+    // Every acceptable LiveKit transport, in the member's order. One that is
+    // not acceptable is skipped; a member with none is not used.
+    let transports: Vec<Url> = content
         .get("foci_preferred")?
         .as_array()?
         .iter()
-        .find(|f| f.get("type").and_then(Value::as_str) == Some("livekit"))?;
-    let raw_url = focus.get("livekit_service_url")?.as_str()?;
-    if raw_url.len() > super::MAX_URL_BYTES {
-        return None;
-    }
-    let service_url = Url::parse(raw_url).ok()?;
-    if !is_service_url(&service_url, "https", "http") {
-        return None;
-    }
+        .take(MAX_FOCI)
+        .filter(|f| f.get("type").and_then(Value::as_str) == Some("livekit"))
+        .filter_map(|f| {
+            let raw_url = f.get("livekit_service_url")?.as_str()?;
+            if raw_url.len() > super::MAX_URL_BYTES {
+                return None;
+            }
+            let url = Url::parse(raw_url).ok()?;
+            is_service_url(&url, "https", "http").then_some(url)
+        })
+        .collect();
+    let service_url = transports.first()?.clone();
     let identity = match content.get("membershipID").and_then(Value::as_str) {
         Some(id) if id.len() <= MAX_IDENTITY_BYTES && !id.chars().any(char::is_control) => {
             id.to_owned()
@@ -198,6 +213,7 @@ fn parse_member(event: &MemberEvent, now_ms: u64) -> Option<ActiveMember> {
         device_id,
         identity,
         service_url,
+        transports,
         joined_ts,
         expires_ts,
     })
@@ -395,6 +411,47 @@ mod tests {
             e.content["foci_preferred"][0]["livekit_service_url"] = json!(bad);
             assert!(active_members([e], NOW).is_empty(), "{bad}");
         }
+    }
+
+    /// GIVEN a member with several transports, one not acceptable, one of another type
+    /// WHEN read THEN the acceptable LiveKit ones are kept in the member's order.
+    #[test]
+    fn given_several_transports_then_acceptable_ones_are_kept_in_order() {
+        let mut e = good("@a:example.org", "DEV", NOW);
+        e.content["foci_preferred"] = json!([
+            {"type": "livekit", "livekit_service_url": "https://u:p@bad.example/jwt"},
+            {"type": "other", "livekit_service_url": "https://other-type.example"},
+            {"type": "livekit", "livekit_service_url": "https://first.example/jwt"},
+            {"type": "livekit", "livekit_service_url": "https://second.example/jwt"},
+            {"type": "livekit", "livekit_service_url": 7},
+        ]);
+        let members = active_members([e], NOW);
+        let urls: Vec<&str> = members[0].transports.iter().map(Url::as_str).collect();
+        assert_eq!(
+            urls,
+            ["https://first.example/jwt", "https://second.example/jwt"]
+        );
+        assert_eq!(members[0].service_url.as_str(), "https://first.example/jwt");
+    }
+
+    /// GIVEN a member with more than the examined number of transports
+    /// WHEN read THEN only the first entries are examined.
+    #[test]
+    fn given_too_many_transports_then_later_ones_are_ignored() {
+        let mut e = good("@a:example.org", "DEV", NOW);
+        let mut list: Vec<Value> = (0..MAX_FOCI)
+            .map(|i| json!({"type": "livekit", "livekit_service_url": format!("https://s{i}.example")}))
+            .collect();
+        list.push(json!({"type": "livekit", "livekit_service_url": "https://late.example"}));
+        e.content["foci_preferred"] = Value::Array(list);
+        let members = active_members([e], NOW);
+        assert_eq!(members[0].transports.len(), MAX_FOCI);
+        assert!(
+            members[0]
+                .transports
+                .iter()
+                .all(|u| u.host_str() != Some("late.example"))
+        );
     }
 
     /// GIVEN a wrong application, scope, call id, device id or lifetime WHEN read THEN the event is skipped.

@@ -384,6 +384,58 @@ mod tests {
         assert!(post(&client(), &url, &json!({})).await.is_ok());
     }
 
+    /// GIVEN another SFU's service that answers with a redirect to a place
+    /// that would give a grant WHEN the profile's client asks THEN the status
+    /// is the answer and the redirect target is never requested.
+    #[tokio::test]
+    async fn given_a_redirect_then_it_is_not_followed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sfu/get"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "/elsewhere/sfu/get"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/elsewhere/sfu/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(grant_body()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let url = Url::parse(&server.uri()).unwrap();
+        let http = crate::homeserver::http_client(None).unwrap();
+        assert_eq!(
+            post(&http, &url, &json!({})).await.unwrap_err(),
+            SfuError::Status(302)
+        );
+    }
+
+    /// GIVEN another SFU's service whose answer names a URL that is not `wss://`
+    /// or has user information WHEN it is read THEN the grant is refused.
+    #[tokio::test]
+    async fn given_an_answer_with_a_bad_url_then_the_grant_is_refused() {
+        for bad in [
+            "https://sfu.example.org",
+            "wss://u:p@sfu.example.org",
+            "wss://",
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "url": bad, "jwt": JWT })),
+                )
+                .mount(&server)
+                .await;
+            let url = Url::parse(&server.uri()).unwrap();
+            assert_eq!(
+                post(&client(), &url, &json!({})).await.unwrap_err(),
+                SfuError::Refused(Refusal::BadUrl),
+                "{bad}"
+            );
+        }
+    }
+
     /// GIVEN a server error WHEN asked THEN only the status is reported.
     #[tokio::test]
     async fn given_server_error_then_status_only() {

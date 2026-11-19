@@ -39,6 +39,39 @@ pub const DIRECT_CONNECTION_TEXT: &str = concat!(
     "Connect this call directly?",
 );
 
+/// What the user reads before the call connects to another SFU (ADR-0054).
+/// `host` is the ASCII (punycode) DNS name of a validated service URL.
+/// `named_buttons` is true where the window's buttons read "Connect" and "Not
+/// now"; elsewhere the text maps them to Yes and No.
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
+pub fn other_sfu_text(host: &str, proxy_configured: bool, named_buttons: bool) -> String {
+    let mut text = format!(
+        concat!(
+            "This call has members on another call server: {}\n\n",
+            "If you connect, that server will see this computer's IP address, ",
+            "your Matrix ID, and when you take part in the call. It will not ",
+            "see the audio or video. Connect to hear and see those members.",
+        ),
+        host
+    );
+    if proxy_configured {
+        text.push_str(concat!(
+            "\n\nThis profile uses a SOCKS5 proxy, but this connection does ",
+            "not use it.",
+        ));
+    }
+    text.push_str("\n\nThe call goes on whatever you choose. ");
+    text.push_str(if named_buttons {
+        "Choose Connect or Not now."
+    } else {
+        "Choose Yes to connect, or No for not now."
+    });
+    text
+}
+
 /// The containment bits reported when the worker said it was contained but
 /// the OS check after `Ready` did not confirm it. The worker's own bits use
 /// the low bits and bit 31, so this one cannot collide with them.
@@ -74,6 +107,13 @@ pub trait Launcher: Send + Sync {
     /// Asks, in a native dialog owned by the core, whether the call may
     /// connect directly. `true` only for an explicit yes.
     fn confirm_direct_connection(&self) -> bool;
+
+    /// Asks, in a native dialog owned by the core, whether the call may
+    /// connect to another SFU (ADR-0054). `true` only for an explicit
+    /// "Connect". The default is a platform without the window: "no".
+    fn confirm_other_sfu(&self, _host: &str, _proxy_configured: bool) -> bool {
+        false
+    }
 
     /// Who lets the user pick a screen to share (ADR-0053). The default is a
     /// platform without screen sharing.
@@ -241,11 +281,33 @@ impl<L: Launcher> CallHost for ContainedCallHost<L> {
     fn confirm_direct_connection(&self) -> bool {
         self.launcher.confirm_direct_connection()
     }
+
+    fn confirm_other_sfu(&self, host: &str, proxy_configured: bool) -> bool {
+        self.launcher.confirm_other_sfu(host, proxy_configured)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN a host and no profile proxy WHEN the question is written THEN it
+    /// names the host, the IP address and the Matrix ID, and says nothing of a
+    /// proxy; WHEN there is a proxy THEN it also says this connection does not
+    /// use it.
+    #[test]
+    fn given_another_sfu_then_the_question_names_what_the_server_sees() {
+        let plain = other_sfu_text("sfu.other.example", false, true);
+        assert!(plain.contains("sfu.other.example"));
+        assert!(plain.contains("IP address"));
+        assert!(plain.contains("Matrix ID"));
+        assert!(plain.contains("Connect") && plain.contains("Not now"));
+        assert!(!plain.contains("proxy"));
+        let proxied = other_sfu_text("sfu.other.example", true, true);
+        assert!(proxied.contains("SOCKS5 proxy") && proxied.contains("does not use it"));
+        let yes_no = other_sfu_text("sfu.other.example", false, false);
+        assert!(yes_no.contains("Yes") && yes_no.contains("No"));
+    }
     use persephone_call_protocol::write_video_frame;
     use std::io::Cursor;
 
@@ -383,6 +445,7 @@ mod tests {
         write_message(
             &mut wire,
             &FromWorker::VideoStarted {
+                connection: 0,
                 tile: 1,
                 identity: "@b:example.org:DEV".to_owned(),
             },
@@ -404,7 +467,11 @@ mod tests {
         );
         assert!(matches!(
             event_rx.try_recv().unwrap(),
-            FromWorker::VideoStarted { tile: 1, .. }
+            FromWorker::VideoStarted {
+                connection: 0,
+                tile: 1,
+                ..
+            }
         ));
         // The controller applies both; the next picture is kept.
         video.stream_applied(1);

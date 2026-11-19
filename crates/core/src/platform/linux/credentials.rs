@@ -152,6 +152,18 @@ pub fn question_alert(caption: &str, message: &str) -> Alert {
     )
 }
 
+/// The question about another call server (ADR-0054); "Not now" is the
+/// default.
+pub fn other_sfu_alert(message: &str) -> Alert {
+    alert(
+        "Persephone",
+        message,
+        Style::Warning,
+        &["Not now", "Connect"],
+        Entry::Message,
+    )
+}
+
 /// The warning before a screen share (ADR-0053); "Cancel" is the default.
 pub fn screen_warning_alert() -> Alert {
     alert(

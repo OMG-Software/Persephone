@@ -9,7 +9,7 @@ use super::credentials::NativePrompt;
 use crate::calls::worker::{CameraPath, StartError};
 use crate::credentials::CredentialSource;
 use crate::platform::call_host::{
-    ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher,
+    ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher, other_sfu_text,
 };
 use crate::platform::unix_call::launched;
 use persephone_media_broker::{SeatbeltContainment, start_call_worker};
@@ -41,6 +41,14 @@ impl Launcher for MacLauncher {
     fn confirm_direct_connection(&self) -> bool {
         NativePrompt
             .confirm_open_link("Persephone", DIRECT_CONNECTION_TEXT)
+            .unwrap_or(false)
+    }
+
+    /// The question about another SFU (ADR-0054) in the same Yes/No alert.
+    /// Not compiled or run on the development machine.
+    fn confirm_other_sfu(&self, host: &str, proxy_configured: bool) -> bool {
+        NativePrompt
+            .confirm_open_link("Persephone", &other_sfu_text(host, proxy_configured, false))
             .unwrap_or(false)
     }
 }
