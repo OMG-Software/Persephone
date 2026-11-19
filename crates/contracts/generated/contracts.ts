@@ -154,7 +154,12 @@ ringDeclined: boolean, };
 
 export type CallIntent = "audio" | "video";
 
-export type CallRing = { roomId: string, caller: string, intent: CallIntent, secondsLeft: number, };
+export type CallRing = { 
+/**
+ * A number the core gives each ring, so a new ring with the same room
+ * and caller can be told apart. It names nothing in Matrix.
+ */
+ringId: number, roomId: string, caller: string, intent: CallIntent, secondsLeft: number, };
 
 export type CallRings = { rings: Array<CallRing>, };
 

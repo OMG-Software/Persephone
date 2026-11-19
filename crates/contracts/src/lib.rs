@@ -2359,6 +2359,9 @@ pub enum CallIntent {
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallRing {
+    /// A number the core gives each ring, so a new ring with the same room
+    /// and caller can be told apart. It names nothing in Matrix.
+    pub ring_id: u32,
     pub room_id: String,
     pub caller: String,
     pub intent: CallIntent,
@@ -2757,10 +2760,12 @@ mod personal_contract_tests {
     #[test]
     fn ring_contracts_refuse_unknown_fields_and_intents() {
         for wire in [
-            r#"{"rings":[{"roomId":"!r:s","caller":"@a:s","intent":"video","secondsLeft":5,"name":"x"}]}"#,
-            r#"{"rings":[{"roomId":"!r:s","caller":"@a:s","intent":"hologram","secondsLeft":5}]}"#,
-            r#"{"rings":[{"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":-1}]}"#,
-            r#"{"rings":[{"roomId":"!r:s","caller":"@a:s","intent":"audio"}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"video","secondsLeft":5,"name":"x"}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"hologram","secondsLeft":5}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":-1}]}"#,
+            r#"{"rings":[{"ringId":-1,"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":5}]}"#,
+            r#"{"rings":[{"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":5}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"audio"}]}"#,
             r#"{"rings":[],"token":"x"}"#,
         ] {
             assert!(serde_json::from_str::<CallRings>(wire).is_err(), "{wire}");

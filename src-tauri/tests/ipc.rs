@@ -109,13 +109,13 @@ impl CoreTransport for FakeCore {
             ),
             Call::CallStatus {} | Call::CallLeave {} => Ok(call_idle()),
             Call::CallRings {} => Ok(serde_json::json!({"rings": [
-                {"roomId": "!r:example.invalid", "caller": "@bob:example.invalid", "intent": "video", "secondsLeft": 42}
+                {"ringId": 9, "roomId": "!r:example.invalid", "caller": "@bob:example.invalid", "intent": "video", "secondsLeft": 42}
             ]})),
             Call::CallDeclineRing { room_id } => match room_id.as_str() {
                 "!r:example.invalid" => Ok(serde_json::json!({"rings": []})),
                 // A ring with a field outside the contract must not reach the page.
                 "!leaky:example.invalid" => Ok(serde_json::json!({"rings": [
-                    {"roomId": "!r:example.invalid", "caller": "@bob:example.invalid", "intent": "audio", "secondsLeft": 1, "body": "hi"}
+                    {"ringId": 9, "roomId": "!r:example.invalid", "caller": "@bob:example.invalid", "intent": "audio", "secondsLeft": 1, "body": "hi"}
                 ]})),
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },

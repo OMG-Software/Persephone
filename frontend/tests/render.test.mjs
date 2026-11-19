@@ -208,7 +208,7 @@ test('GIVEN identical pinned messages WHEN controls render THEN both action name
 test('GIVEN hostile caller and room names WHEN the ring prompt renders THEN they stay inert and isolated, and video needs a camera', async () => {
   const { default: RingPrompt } = await vite.ssrLoadModule('/src/RingPrompt.svelte');
   const hostile = '<img src=x onerror=alert(1)><script>alert(2)</script>';
-  const rings = [{ roomId: '!r:s', caller: hostile, intent: 'video', secondsLeft: 30, endsAt: 30_000 }];
+  const rings = [{ ringId: 1, roomId: '!r:s', caller: hostile, intent: 'video', secondsLeft: 30, endsAt: 30_000 }];
   const props = { rings, roomNames: new Map([['!r:s', hostile]]), busy: new Set(), onanswer() {}, ondecline() {} };
   const { body: withCamera } = render(RingPrompt, { props: { ...props, camera: true } });
   assert.match(withCamera, /Incoming call/);

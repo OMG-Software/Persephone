@@ -2534,6 +2534,7 @@ impl Core {
                 .into_iter()
                 .take(CALL_RINGS_MAX)
                 .map(|ring| CallRing {
+                    ring_id: ring.id,
                     room_id: ring.room_id.to_string(),
                     caller: ring.sender.to_string(),
                     intent: match ring.intent {
@@ -3740,6 +3741,7 @@ mod tests {
 
     fn test_ring(room: &str, sender: &str, ends_ms: u64) -> calls::rings::Ring {
         calls::rings::Ring {
+            id: 0,
             room_id: matrix_sdk::ruma::OwnedRoomId::try_from(room).unwrap(),
             event_id: matrix_sdk::ruma::OwnedEventId::try_from("$n:example.org").unwrap(),
             sender: matrix_sdk::ruma::OwnedUserId::try_from(sender).unwrap(),
