@@ -1013,4 +1013,93 @@ mod tests {
             assert!((1..64).contains(&abi));
         }
     }
+
+    /// GIVEN the worker's own Landlock rules applied on this kernel WHEN a
+    /// thread lists /dev/shm, reads a file there, creates one, opens one for
+    /// writing, truncates one and grows a memfd THEN only the reads and the
+    /// memfd work: no file the worker grows can outlive it. Landlock and
+    /// `no_new_privs` hold for the calling thread only, so the rules run on
+    /// a thread of their own and leave the other tests alone. (No child
+    /// process: a fork would copy other tests' descriptors until its exec.)
+    /// A kernel without Landlock ABI 3 has nothing to check: the worker does
+    /// not run there.
+    #[test]
+    fn given_worker_landlock_then_dev_shm_is_read_only() {
+        if !landlock_abi().is_some_and(abi_ok) || !Path::new("/dev/shm").is_dir() {
+            return;
+        }
+        let existing = Path::new("/dev/shm").join(format!(
+            "persephone-shm-probe-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let created = existing.with_extension("new");
+        std::fs::write(&existing, b"before").expect("the probe file is written");
+        let probe = existing.clone();
+        let results = std::thread::spawn(move || probe_shm(&probe))
+            .join()
+            .expect("the probe thread ends");
+        let after = std::fs::read(&existing);
+        let _ = std::fs::remove_file(&existing);
+        let _ = std::fs::remove_file(&created);
+        assert_eq!(
+            results,
+            [
+                ("list", "ok"),
+                ("read", "ok"),
+                ("create", "EACCES"),
+                ("write", "EACCES"),
+                ("truncate", "EACCES"),
+                ("memfd", "ok"),
+            ]
+        );
+        assert_eq!(after.expect("probe file kept"), b"before");
+        assert!(!created.exists());
+    }
+
+    /// The probe thread: applies the worker's rules to itself and tries each
+    /// access. The thread ends afterwards, so the rules end with it.
+    fn probe_shm(existing: &Path) -> [(&'static str, &'static str); 6] {
+        use std::fs::OpenOptions;
+        fn outcome(ok: bool) -> &'static str {
+            if ok { "ok" } else { "failed" }
+        }
+        fn denied(result: std::io::Result<std::fs::File>) -> &'static str {
+            match result {
+                Err(error) if error.raw_os_error() == Some(libc::EACCES) => "EACCES",
+                Err(_) => "other error",
+                Ok(_) => "allowed",
+            }
+        }
+        // SAFETY: prctl with integer arguments only; it sets this thread's
+        // flag.
+        let no_new_privs = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, NONE, NONE, NONE) };
+        assert_eq!(no_new_privs, 0);
+        landlock(CameraMode::None).expect("the worker's rules apply");
+        let list = std::fs::read_dir("/dev/shm").is_ok();
+        let read = std::fs::read(existing).is_ok_and(|bytes| bytes == b"before");
+        let create = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(existing.with_extension("new"));
+        let write = OpenOptions::new().write(true).open(existing);
+        let truncate = OpenOptions::new().write(true).truncate(true).open(existing);
+        // SAFETY: a fixed C string name and flags; the descriptor is owned
+        // below.
+        let raw = unsafe { libc::memfd_create(c"persephone-probe".as_ptr(), libc::MFD_CLOEXEC) };
+        let grown = raw >= 0 && {
+            // SAFETY: the kernel returned a new descriptor that nothing else
+            // owns.
+            let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+            file.set_len(64 * 1024 * 1024).is_ok()
+        };
+        [
+            ("list", outcome(list)),
+            ("read", outcome(read)),
+            ("create", denied(create)),
+            ("write", denied(write)),
+            ("truncate", denied(truncate)),
+            ("memfd", outcome(grown)),
+        ]
+    }
 }
