@@ -58,6 +58,7 @@
 * [0048 - Add camera video to calls in the call worker](0048-add-camera-video-to-calls-in-the-call-worker.md)
 * [0049 - Contain the call worker on Linux and macOS](0049-contain-the-call-worker-on-linux-and-macos.md)
 * [0051 - Tier CI by event and run the full matrix in the merge queue](0051-tier-ci-by-event-and-run-the-full-matrix-in-the-merge-queue.md)
+* [0053 - Share the screen in calls on Linux and Windows](0053-share-the-screen-in-calls-on-linux-and-windows.md)
 
 ## Superseded Records
 
