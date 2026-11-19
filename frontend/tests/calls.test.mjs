@@ -18,6 +18,7 @@ import {
   CAMERA_TEXT,
   VIDEO_CALL_LABEL,
   callButton,
+  STARTING_TEXT,
   cameraButton,
   hasVideo,
   videoCallButton,
@@ -33,9 +34,9 @@ const ready = (over) => ({ available: true, reason: null, activeMembers: 0, ...o
 
 test('GIVEN every call code in the contract WHEN its text is read THEN each is plain, non-empty text, except a normal leave', () => {
   const codes = {
-    unavailable: ['unsupported_platform', 'not_joined', 'not_encrypted', 'no_call_server', 'server_unreachable'],
+    unavailable: ['unsupported_platform', 'not_joined', 'not_encrypted', 'not_permitted', 'no_call_server', 'server_unreachable'],
     join: ['already_in_call', 'not_joined', 'not_encrypted', 'no_call_server', 'declined', 'unsupported_platform', 'containment', 'no_worker', 'no_delayed_events', 'membership', 'call_server', 'keys', 'proxy_unreadable', 'device_setting_unreadable'],
-    end: ['connection_failed', 'audio_device', 'device_not_found', 'containment', 'worker_stopped', 'membership_lost', 'keys_unavailable', 'session_ended', 'internal']
+    end: ['connection_failed', 'audio_device', 'device_not_found', 'containment', 'worker_stopped', 'worker_crashed', 'membership_lost', 'keys_unavailable', 'session_ended', 'internal']
   };
   for (const [table, list] of [[UNAVAILABLE_TEXT, codes.unavailable], [JOIN_ERROR_TEXT, codes.join], [END_TEXT, codes.end]]) {
     assert.deepEqual(Object.keys(table).filter((key) => key !== 'left').sort(), [...list].sort());
@@ -58,10 +59,15 @@ test('GIVEN an unavailable room WHEN the button is built THEN it is disabled wit
   assert.equal(view.label, 'Join call (2)');
 });
 
-test('GIVEN readiness not yet known or a join waiting WHEN the button is built THEN it is disabled without a reason', () => {
+test('GIVEN readiness not yet known WHEN the button is built THEN it is disabled without a reason', () => {
   assert.deepEqual([callButton('!r:s', null, IDLE_CALL, false).disabled, callButton('!r:s', null, IDLE_CALL, false).reason], [true, null]);
-  const pending = callButton('!r:s', ready(), IDLE_CALL, true);
-  assert.deepEqual([pending.disabled, pending.reason], [true, null]);
+});
+
+test('GIVEN a join waiting for the core WHEN the buttons are built THEN they are disabled and say that a proxy warning may be waiting', () => {
+  for (const view of [callButton('!r:s', ready(), IDLE_CALL, true), videoCallButton('!r:s', ready(), IDLE_CALL, true)]) {
+    assert.deepEqual([view.disabled, view.reason], [true, STARTING_TEXT]);
+  }
+  assert.match(STARTING_TEXT, /proxy warning/);
 });
 
 test('GIVEN this account is in a call WHEN buttons are built THEN that room hides it and other rooms are disabled', () => {

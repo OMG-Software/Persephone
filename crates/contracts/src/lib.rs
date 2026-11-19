@@ -2125,6 +2125,9 @@ pub enum CallUnavailable {
     NotJoined,
     /// A call never runs without end-to-end encryption.
     NotEncrypted,
+    /// This user's power level is below what the room requires to send the
+    /// call member state event, so the call could not join.
+    NotPermitted,
     /// The homeserver offers no call server.
     NoCallServer,
     /// The homeserver could not be asked.
@@ -2180,6 +2183,8 @@ pub enum CallEnd {
     AudioDevice,
     Containment,
     WorkerStopped,
+    /// The call process ended with an internal error (a panic or an abort).
+    WorkerCrashed,
     MembershipLost,
     KeysUnavailable,
     SessionEnded,

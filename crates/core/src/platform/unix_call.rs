@@ -2,7 +2,7 @@
 //! long-lived worker, ended and checked through the link's
 //! [`WorkerProcess`] (ADR-0043, ADR-0049).
 
-use crate::calls::worker::WorkerProcess;
+use crate::calls::worker::{WorkerExit, WorkerProcess};
 use crate::platform::call_host::Launched;
 use persephone_media_broker::{LongLivedWorker, StartedCallWorker};
 use std::time::Duration;
@@ -17,6 +17,13 @@ impl WorkerProcess for UnixProcess {
 
     fn wait_exit(&self, timeout: Duration) -> bool {
         self.0.wait_exit(timeout)
+    }
+
+    fn exit_status(&self) -> Option<WorkerExit> {
+        self.0.exit_status().map(|exit| match exit {
+            persephone_media_broker::WorkerExit::Code(code) => WorkerExit::Code(code),
+            persephone_media_broker::WorkerExit::Signal(signal) => WorkerExit::Signal(signal),
+        })
     }
 
     /// `/proc/<pid>/status` on Linux, `sandbox_check` on macOS.
