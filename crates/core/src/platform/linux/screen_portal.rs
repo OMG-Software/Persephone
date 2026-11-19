@@ -1,0 +1,416 @@
+//! The screen share through the desktop's ScreenCast portal
+//! (`org.freedesktop.portal.ScreenCast`, ADR-0053).
+//!
+//! The core, not the call worker, talks to the session bus. The flow:
+//!
+//! 1. The core shows its own warning window: the shared screen can show
+//!    Persephone's messages, because Linux does not hide the window from
+//!    capture. "Cancel" ends the request; nothing else runs.
+//! 2. `CreateSession`, `SelectSources` (monitor and window sources, one of
+//!    them, `persist_mode` 0, no restore token, the cursor drawn into the
+//!    picture where the portal offers it), `Start` (the desktop draws its own
+//!    picker), then `OpenPipeWireRemote`.
+//! 3. The node ID from the `Start` answer and the remote go to the worker.
+//!    The portal session stays open for the whole share. It closes when the
+//!    [`PortalSession`] drops (a stop, a worker end state, the end of the
+//!    call). If the desktop closes it first (the user stops the share from
+//!    the desktop), the `closed` signal fires.
+//!
+//! A cancelled picker, a refusal, a timeout or any failure ends in an
+//! error. Nothing falls back to another source. The worker never sees the
+//! bus.
+
+use super::bus::{self, BusError};
+use super::camera_portal::{close_message, is_socket, new_token, request_path};
+use super::credentials::{prompt, screen_warning_alert, yes};
+use crate::calls::screen::{
+    Remote, SOURCE_TYPES, ScreenGrant, ScreenRefusal, ScreenSource, pick_node,
+    preferred_cursor_mode,
+};
+use persephone_call_protocol::ScreenTarget;
+use std::collections::HashMap;
+use std::os::fd::OwnedFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
+use zbus::blocking::{Connection, Proxy};
+use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
+
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const SCREEN_CAST: &str = "org.freedesktop.portal.ScreenCast";
+const REQUEST: &str = "org.freedesktop.portal.Request";
+const SESSION: &str = "org.freedesktop.portal.Session";
+const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
+
+/// The longest wait for the user's answer to one portal request. The picker
+/// is a window the user may leave open for a while.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(120);
+/// How often a wait looks at the cancel flag.
+const CANCEL_CHECK: Duration = Duration::from_millis(100);
+
+/// The ScreenCast source of the Linux desktop.
+pub struct PortalScreen;
+
+impl ScreenSource for PortalScreen {
+    fn available(&self) -> bool {
+        true
+    }
+
+    /// Warns, then asks the portal. The warning is the core's own window; a
+    /// "Cancel" or a closed window ends the request before the bus is used.
+    fn choose(&self, cancel: &AtomicBool) -> Result<ScreenGrant, ScreenRefusal> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ScreenRefusal::Cancelled);
+        }
+        match prompt(screen_warning_alert()).and_then(|answer| yes(answer.response)) {
+            Ok(true) => {}
+            Ok(false) => return Err(ScreenRefusal::Cancelled),
+            // No display, or a window that did not run.
+            Err(_) => return Err(ScreenRefusal::Unavailable),
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ScreenRefusal::Cancelled);
+        }
+        open_share(cancel)
+    }
+}
+
+/// Why a portal step failed.
+fn refusal(error: &zbus::Error) -> ScreenRefusal {
+    let denied = match error {
+        zbus::Error::MethodError(name, _, _) => {
+            name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"
+        }
+        zbus::Error::FDO(inner) => matches!(**inner, zbus::fdo::Error::AccessDenied(_)),
+        _ => false,
+    };
+    if denied {
+        return ScreenRefusal::Refused;
+    }
+    match bus::classify(error) {
+        BusError::Absent => ScreenRefusal::Unavailable,
+        BusError::Failed => ScreenRefusal::Refused,
+    }
+}
+
+/// An open portal session. Dropping it closes the session and the bus
+/// connection, so the desktop's "sharing" indicator goes away.
+pub struct PortalSession {
+    connection: Connection,
+    path: OwnedObjectPath,
+}
+
+impl Drop for PortalSession {
+    fn drop(&mut self) {
+        // `Close` waits for no reply: the portal may be gone.
+        if let Ok(message) = zbus::Message::method_call(self.path.as_str(), "Close")
+            .and_then(|builder| builder.destination(PORTAL))
+            .and_then(|builder| builder.interface(SESSION))
+            .and_then(|builder| builder.with_flags(zbus::message::Flags::NoReplyExpected))
+            .and_then(|builder| builder.build(&()))
+        {
+            let _ = self.connection.send(&message);
+        }
+        let _ = self.connection.clone().close();
+    }
+}
+
+/// One request of the portal: the method call and the wait for its
+/// `Response`. Returns the results of the response. The `Response` listener
+/// exists before the call, so the answer cannot be missed.
+fn request(
+    connection: &Connection,
+    cancel: &AtomicBool,
+    call: impl FnOnce(&Connection, &str) -> zbus::Result<zbus::Message> + Send + 'static,
+) -> Result<HashMap<String, OwnedValue>, ScreenRefusal> {
+    let unique = connection.unique_name().ok_or(ScreenRefusal::Refused)?;
+    let token = new_token().ok_or(ScreenRefusal::Refused)?;
+    let path = request_path(unique.as_str(), &token).ok_or(ScreenRefusal::Refused)?;
+    let listener = Proxy::new_owned(connection.clone(), PORTAL, path.clone(), REQUEST)
+        .map_err(|_| ScreenRefusal::Refused)?;
+    let mut responses = listener
+        .receive_signal("Response")
+        .map_err(|_| ScreenRefusal::Refused)?;
+    let (answer_tx, answer_rx) = mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("screen-portal".to_owned())
+        .spawn(move || {
+            let _ = answer_tx.send(responses.next());
+        })
+        .map_err(|_| ScreenRefusal::Refused)?;
+
+    let (call_tx, call_rx) = mpsc::channel();
+    let call_connection = connection.clone();
+    std::thread::Builder::new()
+        .name("screen-portal-call".to_owned())
+        .spawn(move || {
+            let result = call(&call_connection, &token).map_err(|error| refusal(&error));
+            let _ = call_tx.send(result);
+        })
+        .map_err(|_| ScreenRefusal::Refused)?;
+    let handle = wait(&call_rx, cancel).and_then(|outcome| outcome)?;
+    // The portal must have made the request at the path that was listened on.
+    let reply_path: OwnedObjectPath = handle
+        .body()
+        .deserialize()
+        .map_err(|_| ScreenRefusal::Refused)?;
+    if reply_path.as_str() != path {
+        return Err(ScreenRefusal::Refused);
+    }
+    let outcome = wait_response(&answer_rx, cancel);
+    if outcome.is_err() {
+        // End the request; `Close` waits for no reply.
+        if let Ok(close) = close_message(path.as_str()) {
+            let _ = connection.send(&close);
+        }
+    }
+    outcome
+}
+
+/// Waits for one result on `receiver` until `cancel` is set.
+fn wait<T>(receiver: &mpsc::Receiver<T>, cancel: &AtomicBool) -> Result<T, ScreenRefusal> {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ScreenRefusal::Cancelled);
+        }
+        match receiver.recv_timeout(CANCEL_CHECK) {
+            Ok(result) => return Ok(result),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(ScreenRefusal::Refused),
+        }
+    }
+}
+
+/// Waits for the `Response` message of a request, for at most
+/// [`ANSWER_TIMEOUT`]. Code 0 is success; 1 is the user's cancel of the
+/// desktop's picker; any other code is a refusal.
+fn wait_response(
+    receiver: &mpsc::Receiver<Option<zbus::Message>>,
+    cancel: &AtomicBool,
+) -> Result<HashMap<String, OwnedValue>, ScreenRefusal> {
+    let deadline = Instant::now() + ANSWER_TIMEOUT;
+    let message = loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(ScreenRefusal::Cancelled);
+        }
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return Err(ScreenRefusal::Unavailable);
+        }
+        match receiver.recv_timeout(CANCEL_CHECK) {
+            Ok(Some(message)) => break message,
+            Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(ScreenRefusal::Refused);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    };
+    let (code, results): (u32, HashMap<String, OwnedValue>) = message
+        .body()
+        .deserialize()
+        .map_err(|_| ScreenRefusal::Refused)?;
+    match code {
+        0 => Ok(results),
+        // The user closed the desktop's picker.
+        1 => Err(ScreenRefusal::Cancelled),
+        _ => Err(ScreenRefusal::Refused),
+    }
+}
+
+/// A method call to the portal's ScreenCast object.
+fn cast_call<B>(connection: &Connection, method: &str, body: &B) -> zbus::Result<zbus::Message>
+where
+    B: serde::Serialize + zbus::zvariant::DynamicType,
+{
+    connection.call_method(Some(PORTAL), PORTAL_PATH, Some(SCREEN_CAST), method, body)
+}
+
+/// The cursor modes the portal offers, as a bit set; `0` when it says
+/// nothing (the option is then left out).
+fn available_cursor_modes(connection: &Connection) -> u32 {
+    connection
+        .call_method(
+            Some(PORTAL),
+            PORTAL_PATH,
+            Some(PROPERTIES),
+            "Get",
+            &(SCREEN_CAST, "AvailableCursorModes"),
+        )
+        .ok()
+        .and_then(|reply| reply.body().deserialize::<OwnedValue>().ok())
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+/// The node IDs of the streams in the `Start` answer.
+fn stream_nodes(results: &HashMap<String, OwnedValue>) -> Vec<u32> {
+    let Some(streams) = results.get("streams") else {
+        return Vec::new();
+    };
+    let Value::Array(array) = &**streams else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(|item| match item {
+            Value::Structure(structure) => match structure.fields().first() {
+                Some(Value::U32(node)) => Some(*node),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Runs the portal flow and returns the grant: the node, the remote and the
+/// open session.
+fn open_share(cancel: &AtomicBool) -> Result<ScreenGrant, ScreenRefusal> {
+    let connection = bus::session().map_err(|error| match error {
+        BusError::Absent => ScreenRefusal::Unavailable,
+        BusError::Failed => ScreenRefusal::Refused,
+    })?;
+    match share_on(&connection, cancel) {
+        Ok(grant) => Ok(grant),
+        Err(error) => {
+            // Ends calls and dialogs still waiting on the bus.
+            let _ = connection.close();
+            Err(error)
+        }
+    }
+}
+
+fn share_on(connection: &Connection, cancel: &AtomicBool) -> Result<ScreenGrant, ScreenRefusal> {
+    // CreateSession.
+    let session_token = new_token().ok_or(ScreenRefusal::Refused)?;
+    let created = request(connection, cancel, {
+        let session_token = session_token.clone();
+        move |connection, token| {
+            let options = HashMap::from([
+                ("handle_token", Value::from(token)),
+                ("session_handle_token", Value::from(session_token.as_str())),
+            ]);
+            cast_call(connection, "CreateSession", &(options,))
+        }
+    })?;
+    let session_path = created
+        .get("session_handle")
+        .and_then(|value| <&str>::try_from(&**value).ok())
+        .and_then(|text| OwnedObjectPath::try_from(text).ok())
+        .ok_or(ScreenRefusal::Refused)?;
+    // From here the session closes with this value, on every path out.
+    let session = PortalSession {
+        connection: connection.clone(),
+        path: session_path.clone(),
+    };
+
+    // SelectSources: monitor or window, one source, nothing remembered.
+    let cursor = preferred_cursor_mode(available_cursor_modes(connection));
+    let session_for_select = session_path.clone();
+    request(connection, cancel, move |connection, token| {
+        let mut options: HashMap<&str, Value<'_>> = HashMap::from([
+            ("handle_token", Value::from(token)),
+            ("types", Value::from(SOURCE_TYPES)),
+            ("multiple", Value::from(false)),
+            ("persist_mode", Value::from(0_u32)),
+        ]);
+        if let Some(mode) = cursor {
+            options.insert("cursor_mode", Value::from(mode));
+        }
+        cast_call(
+            connection,
+            "SelectSources",
+            &(ObjectPath::from(&session_for_select), options),
+        )
+    })?;
+
+    // Start: the desktop shows its own picker.
+    let session_for_start = session_path.clone();
+    let started = request(connection, cancel, move |connection, token| {
+        let options = HashMap::from([("handle_token", Value::from(token))]);
+        cast_call(
+            connection,
+            "Start",
+            &(ObjectPath::from(&session_for_start), "", options),
+        )
+    })?;
+    let node = pick_node(&stream_nodes(&started))?;
+
+    // The remote, then the signal for a session the desktop closes.
+    let reply = connection
+        .call_method(
+            Some(PORTAL),
+            PORTAL_PATH,
+            Some(SCREEN_CAST),
+            "OpenPipeWireRemote",
+            &(
+                ObjectPath::from(&session_path),
+                HashMap::<&str, Value<'_>>::new(),
+            ),
+        )
+        .map_err(|error| refusal(&error))?;
+    let fd: zbus::zvariant::OwnedFd = reply
+        .body()
+        .deserialize()
+        .map_err(|_| ScreenRefusal::Refused)?;
+    let remote: Remote = OwnedFd::from(fd);
+    if !is_socket(&remote) {
+        return Err(ScreenRefusal::Refused);
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err(ScreenRefusal::Cancelled);
+    }
+    let closed = watch_closed(connection, &session_path)?;
+    Ok(ScreenGrant {
+        target: ScreenTarget::Portal { node },
+        remote: Some(remote),
+        session: Some(Box::new(session)),
+        closed: Some(closed),
+    })
+}
+
+/// Watches the session's `Closed` signal on its own thread; the receiver
+/// fires when the desktop closes the session. The thread ends with the
+/// connection.
+fn watch_closed(
+    connection: &Connection,
+    session_path: &OwnedObjectPath,
+) -> Result<oneshot::Receiver<()>, ScreenRefusal> {
+    let proxy = Proxy::new_owned(connection.clone(), PORTAL, session_path.to_owned(), SESSION)
+        .map_err(|_| ScreenRefusal::Refused)?;
+    let mut signals = proxy
+        .receive_signal("Closed")
+        .map_err(|_| ScreenRefusal::Refused)?;
+    let (tx, rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("screen-portal-closed".to_owned())
+        .spawn(move || {
+            if signals.next().is_some() {
+                let _ = tx.send(());
+            }
+        })
+        .map_err(|_| ScreenRefusal::Refused)?;
+    Ok(rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GIVEN a `Start` answer with streams WHEN the nodes are read THEN each
+    /// stream's node ID comes out, and an answer without streams gives none.
+    #[test]
+    fn given_a_start_answer_then_the_node_ids_are_read() {
+        assert!(stream_nodes(&HashMap::new()).is_empty());
+        let wrong = HashMap::from([("streams".to_owned(), OwnedValue::from(7_u32))]);
+        assert!(stream_nodes(&wrong).is_empty());
+    }
+
+    /// GIVEN the portal's refusal and absence errors WHEN mapped THEN access
+    /// denied is a refusal and a missing service is unavailable.
+    #[test]
+    fn given_portal_errors_then_the_refusal_names_the_cause() {
+        let denied = zbus::Error::FDO(Box::new(zbus::fdo::Error::AccessDenied("x".into())));
+        assert_eq!(refusal(&denied), ScreenRefusal::Refused);
+    }
+}

@@ -95,7 +95,12 @@ reachable: boolean,
 /**
  * This device holds a key for it. Without one it cannot be heard.
  */
-keyed: boolean, };
+keyed: boolean, 
+/**
+ * It shares its screen (ADR-0053). The sender's label is only a
+ * display hint; shown as text.
+ */
+sharing: boolean, };
 
 export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found";
 
@@ -103,11 +108,13 @@ export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" |
 
 export type CallCamera = "off" | "starting" | "on" | "not_found" | "unavailable";
 
+export type CallScreen = "off" | "starting" | "on" | "not_found" | "unavailable" | "refused";
+
 export type CallParticipantRef = { userId: string, deviceId: string, };
 
 export type CallVideoTile = { 
 /**
- * 0 to 4.
+ * 0 to 5.
  */
 tile: number, participant: CallParticipantRef | null, own: boolean, 
 /**
@@ -130,6 +137,10 @@ ended: CallEnd | null,
  * Set when this reply refuses a join.
  */
 joinError: CallJoinError | null, camera: CallCamera, 
+/**
+ * The own screen share (ADR-0053).
+ */
+screen: CallScreen, 
 /**
  * The active video tiles, at most [`CALL_VIDEO_TILES_MAX`].
  */

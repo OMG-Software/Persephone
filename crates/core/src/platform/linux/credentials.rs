@@ -152,6 +152,17 @@ pub fn question_alert(caption: &str, message: &str) -> Alert {
     )
 }
 
+/// The warning before a screen share (ADR-0053); "Cancel" is the default.
+pub fn screen_warning_alert() -> Alert {
+    alert(
+        "Persephone",
+        crate::calls::screen::LINUX_SCREEN_WARNING_TEXT,
+        Style::Warning,
+        &["Cancel", "Share"],
+        Entry::Message,
+    )
+}
+
 pub fn recovery_alert(caption: &str, message: &str) -> Alert {
     alert(
         caption,

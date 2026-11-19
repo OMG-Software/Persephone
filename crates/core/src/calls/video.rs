@@ -2,9 +2,12 @@
 //!
 //! Pictures do not use the worker's event queue: that queue blocks the read
 //! thread when the controller is slow, and a picture is worth nothing once a
-//! newer one exists. The store keeps at most one picture per tile (five in
-//! all, each at most [`persephone_call_protocol::MAX_VIDEO_BYTES`]), so a
-//! slow page loses pictures and never grows memory.
+//! newer one exists. The store keeps at most one picture per tile (six in
+//! all: five camera tiles of at most
+//! [`persephone_call_protocol::MAX_VIDEO_BYTES`] and the screen tile of at
+//! most [`persephone_call_protocol::MAX_SCREEN_BYTES`], about 8.3 MB), so a
+//! slow page loses pictures and never grows memory. A picture's limit is
+//! its tile's (ADR-0053), checked before it is kept.
 //!
 //! Two threads share one [`VideoStore`]:
 //!
@@ -22,8 +25,8 @@
 //! lock is released.
 //!
 //! A picture is kept only when the controller has said its tile may show:
-//! tile 0 while the camera is on, tiles 1 to 4 after the worker's
-//! `VideoStarted` for a current participant. [`VideoStore::close`] ends the
+//! tile 0 while the camera is on, tiles 1 to 5 (5 is the screen share) after
+//! the worker's `VideoStarted` for a current participant. [`VideoStore::close`] ends the
 //! store for good: it drops every picture and refuses later ones.
 //!
 //! A tile's stream can change (a freed tile goes to a waiting track) before
@@ -42,11 +45,12 @@
 //! tile's reassignment, or than the call itself, gets no picture of another
 //! stream under the old participant's name.
 
-use persephone_call_protocol::{MAX_VIDEO_PIXELS, MAX_VIDEO_ROTATION, MAX_VIDEO_SIDE, VIDEO_TILES};
+use persephone_call_protocol::{MAX_VIDEO_ROTATION, VIDEO_TILES, picture_fits};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Tiles in a call: 0 is the own camera, 1 to 4 are remote.
+/// Tiles in a call: 0 is the own camera, 1 to 4 are remote cameras and 5 is
+/// the remote screen share.
 const TILES: usize = VIDEO_TILES as usize;
 /// The own camera's tile.
 const OWN_TILE: usize = 0;
@@ -191,11 +195,10 @@ impl VideoStore {
         rgba: impl AsRef<[u8]> + Send + Sync + 'static,
     ) -> bool {
         let pixels = u64::from(width) * u64::from(height);
+        // The limits are the tile's, checked by index before anything is kept.
         if usize::from(tile) >= TILES
             || rotation > MAX_VIDEO_ROTATION
-            || !(1..=MAX_VIDEO_SIDE).contains(&width)
-            || !(1..=MAX_VIDEO_SIDE).contains(&height)
-            || pixels > u64::from(MAX_VIDEO_PIXELS)
+            || !picture_fits(tile, width, height)
             || u64::try_from(rgba.as_ref().len()).ok() != Some(pixels * 4)
         {
             return false;
@@ -244,14 +247,14 @@ impl VideoStore {
             .cloned()
     }
 
-    /// Sets which tiles may show: the own tile (`own`) and tiles 1 to 4
-    /// (`remote[0]` is tile 1). A tile that may not show loses its picture.
+    /// Sets which tiles may show: the own tile (`own`) and tiles 1 to 5
+    /// (`remote[0]` is tile 1, `remote[4]` the screen tile). A tile that may not show loses its picture.
     pub fn sync(&self, own: bool, remote: [bool; TILES - 1]) {
         let mut state = self.state();
         if state.closed {
             return;
         }
-        let allowed = [own, remote[0], remote[1], remote[2], remote[3]];
+        let allowed = [own, remote[0], remote[1], remote[2], remote[3], remote[4]];
         for (tile, allow) in allowed.into_iter().enumerate() {
             let allow = allow && !state.blocked[tile];
             state.allowed[tile] = allow;
@@ -343,7 +346,7 @@ mod tests {
 
     fn open_store() -> VideoStore {
         let store = VideoStore::new();
-        store.sync(true, [true; 4]);
+        store.sync(true, [true; 5]);
         store
     }
 
@@ -385,8 +388,12 @@ mod tests {
     fn given_pictures_outside_the_limits_then_they_are_dropped() {
         let store = open_store();
         assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 7)));
-        let cases: [(u8, u8, u32, u32, usize); 8] = [
-            (5, 0, 2, 2, 16),
+        let cases: [(u8, u8, u32, u32, usize); 12] = [
+            (6, 0, 2, 2, 16),
+            (1, 0, 1280, 720, 1280 * 720 * 4),
+            (4, 0, 1280, 720, 1280 * 720 * 4),
+            (5, 0, 1281, 1, 1281 * 4),
+            (5, 0, 1280, 721, 1280 * 721 * 4),
             (1, 4, 2, 2, 16),
             (1, 0, 0, 2, 0),
             (1, 0, 2, 0, 0),
@@ -409,6 +416,37 @@ mod tests {
         assert!(largest, "the largest allowed picture is kept");
     }
 
+    /// GIVEN the screen tile WHEN pictures of 1280x720 and 720x1280 arrive
+    /// THEN both are kept (3,686,400 bytes each) and the picture of a camera
+    /// tile is still held to 640x360; all six tiles together hold at most
+    /// about 8.3 MB.
+    #[test]
+    fn given_the_screen_tile_then_it_keeps_a_1280_by_720_picture() {
+        let store = open_store();
+        assert!(store.insert(5, 0, 1280, 720, rgba(1280, 720, 1)));
+        assert!(store.insert(5, 0, 720, 1280, rgba(720, 1280, 2)));
+        let kept = store
+            .newest(5, 0, store.stream(5))
+            .expect("the screen picture");
+        assert_eq!(
+            (kept.width, kept.height, kept.bytes().len()),
+            (720, 1280, 3_686_400)
+        );
+        assert!(!store.insert(3, 0, 1280, 720, rgba(1280, 720, 1)));
+        let mut total = 0;
+        for tile in 0..4 {
+            assert!(store.insert(tile, 0, 640, 360, rgba(640, 360, 3)));
+        }
+        assert!(store.insert(4, 0, 640, 360, rgba(640, 360, 3)));
+        for tile in 0..6 {
+            total += store
+                .newest(tile, 0, store.stream(tile))
+                .map_or(0, |picture| picture.bytes().len());
+        }
+        assert_eq!(total, 5 * 921_600 + 3_686_400);
+        assert!(total < 8_400_000);
+    }
+
     /// GIVEN a tile that stops being allowed WHEN synced THEN its picture goes
     /// and later pictures are dropped; the other tiles keep theirs.
     #[test]
@@ -416,7 +454,7 @@ mod tests {
         let store = open_store();
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         assert!(store.insert(2, 0, 2, 2, rgba(2, 2, 1)));
-        store.sync(false, [true, false, true, true]);
+        store.sync(false, [true, false, true, true, true]);
         assert!(store.newest(0, 0, store.stream(0)).is_none());
         assert!(store.newest(2, 0, store.stream(2)).is_none());
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
@@ -492,14 +530,14 @@ mod tests {
         assert!(store.newest(0, 0, store.stream(0)).is_none());
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 2)));
         assert!(store.insert(1, 0, 2, 2, rgba(2, 2, 2)), "remote tiles stay");
-        store.sync(true, [true; 4]);
+        store.sync(true, [true; 5]);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 3)), "still blocked");
         store.camera_on_taken(off);
         let on = store.camera_request(true);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 3)), "not taken yet");
         store.camera_on_taken(on);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 3)), "not allowed yet");
-        store.sync(true, [true; 4]);
+        store.sync(true, [true; 5]);
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 3)));
     }
 
@@ -512,11 +550,11 @@ mod tests {
         let on = store.camera_request(true);
         let _off = store.camera_request(false);
         store.camera_on_taken(on);
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         let again = store.camera_request(true);
         store.camera_on_taken(again);
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(
             store.insert(0, 0, 2, 2, rgba(2, 2, 1)),
             "a later on lifts it"
@@ -531,7 +569,7 @@ mod tests {
         assert!(store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         store.close();
         assert_eq!(store.kept(), 0);
-        store.sync(true, [true; 4]);
+        store.sync(true, [true; 5]);
         assert!(!store.insert(0, 0, 2, 2, rgba(2, 2, 1)));
         assert!(store.newest(0, 0, store.stream(0)).is_none());
     }

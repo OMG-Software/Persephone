@@ -161,6 +161,15 @@ impl CallWorkerLink {
         persephone_media_broker::send_camera_fd(channel, fd).map_err(|_| WorkerGone)
     }
 
+    /// Sends the ScreenCast portal's remote to the worker over the camera
+    /// channel with the data byte `s` (ADR-0053). Call it directly before
+    /// `SetScreen { target: Some(Portal { .. }) }`, once per command.
+    #[cfg(target_os = "linux")]
+    pub fn send_screen_handle(&self, fd: std::os::fd::BorrowedFd<'_>) -> Result<(), WorkerGone> {
+        let channel = self.camera.as_ref().ok_or(WorkerGone)?;
+        persephone_media_broker::send_screen_fd(channel, fd).map_err(|_| WorkerGone)
+    }
+
     /// Uses `video` as the link's picture store: the one the host's read
     /// thread writes to.
     pub fn with_video(mut self, video: VideoStore) -> Self {
@@ -219,6 +228,12 @@ pub trait CallHost: Send + Sync {
     /// [`CallHost::start`] always refuses.
     fn supported(&self) -> bool {
         true
+    }
+
+    /// Who lets the user pick a screen to share (ADR-0053). A platform
+    /// without screen sharing keeps this default.
+    fn screen_source(&self) -> Arc<dyn super::screen::ScreenSource> {
+        super::screen::unavailable()
     }
 }
 

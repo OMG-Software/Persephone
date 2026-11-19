@@ -20,6 +20,7 @@ pub mod gtk_thread;
 pub mod modules;
 pub mod pick;
 pub mod portal;
+pub mod screen_portal;
 pub mod ui;
 pub mod vault;
 

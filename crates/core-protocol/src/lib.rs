@@ -683,8 +683,18 @@ pub enum Call {
     CallCamera {
         on: bool,
     },
+    /// Start or stop sharing the screen during a call (ADR-0053). The page
+    /// names no screen, window or handle: on a start the core shows its own
+    /// chooser or warning, and a cancel leaves the share off. Replies
+    /// `CallStatus`, with the screen `starting` when started; the worker's
+    /// answer arrives as [`Event::CallChanged`]. Refused when no call is
+    /// connected.
+    CallScreen {
+        on: bool,
+    },
     /// The newest picture on a video tile (0 is the own camera, 1 to 4 are
-    /// remote), if its number is above `after` and it belongs to the tile's
+    /// remote cameras, 5 is the remote screen share), if its number is above
+    /// `after` and it belongs to the tile's
     /// stream `stream` (from the call status). Answered at once with a
     /// [`VideoReply`] and one pixel frame, or with an `ok` reply holding null
     /// when there is no such picture.
@@ -899,14 +909,42 @@ pub const MAX_PROXY_BYTES: usize = 300;
 /// Longest call device ID either side accepts, in bytes.
 pub const MAX_CALL_DEVICE_ID_BYTES: usize = 512;
 
-/// Video tiles in a call: tile 0 is the own camera, tiles 1 to 4 are remote.
-pub const CALL_VIDEO_TILES: u8 = 5;
+/// Video tiles in a call: tile 0 is the own camera, tiles 1 to 4 are remote
+/// cameras, tile 5 is the remote screen share (ADR-0053).
+pub const CALL_VIDEO_TILES: u8 = 6;
 
-/// The longest side of a call video picture, in pixels.
+/// The tile of the remote screen share.
+pub const CALL_SCREEN_TILE: u8 = 5;
+
+/// The longest side of a call camera picture, in pixels.
 pub const MAX_CALL_VIDEO_SIDE: u32 = 640;
 
-/// The most pixels in one call video picture.
+/// The most pixels in one call camera picture.
 pub const MAX_CALL_VIDEO_PIXELS: u32 = 640 * 360;
+
+/// The longest side of a screen share picture, in pixels.
+pub const MAX_CALL_SCREEN_SIDE: u32 = 1280;
+
+/// The most pixels in one screen share picture: 1280 x 720.
+pub const MAX_CALL_SCREEN_PIXELS: u32 = 1280 * 720;
+
+/// The longest side of a picture on this tile.
+pub const fn max_call_video_side(tile: u8) -> u32 {
+    if tile == CALL_SCREEN_TILE {
+        MAX_CALL_SCREEN_SIDE
+    } else {
+        MAX_CALL_VIDEO_SIDE
+    }
+}
+
+/// The most pixels in a picture on this tile.
+pub const fn max_call_video_pixels(tile: u8) -> u32 {
+    if tile == CALL_SCREEN_TILE {
+        MAX_CALL_SCREEN_PIXELS
+    } else {
+        MAX_CALL_VIDEO_PIXELS
+    }
+}
 
 /// The most bytes in the one `RgbaPixels` frame after a [`VideoReply`].
 pub const MAX_CALL_VIDEO_BYTES: u64 = MAX_CALL_VIDEO_PIXELS as u64 * 4;
@@ -1076,13 +1114,16 @@ impl VideoReply {
         if self.tile >= CALL_VIDEO_TILES
             || self.rotation > MAX_CALL_VIDEO_ROTATION
             || self.seq > MAX_SAFE_TIMESTAMP
-            || !(1..=MAX_CALL_VIDEO_SIDE).contains(&self.width)
-            || !(1..=MAX_CALL_VIDEO_SIDE).contains(&self.height)
         {
             return None;
         }
+        // The limits are the tile's: checked before any buffer exists.
+        let side = max_call_video_side(self.tile);
+        if !(1..=side).contains(&self.width) || !(1..=side).contains(&self.height) {
+            return None;
+        }
         let pixels = u64::from(self.width) * u64::from(self.height);
-        if pixels > u64::from(MAX_CALL_VIDEO_PIXELS) {
+        if pixels > u64::from(max_call_video_pixels(self.tile)) {
             return None;
         }
         Some(FrameHeader {
@@ -1906,6 +1947,10 @@ mod tests {
             (
                 Call::CallCamera { on: false },
                 r#"{"id":1,"call":{"command":"call_camera","on":false}}"#,
+            ),
+            (
+                Call::CallScreen { on: true },
+                r#"{"id":1,"call":{"command":"call_screen","on":true}}"#,
             ),
             (
                 Call::CallVideoFrame {
@@ -2965,7 +3010,10 @@ mod tests {
     fn given_an_out_of_limit_video_reply_then_nothing_crosses() {
         let budgets = ResourceBudgets::default();
         for reply in [
-            r#"{"video_reply":{"id":1,"tile":5,"seq":1,"rotation":0,"width":1,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":6,"seq":1,"rotation":0,"width":1,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":5,"seq":1,"rotation":0,"width":1281,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":5,"seq":1,"rotation":0,"width":1280,"height":721}}"#,
+            r#"{"video_reply":{"id":1,"tile":4,"seq":1,"rotation":0,"width":1280,"height":720}}"#,
             r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":4,"width":1,"height":1}}"#,
             r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":0,"height":1}}"#,
             r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1,"height":0}}"#,
@@ -3001,8 +3049,22 @@ mod tests {
                 Ok(FromCore::Video(_))
             ));
         }
+        // The screen tile takes up to 1280 x 720, and its turned form.
+        for (width, height) in [(1280, 720), (720, 1280)] {
+            let screen = video_reply(5, width, height);
+            let mut wire = Vec::new();
+            let pixels = vec![1; width as usize * height as usize * 4];
+            send_video_reply(&mut wire, &screen, &pixels).unwrap();
+            assert!(matches!(
+                receive_from_core(&mut Cursor::new(wire), &budgets),
+                Ok(FromCore::Video(_))
+            ));
+        }
         for (reply, length) in [
-            (video_reply(5, 2, 2), 16),
+            (video_reply(6, 2, 2), 16),
+            (video_reply(5, 1281, 1), 1281 * 4),
+            (video_reply(5, 1280, 721), 1280 * 721 * 4),
+            (video_reply(4, 1280, 720), 1280 * 720 * 4),
             (
                 VideoReply {
                     rotation: 4,
@@ -3030,7 +3092,7 @@ mod tests {
     }
 
     /// GIVEN video and camera calls WHEN their limits are checked THEN tiles
-    /// 0 to 4 and safe cursors pass, and every other value is refused.
+    /// 0 to 5 and safe cursors pass, and every other value is refused.
     #[test]
     fn given_video_calls_when_limits_are_checked_then_bounds_hold() {
         let frame = |tile, after, stream| Call::CallVideoFrame {
@@ -3040,11 +3102,11 @@ mod tests {
         };
         assert!(call_video_within_limits(&frame(0, 0, 0)));
         assert!(call_video_within_limits(&frame(
-            4,
+            5,
             MAX_SAFE_TIMESTAMP,
             MAX_SAFE_TIMESTAMP
         )));
-        assert!(!call_video_within_limits(&frame(5, 0, 0)));
+        assert!(!call_video_within_limits(&frame(6, 0, 0)));
         assert!(!call_video_within_limits(&frame(255, 0, 0)));
         assert!(!call_video_within_limits(&frame(
             0,
@@ -3072,6 +3134,57 @@ mod tests {
         ))));
         assert!(!call_video_within_limits(&devices(Some("a\nb".into()))));
         assert!(call_video_within_limits(&Call::CallCamera { on: true }));
+        assert!(call_video_within_limits(&Call::CallScreen { on: true }));
+    }
+
+    /// GIVEN video replies of many sizes on camera tiles and the screen tile
+    /// WHEN their frame headers are made THEN the tile decides the limit: a
+    /// screen picture up to 1280x720 passes only on tile 5, a camera picture
+    /// stays at 640x360, and every size over a limit is refused.
+    #[test]
+    fn given_video_replies_when_headers_are_made_then_the_tile_limit_decides() {
+        let reply = |tile, width, height| VideoReply {
+            id: 1,
+            tile,
+            seq: 1,
+            rotation: 0,
+            width,
+            height,
+        };
+        let header = reply(CALL_SCREEN_TILE, 1280, 720)
+            .frame_header()
+            .expect("a full screen picture");
+        assert_eq!(header.length, 3_686_400);
+        assert!(reply(CALL_SCREEN_TILE, 720, 1280).frame_header().is_some());
+        assert!(reply(CALL_SCREEN_TILE, 1281, 720).frame_header().is_none());
+        assert!(reply(CALL_SCREEN_TILE, 1280, 721).frame_header().is_none());
+        assert!(reply(CALL_SCREEN_TILE, 0, 720).frame_header().is_none());
+        for tile in 0..CALL_SCREEN_TILE {
+            assert!(reply(tile, 640, 360).frame_header().is_some(), "{tile}");
+            assert!(reply(tile, 1280, 720).frame_header().is_none(), "{tile}");
+            assert!(reply(tile, 641, 360).frame_header().is_none(), "{tile}");
+            assert!(reply(tile, 640, 361).frame_header().is_none(), "{tile}");
+        }
+        assert!(reply(CALL_VIDEO_TILES, 1, 1).frame_header().is_none());
+    }
+
+    /// GIVEN the screen command WHEN it is decoded THEN it carries only the
+    /// flag: any source, device, handle, id or missing flag is refused.
+    #[test]
+    fn given_the_screen_command_then_the_page_can_name_no_source() {
+        let decoded = |json: &[u8]| serde_json::from_slice::<Request>(json);
+        assert!(decoded(br#"{"id":1,"call":{"command":"call_screen","on":true}}"#).is_ok());
+        assert!(decoded(br#"{"id":1,"call":{"command":"call_screen","on":false}}"#).is_ok());
+        for json in [
+            &br#"{"id":1,"call":{"command":"call_screen"}}"#[..],
+            br#"{"id":1,"call":{"command":"call_screen","on":1}}"#,
+            br#"{"id":1,"call":{"command":"call_screen","on":true,"source":"1"}}"#,
+            br#"{"id":1,"call":{"command":"call_screen","on":true,"monitor":0}}"#,
+            br#"{"id":1,"call":{"command":"call_screen","on":true,"node":7}}"#,
+            br#"{"id":1,"call":{"command":"call_screen","on":true,"window":"x"}}"#,
+        ] {
+            assert!(decoded(json).is_err(), "{}", String::from_utf8_lossy(json));
+        }
     }
 }
 

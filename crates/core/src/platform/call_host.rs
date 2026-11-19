@@ -7,6 +7,7 @@
 //! the writer and returns the link. The read and write threads, the `Ready`
 //! gate and the picture store wiring are the same on every OS.
 
+use crate::calls::screen::ScreenSource;
 use crate::calls::video::VideoStore;
 use crate::calls::worker::{
     CALL_WORKER_EXE, COMMAND_QUEUE, CallHost, CallWorkerLink, CameraPath, EVENT_QUEUE,
@@ -20,7 +21,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
-    sync::mpsc as std_mpsc,
+    sync::{Arc, mpsc as std_mpsc},
     thread,
 };
 use tokio::sync::mpsc;
@@ -73,6 +74,12 @@ pub trait Launcher: Send + Sync {
     /// Asks, in a native dialog owned by the core, whether the call may
     /// connect directly. `true` only for an explicit yes.
     fn confirm_direct_connection(&self) -> bool;
+
+    /// Who lets the user pick a screen to share (ADR-0053). The default is a
+    /// platform without screen sharing.
+    fn screen_source(&self) -> Arc<dyn ScreenSource> {
+        crate::calls::screen::unavailable()
+    }
 }
 
 /// Starts the call worker through `L` and returns the link once the worker is
@@ -173,6 +180,10 @@ fn write_loop<W: std::io::Write>(mut writer: W, mut commands: mpsc::Receiver<ToW
 }
 
 impl<L: Launcher> CallHost for ContainedCallHost<L> {
+    fn screen_source(&self) -> Arc<dyn ScreenSource> {
+        self.launcher.screen_source()
+    }
+
     fn start(&self) -> Result<CallWorkerLink, StartError> {
         if !self.exe.is_file() {
             return Err(StartError::NoExe);
@@ -343,7 +354,7 @@ mod tests {
         let (first_tx, _first_rx) = std_mpsc::channel();
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_QUEUE);
         let video = VideoStore::new();
-        video.sync(false, [true, false, false, false]);
+        video.sync(false, [true, false, false, false, false]);
         read_loop(Cursor::new(wire), first_tx, event_tx, video.clone());
         assert_eq!(event_rx.try_recv().unwrap(), FromWorker::Connected);
         assert_eq!(event_rx.try_recv().unwrap(), FromWorker::Left);
@@ -381,7 +392,7 @@ mod tests {
         let (first_tx, _first_rx) = std_mpsc::channel();
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_QUEUE);
         let video = VideoStore::new();
-        video.sync(false, [true, false, false, false]);
+        video.sync(false, [true, false, false, false, false]);
         read_loop(Cursor::new(wire), first_tx, event_tx, video.clone());
         assert!(
             video.newest(1, 0, video.stream(1)).is_none(),
@@ -448,7 +459,7 @@ mod tests {
         let (first_tx, _first_rx) = std_mpsc::channel();
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_QUEUE);
         let video = VideoStore::new();
-        video.sync(true, [true; 4]);
+        video.sync(true, [true; 5]);
         read_loop(Cursor::new(wire), first_tx, event_tx, video.clone());
         assert!(event_rx.try_recv().is_err());
         assert!(video.newest(1, 0, video.stream(1)).is_none());

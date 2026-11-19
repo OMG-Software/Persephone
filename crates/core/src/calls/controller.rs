@@ -24,6 +24,7 @@ use super::membership::{
     own_membership, own_state_key, participant_identity, read_members,
 };
 use super::readiness::{TurnServers, sfu_transport, turn_servers};
+use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError};
 use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{CallHost, CallWorkerLink, StartError, WorkerProcess};
@@ -38,9 +39,10 @@ use matrix_sdk::{
     },
 };
 use persephone_call_protocol::{
-    CameraState, FailureCode, FrameKeyMsg, FromWorker, ToWorker, TurnServer, VIDEO_TILES,
+    CameraState, FailureCode, FrameKeyMsg, FromWorker, ScreenState, ToWorker, TurnServer,
+    VIDEO_TILES,
 };
-use persephone_contracts::{CallCamera, CallParticipantRef, CallVideoTile};
+use persephone_contracts::{CallCamera, CallParticipantRef, CallScreen, CallVideoTile};
 use std::{
     collections::{BTreeSet, HashSet},
     future::Future,
@@ -141,6 +143,8 @@ pub struct Participant {
     pub reachable: bool,
     /// This device holds a key for it. Without one it cannot be heard.
     pub keyed: bool,
+    /// It shares its screen (ADR-0053); a display hint from the sender.
+    pub sharing: bool,
 }
 
 /// The call as the page sees it. It holds no secret and no peer text.
@@ -156,6 +160,8 @@ pub enum CallState {
         /// At most [`MAX_CALL_MEMBERS`], other devices only.
         participants: Vec<Participant>,
         camera: CallCamera,
+        /// The own screen share (ADR-0053).
+        screen: CallScreen,
         /// The active video tiles, at most [`VIDEO_TILES`].
         video: Vec<CallVideoTile>,
     },
@@ -270,6 +276,11 @@ struct View {
     speaking: HashSet<String>,
     keyed: HashSet<String>,
     camera: CallCamera,
+    /// The own screen share.
+    screen: CallScreen,
+    /// The members that share a screen, as the worker said with
+    /// `ScreenSharer`. A display hint only.
+    sharing: HashSet<String>,
     /// The identity on each remote tile (tile 1 first), as the worker said
     /// with `VideoStarted`. An identity that is not a member yet waits here
     /// and shows once the membership is read.
@@ -280,7 +291,7 @@ struct View {
     video_streams: [u64; VIDEO_TILES as usize],
 }
 
-/// Remote video tiles: tiles 1 to 4.
+/// Remote video tiles: tiles 1 to 4 are cameras, tile 5 is the screen share.
 const REMOTE_TILES: usize = VIDEO_TILES as usize - 1;
 
 impl View {
@@ -300,6 +311,8 @@ impl View {
             } else {
                 CallCamera::Off
             },
+            screen: CallScreen::Off,
+            sharing: HashSet::new(),
             remote_video: Default::default(),
             video_streams: Default::default(),
         }
@@ -314,6 +327,26 @@ impl View {
         let present: HashSet<&str> = self.members.iter().map(|m| m.identity.as_str()).collect();
         self.speaking.retain(|id| present.contains(id.as_str()));
         self.keyed.retain(|id| present.contains(id.as_str()));
+        self.sharing.retain(|id| present.contains(id.as_str()));
+    }
+
+    /// The page asked for the screen share on or off. The state shows
+    /// `starting` until the pick and the worker answer.
+    fn request_screen(&mut self, on: bool) -> Applied {
+        let next = match (on, self.screen) {
+            (true, CallScreen::On | CallScreen::Starting) => self.screen,
+            (true, _) => CallScreen::Starting,
+            (false, _) => CallScreen::Off,
+        };
+        self.set_screen(next)
+    }
+
+    fn set_screen(&mut self, screen: CallScreen) -> Applied {
+        if self.screen == screen {
+            return Applied::Same;
+        }
+        self.screen = screen;
+        Applied::Changed
     }
 
     /// The page asked for the camera on or off. The state shows `starting`
@@ -337,7 +370,7 @@ impl View {
 
     /// Forgets the video of a member that left.
     fn forget_video(&mut self, identity: &str) -> bool {
-        let mut changed = false;
+        let mut changed = self.sharing.remove(identity);
         for slot in &mut self.remote_video {
             if slot.as_deref() == Some(identity) {
                 *slot = None;
@@ -413,6 +446,30 @@ impl View {
                 CameraState::NotFound => CallCamera::NotFound,
                 CameraState::Unavailable => CallCamera::Unavailable,
             }),
+            FromWorker::Screen { state } => self.set_screen(match state {
+                ScreenState::Off => CallScreen::Off,
+                ScreenState::Starting => CallScreen::Starting,
+                ScreenState::On => CallScreen::On,
+                ScreenState::NotFound => CallScreen::NotFound,
+                ScreenState::Unavailable => CallScreen::Unavailable,
+                ScreenState::Refused => CallScreen::Refused,
+            }),
+            FromWorker::ScreenSharer { identity, sharing } => {
+                // Only a current member can be shown as sharing.
+                if !self.is_member(identity) && *sharing {
+                    return Applied::Same;
+                }
+                let changed = if *sharing {
+                    self.sharing.insert(identity.clone())
+                } else {
+                    self.sharing.remove(identity)
+                };
+                if changed {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
             FromWorker::VideoStarted { tile, identity } => {
                 let Some(slot) = usize::from(*tile)
                     .checked_sub(1)
@@ -516,9 +573,11 @@ impl View {
                     speaking: self.speaking.contains(&m.identity),
                     reachable: m.service_url == self.own_sfu,
                     keyed: self.keyed.contains(&m.identity),
+                    sharing: self.sharing.contains(&m.identity),
                 })
                 .collect(),
             camera: self.camera,
+            screen: self.screen,
             video: self.video_tiles(),
         }
     }
@@ -722,6 +781,8 @@ enum Command {
         on: bool,
         request: u64,
     },
+    /// The screen share on or off (ADR-0053). The page names no source.
+    Screen(bool),
 }
 
 /// Tells the owner of the controller that the state changed.
@@ -1199,6 +1260,12 @@ impl CallController {
             portal: None,
             portal_capture: false,
             portal_sent: false,
+            screens: self.inner.host.screen_source(),
+            screen_pick: None,
+            screen_wanted: false,
+            screen_session: None,
+            screen_closed: None,
+            screen_sent: false,
         })
     }
 
@@ -1281,6 +1348,50 @@ impl CallController {
             true
         });
         permit.send(Command::Camera { on, request });
+        drop(slot);
+        if changed {
+            let listener = plain(&self.inner.listener).clone();
+            if let Some(listener) = listener {
+                listener();
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts or stops the screen share (ADR-0053). Refused unless a call is
+    /// connected. The page names no screen: on a start the platform's source
+    /// shows its own warning or chooser, and a cancel leaves the share off.
+    /// The state shows `starting` at once when started, and the answer of the
+    /// pick and the worker replaces it.
+    pub fn set_screen(&self, on: bool) -> Result<(), CallError> {
+        let slot = self.inner.slot();
+        let Slot::Running(run) = &*slot else {
+            return Err(CallError::NotInCall);
+        };
+        if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
+            return Err(CallError::NotInCall);
+        }
+        // A queue place is taken first, so a full queue changes nothing.
+        let permit = run
+            .commands
+            .try_reserve()
+            .map_err(|_| CallError::NotInCall)?;
+        let changed = self.inner.state.send_if_modified(|state| {
+            let CallState::Active { screen, .. } = state else {
+                return false;
+            };
+            let next = match (on, *screen) {
+                (true, CallScreen::On | CallScreen::Starting) => *screen,
+                (true, _) => CallScreen::Starting,
+                (false, _) => CallScreen::Off,
+            };
+            if next == *screen {
+                return false;
+            }
+            *screen = next;
+            true
+        });
+        permit.send(Command::Screen(on));
         drop(slot);
         if changed {
             let listener = plain(&self.inner.listener).clone();
@@ -1502,6 +1613,21 @@ struct Call {
     /// `portal_capture` again: a reply to the old capture (its `Off`) can
     /// arrive after the new remote went and clear the flag.
     portal_sent: bool,
+    /// Who lets the user pick a screen to share (ADR-0053).
+    screens: Arc<dyn ScreenSource>,
+    /// The pick in flight: the user's answer to the core's own window or the
+    /// portal's picker. Dropping it cancels the pick.
+    screen_pick: Option<ScreenPick>,
+    /// The latest screen request: `true` from a start until a stop. A pick
+    /// that ends after a stop is closed unused.
+    screen_wanted: bool,
+    /// The share's portal session, open for the whole share. Dropping it
+    /// closes the session.
+    screen_session: Option<Box<dyn Send + Sync>>,
+    /// Fires when the desktop closes the portal session.
+    screen_closed: Option<oneshot::Receiver<()>>,
+    /// A `SetScreen` start went to the worker and no stop or end since.
+    screen_sent: bool,
 }
 
 /// The result of a camera portal access request: the PipeWire remote, or
@@ -1541,6 +1667,41 @@ async fn portal_done(slot: &mut Option<PortalTask>) -> PortalRemote {
     let result = (&mut portal.task).await;
     *slot = None;
     result.unwrap_or_default()
+}
+
+/// A screen pick running on a blocking thread. Dropping it sets the pick's
+/// cancel flag: the window closes and the wait ends within a fraction of a
+/// second, so the end of a call does not wait for the user's answer.
+struct ScreenPick {
+    task: JoinHandle<Result<ScreenGrant, ScreenRefusal>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for ScreenPick {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Waits for the pick in `slot`, if any; otherwise it never ends.
+async fn screen_pick_done(slot: &mut Option<ScreenPick>) -> Result<ScreenGrant, ScreenRefusal> {
+    let Some(pick) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    let result = (&mut pick.task).await;
+    *slot = None;
+    result.unwrap_or(Err(ScreenRefusal::Unavailable))
+}
+
+/// Waits until the desktop closes the portal session, if one is open;
+/// otherwise it never ends.
+async fn screen_session_closed(slot: &mut Option<oneshot::Receiver<()>>) {
+    let Some(closed) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    // A dropped sender is a closed session too.
+    let _ = closed.await;
+    *slot = None;
 }
 
 /// Frees the slot when the task ends, also after a panic.
@@ -1636,6 +1797,149 @@ impl Call {
         Ok(())
     }
 
+    /// Starts or stops the screen share as the user asked (ADR-0053). A start
+    /// asks the platform's source off the call loop: the user answers in a
+    /// window the core or the desktop draws. A stop cancels a pick in flight,
+    /// closes the portal session and stops the worker's capture.
+    fn screen_command(&mut self, inner: &Inner, on: bool) -> Result<(), EndReason> {
+        self.screen_wanted = on;
+        if on {
+            if !self.screens.available() {
+                let changed = self.view.set_screen(CallScreen::Unavailable) == Applied::Changed;
+                if changed {
+                    self.publish(inner);
+                }
+                return Ok(());
+            }
+            // A pick in flight or a share that runs is not started twice.
+            if self.screen_pick.is_none() && !self.screen_sent {
+                let source = self.screens.clone();
+                let cancel = Arc::new(AtomicBool::new(false));
+                let flag = cancel.clone();
+                self.screen_pick = Some(ScreenPick {
+                    task: tokio::task::spawn_blocking(move || source.choose(&flag)),
+                    cancel,
+                });
+            }
+            if self.view.request_screen(true) == Applied::Changed {
+                self.publish(inner);
+            }
+            return Ok(());
+        }
+        // A stop: no pick, no session, no capture.
+        self.screen_pick = None;
+        self.screen_closed = None;
+        self.screen_session = None;
+        if self.screen_sent {
+            self.screen_sent = false;
+            self.send_worker(ToWorker::SetScreen { target: None })?;
+        }
+        if self.view.request_screen(false) == Applied::Changed {
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
+    /// The pick ended. A grant goes to the worker: on Linux the remote first,
+    /// then the command. A cancel, a refusal or a remote that could not go
+    /// leaves the share off or unavailable; no other source is tried.
+    fn screen_picked(
+        &mut self,
+        inner: &Inner,
+        picked: Result<ScreenGrant, ScreenRefusal>,
+    ) -> Result<(), EndReason> {
+        let grant = match picked {
+            Ok(grant) if self.screen_wanted => grant,
+            // A stop came meanwhile: the grant (and its session) is dropped.
+            Ok(_) => return Ok(()),
+            Err(refusal) => {
+                if self.screen_wanted && self.view.set_screen(refusal.shown()) == Applied::Changed {
+                    self.publish(inner);
+                }
+                self.screen_wanted = false;
+                return Ok(());
+            }
+        };
+        let ScreenGrant {
+            target,
+            remote,
+            session,
+            closed,
+        } = grant;
+        // The remote goes first and the command says so by its target: the
+        // worker takes the oldest screen remote with it.
+        if !self.send_screen_remote(remote, &target) {
+            self.screen_wanted = false;
+            if self.view.set_screen(CallScreen::Unavailable) == Applied::Changed {
+                self.publish(inner);
+            }
+            return Ok(());
+        }
+        self.screen_session = session;
+        self.screen_closed = closed;
+        self.screen_sent = true;
+        self.send_worker(ToWorker::SetScreen {
+            target: Some(target),
+        })
+    }
+
+    /// Sends the portal's remote when the target needs one. Returns whether
+    /// the command may follow.
+    #[cfg(target_os = "linux")]
+    fn send_screen_remote(
+        &self,
+        remote: Option<super::screen::Remote>,
+        target: &persephone_call_protocol::ScreenTarget,
+    ) -> bool {
+        use persephone_call_protocol::ScreenTarget;
+        use std::os::fd::AsFd;
+        match (target, remote) {
+            (ScreenTarget::Portal { .. }, Some(remote)) => {
+                self.link.send_screen_handle(remote.as_fd()).is_ok()
+            }
+            (ScreenTarget::Portal { .. }, None) => false,
+            (ScreenTarget::Monitor { .. }, _) => true,
+        }
+    }
+
+    /// Off Linux there is no remote: a target that needs one is refused.
+    #[cfg(not(target_os = "linux"))]
+    fn send_screen_remote(
+        &self,
+        _remote: Option<super::screen::Remote>,
+        target: &persephone_call_protocol::ScreenTarget,
+    ) -> bool {
+        matches!(
+            target,
+            persephone_call_protocol::ScreenTarget::Monitor { .. }
+        )
+    }
+
+    /// The desktop closed the portal session (the user stopped the share
+    /// from the desktop). The worker's capture ends with it: say so.
+    fn screen_ended_by_desktop(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        self.screen_session = None;
+        self.screen_wanted = false;
+        if self.screen_sent {
+            self.screen_sent = false;
+            self.send_worker(ToWorker::SetScreen { target: None })?;
+        }
+        if self.view.set_screen(CallScreen::Off) == Applied::Changed {
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
+    /// The worker reports the share's state. Any state but `Starting` and
+    /// `On` ends the share: its portal session closes.
+    fn screen_state_from_worker(&mut self, state: ScreenState) {
+        if !matches!(state, ScreenState::Starting | ScreenState::On) {
+            self.screen_sent = false;
+            self.screen_closed = None;
+            self.screen_session = None;
+        }
+    }
+
     /// Whether a camera-on goes through the portal first: on the portal path,
     /// unless a remote already went to the worker for a capture that may
     /// still run (a repeated on then needs no new request). While a request
@@ -1722,6 +2026,9 @@ impl Call {
             } else if self.portal_sent {
                 self.portal_capture = true;
             }
+        }
+        if let FromWorker::Screen { state } = event {
+            self.screen_state_from_worker(*state);
         }
         let changed = match self.view.apply(event) {
             Applied::Same => false,
@@ -1846,9 +2153,16 @@ impl Call {
                     Some(Command::Camera { on, request }) => {
                         self.camera_command(inner, on, request)?;
                     }
+                    Some(Command::Screen(on)) => self.screen_command(inner, on)?,
                     None => return Ok(()),
                 },
                 remote = portal_done(&mut self.portal) => self.portal_finished(inner, remote)?,
+                picked = screen_pick_done(&mut self.screen_pick) => {
+                    self.screen_picked(inner, picked)?;
+                }
+                () = screen_session_closed(&mut self.screen_closed) => {
+                    self.screen_ended_by_desktop(inner)?;
+                }
                 event = self.link.events.recv() => {
                     let Some(event) = event else {
                         return Err(EndReason::WorkerStopped);
@@ -1988,11 +2302,18 @@ impl Call {
             handles,
             mut tasks,
             portal,
+            screen_pick,
+            screen_session,
+            screen_closed,
             ..
         } = self;
         // A portal request still waiting for the user is cancelled first, so
-        // its dialog does not stay open while the call is torn down.
+        // its dialog does not stay open while the call is torn down. The
+        // screen pick and the share's portal session end with the call.
         drop(portal);
+        drop(screen_pick);
+        drop(screen_closed);
+        drop(screen_session);
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
         if session_ended {
@@ -2527,6 +2848,12 @@ mod tests {
             portal: None,
             portal_capture: false,
             portal_sent: false,
+            screens: crate::calls::screen::unavailable(),
+            screen_pick: None,
+            screen_wanted: false,
+            screen_session: None,
+            screen_closed: None,
+            screen_sent: false,
         };
         TestCall {
             call,
@@ -3089,7 +3416,10 @@ mod tests {
         );
         assert_eq!(view.apply(&started(1, "@a:example.org:A")), Applied::Same);
         view.apply(&started(2, "@stranger:example.org:S"));
-        assert_eq!(view.video_allowed(), (false, [true, false, false, false]));
+        assert_eq!(
+            view.video_allowed(),
+            (false, [true, false, false, false, false])
+        );
         let CallState::Active { video, .. } = view.state() else {
             panic!("active");
         };
@@ -3110,7 +3440,7 @@ mod tests {
             "S",
             "https://sfu.example.org",
         )]);
-        assert_eq!(view.video_allowed().1, [false, true, false, false]);
+        assert_eq!(view.video_allowed().1, [false, true, false, false, false]);
         assert_eq!(view.video_tiles()[0].tile, 2);
     }
 
@@ -3122,16 +3452,16 @@ mod tests {
         view.apply(&started(1, "@a:example.org:A"));
         view.apply(&started(3, "@b:example.org:B"));
         assert_eq!(view.apply(&started(0, "@a:example.org:A")), Applied::Same);
-        assert_eq!(view.apply(&started(5, "@a:example.org:A")), Applied::Same);
+        assert_eq!(view.apply(&started(6, "@a:example.org:A")), Applied::Same);
         assert_eq!(
             view.apply(&FromWorker::VideoStopped { tile: 0 }),
             Applied::Same
         );
         assert_eq!(
-            view.apply(&FromWorker::VideoStopped { tile: 5 }),
+            view.apply(&FromWorker::VideoStopped { tile: 6 }),
             Applied::Same
         );
-        assert_eq!(view.video_allowed().1, [true, false, true, false]);
+        assert_eq!(view.video_allowed().1, [true, false, true, false, false]);
         assert_eq!(
             view.apply(&FromWorker::VideoStopped { tile: 1 }),
             Applied::Changed
@@ -3146,7 +3476,7 @@ mod tests {
             }),
             Applied::Changed
         );
-        assert_eq!(view.video_allowed().1, [false; 4]);
+        assert_eq!(view.video_allowed().1, [false; 5]);
         view.apply(&started(2, "@a:example.org:A"));
         assert!(view.forget_video("@a:example.org:A"));
         assert!(!view.forget_video("@a:example.org:A"));
@@ -3196,6 +3526,7 @@ mod tests {
             muted: false,
             participants: Vec::new(),
             camera: CallCamera::Off,
+            screen: CallScreen::Off,
             video: Vec::new(),
         }
     }
@@ -3252,13 +3583,14 @@ mod tests {
         assert_eq!(changes.load(Ordering::SeqCst), 1);
 
         // The worker answered: the own tile shows and holds a picture.
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
         calls.inner.publish(CallState::Active {
             room_id: room_id!("!r:example.org").to_owned(),
             muted: false,
             participants: Vec::new(),
             camera: CallCamera::On,
+            screen: CallScreen::Off,
             video: vec![CallVideoTile {
                 tile: 0,
                 participant: None,
@@ -3282,7 +3614,7 @@ mod tests {
         );
         // An unrelated event makes the task sync while its view still has
         // the camera on: the own tile stays shut.
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(!store.insert(0, 0, 2, 2, vec![3; 16]));
         assert!(calls.video_picture(0, 0, store.stream(0)).is_none());
         let CallState::Active { camera, video, .. } = calls.state() else {
@@ -3300,7 +3632,7 @@ mod tests {
     async fn given_a_queued_on_then_off_then_the_older_on_cannot_reopen_the_tile() {
         let calls = controller(FakeHost::new(true, None));
         let (store, mut commands, _) = running_call(&calls, active_state());
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
         assert_eq!(calls.set_camera(true), Ok(()));
         assert_eq!(calls.set_camera(false), Ok(()));
@@ -3309,7 +3641,7 @@ mod tests {
         };
         // What `camera_command` does to the store for the older on.
         store.camera_on_taken(request);
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(
             !store.insert(0, 0, 2, 2, vec![2; 16]),
             "the off accepted after the on keeps the tile shut"
@@ -3323,7 +3655,7 @@ mod tests {
             panic!("a new on");
         };
         store.camera_on_taken(request);
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(
             store.insert(0, 0, 2, 2, vec![3; 16]),
             "a later on reopens it"
@@ -3337,7 +3669,7 @@ mod tests {
     async fn given_a_full_command_queue_then_the_camera_state_does_not_change() {
         let calls = controller(FakeHost::new(true, None));
         let (store, _commands, _) = running_call(&calls, active_state());
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
         {
             let Slot::Running(run) = &*calls.inner.slot() else {
@@ -3365,7 +3697,7 @@ mod tests {
             "no call, no picture"
         );
         let (store, _commands, _) = running_call(&calls, active_state());
-        store.sync(false, [true, false, false, false]);
+        store.sync(false, [true, false, false, false, false]);
         assert!(store.insert(1, 3, 2, 2, vec![5; 16]));
         let picture = calls.video_picture(1, 0, store.stream(1)).expect("picture");
         assert_eq!((picture.seq, picture.rotation), (1, 3));
@@ -3385,7 +3717,7 @@ mod tests {
         for session_end in [true, false] {
             let calls = controller(FakeHost::new(true, None));
             let (store, _commands, _) = running_call(&calls, active_state());
-            store.sync(true, [true; 4]);
+            store.sync(true, [true; 5]);
             assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
             assert!(store.insert(4, 0, 2, 2, vec![1; 16]));
             if session_end {
@@ -3395,7 +3727,7 @@ mod tests {
             }
             assert!(calls.video_picture(0, 0, store.stream(0)).is_none());
             assert!(calls.video_picture(4, 0, store.stream(4)).is_none());
-            store.sync(true, [true; 4]);
+            store.sync(true, [true; 5]);
             assert!(!store.insert(0, 0, 2, 2, vec![1; 16]), "{session_end}");
         }
     }
@@ -3408,9 +3740,408 @@ mod tests {
         let guard = calls.claim(room_id!("!r:example.org")).unwrap();
         let store = VideoStore::new();
         *plain(&calls.inner.video) = Some(store.clone());
-        store.sync(true, [true; 4]);
+        store.sync(true, [true; 5]);
         drop(guard);
         assert!(!store.insert(0, 0, 2, 2, vec![1; 16]));
         assert!(plain(&calls.inner.video).is_none());
+    }
+
+    // ----- Screen share (ADR-0053) -----
+
+    /// A drop guard for the portal session: it flips a flag when the session
+    /// closes.
+    struct SessionGuard(Arc<AtomicBool>);
+
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn monitor() -> persephone_call_protocol::ScreenTarget {
+        persephone_call_protocol::ScreenTarget::Monitor {
+            index: 1,
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    /// A grant of one monitor, with a session guard. `dropped` becomes true
+    /// when the session closes.
+    fn grant(dropped: &Arc<AtomicBool>) -> ScreenGrant {
+        ScreenGrant {
+            target: monitor(),
+            remote: None,
+            session: Some(Box::new(SessionGuard(dropped.clone()))),
+            closed: None,
+        }
+    }
+
+    fn is_monitor_start(message: Option<ToWorker>) -> bool {
+        matches!(
+            message,
+            Some(ToWorker::SetScreen {
+                target: Some(persephone_call_protocol::ScreenTarget::Monitor {
+                    index: 1,
+                    width: 1920,
+                    height: 1080
+                })
+            })
+        )
+    }
+
+    /// A source that answers every pick with a cancel and counts the picks.
+    struct Scripted {
+        available: bool,
+        picks: AtomicUsize,
+    }
+
+    impl ScreenSource for Scripted {
+        fn available(&self) -> bool {
+            self.available
+        }
+
+        fn choose(&self, _cancel: &AtomicBool) -> Result<ScreenGrant, ScreenRefusal> {
+            self.picks.fetch_add(1, Ordering::SeqCst);
+            Err(ScreenRefusal::Cancelled)
+        }
+    }
+
+    fn call_with_source(available: bool) -> (TestCall, Arc<Inner>, Arc<Scripted>) {
+        let mut fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let source = Arc::new(Scripted {
+            available,
+            picks: AtomicUsize::new(0),
+        });
+        fixture.call.screens = source.clone();
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        (fixture, inner, source)
+    }
+
+    /// GIVEN a platform without screen sharing WHEN the page starts a share
+    /// THEN the share is unavailable, nobody is asked, and nothing goes to
+    /// the worker.
+    #[tokio::test]
+    async fn given_no_screen_source_when_a_share_starts_then_it_is_unavailable() {
+        let (mut fixture, inner, source) = call_with_source(false);
+        fixture.call.screen_command(&inner, true).unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert_eq!(source.picks.load(Ordering::SeqCst), 0);
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(fixture.call.screen_pick.is_none());
+    }
+
+    /// GIVEN a share that starts WHEN the user cancels the chooser THEN the
+    /// share is off and nothing goes to the worker; WHEN the pick is refused
+    /// THEN the share shows refused; neither falls back to another source.
+    #[tokio::test]
+    async fn given_a_cancelled_or_refused_pick_then_the_share_stays_off() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true).unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Starting);
+        assert!(fixture.call.screen_pick.is_some());
+        fixture
+            .call
+            .screen_picked(&inner, Err(ScreenRefusal::Cancelled))
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+        assert!(fixture.to_worker.try_recv().is_err());
+
+        fixture.call.screen_command(&inner, true).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Err(ScreenRefusal::Refused))
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Refused);
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a pick in flight WHEN a second start comes THEN no second pick
+    /// runs; WHEN the user picks THEN the worker gets one command with the
+    /// chosen screen and the session stays open.
+    #[tokio::test]
+    async fn given_a_grant_then_the_worker_gets_the_command_with_the_chosen_screen() {
+        let (mut fixture, inner, source) = call_with_source(true);
+        fixture.call.screen_command(&inner, true).unwrap();
+        fixture.call.screen_command(&inner, true).unwrap();
+        // The scripted source answers by cancel; wait for the one pick.
+        let mut pick = fixture.call.screen_pick.take().expect("a pick");
+        let _ = (&mut pick.task).await;
+        assert_eq!(source.picks.load(Ordering::SeqCst), 1, "one pick only");
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+        assert!(fixture.to_worker.try_recv().is_err(), "one command only");
+        assert!(fixture.call.screen_sent);
+        assert!(!dropped.load(Ordering::SeqCst), "the session stays open");
+    }
+
+    /// GIVEN a running share WHEN the page stops it THEN the worker is told,
+    /// the session closes and the state is off; a second stop sends nothing.
+    #[tokio::test]
+    async fn given_a_running_share_when_it_is_stopped_then_the_session_closes() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        let _ = fixture.to_worker.try_recv();
+        fixture.call.screen_command(&inner, false).unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None })
+        ));
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+        fixture.call.screen_command(&inner, false).unwrap();
+        assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a pick that ends after the user stopped THEN the grant is
+    /// dropped (its session closes) and nothing goes to the worker.
+    #[tokio::test]
+    async fn given_a_pick_that_ends_after_a_stop_then_it_is_closed_unused() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true).unwrap();
+        fixture.call.screen_command(&inner, false).unwrap();
+        assert!(fixture.call.screen_pick.is_none());
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a running share WHEN the worker reports each state THEN the
+    /// share's portal session closes for every end state and the shown state
+    /// follows; `On` and `Starting` keep the session.
+    #[tokio::test]
+    async fn given_the_worker_reports_a_share_state_then_the_session_follows() {
+        for (state, shown, closes) in [
+            (ScreenState::Starting, CallScreen::Starting, false),
+            (ScreenState::On, CallScreen::On, false),
+            (ScreenState::NotFound, CallScreen::NotFound, true),
+            (ScreenState::Unavailable, CallScreen::Unavailable, true),
+            (ScreenState::Refused, CallScreen::Refused, true),
+            (ScreenState::Off, CallScreen::Off, true),
+        ] {
+            let (mut fixture, inner, _) = call_with_source(true);
+            fixture.call.screen_command(&inner, true).unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            fixture
+                .call
+                .screen_picked(&inner, Ok(grant(&dropped)))
+                .unwrap();
+            fixture
+                .call
+                .worker_event(&inner, &FromWorker::Screen { state })
+                .unwrap();
+            assert_eq!(fixture.call.view.screen, shown, "{state:?}");
+            assert_eq!(dropped.load(Ordering::SeqCst), closes, "{state:?}");
+            assert_eq!(fixture.call.screen_sent, !closes, "{state:?}");
+        }
+    }
+
+    /// GIVEN a running share WHEN the desktop closes the portal session THEN
+    /// the worker is told to stop and the share is off.
+    #[tokio::test]
+    async fn given_the_desktop_closes_the_session_then_the_share_ends() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let mut with_signal = grant(&dropped);
+        with_signal.closed = Some(closed_rx);
+        fixture.call.screen_picked(&inner, Ok(with_signal)).unwrap();
+        let _ = fixture.to_worker.try_recv();
+        closed_tx.send(()).unwrap();
+        screen_session_closed(&mut fixture.call.screen_closed).await;
+        fixture.call.screen_ended_by_desktop(&inner).unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None })
+        ));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+    }
+
+    /// GIVEN the end of the call WHEN the call is torn down THEN a pick in
+    /// flight is cancelled and the session closes with it.
+    #[tokio::test]
+    async fn given_the_call_ends_then_the_pick_is_cancelled_and_the_session_closes() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true).unwrap();
+        let cancel = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture.call.screen_session = Some(Box::new(SessionGuard(dropped.clone())));
+        fixture.call.finish(true).await;
+        assert!(cancel.load(Ordering::SeqCst), "the pick was cancelled");
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+    }
+
+    /// GIVEN screen sharers and screen video WHEN the worker says so THEN a
+    /// member shows as sharing, the screen tile (5) carries the sharer, a
+    /// stranger is not marked, and a member that leaves loses both.
+    #[test]
+    fn given_remote_screen_shares_then_members_show_as_sharing_and_tile_five_is_theirs() {
+        let mut view = view();
+        let share = |identity: &str, sharing| FromWorker::ScreenSharer {
+            identity: identity.to_owned(),
+            sharing,
+        };
+        assert_eq!(
+            view.apply(&share("@a:example.org:A", true)),
+            Applied::Changed
+        );
+        assert_eq!(view.apply(&share("@a:example.org:A", true)), Applied::Same);
+        assert_eq!(view.apply(&share("@x:example.org:X", true)), Applied::Same);
+        view.apply(&FromWorker::Connected);
+        let CallState::Active { participants, .. } = view.state() else {
+            panic!("active");
+        };
+        assert_eq!(
+            participants.iter().map(|p| p.sharing).collect::<Vec<_>>(),
+            [true, false]
+        );
+        view.apply(&started(5, "@a:example.org:A"));
+        let tiles = view.video_tiles();
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].tile, 5);
+        assert_eq!(view.video_allowed().1, [false, false, false, false, true]);
+        assert_eq!(
+            view.apply(&share("@a:example.org:A", false)),
+            Applied::Changed
+        );
+        view.apply(&share("@a:example.org:A", true));
+        assert_eq!(
+            view.apply(&FromWorker::ParticipantLeft {
+                identity: "@a:example.org:A".to_owned()
+            }),
+            Applied::Changed
+        );
+        assert!(view.sharing.is_empty());
+        assert!(view.video_tiles().is_empty());
+    }
+
+    /// GIVEN each worker screen state WHEN applied THEN the page's state
+    /// follows, and a screen problem never ends the call.
+    #[test]
+    fn given_worker_screen_states_then_the_view_follows_and_the_call_continues() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        for (state, shown) in [
+            (ScreenState::Starting, CallScreen::Starting),
+            (ScreenState::On, CallScreen::On),
+            (ScreenState::NotFound, CallScreen::NotFound),
+            (ScreenState::Unavailable, CallScreen::Unavailable),
+            (ScreenState::Refused, CallScreen::Refused),
+            (ScreenState::Off, CallScreen::Off),
+        ] {
+            let applied = view.apply(&FromWorker::Screen { state });
+            assert!(
+                matches!(applied, Applied::Changed | Applied::Same),
+                "{state:?}"
+            );
+            assert_eq!(view.screen, shown);
+        }
+    }
+
+    /// GIVEN no call, a joining call or a closed queue WHEN the page starts a
+    /// share THEN it is refused; GIVEN a connected call THEN the task gets
+    /// the command with no source and the state shows `starting` at once.
+    #[tokio::test]
+    async fn given_a_connected_call_then_the_screen_command_reaches_the_task() {
+        let calls = controller(FakeHost::new(true, None));
+        assert_eq!(calls.set_screen(true), Err(CallError::NotInCall));
+        let calls = controller(FakeHost::new(true, None));
+        let joining = CallState::Joining {
+            room_id: room_id!("!r:example.org").to_owned(),
+        };
+        let (_store, _commands, _) = running_call(&calls, joining);
+        assert_eq!(calls.set_screen(true), Err(CallError::NotInCall));
+
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _) = running_call(&calls, active_state());
+        assert_eq!(calls.set_screen(true), Ok(()));
+        assert!(matches!(commands.try_recv(), Ok(Command::Screen(true))));
+        let CallState::Active { screen, .. } = calls.state() else {
+            panic!("active");
+        };
+        assert_eq!(screen, CallScreen::Starting);
+        assert_eq!(calls.set_screen(false), Ok(()));
+        assert!(matches!(commands.try_recv(), Ok(Command::Screen(false))));
+        let CallState::Active { screen, .. } = calls.state() else {
+            panic!("active");
+        };
+        assert_eq!(screen, CallScreen::Off);
+    }
+
+    /// GIVEN a Linux grant with a remote WHEN it goes to the worker THEN the
+    /// remote goes over the camera channel first, with the byte `s`, and the
+    /// command follows; a portal grant without a remote is unavailable.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn given_a_portal_grant_then_the_screen_remote_goes_first_with_the_byte_s() {
+        use persephone_call_protocol::ScreenTarget;
+        use std::io::Read;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let (core_end, mut worker_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (command_tx, mut commands) = mpsc::channel(4);
+        fixture.call.link = CallWorkerLink::from_parts(
+            command_tx,
+            mpsc::channel(1).1,
+            Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+        )
+        .with_camera_channel(core_end);
+        fixture.call.screen_command(&inner, true).unwrap();
+        let remote = std::os::fd::OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let portal = ScreenGrant {
+            target: ScreenTarget::Portal { node: 42 },
+            remote: Some(remote),
+            session: Some(Box::new(SessionGuard(dropped.clone()))),
+            closed: None,
+        };
+        fixture.call.screen_picked(&inner, Ok(portal)).unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(worker_end.read(&mut byte).unwrap(), 1, "the remote went");
+        assert_eq!(byte, [b's']);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ToWorker::SetScreen {
+                target: Some(ScreenTarget::Portal { node: 42 })
+            })
+        ));
+        assert!(!dropped.load(Ordering::SeqCst));
+
+        fixture.call.screen_command(&inner, false).unwrap();
+        fixture.call.screen_command(&inner, true).unwrap();
+        let no_remote = ScreenGrant {
+            target: ScreenTarget::Portal { node: 43 },
+            remote: None,
+            session: None,
+            closed: None,
+        };
+        fixture.call.screen_picked(&inner, Ok(no_remote)).unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
     }
 }

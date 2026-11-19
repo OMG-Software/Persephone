@@ -1140,6 +1140,7 @@ impl Core {
             }
             Call::CallMute { muted } => self.call_mute(*muted),
             Call::CallCamera { on } => self.call_camera(*on),
+            Call::CallScreen { on } => self.call_screen(*on),
             // Its picture reaches only `serve`.
             Call::CallVideoFrame { .. } => Outcome::Error(ErrorCode::Unavailable),
             Call::CallStatus {} => match self.calls_open() {
@@ -2152,6 +2153,18 @@ impl Core {
             return Outcome::Error(code);
         }
         match self.calls.set_camera(on) {
+            Ok(()) => ok(&calls::status::status(&self.calls.state())),
+            Err(_) => Outcome::Error(ErrorCode::Unavailable),
+        }
+    }
+
+    /// Starts or stops the screen share (ADR-0053). The page names no
+    /// source: the platform's own window or portal asks the user.
+    fn call_screen(&self, on: bool) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        match self.calls.set_screen(on) {
             Ok(()) => ok(&calls::status::status(&self.calls.state())),
             Err(_) => Outcome::Error(ErrorCode::Unavailable),
         }

@@ -25,9 +25,7 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
@@ -44,8 +42,8 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
     InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread,
-    STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 #[allow(dead_code)] // the worker uses the parts the probe does not
@@ -58,7 +56,10 @@ const CHILD_ARG: &str = "--screen-probe-child";
 const CALL_CAPABILITIES: [&str; 3] = ["internetClient", "microphone", "webcam"];
 /// The candidates tried on top of them.
 const CANDIDATES: [(&str, &[&str]); 3] = [
-    ("with graphicsCaptureProgrammatic", &["graphicsCaptureProgrammatic"]),
+    (
+        "with graphicsCaptureProgrammatic",
+        &["graphicsCaptureProgrammatic"],
+    ),
     ("with graphicsCapture", &["graphicsCapture"]),
     (
         "with both",
@@ -181,10 +182,16 @@ fn parent() -> i32 {
     };
     println!("screen-probe: {} monitor(s) listed", monitors.len());
     for (index, monitor) in monitors.iter().enumerate() {
-        println!("screen-probe: monitor {index} {}x{}", monitor.width, monitor.height);
+        println!(
+            "screen-probe: monitor {index} {}x{}",
+            monitor.width, monitor.height
+        );
     }
     let control = child(0);
-    println!("screen-probe: control (this process, no container): {}", describe(control));
+    println!(
+        "screen-probe: control (this process, no container): {}",
+        describe(control)
+    );
     if control != 0 {
         println!("screen-probe: INCONCLUSIVE, the control did not capture a frame");
         return 1;
@@ -211,10 +218,16 @@ fn parent() -> i32 {
                     let high = run_in_container(&container, &exe, caps, 1);
                     let low = run_in_container(&container, &exe, caps, 2);
                     if let (Ok(high), Ok(low)) = (high, low) {
-                        line.push_str(&format!(", HRESULT {:#010x}", (high << 16) | (low & 0xFFFF)));
+                        line.push_str(&format!(
+                            ", HRESULT {:#010x}",
+                            (high << 16) | (low & 0xFFFF)
+                        ));
                     }
                 }
-                println!("screen-probe: AppContainer [{}] ({name}): {line}", caps.join(", "));
+                println!(
+                    "screen-probe: AppContainer [{}] ({name}): {line}",
+                    caps.join(", ")
+                );
             }
             Err(error) => {
                 println!("screen-probe: AppContainer ({name}): launch failed: {error}");
@@ -299,9 +312,10 @@ impl CapabilitySids {
                     LocalFree((*groups.add(index)).cast());
                 }
                 LocalFree(groups.cast());
-                result
-                    .0
-                    .extend_from_slice(std::slice::from_raw_parts(capabilities, capability_count as usize));
+                result.0.extend_from_slice(std::slice::from_raw_parts(
+                    capabilities,
+                    capability_count as usize,
+                ));
                 LocalFree(capabilities.cast());
             }
             if capability_count != 1 {
@@ -339,7 +353,9 @@ fn run_in_container(
     capabilities: &[&str],
     part: u32,
 ) -> Result<u32, String> {
-    let sid = container.sid().ok_or("DeriveAppContainerSidFromAppContainerName")?;
+    let sid = container
+        .sid()
+        .ok_or("DeriveAppContainerSidFromAppContainerName")?;
     let sids = CapabilitySids::derive(capabilities).ok_or("DeriveCapabilitySidsFromName")?;
     let mut list: Vec<SID_AND_ATTRIBUTES> = sids
         .0
@@ -535,7 +551,10 @@ mod tests {
     /// capabilities and adds only graphics capture names.
     #[test]
     fn given_candidates_then_they_only_add_graphics_capture_capabilities() {
-        assert_eq!(CALL_CAPABILITIES, ["internetClient", "microphone", "webcam"]);
+        assert_eq!(
+            CALL_CAPABILITIES,
+            ["internetClient", "microphone", "webcam"]
+        );
         for (_, extra) in CANDIDATES {
             assert!(!extra.is_empty());
             assert!(extra.iter().all(|name| name.starts_with("graphicsCapture")));

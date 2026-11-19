@@ -45,6 +45,7 @@ pub mod incoming;
 pub mod keys;
 pub mod membership;
 pub mod readiness;
+pub mod screen;
 pub mod sfu;
 pub mod status;
 pub mod video;

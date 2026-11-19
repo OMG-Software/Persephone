@@ -224,12 +224,28 @@ fn call_child_setup(broker: libc::pid_t, child_fd: libc::c_int) -> io::Result<()
     unix::set_call_limits(Some(CALL_ADDRESS_SPACE))
 }
 
-/// Sends `fd` to the worker over the camera channel: one descriptor
-/// (`SCM_RIGHTS`) and exactly one data byte. It never blocks: a full channel
-/// is `WouldBlock`.
+/// The data byte of a camera descriptor on the camera channel (ADR-0053).
+pub const KIND_CAMERA: u8 = b'c';
+/// The data byte of a screen share descriptor on the camera channel.
+pub const KIND_SCREEN: u8 = b's';
+
+/// Sends the camera portal's remote `fd` to the worker over the camera
+/// channel: one descriptor (`SCM_RIGHTS`) and one data byte, `c`. It never
+/// blocks: a full channel is `WouldBlock`.
 pub fn send_camera_fd(channel: &UnixStream, fd: BorrowedFd<'_>) -> io::Result<()> {
+    send_fd(channel, fd, KIND_CAMERA)
+}
+
+/// Sends the screen cast portal's remote `fd` to the worker over the camera
+/// channel with the data byte `s` (ADR-0053). The worker keeps at most four
+/// of each kind; any other byte closes its channel.
+pub fn send_screen_fd(channel: &UnixStream, fd: BorrowedFd<'_>) -> io::Result<()> {
+    send_fd(channel, fd, KIND_SCREEN)
+}
+
+fn send_fd(channel: &UnixStream, fd: BorrowedFd<'_>, kind: u8) -> io::Result<()> {
     use std::mem::{size_of, zeroed};
-    let byte = [0_u8; 1];
+    let byte = [kind; 1];
     let mut iov = libc::iovec {
         iov_base: byte.as_ptr() as *mut _,
         iov_len: byte.len(),
@@ -525,6 +541,7 @@ mod tests {
         let (broker, worker) = UnixStream::pair().unwrap();
         let file = fs::File::open("/dev/null").unwrap();
         send_camera_fd(&broker, file.as_fd()).unwrap();
+        send_screen_fd(&broker, file.as_fd()).unwrap();
         // One byte arrives.
         let mut byte = [0_u8; 1];
         // SAFETY: recvmsg with a one-byte buffer and a control buffer.
@@ -540,10 +557,26 @@ mod tests {
         message.msg_controllen = 32;
         let got = unsafe { libc::recvmsg(worker.as_raw_fd(), &mut message, 0) };
         assert_eq!(got, 1);
+        assert_eq!(byte, [b'c'], "a camera descriptor carries the byte c");
         // SAFETY: the buffer was filled by recvmsg.
         let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
         assert!(!header.is_null());
         assert_eq!(unsafe { (*header).cmsg_type }, libc::SCM_RIGHTS);
+        // The screen descriptor came second, with the byte s.
+        let mut second = [0_u8; 1];
+        let mut control = [0_u64; 4];
+        let mut iov = libc::iovec {
+            iov_base: second.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = 32;
+        let got = unsafe { libc::recvmsg(worker.as_raw_fd(), &mut message, 0) };
+        assert_eq!(got, 1);
+        assert_eq!(second, [b's'], "a screen descriptor carries the byte s");
         drop(worker);
     }
 
