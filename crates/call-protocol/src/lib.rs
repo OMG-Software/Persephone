@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 4;
+pub const VERSION: u8 = 5;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
@@ -23,6 +23,9 @@ pub const MAX_TURN_CREDENTIAL_BYTES: usize = 512;
 pub const MIN_KEY_BYTES: usize = 16;
 pub const MAX_KEY_BYTES: usize = 64;
 pub const MAX_PARTICIPANTS: usize = 32;
+/// Most subscribe-only connections to other SFUs for one call (ADR-0054).
+/// Connection 0 is the own SFU; the others are 1 to this number.
+pub const MAX_OTHER_CONNECTIONS: u8 = 3;
 /// A device ID as the platform reports it: an audio endpoint ID from
 /// libwebrtc, or a camera's symbolic link.
 pub const MAX_DEVICE_ID_BYTES: usize = 512;
@@ -227,6 +230,15 @@ pub enum ToWorker {
         /// nothing. Only a camera-on carries one.
         remote: bool,
     },
+    /// Connect to another SFU as subscriber only (ADR-0054). `index` is the
+    /// connection number, 1 to [`MAX_OTHER_CONNECTIONS`]; the own SFU is
+    /// connection 0. The worker publishes nothing on it and answers with
+    /// [`FromWorker::Connection`].
+    Subscribe {
+        index: u8,
+        url: String,
+        jwt: Zeroizing<String>,
+    },
 }
 
 impl std::fmt::Debug for ToWorker {
@@ -277,6 +289,12 @@ impl std::fmt::Debug for ToWorker {
             Self::SetScreen { target } => {
                 f.debug_struct("SetScreen").field("target", target).finish()
             }
+            Self::Subscribe { index, url, jwt } => f
+                .debug_struct("Subscribe")
+                .field("index", index)
+                .field("url", url)
+                .field("jwt_len", &jwt.len())
+                .finish(),
         }
     }
 }
@@ -395,13 +413,18 @@ pub enum FromWorker {
         containment_bits: u32,
     },
     Connected,
+    /// A remote participant joined the room of this connection (0 is the
+    /// own SFU, 1 to 3 are other SFUs, ADR-0054).
     ParticipantJoined {
+        connection: u8,
         identity: String,
     },
     ParticipantLeft {
+        connection: u8,
         identity: String,
     },
     Speaking {
+        connection: u8,
         identity: String,
         speaking: bool,
     },
@@ -431,12 +454,14 @@ pub enum FromWorker {
     /// A remote participant started or stopped a screen share that is not
     /// shown on tile 5. It is only a display hint (ADR-0053).
     ScreenSharer {
+        connection: u8,
         identity: String,
         sharing: bool,
     },
     /// A remote participant's video arrived on this tile (1 to 5).
     VideoStarted {
         tile: u8,
+        connection: u8,
         identity: String,
     },
     /// The video on this tile (0 to 5) ended.
@@ -450,6 +475,12 @@ pub enum FromWorker {
         tile: u8,
         rotation: u8,
     },
+    /// The connection to another SFU (1 to 3) is up, or it ended or never
+    /// came up (ADR-0054). It never ends the call.
+    Connection {
+        connection: u8,
+        up: bool,
+    },
 }
 
 // Tags of core to worker messages.
@@ -462,6 +493,7 @@ const TO_LEAVE: u8 = 6;
 const TO_LIST_DEVICES: u8 = 7;
 const TO_SET_CAMERA: u8 = 8;
 const TO_SET_SCREEN: u8 = 9;
+const TO_SUBSCRIBE: u8 = 10;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -479,6 +511,7 @@ const FROM_VIDEO_STOPPED: u8 = 12;
 const FROM_VIDEO_FRAME: u8 = 13;
 const FROM_SCREEN: u8 = 14;
 const FROM_SCREEN_SHARER: u8 = 15;
+const FROM_CONNECTION: u8 = 16;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -557,6 +590,24 @@ impl<'a> Reader<'a> {
     fn device_choice(&mut self) -> Result<Option<String>, DecodeError> {
         let id = self.str(MAX_DEVICE_ID_BYTES, CharRule::NoControl, true)?;
         Ok((!id.is_empty()).then(|| id.to_owned()))
+    }
+
+    /// A connection number: 0 is the own SFU, 1 to 3 are other SFUs.
+    fn connection(&mut self) -> Result<u8, DecodeError> {
+        let connection = self.u8()?;
+        if connection <= MAX_OTHER_CONNECTIONS {
+            Ok(connection)
+        } else {
+            Err(DecodeError::InvalidValue)
+        }
+    }
+
+    /// A connection to another SFU: 1 to 3.
+    fn other_connection(&mut self) -> Result<u8, DecodeError> {
+        match self.connection()? {
+            0 => Err(DecodeError::InvalidValue),
+            connection => Ok(connection),
+        }
     }
 
     /// A tile number from `first` up to the last tile.
@@ -728,6 +779,12 @@ impl ToWorker {
                 out.push(u8::from(*on));
                 out.push(u8::from(*remote));
             }
+            Self::Subscribe { index, url, jwt } => {
+                out.push(TO_SUBSCRIBE);
+                out.push(*index);
+                put_str(&mut out, url);
+                put_str(&mut out, jwt);
+            }
             Self::SetScreen { target } => {
                 out.push(TO_SET_SCREEN);
                 match target {
@@ -812,6 +869,17 @@ impl ToWorker {
                 }
                 Self::SetCamera { on, remote }
             }
+            TO_SUBSCRIBE => {
+                let index = reader.other_connection()?;
+                let url = reader.str(MAX_URL_BYTES, CharRule::AsciiGraphic, false)?;
+                validate_sfu_url(url)?;
+                let url = url.to_owned();
+                Self::Subscribe {
+                    index,
+                    url,
+                    jwt: reader.secret(MAX_JWT_BYTES, CharRule::AsciiGraphic)?,
+                }
+            }
             TO_SET_SCREEN => {
                 let target = match reader.u8()? {
                     0 => None,
@@ -890,16 +958,29 @@ impl FromWorker {
                 out.extend_from_slice(&containment_bits.to_be_bytes());
             }
             Self::Connected => out.push(FROM_CONNECTED),
-            Self::ParticipantJoined { identity } => {
+            Self::ParticipantJoined {
+                connection,
+                identity,
+            } => {
                 out.push(FROM_PARTICIPANT_JOINED);
+                out.push(*connection);
                 put_str(&mut out, identity);
             }
-            Self::ParticipantLeft { identity } => {
+            Self::ParticipantLeft {
+                connection,
+                identity,
+            } => {
                 out.push(FROM_PARTICIPANT_LEFT);
+                out.push(*connection);
                 put_str(&mut out, identity);
             }
-            Self::Speaking { identity, speaking } => {
+            Self::Speaking {
+                connection,
+                identity,
+                speaking,
+            } => {
                 out.push(FROM_SPEAKING);
+                out.push(*connection);
                 put_str(&mut out, identity);
                 out.push(u8::from(*speaking));
             }
@@ -930,15 +1011,30 @@ impl FromWorker {
                 out.push(FROM_SCREEN);
                 out.push(*state as u8);
             }
-            Self::ScreenSharer { identity, sharing } => {
+            Self::ScreenSharer {
+                connection,
+                identity,
+                sharing,
+            } => {
                 out.push(FROM_SCREEN_SHARER);
+                out.push(*connection);
                 put_str(&mut out, identity);
                 out.push(u8::from(*sharing));
             }
-            Self::VideoStarted { tile, identity } => {
+            Self::VideoStarted {
+                tile,
+                connection,
+                identity,
+            } => {
                 out.push(FROM_VIDEO_STARTED);
                 out.push(*tile);
+                out.push(*connection);
                 put_str(&mut out, identity);
+            }
+            Self::Connection { connection, up } => {
+                out.push(FROM_CONNECTION);
+                out.push(*connection);
+                out.push(u8::from(*up));
             }
             Self::VideoStopped { tile } => {
                 out.push(FROM_VIDEO_STOPPED);
@@ -961,12 +1057,15 @@ impl FromWorker {
             },
             FROM_CONNECTED => Self::Connected,
             FROM_PARTICIPANT_JOINED => Self::ParticipantJoined {
+                connection: reader.connection()?,
                 identity: reader.identity()?,
             },
             FROM_PARTICIPANT_LEFT => Self::ParticipantLeft {
+                connection: reader.connection()?,
                 identity: reader.identity()?,
             },
             FROM_SPEAKING => Self::Speaking {
+                connection: reader.connection()?,
                 identity: reader.identity()?,
                 speaking: reader.bool()?,
             },
@@ -989,12 +1088,18 @@ impl FromWorker {
                 state: ScreenState::try_from(reader.u8()?)?,
             },
             FROM_SCREEN_SHARER => Self::ScreenSharer {
+                connection: reader.connection()?,
                 identity: reader.identity()?,
                 sharing: reader.bool()?,
             },
             FROM_VIDEO_STARTED => Self::VideoStarted {
                 tile: reader.tile(1)?,
+                connection: reader.connection()?,
                 identity: reader.identity()?,
+            },
+            FROM_CONNECTION => Self::Connection {
+                connection: reader.other_connection()?,
+                up: reader.bool()?,
             },
             FROM_VIDEO_STOPPED => Self::VideoStopped {
                 tile: reader.tile(0)?,
@@ -1291,6 +1396,14 @@ mod tests {
         .to_vec()
     }
 
+    fn subscribe(index: u8, url: &str) -> ToWorker {
+        ToWorker::Subscribe {
+            index,
+            url: url.to_owned(),
+            jwt: Zeroizing::new("a.b.c".to_owned()),
+        }
+    }
+
     fn all_to_worker() -> Vec<ToWorker> {
         vec![
             join(),
@@ -1313,6 +1426,8 @@ mod tests {
                 on: true,
                 remote: true,
             },
+            subscribe(1, "wss://sfu.other.example"),
+            subscribe(3, "wss://sfu.example.org:7881/livekit?x=1"),
             ToWorker::SetCamera {
                 on: false,
                 remote: false,
@@ -1340,12 +1455,15 @@ mod tests {
             },
             FromWorker::Connected,
             FromWorker::ParticipantJoined {
+                connection: 0,
                 identity: "@bob:example.org:D".to_owned(),
             },
             FromWorker::ParticipantLeft {
+                connection: 0,
                 identity: "ünï".to_owned(),
             },
             FromWorker::Speaking {
+                connection: 0,
                 identity: "@bob:example.org:D".to_owned(),
                 speaking: true,
             },
@@ -1392,24 +1510,51 @@ mod tests {
                 state: ScreenState::Refused,
             },
             FromWorker::ScreenSharer {
+                connection: 0,
                 identity: "@bob:example.org:D".to_owned(),
                 sharing: true,
             },
             FromWorker::ScreenSharer {
+                connection: 0,
                 identity: "ünï".to_owned(),
                 sharing: false,
             },
             FromWorker::VideoStarted {
                 tile: 1,
+                connection: 0,
                 identity: "@bob:example.org:D".to_owned(),
             },
             FromWorker::VideoStarted {
                 tile: 4,
+                connection: 0,
                 identity: "ünï".to_owned(),
             },
             FromWorker::VideoStarted {
                 tile: SCREEN_TILE,
+                connection: 0,
                 identity: "@bob:example.org:D".to_owned(),
+            },
+            FromWorker::ParticipantJoined {
+                connection: 3,
+                identity: "@carol:other.example:D".to_owned(),
+            },
+            FromWorker::Speaking {
+                connection: 2,
+                identity: "@carol:other.example:D".to_owned(),
+                speaking: true,
+            },
+            FromWorker::VideoStarted {
+                tile: 2,
+                connection: 1,
+                identity: "@carol:other.example:D".to_owned(),
+            },
+            FromWorker::Connection {
+                connection: 1,
+                up: true,
+            },
+            FromWorker::Connection {
+                connection: 3,
+                up: false,
             },
             FromWorker::VideoStopped { tile: 0 },
             FromWorker::VideoStopped { tile: 4 },
@@ -1560,6 +1705,7 @@ mod tests {
             assert_eq!(ToWorker::decode(&case), Err(DecodeError::TooLarge));
         }
         let long_identity = FromWorker::ParticipantJoined {
+            connection: 0,
             identity: identity.clone(),
         };
         assert_eq!(
@@ -1629,11 +1775,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 10]),
+            ToWorker::decode(&[VERSION, 11]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 16]),
+            FromWorker::decode(&[VERSION, 17]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -1665,7 +1811,7 @@ mod tests {
     /// THEN it is rejected.
     #[test]
     fn given_invalid_utf8_identity_when_decoded_then_it_is_rejected() {
-        let body = [VERSION, FROM_PARTICIPANT_LEFT, 0, 2, 0xC3, 0x28];
+        let body = [VERSION, FROM_PARTICIPANT_LEFT, 0, 0, 2, 0xC3, 0x28];
         assert_eq!(FromWorker::decode(&body), Err(DecodeError::InvalidUtf8));
     }
 
@@ -1676,6 +1822,7 @@ mod tests {
     fn given_control_character_in_identity_when_decoded_then_it_is_rejected() {
         for bad in ["a\nb", "a\0b", "a\u{7f}b", "a\u{85}b"] {
             let message = FromWorker::ParticipantJoined {
+                connection: 0,
                 identity: bad.to_owned(),
             };
             assert_eq!(
@@ -2154,21 +2301,21 @@ mod tests {
             (&[VERSION, FROM_VIDEO_FRAME, 0, 4], invalid),
             (&[VERSION, FROM_VIDEO_FRAME, 0], DecodeError::Truncated),
             (&[VERSION, FROM_VIDEO_STOPPED, 6], invalid),
-            (&[VERSION, FROM_VIDEO_STARTED, 0, 0, 1, 97], invalid),
-            (&[VERSION, FROM_VIDEO_STARTED, 6, 0, 1, 97], invalid),
+            (&[VERSION, FROM_VIDEO_STARTED, 0, 0, 0, 1, 97], invalid),
+            (&[VERSION, FROM_VIDEO_STARTED, 6, 0, 0, 1, 97], invalid),
             (&[VERSION, FROM_SCREEN, 6], invalid),
             (&[VERSION, FROM_SCREEN], DecodeError::Truncated),
-            (&[VERSION, FROM_SCREEN_SHARER, 0, 1, 97, 2], invalid),
+            (&[VERSION, FROM_SCREEN_SHARER, 0, 0, 1, 97, 2], invalid),
             (
-                &[VERSION, FROM_SCREEN_SHARER, 0, 0, 1],
+                &[VERSION, FROM_SCREEN_SHARER, 0, 0, 0, 1],
                 DecodeError::TooShort,
             ),
             (
-                &[VERSION, FROM_SCREEN_SHARER, 0, 1, 97],
+                &[VERSION, FROM_SCREEN_SHARER, 0, 0, 1, 97],
                 DecodeError::Truncated,
             ),
             (
-                &[VERSION, FROM_VIDEO_STARTED, 1, 0, 0],
+                &[VERSION, FROM_VIDEO_STARTED, 1, 0, 0, 0],
                 DecodeError::TooShort,
             ),
             (&[VERSION, FROM_CAMERA, 4], invalid),
@@ -2199,6 +2346,7 @@ mod tests {
         );
         let long = FromWorker::VideoStarted {
             tile: 1,
+            connection: 0,
             identity: "i".repeat(MAX_IDENTITY_BYTES + 1),
         };
         assert_eq!(
@@ -2207,6 +2355,7 @@ mod tests {
         );
         let control = FromWorker::VideoStarted {
             tile: 1,
+            connection: 0,
             identity: "a\nb".to_owned(),
         };
         assert_eq!(
@@ -2245,7 +2394,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 4));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 5));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -2468,5 +2617,154 @@ mod tests {
         ] {
             assert_eq!(FromWorker::decode(&cameras(list).encode()), Err(expected));
         }
+    }
+
+    /// GIVEN a Subscribe with each connection index and a `wss://` URL
+    /// WHEN it is encoded and decoded
+    /// THEN it is the same message.
+    #[test]
+    fn given_subscribe_when_round_tripped_then_it_is_kept() {
+        for index in 1..=MAX_OTHER_CONNECTIONS {
+            let message = subscribe(index, "wss://sfu.other.example");
+            assert_eq!(ToWorker::decode(&message.encode()), Ok(message));
+        }
+    }
+
+    /// GIVEN a Subscribe with index 0 or above 3, or a URL that is not
+    /// `wss://`, or a JWT with a space, or no JWT
+    /// WHEN it is decoded
+    /// THEN it is rejected.
+    #[test]
+    fn given_bad_subscribe_when_decoded_then_it_is_rejected() {
+        for index in [0, 4, 255] {
+            let body = subscribe(index, "wss://sfu.other.example").encode();
+            assert_eq!(
+                ToWorker::decode(&body),
+                Err(DecodeError::InvalidValue),
+                "{index}"
+            );
+        }
+        for url in ["https://x", "ws://x.example", "wss://", "WSS://x.example"] {
+            let body = subscribe(1, url).encode();
+            assert_eq!(
+                ToWorker::decode(&body),
+                Err(DecodeError::InvalidValue),
+                "{url}"
+            );
+        }
+        let spaced = ToWorker::Subscribe {
+            index: 1,
+            url: "wss://x.example".to_owned(),
+            jwt: Zeroizing::new("a b".to_owned()),
+        };
+        assert_eq!(
+            ToWorker::decode(&spaced.encode()),
+            Err(DecodeError::InvalidCharacter)
+        );
+        let empty = ToWorker::Subscribe {
+            index: 1,
+            url: "wss://x.example".to_owned(),
+            jwt: Zeroizing::new(String::new()),
+        };
+        assert_eq!(
+            ToWorker::decode(&empty.encode()),
+            Err(DecodeError::TooShort)
+        );
+    }
+
+    /// GIVEN a Subscribe with a URL or JWT over its limit, a cut body, or
+    /// trailing bytes
+    /// WHEN it is decoded
+    /// THEN it is rejected before anything large is kept.
+    #[test]
+    fn given_oversized_cut_or_padded_subscribe_when_decoded_then_it_is_rejected() {
+        let long_url = format!("wss://{}", "a".repeat(MAX_URL_BYTES));
+        assert_eq!(
+            ToWorker::decode(&subscribe(1, &long_url).encode()),
+            Err(DecodeError::TooLarge)
+        );
+        let long_jwt = ToWorker::Subscribe {
+            index: 1,
+            url: "wss://x.example".to_owned(),
+            jwt: Zeroizing::new("a".repeat(MAX_JWT_BYTES + 1)),
+        };
+        assert_eq!(
+            ToWorker::decode(&long_jwt.encode()),
+            Err(DecodeError::TooLarge)
+        );
+        let full = subscribe(2, "wss://x.example").encode();
+        for cut in 2..full.len() {
+            assert!(ToWorker::decode(&full[..cut]).is_err(), "cut at {cut}");
+        }
+        let mut padded = full.to_vec();
+        padded.push(0);
+        assert_eq!(
+            ToWorker::decode(&padded),
+            Err(DecodeError::TrailingBytes)
+        );
+    }
+
+    /// GIVEN a Subscribe
+    /// WHEN it is formatted with Debug
+    /// THEN the JWT is not shown.
+    #[test]
+    fn given_subscribe_when_debug_formatted_then_the_jwt_is_hidden() {
+        let message = ToWorker::Subscribe {
+            index: 1,
+            url: "wss://x.example".to_owned(),
+            jwt: Zeroizing::new("secret.jwt.text".to_owned()),
+        };
+        let text = format!("{message:?}");
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("jwt_len"));
+    }
+
+    /// GIVEN worker messages with a connection above 3, or a Connection
+    /// message for connection 0
+    /// WHEN they are decoded
+    /// THEN they are rejected.
+    #[test]
+    fn given_bad_connection_numbers_when_decoded_then_they_are_rejected() {
+        let invalid = DecodeError::InvalidValue;
+        for connection in [4, 255] {
+            for body in [
+                vec![VERSION, FROM_PARTICIPANT_JOINED, connection, 0, 1, 97],
+                vec![VERSION, FROM_PARTICIPANT_LEFT, connection, 0, 1, 97],
+                vec![VERSION, FROM_SPEAKING, connection, 0, 1, 97, 1],
+                vec![VERSION, FROM_SCREEN_SHARER, connection, 0, 1, 97, 1],
+                vec![VERSION, FROM_VIDEO_STARTED, 1, connection, 0, 1, 97],
+                vec![VERSION, FROM_CONNECTION, connection, 1],
+            ] {
+                assert_eq!(FromWorker::decode(&body), Err(invalid), "{body:?}");
+            }
+        }
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_CONNECTION, 0, 1]),
+            Err(invalid)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_CONNECTION, 1, 2]),
+            Err(invalid)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_CONNECTION, 1]),
+            Err(DecodeError::Truncated)
+        );
+    }
+
+    /// GIVEN a message of the previous wire version (4)
+    /// WHEN it is decoded in either direction
+    /// THEN the version is refused.
+    #[test]
+    fn given_wire_version_4_when_decoded_then_it_is_refused() {
+        assert_eq!(VERSION, 5);
+        assert_eq!(
+            ToWorker::decode(&[4, TO_LEAVE]),
+            Err(DecodeError::UnknownVersion)
+        );
+        assert_eq!(
+            FromWorker::decode(&[4, FROM_CONNECTED]),
+            Err(DecodeError::UnknownVersion)
+        );
     }
 }
