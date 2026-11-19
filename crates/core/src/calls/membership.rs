@@ -153,6 +153,22 @@ fn valid_device_id(device: &str) -> bool {
         && device.bytes().all(|b| b.is_ascii_graphic())
 }
 
+/// The acceptable LiveKit service URL of one `foci_preferred` entry.
+fn focus_url(focus: &Value) -> Option<Url> {
+    let key = match focus.get("type").and_then(Value::as_str)? {
+        "livekit" => "livekit_service_url",
+        "m.livekit" => "url",
+        _ => return None,
+    };
+    let raw_url = focus.get(key)?.as_str()?;
+    if raw_url.len() > super::MAX_URL_BYTES {
+        return None;
+    }
+    Url::parse(raw_url)
+        .ok()
+        .filter(|url| is_service_url(url, "https", "http"))
+}
+
 fn parse_member(event: &MemberEvent, now_ms: u64) -> Option<ActiveMember> {
     let content = event.content.as_object().filter(|c| !c.is_empty())?;
     if content.get("application")?.as_str()? != "m.call"
@@ -184,22 +200,16 @@ fn parse_member(event: &MemberEvent, now_ms: u64) -> Option<ActiveMember> {
     if expires_ts <= now_ms {
         return None;
     }
-    // Every acceptable LiveKit transport, in the member's order. One that is
-    // not acceptable is skipped; a member with none is not used.
+    // Every acceptable LiveKit transport, in the member's order, at most
+    // [`MAX_FOCI`] examined. The legacy form has `type` `livekit` and
+    // `livekit_service_url`; the newer form has `type` `m.livekit` and `url`.
+    // One that is not acceptable is skipped; a member with none is not used.
     let transports: Vec<Url> = content
         .get("foci_preferred")?
         .as_array()?
         .iter()
         .take(MAX_FOCI)
-        .filter(|f| f.get("type").and_then(Value::as_str) == Some("livekit"))
-        .filter_map(|f| {
-            let raw_url = f.get("livekit_service_url")?.as_str()?;
-            if raw_url.len() > super::MAX_URL_BYTES {
-                return None;
-            }
-            let url = Url::parse(raw_url).ok()?;
-            is_service_url(&url, "https", "http").then_some(url)
-        })
+        .filter_map(focus_url)
         .collect();
     let service_url = transports.first()?.clone();
     let identity = match content.get("membershipID").and_then(Value::as_str) {
@@ -424,12 +434,17 @@ mod tests {
             {"type": "livekit", "livekit_service_url": "https://first.example/jwt"},
             {"type": "livekit", "livekit_service_url": "https://second.example/jwt"},
             {"type": "livekit", "livekit_service_url": 7},
+            {"type": "m.livekit", "url": "https://third.example/jwt"},
         ]);
         let members = active_members([e], NOW);
         let urls: Vec<&str> = members[0].transports.iter().map(Url::as_str).collect();
         assert_eq!(
             urls,
-            ["https://first.example/jwt", "https://second.example/jwt"]
+            [
+                "https://first.example/jwt",
+                "https://second.example/jwt",
+                "https://third.example/jwt"
+            ]
         );
         assert_eq!(members[0].service_url.as_str(), "https://first.example/jwt");
     }
@@ -452,6 +467,60 @@ mod tests {
                 .iter()
                 .all(|u| u.host_str() != Some("late.example"))
         );
+    }
+
+    /// GIVEN the newer and legacy focus forms, alone and mixed WHEN read THEN the first acceptable one in the member's order is used.
+    #[test]
+    fn given_newer_focus_form_then_accepted() {
+        let newer = json!({ "type": "m.livekit", "url": "https://newer.example.org" });
+        let legacy = json!({
+            "type": "livekit", "livekit_service_url": "https://legacy.example.org/jwt"
+        });
+        let cases = [
+            (vec![newer.clone()], "https://newer.example.org/"),
+            (
+                vec![legacy.clone(), newer.clone()],
+                "https://legacy.example.org/jwt",
+            ),
+            (
+                vec![newer.clone(), legacy.clone()],
+                "https://newer.example.org/",
+            ),
+            // A malformed entry is passed over for a later good one.
+            (
+                vec![json!({ "type": "m.livekit", "url": 5 }), legacy.clone()],
+                "https://legacy.example.org/jwt",
+            ),
+            (
+                vec![
+                    json!({ "type": "m.livekit", "url": "http://x.example.org" }),
+                    newer,
+                ],
+                "https://newer.example.org/",
+            ),
+        ];
+        for (foci, expected) in cases {
+            let mut e = good("@a:example.org", "DEV", NOW);
+            e.content["foci_preferred"] = json!(foci);
+            let members = active_members([e], NOW);
+            assert_eq!(members[0].service_url.as_str(), expected);
+        }
+    }
+
+    /// GIVEN malformed newer focus entries only WHEN read THEN the event is skipped.
+    #[test]
+    fn given_malformed_newer_focus_then_skipped() {
+        for bad in [
+            json!({ "type": "m.livekit" }),
+            json!({ "type": "m.livekit", "url": "not a url" }),
+            json!({ "type": "m.livekit", "url": "https://u:p@x.example.org" }),
+            json!({ "type": "m.livekit", "livekit_service_url": "https://x.example.org" }),
+            json!({ "type": "livekit", "url": "https://x.example.org" }),
+        ] {
+            let mut e = good("@a:example.org", "DEV", NOW);
+            e.content["foci_preferred"] = json!([bad]);
+            assert!(active_members([e], NOW).is_empty(), "{bad}");
+        }
     }
 
     /// GIVEN a wrong application, scope, call id, device id or lifetime WHEN read THEN the event is skipped.

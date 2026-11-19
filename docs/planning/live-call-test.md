@@ -345,18 +345,51 @@ Observed, in order:
     new connection, so no `/sfu/get` was sent. No call worker process
     started. The call state still showed the previous ended call.
 
-Findings to fix or decide later:
+Findings to fix or decide later. Status as of 19 November 2026:
 
 - When the membership event is refused, the cleanup sends the delayed leave
   instead of cancelling it.
+  *Fixed 19 November 2026 in `crates/core/src/calls/controller.rs`.* The
+  flag `membership_sent` was set before the send and never cleared. It is
+  now cleared when the homeserver answers with a client error (4xx), so the
+  cleanup cancels the delayed leave. A timeout, a lost connection or a 5xx
+  may hide a write, so those still send the leave. Test:
+  `given_membership_failures_then_only_a_client_error_is_a_refusal`.
 - Readiness does not warn when power levels block call membership.
+  *Fixed 19 November 2026 in `crates/core/src/calls/status.rs`.* A new code
+  `not_permitted` follows `not_encrypted`. Tests: `given_power_levels_then_member_state_permission_follows_the_room`,
+  `given_no_power_levels_event_then_only_the_creator_may_send`.
 - A worker that panics shows "The call process stopped." The panic message
   is lost because the worker has no stderr by design.
+  *Fixed 19 November 2026 without a message.* The core reads the exit status
+  of an ended worker (`crates/media-broker`, `crates/core/src/calls/worker.rs`
+  `exit_is_crash`, `controller.rs` `stop_reason`). A panic (exit 101), the
+  worker's own unreportable exit, a Windows crash status or a crash signal
+  ends the call with the new code `worker_crashed`. The Unix part of the
+  status read was not compiled or run on the development machine.
 - The worker gathered a server-reflexive candidate, so it contacted a STUN
   server that the SFU named. The proxy warning names only the SFU and the
   TURN server. Check which STUN server LiveKit sends by default.
+  *Fixed 19 November 2026 (text only) in `crates/core/src/platform/call_host.rs`.*
+  The warning now says that STUN or TURN servers named by the call server
+  also see the IP address. ICE behaviour is unchanged. The worker passes the
+  homeserver's TURN servers, and the core keeps only `turn:` and `turns:`
+  URIs. `livekit` 0.11 uses the SFU's `ice_servers` from the join response
+  only when the worker's list is empty, so the STUN server comes from the
+  SFU when the homeserver has no TURN. A UDP TURN server also answers STUN
+  binding requests, so with a homeserver TURN server it can be the source.
+  The default STUN list of the LiveKit server was not checked in this run.
 - `internetClient` excludes private ranges. A self-hosted SFU on a LAN or
   VPN address cannot be reached by the contained worker.
+  *Still open: a containment decision.* Not changed.
+- While the core's proxy warning is open, the call button is disabled with
+  no text (evidence finding).
+  *Fixed 19 November 2026 in `frontend/src/calls.ts`.* The pending text now
+  says that a proxy warning window may be open. The page cannot see the
+  core's window, so the text is not specific to the warning.
+- Newer SFU transport form (`m.livekit` with `url`, Synapse 1.161 and later).
+  *Done 19 November 2026 in `crates/core/src/calls/readiness.rs` and
+  `membership.rs`; see the ADR-0043 amendment.*
 
 ## Synapse configuration additions
 
@@ -457,6 +490,39 @@ Pass criteria are in brackets. Each step records its observed result.
 22. **Containment.** Record whether any mitigation must be relaxed for
     Media Foundation in the AppContainer, and the worker's peak memory with
     four remote videos against its 512 MiB Job limit.
+
+## Ringing checks (ADR-0052, implemented, not yet run live)
+
+The core code, the contracts and the page exist and have unit and IPC tests.
+No run against a live homeserver or Element client has happened. Each step
+needs a live Element Call or Element Web client beside Persephone, on
+Synapse and on Merovingian.
+
+23. **Incoming ring.** Start a call from Element in a direct chat with the
+    Persephone user. Record whether Persephone shows "Incoming call" and the
+    caller, and one desktop notification with the text "Incoming call". Record
+    whether the notification names the caller only when notification names are
+    on. [one prompt, one notification, no sound from Persephone, no join, no
+    device on]
+24. **Group room.** Start a call from Element in a group room. Record that
+    Persephone does not ring (type `notification`) and that the room shows the
+    call mark in the room list.
+25. **Answer.** Answer with and without video. Record that every join check
+    runs (readiness, proxy question, cross-signed keys) and that the prompt
+    goes away on the join.
+26. **Decline.** Decline from Persephone. Record that Element shows the
+    decline and that the prompt goes away. Decline from Element in a ring that
+    Persephone sent and record "Declined" in Persephone's call bar while the
+    call goes on.
+27. **Send.** Start a call from Persephone in a direct chat and in a group
+    room. Record the events on the homeserver: type, `notification_type`,
+    `m.mentions`, `m.relates_to`, `lifetime` 90000, `m.call.intent`, and that
+    it is encrypted in an encrypted room.
+28. **Sticky only.** Record whether any Element version sends only the sticky
+    (MSC4354) notification; Persephone does not read it.
+29. **Bounds.** Record that a second ring from the same user within 30 s, a
+    ring with an old `sender_ts` and a ring from a room the user left do not
+    show a prompt.
 
 ## Linux and macOS containment checks (ADR-0049, not yet run)
 

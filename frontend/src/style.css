@@ -3269,6 +3269,42 @@ mark {
   background: var(--panel);
 }
 
+.ring-prompt {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-soft);
+}
+
+.ring-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ring-text {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  align-items: baseline;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ring-title {
+  font-weight: 600;
+}
+
+.call-mark {
+  display: inline-flex;
+  flex: none;
+  color: var(--presence);
+}
+
 .call-head {
   display: flex;
   align-items: center;

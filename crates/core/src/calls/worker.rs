@@ -82,12 +82,72 @@ pub enum CameraPath {
     None,
 }
 
+/// How the worker process ended, as the OS reported it. No worker text is
+/// involved: the core reads the status only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerExit {
+    /// The exit code (Windows: the full 32-bit code).
+    Code(u32),
+    /// The signal that ended the process (Linux and macOS).
+    Signal(u32),
+}
+
+/// The exit code of a Rust panic that unwinds out of `main`, on every OS.
+const EXIT_PANIC: u32 = 101;
+
+/// The worker's own "could not report" exit code (`EXIT_UNREPORTABLE` in
+/// `crates/call-worker/src/main.rs`): its runtime or its writer failed.
+const EXIT_UNREPORTABLE: u32 = 2;
+
+/// Whether the exit shows an internal failure of the worker, not a stop.
+///
+/// A panic that unwinds out of `main` exits with 101 on every OS. This
+/// workspace sets no `panic = "abort"`; if it did, an abort ends the process
+/// with `SIGABRT` on Linux and macOS and with `0xC0000409` on Windows. On
+/// Windows any `NTSTATUS` error code (`0xC0000000..`) is a crash, such as an
+/// access violation. A kill by the core (`SIGKILL`; Job termination, exit
+/// code 1), a stop by the user (`SIGTERM`) and the worker's own codes 0, 1
+/// and 3 are not crashes.
+pub fn exit_is_crash(exit: WorkerExit) -> bool {
+    match exit {
+        WorkerExit::Code(code) => {
+            code == EXIT_PANIC || code == EXIT_UNREPORTABLE || code & 0xF000_0000 == 0xC000_0000
+        }
+        WorkerExit::Signal(signal) => crash_signal(signal),
+    }
+}
+
+#[cfg(unix)]
+fn crash_signal(signal: u32) -> bool {
+    [
+        libc::SIGABRT,
+        libc::SIGSEGV,
+        libc::SIGBUS,
+        libc::SIGILL,
+        libc::SIGFPE,
+        libc::SIGTRAP,
+        libc::SIGSYS,
+    ]
+    .iter()
+    .any(|crash| u32::try_from(*crash) == Ok(signal))
+}
+
+#[cfg(not(unix))]
+fn crash_signal(_signal: u32) -> bool {
+    false
+}
+
 /// The running worker process, as the link needs it.
 pub trait WorkerProcess: Send + Sync {
     /// Ends the worker and everything in its containment now.
     fn kill(&self);
     /// Waits up to `timeout` for the worker to exit. Returns whether it did.
     fn wait_exit(&self, timeout: Duration) -> bool;
+    /// How the worker ended. `None` while it runs, or when this host cannot
+    /// tell.
+    fn exit_status(&self) -> Option<WorkerExit> {
+        None
+    }
     /// Whether the OS shows the worker as contained, checked after its `Ready`
     /// message and before any input goes to it (Linux: `/proc/<pid>/status`;
     /// macOS: `sandbox_check`). On Windows the containment is complete before
@@ -183,6 +243,16 @@ impl CallWorkerLink {
         self.video.clone()
     }
 
+    /// How the worker ended, after waiting up to `wait` for it to exit.
+    /// Blocks; call it from a blocking task.
+    pub fn exit_status(&self, wait: Duration) -> Option<WorkerExit> {
+        if self.process.wait_exit(wait) {
+            self.process.exit_status()
+        } else {
+            None
+        }
+    }
+
     /// A handle that ends the worker from outside the task that owns the
     /// link, for example when the session locks.
     pub fn kill_handle(&self) -> Arc<dyn WorkerProcess> {
@@ -219,8 +289,9 @@ pub trait CallHost: Send + Sync {
     fn start(&self) -> Result<CallWorkerLink, StartError>;
 
     /// Asks, in a native dialog owned by the core, whether this call may
-    /// connect directly: the profile has a SOCKS5 proxy, and the SFU and
-    /// TURN server will see this computer's IP address (ADR-0028 addition).
+    /// connect directly: the profile has a SOCKS5 proxy, and the SFU, the
+    /// TURN server and any STUN or TURN server that the SFU names will see
+    /// this computer's IP address (ADR-0028 addition).
     /// Blocks until answered; `true` only for an explicit yes.
     fn confirm_direct_connection(&self) -> bool;
 
@@ -275,6 +346,56 @@ impl CallHost for Unsupported {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN exit statuses WHEN classified THEN a panic, the worker's
+    /// unreportable exit and a Windows crash status are crashes, and a clean
+    /// exit, a worker failure code, a kill and a user stop are not.
+    #[test]
+    fn given_exit_status_then_only_internal_failures_are_crashes() {
+        for crash in [
+            WorkerExit::Code(101),
+            WorkerExit::Code(2),
+            WorkerExit::Code(0xC000_0005),
+            WorkerExit::Code(0xC000_0409),
+        ] {
+            assert!(exit_is_crash(crash), "{crash:?}");
+        }
+        for stop in [
+            WorkerExit::Code(0),
+            WorkerExit::Code(1),
+            WorkerExit::Code(3),
+            WorkerExit::Code(0x4000_0010),
+            WorkerExit::Code(0x8000_0003),
+        ] {
+            assert!(!exit_is_crash(stop), "{stop:?}");
+        }
+    }
+
+    /// GIVEN signals WHEN classified THEN an abort or a fault is a crash and
+    /// a kill or a terminate is not.
+    #[cfg(unix)]
+    #[test]
+    fn given_signal_then_only_faults_are_crashes() {
+        for crash in [
+            libc::SIGABRT,
+            libc::SIGSEGV,
+            libc::SIGBUS,
+            libc::SIGILL,
+            libc::SIGSYS,
+        ] {
+            assert!(exit_is_crash(WorkerExit::Signal(crash as u32)), "{crash}");
+        }
+        for stop in [libc::SIGKILL, libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            assert!(!exit_is_crash(WorkerExit::Signal(stop as u32)), "{stop}");
+        }
+    }
+
+    /// GIVEN a signal status on an OS without signals WHEN classified THEN it is not a crash.
+    #[cfg(not(unix))]
+    #[test]
+    fn given_signal_without_signals_then_no_crash() {
+        assert!(!exit_is_crash(WorkerExit::Signal(6)));
+    }
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},

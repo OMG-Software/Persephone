@@ -34,7 +34,8 @@ use tokio::sync::mpsc;
 pub const DIRECT_CONNECTION_TEXT: &str = concat!(
     "This profile uses a SOCKS5 proxy, but calls cannot use it.\n\n",
     "If you continue, this call connects directly. The call server and the ",
-    "TURN server will see this computer's IP address. Messages and all other ",
+    "TURN server will see this computer's IP address. So can any STUN or TURN ",
+    "server that the call server names. Messages and all other ",
     "connections still use the proxy.\n\n",
     "Connect this call directly?",
 );
@@ -313,6 +314,14 @@ mod tests {
     }
     use persephone_call_protocol::write_video_frame;
     use std::io::Cursor;
+
+    /// GIVEN the proxy warning WHEN it is read THEN it names the call server, the TURN server and the STUN or TURN servers that the call server names.
+    #[test]
+    fn given_the_proxy_warning_then_it_names_every_server_that_sees_the_address() {
+        for part in ["call server", "TURN server", "STUN or TURN", "IP address"] {
+            assert!(DIRECT_CONNECTION_TEXT.contains(part), "{part}");
+        }
+    }
 
     fn first_of(messages: &[FromWorker]) -> Option<Result<FromWorker, ReadError>> {
         let mut wire = Vec::new();

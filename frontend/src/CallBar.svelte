@@ -7,6 +7,7 @@
     END_TEXT,
     NO_KEY_TEXT,
     PHASE_TEXT,
+    RING_DECLINED_TEXT,
     SCREEN_TEXT,
     screenButton,
     SHARING_TEXT,
@@ -108,6 +109,9 @@
         {/if}
       </span>
     </div>
+    {#if !ended && status.ringDeclined}
+      <p class="call-declined note" role="status">{RING_DECLINED_TEXT}</p>
+    {/if}
     {#if !ended && cameraText !== ''}
       <p class="call-camera-note note" role="status">{cameraText}</p>
     {/if}

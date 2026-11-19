@@ -25,8 +25,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, HANDLE, HANDLE_FLAG_INHERIT, LocalFree, SetHandleInformation, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        GetLastError, HANDLE, HANDLE_FLAG_INHERIT, LocalFree, STILL_ACTIVE, SetHandleInformation,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
         DeriveCapabilitySidsFromName, FreeSid, Isolation::CreateAppContainerProfile,
@@ -509,6 +509,14 @@ impl LongLivedWorker {
     /// Waits up to `timeout` for the process to exit. Returns whether it did.
     pub fn wait_exit(&self, timeout: Duration) -> bool {
         self.0.wait(timeout) == Wait::Exited
+    }
+
+    /// How the process ended. `None` while it runs or when the OS cannot say.
+    pub fn exit_status(&self) -> Option<crate::WorkerExit> {
+        let mut code = 0u32;
+        // SAFETY: reads the exit code of the worker's own process handle.
+        let ok = unsafe { GetExitCodeProcess(raw(&self.0.process), &mut code) };
+        (ok != 0 && code != STILL_ACTIVE as u32).then_some(crate::WorkerExit::Code(code))
     }
 }
 
