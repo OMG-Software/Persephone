@@ -322,7 +322,7 @@ test('GIVEN one operation WHEN no later one starts THEN its reply is current', (
   assert.equal(operations.isCurrent(operations.begin()), true);
 });
 
-const ring = (over) => ({ roomId: '!r:s', caller: '@alice:s', intent: 'audio', secondsLeft: 30, ...over });
+const ring = (over) => ({ ringId: 1, roomId: '!r:s', caller: '@alice:s', intent: 'audio', secondsLeft: 30, ...over });
 
 test('GIVEN the core\'s list of rings WHEN the page stamps them THEN each ends at its seconds left, newest first as sent', () => {
   const list = { rings: [ring({ roomId: '!a:s', secondsLeft: 10 }), ring({ roomId: '!b:s', secondsLeft: 90, intent: 'video' })] };
@@ -371,11 +371,13 @@ test('GIVEN rings or none WHEN announced THEN a ring says only Incoming call, ne
 });
 
 test('GIVEN shown rings WHEN a ring is added or replaced THEN the announcement key changes, and the time left does not change it', () => {
-  const first = shownRings({ rings: [ring({ roomId: '!a:s', caller: '@bob:s', secondsLeft: 30 })] }, 0);
-  const later = shownRings({ rings: [ring({ roomId: '!a:s', caller: '@bob:s', secondsLeft: 12 })] }, 5_000);
-  const replaced = shownRings({ rings: [ring({ roomId: '!a:s', caller: '@carol:s' })] }, 0);
-  const added = shownRings({ rings: [ring({ roomId: '!a:s', caller: '@bob:s' }), ring({ roomId: '!b:s', caller: '@dan:s' })] }, 0);
+  const first = shownRings({ rings: [ring({ ringId: 1, roomId: '!a:s', caller: '@bob:s', secondsLeft: 30 })] }, 0);
+  const later = shownRings({ rings: [ring({ ringId: 1, roomId: '!a:s', caller: '@bob:s', secondsLeft: 12 })] }, 5_000);
+  const again = shownRings({ rings: [ring({ ringId: 2, roomId: '!a:s', caller: '@bob:s' })] }, 0);
+  const replaced = shownRings({ rings: [ring({ ringId: 3, roomId: '!a:s', caller: '@carol:s' })] }, 0);
+  const added = shownRings({ rings: [ring({ ringId: 1, roomId: '!a:s', caller: '@bob:s' }), ring({ ringId: 4, roomId: '!b:s', caller: '@dan:s' })] }, 0);
   assert.equal(ringsKey(later), ringsKey(first));
+  assert.notEqual(ringsKey(again), ringsKey(first));
   assert.notEqual(ringsKey(replaced), ringsKey(first));
   assert.notEqual(ringsKey(added), ringsKey(first));
   assert.notEqual(ringsKey([]), ringsKey(first));

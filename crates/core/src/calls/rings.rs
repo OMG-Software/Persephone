@@ -174,6 +174,10 @@ pub struct Late {
 /// A ring that passed [`screen`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ring {
+    /// A number the core gives each admitted ring, so the page can tell a
+    /// new ring from an older one with the same room and caller. It names
+    /// nothing in Matrix. 0 until [`Rings::admit`] sets it.
+    pub id: u32,
     pub room_id: OwnedRoomId,
     pub event_id: OwnedEventId,
     pub sender: OwnedUserId,
@@ -202,6 +206,7 @@ pub fn screen(event: &Incoming, early: Early, now_ms: u64) -> Result<Ring, Refus
         return Err(Refusal::Expired);
     }
     Ok(Ring {
+        id: 0,
         room_id: event.room_id.clone(),
         event_id: event.event_id.clone(),
         sender: event.sender.clone(),
@@ -231,6 +236,8 @@ struct RingState {
     senders: Vec<(OwnedUserId, u64)>,
     /// The room of the open call, or of a join in progress.
     open_room: Option<OwnedRoomId>,
+    /// The [`Ring::id`] of the last admitted ring.
+    last_id: u32,
 }
 
 impl RingState {
@@ -268,7 +275,7 @@ impl Rings {
     /// Keeps `ring` within the bounds: one for each room (the newer one
     /// replaces the older), at most [`MAX_RINGS`] (the oldest is dropped),
     /// and one for each sender in [`SENDER_GAP_MS`].
-    pub fn admit(&self, ring: Ring, now_ms: u64) -> Result<(), Refusal> {
+    pub fn admit(&self, mut ring: Ring, now_ms: u64) -> Result<(), Refusal> {
         if ring.ends_ms <= now_ms {
             return Err(Refusal::Expired);
         }
@@ -284,6 +291,8 @@ impl Rings {
             return Err(Refusal::TooManySenders);
         }
         state.senders.push((ring.sender.clone(), now_ms));
+        state.last_id = state.last_id.wrapping_add(1);
+        ring.id = state.last_id;
         // Expired rings go first, so they never push out a live one.
         state
             .rings
@@ -577,6 +586,7 @@ mod tests {
 
     fn ring(room: &str, sender: &str, ends_ms: u64) -> Ring {
         Ring {
+            id: 0,
             room_id: matrix_sdk::ruma::OwnedRoomId::try_from(room).unwrap(),
             event_id: event_id!("$n:example.org").to_owned(),
             sender: OwnedUserId::try_from(sender).unwrap(),
@@ -726,6 +736,25 @@ mod tests {
             }),
             Err(Refusal::NoMembership)
         );
+    }
+
+    /// GIVEN two rings from the same caller in the same room WHEN each is
+    /// admitted THEN each has its own number, so the page can tell them
+    /// apart.
+    #[test]
+    fn given_a_new_ring_from_the_same_caller_then_it_has_a_new_number() {
+        let rings = Rings::default();
+        rings
+            .admit(ring("!r:s", "@a:s", NOW + 60_000), NOW)
+            .unwrap();
+        let first = rings.live(NOW)[0].id;
+        rings
+            .admit(ring("!r:s", "@a:s", NOW + 90_000), NOW + SENDER_GAP_MS)
+            .unwrap();
+        let live = rings.live(NOW + SENDER_GAP_MS);
+        assert_eq!(live.len(), 1);
+        assert_ne!(first, 0);
+        assert_ne!(live[0].id, first);
     }
 
     #[test]

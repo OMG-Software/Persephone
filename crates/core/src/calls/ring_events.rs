@@ -37,6 +37,11 @@ pub trait Env: Send + Sync {
     /// The generation of the open session, or `None` while it is not open.
     /// A lock advances it, so a ring handled across a lock is dropped.
     fn open_generation(&self) -> Option<u64>;
+    /// Runs `action` only while `generation` is still the open session's,
+    /// under the lock that a lock takes to advance the generation. A lock
+    /// then clears whatever `action` queued. `action` must not call back
+    /// into the session.
+    fn while_open(&self, generation: u64, action: &mut dyn FnMut());
 }
 
 #[derive(Deserialize)]
@@ -167,9 +172,11 @@ async fn ring_arrived(env: &dyn Env, room: &Room, event: Envelope) {
             (String::new(), String::new())
         };
         let (room_name, caller) = super::rings::toast_names(allowed, room_name, caller);
-        if still_open() {
-            listener.notify_call(&room_name, &caller);
-        }
+        // Under the session's lock: a lock that starts after this cannot
+        // miss the notification when it clears them.
+        env.while_open(generation, &mut || {
+            listener.notify_call(&room_name, &caller)
+        });
     }
 }
 
@@ -370,6 +377,11 @@ mod tests {
                 generations[0]
             }
         }
+        fn while_open(&self, generation: u64, action: &mut dyn FnMut()) {
+            if self.open_generation() == Some(generation) {
+                action();
+            }
+        }
     }
 
     fn state_event(kind: &str, key: &str, sender: &str, content: Value) -> Value {
@@ -546,6 +558,7 @@ mod tests {
 
     fn ring_from(sender: &str, event: &str) -> Ring {
         Ring {
+            id: 0,
             room_id: room_id!("!call:synthetic.test").to_owned(),
             event_id: OwnedEventId::try_from(event).unwrap(),
             sender: OwnedUserId::try_from(sender).unwrap(),

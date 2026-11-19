@@ -237,7 +237,7 @@ const noDevices: CallDevices = { supported: true, recording: [{ id: "a", name: "
 const deviceWithPath: CallDevices = { ...noDevices, recording: [{ id: "a", name: "b", path: "c" }] };
 // @ts-expect-error the saved choice must be explicit null, not missing
 const missingChoice: CallDevices = { supported: true, recording: [], playout: [], cameras: [], selectedRecording: null, selectedPlayout: null, unreadable: false };
-const ringList: CallRings = { rings: [{ roomId: "!r:s", caller: "@a:s", intent: "video", secondsLeft: 5 }] };
+const ringList: CallRings = { rings: [{ ringId: 1, roomId: "!r:s", caller: "@a:s", intent: "video", secondsLeft: 5 }] };
 // @ts-expect-error a ring carries no name or text, only IDs, the intent and the time left
 const ringWithName: CallRings = { rings: [{ ...ringList.rings[0], name: "x" }] };
 // @ts-expect-error only audio and video are intents

@@ -1,6 +1,7 @@
 {
   "rings": [
     {
+      "ringId": 3,
       "roomId": "!example:server.invalid",
       "caller": "@alice:server.invalid",
       "intent": "video",
