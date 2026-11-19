@@ -60,7 +60,7 @@ use std::{
 };
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, oneshot, watch},
+    sync::{Notify, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time,
 };
@@ -1417,6 +1417,7 @@ impl CallController {
             screens: self.inner.host.screen_source(),
             screen_pick: None,
             screen_wanted: false,
+            screen_last_on: false,
             screen_closed: None,
             screen_sent: false,
             proxy: setup.proxy,
@@ -1527,60 +1528,80 @@ impl CallController {
     /// The state shows `starting` at once when started, and the answer of the
     /// pick and the worker replaces it.
     pub fn set_screen(&self, on: bool) -> Result<(), CallError> {
-        let slot = self.inner.slot();
-        let Slot::Running(run) = &*slot else {
-            return Err(CallError::NotInCall);
-        };
-        if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
-            return Err(CallError::NotInCall);
-        }
-        // A queue place is taken first, so a full queue changes nothing.
-        let permit = run
-            .commands
-            .try_reserve()
-            .map_err(|_| CallError::NotInCall)?;
-        // The page's screen changes and a stop is counted under the lock
-        // that the call task holds while it publishes (`Call::publish`). So
-        // a task publication either comes first, and this `Off` replaces it,
-        // or it sees the stop and keeps this `Off`.
-        let mut control = plain(&run.screen_control);
-        let changed = self.inner.state.send_if_modified(|state| {
-            let CallState::Active { screen, .. } = state else {
-                return false;
+        let changed = {
+            let slot = self.inner.slot();
+            let Slot::Running(run) = &*slot else {
+                return Err(CallError::NotInCall);
             };
-            let next = match (on, *screen) {
-                (true, CallScreen::On | CallScreen::Starting) => *screen,
-                (true, _) => CallScreen::Starting,
-                (false, _) => CallScreen::Off,
-            };
-            if next == *screen {
-                return false;
+            if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
+                return Err(CallError::NotInCall);
             }
-            *screen = next;
-            true
-        });
-        // A stop is counted before it is queued, under the lock that the
-        // call task holds from its check of a finished pick until the
-        // pick's start is queued for the worker. So a stop is either seen by
-        // that check, and the pick is closed unused, or it comes after the
-        // start and stops it. The stop also takes the portal session: it
-        // closes here, so capture is revoked at once, also while the call
-        // task waits for a key send. `Off` is then true when it shows.
-        if !on {
-            control.stops = control.stops.wrapping_add(1);
-        }
-        control.requests = control.requests.wrapping_add(1);
-        let revoked = if on { None } else { control.session.take() };
-        let (stops, request) = (control.stops, control.requests);
-        drop(control);
-        // Closing the session talks to the bus; not under the lock.
-        drop(revoked);
-        permit.send(Command::Screen { on, stops, request });
-        drop(slot);
+            self.accept_screen(run, on)?
+        };
         if changed {
             self.inner.notify();
         }
         Ok(())
+    }
+
+    /// Accepts a screen command for the running call `run`, with the slot
+    /// lock held. Returns whether the page changed.
+    fn accept_screen(&self, run: &RunHandle, on: bool) -> Result<bool, CallError> {
+        // A queue place is taken first: a full queue refuses a start and
+        // changes nothing. A stop never waits for queue room: it does not go
+        // through the queue then, but waits in the screen control and wakes
+        // the call task, so capture never outlives the user's stop.
+        let permit = match run.commands.try_reserve() {
+            Ok(permit) => Some(permit),
+            Err(mpsc::error::TrySendError::Full(())) if !on => None,
+            Err(_) => return Err(CallError::NotInCall),
+        };
+        // 1. The command is counted first, under the lock that the call task
+        // holds from its check of a finished pick until the pick's start is
+        // queued, and while it publishes. So a pick that ends after a stop is
+        // closed unused, and a task publication from now on keeps the page's
+        // screen state. A stop takes the portal session.
+        let (stops, request, revoked) = {
+            let mut control = plain(&run.screen_control);
+            if !on {
+                control.stops = control.stops.wrapping_add(1);
+            }
+            control.requests = control.requests.wrapping_add(1);
+            let revoked = if on { None } else { control.session.take() };
+            (control.stops, control.requests, revoked)
+        };
+        // 2. The session closes, so capture is revoked before `Off` shows.
+        // Closing talks to the bus; not under the lock.
+        drop(revoked);
+        // 3. The page shows the command. No other screen command comes in
+        // between: the slot lock is held throughout.
+        let changed = {
+            let mut control = plain(&run.screen_control);
+            let changed = self.inner.state.send_if_modified(|state| {
+                let CallState::Active { screen, .. } = state else {
+                    return false;
+                };
+                let next = match (on, *screen) {
+                    (true, CallScreen::On | CallScreen::Starting) => *screen,
+                    (true, _) => CallScreen::Starting,
+                    (false, _) => CallScreen::Off,
+                };
+                if next == *screen {
+                    return false;
+                }
+                *screen = next;
+                true
+            });
+            if permit.is_none() {
+                control.stop_waiting = Some((stops, request));
+                control.wake.notify_one();
+            }
+            changed
+        };
+        if let Some(permit) = permit {
+            permit.send(Command::Screen { on, stops, request });
+        }
+        Ok(changed)
     }
 
     /// The session stops admitting work (lock, sign-out, an ended session,
@@ -1900,6 +1921,10 @@ struct Call {
     /// The latest screen request: `true` from a start until a stop. A pick
     /// that ends after a stop is closed unused.
     screen_wanted: bool,
+    /// The last screen command read was a start. A failed start clears
+    /// `screen_wanted` but not this: the end state of the share that the
+    /// stop before it ended then does not show over the failure.
+    screen_last_on: bool,
     /// Fires when the desktop closes the portal session.
     screen_closed: Option<oneshot::Receiver<()>>,
     /// A `SetScreen` start went to the worker and no stop or end since.
@@ -2020,6 +2045,14 @@ struct ScreenControl {
     stops: u64,
     requests: u64,
     session: Option<Box<dyn Send + Sync>>,
+    /// A stop (its stop count and number) that met a full command queue.
+    /// The call task takes it when `wake` fires, or before it reads a later
+    /// command. A newer waiting stop replaces an older one: it stops the
+    /// same share or a later one.
+    stop_waiting: Option<(u64, u64)>,
+    /// Wakes the call task for a waiting stop. A wake with no task waiting
+    /// is kept until it waits.
+    wake: Arc<Notify>,
 }
 
 /// Waits for room in the worker's command queue while `sender` is given (a
@@ -2195,6 +2228,11 @@ impl Call {
     /// page is reconciled with the view, also when the command did not
     /// change the view (a start of a share the worker already reports `On`).
     /// `publish` skips an unchanged page.
+    ///
+    /// A stop that waits in the screen control and is older than this
+    /// command goes first. A command older than a stop already read is
+    /// stale and does nothing. A start whose stop count is behind the
+    /// accepted count is followed by a stop: it opens no picker.
     fn screen_request(
         &mut self,
         inner: &Inner,
@@ -2202,9 +2240,34 @@ impl Call {
         stops: u64,
         request: u64,
     ) -> Result<(), EndReason> {
+        self.take_waiting_stop(inner, request)?;
+        if request <= self.screen_seen_request {
+            return Ok(());
+        }
         self.screen_seen_request = request;
-        self.screen_command(inner, on, stops)?;
+        let superseded = on && stops != plain(&self.screen_control).stops;
+        if !superseded {
+            self.screen_command(inner, on, stops)?;
+        }
         self.publish(inner);
+        Ok(())
+    }
+
+    /// Runs the stop that waits in the screen control, if it is older than
+    /// command `before`.
+    fn take_waiting_stop(&mut self, inner: &Inner, before: u64) -> Result<(), EndReason> {
+        let waiting = {
+            let mut control = plain(&self.screen_control);
+            match control.stop_waiting {
+                Some((_, request)) if request < before => control.stop_waiting.take(),
+                _ => None,
+            }
+        };
+        if let Some((stops, request)) = waiting {
+            self.screen_seen_request = request;
+            self.screen_command(inner, false, stops)?;
+            self.publish(inner);
+        }
         Ok(())
     }
 
@@ -2214,6 +2277,7 @@ impl Call {
     /// closes the portal session and stops the worker's capture.
     fn screen_command(&mut self, inner: &Inner, on: bool, stops: u64) -> Result<(), EndReason> {
         self.screen_wanted = on;
+        self.screen_last_on = on;
         self.screen_seen_stops = stops;
         if on {
             if !self.screens.available() {
@@ -2413,7 +2477,7 @@ impl Call {
             return false;
         }
         if !self.screen_sent {
-            return !self.screen_wanted
+            return !self.screen_last_on
                 && !matches!(state, ScreenState::Starting | ScreenState::On);
         }
         let running = matches!(state, ScreenState::Starting | ScreenState::On);
@@ -2821,10 +2885,12 @@ impl Call {
         if self.camera_wanted.load(Ordering::SeqCst) && uses_portal(&self.link) {
             self.start_portal();
         }
+        let wake = plain(&self.screen_control).wake.clone();
         loop {
             let due = pending_own.as_ref().map(|(at, _)| *at);
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
+                () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
                 command = commands.recv() => match command {
                     Some(Command::Mute(muted)) => self.send_worker(ToWorker::SetMuted { muted })?,
                     Some(Command::Camera { on, request }) => {
@@ -3655,6 +3721,7 @@ mod tests {
             screens: crate::calls::screen::unavailable(),
             screen_pick: None,
             screen_wanted: false,
+            screen_last_on: false,
             screen_closed: None,
             screen_sent: false,
             proxy: false,
@@ -5216,6 +5283,187 @@ mod tests {
             .screen_request(&inner, true, stops, second)
             .unwrap();
         assert_eq!(shown(&inner), CallScreen::On);
+    }
+
+    /// GIVEN a running call whose command queue is full WHEN the page stops
+    /// the share THEN the stop is accepted: the portal session closes, the
+    /// page shows `Off`, and the stop waits in the screen control with a
+    /// wake for the task; a start is still refused on a full queue.
+    #[tokio::test]
+    async fn given_a_full_command_queue_when_the_page_stops_then_capture_is_revoked() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _) = running_call(&calls, active_state());
+        let (control, sender) = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            (run.screen_control.clone(), run.commands.clone())
+        };
+        let dropped = Arc::new(AtomicBool::new(false));
+        plain(&control).session = Some(Box::new(SessionGuard(dropped.clone())));
+        assert_eq!(calls.set_screen(true), Ok(()));
+        while sender.try_send(Command::Mute(true)).is_ok() {}
+
+        assert_eq!(calls.set_screen(true), Err(CallError::NotInCall));
+        assert_eq!(calls.set_screen(false), Ok(()));
+        assert!(dropped.load(Ordering::SeqCst), "capture is revoked");
+        assert!(matches!(
+            calls.state(),
+            CallState::Active {
+                screen: CallScreen::Off,
+                ..
+            }
+        ));
+        let wake = {
+            let control = plain(&control);
+            assert_eq!(control.stop_waiting, Some((1, 2)));
+            control.wake.clone()
+        };
+        tokio::time::timeout(Duration::from_secs(1), wake.notified())
+            .await
+            .expect("the task is woken");
+    }
+
+    /// GIVEN a share whose portal session is open WHEN the page stops it
+    /// THEN the session closes before the page shows `Off`.
+    #[tokio::test]
+    async fn given_a_share_when_the_page_stops_it_then_the_session_closes_before_off_shows() {
+        struct Watching(watch::Receiver<CallState>, Arc<Mutex<Option<CallScreen>>>);
+        impl Drop for Watching {
+            fn drop(&mut self) {
+                if let CallState::Active { screen, .. } = &*self.0.borrow() {
+                    *plain(&self.1) = Some(*screen);
+                }
+            }
+        }
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _) = running_call(&calls, active_state());
+        let control = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            run.screen_control.clone()
+        };
+        assert_eq!(calls.set_screen(true), Ok(()));
+        let seen = Arc::new(Mutex::new(None));
+        plain(&control).session = Some(Box::new(Watching(
+            calls.inner.state.subscribe(),
+            seen.clone(),
+        )));
+        assert_eq!(calls.set_screen(false), Ok(()));
+        assert_eq!(
+            *plain(&seen),
+            Some(CallScreen::Starting),
+            "the page did not show Off yet"
+        );
+        assert!(matches!(
+            calls.state(),
+            CallState::Active {
+                screen: CallScreen::Off,
+                ..
+            }
+        ));
+    }
+
+    /// GIVEN a start queued for the task and a later stop that waits in the
+    /// screen control (the queue was full) WHEN the task reads the start
+    /// THEN it opens no picker; WHEN it is woken THEN the stop runs. GIVEN a
+    /// running share and a waiting stop WHEN a later start is read first
+    /// THEN the stop goes to the worker before the start runs.
+    #[tokio::test]
+    async fn given_a_waiting_stop_then_an_earlier_start_opens_no_picker_and_the_stop_runs() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        let wait = |control: &Mutex<ScreenControl>, inner: &Inner| {
+            let (stops, request) = accept_command(control, inner, false);
+            plain(control).stop_waiting = Some((stops, request));
+        };
+        let (stops, start) = accept_command(&fixture.call.screen_control, &inner, true);
+        wait(&fixture.call.screen_control, &inner);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, start)
+            .unwrap();
+        assert!(fixture.call.screen_pick.is_none(), "no picker opens");
+        assert_eq!(shown(&inner), CallScreen::Off);
+        fixture.call.take_waiting_stop(&inner, u64::MAX).unwrap();
+        assert!(plain(&fixture.call.screen_control).stop_waiting.is_none());
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+
+        // A running share, then a stop that waits and a later start.
+        let (stops, start) = accept_command(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, start)
+            .unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        while fixture.to_worker.try_recv().is_ok() {}
+        wait(&fixture.call.screen_control, &inner);
+        let (stops, later) = accept_command(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, later)
+            .unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None, share: stopped }) if stopped == share
+        ));
+        assert!(fixture.call.screen_wanted, "the later start runs");
+        assert_eq!(shown(&inner), CallScreen::Starting);
+    }
+
+    /// GIVEN a share's stop that waits for worker queue room and a new start
+    /// that then fails (`Unavailable`) WHEN the stop goes and the worker
+    /// reports the stopped share `Off` THEN the failure stays shown.
+    #[tokio::test]
+    async fn given_a_failed_restart_when_the_old_share_reports_off_then_the_failure_stays() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        while fixture
+            .call
+            .link
+            .send(ToWorker::SetMuted { muted: true })
+            .is_ok()
+        {}
+        plain(&fixture.call.screen_control).stops += 1;
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&second)))
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+
+        while fixture.to_worker.try_recv().is_ok() {}
+        let permit = screen_stop_room(Some(fixture.call.link.command_sender())).await;
+        fixture.call.screen_stop_room_ready(permit).unwrap();
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::Off,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
     }
 
     /// GIVEN a running share WHEN the handle accepts a stop and then a start
