@@ -128,6 +128,19 @@ fn encode(stage: u32, hresult: u32, part: u32) -> u32 {
     }
 }
 
+/// The last capture stage (`wgc::Stage::BadSize`).
+const LAST_STAGE: u32 = wgc::Stage::BadSize as u32;
+
+/// Whether `code` is a status the child gives for `part`: a stage for part 0
+/// (0 is a frame), or a stage with an HRESULT half for part 1 and 2. A crash
+/// or an unread exit code is not one.
+fn known_status(code: u32, part: u32) -> bool {
+    match part {
+        0 => code <= LAST_STAGE,
+        _ => decode(code).is_some_and(|(stage, _)| stage <= LAST_STAGE),
+    }
+}
+
 /// The stage and the HRESULT half of a part 1 or 2 exit code. `None` when the
 /// code cannot come from `encode` (for example `NOT_STARTED`).
 fn decode(code: u32) -> Option<(u32, u32)> {
@@ -267,7 +280,7 @@ fn parent() -> i32 {
                         // A capture failure is a result; a repeat that did
                         // not launch is a failed measurement.
                         _ => {
-                            line.push_str(", HRESULT unknown: a repeat run did not launch");
+                            line.push_str(", HRESULT unknown: a repeat run failed");
                             failed = true;
                         }
                     }
@@ -278,7 +291,7 @@ fn parent() -> i32 {
                 );
             }
             Err(RunError::Failed(error)) => {
-                println!("screen-probe: AppContainer ({name}): launch failed: {error}");
+                println!("screen-probe: AppContainer ({name}): run failed: {error}");
                 failed = true;
             }
             Err(RunError::Unconfirmed(error, child)) => {
@@ -286,7 +299,25 @@ fn parent() -> i32 {
             }
         }
     }
-    i32::from(failed)
+    let deleted = delete_profile(container);
+    i32::from(failed || !deleted)
+}
+
+/// Deletes the AppContainer profile and reports the result. False when the
+/// profile remains.
+fn delete_profile(container: Container) -> bool {
+    match container.delete() {
+        Ok(()) => {
+            println!("screen-probe: the AppContainer profile is deleted");
+            true
+        }
+        Err(hresult) => {
+            println!(
+                "screen-probe: the AppContainer profile could not be deleted (HRESULT {hresult:#010x}); remove it by hand"
+            );
+            false
+        }
+    }
 }
 
 /// Stops the probe after a run whose child may still be running. The probe
@@ -302,7 +333,9 @@ fn parent() -> i32 {
 fn abandon(container: Container, name: &str, error: &str, child: Unexited) -> i32 {
     println!("screen-probe: AppContainer ({name}): {error}; the probe stops");
     if child.end_and_wait_longer() {
-        println!("screen-probe: the child exited; the AppContainer profile is deleted");
+        println!("screen-probe: the child exited");
+        drop(child);
+        delete_profile(container);
         return 1;
     }
     // SAFETY: the process handle is owned and valid.
@@ -427,6 +460,14 @@ impl Container {
     /// Keeps the profile: a child that may still run uses it.
     fn keep(mut self) {
         self.keep = true;
+    }
+
+    /// Deletes the profile now. `Err` holds the failing HRESULT.
+    fn delete(mut self) -> Result<(), i32> {
+        self.keep = true;
+        // SAFETY: the name is NUL-terminated.
+        let hresult = unsafe { DeleteAppContainerProfile(self.name.as_ptr()) };
+        if hresult >= 0 { Ok(()) } else { Err(hresult) }
     }
 
     fn sid(&self) -> Option<PSID> {
@@ -724,13 +765,42 @@ fn run_in_container(
     }
     let mut code = NOT_STARTED;
     // SAFETY: the process has ended.
-    unsafe { GetExitCodeProcess(process.0, &mut code) };
+    if unsafe { GetExitCodeProcess(process.0, &mut code) } == 0 {
+        return Err("GetExitCodeProcess failed".into());
+    }
+    // An exit is not a measurement: a crash or another code is a failed run.
+    if !known_status(code, part) {
+        return Err(format!(
+            "the probe ended without a capture result ({})",
+            describe(code)
+        )
+        .into());
+    }
     Ok(code)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN exit codes WHEN checked for a part THEN only the codes the child
+    /// gives for that part are capture results; a crash, `NOT_STARTED` and
+    /// an unknown stage are not.
+    #[test]
+    fn given_exit_codes_when_checked_then_only_child_results_are_measurements() {
+        for stage in 0..=LAST_STAGE {
+            assert!(known_status(stage, 0), "{stage}");
+        }
+        assert!(!known_status(LAST_STAGE + 1, 0));
+        assert!(!known_status(NOT_STARTED, 0));
+        assert!(!known_status(0xC000_0005, 0), "an access violation");
+        for part in [1, 2] {
+            assert!(known_status(encode(10, 0x8007_0005, part), part));
+            assert!(!known_status(encode(LAST_STAGE + 1, 0, part), part));
+            assert!(!known_status(NOT_STARTED, part));
+            assert!(!known_status(0xC000_0005, part));
+        }
+    }
 
     /// GIVEN every exit code the capture stages can return WHEN described
     /// THEN each has its own name and success is code 0.
