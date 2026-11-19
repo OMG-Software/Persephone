@@ -25,7 +25,9 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, LocalFree, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
@@ -67,6 +69,9 @@ const CANDIDATES: [(&str, &[&str]); 3] = [
     ),
 ];
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many more `RUN_TIMEOUT` waits the probe gives a child whose exit was
+/// not confirmed, ending it again before each.
+const EXIT_ROUNDS: u32 = 10;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 // PROCESS_CREATION_MITIGATION_POLICY_* of the call worker: everything the
@@ -240,14 +245,18 @@ fn parent() -> i32 {
                     // The error code of the failed call, in two more runs. Each
                     // run reports its own stage. Use the halves only when both
                     // runs failed at the stage of the first run.
-                    let high = run(1);
-                    if let Err(RunError::Unconfirmed(error)) = high {
-                        return abandon(container, name, &error);
-                    }
-                    let low = run(2);
-                    if let Err(RunError::Unconfirmed(error)) = low {
-                        return abandon(container, name, &error);
-                    }
+                    let high = match run(1) {
+                        Err(RunError::Unconfirmed(error, child)) => {
+                            return abandon(container, name, &error, child);
+                        }
+                        other => other,
+                    };
+                    let low = match run(2) {
+                        Err(RunError::Unconfirmed(error, child)) => {
+                            return abandon(container, name, &error, child);
+                        }
+                        other => other,
+                    };
                     match (high, low) {
                         (Ok(high), Ok(low)) => match combine(code, high, low) {
                             Some(hresult) => line.push_str(&format!(
@@ -272,19 +281,29 @@ fn parent() -> i32 {
                 println!("screen-probe: AppContainer ({name}): launch failed: {error}");
                 failed = true;
             }
-            Err(RunError::Unconfirmed(error)) => return abandon(container, name, &error),
+            Err(RunError::Unconfirmed(error, child)) => {
+                return abandon(container, name, &error, child);
+            }
         }
     }
     i32::from(failed)
 }
 
-/// Stops the probe after a run whose child may still be running. The
-/// AppContainer profile is kept, not deleted under the child.
-fn abandon(container: Container, name: &str, error: &str) -> i32 {
-    println!(
-        "screen-probe: AppContainer ({name}): {error}; the probe stops and keeps the AppContainer profile"
-    );
-    std::mem::forget(container);
+/// Stops the probe after a run whose child may still be running. The probe
+/// keeps owning the child and waits longer for its exit. Only a confirmed
+/// exit releases the handles and deletes the AppContainer profile. Otherwise
+/// the profile is kept; the handles close when the probe exits, and the
+/// Job's kill-on-close limit ends a child that is in the Job.
+fn abandon(container: Container, name: &str, error: &str, child: Unexited) -> i32 {
+    println!("screen-probe: AppContainer ({name}): {error}; the probe stops");
+    if child.end_and_wait_longer() {
+        println!("screen-probe: the child exited; the AppContainer profile is deleted");
+    } else {
+        println!(
+            "screen-probe: the child's exit was not confirmed; the AppContainer profile is kept"
+        );
+        container.keep();
+    }
     1
 }
 
@@ -292,9 +311,9 @@ fn abandon(container: Container, name: &str, error: &str) -> i32 {
 enum RunError {
     /// The run failed, and its child has exited or never started.
     Failed(String),
-    /// The child may still run. Its handles stay open (they are never
-    /// closed by this process) and the profile must not be deleted.
-    Unconfirmed(String),
+    /// The child may still run. The caller keeps its handles until it
+    /// confirms the exit, and must not delete the profile before that.
+    Unconfirmed(String, Unexited),
 }
 
 impl From<&str> for RunError {
@@ -309,17 +328,57 @@ impl From<String> for RunError {
     }
 }
 
-/// The child of `handles` (its Job, process and thread) did not confirm its
-/// exit. The handles are kept open, so the process cannot be mistaken for
-/// another and the Job keeps its limits.
-fn unconfirmed(what: &str, handles: [Owned; 3]) -> RunError {
-    std::mem::forget(handles);
-    RunError::Unconfirmed(format!("{what}, and the probe's exit was not confirmed"))
+/// The child (its Job, process and thread) did not confirm its exit. The
+/// handles go to the caller, so the process cannot be mistaken for another
+/// and the Job keeps its limits while the caller waits.
+fn unconfirmed(what: &str, job: Owned, process: Owned, thread: Owned) -> RunError {
+    RunError::Unconfirmed(
+        format!("{what}, and the probe's exit was not confirmed"),
+        Unexited {
+            job,
+            process,
+            thread,
+        },
+    )
 }
 
-/// A named AppContainer profile, deleted when dropped.
+/// A child whose exit is not confirmed, with the handles that own it.
+struct Unexited {
+    job: Owned,
+    process: Owned,
+    // Held, not used: kept open until the exit is confirmed.
+    #[allow(dead_code)]
+    thread: Owned,
+}
+
+impl Unexited {
+    /// Ends the child again and waits, up to `EXIT_ROUNDS` more times. True
+    /// once the process has exited; false if it did not, or if the wait
+    /// cannot observe it.
+    fn end_and_wait_longer(&self) -> bool {
+        for round in 1..=EXIT_ROUNDS {
+            // SAFETY: the handles are owned and valid. The Job ends every
+            // process in it; the process may not be in the Job.
+            unsafe {
+                TerminateJobObject(self.job.0, 1);
+                TerminateProcess(self.process.0, 1);
+            }
+            match wait_once(self.process.0) {
+                WAIT_OBJECT_0 => return true,
+                WAIT_TIMEOUT => println!(
+                    "screen-probe: the child has not exited ({round} of {EXIT_ROUNDS} more waits)"
+                ),
+                _ => return false,
+            }
+        }
+        false
+    }
+}
+
+/// A named AppContainer profile, deleted when dropped unless kept.
 struct Container {
     name: Vec<u16>,
+    keep: bool,
 }
 
 impl Container {
@@ -343,7 +402,15 @@ impl Container {
         } else if hr != HRESULT_ALREADY_EXISTS {
             return None;
         }
-        Some(Self { name: wide })
+        Some(Self {
+            name: wide,
+            keep: false,
+        })
+    }
+
+    /// Keeps the profile: a child that may still run uses it.
+    fn keep(mut self) {
+        self.keep = true;
     }
 
     fn sid(&self) -> Option<PSID> {
@@ -356,6 +423,9 @@ impl Container {
 
 impl Drop for Container {
     fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
         // SAFETY: the name is NUL-terminated.
         unsafe { DeleteAppContainerProfile(self.name.as_ptr()) };
     }
@@ -434,8 +504,13 @@ fn end_and_wait(job: HANDLE, process: HANDLE) -> bool {
 
 /// Waits, bounded, for a process to exit.
 fn wait_for_exit(process: HANDLE) -> bool {
+    wait_once(process) == WAIT_OBJECT_0
+}
+
+/// One wait of `RUN_TIMEOUT` on a process handle.
+fn wait_once(process: HANDLE) -> WAIT_EVENT {
     // SAFETY: waits on a process handle the caller owns.
-    unsafe { WaitForSingleObject(process, RUN_TIMEOUT.as_millis() as u32) == WAIT_OBJECT_0 }
+    unsafe { WaitForSingleObject(process, RUN_TIMEOUT.as_millis() as u32) }
 }
 
 /// The capture attempt in the container. `part` 0 returns the stage, 1 and 2
@@ -604,7 +679,9 @@ fn run_in_container(
         if !wait_for_exit(process.0) {
             return Err(unconfirmed(
                 "AssignProcessToJobObject",
-                [job, process, thread],
+                job,
+                process,
+                thread,
             ));
         }
         return Err("AssignProcessToJobObject".into());
@@ -612,12 +689,11 @@ fn run_in_container(
     // SAFETY: resumes the probe's primary thread.
     if unsafe { ResumeThread(thread.0) } == u32::MAX {
         if !end_and_wait(job.0, process.0) {
-            return Err(unconfirmed("ResumeThread", [job, process, thread]));
+            return Err(unconfirmed("ResumeThread", job, process, thread));
         }
         return Err("ResumeThread".into());
     }
-    // SAFETY: waits on the process handle this function owns.
-    let waited = unsafe { WaitForSingleObject(process.0, RUN_TIMEOUT.as_millis() as u32) };
+    let waited = wait_once(process.0);
     if waited != WAIT_OBJECT_0 {
         let what = if waited == WAIT_TIMEOUT {
             "the probe did not finish in time"
@@ -625,7 +701,7 @@ fn run_in_container(
             "WaitForSingleObject failed"
         };
         if !end_and_wait(job.0, process.0) {
-            return Err(unconfirmed(what, [job, process, thread]));
+            return Err(unconfirmed(what, job, process, thread));
         }
         return Err(what.into());
     }

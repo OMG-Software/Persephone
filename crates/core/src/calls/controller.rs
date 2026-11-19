@@ -2376,7 +2376,14 @@ impl Call {
             return !self.screen_wanted
                 && !matches!(state, ScreenState::Starting | ScreenState::On);
         }
-        if !matches!(state, ScreenState::Starting | ScreenState::On) {
+        let running = matches!(state, ScreenState::Starting | ScreenState::On);
+        // The handle accepted a stop that this task has not read yet: the
+        // page already shows `Off`, so a running state must not show over
+        // it. A later start carries the new count and shows again.
+        if running && plain(&self.screen_control).stops != self.screen_pick_stops {
+            return false;
+        }
+        if !running {
             self.screen_sent = false;
             self.screen_closed = None;
             self.close_screen_session();
@@ -4885,6 +4892,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+    }
+
+    /// GIVEN a share whose start went to the worker WHEN the handle accepts a
+    /// stop (the page shows `Off`) and the worker reports `On` before the
+    /// task reads the stop THEN `On` does not show over `Off`; WHEN a later
+    /// share starts THEN its `On` shows.
+    #[tokio::test]
+    async fn given_an_accepted_stop_when_on_arrives_first_then_off_stays_and_a_later_share_shows() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+
+        // What `set_screen(false)` does before the task reads the stop.
+        plain(&fixture.call.screen_control).stops += 1;
+        inner.state.send_modify(|state| {
+            if let CallState::Active { screen, .. } = state {
+                *screen = CallScreen::Off;
+            }
+        });
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_ne!(fixture.call.view.screen, CallScreen::On);
+        assert_eq!(shown(&inner), CallScreen::Off);
+
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert_eq!(shown(&inner), CallScreen::Off);
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&second)))
+            .unwrap();
+        let later = fixture.call.screen_share;
+        assert_ne!(later, share);
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share: later,
+                },
+            )
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::On);
+        assert_eq!(shown(&inner), CallScreen::On);
     }
 
     /// GIVEN a share whose portal session is open WHEN the page stops it
