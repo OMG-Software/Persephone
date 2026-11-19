@@ -11,12 +11,13 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import type { CallVideoTile } from '../../crates/contracts/generated/contracts';
-  import { OWN_TILE_LABEL, PARTICIPANT_TILE_LABEL } from './calls';
+  import { OWN_TILE_LABEL, PARTICIPANT_TILE_LABEL, SCREEN_TILE_LABEL } from './calls';
   import PersonName from './PersonName.svelte';
-  import { tileLayout, type TileRef, type VideoPicture } from './video';
+  import { SCREEN_TILE, tileLayout, type TileRef, type VideoPicture } from './video';
 
-  // The video tiles of the call: the own camera (mirrored, labelled "You")
-  // and up to four other devices. The core sends plain RGBA pictures; this
+  // The video tiles of the call: the own camera (mirrored, labelled "You"),
+  // up to four other cameras and the one remote screen share (tile 5).
+  // The own screen share has no tile here: the call bar says it is shared. The core sends plain RGBA pictures; this
   // draws each on a canvas and does nothing else with them. Names are
   // untrusted text. `ticks` goes up each time the core says a new picture is
   // waiting. Unmounting stops every tile; replies still on their way are
@@ -99,7 +100,7 @@
     {#each shown as tile (tile.tile)}
       {@const shape = shapes[tile.tile]}
       {@const layout = shape ? tileLayout(shape.width, shape.height, shape.rotation, tile.own) : null}
-      <figure class="video-tile" class:own={tile.own}>
+      <figure class="video-tile" class:own={tile.own} class:screen={tile.tile === SCREEN_TILE}>
         <div class="video-frame" style:aspect-ratio={layout ? String(layout.ratio) : '4 / 3'}>
           <canvas
             use:canvasRef={tile.tile}
@@ -118,6 +119,7 @@
               userId={tile.participant.userId}
               name={names.get(tile.participant.userId) ?? null}
             />
+            {#if tile.tile === SCREEN_TILE}<span class="note">{SCREEN_TILE_LABEL}</span>{/if}
           {:else}
             {PARTICIPANT_TILE_LABEL}
           {/if}

@@ -16,6 +16,7 @@ mod camera_channel;
 mod containment;
 mod mapping;
 mod output;
+mod screen;
 mod session;
 mod video;
 

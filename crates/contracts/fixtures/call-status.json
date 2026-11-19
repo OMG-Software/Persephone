@@ -8,12 +8,14 @@
       "deviceId": "ALICEDEVICE",
       "speaking": true,
       "reachable": true,
-      "keyed": false
+      "keyed": false,
+      "sharing": true
     }
   ],
   "ended": null,
   "joinError": null,
   "camera": "on",
+  "screen": "starting",
   "video": [
     {
       "tile": 0,
@@ -29,6 +31,15 @@
       },
       "own": false,
       "stream": 2
+    },
+    {
+      "tile": 5,
+      "participant": {
+        "userId": "@alice:server.invalid",
+        "deviceId": "ALICEDEVICE"
+      },
+      "own": false,
+      "stream": 3
     }
   ],
   "ringDeclined": true

@@ -52,6 +52,7 @@ fn main() {
             "call_leave",
             "call_mute",
             "call_camera",
+            "call_screen",
             "call_video_frame",
             "call_status",
             "call_rings",

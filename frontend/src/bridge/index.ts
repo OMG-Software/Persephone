@@ -426,7 +426,19 @@ export function callCamera(on: boolean): Promise<CallStatus> {
 }
 
 /**
- * The newest picture on video tile `tile` (0 to 4; 0 is the own camera) if
+ * Starts or stops sharing the screen during a call (ADR-0053). The page names
+ * no screen and no window: the core shows its own warning or chooser and the
+ * desktop's picker, and a cancel leaves the share off. The reply is the call as
+ * it is now, with the screen `starting` when started; the answer arrives as a
+ * call change. Codes only.
+ */
+export function callScreen(on: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_screen', { on });
+}
+
+/**
+ * The newest picture on video tile `tile` (0 to 5; 0 is the own camera, 5 is
+ * the remote screen share) if
  * its number is above `after` and it belongs to the tile's stream `stream`
  * (from the call status), else null. The host answers with raw bytes: an
  * empty body for no newer picture, otherwise the picture number as a
@@ -435,7 +447,7 @@ export function callCamera(on: boolean): Promise<CallStatus> {
  * else.
  */
 export async function callVideoFrame(tile: number, after: number, stream: number): Promise<VideoPicture | null> {
-  return parseVideoPicture(await invoke<unknown>('call_video_frame', { tile, after, stream }));
+  return parseVideoPicture(await invoke<unknown>('call_video_frame', { tile, after, stream }), tile);
 }
 
 /**

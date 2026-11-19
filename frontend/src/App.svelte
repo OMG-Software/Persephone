@@ -9,6 +9,7 @@
   import RingPrompt from './RingPrompt.svelte';
   import {
     CAMERA_COMMAND_TEXT,
+    SCREEN_COMMAND_TEXT,
     CallRefresher,
     IDLE_CALL,
     JOIN_ERROR_TEXT,
@@ -26,7 +27,7 @@
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callCamera, callDeclineRing, callDevices, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -752,10 +753,14 @@
   let callPending = $state(false);
   let callBusy = $state(false);
   let cameraBusy = $state(false);
+  let screenBusy = $state(false);
   // Goes up each time the core says a new video picture is waiting.
   let callVideoTicks = $state(0);
   let callJoinText = $state<string | null>(null);
   let cameraText = $state<string | null>(null);
+  let screenText = $state<string | null>(null);
+  // The newest screen share command; as `cameraRequest`.
+  let screenRequest = 0;
   // The newest camera command. Its failure alone shows `cameraText`; a
   // Mute or Leave in between does not hide it. Goes up when the call ends
   // and on a session change, so an old command shows nothing.
@@ -771,6 +776,8 @@
     if (callState.phase === 'ended' || callState.phase === 'idle') {
       cameraRequest += 1;
       cameraText = null;
+      screenRequest += 1;
+      screenText = null;
     }
   });
   // A status read during which a call command finished is dropped: that
@@ -1011,6 +1018,31 @@
     }
   }
 
+  // Starts or stops the screen share. The page sends no source: on a start the
+  // core shows its own warning or chooser, and a cancel leaves the share off.
+  async function toggleScreen() {
+    const generation = sessionGeneration;
+    screenBusy = true;
+    screenText = null;
+    screenRequest += 1;
+    const request = screenRequest;
+    const operation = callOperations.begin();
+    try {
+      const reply = await callScreen(callState.screen !== 'on' && callState.screen !== 'starting');
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
+    } catch {
+      if (generation === sessionGeneration && request === screenRequest) {
+        screenText = SCREEN_COMMAND_TEXT;
+      }
+    } finally {
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        screenBusy = false;
+        callRefresher.request();
+      }
+    }
+  }
+
   async function toggleCamera() {
     const generation = sessionGeneration;
     cameraBusy = true;
@@ -1067,9 +1099,12 @@
     callPending = false;
     callBusy = false;
     cameraBusy = false;
+    screenBusy = false;
     callJoinText = null;
     cameraText = null;
     cameraRequest += 1;
+    screenText = null;
+    screenRequest += 1;
     callDismissed = false;
     callNames = new Map();
     callNamesFor = null;
@@ -2804,8 +2839,10 @@
           names={callNames}
           busy={callBusy}
           {cameraBusy}
+          {screenBusy}
           onmute={toggleMute}
           oncamera={toggleCamera}
+          onscreen={toggleScreen}
           onleave={leaveCall}
           ondismiss={dismissCall}
         />
@@ -2813,6 +2850,12 @@
           <p class="call-notice camera-notice error" role="alert">
             <span>{cameraText}</span>
             <button type="button" class="secondary" onclick={() => (cameraText = null)}>Dismiss</button>
+          </p>
+        {/if}
+        {#if screenText}
+          <p class="call-notice screen-notice error" role="alert">
+            <span>{screenText}</span>
+            <button type="button" class="secondary" onclick={() => (screenText = null)}>Dismiss</button>
           </p>
         {/if}
         {#if hasVideo(callState)}

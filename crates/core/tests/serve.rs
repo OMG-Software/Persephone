@@ -737,7 +737,7 @@ fn given_no_call_then_the_camera_command_is_refused() {
 }
 
 /// GIVEN video frame requests with and without a call WHEN served THEN every
-/// tile below five answers `ok(null)` (no picture), a tile, `after` or
+/// tile below six answers `ok(null)` (no picture), a tile, `after` or
 /// `stream` out of bounds is an invalid argument, and the loop stays in step
 /// for the next request.
 #[test]
@@ -750,8 +750,8 @@ fn given_video_frame_requests_then_no_picture_is_null_and_bad_bounds_are_refused
     };
     let calls = [
         (1, frame(0, 0, 0)),
-        (2, frame(4, 7, 3)),
-        (3, frame(5, 0, 0)),
+        (2, frame(5, 7, 3)),
+        (3, frame(6, 0, 0)),
         (4, frame(255, 0, 0)),
         (5, frame(1, 9_007_199_254_740_992, 0)),
         (6, frame(1, 9_007_199_254_740_991, 9_007_199_254_740_991)),

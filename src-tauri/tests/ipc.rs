@@ -131,25 +131,28 @@ impl CoreTransport for FakeCore {
             },
             Call::CallJoin { room_id, video } => match room_id.as_str() {
                 "!r:example.invalid" => Ok(
-                    serde_json::json!({"phase": "joining", "roomId": room_id, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": if video { "starting" } else { "off" }, "video": []}),
+                    serde_json::json!({"phase": "joining", "roomId": room_id, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": if video { "starting" } else { "off" }, "screen": "off", "video": []}),
                 ),
                 // A refused join is a status with a code, not an error.
                 "!plain:example.invalid" => Ok(
-                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": "not_encrypted", "camera": "off", "video": []}),
+                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": "not_encrypted", "camera": "off", "screen": "off", "video": []}),
                 ),
                 // A reply with a field the contract does not have.
                 _ => Ok(
-                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "video": [], "sfuUrl": "wss://x"}),
+                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": [], "sfuUrl": "wss://x"}),
                 ),
             },
             Call::CallCamera { on } => Ok(
-                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "participants": [], "ended": null, "joinError": null, "camera": if on { "starting" } else { "off" }, "video": []}),
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "participants": [], "ended": null, "joinError": null, "camera": if on { "starting" } else { "off" }, "screen": "off", "video": []}),
+            ),
+            Call::CallScreen { on } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": if on { "starting" } else { "off" }, "video": []}),
             ),
             // Answered with a picture, through `video_frame`; the UI never
             // sends it as an ordinary call.
             Call::CallVideoFrame { .. } => Err(CoreError::BadReply),
             Call::CallMute { muted } => Ok(
-                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": muted, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true}], "ended": null, "joinError": null, "camera": "off", "video": []}),
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": muted, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true, "sharing": false}], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
             ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
                 "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
@@ -701,7 +704,7 @@ impl CoreTransport for FakeCore {
 /// A well-formed image handle the fake core knows.
 /// The call status when no call exists.
 fn call_idle() -> serde_json::Value {
-    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "video": [], "ringDeclined": false})
+    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": [], "ringDeclined": false})
 }
 
 const HANDLE: &str = "0123456789abcdef0123456789abcdef";
@@ -937,6 +940,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-leave",
             "allow-call-mute",
             "allow-call-camera",
+            "allow-call-screen",
             "allow-call-video-frame",
             "allow-call-status",
             "allow-call-rings",
@@ -1432,6 +1436,14 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
         "off"
     );
     assert_eq!(
+        invoke("call_screen", serde_json::json!({"on": true})).unwrap()["screen"],
+        "starting"
+    );
+    assert_eq!(
+        invoke("call_screen", serde_json::json!({"on": false})).unwrap()["screen"],
+        "off"
+    );
+    assert_eq!(
         invoke("call_leave", serde_json::json!({})).unwrap()["phase"],
         "idle"
     );
@@ -1442,6 +1454,16 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
     let muted = invoke("call_mute", serde_json::json!({"muted": true})).unwrap();
     assert_eq!(muted["muted"], true);
     assert_eq!(muted["participants"][0]["userId"], "@bob:example.invalid");
+
+    // The handler takes the flag only, so an extra argument is dropped before
+    // the relay: what reaches the core is `CallScreen { on }` and nothing else.
+    for extra in ["source", "monitor", "window", "node", "handle", "device"] {
+        assert_eq!(
+            invoke("call_screen", serde_json::json!({"on": true, extra: "x"})).unwrap()["screen"],
+            "starting",
+            "{extra}"
+        );
+    }
 
     // The rings are listed without arguments, and a decline names one room.
     let rings = invoke("call_rings", serde_json::json!({})).unwrap();
@@ -1475,6 +1497,10 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
     assert!(invoke("call_mute", serde_json::json!({})).is_err());
     assert!(invoke("call_camera", serde_json::json!({"on": 1})).is_err());
     assert!(invoke("call_camera", serde_json::json!({})).is_err());
+    // The page names no screen: the command is the flag, and a wrong or
+    // missing flag is refused before it reaches the core.
+    assert!(invoke("call_screen", serde_json::json!({"on": 1})).is_err());
+    assert!(invoke("call_screen", serde_json::json!({})).is_err());
     assert_eq!(
         invoke("call_decline_ring", room(&long)).unwrap_err(),
         "invalid_argument"
@@ -2941,7 +2967,7 @@ fn given_bad_call_video_arguments_then_the_ui_refuses_without_calling_the_core()
     let app = app_with(core.clone());
     let window = create_main_window(&app).unwrap();
     for args in [
-        serde_json::json!({"tile": 5, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 6, "after": 0, "stream": 0}),
         serde_json::json!({"tile": 255, "after": 0, "stream": 0}),
         serde_json::json!({"tile": 0, "after": 9_007_199_254_740_992_u64, "stream": 0}),
         serde_json::json!({"tile": 0, "after": u64::MAX, "stream": 0}),
@@ -2978,6 +3004,7 @@ fn given_bad_call_video_arguments_then_the_ui_refuses_without_calling_the_core()
     for (cmd, args) in [
         ("call_video_frame", ok.clone()),
         ("call_camera", serde_json::json!({"on": true})),
+        ("call_screen", serde_json::json!({"on": true})),
     ] {
         assert!(
             get_ipc_response(&window, request(cmd, app_origin(), args.clone())).is_ok(),

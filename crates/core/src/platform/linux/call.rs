@@ -125,6 +125,11 @@ impl Launcher for LinuxLauncher {
         (self.camera_path)()
     }
 
+    /// The ScreenCast portal, behind the core's own warning window.
+    fn screen_source(&self) -> std::sync::Arc<dyn crate::calls::screen::ScreenSource> {
+        std::sync::Arc::new(super::screen_portal::PortalScreen)
+    }
+
     /// The same question as on Windows, in the core's own GTK window; "No"
     /// by default. No display, or a window that did not run, is "no".
     fn confirm_direct_connection(&self) -> bool {

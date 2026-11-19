@@ -3366,6 +3366,25 @@ mark {
   margin: 0;
 }
 
+.call-screen {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-screen[aria-pressed='true'] {
+  border-color: var(--presence);
+}
+
+.call-screen-note {
+  margin: 0;
+}
+
+/* The shared screen is wider than a camera tile, so text on it can be read. */
+.video-tile.screen {
+  grid-column: span 2;
+}
+
 /* The call's video tiles: a grid of up to five, each as wide as its picture
    allows. The canvas is centred in its frame and turned by CSS. */
 .call-video {

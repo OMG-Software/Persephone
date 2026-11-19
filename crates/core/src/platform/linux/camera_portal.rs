@@ -109,7 +109,7 @@ fn sender_part(unique_name: &str) -> Option<String> {
 }
 
 /// The object path of the request that the portal makes for `token`.
-fn request_path(unique_name: &str, token: &str) -> Option<String> {
+pub(super) fn request_path(unique_name: &str, token: &str) -> Option<String> {
     let sender = sender_part(unique_name)?;
     let token_ok =
         !token.is_empty() && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -117,7 +117,7 @@ fn request_path(unique_name: &str, token: &str) -> Option<String> {
 }
 
 /// A fresh handle token: `persephone_` and 16 hex digits of randomness.
-fn new_token() -> Option<String> {
+pub(super) fn new_token() -> Option<String> {
     let mut bytes = [0_u8; 8];
     getrandom::fill(&mut bytes).ok()?;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -148,7 +148,7 @@ fn outcome(code: u32) -> Outcome {
 
 /// Whether the descriptor the portal returned is a socket. The worker would
 /// refuse anything else when it connects; the core does not forward it.
-fn is_socket(fd: &OwnedFd) -> bool {
+pub(super) fn is_socket(fd: &OwnedFd) -> bool {
     use std::os::fd::AsRawFd;
     // SAFETY: `stat` is plain data; fstat writes it for an open descriptor.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
@@ -380,7 +380,7 @@ fn failure(error: &zbus::Error) -> CameraError {
 
 /// The `Close` call of the request at `path`, marked so that the portal sends
 /// no reply and nothing waits for one.
-fn close_message(path: &str) -> zbus::Result<zbus::Message> {
+pub(super) fn close_message(path: &str) -> zbus::Result<zbus::Message> {
     zbus::Message::method_call(path, "Close")?
         .destination(PORTAL)?
         .interface(REQUEST)?

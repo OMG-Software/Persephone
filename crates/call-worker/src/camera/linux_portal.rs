@@ -45,13 +45,13 @@ use crate::video::pick_camera;
 const SPA_LOG_LEVEL_NONE: u32 = 0;
 /// The longest wait for the remote to answer, and for a stream to start.
 const ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(5);
-const STREAM_START_TIMEOUT: Duration = Duration::from_secs(6);
+pub(crate) const STREAM_START_TIMEOUT: Duration = Duration::from_secs(6);
 /// Longest wait for the round trip that handles pending registry events after
 /// a stream failed to start. It keeps the open within the 13 s open timeout
 /// (5 s enumeration + 6 s start + this) and below the 3 s stop wait.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often a running capture looks at the stop flag.
-const STOP_POLL: Duration = Duration::from_millis(100);
+pub(crate) const STOP_POLL: Duration = Duration::from_millis(100);
 /// Camera nodes read from one remote.
 const MAX_NODES: usize = 64;
 /// Buffers asked for (range), and the widest picture row the worker takes.
@@ -121,15 +121,15 @@ fn stream_flags() -> pw::stream::StreamFlags {
 }
 
 /// A PipeWire connection over the portal's descriptor.
-struct Remote {
-    mainloop: MainLoopRc,
+pub(crate) struct Remote {
+    pub(crate) mainloop: MainLoopRc,
     // Kept alive for the core.
     _context: pw::context::ContextRc,
-    core: pw::core::CoreRc,
+    pub(crate) core: pw::core::CoreRc,
 }
 
 /// Connects over a portal remote. Without one the camera is unavailable.
-fn connect(remote: Option<OwnedFd>) -> Result<Remote, CameraState> {
+pub(crate) fn connect(remote: Option<OwnedFd>) -> Result<Remote, CameraState> {
     let fd = remote.ok_or(CameraState::Unavailable)?;
     pw::init();
     // SAFETY: sets the library's log level; no pointers are involved.
@@ -147,7 +147,7 @@ fn connect(remote: Option<OwnedFd>) -> Result<Remote, CameraState> {
     })
 }
 
-fn quit(mainloop: &MainLoopWeak) {
+pub(crate) fn quit(mainloop: &MainLoopWeak) {
     if let Some(mainloop) = mainloop.upgrade() {
         mainloop.quit();
     }
@@ -269,7 +269,9 @@ fn roundtrip(remote: &Remote, timeout: Duration) -> bool {
 /// when no descriptor came from the core or the remote does not answer.
 pub fn list() -> Vec<(String, String)> {
     // The listing worker gets one remote before `ListDevices`.
-    let Ok(remote) = connect(crate::camera_channel::take_handle()) else {
+    let Ok(remote) = connect(crate::camera_channel::take_handle(
+        crate::camera_channel::Kind::Camera,
+    )) else {
         return Vec::new();
     };
     let nodes = enumerate(&remote, &Rc::default())
@@ -339,13 +341,13 @@ fn row_stride(chunk_stride: i32, negotiated: Negotiated) -> Option<u32> {
 
 /// The valid bytes of a buffer: `size` bytes at `offset`, inside the mapped
 /// area. `None` for an empty or overrunning chunk.
-fn chunk_range(offset: u32, size: u32, mapped: usize) -> Option<std::ops::Range<usize>> {
+pub(crate) fn chunk_range(offset: u32, size: u32, mapped: usize) -> Option<std::ops::Range<usize>> {
     let start = offset as usize;
     let end = start.checked_add(size as usize)?;
     (size > 0 && end <= mapped).then_some(start..end)
 }
 
-fn pod_bytes(value: &Value) -> Option<Vec<u8>> {
+pub(crate) fn pod_bytes(value: &Value) -> Option<Vec<u8>> {
     PodSerializer::serialize(Cursor::new(Vec::new()), value)
         .ok()
         .map(|(cursor, _)| cursor.into_inner())
@@ -416,7 +418,7 @@ fn format_pod() -> Option<Vec<u8>> {
 
 /// The buffer request: one block, shared memory only (`MemPtr` or `MemFd`),
 /// no DMA buffers.
-fn buffers_pod() -> Option<Vec<u8>> {
+pub(crate) fn buffers_pod() -> Option<Vec<u8>> {
     let shared_memory = (1_u32 << DataType::MemPtr.as_raw()) | (1_u32 << DataType::MemFd.as_raw());
     let object = Object {
         type_: SpaTypes::ObjectParamBuffers.as_raw(),

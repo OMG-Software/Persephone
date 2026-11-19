@@ -8,6 +8,9 @@
     NO_KEY_TEXT,
     PHASE_TEXT,
     RING_DECLINED_TEXT,
+    SCREEN_TEXT,
+    screenButton,
+    SHARING_TEXT,
     showCallBar,
     UNREACHABLE_TEXT
   } from './calls';
@@ -25,8 +28,10 @@
     names,
     busy,
     cameraBusy,
+    screenBusy,
     onmute,
     oncamera,
+    onscreen,
     onleave,
     ondismiss
   }: {
@@ -39,8 +44,12 @@
     busy: boolean;
     // A camera request is waiting for the core.
     cameraBusy: boolean;
+    // A screen share request is waiting for the core.
+    screenBusy: boolean;
     onmute: () => void;
     oncamera: () => void;
+    // Starts or stops the share. The page names no screen: the core asks.
+    onscreen: () => void;
     onleave: () => void;
     ondismiss: () => void;
   } = $props();
@@ -49,6 +58,8 @@
   const ended = $derived(status.phase === 'ended');
   const camera = $derived(cameraButton(status.camera));
   const cameraText = $derived(CAMERA_TEXT[status.camera]);
+  const screen = $derived(screenButton(status.screen));
+  const screenText = $derived(SCREEN_TEXT[status.screen]);
 </script>
 
 <div class="visually-hidden" aria-live="polite" aria-atomic="true">
@@ -84,6 +95,16 @@
             <Icon name={camera.pressed ? 'video-off' : 'video'} />
             {camera.label}
           </button>
+          <button
+            type="button"
+            class="secondary call-screen"
+            aria-pressed={screen.pressed}
+            disabled={screenBusy || status.phase !== 'active'}
+            onclick={onscreen}
+          >
+            <Icon name="screen" />
+            {screen.label}
+          </button>
           <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
         {/if}
       </span>
@@ -93,6 +114,9 @@
     {/if}
     {#if !ended && cameraText !== ''}
       <p class="call-camera-note note" role="status">{cameraText}</p>
+    {/if}
+    {#if !ended && screenText !== ''}
+      <p class="call-screen-note note" role="status">{screenText}</p>
     {/if}
     {#if ended}
       <p class="call-end">{status.ended === null ? END_TEXT.internal : END_TEXT[status.ended]}</p>
@@ -106,6 +130,7 @@
               <span class="speaking-mark idle" aria-hidden="true"></span>
             {/if}
             <PersonName userId={person.userId} name={names.get(person.userId) ?? null} />
+            {#if person.sharing}<span class="note call-note call-sharing">{SHARING_TEXT}</span>{/if}
             {#if !person.keyed}<span class="note call-note">{NO_KEY_TEXT}</span>{/if}
             {#if !person.reachable}<span class="note call-note">{UNREACHABLE_TEXT}</span>{/if}
           </li>

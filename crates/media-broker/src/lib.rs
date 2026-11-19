@@ -35,7 +35,10 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
-pub use linux::{CallCamera, SeccompContainment, send_camera_fd, start_call_worker};
+pub use linux::{
+    CallCamera, KIND_CAMERA, KIND_SCREEN, SeccompContainment, send_camera_fd, send_screen_fd,
+    start_call_worker,
+};
 #[cfg(target_os = "macos")]
 pub use macos::{SeatbeltContainment, start_call_worker};
 #[cfg(any(target_os = "linux", target_os = "macos"))]

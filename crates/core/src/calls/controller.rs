@@ -25,6 +25,7 @@ use super::membership::{
 };
 use super::readiness::{TurnServers, sfu_transport, turn_servers};
 use super::rings::{self, Plan, Watch};
+use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError};
 use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
@@ -43,9 +44,10 @@ use matrix_sdk::{
     },
 };
 use persephone_call_protocol::{
-    CameraState, FailureCode, FrameKeyMsg, FromWorker, ToWorker, TurnServer, VIDEO_TILES,
+    CameraState, FailureCode, FrameKeyMsg, FromWorker, ScreenState, ToWorker, TurnServer,
+    VIDEO_TILES,
 };
-use persephone_contracts::{CallCamera, CallParticipantRef, CallVideoTile};
+use persephone_contracts::{CallCamera, CallParticipantRef, CallScreen, CallVideoTile};
 use std::{
     collections::{BTreeSet, HashSet},
     future::Future,
@@ -57,7 +59,7 @@ use std::{
 };
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, oneshot, watch},
+    sync::{Notify, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time,
 };
@@ -149,6 +151,8 @@ pub struct Participant {
     pub reachable: bool,
     /// This device holds a key for it. Without one it cannot be heard.
     pub keyed: bool,
+    /// It shares its screen (ADR-0053); a display hint from the sender.
+    pub sharing: bool,
 }
 
 /// The call as the page sees it. It holds no secret and no peer text.
@@ -164,6 +168,8 @@ pub enum CallState {
         /// At most [`MAX_CALL_MEMBERS`], other devices only.
         participants: Vec<Participant>,
         camera: CallCamera,
+        /// The own screen share (ADR-0053).
+        screen: CallScreen,
         /// The active video tiles, at most [`VIDEO_TILES`].
         video: Vec<CallVideoTile>,
         /// The other member of a direct chat declined this call's ring
@@ -281,6 +287,13 @@ struct View {
     speaking: HashSet<String>,
     keyed: HashSet<String>,
     camera: CallCamera,
+    /// The own screen share.
+    screen: CallScreen,
+    /// The identities that share a screen, as the worker said with
+    /// `ScreenSharer`. A display hint only. An identity that is not a member
+    /// yet waits here and shows once the membership is read; only members
+    /// are shown. At most `MAX_PARTICIPANTS` wait.
+    sharing: HashSet<String>,
     /// The identity on each remote tile (tile 1 first), as the worker said
     /// with `VideoStarted`. An identity that is not a member yet waits here
     /// and shows once the membership is read.
@@ -293,7 +306,7 @@ struct View {
     ring_declined: bool,
 }
 
-/// Remote video tiles: tiles 1 to 4.
+/// Remote video tiles: tiles 1 to 4 are cameras, tile 5 is the screen share.
 const REMOTE_TILES: usize = VIDEO_TILES as usize - 1;
 
 impl View {
@@ -313,6 +326,8 @@ impl View {
             } else {
                 CallCamera::Off
             },
+            screen: CallScreen::Off,
+            sharing: HashSet::new(),
             remote_video: Default::default(),
             video_streams: Default::default(),
             ring_declined: false,
@@ -328,6 +343,27 @@ impl View {
         let present: HashSet<&str> = self.members.iter().map(|m| m.identity.as_str()).collect();
         self.speaking.retain(|id| present.contains(id.as_str()));
         self.keyed.retain(|id| present.contains(id.as_str()));
+        // `sharing` keeps hints of identities that are not members yet: the
+        // worker can hear of a share before the membership arrives.
+    }
+
+    /// The page asked for the screen share on or off. The state shows
+    /// `starting` until the pick and the worker answer.
+    fn request_screen(&mut self, on: bool) -> Applied {
+        let next = match (on, self.screen) {
+            (true, CallScreen::On | CallScreen::Starting) => self.screen,
+            (true, _) => CallScreen::Starting,
+            (false, _) => CallScreen::Off,
+        };
+        self.set_screen(next)
+    }
+
+    fn set_screen(&mut self, screen: CallScreen) -> Applied {
+        if self.screen == screen {
+            return Applied::Same;
+        }
+        self.screen = screen;
+        Applied::Changed
     }
 
     /// The page asked for the camera on or off. The state shows `starting`
@@ -351,7 +387,7 @@ impl View {
 
     /// Forgets the video of a member that left.
     fn forget_video(&mut self, identity: &str) -> bool {
-        let mut changed = false;
+        let mut changed = self.sharing.remove(identity);
         for slot in &mut self.remote_video {
             if slot.as_deref() == Some(identity) {
                 *slot = None;
@@ -427,6 +463,30 @@ impl View {
                 CameraState::NotFound => CallCamera::NotFound,
                 CameraState::Unavailable => CallCamera::Unavailable,
             }),
+            FromWorker::Screen { state, .. } => self.set_screen(match state {
+                ScreenState::Off => CallScreen::Off,
+                ScreenState::Starting => CallScreen::Starting,
+                ScreenState::On => CallScreen::On,
+                ScreenState::NotFound => CallScreen::NotFound,
+                ScreenState::Unavailable => CallScreen::Unavailable,
+                ScreenState::Refused => CallScreen::Refused,
+            }),
+            FromWorker::ScreenSharer { identity, sharing } => {
+                // Kept also for an identity that is not a member yet, up to
+                // the bound; only a member is ever shown as sharing.
+                let changed = if !*sharing {
+                    self.sharing.remove(identity)
+                } else if self.sharing.len() < persephone_call_protocol::MAX_PARTICIPANTS {
+                    self.sharing.insert(identity.clone())
+                } else {
+                    false
+                };
+                if changed && self.is_member(identity) {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
             FromWorker::VideoStarted { tile, identity } => {
                 let Some(slot) = usize::from(*tile)
                     .checked_sub(1)
@@ -530,9 +590,11 @@ impl View {
                     speaking: self.speaking.contains(&m.identity),
                     reachable: m.service_url == self.own_sfu,
                     keyed: self.keyed.contains(&m.identity),
+                    sharing: self.sharing.contains(&m.identity),
                 })
                 .collect(),
             camera: self.camera,
+            screen: self.screen,
             video: self.video_tiles(),
             ring_declined: self.ring_declined,
         }
@@ -724,6 +786,9 @@ struct RunHandle {
     commands: mpsc::Sender<Command>,
     /// The user's latest camera request, shared with the call task.
     camera_wanted: Arc<AtomicBool>,
+    /// The screen stops accepted and the share's portal session, shared
+    /// with the call task.
+    screen_control: Arc<Mutex<ScreenControl>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -735,6 +800,14 @@ enum Command {
     /// (0 when the call has no video store).
     Camera {
         on: bool,
+        request: u64,
+    },
+    /// The screen share on or off (ADR-0053). The page names no source.
+    /// `stops` is the stop count when the handle accepted the command;
+    /// `request` numbers the screen commands the handle accepted.
+    Screen {
+        on: bool,
+        stops: u64,
         request: u64,
     },
 }
@@ -784,10 +857,15 @@ impl Inner {
             }
         });
         if changed {
-            let listener = plain(&self.listener).clone();
-            if let Some(listener) = listener {
-                listener();
-            }
+            self.notify();
+        }
+    }
+
+    /// Tells the listener that the state changed. Called with no lock held.
+    fn notify(&self) {
+        let listener = plain(&self.listener).clone();
+        if let Some(listener) = listener {
+            listener();
         }
     }
 
@@ -1004,6 +1082,7 @@ impl CallController {
         let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE);
         let kill = call.link.kill_handle();
         let camera_wanted = call.camera_wanted.clone();
+        let screen_control = call.screen_control.clone();
         let mut call = Some(call);
         let halted = {
             // `leave` and the end of the session set their flag under this
@@ -1028,6 +1107,7 @@ impl CallController {
                         stop: Some(stop),
                         commands,
                         camera_wanted,
+                        screen_control,
                         task: Some(task),
                     });
                     guard.armed = false;
@@ -1254,6 +1334,18 @@ impl CallController {
             portal_capture: false,
             portal_sent: false,
             ring: ring_watch.map(|(watch, _)| watch),
+            screens: self.inner.host.screen_source(),
+            screen_pick: None,
+            screen_wanted: false,
+            screen_last_on: false,
+            screen_closed: None,
+            screen_sent: false,
+            screen_control: Arc::default(),
+            screen_pick_stops: 0,
+            screen_seen_stops: 0,
+            screen_seen_request: 0,
+            screen_share: 0,
+            screen_stop_pending: None,
         })
     }
 
@@ -1344,6 +1436,84 @@ impl CallController {
             }
         }
         Ok(())
+    }
+
+    /// Starts or stops the screen share (ADR-0053). Refused unless a call is
+    /// connected. The page names no screen: on a start the platform's source
+    /// shows its own warning or chooser, and a cancel leaves the share off.
+    /// The state shows `starting` at once when started, and the answer of the
+    /// pick and the worker replaces it.
+    pub fn set_screen(&self, on: bool) -> Result<(), CallError> {
+        let changed = {
+            let slot = self.inner.slot();
+            let Slot::Running(run) = &*slot else {
+                return Err(CallError::NotInCall);
+            };
+            if !matches!(*self.inner.state.borrow(), CallState::Active { .. }) {
+                return Err(CallError::NotInCall);
+            }
+            self.accept_screen(run, on)?
+        };
+        if changed {
+            self.inner.notify();
+        }
+        Ok(())
+    }
+
+    /// Accepts a screen command for the running call `run`, with the slot
+    /// lock held. Returns whether the page changed.
+    fn accept_screen(&self, run: &RunHandle, on: bool) -> Result<bool, CallError> {
+        // A queue place is taken first: a full queue refuses a start and
+        // changes nothing. A stop never waits for queue room: it does not go
+        // through the queue then, but waits in the screen control and wakes
+        // the call task, so capture never outlives the user's stop.
+        let permit = match run.commands.try_reserve() {
+            Ok(permit) => Some(permit),
+            Err(mpsc::error::TrySendError::Full(())) if !on => None,
+            Err(_) => return Err(CallError::NotInCall),
+        };
+        // One step under the screen control lock, which the call task holds
+        // from its check of a finished pick until the pick's start is
+        // queued, while it publishes, and while it closes the session:
+        // 1. The command is counted, so a pick that ends after a stop is
+        //    closed unused and a task publication keeps the page's state.
+        // 2. A stop closes the portal session (`close_session`), so capture
+        //    is revoked before `Off` shows. A close by the task that is under
+        //    way has finished: it holds the lock until `Close` is sent.
+        // 3. The page shows the command.
+        let (stops, request, changed) = {
+            let mut control = plain(&run.screen_control);
+            if !on {
+                control.stops = control.stops.wrapping_add(1);
+                close_session(&mut control);
+            }
+            control.requests = control.requests.wrapping_add(1);
+            let (stops, request) = (control.stops, control.requests);
+            let changed = self.inner.state.send_if_modified(|state| {
+                let CallState::Active { screen, .. } = state else {
+                    return false;
+                };
+                let next = match (on, *screen) {
+                    (true, CallScreen::On | CallScreen::Starting) => *screen,
+                    (true, _) => CallScreen::Starting,
+                    (false, _) => CallScreen::Off,
+                };
+                if next == *screen {
+                    return false;
+                }
+                *screen = next;
+                true
+            });
+            if permit.is_none() {
+                control.stop_waiting = Some((stops, request));
+                control.wake.notify_one();
+            }
+            (stops, request, changed)
+        };
+        if let Some(permit) = permit {
+            permit.send(Command::Screen { on, stops, request });
+        }
+        Ok(changed)
     }
 
     /// The session stops admitting work (lock, sign-out, an ended session,
@@ -1650,6 +1820,47 @@ struct Call {
     portal_sent: bool,
     /// The ring this call sent, when it sent one to a direct chat.
     ring: Option<Arc<Watch>>,
+    /// Who lets the user pick a screen to share (ADR-0053).
+    screens: Arc<dyn ScreenSource>,
+    /// The pick in flight: the user's answer to the core's own window or the
+    /// portal's picker. Dropping it cancels the pick. A stop cancels it but
+    /// keeps it here until its task ends, so at most one pick (and one
+    /// warning window) exists at a time.
+    screen_pick: Option<ScreenPick>,
+    /// The latest screen request: `true` from a start until a stop. A pick
+    /// that ends after a stop is closed unused.
+    screen_wanted: bool,
+    /// The last screen command read was a start. A failed start clears
+    /// `screen_wanted` but not this: the end state of the share that the
+    /// stop before it ended then does not show over the failure.
+    screen_last_on: bool,
+    /// Fires when the desktop closes the portal session.
+    screen_closed: Option<oneshot::Receiver<()>>,
+    /// A `SetScreen` start went to the worker and no stop or end since.
+    screen_sent: bool,
+    /// The screen stops the handle accepted and the share's portal session.
+    /// `set_screen` counts a stop and closes the session before it queues
+    /// the stop. The task holds the lock from its check of a finished pick
+    /// until the pick's start is queued.
+    screen_control: Arc<Mutex<ScreenControl>>,
+    /// A stop of share `n` that met a full worker queue. It goes as soon as
+    /// the queue has room; no screen start goes before it.
+    screen_stop_pending: Option<u32>,
+    /// The stop count when the start of the pick in flight was accepted. A
+    /// pick that ends after a later stop was accepted is closed unused.
+    screen_pick_stops: u64,
+    /// The stop count of the last screen command this task read. A higher
+    /// count is a stop the handle accepted and showed, which this task has
+    /// not read yet: until it does, the page's screen state stands.
+    screen_seen_stops: u64,
+    /// The number of the last screen command this task read. A higher
+    /// number is a command the handle accepted and showed (`Off`, or
+    /// `Starting` for a start after a stop) that this task has not read:
+    /// until it does, the page's screen state stands.
+    screen_seen_request: u64,
+    /// The number of the last share that went to the worker. A worker state
+    /// of another share is an older one's and is ignored.
+    screen_share: u32,
 }
 
 /// The result of a camera portal access request: the PipeWire remote, or
@@ -1689,6 +1900,83 @@ async fn portal_done(slot: &mut Option<PortalTask>) -> PortalRemote {
     let result = (&mut portal.task).await;
     *slot = None;
     result.unwrap_or_default()
+}
+
+/// A screen pick running on a blocking thread. Dropping it sets the pick's
+/// cancel flag: the window closes and the wait ends within a fraction of a
+/// second, so the end of a call does not wait for the user's answer.
+struct ScreenPick {
+    task: JoinHandle<Result<ScreenGrant, ScreenRefusal>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for ScreenPick {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+/// What a screen command changes at once, shared by the handle and the
+/// call task under one lock (ADR-0053): the count of accepted stops, the
+/// number of the last accepted screen command, and the share's open portal
+/// session. Dropping the session closes it.
+#[derive(Default)]
+struct ScreenControl {
+    stops: u64,
+    requests: u64,
+    session: Option<Box<dyn Send + Sync>>,
+    /// A stop (its stop count and number) that met a full command queue.
+    /// The call task takes it when `wake` fires, or before it reads a later
+    /// command. A newer waiting stop replaces an older one: it stops the
+    /// same share or a later one.
+    stop_waiting: Option<(u64, u64)>,
+    /// Wakes the call task for a waiting stop. A wake with no task waiting
+    /// is kept until it waits.
+    wake: Arc<Notify>,
+}
+
+/// Closes the share's portal session, if open, with the screen control
+/// lock held. Dropping the session sends `Close` and waits for no reply, so
+/// the lock is held only briefly. A stop that comes meanwhile waits for the
+/// lock: its `Off` never shows before the close has gone out.
+fn close_session(control: &mut ScreenControl) {
+    control.session = None;
+}
+
+/// Waits for room in the worker's command queue while `sender` is given (a
+/// screen stop waits); otherwise it never ends. `None` is a closed queue.
+async fn screen_stop_room(
+    sender: Option<mpsc::Sender<ToWorker>>,
+) -> Option<mpsc::OwnedPermit<ToWorker>> {
+    let Some(sender) = sender else {
+        return std::future::pending().await;
+    };
+    sender.reserve_owned().await.ok()
+}
+
+/// Waits for the pick in `slot`, if any; otherwise it never ends. Gives the
+/// pick's result and whether a stop cancelled the pick.
+async fn screen_pick_done(
+    slot: &mut Option<ScreenPick>,
+) -> (Result<ScreenGrant, ScreenRefusal>, bool) {
+    let Some(pick) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    let result = (&mut pick.task).await;
+    let cancelled = pick.cancel.load(Ordering::SeqCst);
+    *slot = None;
+    (result.unwrap_or(Err(ScreenRefusal::Unavailable)), cancelled)
+}
+
+/// Waits until the desktop closes the portal session, if one is open;
+/// otherwise it never ends.
+async fn screen_session_closed(slot: &mut Option<oneshot::Receiver<()>>) {
+    let Some(closed) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    // A dropped sender is a closed session too.
+    let _ = closed.await;
+    *slot = None;
 }
 
 /// Frees the slot when the task ends, also after a panic.
@@ -1823,6 +2111,322 @@ impl Call {
         Ok(())
     }
 
+    /// A screen command from the handle, numbered `request`. The page kept
+    /// its screen state while the command was unread; once it is read, the
+    /// page is reconciled with the view, also when the command did not
+    /// change the view (a start of a share the worker already reports `On`).
+    /// `publish` skips an unchanged page.
+    ///
+    /// A stop that waits in the screen control and is older than this
+    /// command goes first. A command older than a stop already read is
+    /// stale and does nothing. A start whose stop count is behind the
+    /// accepted count is followed by a stop: it opens no picker.
+    fn screen_request(
+        &mut self,
+        inner: &Inner,
+        on: bool,
+        stops: u64,
+        request: u64,
+    ) -> Result<(), EndReason> {
+        self.take_waiting_stop(inner, request)?;
+        if request <= self.screen_seen_request {
+            return Ok(());
+        }
+        self.screen_seen_request = request;
+        let superseded = on && stops != plain(&self.screen_control).stops;
+        if !superseded {
+            self.screen_command(inner, on, stops)?;
+        }
+        self.publish(inner);
+        Ok(())
+    }
+
+    /// Runs the stop that waits in the screen control, if it is older than
+    /// command `before`.
+    fn take_waiting_stop(&mut self, inner: &Inner, before: u64) -> Result<(), EndReason> {
+        let waiting = {
+            let mut control = plain(&self.screen_control);
+            match control.stop_waiting {
+                Some((_, request)) if request < before => control.stop_waiting.take(),
+                _ => None,
+            }
+        };
+        if let Some((stops, request)) = waiting {
+            self.screen_seen_request = request;
+            self.screen_command(inner, false, stops)?;
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
+    /// Starts or stops the screen share as the user asked (ADR-0053). A start
+    /// asks the platform's source off the call loop: the user answers in a
+    /// window the core or the desktop draws. A stop cancels a pick in flight,
+    /// closes the portal session and stops the worker's capture.
+    fn screen_command(&mut self, inner: &Inner, on: bool, stops: u64) -> Result<(), EndReason> {
+        self.screen_wanted = on;
+        self.screen_last_on = on;
+        self.screen_seen_stops = stops;
+        if on {
+            if !self.screens.available() {
+                // The handle already shows `Starting`. The refusal is
+                // published on every attempt, also when the task's view
+                // did not change; `publish` skips an unchanged page.
+                self.view.set_screen(CallScreen::Unavailable);
+                self.publish(inner);
+                return Ok(());
+            }
+            // A pick in flight or a share that runs is not started twice. A
+            // stopped pick that has not ended yet holds the slot: the new
+            // pick begins when it ends (`stopped_pick_ended`).
+            match &self.screen_pick {
+                None if !self.screen_sent => {
+                    self.screen_pick_stops = stops;
+                    self.begin_screen_pick();
+                }
+                Some(pick) if pick.cancel.load(Ordering::SeqCst) => {
+                    self.screen_pick_stops = stops;
+                }
+                _ => {}
+            }
+            if self.view.request_screen(true) == Applied::Changed {
+                self.publish(inner);
+            }
+            return Ok(());
+        }
+        // A stop: no pick, no session, no capture. The pick is cancelled; it
+        // stays until its task ends, which closes its window.
+        if let Some(pick) = &self.screen_pick {
+            pick.cancel.store(true, Ordering::SeqCst);
+        }
+        self.screen_closed = None;
+        self.close_screen_session();
+        if self.screen_sent {
+            self.screen_sent = false;
+            self.send_screen_stop()?;
+        }
+        if self.view.request_screen(false) == Applied::Changed {
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
+    /// Asks the platform's source off the call loop.
+    fn begin_screen_pick(&mut self) {
+        let source = self.screens.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        self.screen_pick = Some(ScreenPick {
+            task: tokio::task::spawn_blocking(move || source.choose(&flag)),
+            cancel,
+        });
+    }
+
+    /// A pick that a stop cancelled has ended. Its grant, if any, is dropped
+    /// unused, which closes its session. A start that came while it ended
+    /// begins its own pick now: the user answers a new warning.
+    fn stopped_pick_ended(&mut self, picked: Result<ScreenGrant, ScreenRefusal>) {
+        drop(picked);
+        if self.screen_wanted && !self.screen_sent {
+            self.begin_screen_pick();
+        }
+    }
+
+    /// The pick ended. A grant goes to the worker: on Linux the remote first,
+    /// then the command. A cancel, a refusal or a remote that could not go
+    /// leaves the share off or unavailable; no other source is tried.
+    fn screen_picked(
+        &mut self,
+        inner: &Inner,
+        picked: Result<ScreenGrant, ScreenRefusal>,
+    ) -> Result<(), EndReason> {
+        // A stop accepted after this pick's start, even one still queued,
+        // makes the pick stale. The lock stays held until the start is
+        // queued, so no stop is accepted between the check and the handoff.
+        // It is released before any publish: `set_screen` takes the slot
+        // first and this lock second.
+        let control = self.screen_control.clone();
+        let mut accepted = plain(&control);
+        let current = self.screen_wanted && self.screen_pick_stops == accepted.stops;
+        let grant = match picked {
+            Ok(grant) if current => grant,
+            // A stop came meanwhile: the grant (and its session) is dropped.
+            Ok(_) => return Ok(()),
+            Err(refusal) => {
+                drop(accepted);
+                if current && self.view.set_screen(refusal.shown()) == Applied::Changed {
+                    self.publish(inner);
+                }
+                self.screen_wanted = false;
+                return Ok(());
+            }
+        };
+        // A full command queue is a worker that has not read its commands
+        // yet, not one that stopped: the share alone fails, the call runs on.
+        // A stop still waiting for room goes first, so no start overtakes
+        // it: the share fails too. The grant drops here, which closes its
+        // session.
+        if self.screen_stop_pending.is_some() || self.link.queue_full() {
+            drop(accepted);
+            self.screen_failed(inner);
+            return Ok(());
+        }
+        let ScreenGrant {
+            target,
+            remote,
+            session,
+            closed,
+        } = grant;
+        // The remote goes first and the command says so by its target: the
+        // worker takes the oldest screen remote with it.
+        if !self.send_screen_remote(remote, &target) {
+            drop(accepted);
+            self.screen_failed(inner);
+            return Ok(());
+        }
+        accepted.session = session;
+        self.screen_closed = closed;
+        self.screen_sent = true;
+        self.screen_share = self.screen_share.wrapping_add(1);
+        let sent = self.send_worker(ToWorker::SetScreen {
+            target: Some(target),
+            share: self.screen_share,
+        });
+        drop(accepted);
+        sent
+    }
+
+    /// A share that could not start: unavailable, and the call runs on.
+    fn screen_failed(&mut self, inner: &Inner) {
+        self.screen_wanted = false;
+        if self.view.set_screen(CallScreen::Unavailable) == Applied::Changed {
+            self.publish(inner);
+        }
+    }
+
+    /// Sends the portal's remote when the target needs one. Returns whether
+    /// the command may follow.
+    #[cfg(target_os = "linux")]
+    fn send_screen_remote(
+        &self,
+        remote: Option<super::screen::Remote>,
+        target: &persephone_call_protocol::ScreenTarget,
+    ) -> bool {
+        use persephone_call_protocol::ScreenTarget;
+        use std::os::fd::AsFd;
+        match (target, remote) {
+            (ScreenTarget::Portal { .. }, Some(remote)) => {
+                self.link.send_screen_handle(remote.as_fd()).is_ok()
+            }
+            (ScreenTarget::Portal { .. }, None) => false,
+            (ScreenTarget::Monitor { .. }, _) => true,
+        }
+    }
+
+    /// Off Linux there is no remote: a target that needs one is refused.
+    #[cfg(not(target_os = "linux"))]
+    fn send_screen_remote(
+        &self,
+        _remote: Option<super::screen::Remote>,
+        target: &persephone_call_protocol::ScreenTarget,
+    ) -> bool {
+        matches!(
+            target,
+            persephone_call_protocol::ScreenTarget::Monitor { .. }
+        )
+    }
+
+    /// The desktop closed the portal session (the user stopped the share
+    /// from the desktop). The worker's capture ends with it: say so.
+    fn screen_ended_by_desktop(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        self.close_screen_session();
+        self.screen_wanted = false;
+        if self.screen_sent {
+            self.screen_sent = false;
+            self.send_screen_stop()?;
+        }
+        if self.view.set_screen(CallScreen::Off) == Applied::Changed {
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
+    /// The worker reports the state of share `share`. Returns whether the
+    /// page's state takes it.
+    ///
+    /// A state of an older share than the last one sent is ignored: it must
+    /// not close the newer share's portal session or show over it. For the
+    /// last share, any state but `Starting` and `On` ends it and closes its
+    /// session. After the last share's stop, only its end state shows, and
+    /// only while no new start waits for its pick: a late `Starting` or `On`
+    /// of a stopped share never shows.
+    fn screen_state_from_worker(&mut self, state: ScreenState, share: u32) -> bool {
+        if share != self.screen_share {
+            return false;
+        }
+        if !self.screen_sent {
+            return !self.screen_last_on
+                && !matches!(state, ScreenState::Starting | ScreenState::On);
+        }
+        let running = matches!(state, ScreenState::Starting | ScreenState::On);
+        // The handle accepted a stop that this task has not read yet: the
+        // share is about to stop, so the view does not take a running state.
+        // (`publish` is what keeps the page's `Off`; this keeps the view
+        // from holding a stale `On`.) A later start shows again.
+        if running && plain(&self.screen_control).stops != self.screen_seen_stops {
+            return false;
+        }
+        if !running {
+            self.screen_sent = false;
+            self.screen_closed = None;
+            self.close_screen_session();
+        }
+        true
+    }
+
+    /// Closes the share's portal session, if open, under the screen control
+    /// lock (`close_session`).
+    fn close_screen_session(&self) {
+        close_session(&mut plain(&self.screen_control));
+    }
+
+    /// Sends the stop of the current share. A full queue keeps it as the one
+    /// pending stop, which goes as soon as the worker reads its queue. Only a
+    /// closed queue ends the call.
+    fn send_screen_stop(&mut self) -> Result<(), EndReason> {
+        if self.screen_stop_pending.is_some() {
+            self.screen_stop_pending = Some(self.screen_share);
+            return Ok(());
+        }
+        let stop = ToWorker::SetScreen {
+            target: None,
+            share: self.screen_share,
+        };
+        match self.link.try_queue(stop) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                self.screen_stop_pending = Some(self.screen_share);
+                Ok(())
+            }
+            Err(_) => Err(EndReason::WorkerStopped),
+        }
+    }
+
+    /// The queue has room for the pending stop (`permit`), or it closed.
+    fn screen_stop_room_ready(
+        &mut self,
+        permit: Option<mpsc::OwnedPermit<ToWorker>>,
+    ) -> Result<(), EndReason> {
+        let permit = permit.ok_or(EndReason::WorkerStopped)?;
+        if let Some(share) = self.screen_stop_pending.take() {
+            permit.send(ToWorker::SetScreen {
+                target: None,
+                share,
+            });
+        }
+        Ok(())
+    }
+
     /// Whether a camera-on goes through the portal first: on the portal path,
     /// unless a remote already went to the worker for a capture that may
     /// still run (a repeated on then needs no new request). While a request
@@ -1910,6 +2514,11 @@ impl Call {
                 self.portal_capture = true;
             }
         }
+        if let FromWorker::Screen { state, share } = event
+            && !self.screen_state_from_worker(*state, *share)
+        {
+            return Ok(());
+        }
         let changed = match self.view.apply(event) {
             Applied::Same => false,
             Applied::Changed => {
@@ -1938,8 +2547,39 @@ impl Call {
             .map_err(|_| EndReason::WorkerStopped)
     }
 
+    /// Publishes the view. The check for an unread screen command and the
+    /// page write are one step under the lock that `set_screen` holds while
+    /// it shows a command and counts it. While the handle has a screen
+    /// command this task has not read, the page keeps its screen state
+    /// (`Off` for a stop, `Starting` for a start): a stale `On` never shows
+    /// over a stop, and the stop's `Off` never shows over a later start,
+    /// also when an unrelated change publishes. Never called with that lock
+    /// held.
     fn publish(&self, inner: &Inner) {
-        inner.publish(self.view.state());
+        let mut next = self.view.state();
+        let changed = {
+            let control = plain(&self.screen_control);
+            let unread = control.stops != self.screen_seen_stops
+                || control.requests != self.screen_seen_request;
+            inner.state.send_if_modified(move |current| {
+                if unread
+                    && let (
+                        CallState::Active { screen: shown, .. },
+                        CallState::Active { screen, .. },
+                    ) = (&*current, &mut next)
+                {
+                    *screen = *shown;
+                }
+                if *current == next {
+                    return false;
+                }
+                *current = next;
+                true
+            })
+        };
+        if changed {
+            inner.notify();
+        }
     }
 
     /// Tells the picture store which tiles may show now.
@@ -2024,18 +2664,36 @@ impl Call {
         if self.camera_wanted.load(Ordering::SeqCst) && uses_portal(&self.link) {
             self.start_portal();
         }
+        let wake = plain(&self.screen_control).wake.clone();
         loop {
             let due = pending_own.as_ref().map(|(at, _)| *at);
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
+                () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
                 command = commands.recv() => match command {
                     Some(Command::Mute(muted)) => self.send_worker(ToWorker::SetMuted { muted })?,
                     Some(Command::Camera { on, request }) => {
                         self.camera_command(inner, on, request)?;
                     }
+                    Some(Command::Screen { on, stops, request }) => {
+                        self.screen_request(inner, on, stops, request)?;
+                    }
                     None => return Ok(()),
                 },
                 remote = portal_done(&mut self.portal) => self.portal_finished(inner, remote)?,
+                (picked, cancelled) = screen_pick_done(&mut self.screen_pick) => {
+                    if cancelled {
+                        self.stopped_pick_ended(picked);
+                    } else {
+                        self.screen_picked(inner, picked)?;
+                    }
+                }
+                permit = screen_stop_room(
+                    self.screen_stop_pending.map(|_| self.link.command_sender()),
+                ) => self.screen_stop_room_ready(permit)?,
+                () = screen_session_closed(&mut self.screen_closed) => {
+                    self.screen_ended_by_desktop(inner)?;
+                }
                 event = self.link.events.recv() => {
                     let Some(event) = event else {
                         return Err(EndReason::WorkerStopped);
@@ -2180,11 +2838,18 @@ impl Call {
             handles,
             mut tasks,
             portal,
+            screen_pick,
+            screen_control,
+            screen_closed,
             ..
         } = self;
         // A portal request still waiting for the user is cancelled first, so
-        // its dialog does not stay open while the call is torn down.
+        // its dialog does not stay open while the call is torn down. The
+        // screen pick and the share's portal session end with the call.
         drop(portal);
+        drop(screen_pick);
+        drop(screen_closed);
+        close_session(&mut plain(&screen_control));
         // No more restarts, so the leave cannot be pushed back.
         tasks.abort_all();
         if session_ended {
@@ -2621,6 +3286,7 @@ mod tests {
             stop: Some(stop),
             commands,
             camera_wanted: Arc::new(AtomicBool::new(false)),
+            screen_control: Arc::default(),
             task: None,
         });
         calls.stop_for_session_end();
@@ -2794,6 +3460,18 @@ mod tests {
             portal_capture: false,
             portal_sent: false,
             ring: None,
+            screens: crate::calls::screen::unavailable(),
+            screen_pick: None,
+            screen_wanted: false,
+            screen_last_on: false,
+            screen_closed: None,
+            screen_sent: false,
+            screen_control: Arc::default(),
+            screen_pick_stops: 0,
+            screen_seen_stops: 0,
+            screen_seen_request: 0,
+            screen_share: 0,
+            screen_stop_pending: None,
         };
         TestCall {
             call,
@@ -3230,6 +3908,7 @@ mod tests {
             stop: Some(stop),
             commands,
             camera_wanted: call.camera_wanted.clone(),
+            screen_control: call.screen_control.clone(),
             task: None,
         });
         run_call(
@@ -3356,7 +4035,10 @@ mod tests {
         );
         assert_eq!(view.apply(&started(1, "@a:example.org:A")), Applied::Same);
         view.apply(&started(2, "@stranger:example.org:S"));
-        assert_eq!(view.video_allowed(), (false, [true, false, false, false]));
+        assert_eq!(
+            view.video_allowed(),
+            (false, [true, false, false, false, false])
+        );
         let CallState::Active { video, .. } = view.state() else {
             panic!("active");
         };
@@ -3377,7 +4059,7 @@ mod tests {
             "S",
             "https://sfu.example.org",
         )]);
-        assert_eq!(view.video_allowed().1, [false, true, false, false]);
+        assert_eq!(view.video_allowed().1, [false, true, false, false, false]);
         assert_eq!(view.video_tiles()[0].tile, 2);
     }
 
@@ -3389,16 +4071,16 @@ mod tests {
         view.apply(&started(1, "@a:example.org:A"));
         view.apply(&started(3, "@b:example.org:B"));
         assert_eq!(view.apply(&started(0, "@a:example.org:A")), Applied::Same);
-        assert_eq!(view.apply(&started(5, "@a:example.org:A")), Applied::Same);
+        assert_eq!(view.apply(&started(6, "@a:example.org:A")), Applied::Same);
         assert_eq!(
             view.apply(&FromWorker::VideoStopped { tile: 0 }),
             Applied::Same
         );
         assert_eq!(
-            view.apply(&FromWorker::VideoStopped { tile: 5 }),
+            view.apply(&FromWorker::VideoStopped { tile: 6 }),
             Applied::Same
         );
-        assert_eq!(view.video_allowed().1, [true, false, true, false]);
+        assert_eq!(view.video_allowed().1, [true, false, true, false, false]);
         assert_eq!(
             view.apply(&FromWorker::VideoStopped { tile: 1 }),
             Applied::Changed
@@ -3413,7 +4095,7 @@ mod tests {
             }),
             Applied::Changed
         );
-        assert_eq!(view.video_allowed().1, [false; 4]);
+        assert_eq!(view.video_allowed().1, [false; 5]);
         view.apply(&started(2, "@a:example.org:A"));
         assert!(view.forget_video("@a:example.org:A"));
         assert!(!view.forget_video("@a:example.org:A"));
@@ -3451,6 +4133,7 @@ mod tests {
             stop: None,
             commands,
             camera_wanted: Arc::new(AtomicBool::new(false)),
+            screen_control: Arc::default(),
             task: None,
         });
         calls.inner.publish(state);
@@ -3463,6 +4146,7 @@ mod tests {
             muted: false,
             participants: Vec::new(),
             camera: CallCamera::Off,
+            screen: CallScreen::Off,
             video: Vec::new(),
             ring_declined: false,
         }
@@ -3520,13 +4204,14 @@ mod tests {
         assert_eq!(changes.load(Ordering::SeqCst), 1);
 
         // The worker answered: the own tile shows and holds a picture.
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
         calls.inner.publish(CallState::Active {
             room_id: room_id!("!r:example.org").to_owned(),
             muted: false,
             participants: Vec::new(),
             camera: CallCamera::On,
+            screen: CallScreen::Off,
             video: vec![CallVideoTile {
                 tile: 0,
                 participant: None,
@@ -3551,7 +4236,7 @@ mod tests {
         );
         // An unrelated event makes the task sync while its view still has
         // the camera on: the own tile stays shut.
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(!store.insert(0, 0, 2, 2, vec![3; 16]));
         assert!(calls.video_picture(0, 0, store.stream(0)).is_none());
         let CallState::Active { camera, video, .. } = calls.state() else {
@@ -3569,7 +4254,7 @@ mod tests {
     async fn given_a_queued_on_then_off_then_the_older_on_cannot_reopen_the_tile() {
         let calls = controller(FakeHost::new(true, None));
         let (store, mut commands, _) = running_call(&calls, active_state());
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
         assert_eq!(calls.set_camera(true), Ok(()));
         assert_eq!(calls.set_camera(false), Ok(()));
@@ -3578,7 +4263,7 @@ mod tests {
         };
         // What `camera_command` does to the store for the older on.
         store.camera_on_taken(request);
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(
             !store.insert(0, 0, 2, 2, vec![2; 16]),
             "the off accepted after the on keeps the tile shut"
@@ -3592,7 +4277,7 @@ mod tests {
             panic!("a new on");
         };
         store.camera_on_taken(request);
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(
             store.insert(0, 0, 2, 2, vec![3; 16]),
             "a later on reopens it"
@@ -3606,7 +4291,7 @@ mod tests {
     async fn given_a_full_command_queue_then_the_camera_state_does_not_change() {
         let calls = controller(FakeHost::new(true, None));
         let (store, _commands, _) = running_call(&calls, active_state());
-        store.sync(true, [false; 4]);
+        store.sync(true, [false; 5]);
         assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
         {
             let Slot::Running(run) = &*calls.inner.slot() else {
@@ -3634,7 +4319,7 @@ mod tests {
             "no call, no picture"
         );
         let (store, _commands, _) = running_call(&calls, active_state());
-        store.sync(false, [true, false, false, false]);
+        store.sync(false, [true, false, false, false, false]);
         assert!(store.insert(1, 3, 2, 2, vec![5; 16]));
         let picture = calls.video_picture(1, 0, store.stream(1)).expect("picture");
         assert_eq!((picture.seq, picture.rotation), (1, 3));
@@ -3654,7 +4339,7 @@ mod tests {
         for session_end in [true, false] {
             let calls = controller(FakeHost::new(true, None));
             let (store, _commands, _) = running_call(&calls, active_state());
-            store.sync(true, [true; 4]);
+            store.sync(true, [true; 5]);
             assert!(store.insert(0, 0, 2, 2, vec![1; 16]));
             assert!(store.insert(4, 0, 2, 2, vec![1; 16]));
             if session_end {
@@ -3664,7 +4349,7 @@ mod tests {
             }
             assert!(calls.video_picture(0, 0, store.stream(0)).is_none());
             assert!(calls.video_picture(4, 0, store.stream(4)).is_none());
-            store.sync(true, [true; 4]);
+            store.sync(true, [true; 5]);
             assert!(!store.insert(0, 0, 2, 2, vec![1; 16]), "{session_end}");
         }
     }
@@ -3677,9 +4362,1446 @@ mod tests {
         let guard = calls.claim(room_id!("!r:example.org")).unwrap();
         let store = VideoStore::new();
         *plain(&calls.inner.video) = Some(store.clone());
-        store.sync(true, [true; 4]);
+        store.sync(true, [true; 5]);
         drop(guard);
         assert!(!store.insert(0, 0, 2, 2, vec![1; 16]));
         assert!(plain(&calls.inner.video).is_none());
+    }
+
+    // ----- Screen share (ADR-0053) -----
+
+    /// A drop guard for the portal session: it flips a flag when the session
+    /// closes.
+    struct SessionGuard(Arc<AtomicBool>);
+
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn monitor() -> persephone_call_protocol::ScreenTarget {
+        persephone_call_protocol::ScreenTarget::Monitor {
+            index: 1,
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    /// A grant of one monitor, with a session guard. `dropped` becomes true
+    /// when the session closes.
+    fn grant(dropped: &Arc<AtomicBool>) -> ScreenGrant {
+        ScreenGrant {
+            target: monitor(),
+            remote: None,
+            session: Some(Box::new(SessionGuard(dropped.clone()))),
+            closed: None,
+        }
+    }
+
+    fn is_monitor_start(message: Option<ToWorker>) -> bool {
+        matches!(
+            message,
+            Some(ToWorker::SetScreen {
+                target: Some(persephone_call_protocol::ScreenTarget::Monitor {
+                    index: 1,
+                    width: 1920,
+                    height: 1080
+                }),
+                ..
+            })
+        )
+    }
+
+    /// A source that answers every pick with a cancel and counts the picks.
+    struct Scripted {
+        available: bool,
+        picks: AtomicUsize,
+    }
+
+    impl ScreenSource for Scripted {
+        fn available(&self) -> bool {
+            self.available
+        }
+
+        fn choose(&self, _cancel: &Arc<AtomicBool>) -> Result<ScreenGrant, ScreenRefusal> {
+            self.picks.fetch_add(1, Ordering::SeqCst);
+            Err(ScreenRefusal::Cancelled)
+        }
+    }
+
+    /// A source whose window stays open until the pick is cancelled, like a
+    /// warning nobody answers. Counts the picks.
+    #[derive(Default)]
+    struct Unanswered {
+        picks: AtomicUsize,
+    }
+
+    impl ScreenSource for Unanswered {
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn choose(&self, cancel: &Arc<AtomicBool>) -> Result<ScreenGrant, ScreenRefusal> {
+            self.picks.fetch_add(1, Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !cancel.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(ScreenRefusal::Cancelled)
+        }
+    }
+
+    /// GIVEN a pick whose window is open WHEN the share stops and starts
+    /// again before that window closes THEN the stopped pick is cancelled
+    /// and keeps the slot, no second pick runs beside it, and the new pick
+    /// begins only once the stopped one has ended.
+    #[tokio::test]
+    async fn given_a_stopped_pick_still_open_when_a_start_comes_then_it_waits_for_the_end() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        let source = Arc::new(Unanswered::default());
+        fixture.call.screens = source.clone();
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        let first = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("the stopped pick stays")
+            .cancel
+            .clone();
+        assert!(first.load(Ordering::SeqCst), "the stop cancelled it");
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &fixture.call.screen_pick.as_ref().unwrap().cancel),
+            "no second pick beside the stopped one"
+        );
+        assert_eq!(fixture.call.view.screen, CallScreen::Starting);
+
+        let (picked, cancelled) = screen_pick_done(&mut fixture.call.screen_pick).await;
+        assert!(cancelled);
+        fixture.call.stopped_pick_ended(picked);
+        let second = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("the waiting start's pick")
+            .cancel
+            .clone();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(!second.load(Ordering::SeqCst), "it needs its own answer");
+        second.store(true, Ordering::SeqCst);
+        let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
+        assert_eq!(source.picks.load(Ordering::SeqCst), 2);
+        assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a pick that a stop cancelled WHEN it ends with a grant, and no
+    /// start came THEN the grant is closed unused and no new pick begins.
+    #[tokio::test]
+    async fn given_a_stopped_pick_that_ends_with_a_grant_then_it_is_closed_unused() {
+        let (mut fixture, inner, source) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        let _ = screen_pick_done(&mut fixture.call.screen_pick).await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture.call.stopped_pick_ended(Ok(grant(&dropped)));
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        assert!(fixture.call.screen_pick.is_none());
+        assert_eq!(source.picks.load(Ordering::SeqCst), 1);
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    fn call_with_source(available: bool) -> (TestCall, Arc<Inner>, Arc<Scripted>) {
+        let mut fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let source = Arc::new(Scripted {
+            available,
+            picks: AtomicUsize::new(0),
+        });
+        fixture.call.screens = source.clone();
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        (fixture, inner, source)
+    }
+
+    /// GIVEN a platform without screen sharing WHEN the page starts a share
+    /// THEN the share is unavailable, nobody is asked, and nothing goes to
+    /// the worker.
+    #[tokio::test]
+    async fn given_no_screen_source_when_a_share_starts_then_it_is_unavailable() {
+        let (mut fixture, inner, source) = call_with_source(false);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert_eq!(source.picks.load(Ordering::SeqCst), 0);
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(fixture.call.screen_pick.is_none());
+    }
+
+    /// GIVEN a share that starts WHEN the user cancels the chooser THEN the
+    /// share is off and nothing goes to the worker; WHEN the pick is refused
+    /// THEN the share shows refused; neither falls back to another source.
+    #[tokio::test]
+    async fn given_a_cancelled_or_refused_pick_then_the_share_stays_off() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Starting);
+        assert!(fixture.call.screen_pick.is_some());
+        fixture
+            .call
+            .screen_picked(&inner, Err(ScreenRefusal::Cancelled))
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+        assert!(fixture.to_worker.try_recv().is_err());
+
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture
+            .call
+            .screen_picked(&inner, Err(ScreenRefusal::Refused))
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Refused);
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a pick in flight WHEN a second start comes THEN no second pick
+    /// runs; WHEN the user picks THEN the worker gets one command with the
+    /// chosen screen and the session stays open.
+    #[tokio::test]
+    async fn given_a_grant_then_the_worker_gets_the_command_with_the_chosen_screen() {
+        let (mut fixture, inner, source) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        // The scripted source answers by cancel; wait for the one pick.
+        let mut pick = fixture.call.screen_pick.take().expect("a pick");
+        let _ = (&mut pick.task).await;
+        assert_eq!(source.picks.load(Ordering::SeqCst), 1, "one pick only");
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+        assert!(fixture.to_worker.try_recv().is_err(), "one command only");
+        assert!(fixture.call.screen_sent);
+        assert!(!dropped.load(Ordering::SeqCst), "the session stays open");
+    }
+
+    /// GIVEN a running share WHEN the page stops it THEN the worker is told,
+    /// the session closes and the state is off; a second stop sends nothing.
+    #[tokio::test]
+    async fn given_a_running_share_when_it_is_stopped_then_the_session_closes() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        let _ = fixture.to_worker.try_recv();
+        fixture.call.screen_command(&inner, false, 0).unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None, .. })
+        ));
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+        fixture.call.screen_command(&inner, false, 0).unwrap();
+        assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a pick that ends after the user stopped THEN the grant is
+    /// dropped (its session closes) and nothing goes to the worker.
+    #[tokio::test]
+    async fn given_a_pick_that_ends_after_a_stop_then_it_is_closed_unused() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        fixture.call.screen_command(&inner, false, 0).unwrap();
+        assert!(
+            fixture
+                .call
+                .screen_pick
+                .as_ref()
+                .is_some_and(|pick| pick.cancel.load(Ordering::SeqCst)),
+            "the stop cancelled the pick"
+        );
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a running share WHEN the worker reports each state THEN the
+    /// share's portal session closes for every end state and the shown state
+    /// follows; `On` and `Starting` keep the session.
+    #[tokio::test]
+    async fn given_the_worker_reports_a_share_state_then_the_session_follows() {
+        for (state, shown, closes) in [
+            (ScreenState::Starting, CallScreen::Starting, false),
+            (ScreenState::On, CallScreen::On, false),
+            (ScreenState::NotFound, CallScreen::NotFound, true),
+            (ScreenState::Unavailable, CallScreen::Unavailable, true),
+            (ScreenState::Refused, CallScreen::Refused, true),
+            (ScreenState::Off, CallScreen::Off, true),
+        ] {
+            let (mut fixture, inner, _) = call_with_source(true);
+            fixture.call.screen_command(&inner, true, 0).unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            fixture
+                .call
+                .screen_picked(&inner, Ok(grant(&dropped)))
+                .unwrap();
+            fixture
+                .call
+                .worker_event(
+                    &inner,
+                    &FromWorker::Screen {
+                        state,
+                        share: fixture.call.screen_share,
+                    },
+                )
+                .unwrap();
+            assert_eq!(fixture.call.view.screen, shown, "{state:?}");
+            assert_eq!(dropped.load(Ordering::SeqCst), closes, "{state:?}");
+            assert_eq!(fixture.call.screen_sent, !closes, "{state:?}");
+        }
+    }
+
+    /// GIVEN a pick in flight WHEN the handle accepted a stop that the task
+    /// has not read yet and the pick then ends THEN the grant is closed
+    /// unused and nothing goes to the worker.
+    #[tokio::test]
+    async fn given_a_stop_accepted_before_the_pick_ends_then_the_grant_is_closed_unused() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        // `set_screen(false)` counts the stop before it queues it.
+        plain(&fixture.call.screen_control).stops += 1;
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a stop that the handle is accepting (it holds the stop lock)
+    /// WHEN a pick ends at that moment THEN the pick's check waits for the
+    /// stop, sees it, and closes the grant unused: nothing goes to the
+    /// worker.
+    #[tokio::test]
+    async fn given_a_stop_accepted_while_a_pick_ends_then_the_check_waits_and_sees_it() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let control = fixture.call.screen_control.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            let mut control = plain(&control);
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            control.stops += 1;
+        });
+        held_rx.recv().unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        stopper.join().unwrap();
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(!fixture.call.screen_sent);
+    }
+
+    /// GIVEN a share whose start went to the worker WHEN a stop is accepted
+    /// just after THEN the stop names that share and closes its session, and
+    /// the share's late `Starting` and `On` do not show over the stop; its
+    /// end state does.
+    #[tokio::test]
+    async fn given_a_stop_just_after_the_handoff_then_late_states_do_not_show_it_running() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&dropped)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+        plain(&fixture.call.screen_control).stops += 1;
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None, share: stopped }) if stopped == share
+        ));
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        for state in [ScreenState::Starting, ScreenState::On] {
+            fixture
+                .call
+                .worker_event(&inner, &FromWorker::Screen { state, share })
+                .unwrap();
+            assert_eq!(fixture.call.view.screen, CallScreen::Off, "{state:?}");
+        }
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::Unavailable,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+    }
+
+    /// GIVEN a share whose start went to the worker WHEN the handle accepts a
+    /// stop (the page shows `Off`) and the worker reports `On` before the
+    /// task reads the stop THEN `On` does not show over `Off`; WHEN a later
+    /// share starts THEN its `On` shows.
+    #[tokio::test]
+    async fn given_an_accepted_stop_when_on_arrives_first_then_off_stays_and_a_later_share_shows() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        assert!(is_monitor_start(fixture.to_worker.try_recv().ok()));
+
+        // What `set_screen(false)` does before the task reads the stop.
+        plain(&fixture.call.screen_control).stops += 1;
+        inner.state.send_modify(|state| {
+            if let CallState::Active { screen, .. } = state {
+                *screen = CallScreen::Off;
+            }
+        });
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_ne!(fixture.call.view.screen, CallScreen::On);
+        assert_eq!(shown(&inner), CallScreen::Off);
+
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert_eq!(shown(&inner), CallScreen::Off);
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&second)))
+            .unwrap();
+        let later = fixture.call.screen_share;
+        assert_ne!(later, share);
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share: later,
+                },
+            )
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::On);
+        assert_eq!(shown(&inner), CallScreen::On);
+    }
+
+    /// What `set_screen(false)` does under the control lock: the page shows
+    /// `Off` and the stop is counted.
+    fn accept_stop(control: &Mutex<ScreenControl>, inner: &Inner) {
+        let mut control = plain(control);
+        inner.state.send_modify(|state| {
+            if let CallState::Active { screen, .. } = state {
+                *screen = CallScreen::Off;
+            }
+        });
+        control.stops += 1;
+    }
+
+    /// GIVEN a running share the page shows `On` WHEN a stop is accepted
+    /// after that publication THEN the page shows `Off`; WHEN an unrelated
+    /// change (mute) and a late `On` publish before the task reads the stop
+    /// THEN the mute shows and `Off` stays; WHEN the task reads the stop and
+    /// a later share starts THEN its `On` shows.
+    #[tokio::test]
+    async fn given_an_unread_stop_when_unrelated_changes_publish_then_off_stays() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, muted, .. } => (*screen, *muted),
+            other => panic!("{other:?}"),
+        };
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        let on = FromWorker::Screen {
+            state: ScreenState::On,
+            share,
+        };
+        fixture.call.worker_event(&inner, &on).unwrap();
+        assert_eq!(shown(&inner), (CallScreen::On, false));
+
+        accept_stop(&fixture.call.screen_control, &inner);
+        assert_eq!(shown(&inner), (CallScreen::Off, false));
+        fixture
+            .call
+            .worker_event(&inner, &FromWorker::Muted { muted: true })
+            .unwrap();
+        assert_eq!(
+            shown(&inner),
+            (CallScreen::Off, true),
+            "mute shows, Off stays"
+        );
+        fixture.call.worker_event(&inner, &on).unwrap();
+        assert_eq!(shown(&inner), (CallScreen::Off, true));
+
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        assert_eq!(shown(&inner), (CallScreen::Off, true));
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&second)))
+            .unwrap();
+        let later = fixture.call.screen_share;
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share: later,
+                },
+            )
+            .unwrap();
+        assert_eq!(shown(&inner), (CallScreen::On, true));
+    }
+
+    /// GIVEN a stop accepted and then a new start accepted (the page shows
+    /// `Starting`) WHEN the task publishes before it reads either THEN the
+    /// page keeps `Starting`: neither the stale `On` nor an `Off` shows.
+    #[tokio::test]
+    async fn given_an_unread_stop_and_start_when_the_task_publishes_then_starting_stays() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share,
+                },
+            )
+            .unwrap();
+        accept_stop(&fixture.call.screen_control, &inner);
+        inner.state.send_modify(|state| {
+            if let CallState::Active { screen, .. } = state {
+                *screen = CallScreen::Starting;
+            }
+        });
+        fixture
+            .call
+            .worker_event(&inner, &FromWorker::Muted { muted: true })
+            .unwrap();
+        assert!(matches!(
+            &*inner.state.borrow(),
+            CallState::Active {
+                screen: CallScreen::Starting,
+                muted: true,
+                ..
+            }
+        ));
+    }
+
+    /// What `set_screen` does under the control lock: the page shows the
+    /// command (a start keeps `Starting` or `On`) and the command is counted.
+    /// Returns the stop count and the command's number.
+    fn accept_command(control: &Mutex<ScreenControl>, inner: &Inner, on: bool) -> (u64, u64) {
+        let mut control = plain(control);
+        inner.state.send_modify(|state| {
+            if let CallState::Active { screen, .. } = state {
+                *screen = match (on, *screen) {
+                    (true, CallScreen::On | CallScreen::Starting) => *screen,
+                    (true, _) => CallScreen::Starting,
+                    (false, _) => CallScreen::Off,
+                };
+            }
+        });
+        if !on {
+            control.stops += 1;
+        }
+        control.requests += 1;
+        (control.stops, control.requests)
+    }
+
+    /// GIVEN a share starting (the page shows `Starting`) WHEN the handle
+    /// accepts a second start and the worker reports `On` before the task
+    /// reads it THEN the page keeps `Starting`; WHEN the task reads the
+    /// start, which does not change its view (already `On`) THEN the page
+    /// shows `On`.
+    #[tokio::test]
+    async fn given_a_second_start_read_after_on_then_the_page_shows_on() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        let (stops, request) = accept_command(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, request)
+            .unwrap();
+        let grant_dropped = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&grant_dropped)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        assert_eq!(shown(&inner), CallScreen::Starting);
+
+        let (stops, second) = accept_command(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_eq!(shown(&inner), CallScreen::Starting, "the start is unread");
+        fixture
+            .call
+            .screen_request(&inner, true, stops, second)
+            .unwrap();
+        assert_eq!(shown(&inner), CallScreen::On);
+    }
+
+    /// GIVEN a running call whose command queue is full WHEN the page stops
+    /// the share THEN the stop is accepted: the portal session closes, the
+    /// page shows `Off`, and the stop waits in the screen control with a
+    /// wake for the task; a start is still refused on a full queue.
+    #[tokio::test]
+    async fn given_a_full_command_queue_when_the_page_stops_then_capture_is_revoked() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _) = running_call(&calls, active_state());
+        let (control, sender) = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            (run.screen_control.clone(), run.commands.clone())
+        };
+        let dropped = Arc::new(AtomicBool::new(false));
+        plain(&control).session = Some(Box::new(SessionGuard(dropped.clone())));
+        assert_eq!(calls.set_screen(true), Ok(()));
+        while sender.try_send(Command::Mute(true)).is_ok() {}
+
+        assert_eq!(calls.set_screen(true), Err(CallError::NotInCall));
+        assert_eq!(calls.set_screen(false), Ok(()));
+        assert!(dropped.load(Ordering::SeqCst), "capture is revoked");
+        assert!(matches!(
+            calls.state(),
+            CallState::Active {
+                screen: CallScreen::Off,
+                ..
+            }
+        ));
+        let wake = {
+            let control = plain(&control);
+            assert_eq!(control.stop_waiting, Some((1, 2)));
+            control.wake.clone()
+        };
+        tokio::time::timeout(Duration::from_secs(1), wake.notified())
+            .await
+            .expect("the task is woken");
+    }
+
+    /// GIVEN a share whose portal session is open WHEN the page stops it
+    /// THEN the session closes before the page shows `Off`.
+    #[tokio::test]
+    async fn given_a_share_when_the_page_stops_it_then_the_session_closes_before_off_shows() {
+        struct Watching(watch::Receiver<CallState>, Arc<Mutex<Option<CallScreen>>>);
+        impl Drop for Watching {
+            fn drop(&mut self) {
+                if let CallState::Active { screen, .. } = &*self.0.borrow() {
+                    *plain(&self.1) = Some(*screen);
+                }
+            }
+        }
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _) = running_call(&calls, active_state());
+        let control = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            run.screen_control.clone()
+        };
+        assert_eq!(calls.set_screen(true), Ok(()));
+        let seen = Arc::new(Mutex::new(None));
+        plain(&control).session = Some(Box::new(Watching(
+            calls.inner.state.subscribe(),
+            seen.clone(),
+        )));
+        assert_eq!(calls.set_screen(false), Ok(()));
+        assert_eq!(
+            *plain(&seen),
+            Some(CallScreen::Starting),
+            "the page did not show Off yet"
+        );
+        assert!(matches!(
+            calls.state(),
+            CallState::Active {
+                screen: CallScreen::Off,
+                ..
+            }
+        ));
+    }
+
+    /// GIVEN the call task closing the portal session (a worker end state),
+    /// paused inside the close WHEN the page stops the share meanwhile THEN
+    /// the stop waits for the close: the page shows `Off` only after it.
+    #[test]
+    fn given_a_close_under_way_when_the_page_stops_then_off_waits_for_it() {
+        struct SlowClose {
+            started: std::sync::mpsc::Sender<()>,
+            page: watch::Receiver<CallState>,
+            seen: Arc<Mutex<Option<CallScreen>>>,
+        }
+        impl Drop for SlowClose {
+            fn drop(&mut self) {
+                let _ = self.started.send(());
+                std::thread::sleep(Duration::from_millis(50));
+                if let CallState::Active { screen, .. } = &*self.page.borrow() {
+                    *plain(&self.seen) = Some(*screen);
+                }
+            }
+        }
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, _commands, _) = running_call(&calls, active_state());
+        let control = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            run.screen_control.clone()
+        };
+        assert_eq!(calls.set_screen(true), Ok(()));
+        let (started, closing) = std::sync::mpsc::channel();
+        let seen = Arc::new(Mutex::new(None));
+        plain(&control).session = Some(Box::new(SlowClose {
+            started,
+            page: calls.inner.state.subscribe(),
+            seen: seen.clone(),
+        }));
+        // What the call task's `close_screen_session` does.
+        let task = {
+            let control = control.clone();
+            std::thread::spawn(move || close_session(&mut plain(&control)))
+        };
+        closing.recv().unwrap();
+        assert_eq!(calls.set_screen(false), Ok(()));
+        task.join().unwrap();
+        assert_eq!(
+            *plain(&seen),
+            Some(CallScreen::Starting),
+            "Off did not show during the close"
+        );
+        assert!(matches!(
+            calls.state(),
+            CallState::Active {
+                screen: CallScreen::Off,
+                ..
+            }
+        ));
+    }
+
+    /// GIVEN a start queued for the task and a later stop that waits in the
+    /// screen control (the queue was full) WHEN the task reads the start
+    /// THEN it opens no picker; WHEN it is woken THEN the stop runs. GIVEN a
+    /// running share and a waiting stop WHEN a later start is read first
+    /// THEN the stop goes to the worker before the start runs.
+    #[tokio::test]
+    async fn given_a_waiting_stop_then_an_earlier_start_opens_no_picker_and_the_stop_runs() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        let wait = |control: &Mutex<ScreenControl>, inner: &Inner| {
+            let (stops, request) = accept_command(control, inner, false);
+            plain(control).stop_waiting = Some((stops, request));
+        };
+        let (stops, start) = accept_command(&fixture.call.screen_control, &inner, true);
+        wait(&fixture.call.screen_control, &inner);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, start)
+            .unwrap();
+        assert!(fixture.call.screen_pick.is_none(), "no picker opens");
+        assert_eq!(shown(&inner), CallScreen::Off);
+        fixture.call.take_waiting_stop(&inner, u64::MAX).unwrap();
+        assert!(plain(&fixture.call.screen_control).stop_waiting.is_none());
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+
+        // A running share, then a stop that waits and a later start.
+        let (stops, start) = accept_command(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, start)
+            .unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        while fixture.to_worker.try_recv().is_ok() {}
+        wait(&fixture.call.screen_control, &inner);
+        let (stops, later) = accept_command(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, later)
+            .unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None, share: stopped }) if stopped == share
+        ));
+        assert!(fixture.call.screen_wanted, "the later start runs");
+        assert_eq!(shown(&inner), CallScreen::Starting);
+    }
+
+    /// GIVEN a share's stop that waits for worker queue room and a new start
+    /// that then fails (`Unavailable`) WHEN the stop goes and the worker
+    /// reports the stopped share `Off` THEN the failure stays shown.
+    #[tokio::test]
+    async fn given_a_failed_restart_when_the_old_share_reports_off_then_the_failure_stays() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        while fixture
+            .call
+            .link
+            .send(ToWorker::SetMuted { muted: true })
+            .is_ok()
+        {}
+        plain(&fixture.call.screen_control).stops += 1;
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&second)))
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+
+        while fixture.to_worker.try_recv().is_ok() {}
+        let permit = screen_stop_room(Some(fixture.call.link.command_sender())).await;
+        fixture.call.screen_stop_room_ready(permit).unwrap();
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::Off,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+    }
+
+    /// GIVEN a running share WHEN the handle accepts a stop and then a start
+    /// (the page shows `Starting`) and the task reads only the stop THEN the
+    /// stop's publication keeps `Starting`; WHEN the task reads the start
+    /// THEN the page follows the task again.
+    #[tokio::test]
+    async fn given_a_stop_then_a_start_when_only_the_stop_is_read_then_starting_stays() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        let accept = accept_command;
+        let (stops, request) = accept(&fixture.call.screen_control, &inner, true);
+        fixture
+            .call
+            .screen_request(&inner, true, stops, request)
+            .unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share,
+                },
+            )
+            .unwrap();
+        assert_eq!(shown(&inner), CallScreen::On);
+
+        let (stops, stop) = accept(&fixture.call.screen_control, &inner, false);
+        let (_, start) = accept(&fixture.call.screen_control, &inner, true);
+        assert_eq!(shown(&inner), CallScreen::Starting);
+        fixture
+            .call
+            .screen_request(&inner, false, stops, stop)
+            .unwrap();
+        assert_eq!(shown(&inner), CallScreen::Starting, "the start stays shown");
+        fixture
+            .call
+            .worker_event(&inner, &FromWorker::Muted { muted: true })
+            .unwrap();
+        assert_eq!(shown(&inner), CallScreen::Starting);
+
+        fixture
+            .call
+            .screen_request(&inner, true, stops, start)
+            .unwrap();
+        assert_eq!(shown(&inner), CallScreen::Starting);
+        fixture
+            .call
+            .screen_picked(&inner, Err(ScreenRefusal::Refused))
+            .unwrap();
+        assert_ne!(
+            shown(&inner),
+            CallScreen::Starting,
+            "the task's answer shows"
+        );
+    }
+
+    /// GIVEN a call whose task holds the screen control lock (it publishes)
+    /// WHEN the page stops the share THEN `Off` does not show until the lock
+    /// is released, and then shows with the stop counted: page change and
+    /// count are one step for the task's publication.
+    #[test]
+    fn given_a_task_publication_when_the_page_stops_then_off_waits_for_the_lock() {
+        let calls = Arc::new(controller(FakeHost::new(true, None)));
+        let (_store, _commands, _) = running_call(&calls, active_state());
+        let control = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            run.screen_control.clone()
+        };
+        assert_eq!(calls.set_screen(true), Ok(()));
+        let shown = |calls: &CallController| match &*calls.inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(shown(&calls), CallScreen::Starting);
+
+        let held = plain(&control);
+        let stopper = {
+            let calls = calls.clone();
+            std::thread::spawn(move || calls.set_screen(false))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            shown(&calls),
+            CallScreen::Starting,
+            "Off waits for the lock"
+        );
+        assert_eq!(held.stops, 0);
+        drop(held);
+        assert_eq!(stopper.join().unwrap(), Ok(()));
+        assert_eq!(shown(&calls), CallScreen::Off);
+        assert_eq!(plain(&control).stops, 1);
+    }
+
+    /// GIVEN a share whose portal session is open WHEN the page stops it
+    /// THEN the handle closes the session at once, before the call task reads
+    /// the stop (it may be in a key send), and counts the stop.
+    #[tokio::test]
+    async fn given_a_share_when_the_page_stops_it_then_the_session_closes_before_the_task_runs() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _) = running_call(&calls, active_state());
+        let control = {
+            let Slot::Running(run) = &*calls.inner.slot() else {
+                panic!("running");
+            };
+            run.screen_control.clone()
+        };
+        let dropped = Arc::new(AtomicBool::new(false));
+        plain(&control).session = Some(Box::new(SessionGuard(dropped.clone())));
+        assert_eq!(calls.set_screen(true), Ok(()));
+        assert!(!dropped.load(Ordering::SeqCst), "a start keeps it");
+        assert_eq!(calls.set_screen(false), Ok(()));
+        assert!(dropped.load(Ordering::SeqCst), "capture is revoked at once");
+        assert!(plain(&control).session.is_none());
+        assert_eq!(plain(&control).stops, 1);
+        let _ = commands.try_recv();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Screen {
+                on: false,
+                stops: 1,
+                ..
+            })
+        ));
+    }
+
+    /// GIVEN a running share and a full worker queue WHEN the page stops the
+    /// share THEN the call runs on, the session closes and the stop waits;
+    /// a new pick then fails rather than overtake it; WHEN the queue has
+    /// room THEN the waiting stop goes, naming its share.
+    #[tokio::test]
+    async fn given_a_full_queue_when_a_share_stops_then_the_stop_waits_and_the_call_runs_on() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let share = fixture.call.screen_share;
+        while fixture
+            .call
+            .link
+            .send(ToWorker::SetMuted { muted: true })
+            .is_ok()
+        {}
+
+        plain(&fixture.call.screen_control).stops += 1;
+        assert_eq!(fixture.call.screen_command(&inner, false, 1), Ok(()));
+        assert!(first.load(Ordering::SeqCst), "the session closed");
+        assert_eq!(fixture.call.screen_stop_pending, Some(share));
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&second)))
+            .unwrap();
+        assert!(second.load(Ordering::SeqCst), "no start before the stop");
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert_eq!(fixture.call.screen_share, share);
+
+        let mut last = None;
+        while let Ok(message) = fixture.to_worker.try_recv() {
+            last = Some(message);
+        }
+        assert!(matches!(last, Some(ToWorker::SetMuted { .. })));
+        let permit = screen_stop_room(Some(fixture.call.link.command_sender())).await;
+        fixture.call.screen_stop_room_ready(permit).unwrap();
+        assert_eq!(fixture.call.screen_stop_pending, None);
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None, share: stopped }) if stopped == share
+        ));
+    }
+
+    /// GIVEN a platform without screen sharing WHEN the page starts a share
+    /// twice (the handle shows `Starting` each time) THEN each attempt
+    /// publishes `Unavailable` again, so the page never stays on `Starting`.
+    #[tokio::test]
+    async fn given_no_screen_source_when_started_again_then_unavailable_is_published_again() {
+        let (mut fixture, inner, _) = call_with_source(false);
+        fixture.call.view.apply(&FromWorker::Connected);
+        let shown = |inner: &Inner| match &*inner.state.borrow() {
+            CallState::Active { screen, .. } => *screen,
+            other => panic!("{other:?}"),
+        };
+        for _ in 0..2 {
+            fixture.call.screen_command(&inner, true, 0).unwrap();
+            assert_eq!(shown(&inner), CallScreen::Unavailable);
+            // What `set_screen(true)` shows before the task runs.
+            inner.state.send_modify(|state| {
+                if let CallState::Active { screen, .. } = state {
+                    *screen = CallScreen::Starting;
+                }
+            });
+        }
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        assert_eq!(shown(&inner), CallScreen::Unavailable);
+    }
+
+    /// GIVEN a worker whose command queue is full WHEN a pick ends THEN the
+    /// share is unavailable, its session closes and the call runs on.
+    #[tokio::test]
+    async fn given_a_full_worker_queue_when_a_pick_ends_then_only_the_share_fails() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        while fixture
+            .call
+            .link
+            .send(ToWorker::SetMuted { muted: true })
+            .is_ok()
+        {}
+        let dropped = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            fixture.call.screen_picked(&inner, Ok(grant(&dropped))),
+            Ok(())
+        );
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+        assert!(!fixture.call.screen_sent);
+        while let Ok(message) = fixture.to_worker.try_recv() {
+            assert!(!matches!(message, ToWorker::SetScreen { .. }));
+        }
+    }
+
+    /// GIVEN share A stopped and share B started WHEN A's late state comes
+    /// THEN B's session stays open and the state is not shown; B's own
+    /// states follow, and B's stop names B.
+    #[tokio::test]
+    async fn given_a_late_state_of_an_older_share_then_the_newer_share_keeps_its_session() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&first)))
+            .unwrap();
+        let _ = fixture.to_worker.try_recv();
+        let older = fixture.call.screen_share;
+        // As `set_screen(false)` does: counted, then queued.
+        plain(&fixture.call.screen_control).stops += 1;
+        fixture.call.screen_command(&inner, false, 1).unwrap();
+        let _ = fixture.to_worker.try_recv();
+        fixture.call.screen_command(&inner, true, 1).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        fixture
+            .call
+            .screen_picked(&inner, Ok(grant(&second)))
+            .unwrap();
+        let newer = fixture.call.screen_share;
+        assert_ne!(newer, older);
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen {
+                target: Some(_),
+                share
+            }) if share == newer
+        ));
+        for state in [ScreenState::On, ScreenState::Off] {
+            fixture
+                .call
+                .worker_event(
+                    &inner,
+                    &FromWorker::Screen {
+                        state,
+                        share: older,
+                    },
+                )
+                .unwrap();
+        }
+        assert!(!second.load(Ordering::SeqCst), "B's session stays open");
+        assert!(fixture.call.screen_sent);
+        assert_eq!(fixture.call.view.screen, CallScreen::Starting);
+        fixture
+            .call
+            .worker_event(
+                &inner,
+                &FromWorker::Screen {
+                    state: ScreenState::On,
+                    share: newer,
+                },
+            )
+            .unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::On);
+        plain(&fixture.call.screen_control).stops += 1;
+        fixture.call.screen_command(&inner, false, 2).unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None, share }) if share == newer
+        ));
+        assert!(second.load(Ordering::SeqCst));
+    }
+
+    /// GIVEN a running share WHEN the desktop closes the portal session THEN
+    /// the worker is told to stop and the share is off.
+    #[tokio::test]
+    async fn given_the_desktop_closes_the_session_then_the_share_ends() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let mut with_signal = grant(&dropped);
+        with_signal.closed = Some(closed_rx);
+        fixture.call.screen_picked(&inner, Ok(with_signal)).unwrap();
+        let _ = fixture.to_worker.try_recv();
+        closed_tx.send(()).unwrap();
+        screen_session_closed(&mut fixture.call.screen_closed).await;
+        fixture.call.screen_ended_by_desktop(&inner).unwrap();
+        assert!(matches!(
+            fixture.to_worker.try_recv(),
+            Ok(ToWorker::SetScreen { target: None, .. })
+        ));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(fixture.call.view.screen, CallScreen::Off);
+    }
+
+    /// GIVEN the end of the call WHEN the call is torn down THEN a pick in
+    /// flight is cancelled and the session closes with it.
+    #[tokio::test]
+    async fn given_the_call_ends_then_the_pick_is_cancelled_and_the_session_closes() {
+        let (mut fixture, inner, _) = call_with_source(true);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let cancel = fixture
+            .call
+            .screen_pick
+            .as_ref()
+            .expect("a pick")
+            .cancel
+            .clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        plain(&fixture.call.screen_control).session = Some(Box::new(SessionGuard(dropped.clone())));
+        fixture.call.finish(true).await;
+        assert!(cancel.load(Ordering::SeqCst), "the pick was cancelled");
+        assert!(dropped.load(Ordering::SeqCst), "the session closed");
+    }
+
+    /// GIVEN screen sharers and screen video WHEN the worker says so THEN a
+    /// member shows as sharing, the screen tile (5) carries the sharer, a
+    /// stranger is not marked, and a member that leaves loses both.
+    #[test]
+    fn given_remote_screen_shares_then_members_show_as_sharing_and_tile_five_is_theirs() {
+        let mut view = view();
+        let share = |identity: &str, sharing| FromWorker::ScreenSharer {
+            identity: identity.to_owned(),
+            sharing,
+        };
+        assert_eq!(
+            view.apply(&share("@a:example.org:A", true)),
+            Applied::Changed
+        );
+        assert_eq!(view.apply(&share("@a:example.org:A", true)), Applied::Same);
+        assert_eq!(view.apply(&share("@x:example.org:X", true)), Applied::Same);
+        view.apply(&FromWorker::Connected);
+        let CallState::Active { participants, .. } = view.state() else {
+            panic!("active");
+        };
+        assert_eq!(
+            participants.iter().map(|p| p.sharing).collect::<Vec<_>>(),
+            [true, false]
+        );
+        view.apply(&started(5, "@a:example.org:A"));
+        let tiles = view.video_tiles();
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].tile, 5);
+        assert_eq!(view.video_allowed().1, [false, false, false, false, true]);
+        assert_eq!(
+            view.apply(&share("@a:example.org:A", false)),
+            Applied::Changed
+        );
+        view.apply(&share("@a:example.org:A", true));
+        assert_eq!(
+            view.apply(&FromWorker::ParticipantLeft {
+                identity: "@a:example.org:A".to_owned()
+            }),
+            Applied::Changed
+        );
+        assert!(!view.sharing.contains("@a:example.org:A"));
+        assert!(view.video_tiles().is_empty());
+    }
+
+    /// GIVEN a share hint for an identity whose membership has not arrived
+    /// WHEN the membership arrives THEN the member shows as sharing; a
+    /// stranger is never shown, and hints beyond the bound are not kept.
+    #[test]
+    fn given_a_share_hint_before_the_membership_then_it_shows_once_the_member_arrives() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        let early = FromWorker::ScreenSharer {
+            identity: "@c:example.org:C".to_owned(),
+            sharing: true,
+        };
+        assert_eq!(view.apply(&early), Applied::Same, "nothing shown yet");
+        let sharing = |view: &View| {
+            let CallState::Active { participants, .. } = view.state() else {
+                panic!("active");
+            };
+            participants
+                .iter()
+                .filter(|p| p.sharing)
+                .map(|p| format!("{}:{}", p.user_id, p.device_id))
+                .collect::<Vec<_>>()
+        };
+        assert!(sharing(&view).is_empty());
+        view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@c:example.org", "C", "https://sfu.example.org"),
+        ]);
+        assert_eq!(sharing(&view), ["@c:example.org:C"]);
+
+        for index in 0..persephone_call_protocol::MAX_PARTICIPANTS + 4 {
+            view.apply(&FromWorker::ScreenSharer {
+                identity: format!("@s{index}:example.org:S"),
+                sharing: true,
+            });
+        }
+        assert_eq!(
+            view.sharing.len(),
+            persephone_call_protocol::MAX_PARTICIPANTS
+        );
+        assert_eq!(sharing(&view), ["@c:example.org:C"], "strangers hidden");
+    }
+
+    /// GIVEN each worker screen state WHEN applied THEN the page's state
+    /// follows, and a screen problem never ends the call.
+    #[test]
+    fn given_worker_screen_states_then_the_view_follows_and_the_call_continues() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        for (state, shown) in [
+            (ScreenState::Starting, CallScreen::Starting),
+            (ScreenState::On, CallScreen::On),
+            (ScreenState::NotFound, CallScreen::NotFound),
+            (ScreenState::Unavailable, CallScreen::Unavailable),
+            (ScreenState::Refused, CallScreen::Refused),
+            (ScreenState::Off, CallScreen::Off),
+        ] {
+            let applied = view.apply(&FromWorker::Screen { state, share: 1 });
+            assert!(
+                matches!(applied, Applied::Changed | Applied::Same),
+                "{state:?}"
+            );
+            assert_eq!(view.screen, shown);
+        }
+    }
+
+    /// GIVEN no call, a joining call or a closed queue WHEN the page starts a
+    /// share THEN it is refused; GIVEN a connected call THEN the task gets
+    /// the command with no source and the state shows `starting` at once.
+    #[tokio::test]
+    async fn given_a_connected_call_then_the_screen_command_reaches_the_task() {
+        let calls = controller(FakeHost::new(true, None));
+        assert_eq!(calls.set_screen(true), Err(CallError::NotInCall));
+        let calls = controller(FakeHost::new(true, None));
+        let joining = CallState::Joining {
+            room_id: room_id!("!r:example.org").to_owned(),
+        };
+        let (_store, _commands, _) = running_call(&calls, joining);
+        assert_eq!(calls.set_screen(true), Err(CallError::NotInCall));
+
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _) = running_call(&calls, active_state());
+        assert_eq!(calls.set_screen(true), Ok(()));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Screen {
+                on: true,
+                stops: 0,
+                request: 1
+            })
+        ));
+        let CallState::Active { screen, .. } = calls.state() else {
+            panic!("active");
+        };
+        assert_eq!(screen, CallScreen::Starting);
+        assert_eq!(calls.set_screen(false), Ok(()));
+        // The stop is counted before the task reads it.
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Screen {
+                on: false,
+                stops: 1,
+                ..
+            })
+        ));
+        let CallState::Active { screen, .. } = calls.state() else {
+            panic!("active");
+        };
+        assert_eq!(screen, CallScreen::Off);
+    }
+
+    /// GIVEN a Linux grant with a remote WHEN it goes to the worker THEN the
+    /// remote goes over the camera channel first, with the byte `s`, and the
+    /// command follows; a portal grant without a remote is unavailable.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn given_a_portal_grant_then_the_screen_remote_goes_first_with_the_byte_s() {
+        use persephone_call_protocol::ScreenTarget;
+        use std::io::Read;
+        let (mut fixture, inner, _) = call_with_source(true);
+        let (core_end, mut worker_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (command_tx, mut commands) = mpsc::channel(4);
+        fixture.call.link = CallWorkerLink::from_parts(
+            command_tx,
+            mpsc::channel(1).1,
+            Box::new(FakeProcess(Arc::new(AtomicBool::new(false)))),
+        )
+        .with_camera_channel(core_end);
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let remote = std::os::fd::OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let portal = ScreenGrant {
+            target: ScreenTarget::Portal { node: 42 },
+            remote: Some(remote),
+            session: Some(Box::new(SessionGuard(dropped.clone()))),
+            closed: None,
+        };
+        fixture.call.screen_picked(&inner, Ok(portal)).unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(worker_end.read(&mut byte).unwrap(), 1, "the remote went");
+        assert_eq!(byte, [b's']);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ToWorker::SetScreen {
+                target: Some(ScreenTarget::Portal { node: 42 }),
+                share: 1
+            })
+        ));
+        assert!(!dropped.load(Ordering::SeqCst));
+
+        fixture.call.screen_command(&inner, false, 0).unwrap();
+        fixture.call.screen_command(&inner, true, 0).unwrap();
+        let no_remote = ScreenGrant {
+            target: ScreenTarget::Portal { node: 43 },
+            remote: None,
+            session: None,
+            closed: None,
+        };
+        fixture.call.screen_picked(&inner, Ok(no_remote)).unwrap();
+        assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
     }
 }

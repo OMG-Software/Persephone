@@ -17,11 +17,22 @@ tokio-stream = { version = "=0.1.19", default-features = false }
 zeroize = "=1.9.1"
 
 [target.'cfg(windows)'.dependencies]
-# Camera capture through Media Foundation (ADR-0048): only these features.
+# Camera capture through Media Foundation (ADR-0048) and screen capture
+# through Windows.Graphics.Capture (ADR-0053): only these features.
 windows = { version = "=0.62.2", default-features = false, features = [
+  "Foundation",
+  "Graphics_Capture",
+  "Graphics_DirectX_Direct3D11",
   "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
   "Win32_Media_MediaFoundation",
   "Win32_System_Com",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
 ] }
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",

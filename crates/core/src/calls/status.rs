@@ -81,6 +81,7 @@ pub fn status(state: &CallState) -> CallStatus {
             muted,
             participants,
             camera,
+            screen,
             video,
             ring_declined,
         } => CallStatus {
@@ -96,11 +97,13 @@ pub fn status(state: &CallState) -> CallStatus {
                     speaking: p.speaking,
                     reachable: p.reachable,
                     keyed: p.keyed,
+                    sharing: p.sharing,
                 })
                 .collect(),
             ended: None,
             join_error: None,
             camera: *camera,
+            screen: *screen,
             video: video.iter().take(CALL_VIDEO_TILES_MAX).cloned().collect(),
             ring_declined: *ring_declined,
         },
@@ -244,7 +247,7 @@ mod tests {
         int, user_id,
     };
     use matrix_sdk::ruma::{owned_device_id, owned_user_id, room_id};
-    use persephone_contracts::{CallCamera, CallVideoTile};
+    use persephone_contracts::{CallCamera, CallScreen, CallVideoTile};
 
     /// Power levels for a room of version 10 with `edit` applied to the default content.
     fn levels(edit: impl FnOnce(&mut RoomPowerLevelsEventContent)) -> RoomPowerLevels {
@@ -447,6 +450,7 @@ mod tests {
             muted: true,
             participants: Vec::new(),
             camera: CallCamera::Off,
+            screen: CallScreen::Off,
             video: Vec::new(),
             ring_declined: false,
         };
@@ -488,6 +492,7 @@ mod tests {
             speaking: true,
             reachable: false,
             keyed: true,
+            sharing: true,
         };
         let many = vec![participant; CALL_PARTICIPANTS_MAX + 5];
         let active = status(&CallState::Active {
@@ -495,6 +500,7 @@ mod tests {
             muted: false,
             participants: many,
             camera: CallCamera::On,
+            screen: CallScreen::On,
             video: vec![
                 CallVideoTile {
                     tile: 0,
@@ -509,7 +515,10 @@ mod tests {
         assert!(active.ring_declined);
         assert!(!CallStatus::idle().ring_declined);
         assert_eq!(active.camera, CallCamera::On);
+        assert_eq!(active.screen, CallScreen::On);
+        assert!(active.participants.iter().all(|p| p.sharing));
         assert_eq!(active.video.len(), CALL_VIDEO_TILES_MAX);
+        assert_eq!(CALL_VIDEO_TILES_MAX, 6);
         assert_eq!(active.phase, CallPhase::Active);
         assert_eq!(active.participants.len(), CALL_PARTICIPANTS_MAX);
         assert_eq!(active.participants[0].user_id, "@a:example.org");

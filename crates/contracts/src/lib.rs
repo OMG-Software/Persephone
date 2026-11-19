@@ -2176,6 +2176,9 @@ pub struct CallParticipant {
     pub reachable: bool,
     /// This device holds a key for it. Without one it cannot be heard.
     pub keyed: bool,
+    /// It shares its screen (ADR-0053). The sender's label is only a
+    /// display hint; shown as text.
+    pub sharing: bool,
 }
 
 /// Why a call ended.
@@ -2249,8 +2252,9 @@ pub struct CallDevices {
     pub unreadable: bool,
 }
 
-/// Most video tiles a call shows: the own camera and four remote ones.
-pub const CALL_VIDEO_TILES_MAX: usize = 5;
+/// Most video tiles a call shows: the own camera, four remote cameras and
+/// the one remote screen share (ADR-0053).
+pub const CALL_VIDEO_TILES_MAX: usize = 6;
 
 /// The camera, as the page shows it (ADR-0048).
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -2266,6 +2270,24 @@ pub enum CallCamera {
     Unavailable,
 }
 
+/// The own screen share, as the page shows it (ADR-0053).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallScreen {
+    Off,
+    /// Asked to start; the core's chooser or warning, the portal or the
+    /// worker has not answered yet.
+    Starting,
+    On,
+    /// The chosen screen is gone or has another size.
+    NotFound,
+    /// Screen sharing cannot run here (this OS, no portal, or capture
+    /// failed).
+    Unavailable,
+    /// The OS or the portal refused the capture.
+    Refused,
+}
+
 /// A remote device, by the same IDs [`CallParticipant`] carries.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2275,12 +2297,13 @@ pub struct CallParticipantRef {
 }
 
 /// One video tile. Tile 0 is the own camera (`own` is true and
-/// `participant` is null). Tiles 1 to 4 show a remote device. The picture
-/// itself comes from `call_video_frame`.
+/// `participant` is null). Tiles 1 to 4 show a remote camera. Tile 5 shows
+/// the one decoded remote screen share (ADR-0053). The picture itself comes
+/// from `call_video_frame`.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallVideoTile {
-    /// 0 to 4.
+    /// 0 to 5.
     pub tile: u8,
     #[serde(deserialize_with = "Option::deserialize")]
     pub participant: Option<CallParticipantRef>,
@@ -2308,6 +2331,8 @@ pub struct CallStatus {
     /// Set when this reply refuses a join.
     pub join_error: Option<CallJoinError>,
     pub camera: CallCamera,
+    /// The own screen share (ADR-0053).
+    pub screen: CallScreen,
     /// The active video tiles, at most [`CALL_VIDEO_TILES_MAX`].
     pub video: Vec<CallVideoTile>,
     /// The other member of a direct chat declined this call's ring
@@ -2360,6 +2385,7 @@ impl CallStatus {
             ended: None,
             join_error: None,
             camera: CallCamera::Off,
+            screen: CallScreen::Off,
             video: Vec::new(),
             ring_declined: false,
         }
@@ -2503,6 +2529,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallEnd::decl(&config)),
         format!("export {}", CallJoinError::decl(&config)),
         format!("export {}", CallCamera::decl(&config)),
+        format!("export {}", CallScreen::decl(&config)),
         format!("export {}", CallParticipantRef::decl(&config)),
         format!("export {}", CallVideoTile::decl(&config)),
         format!("export {}", CallStatus::decl(&config)),
@@ -2689,27 +2716,27 @@ mod personal_contract_tests {
     fn call_contracts_refuse_unknown_fields_and_codes() {
         assert_eq!(
             serde_json::to_string(&CallStatus::idle()).unwrap(),
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[],"ringDeclined":false}"#
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#
         );
         for wire in [
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[],"token":"x"}"#,
-            r#"{"phase":"paused","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[]}"#,
-            r#"{"phase":"ended","roomId":null,"muted":false,"participants":[],"ended":"crashed","joinError":null,"camera":"off","video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":"busy","camera":"off","video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":"no","participants":[],"ended":null,"joinError":null,"camera":"off","video":[]}"#,
-            r#"{"phase":"active","roomId":null,"muted":false,"participants":[{"userId":"@a:s","deviceId":"D","speaking":false,"reachable":true,"keyed":true,"url":"x"}],"ended":null,"joinError":null,"camera":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"token":"x"}"#,
+            r#"{"phase":"paused","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"ended","roomId":null,"muted":false,"participants":[],"ended":"crashed","joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":"busy","camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":"no","participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"active","roomId":null,"muted":false,"participants":[{"userId":"@a:s","deviceId":"D","speaking":false,"reachable":true,"keyed":true,"sharing":false,"url":"x"}],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
             // The camera and video fields are required, and the camera is a closed set.
             r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null}"#,
             r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off"}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off"}"#,
             r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"notFound","video":[]}"#,
             r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"broken","video":[]}"#,
             r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":true,"video":[]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[{"tile":256,"participant":null,"own":true}]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[{"tile":-1,"participant":null,"own":true}]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[{"tile":0,"participant":null,"own":true,"url":"x"}]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[{"tile":1,"participant":{"userId":"@a:s"},"own":false}]}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[{"tile":1,"participant":{"userId":"@a:s","deviceId":"D","x":1},"own":false}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":256,"participant":null,"own":true}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":-1,"participant":null,"own":true}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":0,"participant":null,"own":true,"url":"x"}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":1,"participant":{"userId":"@a:s"},"own":false}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":1,"participant":{"userId":"@a:s","deviceId":"D","x":1},"own":false}]}"#,
         ] {
             assert!(serde_json::from_str::<CallStatus>(wire).is_err(), "{wire}");
         }
@@ -2743,7 +2770,7 @@ mod personal_contract_tests {
             assert!(serde_json::from_str::<CallRings>(wire).is_err(), "{wire}");
         }
         let status: CallStatus = serde_json::from_str(
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
         )
         .unwrap();
         assert!(!status.ring_declined);

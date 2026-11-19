@@ -1,6 +1,7 @@
 import type {
   AppStatus,
   CallCamera,
+  CallScreen,
   CallDevices,
   CallIntent,
   CallRings,
@@ -222,7 +223,7 @@ void bigintFilter;
 void unknownAttachment;
 void unknownSync;
 void missingHealth;
-const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, camera: "off", video: [], ringDeclined: false };
+const idleCall: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, camera: "off", screen: "off", video: [], ringDeclined: false };
 const readyCall: CallReadiness = { available: false, reason: "no_call_server", activeMembers: 0 };
 // @ts-expect-error a status carries codes, never a token or URL
 const callWithToken: CallStatus = { ...idleCall, token: "secret" };
@@ -246,8 +247,14 @@ const unknownIntent: CallIntent = "hologram";
 const missingDeclined: CallStatus = { ...idleCall, ringDeclined: undefined };
 // @ts-expect-error only the defined camera states are accepted
 const unknownCamera: CallCamera = "notFound";
+// @ts-expect-error only the defined screen states are accepted
+const unknownScreen: CallScreen = "notFound";
+// @ts-expect-error the screen state is required
+const missingScreen: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, camera: "off", video: [] };
+const sharingScreen: CallScreen = "starting";
+void sharingScreen;
 // @ts-expect-error the camera state is required
-const missingCamera: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, video: [] };
+const missingCamera: CallStatus = { phase: "idle", roomId: null, muted: false, participants: [], ended: null, joinError: null, screen: "off", video: [] };
 // @ts-expect-error a tile names its participant explicitly, or null
 const tileWithoutParticipant: CallVideoTile = { tile: 0, own: true, stream: 0 };
 // @ts-expect-error a tile carries no picture data or URL
@@ -257,6 +264,8 @@ const tileWithoutStream: CallVideoTile = { tile: 0, participant: null, own: true
 const remoteTile: CallVideoTile = { tile: 1, participant: { userId: "@a:s", deviceId: "D" }, own: false, stream: 1 };
 void unknownCamera;
 void missingCamera;
+void unknownScreen;
+void missingScreen;
 void tileWithoutParticipant;
 void tileWithoutStream;
 void tileWithUrl;
