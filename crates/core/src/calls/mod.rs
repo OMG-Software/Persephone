@@ -18,6 +18,8 @@
 //!   and parsed strictly: a sender can set a key only for its own identity.
 //! * [`sfu`]: the LiveKit JWT service request (`/sfu/get`) with an OpenID
 //!   token. The answer must name a `wss://` URL and a well-formed JWT.
+//! * [`other_sfu`]: which SFU each member is on, the other SFUs a call connects
+//!   to (ADR-0054) and what the user has been asked about them.
 //! * [`readiness`]: whether the homeserver offers an SFU transport and TURN
 //!   servers, so the page can say a call is not possible before it starts.
 //! * [`devices`]: the saved microphone, speaker and camera, and the device
@@ -46,6 +48,7 @@ pub mod encryption_keys;
 pub mod incoming;
 pub mod keys;
 pub mod membership;
+pub mod other_sfu;
 pub mod readiness;
 pub mod ring_events;
 pub mod rings;

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::task::Poll;
 use std::time::Duration;
 
 use livekit::{
@@ -35,20 +36,21 @@ use livekit::{
 };
 use livekit_signaling::SignalError;
 use persephone_call_protocol::{
-    CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_SCREEN_FPS, MAX_VIDEO_FPS,
-    MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE, ScreenState, ScreenTarget, ToWorker,
-    VIDEO_TILES,
+    CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_OTHER_CONNECTIONS, MAX_PARTICIPANTS,
+    MAX_SCREEN_FPS, MAX_VIDEO_FPS, MAX_VIDEO_PIXELS, MAX_VIDEO_SIDE, SCREEN_TILE, ScreenState,
+    ScreenTarget, ToWorker, VIDEO_TILES,
 };
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 use tokio_stream::StreamExt;
+use zeroize::Zeroizing;
 
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
-    ConnectFault, RoomChange, SpeakingTracker, apply, bounded_device_list, choose_device,
-    failure_for_connect, valid_identity,
+    ConnectFault, RoomChange, Slot, Slots, SpeakingTracker, apply, bounded_device_list,
+    choose_device, failure_for_connect, valid_identity,
 };
 use crate::output::{Closed, Output, PictureSink};
 use crate::screen;
@@ -147,6 +149,9 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     if !containment::apply_stage2() && !cfg!(feature = "dev-uncontained") {
         return fail(output, FailureCode::Containment).await;
     }
+    // The same options (key provider, TURN servers) serve every connection to
+    // another SFU (ADR-0054).
+    let other_options = options.clone();
     let connected = Room::connect(&sfu_url, &jwt, options).await;
     // The token is not needed after the connection attempt.
     drop(jwt);
@@ -170,7 +175,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     }
     let mut tracker = SpeakingTracker::default();
     for identity in room.remote_participants().keys() {
-        let change = RoomChange::Joined(identity.to_string());
+        let change = RoomChange::Joined(0, identity.to_string());
         for message in apply(change, &mut tracker) {
             if output.send(message).await.is_err() {
                 let _ = room.close().await;
@@ -188,6 +193,13 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     let mut screens = ScreenInbox {
         ended: screen_ends.clone(),
         opened: screen_open_done,
+    };
+    // At most one connect is in flight for each other SFU, so this many
+    // results can wait.
+    let (connect_tx, connect_done) = mpsc::channel::<Connected>(usize::from(MAX_OTHER_CONNECTIONS));
+    let mut others_inbox = OtherInbox {
+        events: OtherEvents::default(),
+        connected: connect_done,
     };
     let mut call = Call {
         room: &room,
@@ -211,6 +223,9 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         screen_share: 0,
         screen_open_tx,
         remote: RemoteVideo::default(),
+        other_options,
+        connect_tx,
+        others: Others::default(),
     };
     let mut end = None;
     if camera_on
@@ -230,12 +245,15 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
                 &mut camera_failed,
                 &mut open_done,
                 &mut screens,
+                &mut others_inbox,
                 &mut tracker,
             )
             .await
         }
     };
     call.shutdown(&mut open_done, &mut screens).await;
+    // Every connection to another SFU ends with the call (ADR-0054).
+    call.close_others(&mut others_inbox).await;
     let _ = room.close().await;
     drop(audio);
     match end {
@@ -363,6 +381,79 @@ struct Call<'a> {
     screen_share: u32,
     screen_open_tx: mpsc::Sender<Opened<OpenedScreen, ScreenState>>,
     remote: RemoteVideo,
+    /// The room options for a connection to another SFU (ADR-0054).
+    other_options: RoomOptions,
+    /// A connect task reports here.
+    connect_tx: mpsc::Sender<Connected>,
+    /// The connections to other SFUs by index (1 to 3). An index is used
+    /// once: a failed or ended connection is never reopened.
+    others: Others,
+}
+
+/// The connections to other SFUs (ADR-0054). They subscribe only: nothing
+/// here publishes a track or sets an own key index.
+type Others = Slots<JoinHandle<()>, Room>;
+
+/// The result of one connect task.
+struct Connected {
+    index: u8,
+    result: Result<(Room, UnboundedReceiver<RoomEvent>), ()>,
+}
+
+/// The event receivers of the rooms of other SFUs. The SDK queue of each is
+/// unbounded, as for the own room; one loop drains all of them.
+#[derive(Default)]
+struct OtherEvents {
+    receivers: [Option<UnboundedReceiver<RoomEvent>>; MAX_OTHER_CONNECTIONS as usize],
+    /// Where the next poll starts, so no room starves the others.
+    next_start: usize,
+}
+
+impl OtherEvents {
+    fn insert(&mut self, index: u8, events: UnboundedReceiver<RoomEvent>) {
+        if let Some(slot) = usize::from(index)
+            .checked_sub(1)
+            .and_then(|slot| self.receivers.get_mut(slot))
+        {
+            *slot = Some(events);
+        }
+    }
+
+    fn remove(&mut self, index: u8) {
+        if let Some(slot) = usize::from(index)
+            .checked_sub(1)
+            .and_then(|slot| self.receivers.get_mut(slot))
+        {
+            *slot = None;
+        }
+    }
+
+    /// The next event of any connection, with its index. `None` as the item
+    /// means that room's queue closed. With no connection it never ends.
+    async fn next(&mut self) -> (u8, Option<RoomEvent>) {
+        let count = self.receivers.len();
+        let start = self.next_start % count;
+        let found = std::future::poll_fn(|cx| {
+            for step in 0..count {
+                let slot = (start + step) % count;
+                if let Some(receiver) = self.receivers[slot].as_mut()
+                    && let Poll::Ready(item) = receiver.poll_recv(cx)
+                {
+                    return Poll::Ready((slot, item));
+                }
+            }
+            Poll::Pending
+        })
+        .await;
+        self.next_start = found.0 + 1;
+        (found.0 as u8 + 1, found.1)
+    }
+}
+
+/// What the event loop waits for about the connections to other SFUs.
+struct OtherInbox {
+    events: OtherEvents,
+    connected: Receiver<Connected>,
 }
 
 /// What the event loop waits for about the screen share.
@@ -485,7 +576,7 @@ struct LocalCamera {
 }
 
 /// One remote video track: the participant's identity and the track's SID.
-type TrackKey = (String, String);
+type TrackKey = (String, String, u8);
 
 /// Remote video: which tracks have a tile, which wait, and the tasks that read
 /// the pictures of each tile.
@@ -1172,6 +1263,7 @@ impl Call<'_> {
     async fn start_reader(
         &mut self,
         tile: u8,
+        connection: u8,
         identity: &str,
         track: RtcVideoTrack,
     ) -> Result<(), Closed> {
@@ -1180,6 +1272,7 @@ impl Call<'_> {
         self.output
             .send(FromWorker::VideoStarted {
                 tile,
+                connection,
                 identity: identity.to_owned(),
             })
             .await?;
@@ -1197,9 +1290,14 @@ impl Call<'_> {
         for removed in &screens.removed {
             // A member that still shares another track stays marked.
             let identity = &removed.0;
-            if !self.remote.screens.any(|key| key.0 == *identity) {
+            if !self
+                .remote
+                .screens
+                .any(|key| key.0 == *identity && key.2 == removed.2)
+            {
                 self.output
                     .send(FromWorker::ScreenSharer {
+                        connection: removed.2,
                         identity: identity.clone(),
                         sharing: false,
                     })
@@ -1218,7 +1316,7 @@ impl Call<'_> {
             if let Some(key) = freed.promoted
                 && let Some(track) = self.remote.waiting.remove(&key)
             {
-                self.start_reader(freed.tile, &key.0, track).await?;
+                self.start_reader(freed.tile, key.2, &key.0, track).await?;
             }
         }
         for freed in self.remote.tiles.remove_where(&matches) {
@@ -1234,14 +1332,125 @@ impl Call<'_> {
             if let Some(key) = freed.promoted
                 && let Some(track) = self.remote.waiting.remove(&key)
             {
-                self.start_reader(freed.tile, &key.0, track).await?;
+                self.start_reader(freed.tile, key.2, &key.0, track).await?;
             }
         }
         Ok(())
     }
 
+    /// Starts the connection to another SFU (ADR-0054). The connect runs on
+    /// its own task, so the loop keeps serving the core; its result comes back
+    /// through a bounded channel. An index that is not 1 to 3, or one used
+    /// before, is a protocol failure of the core.
+    fn begin_other(
+        &mut self,
+        index: u8,
+        url: String,
+        jwt: Zeroizing<String>,
+    ) -> Result<Vec<FromWorker>, FailureCode> {
+        let options = self.other_options.clone();
+        let done = self.connect_tx.clone();
+        let task = tokio::spawn(async move {
+            let result = Room::connect(&url, &jwt, options).await.map_err(|_| ());
+            // The token is not needed after the connection attempt.
+            drop(jwt);
+            let _ = done.send(Connected { index, result }).await;
+        });
+        match self.others.begin(index, task) {
+            Ok(()) => Ok(Vec::new()),
+            Err(task) => {
+                task.abort();
+                Err(FailureCode::Protocol)
+            }
+        }
+    }
+
+    /// A connect task ended. The room only subscribes: nothing is published
+    /// on it. A failure is reported and never ends the call.
+    async fn other_connected(
+        &mut self,
+        done: Connected,
+        events: &mut OtherEvents,
+    ) -> Result<(), Closed> {
+        let Connected { index, result } = done;
+        if !self.others.is_connecting(index) {
+            // Not a connect this call waits for: close what came.
+            if let Ok((room, _)) = result {
+                let _ = room.close().await;
+            }
+            return Ok(());
+        }
+        match result {
+            Ok((room, receiver)) => {
+                self.output
+                    .send(FromWorker::Connection {
+                        connection: index,
+                        up: true,
+                    })
+                    .await?;
+                for identity in room
+                    .remote_participants()
+                    .keys()
+                    .take(MAX_PARTICIPANTS)
+                    .map(ToString::to_string)
+                    .filter(|identity| valid_identity(identity))
+                {
+                    self.output
+                        .send(FromWorker::ParticipantJoined {
+                            connection: index,
+                            identity,
+                        })
+                        .await?;
+                }
+                events.insert(index, receiver);
+                self.others.up(index, room);
+                Ok(())
+            }
+            Err(()) => {
+                self.others.end(index);
+                self.output
+                    .send(FromWorker::Connection {
+                        connection: index,
+                        up: false,
+                    })
+                    .await
+            }
+        }
+    }
+
+    /// The room of another SFU ended or its queue closed: its tracks go and
+    /// its room closes. The connection is not reopened (ADR-0054).
+    async fn other_lost(&mut self, index: u8, events: &mut OtherEvents) -> Result<(), Closed> {
+        events.remove(index);
+        self.remove_tracks(|key| key.2 == index).await?;
+        if let Some(Slot::Up(room)) = self.others.end(index) {
+            let _ = room.close().await;
+        }
+        Ok(())
+    }
+
+    /// Ends every connection to another SFU: a connect still running stops, a
+    /// finished one that nobody took closes, and each open room closes.
+    async fn close_others(&mut self, inbox: &mut OtherInbox) {
+        inbox.connected.close();
+        while let Ok(done) = inbox.connected.try_recv() {
+            if let Ok((room, _)) = done.result {
+                let _ = room.close().await;
+            }
+        }
+        for slot in self.others.take_all() {
+            match slot {
+                Slot::Connecting(task) => task.abort(),
+                Slot::Up(room) => {
+                    let _ = room.close().await;
+                }
+                Slot::Ended => {}
+            }
+        }
+    }
+
     /// Follows the video tracks of remote participants.
-    async fn on_event(&mut self, event: &RoomEvent) -> Result<(), Closed> {
+    async fn on_event(&mut self, connection: u8, event: &RoomEvent) -> Result<(), Closed> {
         match event {
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Video(track),
@@ -1254,20 +1463,23 @@ impl Call<'_> {
                 if !valid_identity(&identity) {
                     return Ok(());
                 }
-                let key = (identity, publication.sid().to_string());
+                let key = (identity, publication.sid().to_string(), connection);
                 match self.remote.screens.add(key.clone()) {
                     Added::Tile(tile) => {
                         self.output
                             .send(FromWorker::ScreenSharer {
+                                connection,
                                 identity: key.0.clone(),
                                 sharing: true,
                             })
                             .await?;
-                        self.start_reader(tile, &key.0, track.rtc_track()).await
+                        self.start_reader(tile, connection, &key.0, track.rtc_track())
+                            .await
                     }
                     Added::Queued => {
                         self.output
                             .send(FromWorker::ScreenSharer {
+                                connection,
                                 identity: key.0.clone(),
                                 sharing: true,
                             })
@@ -1287,9 +1499,12 @@ impl Call<'_> {
                 if !valid_identity(&identity) {
                     return Ok(());
                 }
-                let key = (identity, publication.sid().to_string());
+                let key = (identity, publication.sid().to_string(), connection);
                 match self.remote.tiles.add(key.clone()) {
-                    Added::Tile(tile) => self.start_reader(tile, &key.0, track.rtc_track()).await,
+                    Added::Tile(tile) => {
+                        self.start_reader(tile, connection, &key.0, track.rtc_track())
+                            .await
+                    }
                     Added::Queued => {
                         self.remote.waiting.insert(key, track.rtc_track());
                         Ok(())
@@ -1305,12 +1520,14 @@ impl Call<'_> {
                 let key = (
                     participant.identity().to_string(),
                     publication.sid().to_string(),
+                    connection,
                 );
                 self.remove_tracks(|known| *known == key).await
             }
             RoomEvent::ParticipantDisconnected(participant) => {
                 let identity = participant.identity().to_string();
-                self.remove_tracks(|known| known.0 == identity).await
+                self.remove_tracks(|known| known.0 == identity && known.2 == connection)
+                    .await
             }
             _ => Ok(()),
         }
@@ -1404,6 +1621,7 @@ impl Call<'_> {
                 target: None,
                 share,
             } => Ok(self.screen_off(share).await),
+            ToWorker::Subscribe { index, url, jwt } => self.begin_other(index, url, jwt),
             ToWorker::Join { .. } | ToWorker::ListDevices | ToWorker::Leave => {
                 Err(FailureCode::Protocol)
             }
@@ -1602,6 +1820,7 @@ async fn event_loop(
     camera_failed: &mut Receiver<u64>,
     open_done: &mut Receiver<Opened<OpenedCamera, CameraState>>,
     screens: &mut ScreenInbox,
+    others: &mut OtherInbox,
     tracker: &mut SpeakingTracker,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
@@ -1612,15 +1831,44 @@ async fn event_loop(
             event = events.recv() => match event {
                 // A decryption failure of one participant does not end the call.
                 Some(event) => {
-                    if call.on_event(&event).await.is_err() {
+                    if call.on_event(0, &event).await.is_err() {
                         return End::Failed(FailureCode::Internal);
                     }
-                    if let Some(change) = room_change(&event) {
+                    if let Some(change) = room_change(0, &event) {
                         outgoing = apply(change, tracker);
                     }
                 }
                 None => return End::Failed(FailureCode::Network),
             },
+            (index, item) = others.events.next() => {
+                // A failure of another SFU never ends the call.
+                match item {
+                    Some(event) => {
+                        if call.on_event(index, &event).await.is_err() {
+                            return End::Failed(FailureCode::Internal);
+                        }
+                        if let Some(change) = room_change(index, &event) {
+                            outgoing = apply(change, tracker);
+                        }
+                        if matches!(event, RoomEvent::Disconnected { .. })
+                            && call.other_lost(index, &mut others.events).await.is_err()
+                        {
+                            return End::Failed(FailureCode::Internal);
+                        }
+                    }
+                    None => {
+                        outgoing = apply(RoomChange::Disconnected(index), tracker);
+                        if call.other_lost(index, &mut others.events).await.is_err() {
+                            return End::Failed(FailureCode::Internal);
+                        }
+                    }
+                }
+            }
+            Some(done) = others.connected.recv() => {
+                if call.other_connected(done, &mut others.events).await.is_err() {
+                    return End::Failed(FailureCode::Internal);
+                }
+            }
             message = input.recv() => match message {
                 Some(Input::Message(ToWorker::Leave)) | Some(Input::Eof) | None => {
                     return End::Left;
@@ -1898,21 +2146,24 @@ async fn publish_microphone(
 }
 
 /// Reduces a room event to what the core is told. Everything else is dropped.
-fn room_change(event: &RoomEvent) -> Option<RoomChange> {
+fn room_change(connection: u8, event: &RoomEvent) -> Option<RoomChange> {
     match event {
-        RoomEvent::ParticipantConnected(participant) => {
-            Some(RoomChange::Joined(participant.identity().to_string()))
-        }
-        RoomEvent::ParticipantDisconnected(participant) => {
-            Some(RoomChange::Left(participant.identity().to_string()))
-        }
+        RoomEvent::ParticipantConnected(participant) => Some(RoomChange::Joined(
+            connection,
+            participant.identity().to_string(),
+        )),
+        RoomEvent::ParticipantDisconnected(participant) => Some(RoomChange::Left(
+            connection,
+            participant.identity().to_string(),
+        )),
         RoomEvent::ActiveSpeakersChanged { speakers } => Some(RoomChange::Speakers(
+            connection,
             speakers
                 .iter()
                 .map(|speaker| speaker.identity().to_string())
                 .collect(),
         )),
-        RoomEvent::Disconnected { .. } => Some(RoomChange::Disconnected),
+        RoomEvent::Disconnected { .. } => Some(RoomChange::Disconnected(connection)),
         _ => None,
     }
 }
@@ -2527,5 +2778,54 @@ mod tests {
             .expect("thread starts");
         let opened = done.recv().await.expect("a result arrives");
         assert_eq!(opened.result.err(), Some(CameraState::Unavailable));
+    }
+
+    /// GIVEN rooms of two other SFUs (1 and 3) and no room at 2
+    /// WHEN each sends an event and one queue closes
+    /// THEN the events come with their index, the closed queue gives `None`,
+    /// and with no room left the wait never ends.
+    #[tokio::test]
+    async fn given_other_rooms_when_they_send_then_events_carry_their_index() {
+        let mut events = OtherEvents::default();
+        let (first_tx, first) = mpsc::unbounded_channel();
+        let (third_tx, third) = mpsc::unbounded_channel();
+        events.insert(1, first);
+        events.insert(3, third);
+        third_tx.send(RoomEvent::Reconnecting).expect("sent");
+        let (index, item) = events.next().await;
+        assert_eq!(index, 3);
+        assert!(matches!(item, Some(RoomEvent::Reconnecting)));
+        first_tx.send(RoomEvent::Reconnected).expect("sent");
+        let (index, item) = events.next().await;
+        assert_eq!(index, 1);
+        assert!(matches!(item, Some(RoomEvent::Reconnected)));
+        drop(first_tx);
+        let (index, item) = events.next().await;
+        assert_eq!((index, item.is_none()), (1, true));
+        events.remove(1);
+        events.remove(3);
+        let waited = tokio::time::timeout(Duration::from_millis(50), events.next()).await;
+        assert!(waited.is_err(), "no room, nothing to wait for");
+    }
+
+    /// GIVEN two rooms that both have events queued
+    /// WHEN the events are taken
+    /// THEN neither room is served twice before the other.
+    #[tokio::test]
+    async fn given_two_busy_other_rooms_then_neither_starves() {
+        let mut events = OtherEvents::default();
+        let (first_tx, first) = mpsc::unbounded_channel();
+        let (second_tx, second) = mpsc::unbounded_channel();
+        events.insert(1, first);
+        events.insert(2, second);
+        for _ in 0..4 {
+            first_tx.send(RoomEvent::Reconnecting).expect("sent");
+            second_tx.send(RoomEvent::Reconnecting).expect("sent");
+        }
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            order.push(events.next().await.0);
+        }
+        assert_eq!(order, [1, 2, 1, 2]);
     }
 }

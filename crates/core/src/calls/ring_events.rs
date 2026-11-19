@@ -786,6 +786,7 @@ mod tests {
             device_id: "DEVICE".into(),
             identity: format!("{user}:DEVICE"),
             service_url: "https://sfu.synthetic.test".parse().unwrap(),
+            transports: vec!["https://sfu.synthetic.test".parse().unwrap()],
             joined_ts: 1_000,
             expires_ts,
         };

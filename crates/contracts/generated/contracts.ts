@@ -88,8 +88,9 @@ export type CallPhase = "idle" | "joining" | "active" | "ended";
 
 export type CallParticipant = { userId: string, deviceId: string, speaking: boolean, 
 /**
- * It publishes to the call server this call uses. Others cannot be
- * heard in this version.
+ * The call is connected to the call server it publishes to: the own
+ * one, or another one the user agreed to connect to (ADR-0054).
+ * Otherwise it cannot be heard or seen.
  */
 reachable: boolean, 
 /**

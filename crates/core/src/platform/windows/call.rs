@@ -7,7 +7,7 @@ use crate::calls::worker::{
     CALL_WORKER_PROFILE, CameraPath, StartError, WorkerExit, WorkerProcess,
 };
 use crate::platform::call_host::{
-    ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher,
+    ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher, other_sfu_text,
 };
 use persephone_media_broker::{
     ContainmentProfile, LongLivedWorker, StartedCallWorker, start_call_worker,
@@ -87,6 +87,23 @@ impl WorkerProcess for JobProcess {
     }
 }
 
+/// A Yes/No box of the core with "No" as the default answer.
+fn ask_yes_no(message: &str) -> bool {
+    let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+    let caption: Vec<u16> = "Persephone".encode_utf16().chain(Some(0)).collect();
+    // SAFETY: both strings are NUL-terminated and live for the call; the
+    // box has no owner window.
+    let answer = unsafe {
+        MessageBoxW(
+            null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+    };
+    answer == IDYES
+}
+
 impl Launcher for WindowsLauncher {
     fn launch(&self, exe: &Path, _camera: CameraPath) -> Result<Launched, StartError> {
         let profile = self.profile()?;
@@ -103,22 +120,13 @@ impl Launcher for WindowsLauncher {
     }
 
     fn confirm_direct_connection(&self) -> bool {
-        let text: Vec<u16> = DIRECT_CONNECTION_TEXT
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        let caption: Vec<u16> = "Persephone".encode_utf16().chain(Some(0)).collect();
-        // SAFETY: both strings are NUL-terminated and live for the call; the
-        // box has no owner window.
-        let answer = unsafe {
-            MessageBoxW(
-                null_mut(),
-                text.as_ptr(),
-                caption.as_ptr(),
-                MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST,
-            )
-        };
-        answer == IDYES
+        ask_yes_no(DIRECT_CONNECTION_TEXT)
+    }
+
+    /// The same box with Yes and No: a message box has no custom button
+    /// names, so the text says Yes means connect. "No" is the default.
+    fn confirm_other_sfu(&self, host: &str, proxy_configured: bool) -> bool {
+        ask_yes_no(&other_sfu_text(host, proxy_configured, false))
     }
 }
 

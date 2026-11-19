@@ -23,10 +23,11 @@ use super::membership::{
     ActiveMember, DELAYED_LEAVE_RESTART, EVENT_TYPE, MEMBERSHIP_REFRESH, leave_content,
     own_membership, own_state_key, participant_identity, read_members,
 };
+use super::other_sfu::{Home, MAX_OTHER_SFUS, OtherSfus, Plan, home, is_other_host};
 use super::readiness::{TurnServers, sfu_transport, turn_servers};
-use super::rings::{self, Plan, Watch};
+use super::rings::{self, Plan as RingPlan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
-use super::sfu::{self, OpenIdToken, SfuError};
+use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
 use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
     CallHost, CallWorkerLink, StartError, WorkerExit, WorkerProcess, exit_is_crash,
@@ -146,8 +147,9 @@ pub struct Participant {
     pub user_id: OwnedUserId,
     pub device_id: OwnedDeviceId,
     pub speaking: bool,
-    /// It publishes to the SFU this call uses. Other members cannot be
-    /// heard in this version.
+    /// The worker is connected to the SFU it publishes to: the own SFU, or
+    /// another SFU the user agreed to connect to (ADR-0054). Otherwise it
+    /// cannot be heard or seen.
     pub reachable: bool,
     /// This device holds a key for it. Without one it cannot be heard.
     pub keyed: bool,
@@ -289,15 +291,19 @@ struct View {
     camera: CallCamera,
     /// The own screen share.
     screen: CallScreen,
-    /// The identities that share a screen, as the worker said with
-    /// `ScreenSharer`. A display hint only. An identity that is not a member
-    /// yet waits here and shows once the membership is read; only members
-    /// are shown. At most `MAX_PARTICIPANTS` wait.
-    sharing: HashSet<String>,
-    /// The identity on each remote tile (tile 1 first), as the worker said
-    /// with `VideoStarted`. An identity that is not a member yet waits here
-    /// and shows once the membership is read.
-    remote_video: [Option<String>; REMOTE_TILES],
+    /// The connection and identity of each screen sharer, as the worker said
+    /// with `ScreenSharer`. A display hint only. An identity that is not a
+    /// member yet waits here and shows once the membership is read, and only
+    /// while the connection is the one that speaks for the member
+    /// (ADR-0054). At most `MAX_PARTICIPANTS` are kept.
+    sharing: HashSet<(u8, String)>,
+    /// The connection and identity on each remote tile (tile 1 first), as the
+    /// worker said with `VideoStarted`. An identity that is not a member yet
+    /// waits here and shows once the membership is read, and only while the
+    /// connection is the one that speaks for the member (ADR-0054).
+    remote_video: [Option<(u8, String)>; REMOTE_TILES],
+    /// The connections to other SFUs (ADR-0054).
+    other: OtherSfus,
     /// The stream number of each tile (tile 0 first), as the picture store
     /// gave it when the controller applied the tile's latest change. The
     /// page asks for pictures of this stream only.
@@ -329,6 +335,7 @@ impl View {
             screen: CallScreen::Off,
             sharing: HashSet::new(),
             remote_video: Default::default(),
+            other: OtherSfus::default(),
             video_streams: Default::default(),
             ring_declined: false,
         }
@@ -336,6 +343,31 @@ impl View {
 
     fn is_member(&self, identity: &str) -> bool {
         self.members.iter().any(|m| m.identity == identity)
+    }
+
+    /// Whether the member `identity` shares a screen: a connection that
+    /// speaks for the member said so.
+    fn is_sharing(&self, identity: &str) -> bool {
+        self.sharing
+            .iter()
+            .any(|(connection, id)| id == identity && self.accepts(*connection, id))
+    }
+
+    /// Whether a participant of this worker connection may stand for the
+    /// member `identity` (ADR-0054). Connection 0 speaks for the members on
+    /// the own SFU. Connection `n` (1 to 3) speaks only for members whose
+    /// membership names the SFU of that connection. Anything else is
+    /// ignored: a member on another SFU also shows as a silent participant
+    /// on the own SFU, and an SFU can name any identity.
+    fn accepts(&self, connection: u8, identity: &str) -> bool {
+        let Some(member) = self.members.iter().find(|m| m.identity == identity) else {
+            return false;
+        };
+        match home(member, &self.own_sfu) {
+            Home::Own => connection == 0,
+            Home::Other(url) => connection != 0 && self.other.index_of(url) == Some(connection),
+            Home::Nowhere => false,
+        }
     }
 
     fn set_members(&mut self, members: Vec<ActiveMember>) {
@@ -385,11 +417,17 @@ impl View {
         Applied::Changed
     }
 
-    /// Forgets the video of a member that left.
-    fn forget_video(&mut self, identity: &str) -> bool {
-        let mut changed = self.sharing.remove(identity);
+    /// Forgets the video and the sharing mark that a connection gave a
+    /// member that left it. The view changes only when that connection
+    /// speaks for the member.
+    fn forget_video(&mut self, connection: u8, identity: &str) -> bool {
+        let removed = self.sharing.remove(&(connection, identity.to_owned()));
+        let mut changed = removed && self.accepts(connection, identity);
         for slot in &mut self.remote_video {
-            if slot.as_deref() == Some(identity) {
+            if slot
+                .as_ref()
+                .is_some_and(|(known, id)| *known == connection && id == identity)
+            {
                 *slot = None;
                 changed = true;
             }
@@ -402,8 +440,8 @@ impl View {
     fn video_allowed(&self) -> (bool, [bool; REMOTE_TILES]) {
         let remote = std::array::from_fn(|i| {
             self.remote_video[i]
-                .as_deref()
-                .is_some_and(|identity| self.is_member(identity))
+                .as_ref()
+                .is_some_and(|(connection, identity)| self.accepts(*connection, identity))
         });
         (self.camera == CallCamera::On, remote)
     }
@@ -434,10 +472,11 @@ impl View {
                 stream: self.video_streams[0],
             });
         }
-        for (index, identity) in self.remote_video.iter().enumerate() {
-            let Some(member) = identity
-                .as_deref()
-                .and_then(|identity| self.members.iter().find(|m| m.identity == identity))
+        for (index, slot) in self.remote_video.iter().enumerate() {
+            let Some(member) = slot
+                .as_ref()
+                .filter(|(connection, identity)| self.accepts(*connection, identity))
+                .and_then(|(_, identity)| self.members.iter().find(|m| m.identity == *identity))
             else {
                 continue;
             };
@@ -471,33 +510,51 @@ impl View {
                 ScreenState::Unavailable => CallScreen::Unavailable,
                 ScreenState::Refused => CallScreen::Refused,
             }),
-            FromWorker::ScreenSharer { identity, sharing } => {
-                // Kept also for an identity that is not a member yet, up to
-                // the bound; only a member is ever shown as sharing.
+            FromWorker::ScreenSharer {
+                connection,
+                identity,
+                sharing,
+            } => {
+                // A member is taken only from the connection that speaks for
+                // it. An identity that is not a member yet is kept with its
+                // connection, up to the bound; it shows once its membership
+                // names that connection's SFU.
+                let member = self.is_member(identity);
+                if member && !self.accepts(*connection, identity) {
+                    return Applied::Same;
+                }
+                let key = (*connection, identity.clone());
                 let changed = if !*sharing {
-                    self.sharing.remove(identity)
+                    self.sharing.remove(&key)
                 } else if self.sharing.len() < persephone_call_protocol::MAX_PARTICIPANTS {
-                    self.sharing.insert(identity.clone())
+                    self.sharing.insert(key)
                 } else {
                     false
                 };
-                if changed && self.is_member(identity) {
+                if changed && member {
                     Applied::Changed
                 } else {
                     Applied::Same
                 }
             }
-            FromWorker::VideoStarted { tile, identity } => {
+            FromWorker::VideoStarted {
+                tile,
+                connection,
+                identity,
+            } => {
                 let Some(slot) = usize::from(*tile)
                     .checked_sub(1)
                     .and_then(|index| self.remote_video.get_mut(index))
                 else {
                     return Applied::Same;
                 };
-                if slot.as_deref() == Some(identity.as_str()) {
+                if slot
+                    .as_ref()
+                    .is_some_and(|(known, id)| known == connection && id == identity)
+                {
                     return Applied::Same;
                 }
-                *slot = Some(identity.clone());
+                *slot = Some((*connection, identity.clone()));
                 Applied::Changed
             }
             FromWorker::VideoStopped { tile } => {
@@ -528,17 +585,34 @@ impl View {
                     Applied::Same
                 }
             }
-            FromWorker::ParticipantLeft { identity } => {
-                let video = self.forget_video(identity);
-                if self.speaking.remove(identity) || video {
+            FromWorker::Connection { connection, up } => {
+                if self.other.worker_connection(*connection, *up) {
                     Applied::Changed
                 } else {
                     Applied::Same
                 }
             }
-            FromWorker::Speaking { identity, speaking } => {
-                // Only a current member can be shown as speaking.
-                if !self.is_member(identity) {
+            FromWorker::ParticipantLeft {
+                connection,
+                identity,
+            } => {
+                let video = self.forget_video(*connection, identity);
+                let speaking =
+                    self.accepts(*connection, identity) && self.speaking.remove(identity);
+                if speaking || video {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
+            FromWorker::Speaking {
+                connection,
+                identity,
+                speaking,
+            } => {
+                // Only a current member can be shown as speaking, and only
+                // by the connection that speaks for it.
+                if !self.accepts(*connection, identity) {
                     return Applied::Same;
                 }
                 let changed = if *speaking {
@@ -588,9 +662,13 @@ impl View {
                     user_id: m.user_id.clone(),
                     device_id: m.device_id.clone(),
                     speaking: self.speaking.contains(&m.identity),
-                    reachable: m.service_url == self.own_sfu,
+                    reachable: match home(m, &self.own_sfu) {
+                        Home::Own => true,
+                        Home::Other(url) => self.other.is_connected(url),
+                        Home::Nowhere => false,
+                    },
                     keyed: self.keyed.contains(&m.identity),
-                    sharing: self.sharing.contains(&m.identity),
+                    sharing: self.is_sharing(&m.identity),
                 })
                 .collect(),
             camera: self.camera,
@@ -743,9 +821,10 @@ impl Access {
 
 /// The user's yes to a direct connection around the profile's proxy, or the
 /// fact that the profile has no proxy. Only [`CallController::confirm_direct`]
-/// makes one, so a join cannot skip the question.
+/// makes one, so a join cannot skip the question. It also keeps whether the
+/// profile has a proxy, for the question about another SFU (ADR-0054).
 #[derive(Debug)]
-pub struct DirectConsent(());
+pub struct DirectConsent(bool);
 
 /// The session a join runs in: the generation and the runtime of the lease
 /// its caller holds. The call's tasks run on that runtime.
@@ -1002,7 +1081,7 @@ impl CallController {
             return Err(CallError::AlreadyInCall);
         }
         if !proxy_configured || self.inner.host.confirm_direct_connection() {
-            Ok(DirectConsent(()))
+            Ok(DirectConsent(proxy_configured))
         } else {
             Err(CallError::Declined)
         }
@@ -1060,14 +1139,14 @@ impl CallController {
         room_id: &RoomId,
         consent: DirectConsent,
     ) -> Result<(), CallError> {
-        let DirectConsent(()) = consent;
+        let DirectConsent(proxy) = consent;
         let mut guard = self.claim(room_id)?;
         let access = Access {
             admit: self.inner.admission(),
             generation: scope.generation,
             flags: guard.flags.clone(),
         };
-        let mut setup = Setup::new(client.clone(), guard.flags.clone());
+        let mut setup = Setup::new(client.clone(), guard.flags.clone(), proxy);
         let prepared = self
             .prepare(&scope, client, room_id, &access, &mut setup, &guard.kill)
             .await;
@@ -1224,7 +1303,7 @@ impl CallController {
         // read before the own membership exists (ADR-0052).
         let plan = ring_plan(&room, &user_id, &device_id).await;
         let ring_watch = match &plan {
-            Some(Plan::Ring(contact)) => {
+            Some(RingPlan::Ring(contact)) => {
                 let watch = Arc::new(Watch::new(contact.clone()));
                 setup
                     .handles
@@ -1313,6 +1392,7 @@ impl CallController {
             return Err(CallError::Worker(StartError::NotReady));
         }
         let video_streams = link.video().streams();
+        let (grants_tx, grants) = mpsc::channel(MAX_OTHER_SFUS);
         Ok(Call {
             access: access.clone(),
             link,
@@ -1340,6 +1420,10 @@ impl CallController {
             screen_last_on: false,
             screen_closed: None,
             screen_sent: false,
+            proxy: setup.proxy,
+            consent: None,
+            grants,
+            grants_tx,
             screen_control: Arc::default(),
             screen_pick_stops: 0,
             screen_seen_stops: 0,
@@ -1562,6 +1646,8 @@ impl CallController {
 struct Setup {
     client: Client,
     flags: Arc<Flags>,
+    /// The profile has a SOCKS5 proxy (ADR-0054 asks about it).
+    proxy: bool,
     link: Option<CallWorkerLink>,
     delayed: Option<DelayedLeave>,
     membership_sent: bool,
@@ -1570,10 +1656,11 @@ struct Setup {
 }
 
 impl Setup {
-    fn new(client: Client, flags: Arc<Flags>) -> Self {
+    fn new(client: Client, flags: Arc<Flags>, proxy: bool) -> Self {
         Self {
             client,
             flags,
+            proxy,
             link: None,
             delayed: None,
             membership_sent: false,
@@ -1620,7 +1707,7 @@ async fn ring_plan(
     room: &matrix_sdk::Room,
     own_user: &matrix_sdk::ruma::UserId,
     own_device: &matrix_sdk::ruma::DeviceId,
-) -> Option<Plan> {
+) -> Option<RingPlan> {
     let members = read_members(room, now_ms()).await.ok()?;
     if members
         .iter()
@@ -1644,7 +1731,7 @@ async fn ring_plan(
 async fn send_ring(
     access: Access,
     room_id: OwnedRoomId,
-    plan: Plan,
+    plan: RingPlan,
     membership_event: OwnedEventId,
     video: bool,
     watch: Option<(Arc<Watch>, mpsc::Sender<()>)>,
@@ -1838,6 +1925,16 @@ struct Call {
     screen_closed: Option<oneshot::Receiver<()>>,
     /// A `SetScreen` start went to the worker and no stop or end since.
     screen_sent: bool,
+    /// The profile has a SOCKS5 proxy, which the connection to another SFU
+    /// does not use (ADR-0054).
+    proxy: bool,
+    /// The question about another SFU's host that waits for the user. The
+    /// call goes on meanwhile.
+    consent: Option<ConsentTask>,
+    /// A token request for another SFU reports here, with its connection
+    /// number (at most [`MAX_OTHER_SFUS`] are in flight).
+    grants: mpsc::Receiver<(u8, Option<SfuGrant>)>,
+    grants_tx: mpsc::Sender<(u8, Option<SfuGrant>)>,
     /// The screen stops the handle accepted and the share's portal session.
     /// `set_screen` counts a stop and closes the session before it queues
     /// the stop. The task holds the lock from its check of a finished pick
@@ -1861,6 +1958,25 @@ struct Call {
     /// The number of the last share that went to the worker. A worker state
     /// of another share is an older one's and is ignored.
     screen_share: u32,
+}
+
+/// The core's window that asks whether to connect to another SFU, running on
+/// a blocking thread.
+struct ConsentTask {
+    host: String,
+    answer: oneshot::Receiver<bool>,
+}
+
+/// Waits for the answer in `slot`, if a question is open; otherwise it never
+/// ends. A window that ended without an answer counts as "Not now".
+async fn consent_done(slot: &mut Option<ConsentTask>) -> (String, bool) {
+    let Some(task) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    let answer = (&mut task.answer).await.unwrap_or(false);
+    let host = std::mem::take(&mut task.host);
+    *slot = None;
+    (host, answer)
 }
 
 /// The result of a camera portal access request: the PipeWire remote, or
@@ -2541,6 +2657,114 @@ impl Call {
         Ok(())
     }
 
+    /// Looks for members on other SFUs and acts on what the user has and has
+    /// not been asked (ADR-0054). The call goes on while a question is open.
+    fn plan_others(&mut self, inner: &Inner) -> Result<(), EndReason> {
+        self.view
+            .other
+            .track(&self.view.members, &self.view.own_sfu);
+        let plan = self.view.other.plan();
+        self.act_on_plan(inner, plan);
+        Ok(())
+    }
+
+    fn act_on_plan(&mut self, inner: &Inner, plan: Plan) {
+        for index in plan.connect {
+            self.request_grant(index);
+        }
+        if let Some(host) = plan.ask {
+            self.ask_consent(inner, host);
+        }
+    }
+
+    /// Asks in the core's own window, on a blocking thread, whether to
+    /// connect to the SFUs on `host`. The window names the host, says the
+    /// server will see the IP address and the Matrix ID, and, with a profile
+    /// proxy, that this connection does not use it.
+    fn ask_consent(&mut self, inner: &Inner, host: String) {
+        let (answer_tx, answer) = oneshot::channel();
+        let asker = inner.host.clone();
+        let name = host.clone();
+        let proxy = self.proxy;
+        tokio::task::spawn_blocking(move || {
+            let _ = answer_tx.send(asker.confirm_other_sfu(&name, proxy));
+        });
+        self.consent = Some(ConsentTask { host, answer });
+    }
+
+    fn consent_answered(
+        &mut self,
+        inner: &Inner,
+        host: &str,
+        connect: bool,
+    ) -> Result<(), EndReason> {
+        let plan = self.view.other.answer(host, connect);
+        self.act_on_plan(inner, plan);
+        self.publish(inner);
+        Ok(())
+    }
+
+    /// Requests the OpenID token for connection `index` and its SFU grant, on
+    /// a task of the call. The token goes to that SFU's service only. The
+    /// profile's HTTP client follows no redirect.
+    fn request_grant(&mut self, index: u8) {
+        let Some(service) = self.view.other.connecting_url(index).cloned() else {
+            return;
+        };
+        let access = self.access.clone();
+        let room_id = self.view.room_id.clone();
+        let device_id = self.own_device.clone();
+        let sender = self.grants_tx.clone();
+        self.tasks.spawn(async move {
+            let work = access.run(|client| async move {
+                let user_id = client.user_id()?.to_owned();
+                let openid = client
+                    .send(request_openid_token::v3::Request::new(user_id))
+                    .await
+                    .ok()?;
+                let body = sfu::request_body(&room_id, &device_id, &OpenIdToken::from(openid));
+                sfu::get_grant(client.http_client(), &service, &body)
+                    .await
+                    .ok()
+            });
+            let grant = time::timeout(SEND_TIMEOUT * 2, work)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+            let _ = sender.send((index, grant)).await;
+        });
+    }
+
+    /// A token request ended. A grant goes to the worker as `Subscribe`, its
+    /// token moved and not copied; a failure leaves those members "not
+    /// reachable". Neither ends the call.
+    fn grant_received(
+        &mut self,
+        inner: &Inner,
+        index: u8,
+        grant: Option<SfuGrant>,
+    ) -> Result<(), EndReason> {
+        let wanted = self.view.other.connecting_url(index).is_some();
+        match grant {
+            // The answer's host follows the same rules as the service host.
+            Some(grant) if wanted && is_other_host(&grant.url) => {
+                let SfuGrant { url, jwt } = grant;
+                self.send_worker(ToWorker::Subscribe {
+                    index,
+                    url: url.to_string(),
+                    jwt,
+                })?;
+            }
+            _ => {
+                if self.view.other.token_failed(index) {
+                    self.publish(inner);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn send_worker(&self, message: ToWorker) -> Result<(), EndReason> {
         self.link
             .send(message)
@@ -2645,6 +2869,7 @@ impl Call {
         };
         let all = recipients(&outgoing, &self.view.members, &[]);
         self.send_keys(&outgoing, all).await?;
+        self.plan_others(inner)?;
         self.publish(inner);
         Ok(())
     }
@@ -2699,6 +2924,12 @@ impl Call {
                         return Err(EndReason::WorkerStopped);
                     };
                     self.worker_event(inner, &event)?;
+                }
+                (host, connect) = consent_done(&mut self.consent) => {
+                    self.consent_answered(inner, &host, connect)?;
+                }
+                Some((index, grant)) = self.grants.recv() => {
+                    self.grant_received(inner, index, grant)?;
                 }
                 Some(()) = self.changes.recv() => {
                     self.members_changed(inner, &mut parked, &mut pending_own, &mut seen_self)
@@ -2783,6 +3014,8 @@ impl Call {
         for candidate in std::mem::take(parked) {
             self.key_received(inner, candidate, parked)?;
         }
+        // A member change may bring a new SFU (ADR-0054).
+        self.plan_others(inner)?;
         self.publish(inner);
         Ok(())
     }
@@ -2924,11 +3157,13 @@ mod tests {
     fn member(user: &str, device: &str, sfu: &str) -> ActiveMember {
         let user_id = OwnedUserId::try_from(user).unwrap();
         let device_id = OwnedDeviceId::from(device);
+        let service_url = Url::parse(sfu).unwrap();
         ActiveMember {
             identity: participant_identity(&user_id, &device_id),
             user_id,
             device_id,
-            service_url: Url::parse(sfu).unwrap(),
+            transports: vec![service_url.clone()],
+            service_url,
             joined_ts: 1,
             expires_ts: u64::MAX,
         }
@@ -3067,6 +3302,7 @@ mod tests {
         let mut view = view();
         view.apply(&FromWorker::Connected);
         let speak = |id: &str, on| FromWorker::Speaking {
+            connection: 0,
             identity: id.to_owned(),
             speaking: on,
         };
@@ -3152,6 +3388,10 @@ mod tests {
         start_error: Option<StartError>,
         confirms: AtomicUsize,
         starts: AtomicUsize,
+        /// The answer to the question about another SFU.
+        other_answer: AtomicBool,
+        /// Each question about another SFU: the host and the proxy flag.
+        asked: Mutex<Vec<(String, bool)>>,
     }
 
     impl FakeHost {
@@ -3161,7 +3401,19 @@ mod tests {
                 start_error,
                 confirms: AtomicUsize::new(0),
                 starts: AtomicUsize::new(0),
+                other_answer: AtomicBool::new(false),
+                asked: Mutex::new(Vec::new()),
             })
+        }
+
+        fn answering_other(answer: bool) -> Arc<Self> {
+            let host = Self::new(true, None);
+            host.other_answer.store(answer, Ordering::SeqCst);
+            host
+        }
+
+        fn asked(&self) -> Vec<(String, bool)> {
+            self.asked.lock().unwrap().clone()
         }
     }
 
@@ -3183,6 +3435,14 @@ mod tests {
         fn confirm_direct_connection(&self) -> bool {
             self.confirms.fetch_add(1, Ordering::SeqCst);
             self.confirm
+        }
+
+        fn confirm_other_sfu(&self, host: &str, proxy_configured: bool) -> bool {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((host.to_owned(), proxy_configured));
+            self.other_answer.load(Ordering::SeqCst)
         }
     }
 
@@ -3436,6 +3696,7 @@ mod tests {
         let (changes_tx, changes) = mpsc::channel(1);
         let (incoming_tx, incoming) = mpsc::channel(1);
         let (failed_tx, failed) = mpsc::channel(1);
+        let (grants_tx, grants) = mpsc::channel(MAX_OTHER_SFUS);
         let call = Call {
             access: Access {
                 admit: admission,
@@ -3466,6 +3727,10 @@ mod tests {
             screen_last_on: false,
             screen_closed: None,
             screen_sent: false,
+            proxy: false,
+            consent: None,
+            grants,
+            grants_tx,
             screen_control: Arc::default(),
             screen_pick_stops: 0,
             screen_seen_stops: 0,
@@ -3778,6 +4043,10 @@ mod tests {
         );
         let inner = controller(FakeHost::new(true, None)).inner.clone();
         let mut call = fixture.call;
+        call.view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@b:example.org", "B", "https://sfu.example.org"),
+        ]);
         let store = call.link.video();
         call.worker_event(&inner, &FromWorker::Connected).unwrap();
         store.stream_changed(1);
@@ -4017,6 +4286,7 @@ mod tests {
 
     fn started(tile: u8, identity: &str) -> FromWorker {
         FromWorker::VideoStarted {
+            connection: 0,
             tile,
             identity: identity.to_owned(),
         }
@@ -4068,6 +4338,10 @@ mod tests {
     #[test]
     fn given_video_ends_then_the_tile_goes_and_bad_tiles_are_ignored() {
         let mut view = view();
+        view.set_members(vec![
+            member("@a:example.org", "A", "https://sfu.example.org"),
+            member("@b:example.org", "B", "https://sfu.example.org"),
+        ]);
         view.apply(&started(1, "@a:example.org:A"));
         view.apply(&started(3, "@b:example.org:B"));
         assert_eq!(view.apply(&started(0, "@a:example.org:A")), Applied::Same);
@@ -4091,14 +4365,15 @@ mod tests {
         );
         assert_eq!(
             view.apply(&FromWorker::ParticipantLeft {
+                connection: 0,
                 identity: "@b:example.org:B".to_owned()
             }),
             Applied::Changed
         );
         assert_eq!(view.video_allowed().1, [false; 5]);
         view.apply(&started(2, "@a:example.org:A"));
-        assert!(view.forget_video("@a:example.org:A"));
-        assert!(!view.forget_video("@a:example.org:A"));
+        assert!(view.forget_video(0, "@a:example.org:A"));
+        assert!(!view.forget_video(0, "@a:example.org:A"));
     }
 
     /// GIVEN a bare picture announcement WHEN applied THEN it is a protocol
@@ -5607,6 +5882,7 @@ mod tests {
     fn given_remote_screen_shares_then_members_show_as_sharing_and_tile_five_is_theirs() {
         let mut view = view();
         let share = |identity: &str, sharing| FromWorker::ScreenSharer {
+            connection: 0,
             identity: identity.to_owned(),
             sharing,
         };
@@ -5636,26 +5912,38 @@ mod tests {
         view.apply(&share("@a:example.org:A", true));
         assert_eq!(
             view.apply(&FromWorker::ParticipantLeft {
+                connection: 0,
                 identity: "@a:example.org:A".to_owned()
             }),
             Applied::Changed
         );
-        assert!(!view.sharing.contains("@a:example.org:A"));
+        assert!(!view.is_sharing("@a:example.org:A"));
+        assert!(!view.sharing.contains(&(0, "@a:example.org:A".to_owned())));
         assert!(view.video_tiles().is_empty());
     }
 
-    /// GIVEN a share hint for an identity whose membership has not arrived
-    /// WHEN the membership arrives THEN the member shows as sharing; a
-    /// stranger is never shown, and hints beyond the bound are not kept.
+    /// GIVEN share hints for identities whose membership has not arrived
+    /// WHEN the membership arrives THEN a member shows as sharing when the
+    /// hint came from the connection that speaks for it, and not when it came
+    /// from another connection; a stranger is never shown, and hints beyond
+    /// the bound are not kept.
     #[test]
     fn given_a_share_hint_before_the_membership_then_it_shows_once_the_member_arrives() {
         let mut view = view();
         view.apply(&FromWorker::Connected);
         let early = FromWorker::ScreenSharer {
+            connection: 0,
             identity: "@c:example.org:C".to_owned(),
             sharing: true,
         };
         assert_eq!(view.apply(&early), Applied::Same, "nothing shown yet");
+        // Connection 2 does not speak for a member on the own SFU.
+        let elsewhere = FromWorker::ScreenSharer {
+            connection: 2,
+            identity: "@d:example.org:D".to_owned(),
+            sharing: true,
+        };
+        assert_eq!(view.apply(&elsewhere), Applied::Same);
         let sharing = |view: &View| {
             let CallState::Active { participants, .. } = view.state() else {
                 panic!("active");
@@ -5670,11 +5958,13 @@ mod tests {
         view.set_members(vec![
             member("@a:example.org", "A", "https://sfu.example.org"),
             member("@c:example.org", "C", "https://sfu.example.org"),
+            member("@d:example.org", "D", "https://sfu.example.org"),
         ]);
         assert_eq!(sharing(&view), ["@c:example.org:C"]);
 
         for index in 0..persephone_call_protocol::MAX_PARTICIPANTS + 4 {
             view.apply(&FromWorker::ScreenSharer {
+                connection: 0,
                 identity: format!("@s{index}:example.org:S"),
                 sharing: true,
             });
@@ -5803,5 +6093,363 @@ mod tests {
         };
         fixture.call.screen_picked(&inner, Ok(no_remote)).unwrap();
         assert_eq!(fixture.call.view.screen, CallScreen::Unavailable);
+    }
+
+    // ---- Other SFUs (ADR-0054) ----
+
+    fn on_own(user: &str, device: &str) -> ActiveMember {
+        member(user, device, "https://sfu.example.org")
+    }
+
+    fn on(user: &str, device: &str, sfu: &str) -> ActiveMember {
+        member(user, device, sfu)
+    }
+
+    fn speaking(connection: u8, id: &str, on: bool) -> FromWorker {
+        FromWorker::Speaking {
+            connection,
+            identity: id.to_owned(),
+            speaking: on,
+        }
+    }
+
+    /// A view with a member on the own SFU and one on `https://other.example.org`
+    /// whose connection (1) is up.
+    fn view_with_other_up() -> View {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        view.other.track(&view.members, &view.own_sfu);
+        view.other.plan();
+        view.other.answer("other.example.org", true);
+        assert_eq!(
+            view.apply(&FromWorker::Connection {
+                connection: 1,
+                up: true
+            }),
+            Applied::Changed
+        );
+        view
+    }
+
+    /// GIVEN a member on another SFU WHEN its connection is not up, up, then
+    /// down THEN it is not reachable, reachable, then not reachable, and the
+    /// own-SFU member stays reachable throughout.
+    #[test]
+    fn given_another_sfu_connection_then_reachable_follows_the_worker() {
+        let mut view = view();
+        view.apply(&FromWorker::Connected);
+        let reachable = |view: &View| match view.state() {
+            CallState::Active { participants, .. } => {
+                participants.iter().map(|p| p.reachable).collect::<Vec<_>>()
+            }
+            _ => panic!("active"),
+        };
+        assert_eq!(reachable(&view), [true, false]);
+        view.other.track(&view.members, &view.own_sfu);
+        view.other.plan();
+        view.other.answer("other.example.org", true);
+        assert_eq!(
+            reachable(&view),
+            [true, false],
+            "connecting is not reachable"
+        );
+        view.apply(&FromWorker::Connection {
+            connection: 1,
+            up: true,
+        });
+        assert_eq!(reachable(&view), [true, true]);
+        assert_eq!(
+            view.apply(&FromWorker::Connection {
+                connection: 1,
+                up: false
+            }),
+            Applied::Changed
+        );
+        assert_eq!(reachable(&view), [true, false]);
+        // The call goes on: the message is not an end, and a repeat changes nothing.
+        assert_eq!(
+            view.apply(&FromWorker::Connection {
+                connection: 1,
+                up: false
+            }),
+            Applied::Same
+        );
+    }
+
+    /// GIVEN a member on another SFU WHEN a participant of that name comes
+    /// from the wrong connection (0, 2, 3) THEN speaking, sharing and video are
+    /// ignored; WHEN it comes from its own connection (1) THEN they show.
+    #[test]
+    fn given_a_participant_from_the_wrong_connection_then_it_is_ignored() {
+        let mut view = view_with_other_up();
+        let b = "@b:example.org:B";
+        for wrong in [0, 2, 3] {
+            assert_eq!(view.apply(&speaking(wrong, b, true)), Applied::Same);
+            assert_eq!(
+                view.apply(&FromWorker::ScreenSharer {
+                    connection: wrong,
+                    identity: b.to_owned(),
+                    sharing: true
+                }),
+                Applied::Same
+            );
+            view.apply(&started_on(wrong, 1, b));
+            assert_eq!(view.video_allowed().1, [false; 5], "connection {wrong}");
+        }
+        assert!(view.speaking.is_empty() && view.sharing.is_empty());
+        assert_eq!(view.apply(&speaking(1, b, true)), Applied::Changed);
+        assert_eq!(
+            view.apply(&FromWorker::ScreenSharer {
+                connection: 1,
+                identity: b.to_owned(),
+                sharing: true
+            }),
+            Applied::Changed
+        );
+        view.apply(&started_on(1, 2, b));
+        assert_eq!(view.video_allowed().1, [false, true, false, false, false]);
+        // A member on the own SFU is heard from connection 0 only.
+        let a = "@a:example.org:A";
+        assert_eq!(view.apply(&speaking(1, a, true)), Applied::Same);
+        assert_eq!(view.apply(&speaking(0, a, true)), Applied::Changed);
+    }
+
+    /// GIVEN a member on another SFU that also shows as a silent participant
+    /// on the own SFU WHEN that presence leaves the own SFU THEN its speaking
+    /// and video from its own SFU stay.
+    #[test]
+    fn given_a_presence_on_the_own_sfu_leaves_then_the_other_sfu_state_stays() {
+        let mut view = view_with_other_up();
+        let b = "@b:example.org:B";
+        view.apply(&speaking(1, b, true));
+        view.apply(&started_on(1, 1, b));
+        assert_eq!(
+            view.apply(&FromWorker::ParticipantLeft {
+                connection: 0,
+                identity: b.to_owned()
+            }),
+            Applied::Same
+        );
+        assert!(view.speaking.contains(b));
+        assert!(view.video_allowed().1[0]);
+        assert_eq!(
+            view.apply(&FromWorker::ParticipantLeft {
+                connection: 1,
+                identity: b.to_owned()
+            }),
+            Applied::Changed
+        );
+        assert!(view.speaking.is_empty());
+        assert_eq!(view.video_allowed().1, [false; 5]);
+    }
+
+    /// GIVEN video of a member on another SFU WHEN its connection ends THEN
+    /// the tile is hidden and its pictures are no longer allowed, and the call
+    /// state stays active.
+    #[test]
+    fn given_another_sfu_ends_then_its_video_is_hidden_and_the_call_stays() {
+        let mut view = view_with_other_up();
+        view.apply(&started_on(1, 3, "@b:example.org:B"));
+        assert_eq!(view.video_allowed().1, [false, false, true, false, false]);
+        view.apply(&FromWorker::Connection {
+            connection: 1,
+            up: false,
+        });
+        // The worker stops the tile with VideoStopped; until then the member
+        // is not reachable, but the page already sees the call as active.
+        assert!(matches!(view.state(), CallState::Active { .. }));
+    }
+
+    fn started_on(connection: u8, tile: u8, identity: &str) -> FromWorker {
+        FromWorker::VideoStarted {
+            tile,
+            connection,
+            identity: identity.to_owned(),
+        }
+    }
+
+    fn other_call(host: &Arc<FakeHost>, killed: Arc<AtomicBool>) -> (TestCall, Arc<Inner>) {
+        let inner = controller(host.clone()).inner.clone();
+        let mut fixture = test_call(no_admission(), Arc::new(Flags::default()), killed);
+        fixture.call.view.set_members(vec![
+            on_own("@a:example.org", "A"),
+            on("@b:example.org", "B", "https://other.example.org/one"),
+            on("@c:example.org", "C", "https://other.example.org/two"),
+        ]);
+        (fixture, inner)
+    }
+
+    /// GIVEN members on two SFUs of one other host WHEN the call plans THEN the
+    /// core asks once, with the host and the proxy flag, contacts nobody
+    /// before the answer, and the call goes on while the window is open.
+    #[tokio::test]
+    async fn given_members_on_another_host_then_the_user_is_asked_once_and_nothing_is_contacted_first()
+     {
+        let host = FakeHost::answering_other(true);
+        let (mut fixture, inner) = other_call(&host, Arc::new(AtomicBool::new(false)));
+        fixture.call.proxy = true;
+        let call = &mut fixture.call;
+        call.worker_event(&inner, &FromWorker::Connected).unwrap();
+        call.plan_others(&inner).unwrap();
+        assert!(call.consent.is_some());
+        assert!(call.tasks.is_empty(), "no token request before the answer");
+        // The call goes on while the window is open.
+        call.worker_event(&inner, &FromWorker::Muted { muted: true })
+            .unwrap();
+        assert!(matches!(
+            inner.state.borrow().clone(),
+            CallState::Active { muted: true, .. }
+        ));
+        let (asked, connect) = consent_done(&mut call.consent).await;
+        assert_eq!((asked.as_str(), connect), ("other.example.org", true));
+        call.consent_answered(&inner, &asked, connect).unwrap();
+        assert_eq!(call.tasks.len(), 2, "one token request for each SFU");
+        // Planning again, as a member change does, asks nothing more.
+        call.plan_others(&inner).unwrap();
+        assert!(call.consent.is_none());
+        assert_eq!(host.asked(), [("other.example.org".to_owned(), true)]);
+    }
+
+    /// GIVEN the user answers "Not now" WHEN the call plans again, also after a
+    /// new member on that host THEN nobody is asked again, no token is
+    /// requested, nothing goes to the worker, and the members are not
+    /// reachable.
+    #[tokio::test]
+    async fn given_not_now_then_that_host_is_not_asked_or_contacted_again() {
+        let host = FakeHost::answering_other(false);
+        let (mut fixture, inner) = other_call(&host, Arc::new(AtomicBool::new(false)));
+        let call = &mut fixture.call;
+        call.worker_event(&inner, &FromWorker::Connected).unwrap();
+        call.plan_others(&inner).unwrap();
+        let (asked, connect) = consent_done(&mut call.consent).await;
+        assert!(!connect);
+        call.consent_answered(&inner, &asked, connect).unwrap();
+        let mut members = call.view.members.clone();
+        members.push(on("@d:example.org", "D", "https://other.example.org/three"));
+        call.view.set_members(members);
+        call.plan_others(&inner).unwrap();
+        assert!(call.consent.is_none() && call.tasks.is_empty());
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert_eq!(host.asked().len(), 1);
+        let CallState::Active { participants, .. } = call.view.state() else {
+            panic!("active");
+        };
+        assert_eq!(
+            participants.iter().map(|p| p.reachable).collect::<Vec<_>>(),
+            [true, false, false, false]
+        );
+    }
+
+    /// GIVEN a token request that failed WHEN its result arrives THEN the
+    /// members are not reachable, no Subscribe goes out and the call is not
+    /// ended.
+    #[tokio::test]
+    async fn given_a_failed_token_request_then_the_call_goes_on_without_those_members() {
+        let host = FakeHost::answering_other(true);
+        let (mut fixture, inner) = other_call(&host, Arc::new(AtomicBool::new(false)));
+        let call = &mut fixture.call;
+        call.worker_event(&inner, &FromWorker::Connected).unwrap();
+        call.plan_others(&inner).unwrap();
+        let (asked, connect) = consent_done(&mut call.consent).await;
+        call.consent_answered(&inner, &asked, connect).unwrap();
+        // No session admits work in this fixture, so each request ends at once
+        // without a grant.
+        for _ in 0..2 {
+            let (index, grant) = call.grants.recv().await.expect("a result");
+            assert!(grant.is_none());
+            call.grant_received(&inner, index, grant).unwrap();
+        }
+        assert!(fixture.to_worker.try_recv().is_err());
+        assert!(matches!(
+            inner.state.borrow().clone(),
+            CallState::Active { .. }
+        ));
+    }
+
+    /// GIVEN a grant for a connecting SFU WHEN it arrives THEN the worker gets
+    /// `Subscribe` with that index, URL and token; a grant for a connection
+    /// nobody waits for sends nothing.
+    #[tokio::test]
+    async fn given_a_grant_then_the_worker_gets_subscribe_for_that_connection_only() {
+        use zeroize::Zeroizing;
+        let host = FakeHost::answering_other(true);
+        let (mut fixture, inner) = other_call(&host, Arc::new(AtomicBool::new(false)));
+        let call = &mut fixture.call;
+        call.plan_others(&inner).unwrap();
+        let (asked, connect) = consent_done(&mut call.consent).await;
+        call.consent_answered(&inner, &asked, connect).unwrap();
+        let grant = |url: &str| SfuGrant {
+            url: Url::parse(url).unwrap(),
+            jwt: Zeroizing::new("a.b.c".to_owned()),
+        };
+        call.grant_received(&inner, 1, Some(grant("wss://sfu.other.example")))
+            .unwrap();
+        let sent = fixture.to_worker.try_recv().expect("Subscribe");
+        let ToWorker::Subscribe { index, url, jwt } = sent else {
+            panic!("Subscribe, not {sent:?}");
+        };
+        assert_eq!(
+            (index, url.as_str(), jwt.as_str()),
+            (1, "wss://sfu.other.example/", "a.b.c")
+        );
+        // Connection 3 was never planned.
+        call.grant_received(&inner, 3, Some(grant("wss://sfu.other.example")))
+            .unwrap();
+        assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a grant whose `wss://` host is an IP literal, `localhost`, a
+    /// single-label, `.local`, `.home.arpa` or `.internal` name
+    /// WHEN it arrives THEN nothing goes to the worker, the members stay not
+    /// reachable and the call goes on.
+    #[tokio::test]
+    async fn given_a_grant_with_a_refused_host_then_no_subscribe_goes_out() {
+        use zeroize::Zeroizing;
+        let refused = [
+            "wss://192.0.2.10",
+            "wss://[2001:db8::1]",
+            "wss://localhost",
+            "wss://LocalHost.",
+            "wss://x.localhost",
+            "wss://sfu",
+            "wss://x.local",
+            "wss://x.home.arpa",
+            "wss://x.internal.",
+        ];
+        for bad in refused {
+            let host = FakeHost::answering_other(true);
+            let (mut fixture, inner) = other_call(&host, Arc::new(AtomicBool::new(false)));
+            let call = &mut fixture.call;
+            call.worker_event(&inner, &FromWorker::Connected).unwrap();
+            call.plan_others(&inner).unwrap();
+            let (asked, connect) = consent_done(&mut call.consent).await;
+            call.consent_answered(&inner, &asked, connect).unwrap();
+            let grant = SfuGrant {
+                url: Url::parse(bad).unwrap(),
+                jwt: Zeroizing::new("a.b.c".to_owned()),
+            };
+            call.grant_received(&inner, 1, Some(grant)).unwrap();
+            assert!(fixture.to_worker.try_recv().is_err(), "{bad}");
+            assert!(call.view.other.connecting_url(1).is_none(), "{bad}");
+            assert!(matches!(
+                inner.state.borrow().clone(),
+                CallState::Active { .. }
+            ));
+        }
+    }
+
+    /// GIVEN a call with other SFUs WHEN the call ends (the session ends)
+    /// THEN the worker, which holds every connection, is ended at once, and a
+    /// question still open is dropped with the call.
+    #[tokio::test]
+    async fn given_a_call_with_other_sfus_ends_then_the_worker_is_ended() {
+        let host = FakeHost::answering_other(true);
+        let killed = Arc::new(AtomicBool::new(false));
+        let (fixture, inner) = other_call(&host, killed.clone());
+        let mut call = fixture.call;
+        call.plan_others(&inner).unwrap();
+        assert!(call.consent.is_some());
+        call.finish(true).await;
+        assert!(killed.load(Ordering::SeqCst));
     }
 }

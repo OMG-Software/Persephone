@@ -97,6 +97,10 @@ Proposed option: "a contained call worker".
   `foci_preferred` ("multi-SFU"). This first version connects only to
   the SFU of this homeserver. Members who publish to another SFU are shown
   as not reachable. Connecting to more than one SFU is later work.
+  Amendment, 19 November 2026: [ADR-0054](0054-connect-to-call-members-on-other-sfus.md)
+  adds subscribe-only connections to other SFUs, after the user agrees for
+  each server. A member is shown as not reachable only while no such
+  connection is up.
 * Only memberships whose state key names the event's sender, whose
   service URL is `https://`, and that have not expired are used. At most
   32 members are kept.

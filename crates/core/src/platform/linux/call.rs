@@ -11,10 +11,10 @@
 //! worker is started from its own thread, which lives until the core drops
 //! the worker ([`spawn_kept`]).
 
-use super::credentials::{prompt, question_alert, yes};
+use super::credentials::{other_sfu_alert, prompt, question_alert, yes};
 use crate::calls::worker::{CameraPath, StartError, WorkerExit, WorkerProcess};
 use crate::platform::call_host::{
-    ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher,
+    ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher, other_sfu_text,
 };
 use crate::platform::unix_call::launched;
 use persephone_media_broker::{CallCamera, SeccompContainment, start_call_worker};
@@ -136,6 +136,19 @@ impl Launcher for LinuxLauncher {
         prompt(question_alert("Persephone", DIRECT_CONNECTION_TEXT))
             .and_then(|answer| yes(answer.response))
             .unwrap_or(false)
+    }
+
+    /// The question about another SFU (ADR-0054), with the buttons "Not now"
+    /// (the default) and "Connect". No display, or a window that did not run,
+    /// is "not now".
+    fn confirm_other_sfu(&self, host: &str, proxy_configured: bool) -> bool {
+        prompt(other_sfu_alert(&other_sfu_text(
+            host,
+            proxy_configured,
+            true,
+        )))
+        .and_then(|answer| yes(answer.response))
+        .unwrap_or(false)
     }
 }
 

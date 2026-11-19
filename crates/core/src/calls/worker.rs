@@ -319,6 +319,17 @@ pub trait CallHost: Send + Sync {
     /// Blocks until answered; `true` only for an explicit yes.
     fn confirm_direct_connection(&self) -> bool;
 
+    /// Asks, in a native dialog owned by the core, whether the call may
+    /// connect to the call server on `host`, which belongs to another
+    /// homeserver (ADR-0054). That server will see this computer's IP address
+    /// and the user's Matrix ID, and with a profile proxy the connection does
+    /// not use the proxy. Blocks until answered; `true` only for an explicit
+    /// "Connect". The default is "no", so a platform without the window never
+    /// contacts another server.
+    fn confirm_other_sfu(&self, _host: &str, _proxy_configured: bool) -> bool {
+        false
+    }
+
     /// Whether this platform has reviewed call containment. `false` means
     /// [`CallHost::start`] always refuses.
     fn supported(&self) -> bool {
@@ -456,6 +467,7 @@ mod tests {
         let host = Unsupported;
         assert!(!host.supported());
         assert!(!host.confirm_direct_connection());
+        assert!(!host.confirm_other_sfu("sfu.example.org", false));
         assert_eq!(host.start().err(), Some(StartError::Unsupported));
     }
 
