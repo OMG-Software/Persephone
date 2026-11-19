@@ -175,6 +175,27 @@ unsigned files, and the `latest` pre-release is replaced only if that commit
 is still the tip of `main` when the build ends. [Release guide](release.md)
 lists the secrets, how to cut a release and how users verify the files.
 
+The Linux release jobs build on Ubuntu 22.04, which sets the bundles' glibc
+floor. Its PipeWire 0.3.48 headers are too old for `libspa` 0.10.1, which
+needs 0.3.65 or later (`spa_meta_region_is_valid` and `spa_meta_first` as
+inline functions, and the `flags` field and unsigned `modifier` of
+`spa_video_info_raw`). Where the headers are older,
+[`.github/scripts/install-pipewire-headers.sh`](../.github/scripts/install-pipewire-headers.sh)
+downloads `libspa-0.2-dev` and `libpipewire-0.3-dev` 1.0.5-1 from the Ubuntu
+24.04 (noble) release pocket, unpacks only their files, and points
+`PKG_CONFIG_PATH` at them; elsewhere it does nothing. The amd64 packages serve
+both architectures, because headers do not depend on it. The call worker still
+links the system's `libpipewire-0.3.so` 0.3.48, so the link fails if the
+worker calls a function that the older library lacks, and the `.deb` and
+`.rpm` packages still depend on the system's `libpipewire-0.3-0`. Each
+package's SHA-256 in the script is the one in noble's `main/binary-amd64`
+`Packages.xz`, which noble's `InRelease` lists and the Ubuntu Archive
+Automatic Signing Key (2018), fingerprint
+`F6EC B376 2474 EDA9 D21B 7022 8719 20D1 991B C93C`, signs. Both were checked
+with `gpgv` and `sha256sum` on 19 November 2026. The release pocket does not
+change during noble's life; when noble leaves the archive, move the pins to
+another signed release.
+
 The app's version line shows the build's revision: the first 12 hex digits of
 the checked-out commit, or `unknown` ([`crates/core/build.rs`](../crates/core/build.rs)).
 It does not show uncommitted changes. Without a usable Git checkout of this

@@ -660,6 +660,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config file librsvg2-dev libpipewire-0.3-dev libclang-dev
 
+      # Ubuntu 22.04's PipeWire 0.3.48 headers are older than the pipewire
+      # crates need. The script unpacks hash-pinned PipeWire 1.0.5 headers and
+      # writes PKG_CONFIG_PATH to GITHUB_ENV; the build still links the
+      # system's libpipewire (ADR-0049).
+      - name: Install PipeWire headers if needed
+        run: sh .github/scripts/install-pipewire-headers.sh
+
       # The call worker links libwebrtc, whose libc++ needs clang 21; the
       # script installs it and writes CXX to GITHUB_ENV (ADR-0049).
       - name: Install clang 21 if needed
