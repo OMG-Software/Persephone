@@ -29,6 +29,11 @@ files as workflow artifacts.
 | Linux arm64 | `ubuntu-22.04-arm` | AppImage, `.deb`, `.rpm` |
 | macOS universal (arm64 + x86_64) | `macos-latest` | `.dmg` and the same app as `.app.zip` |
 
+The Linux jobs build on Ubuntu 22.04 to keep the bundles' glibc floor low. Its
+PipeWire 0.3.48 headers are too old for the `pipewire` crates, so the jobs
+build against PipeWire 1.0.5 headers and link the system's `libpipewire`
+([Release builds](development.md#release-builds)).
+
 Every release also has `SHA256SUMS` over all files, `SHA256SUMS.sigstore.json`
 (cosign keyless signature), `SHA256SUMS.asc` (GPG signature), a CycloneDX SBOM
 (`*-sbom.cdx.json`, from syft) and the third-party notices
