@@ -59,15 +59,15 @@ pub fn other_sfu_text(host: &str, proxy_configured: bool, named_buttons: bool) -
     );
     if proxy_configured {
         text.push_str(concat!(
-            "\n\nThis profile uses a SOCKS5 proxy, but this connection does ",
-            "not use it.",
+            "\n\nThis profile uses a SOCKS5 proxy. The request for a call token ",
+            "uses the proxy, but the call connection to that server does not.",
         ));
     }
     text.push_str("\n\nThe call goes on whatever you choose. ");
     text.push_str(if named_buttons {
         "Choose Connect or Not now."
     } else {
-        "Choose Yes to connect, or No for not now."
+        "Choose Yes to connect. Choose No for not now. No is the default."
     });
     text
 }
@@ -304,9 +304,12 @@ mod tests {
         assert!(plain.contains("Connect") && plain.contains("Not now"));
         assert!(!plain.contains("proxy"));
         let proxied = other_sfu_text("sfu.other.example", true, true);
-        assert!(proxied.contains("SOCKS5 proxy") && proxied.contains("does not use it"));
+        assert!(proxied.contains("request for a call token uses the proxy"));
+        assert!(proxied.contains("call connection to that server does not"));
         let yes_no = other_sfu_text("sfu.other.example", false, false);
-        assert!(yes_no.contains("Yes") && yes_no.contains("No"));
+        assert!(yes_no.contains("Yes to connect"));
+        assert!(yes_no.contains("No for not now"));
+        assert!(yes_no.contains("No is the default"));
     }
     use persephone_call_protocol::write_video_frame;
     use std::io::Cursor;

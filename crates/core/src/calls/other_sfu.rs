@@ -25,11 +25,26 @@ pub enum Home<'a> {
     Nowhere,
 }
 
-/// Whether the host of `url` is a DNS name. An IP address literal, IPv4 or
-/// IPv6, is not: it would let a membership make the core contact an address
-/// of its choice.
-fn has_dns_host(url: &Url) -> bool {
-    matches!(url.host(), Some(Host::Domain(_)))
+/// Whether the host of `url` may be contacted as another SFU (ADR-0054). It
+/// must be a DNS name that is not local by its form: not an IP address
+/// literal (IPv4 or IPv6), not `localhost` or `*.localhost` (RFC 6761), not a
+/// single-label name, and not `*.local` (mDNS), `*.home.arpa` (RFC 8375) or
+/// `*.internal`. Case and one trailing dot do not matter. This is the rule
+/// for the service URL and for the `wss://` URL in the answer.
+pub fn is_other_host(url: &Url) -> bool {
+    let Some(Host::Domain(domain)) = url.host() else {
+        return false;
+    };
+    let name = domain.to_ascii_lowercase();
+    let name = name.strip_suffix('.').unwrap_or(&name);
+    let local = |suffix: &str| name.ends_with(suffix);
+    name.contains('.')
+        && !name.is_empty()
+        && name != "localhost"
+        && !local(".localhost")
+        && !local(".local")
+        && !local(".home.arpa")
+        && !local(".internal")
 }
 
 /// The SFU of `member` (ADR-0054).
@@ -49,7 +64,7 @@ pub fn home<'a>(member: &'a ActiveMember, own: &Url) -> Home<'a> {
     member
         .transports
         .iter()
-        .find(|transport| transport.as_str() != own.as_str() && has_dns_host(transport))
+        .find(|transport| transport.as_str() != own.as_str() && is_other_host(transport))
         .map_or(Home::Nowhere, Home::Other)
 }
 
@@ -328,6 +343,47 @@ mod tests {
                 Home::Other(&url("https://sfu.b.example")),
                 "{literal}"
             );
+        }
+    }
+
+    /// GIVEN a service host that is local by its form
+    /// WHEN the home is asked
+    /// THEN the member is nowhere, in any case and with a trailing dot, while a
+    /// normal name is accepted.
+    #[test]
+    fn given_local_host_names_then_they_are_never_another_sfu() {
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "localhost.",
+            "sfu.localhost",
+            "Sfu.LocalHost.",
+            "sfu",
+            "sfu.",
+            "printer.local",
+            "printer.LOCAL.",
+            "nas.home.arpa",
+            "nas.Home.Arpa.",
+            "sfu.internal",
+            "sfu.INTERNAL.",
+            "a.b.internal",
+        ] {
+            let url = Url::parse(&format!("https://{host}/jwt")).unwrap();
+            assert!(!is_other_host(&url), "{host}");
+            let only = member("a", &[url.as_str()]);
+            assert_eq!(home(&only, &own()), Home::Nowhere, "{host}");
+        }
+        for host in [
+            "sfu.example.org",
+            "SFU.Example.ORG.",
+            "local.example.org",
+            "internal.example",
+        ] {
+            let url = Url::parse(&format!("https://{host}/jwt")).unwrap();
+            assert!(is_other_host(&url), "{host}");
+        }
+        for literal in ["https://192.0.2.10", "https://[2001:db8::1]"] {
+            assert!(!is_other_host(&Url::parse(literal).unwrap()), "{literal}");
         }
     }
 

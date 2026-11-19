@@ -23,7 +23,7 @@ use super::membership::{
     ActiveMember, DELAYED_LEAVE_RESTART, EVENT_TYPE, MEMBERSHIP_REFRESH, leave_content,
     own_membership, own_state_key, participant_identity, read_members,
 };
-use super::other_sfu::{Home, MAX_OTHER_SFUS, OtherSfus, Plan, home};
+use super::other_sfu::{Home, MAX_OTHER_SFUS, OtherSfus, Plan, home, is_other_host};
 use super::readiness::{TurnServers, sfu_transport, turn_servers};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
@@ -2241,7 +2241,8 @@ impl Call {
     ) -> Result<(), EndReason> {
         let wanted = self.view.other.connecting_url(index).is_some();
         match grant {
-            Some(grant) if wanted => {
+            // The answer's host follows the same rules as the service host.
+            Some(grant) if wanted && is_other_host(&grant.url) => {
                 let SfuGrant { url, jwt } = grant;
                 self.send_worker(ToWorker::Subscribe {
                     index,
@@ -4705,6 +4706,46 @@ mod tests {
         call.grant_received(&inner, 3, Some(grant("wss://sfu.other.example")))
             .unwrap();
         assert!(fixture.to_worker.try_recv().is_err());
+    }
+
+    /// GIVEN a grant whose `wss://` host is an IP literal, `localhost`, a
+    /// single-label, `.local`, `.home.arpa` or `.internal` name
+    /// WHEN it arrives THEN nothing goes to the worker, the members stay not
+    /// reachable and the call goes on.
+    #[tokio::test]
+    async fn given_a_grant_with_a_refused_host_then_no_subscribe_goes_out() {
+        use zeroize::Zeroizing;
+        let refused = [
+            "wss://192.0.2.10",
+            "wss://[2001:db8::1]",
+            "wss://localhost",
+            "wss://LocalHost.",
+            "wss://x.localhost",
+            "wss://sfu",
+            "wss://x.local",
+            "wss://x.home.arpa",
+            "wss://x.internal.",
+        ];
+        for bad in refused {
+            let host = FakeHost::answering_other(true);
+            let (mut fixture, inner) = other_call(&host, Arc::new(AtomicBool::new(false)));
+            let call = &mut fixture.call;
+            call.worker_event(&inner, &FromWorker::Connected).unwrap();
+            call.plan_others(&inner).unwrap();
+            let (asked, connect) = consent_done(&mut call.consent).await;
+            call.consent_answered(&inner, &asked, connect).unwrap();
+            let grant = SfuGrant {
+                url: Url::parse(bad).unwrap(),
+                jwt: Zeroizing::new("a.b.c".to_owned()),
+            };
+            call.grant_received(&inner, 1, Some(grant)).unwrap();
+            assert!(fixture.to_worker.try_recv().is_err(), "{bad}");
+            assert!(call.view.other.connecting_url(1).is_none(), "{bad}");
+            assert!(matches!(
+                inner.state.borrow().clone(),
+                CallState::Active { .. }
+            ));
+        }
     }
 
     /// GIVEN a call with other SFUs WHEN the call ends (the session ends)
