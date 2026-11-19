@@ -39,8 +39,8 @@ pub trait Env: Send + Sync {
     fn open_generation(&self) -> Option<u64>;
     /// Runs `action` only while `generation` is still the open session's,
     /// under the lock that a lock takes to advance the generation. A lock
-    /// then clears whatever `action` queued. `action` must not call back
-    /// into the session.
+    /// then clears whatever `action` queued. `action` must not take the
+    /// session's lock; it may read [`Env::toast`], which takes none.
     fn while_open(&self, generation: u64, action: &mut dyn FnMut());
 }
 
@@ -171,11 +171,24 @@ async fn ring_arrived(env: &dyn Env, room: &Room, event: Envelope) {
         } else {
             (String::new(), String::new())
         };
-        let (room_name, caller) = super::rings::toast_names(allowed, room_name, caller);
         // Under the session's lock: a lock that starts after this cannot
-        // miss the notification when it clears them.
+        // miss the notification when it clears them. The lookup above
+        // awaited, so the ring and the settings are read again here: the
+        // ring may have been answered, declined, replaced or expired, and
+        // the notifications or their names may have been turned off.
         env.while_open(generation, &mut || {
-            listener.notify_call(&room_name, &caller)
+            let Some(allowed_now) = env.toast() else {
+                return;
+            };
+            if !rings.is_live(&event_id, now_ms()) {
+                return;
+            }
+            let (room_name, caller) = super::rings::toast_names(
+                allowed && allowed_now,
+                room_name.clone(),
+                caller.clone(),
+            );
+            listener.notify_call(&room_name, &caller);
         });
     }
 }
@@ -336,9 +349,16 @@ mod tests {
         }
     }
 
+    /// A change made under the session's lock, just before the notification.
+    type Hook = Box<dyn FnOnce(&Recorder) + Send>;
+
     struct TestEnv {
         listener: Arc<Recorder>,
-        toast: Option<bool>,
+        /// The settings the session reports, one for each ask; the last one
+        /// repeats.
+        toasts: Mutex<Vec<Option<bool>>>,
+        /// Runs once, under the session's lock, before the notification.
+        before_notify: Mutex<Option<Hook>>,
         /// The generations the session reports, one for each ask; the last
         /// one repeats. `None` is a locked session.
         generations: Mutex<Vec<Option<u64>>>,
@@ -356,9 +376,24 @@ mod tests {
         ) -> Self {
             Self {
                 listener,
-                toast,
+                toasts: Mutex::new(vec![toast]),
                 generations: Mutex::new(generations),
+                before_notify: Mutex::new(None),
             }
+        }
+
+        /// The settings change to `later` after the first read, and
+        /// `before_notify` runs just before the notification.
+        fn changing(
+            listener: Arc<Recorder>,
+            toast: Option<bool>,
+            later: Option<bool>,
+            before_notify: impl FnOnce(&Recorder) + Send + 'static,
+        ) -> Self {
+            let env = Self::new(listener, toast);
+            env.toasts.lock().unwrap().push(later);
+            *env.before_notify.lock().unwrap() = Some(Box::new(before_notify));
+            env
         }
     }
 
@@ -367,7 +402,12 @@ mod tests {
             Some(self.listener.clone())
         }
         fn toast(&self) -> Option<bool> {
-            self.toast
+            let mut toasts = self.toasts.lock().unwrap();
+            if toasts.len() > 1 {
+                toasts.remove(0)
+            } else {
+                toasts[0]
+            }
         }
         fn open_generation(&self) -> Option<u64> {
             let mut generations = self.generations.lock().unwrap();
@@ -379,6 +419,9 @@ mod tests {
         }
         fn while_open(&self, generation: u64, action: &mut dyn FnMut()) {
             if self.open_generation() == Some(generation) {
+                if let Some(hook) = self.before_notify.lock().unwrap().take() {
+                    hook(&self.listener);
+                }
                 action();
             }
         }
@@ -681,6 +724,55 @@ mod tests {
             // notification.
             assert_eq!(!live_ids(&recorder).is_empty(), kept, "{case}");
             assert!(recorder.toasts.lock().unwrap().is_empty(), "{case}");
+        }
+    }
+
+    /// GIVEN a ring whose caller's names are being read WHEN the ring ends,
+    /// or the notification settings change, before the notification THEN
+    /// the notification follows the ring and the settings at that time.
+    #[tokio::test]
+    async fn given_a_change_during_the_name_lookup_then_the_notification_follows_it() {
+        let named = vec![("Planning".to_owned(), "Bob".to_owned())];
+        let nameless = vec![(String::new(), String::new())];
+        let ended = |recorder: &Recorder| {
+            recorder
+                .rings
+                .retain(|ring| ring.event_id != event_id!("$ring"));
+        };
+        let unchanged = |_: &Recorder| {};
+        // The case, the settings after the first read, the change and the
+        // notifications expected.
+        type Case = (&'static str, Option<bool>, Hook, Vec<(String, String)>);
+        let cases: [Case; 5] = [
+            ("unchanged", Some(true), Box::new(unchanged), named),
+            ("answered or declined", Some(true), Box::new(ended), vec![]),
+            ("notifications off", None, Box::new(unchanged), vec![]),
+            ("names off", Some(false), Box::new(unchanged), nameless),
+            (
+                "replaced",
+                Some(true),
+                Box::new(|recorder: &Recorder| {
+                    let mut newer = ring_from(STRANGER, "$newer");
+                    newer.ends_ms = now_ms() + 90_000;
+                    recorder.rings.admit(newer, now_ms()).unwrap();
+                }),
+                vec![],
+            ),
+        ];
+        for (case, later, hook, expected) in cases {
+            let reply = sync_reply(
+                vec![in_call(CALLER, "BOB")],
+                vec![ring_event("$ring", CALLER)],
+                &[],
+            );
+            let recorder = run_with(
+                reply,
+                Some(true),
+                |_| {},
+                move |listener, toast| TestEnv::changing(listener, toast, later, hook),
+            )
+            .await;
+            assert_eq!(*recorder.toasts.lock().unwrap(), expected, "{case}");
         }
     }
 
