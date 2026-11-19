@@ -12,7 +12,7 @@
 //! the worker ([`spawn_kept`]).
 
 use super::credentials::{prompt, question_alert, yes};
-use crate::calls::worker::{CameraPath, StartError, WorkerProcess};
+use crate::calls::worker::{CameraPath, StartError, WorkerExit, WorkerProcess};
 use crate::platform::call_host::{
     ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher,
 };
@@ -94,6 +94,10 @@ impl WorkerProcess for KeptParent {
 
     fn wait_exit(&self, timeout: Duration) -> bool {
         self.process.wait_exit(timeout)
+    }
+
+    fn exit_status(&self) -> Option<WorkerExit> {
+        self.process.exit_status()
     }
 
     fn confirm_contained(&self) -> bool {

@@ -345,18 +345,51 @@ Observed, in order:
     new connection, so no `/sfu/get` was sent. No call worker process
     started. The call state still showed the previous ended call.
 
-Findings to fix or decide later:
+Findings to fix or decide later. Status as of 19 November 2026:
 
 - When the membership event is refused, the cleanup sends the delayed leave
   instead of cancelling it.
+  *Fixed 19 November 2026 in `crates/core/src/calls/controller.rs`.* The
+  flag `membership_sent` was set before the send and never cleared. It is
+  now cleared when the homeserver answers with a client error (4xx), so the
+  cleanup cancels the delayed leave. A timeout, a lost connection or a 5xx
+  may hide a write, so those still send the leave. Test:
+  `given_membership_failures_then_only_a_client_error_is_a_refusal`.
 - Readiness does not warn when power levels block call membership.
+  *Fixed 19 November 2026 in `crates/core/src/calls/status.rs`.* A new code
+  `not_permitted` follows `not_encrypted`. Tests: `given_power_levels_then_member_state_permission_follows_the_room`,
+  `given_no_power_levels_event_then_only_the_creator_may_send`.
 - A worker that panics shows "The call process stopped." The panic message
   is lost because the worker has no stderr by design.
+  *Fixed 19 November 2026 without a message.* The core reads the exit status
+  of an ended worker (`crates/media-broker`, `crates/core/src/calls/worker.rs`
+  `exit_is_crash`, `controller.rs` `stop_reason`). A panic (exit 101), the
+  worker's own unreportable exit, a Windows crash status or a crash signal
+  ends the call with the new code `worker_crashed`. The Unix part of the
+  status read was not compiled or run on the development machine.
 - The worker gathered a server-reflexive candidate, so it contacted a STUN
   server that the SFU named. The proxy warning names only the SFU and the
   TURN server. Check which STUN server LiveKit sends by default.
+  *Fixed 19 November 2026 (text only) in `crates/core/src/platform/call_host.rs`.*
+  The warning now says that STUN or TURN servers named by the call server
+  also see the IP address. ICE behaviour is unchanged. The worker passes the
+  homeserver's TURN servers, and the core keeps only `turn:` and `turns:`
+  URIs. `livekit` 0.11 uses the SFU's `ice_servers` from the join response
+  only when the worker's list is empty, so the STUN server comes from the
+  SFU when the homeserver has no TURN. A UDP TURN server also answers STUN
+  binding requests, so with a homeserver TURN server it can be the source.
+  The default STUN list of the LiveKit server was not checked in this run.
 - `internetClient` excludes private ranges. A self-hosted SFU on a LAN or
   VPN address cannot be reached by the contained worker.
+  *Still open: a containment decision.* Not changed.
+- While the core's proxy warning is open, the call button is disabled with
+  no text (evidence finding).
+  *Fixed 19 November 2026 in `frontend/src/calls.ts`.* The pending text now
+  says that a proxy warning window may be open. The page cannot see the
+  core's window, so the text is not specific to the warning.
+- Newer SFU transport form (`m.livekit` with `url`, Synapse 1.161 and later).
+  *Done 19 November 2026 in `crates/core/src/calls/readiness.rs` and
+  `membership.rs`; see the ADR-0043 amendment.*
 
 ## Synapse configuration additions
 

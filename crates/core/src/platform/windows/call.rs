@@ -3,7 +3,9 @@
 //! its `Ready` message before it hands out the link (ADR-0043). The read and
 //! write loops and the `Ready` gate are shared (`platform/call_host.rs`).
 
-use crate::calls::worker::{CALL_WORKER_PROFILE, CameraPath, StartError, WorkerProcess};
+use crate::calls::worker::{
+    CALL_WORKER_PROFILE, CameraPath, StartError, WorkerExit, WorkerProcess,
+};
 use crate::platform::call_host::{
     ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher,
 };
@@ -75,6 +77,13 @@ impl WorkerProcess for JobProcess {
 
     fn wait_exit(&self, timeout: Duration) -> bool {
         self.0.wait_exit(timeout)
+    }
+
+    fn exit_status(&self) -> Option<WorkerExit> {
+        self.0.exit_status().map(|exit| match exit {
+            persephone_media_broker::WorkerExit::Code(code) => WorkerExit::Code(code),
+            persephone_media_broker::WorkerExit::Signal(signal) => WorkerExit::Signal(signal),
+        })
     }
 }
 

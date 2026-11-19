@@ -26,7 +26,9 @@ use super::membership::{
 use super::readiness::{TurnServers, sfu_transport, turn_servers};
 use super::sfu::{self, OpenIdToken, SfuError};
 use super::video::{Notifier, Picture, VideoStore};
-use super::worker::{CallHost, CallWorkerLink, StartError, WorkerProcess};
+use super::worker::{
+    CallHost, CallWorkerLink, StartError, WorkerExit, WorkerProcess, exit_is_crash,
+};
 use super::{MAX_CALL_MEMBERS, keys::FrameKey};
 use crate::session::Admission;
 use matrix_sdk::{
@@ -120,6 +122,9 @@ pub enum EndReason {
     WorkerFailed(FailureCode),
     /// The worker exited or its channel closed.
     WorkerStopped,
+    /// The worker ended with an internal failure: a panic, an abort or a
+    /// crash.
+    WorkerCrashed,
     /// The delayed leave could not be kept alive, or this device's
     /// membership disappeared.
     MembershipLost,
@@ -1133,6 +1138,7 @@ impl CallController {
             Some(created_ts),
             scope.video,
         );
+        // Set before the send: a timeout or a lost answer may hide a write.
         setup.membership_sent = true;
         time::timeout(
             SEND_TIMEOUT,
@@ -1140,7 +1146,14 @@ impl CallController {
         )
         .await
         .map_err(|_| CallError::Membership)?
-        .map_err(|_| CallError::Membership)?;
+        .map_err(|error| {
+            if membership_refused(&error) {
+                // Nothing was written, so the cleanup cancels the delayed
+                // leave instead of sending it.
+                setup.membership_sent = false;
+            }
+            CallError::Membership
+        })?;
         flags.halt()?;
 
         // 7. The SFU grant.
@@ -1566,6 +1579,40 @@ impl Drop for EndGuard {
     }
 }
 
+/// Whether the homeserver refused a membership send for certain: it answered
+/// with a client error. A timeout, a network failure or a server error may
+/// hide a write, so those are not refusals.
+fn membership_refused(error: &matrix_sdk::Error) -> bool {
+    error
+        .as_client_api_error()
+        .is_some_and(|api| api.status_code.is_client_error())
+}
+
+/// How long the core waits for an ended worker to show its exit status.
+const EXIT_STATUS_WAIT: Duration = Duration::from_millis(500);
+
+/// The end reason for a worker that stopped: a crash when its exit status
+/// shows an internal failure, else a plain stop.
+fn stop_reason(exit: Option<WorkerExit>) -> EndReason {
+    match exit {
+        Some(exit) if exit_is_crash(exit) => EndReason::WorkerCrashed,
+        _ => EndReason::WorkerStopped,
+    }
+}
+
+async fn refine_worker_stop(call: &Call) -> EndReason {
+    let process = call.link.kill_handle();
+    let exit = tokio::task::spawn_blocking(move || {
+        process
+            .wait_exit(EXIT_STATUS_WAIT)
+            .then(|| process.exit_status())
+            .flatten()
+    })
+    .await
+    .unwrap_or(None);
+    stop_reason(exit)
+}
+
 async fn run_call(
     inner: Arc<Inner>,
     id: u64,
@@ -1584,6 +1631,11 @@ async fn run_call(
     let reason = match call.run(&inner, &mut stop, &mut commands).await {
         Ok(()) => EndReason::Left,
         Err(reason) => reason,
+    };
+    let reason = if reason == EndReason::WorkerStopped {
+        refine_worker_stop(&call).await
+    } else {
+        reason
     };
     if reason == EndReason::SessionEnded {
         flags.ended.store(true, Ordering::SeqCst);
@@ -2027,6 +2079,43 @@ mod tests {
     use matrix_sdk::ruma::{owned_device_id, owned_user_id, room_id};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    /// GIVEN a homeserver answer to a request WHEN the failure is classified
+    /// THEN a 4xx refusal is certain (the cleanup cancels the delayed leave),
+    /// and a 5xx may hide a write (the cleanup sends it).
+    #[tokio::test]
+    async fn given_membership_failures_then_only_a_client_error_is_a_refusal() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for (status, errcode, refused) in [
+            (403, "M_FORBIDDEN", true),
+            (400, "M_BAD_JSON", true),
+            (429, "M_LIMIT_EXCEEDED", true),
+            (500, "M_UNKNOWN", false),
+        ] {
+            let server = MockServer::start().await;
+            let client = crate::calls::readiness::tests::signed_in(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/_matrix/client/v3/voip/turnServer"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({ "errcode": errcode, "error": "no" })),
+                )
+                .mount(&server)
+                .await;
+            let error = client
+                .send(matrix_sdk::ruma::api::client::voip::get_turn_server_info::v3::Request::new())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                membership_refused(&matrix_sdk::Error::from(error)),
+                refused,
+                "{status}"
+            );
+        }
+    }
+
     fn member(user: &str, device: &str, sfu: &str) -> ActiveMember {
         let user_id = OwnedUserId::try_from(user).unwrap();
         let device_id = OwnedDeviceId::from(device);
@@ -2173,6 +2262,26 @@ mod tests {
         assert!(participants[0].speaking);
         view.set_members(vec![member("@b:example.org", "B", "https://x.example.org")]);
         assert!(view.speaking.is_empty());
+    }
+
+    /// GIVEN a stopped worker WHEN its exit status is read THEN a crash status
+    /// ends the call as crashed, and a clean exit, a kill or an unknown status
+    /// ends it as stopped.
+    #[test]
+    fn given_worker_exit_then_the_stop_reason_names_crashes() {
+        assert_eq!(
+            stop_reason(Some(WorkerExit::Code(101))),
+            EndReason::WorkerCrashed
+        );
+        assert_eq!(
+            stop_reason(Some(WorkerExit::Code(0))),
+            EndReason::WorkerStopped
+        );
+        assert_eq!(
+            stop_reason(Some(WorkerExit::Code(1))),
+            EndReason::WorkerStopped
+        );
+        assert_eq!(stop_reason(None), EndReason::WorkerStopped);
     }
 
     /// GIVEN a worker failure, close or mute report WHEN applied THEN they end

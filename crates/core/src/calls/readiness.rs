@@ -109,19 +109,36 @@ pub struct SfuService {
     pub advertised: String,
 }
 
-/// The first LiveKit service URL that is safe to use.
-fn first_livekit(transports: &[RtcTransport]) -> Option<SfuService> {
-    transports.iter().find_map(|transport| match transport {
-        RtcTransport::LiveKit(livekit) if livekit.service_url.len() <= MAX_URL_BYTES => {
-            Url::parse(&livekit.service_url)
-                .ok()
-                .filter(|url| is_service_url(url, "https", "http"))
-                .map(|url| SfuService {
-                    url,
-                    advertised: livekit.service_url.clone(),
-                })
-        }
+/// The advertised URL string of a LiveKit transport, in either form.
+///
+/// The legacy form is `{"type":"livekit","livekit_service_url":U}`. The
+/// newer form (Synapse 1.161 and later) is `{"type":"m.livekit","url":U}`.
+/// A URL longer than [`MAX_URL_BYTES`] is refused before it is copied.
+fn livekit_url(transport: &RtcTransport) -> Option<String> {
+    match transport {
+        RtcTransport::LiveKit(livekit) => bounded_copy(&livekit.service_url),
+        other if other.transport_type() == "m.livekit" => other
+            .data()
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .and_then(bounded_copy),
         _ => None,
+    }
+}
+
+/// A copy of `url` when it is at most [`MAX_URL_BYTES`] long.
+fn bounded_copy(url: &str) -> Option<String> {
+    (url.len() <= MAX_URL_BYTES).then(|| url.to_owned())
+}
+
+/// The first LiveKit service URL that is safe to use, in server order.
+fn first_livekit(transports: &[RtcTransport]) -> Option<SfuService> {
+    transports.iter().find_map(|transport| {
+        let advertised = livekit_url(transport)?;
+        Url::parse(&advertised)
+            .ok()
+            .filter(|url| is_service_url(url, "https", "http"))
+            .map(|url| SfuService { url, advertised })
     })
 }
 
@@ -270,6 +287,83 @@ pub(super) mod tests {
             "https://good.example.org/jwt"
         );
         assert!(first_livekit(&[]).is_none());
+    }
+
+    /// GIVEN the newer and the legacy transport forms WHEN the first usable one is picked THEN both forms work, in server order, and the advertised string is kept.
+    #[test]
+    fn given_newer_transport_form_then_accepted() {
+        let newer = |url: serde_json::Value| {
+            let data = json!({ "url": url }).as_object().unwrap().clone();
+            RtcTransport::new("m.livekit", data).unwrap()
+        };
+        let got = first_livekit(&[newer(json!("https://sfu.example.org"))]).unwrap();
+        assert_eq!(got.advertised, "https://sfu.example.org");
+        assert_eq!(got.url.as_str(), "https://sfu.example.org/");
+
+        let mixed = [
+            newer(json!("https://first.example.org/jwt")),
+            RtcTransport::livekit("https://second.example.org".to_owned()),
+        ];
+        assert_eq!(
+            first_livekit(&mixed).unwrap().url.as_str(),
+            "https://first.example.org/jwt"
+        );
+        let mixed = [
+            RtcTransport::livekit("https://legacy.example.org".to_owned()),
+            newer(json!("https://newer.example.org")),
+        ];
+        assert_eq!(
+            first_livekit(&mixed).unwrap().advertised,
+            "https://legacy.example.org"
+        );
+    }
+
+    /// GIVEN malformed newer entries WHEN the first usable one is picked THEN they are passed over.
+    #[test]
+    fn given_malformed_newer_entries_then_rejected() {
+        let make = |data: serde_json::Value| {
+            RtcTransport::new("m.livekit", data.as_object().unwrap().clone()).unwrap()
+        };
+        let bad = [
+            make(json!({})),
+            make(json!({ "url": 5 })),
+            make(json!({ "url": "not a url" })),
+            make(json!({ "url": "https://u:p@sfu.example.org" })),
+            make(
+                json!({ "url": format!("https://sfu.example.org/{}", "a".repeat(MAX_URL_BYTES)) }),
+            ),
+            make(json!({ "livekit_service_url": "https://sfu.example.org" })),
+            RtcTransport::new("m.other", serde_json::Map::new()).unwrap(),
+        ];
+        assert!(first_livekit(&bad).is_none());
+        let mut list = bad.to_vec();
+        list.push(make(json!({ "url": "https://good.example.org" })));
+        assert_eq!(
+            first_livekit(&list).unwrap().advertised,
+            "https://good.example.org"
+        );
+        if !cfg!(feature = "dev-disposable-servers") {
+            assert!(first_livekit(&[make(json!({ "url": "http://sfu.example.org" }))]).is_none());
+        }
+    }
+
+    /// GIVEN advertised URLs at and over the limit WHEN either form is read THEN only the one at the limit is kept.
+    #[test]
+    fn given_a_url_at_and_over_the_limit_then_only_the_one_at_the_limit_is_read() {
+        let base = "https://sfu.example.org/";
+        let at = format!("{base}{}", "a".repeat(MAX_URL_BYTES - base.len()));
+        let over = format!("{at}a");
+        let newer = |url: &str| {
+            let data = json!({ "url": url });
+            RtcTransport::new("m.livekit", data.as_object().unwrap().clone()).unwrap()
+        };
+        assert_eq!(
+            livekit_url(&RtcTransport::livekit(at.clone())),
+            Some(at.clone())
+        );
+        assert_eq!(livekit_url(&newer(&at)), Some(at.clone()));
+        assert_eq!(livekit_url(&RtcTransport::livekit(over.clone())), None);
+        assert_eq!(livekit_url(&newer(&over)), None);
     }
 
     /// GIVEN a service advertised as a bare origin, with or without a final

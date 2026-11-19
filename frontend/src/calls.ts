@@ -21,6 +21,7 @@ export const UNAVAILABLE_TEXT: Record<CallUnavailable, string> = {
   unsupported_platform: 'Calls are not available on this system yet.',
   not_joined: 'Join the room to start a call.',
   not_encrypted: 'Calls need an encrypted room.',
+  not_permitted: 'You do not have permission to start a call in this room.',
   no_call_server: 'Your homeserver has no call service.',
   server_unreachable: 'Cannot reach your homeserver to check for calls.'
 };
@@ -53,6 +54,7 @@ export const END_TEXT: Record<CallEnd, string> = {
     'The chosen microphone or speaker is not connected. Choose another in Preferences.',
   containment: 'The call stopped: its process was not contained.',
   worker_stopped: 'The call process stopped.',
+  worker_crashed: 'The call process failed with an internal error.',
   membership_lost: 'Your homeserver ended your call membership.',
   keys_unavailable: 'The call keys are not available.',
   session_ended: 'The call ended because Persephone locked.',
@@ -67,7 +69,12 @@ export const PHASE_TEXT: Record<CallPhase, string> = {
 };
 
 export const IN_CALL_TEXT = 'You are already in a call.';
-export const STARTING_TEXT = 'Starting the call…';
+/**
+ * Shown while a join waits for the core. A profile with a proxy makes the
+ * core open its own warning window first, and the page cannot see that
+ * window, so the text names it.
+ */
+export const STARTING_TEXT = 'Starting the call… If a proxy warning window is open, answer it to go on.';
 export const NO_KEY_TEXT = 'Cannot hear yet: no key';
 export const UNREACHABLE_TEXT = 'On another call server: not reachable';
 
@@ -111,7 +118,7 @@ export function callButton(
     const here = status.roomId === roomId;
     return { hidden: here, disabled: true, label, reason: here ? null : IN_CALL_TEXT };
   }
-  if (pending) return { hidden: false, disabled: true, label, reason: null };
+  if (pending) return { hidden: false, disabled: true, label, reason: STARTING_TEXT };
   if (readiness === null) return { hidden: false, disabled: true, label, reason: null };
   if (!readiness.available) {
     const reason = readiness.reason === null ? null : UNAVAILABLE_TEXT[readiness.reason];
