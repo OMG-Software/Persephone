@@ -32,13 +32,18 @@ use matrix_sdk::{
     ruma::{
         UserId,
         api::client::{
+            backup::{BackupAlgorithm, get_latest_backup_info},
             keys::get_keys,
             uiaa::{AuthData, MatrixUserIdentifier, Password, UserIdentifier},
         },
+        serde::Raw,
     },
 };
+use matrix_sdk_crypto::store::CryptoStore;
 use persephone_contracts::{IdentityState, RecoveryState, SecurityError};
 use std::time::Duration;
+
+use crate::store::Stores;
 use zeroize::Zeroizing;
 
 /// The identity state from the local store and `published`, what the
@@ -206,19 +211,63 @@ pub const BACKUP_UPLOAD_WAIT: Duration = Duration::from_secs(15);
 
 /// Whether this device's room keys are all in the key backup, so signing out
 /// loses no encrypted history. False when the backup is not enabled on this
-/// device, or when the remaining keys did not finish uploading within
-/// `wait`: an upload error, a backup deleted or replaced meanwhile, or a
-/// timeout. Waiting also starts the upload of keys received since the last
-/// one.
-pub async fn keys_backed_up(client: &Client, wait: Duration) -> bool {
+/// device, when the remaining keys did not finish uploading, or when the
+/// homeserver's current backup is not the one this device uploads to; also
+/// when any of this does not finish within `wait`. Waiting also starts the
+/// upload of keys received since the last one.
+pub async fn keys_backed_up(client: &Client, stores: &Stores, wait: Duration) -> bool {
     let backups = client.encryption().backups();
     if !backups.are_enabled().await {
         return false;
     }
-    matches!(
-        tokio::time::timeout(wait, backups.wait_for_steady_state()).await,
-        Ok(Ok(()))
+    let checked = async {
+        backups.wait_for_steady_state().await.is_ok()
+            && server_keeps_local_backup(client, stores).await
+    };
+    tokio::time::timeout(wait, checked).await.unwrap_or(false)
+}
+
+/// Asks the homeserver whether its current key backup is the one this device
+/// uploads to. The SDK learns that a backup was deleted or replaced only when
+/// an upload fails, and with nothing left to upload it asks nothing, so a
+/// backup another device removed after the last upload still looks enabled.
+/// No answer, no backup, or another backup is false.
+async fn server_keeps_local_backup(client: &Client, stores: &Stores) -> bool {
+    let Ok(local) = stores.crypto().load_backup_keys().await else {
+        return false;
+    };
+    let (Some(version), Some(key)) = (local.backup_version, local.decryption_key) else {
+        return false;
+    };
+    let Ok(current) = client
+        .send(get_latest_backup_info::v3::Request::new())
+        .await
+    else {
+        return false;
+    };
+    same_backup(
+        &version,
+        &key.megolm_v1_public_key().to_base64(),
+        &current.version,
+        &current.algorithm,
     )
+}
+
+/// Whether the homeserver's backup (`server_version`, `server_algorithm`) is
+/// the local one: the same version and the same public key. Any algorithm
+/// other than the one Matrix defines is never the local backup.
+fn same_backup(
+    local_version: &str,
+    local_public_key: &str,
+    server_version: &str,
+    server_algorithm: &Raw<BackupAlgorithm>,
+) -> bool {
+    match server_algorithm.deserialize() {
+        Ok(BackupAlgorithm::MegolmBackupV1Curve25519AesSha2(auth)) => {
+            server_version == local_version && auth.public_key.encode() == local_public_key
+        }
+        _ => false,
+    }
 }
 
 /// Deletes the homeserver's key backup and starts a new one with new secret
@@ -305,5 +354,52 @@ fn http_error(error: &HttpError) -> SecurityError {
     match error {
         HttpError::Reqwest(_) => SecurityError::Unreachable,
         _ => SecurityError::Failed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn algorithm(json: serde_json::Value) -> Raw<BackupAlgorithm> {
+        Raw::from_json(serde_json::value::to_raw_value(&json).unwrap())
+    }
+
+    fn megolm(public_key: &str) -> Raw<BackupAlgorithm> {
+        algorithm(serde_json::json!({
+            "algorithm": "m.megolm_backup.v1.curve25519-aes-sha2",
+            "auth_data": { "public_key": public_key, "signatures": {} }
+        }))
+    }
+
+    /// GIVEN the homeserver's current backup WHEN its version and public key
+    /// are the local ones THEN it is the local backup; a different version
+    /// (the backup was replaced), a different key, or another algorithm is
+    /// not, so sign-out refuses.
+    #[test]
+    fn given_the_server_backup_then_only_the_same_version_and_key_match() {
+        let key = "aGVsbG8";
+        assert!(same_backup("3", key, "3", &megolm(key)));
+        assert!(!same_backup("3", key, "4", &megolm(key)), "replaced");
+        assert!(
+            !same_backup("3", key, "3", &megolm("d29ybGQ")),
+            "another key"
+        );
+        assert!(
+            !same_backup(
+                "3",
+                key,
+                "3",
+                &algorithm(serde_json::json!({
+                    "algorithm": "org.example.other",
+                    "auth_data": { "public_key": key }
+                }))
+            ),
+            "another algorithm"
+        );
+        assert!(
+            !same_backup("3", key, "3", &algorithm(serde_json::json!({}))),
+            "unreadable"
+        );
     }
 }

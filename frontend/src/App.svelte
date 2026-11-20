@@ -368,6 +368,7 @@
   // The core refused the sign-out: this device's room keys are not all in a
   // key backup. The question then states the loss and offers recovery.
   let signOutLosesKeys = $state(false);
+  let keysWarning = $state<HTMLElement | null>(null);
   // What the window shows besides the room: settings, and the jump palette.
   let view = $state<'chat' | 'settings'>('chat');
   let settingsTab = $state<SettingsTab>('security');
@@ -1595,10 +1596,13 @@
       if (generation === sessionGeneration && status) status = { ...status, store };
     } catch (reason) {
       if (generation === sessionGeneration) {
+        // The session goes on: save the draft whose autosave `protect` stopped.
+        void draftKeeper.flush();
         if (String(reason) === 'keys_not_backed_up') {
           // Nothing changed. Ask again, with the loss stated.
           signOutLosesKeys = true;
           confirmingSignOut = true;
+          void focusKeysWarning();
         } else {
           error =
             String(reason) === 'limit_exceeded'
@@ -1609,6 +1613,21 @@
     } finally {
       switching = false;
     }
+  }
+
+  // The warning replaces the question that had focus, so it takes focus
+  // once it shows.
+  async function focusKeysWarning() {
+    await tick();
+    keysWarning?.focus();
+  }
+
+  // Closes the warning and gives focus back to the Sign out button.
+  async function keepSignedIn() {
+    confirmingSignOut = false;
+    signOutLosesKeys = false;
+    await tick();
+    document.getElementById('sign-out-button')?.focus();
   }
 
   /** Lock or unlock the active store and ignore status from a session that changed meanwhile. */
@@ -2813,7 +2832,7 @@
               <h3>Sign out</h3>
               {#if confirmingSignOut && signOutLosesKeys}
                 <div class="confirm" role="alertdialog" aria-labelledby="sign-out-question">
-                  <p id="sign-out-question">
+                  <p id="sign-out-question" tabindex="-1" bind:this={keysWarning}>
                     This device's message keys are not all in a key backup. If you sign out now,
                     you lose the encrypted history this device can read, unless another of your
                     signed-in devices has the keys. Set up recovery first to keep them.
@@ -2841,10 +2860,7 @@
                     type="button"
                     disabled={switching}
                     class="secondary"
-                    onclick={() => {
-                      confirmingSignOut = false;
-                      signOutLosesKeys = false;
-                    }}
+                    onclick={keepSignedIn}
                   >
                     Cancel
                   </button>
@@ -2876,6 +2892,7 @@
                 <p>Signs this device out of the homeserver and deletes its keys and local data.</p>
                 <div class="actions">
                   <button
+                    id="sign-out-button"
                     type="button"
                     disabled={switching}
                     class="danger"

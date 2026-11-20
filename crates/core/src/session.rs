@@ -2172,6 +2172,7 @@ impl Session {
                         }
                         if !lease.stores().block_on(security::keys_backed_up(
                             &client,
+                            lease.stores(),
                             security::BACKUP_UPLOAD_WAIT,
                         )) {
                             self.release_new_work();
