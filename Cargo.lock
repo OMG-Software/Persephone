@@ -4520,7 +4520,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "persephone-call-protocol"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "persephone-media-protocol",
  "zeroize",
@@ -4528,7 +4528,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-call-worker"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "block2",
  "dispatch2",
@@ -4553,7 +4553,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-contracts"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4562,7 +4562,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-core"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -4600,7 +4600,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-core-protocol"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "persephone-contracts",
  "persephone-media-protocol",
@@ -4610,7 +4610,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-desktop"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "gtk",
  "libc",
@@ -4627,7 +4627,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-media-broker"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "libc",
  "persephone-media-protocol",
@@ -4637,7 +4637,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-media-decoder"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "persephone-media-protocol",
  "png 0.18.1",
@@ -4646,11 +4646,11 @@ dependencies = [
 
 [[package]]
 name = "persephone-media-protocol"
-version = "0.0.1"
+version = "0.2.0"
 
 [[package]]
 name = "persephone-media-sandbox"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "persephone-media-decoder",
  "persephone-media-protocol",
@@ -4661,7 +4661,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-media-worker"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "libc",
  "persephone-media-protocol",
@@ -4672,7 +4672,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-test-matrix"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
@@ -4692,7 +4692,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-test-storage"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "matrix-sdk-base",
  "matrix-sdk-crypto",
@@ -4707,7 +4707,7 @@ dependencies = [
 
 [[package]]
 name = "persephone-test-windows"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "windows",
  "windows-sys 0.61.2",
