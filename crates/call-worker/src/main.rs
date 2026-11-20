@@ -15,6 +15,8 @@ mod camera;
 mod camera_channel;
 mod containment;
 mod mapping;
+#[cfg(test)]
+mod native_volume_tests;
 mod output;
 #[cfg(target_os = "linux")]
 mod pulse;

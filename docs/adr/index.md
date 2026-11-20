@@ -61,6 +61,7 @@
 * [0052 - Ring for incoming calls and show active calls](0052-ring-for-incoming-calls-and-show-active-calls.md)
 * [0053 - Share the screen in calls on Linux and Windows](0053-share-the-screen-in-calls-on-linux-and-windows.md)
 * [0054 - Connect to call members on other SFUs](0054-connect-to-call-members-on-other-sfus.md)
+* [0055 - Add deafen and a call volume to calls](0055-add-deafen-and-a-call-volume-to-calls.md)
 
 ## Superseded Records
 

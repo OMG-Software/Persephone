@@ -524,6 +524,31 @@ Synapse and on Merovingian.
     ring with an old `sender_ts` and a ring from a room the user left do not
     show a prompt.
 
+## Deafen and volume checks (ADR-0055, added 19 November 2026, not yet run)
+
+Run these during step 6, with a test tone from Element Call.
+
+30. **Volume.** Move the call bar's volume slider from 100 to 20 and back.
+    [the tone gets quieter at once and comes back; at 0 it is silent; the
+    peer's audio is not changed]
+31. **Volume is saved.** Leave, then open Settings, Calls. [the slider shows
+    the last value]; join again [the call starts at that volume]
+32. **Deafen.** Unmuted, press Deafen. [the tone stops; the peer hears
+    silence; the call bar shows Undeafen and Unmute]
+33. **Undeafen.** [the tone comes back; the peer hears Persephone again]
+34. **Undeafen keeps a mute.** Mute, deafen, undeafen. [the tone comes back;
+    the peer still hears silence]
+35. **Unmute while deafened.** Deafen, then press Unmute. [the tone comes
+    back and the peer hears Persephone: unmute also undeafens]
+36. **A peer joins while deafened.** Deafen, then let Element Call leave and
+    rejoin. [no sound from the rejoined peer until undeafen; record any
+    short sound at the rejoin]
+37. **Deafen and rejoin.** Deafen, leave, join again. [the new call is not
+    deafened and uses the saved volume]
+38. **Another SFU.** With a member on another SFU (ADR-0054), deafen and
+    move the volume. [that member's audio follows the same as the own SFU's
+    members]
+
 ## Linux and macOS containment checks (ADR-0049, not yet run)
 
 ADR-0049 keeps calls on Linux and macOS unverified until a live run like the
@@ -745,3 +770,4 @@ worker's seccomp filter.
   above.
 - Merovingian (separate run after its probe).
 - More than two participants.
+- Deafen and the volume with more than one remote member.

@@ -1,7 +1,7 @@
 //! The call's devices (ADR-0043, ADR-0048): the user's saved choice and the list
 //! of devices the page offers.
 //!
-//! * The choice (microphone, speaker, camera) belongs to the profile. It is one JSON record in the encrypted
+//! * The choice (microphone, speaker, camera, playout volume) belongs to the profile. It is one JSON record in the encrypted
 //!   crypto store, like the proxy. It holds platform device IDs only; `None`
 //!   is the system default. A device need not be present when it is saved.
 //! * A record that cannot be read fails the join. A call never falls back to
@@ -14,7 +14,8 @@ use super::worker::{CallHost, StartError, WorkerAudio};
 use crate::{store::Stores, views::project_name};
 use matrix_sdk_crypto::store::CryptoStore;
 use persephone_call_protocol::{
-    FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES, MediaDevice, ToWorker,
+    FromWorker, MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES, MAX_VOLUME_PERCENT,
+    MediaDevice, ToWorker,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,9 +23,9 @@ use std::time::{Duration, Instant};
 
 pub const DEVICES_KEY: &str = "persephone.call_devices.v1";
 /// The largest saved record: three IDs at the limit, each one escaped to
-/// at most two bytes a byte (`"` and `\`) plus its quotes, and the field
-/// names. Every valid selection serializes under it.
-const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 64;
+/// at most two bytes a byte (`"` and `\`) plus its quotes, the field names
+/// and the volume. Every valid selection serializes under it.
+const MAX_RECORD_BYTES: usize = 3 * (2 * MAX_DEVICE_ID_BYTES + 2) + 80;
 /// How long the worker has to answer `ListDevices`.
 pub const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the worker has to exit after the list.
@@ -32,9 +33,10 @@ const FINISH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often the wait looks for the answer.
 const POLL: Duration = Duration::from_millis(20);
 
-/// The saved microphone, speaker and camera. `None` is the system default
-/// (for the camera: the first one the worker finds). A record saved before
-/// cameras existed has no `camera` and reads as `None`.
+/// The saved microphone, speaker, camera and playout volume. `None` is the
+/// system default (for the camera: the first one the worker finds; for the
+/// volume: 100 percent). A record saved before cameras or the volume existed
+/// has no such field and reads as `None`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
@@ -42,6 +44,9 @@ pub struct Selection {
     pub playout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<String>,
+    /// The playout volume of remote call audio, 0 to 100 percent (ADR-0055).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<u8>,
 }
 
 /// Whether `id` can be a device ID: not empty, bounded, no control character.
@@ -50,12 +55,22 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 impl Selection {
-    /// Whether every set ID is valid.
+    /// Whether every set ID and the volume are valid.
     pub fn is_valid(&self) -> bool {
         [&self.recording, &self.playout, &self.camera]
             .into_iter()
             .flatten()
             .all(|id| valid_id(id))
+            && self
+                .volume
+                .is_none_or(|volume| volume <= MAX_VOLUME_PERCENT)
+    }
+
+    /// The playout volume to use: the saved one, else 100 percent.
+    pub fn volume(&self) -> u8 {
+        self.volume
+            .unwrap_or(MAX_VOLUME_PERCENT)
+            .min(MAX_VOLUME_PERCENT)
     }
 }
 
@@ -306,7 +321,8 @@ mod tests {
             Ok(Selection {
                 recording: Some("a".into()),
                 playout: None,
-                camera: None
+                camera: None,
+                volume: None,
             })
         );
         assert_eq!(parse(b"{}"), Ok(Selection::default()));
@@ -328,6 +344,10 @@ mod tests {
             br#"{"recording":null,"playout":null,"camera":""}"#,
             br#"{"recording":null,"playout":null,"camera":"a\u0007"}"#,
             br#"{"recording":null,"playout":null,"camera":3}"#,
+            br#"{"recording":null,"playout":null,"volume":101}"#,
+            br#"{"recording":null,"playout":null,"volume":-1}"#,
+            br#"{"recording":null,"playout":null,"volume":50.5}"#,
+            br#"{"recording":null,"playout":null,"volume":"50"}"#,
             long.as_bytes(),
             huge.as_bytes(),
         ] {
@@ -352,6 +372,7 @@ mod tests {
                 recording: Some(id.clone()),
                 playout: Some(id.clone()),
                 camera: Some(id),
+                volume: Some(MAX_VOLUME_PERCENT),
             };
             assert!(selection.is_valid());
             let bytes = serde_json::to_vec(&selection).unwrap();
@@ -365,6 +386,33 @@ mod tests {
         assert_eq!(parse(over.as_bytes()), Err(Unreadable));
     }
 
+    /// GIVEN a record with and without a volume WHEN read THEN a missing
+    /// volume is 100 percent, a saved one is kept, and a record saved before
+    /// the volume existed still reads.
+    #[test]
+    fn given_saved_volume_then_it_is_read_or_defaults_to_full() {
+        let old = parse(br#"{"recording":"a","playout":null,"camera":"c"}"#).unwrap();
+        assert_eq!((old.volume, old.volume()), (None, MAX_VOLUME_PERCENT));
+        let quiet = parse(br#"{"recording":null,"playout":null,"volume":0}"#).unwrap();
+        assert_eq!(quiet.volume(), 0);
+        let half = Selection {
+            volume: Some(50),
+            ..Selection::default()
+        };
+        let bytes = serde_json::to_vec(&half).unwrap();
+        assert_eq!(parse(&bytes), Ok(half));
+        assert!(
+            !Selection {
+                volume: Some(MAX_VOLUME_PERCENT + 1),
+                ..Selection::default()
+            }
+            .is_valid()
+        );
+        // No volume is not written, so an older build still reads the record.
+        let none = serde_json::to_vec(&Selection::default()).unwrap();
+        assert!(!String::from_utf8(none).unwrap().contains("volume"));
+    }
+
     /// GIVEN device IDs WHEN checked THEN empty, long and control IDs fail.
     #[test]
     fn given_device_ids_then_empty_long_and_control_ones_are_invalid() {
@@ -376,6 +424,7 @@ mod tests {
             recording: Some("ok".into()),
             playout: Some(String::new()),
             camera: None,
+            volume: None,
         };
         assert!(!selection.is_valid());
         let selection = Selection {

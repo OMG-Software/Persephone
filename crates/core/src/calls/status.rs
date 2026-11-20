@@ -63,7 +63,9 @@ pub fn join_error(error: CallError) -> Option<CallJoinError> {
         CallError::Membership => CallJoinError::Membership,
         CallError::OpenId | CallError::Sfu(_) => CallJoinError::CallServer,
         CallError::Keys => CallJoinError::Keys,
-        CallError::NotInCall | CallError::Cancelled | CallError::SessionEnded => return None,
+        CallError::NotInCall | CallError::Busy | CallError::Cancelled | CallError::SessionEnded => {
+            return None;
+        }
     })
 }
 
@@ -79,6 +81,8 @@ pub fn status(state: &CallState) -> CallStatus {
         CallState::Active {
             room_id,
             muted,
+            deafened,
+            volume,
             participants,
             camera,
             screen,
@@ -88,6 +92,8 @@ pub fn status(state: &CallState) -> CallStatus {
             phase: CallPhase::Active,
             room_id: Some(room_id.to_string()),
             muted: *muted,
+            deafened: *deafened,
+            volume: *volume,
             participants: participants
                 .iter()
                 .take(CALL_PARTICIPANTS_MAX)
@@ -432,6 +438,7 @@ mod tests {
         }
         for error in [
             CallError::NotInCall,
+            CallError::Busy,
             CallError::Cancelled,
             CallError::SessionEnded,
         ] {
@@ -448,6 +455,8 @@ mod tests {
         let active = CallState::Active {
             room_id: room.clone(),
             muted: true,
+            deafened: true,
+            volume: 30,
             participants: Vec::new(),
             camera: CallCamera::Off,
             screen: CallScreen::Off,
@@ -462,6 +471,8 @@ mod tests {
         let busy = join_reply(CallError::AlreadyInCall, &active);
         assert_eq!(busy.phase, CallPhase::Active);
         assert!(busy.muted);
+        assert!(busy.deafened);
+        assert_eq!(busy.volume, 30);
         assert_eq!(busy.join_error, Some(CallJoinError::AlreadyInCall));
 
         let ended = CallState::Ended {
@@ -498,6 +509,8 @@ mod tests {
         let active = status(&CallState::Active {
             room_id: room.clone(),
             muted: false,
+            deafened: false,
+            volume: 100,
             participants: many,
             camera: CallCamera::On,
             screen: CallScreen::On,

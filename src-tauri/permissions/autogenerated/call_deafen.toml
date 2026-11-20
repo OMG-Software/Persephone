@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-deafen"
+description = "Enables the call_deafen command without any pre-configured scope."
+commands.allow = ["call_deafen"]
+
+[[permission]]
+identifier = "deny-call-deafen"
+description = "Denies the call_deafen command without any pre-configured scope."
+commands.deny = ["call_deafen"]

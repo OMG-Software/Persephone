@@ -3322,6 +3322,8 @@ mark {
 
 .call-controls {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   margin-left: auto;
 }
@@ -3334,6 +3336,40 @@ mark {
 
 .call-mute[aria-pressed='true'] {
   border-color: var(--danger);
+}
+
+.call-deafen {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-deafen[aria-pressed='true'] {
+  border-color: var(--danger);
+}
+
+/* The call volume: a slider with its value, under the call controls. */
+.call-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.call-volume input {
+  width: 160px;
+  accent-color: var(--accent);
+}
+
+.call-volume output {
+  min-width: 4ch;
+  text-align: right;
+}
+
+.call-devices input[type='range'] {
+  width: 100%;
+  max-width: 320px;
+  accent-color: var(--accent);
 }
 
 .call-people {

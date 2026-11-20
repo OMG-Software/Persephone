@@ -466,6 +466,8 @@ test('GIVEN each camera state WHEN the call bar is rendered THEN failures say so
     phase: 'active',
     roomId: '!r:s',
     muted: false,
+    deafened: false,
+    volume: 100,
     participants: [],
     ended: null,
     joinError: null,
@@ -482,7 +484,10 @@ test('GIVEN each camera state WHEN the call bar is rendered THEN failures say so
         busy: false,
         cameraBusy: false,
         screenBusy: false,
+        volume: 100,
         onmute() {},
+        ondeafen() {},
+        onvolume() {},
         oncamera() {},
         onscreen() {},
         onleave() {},
@@ -497,6 +502,51 @@ test('GIVEN each camera state WHEN the call bar is rendered THEN failures say so
   assert.doesNotMatch(bar('on'), /not connected|could not start|Starting the camera/);
   assert.doesNotMatch(bar('off'), /not connected|could not start|Starting the camera/);
   assert.match(bar('not_found'), /aria-pressed="false"/);
+});
+
+test('GIVEN a call WHEN the call bar is rendered THEN deafen is a toggle that says what it does, and the volume is a 0 to 100 slider read as a percentage', () => {
+  const bar = (over, volume = 40) =>
+    render(CallBar, {
+      props: {
+        status: {
+          phase: 'active',
+          roomId: '!r:s',
+          muted: false,
+          deafened: false,
+          volume: 100,
+          participants: [],
+          ended: null,
+          joinError: null,
+          camera: 'off',
+          video: [],
+          ...over
+        },
+        dismissed: false,
+        roomName: 'Plans',
+        names: new Map(),
+        busy: false,
+        cameraBusy: false,
+        volume,
+        onmute() {},
+        ondeafen() {},
+        onvolume() {},
+        oncamera() {},
+        onleave() {},
+        ondismiss() {}
+      }
+    }).body;
+  const hearing = bar({});
+  assert.match(hearing, /class="secondary call-deafen"[^>]*aria-pressed="false"/);
+  assert.match(hearing, />\s*Deafen\s*</);
+  assert.match(hearing, /Turns off all call sound and mutes your microphone/);
+  assert.match(hearing, /type="range"[^>]*min="0"[^>]*max="100"/);
+  assert.match(hearing, /aria-valuetext="40%"/);
+  const deaf = bar({ deafened: true, muted: true });
+  assert.match(deaf, /class="secondary call-deafen"[^>]*aria-pressed="true"/);
+  assert.match(deaf, />\s*Undeafen\s*</);
+  assert.match(deaf, />\s*Unmute\s*</);
+  const ended = bar({ phase: 'ended', ended: 'left' });
+  assert.doesNotMatch(ended, /type="range"|call-deafen/);
 });
 
 test('GIVEN the video source files WHEN read THEN they use no raw HTML insertion', async () => {

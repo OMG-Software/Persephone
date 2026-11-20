@@ -4,6 +4,8 @@
     callAnnouncement,
     CAMERA_TEXT,
     cameraButton,
+    DEAFEN_LABEL,
+    DEAFEN_TEXT,
     END_TEXT,
     NO_KEY_TEXT,
     PHASE_TEXT,
@@ -12,7 +14,12 @@
     screenButton,
     SHARING_TEXT,
     showCallBar,
-    UNREACHABLE_TEXT
+    UNDEAFEN_LABEL,
+    UNREACHABLE_TEXT,
+    VOLUME_LABEL,
+    VOLUME_MAX,
+    volumeText,
+    volumeValue
   } from './calls';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
@@ -29,7 +36,10 @@
     busy,
     cameraBusy,
     screenBusy,
+    volume,
     onmute,
+    ondeafen,
+    onvolume,
     oncamera,
     onscreen,
     onleave,
@@ -40,13 +50,18 @@
     roomName: string;
     // Display names from the call room's members, by user ID.
     names: ReadonlyMap<string, string>;
-    // A mute or leave request is waiting for the core.
+    // A mute, deafen or leave request is waiting for the core.
     busy: boolean;
     // A camera request is waiting for the core.
     cameraBusy: boolean;
     // A screen share request is waiting for the core.
     screenBusy: boolean;
+    // The volume the slider shows: the one being set, else the call's.
+    volume: number;
     onmute: () => void;
+    ondeafen: () => void;
+    // The slider moved; the page sends the newest value.
+    onvolume: (percent: number) => void;
     oncamera: () => void;
     // Starts or stops the share. The page names no screen: the core asks.
     onscreen: () => void;
@@ -87,6 +102,17 @@
           </button>
           <button
             type="button"
+            class="secondary call-deafen"
+            aria-pressed={status.deafened}
+            aria-describedby="call-deafen-text"
+            disabled={busy}
+            onclick={ondeafen}
+          >
+            <Icon name={status.deafened ? 'headphones-off' : 'headphones'} />
+            {status.deafened ? UNDEAFEN_LABEL : DEAFEN_LABEL}
+          </button>
+          <button
+            type="button"
             class="secondary call-camera"
             aria-pressed={camera.pressed}
             disabled={cameraBusy || status.phase !== 'active'}
@@ -111,6 +137,23 @@
     </div>
     {#if !ended && status.ringDeclined}
       <p class="call-declined note" role="status">{RING_DECLINED_TEXT}</p>
+    {/if}
+    {#if !ended}
+      <span id="call-deafen-text" class="visually-hidden">{DEAFEN_TEXT}</span>
+      <label class="call-volume">
+        <Icon name="volume" />
+        <span>{VOLUME_LABEL}</span>
+        <input
+          type="range"
+          min="0"
+          max={VOLUME_MAX}
+          step="5"
+          value={volume}
+          aria-valuetext={volumeText(volume)}
+          oninput={(event) => onvolume(volumeValue(Number(event.currentTarget.value)))}
+        />
+        <output class="note">{volumeText(volume)}</output>
+      </label>
     {/if}
     {#if !ended && cameraText !== ''}
       <p class="call-camera-note note" role="status">{cameraText}</p>

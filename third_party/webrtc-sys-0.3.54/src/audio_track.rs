@@ -44,6 +44,8 @@ pub mod ffi {
 
         fn add_sink(self: &AudioTrack, sink: &SharedPtr<NativeAudioSink>);
         fn remove_sink(self: &AudioTrack, sink: &SharedPtr<NativeAudioSink>);
+        // PERSEPHONE PATCH (ADR-0055): the playout gain of a remote track.
+        fn set_volume(self: &AudioTrack, volume: f64);
         fn new_native_audio_sink(
             observer: Box<AudioSinkWrapper>,
             sample_rate: i32,

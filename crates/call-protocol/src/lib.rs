@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 6;
+pub const VERSION: u8 = 7;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
@@ -95,6 +95,8 @@ pub fn picture_fits(tile: u8, width: u32, height: u32) -> bool {
 }
 /// The largest rotation: quarter turns clockwise, 0 to 3.
 pub const MAX_VIDEO_ROTATION: u8 = 3;
+/// The highest playout volume, in percent: the sound as received (ADR-0055).
+pub const MAX_VOLUME_PERCENT: u8 = 100;
 /// The fixed length of a media-protocol frame header.
 const FRAME_HEADER_LEN: usize = 17;
 
@@ -229,6 +231,9 @@ pub enum ToWorker {
         camera_device: Option<String>,
         /// Start the camera as the call connects.
         camera_on: bool,
+        /// The playout volume of every remote audio track, 0 to
+        /// [`MAX_VOLUME_PERCENT`].
+        volume: u8,
     },
     /// Only as the first message: report the devices, then exit.
     ListDevices,
@@ -276,6 +281,17 @@ pub enum ToWorker {
         url: String,
         jwt: Zeroizing<String>,
     },
+    /// Stop or restart the playout of every remote audio track, including
+    /// tracks subscribed later. It does not change the microphone. The
+    /// worker answers with [`FromWorker::Deafened`].
+    SetDeafened {
+        deafened: bool,
+    },
+    /// Set the playout volume of every remote audio track, including tracks
+    /// subscribed later: 0 to [`MAX_VOLUME_PERCENT`]. No answer.
+    SetVolume {
+        percent: u8,
+    },
 }
 
 impl std::fmt::Debug for ToWorker {
@@ -292,6 +308,7 @@ impl std::fmt::Debug for ToWorker {
                 playout_device,
                 camera_device,
                 camera_on,
+                volume,
             } => f
                 .debug_struct("Join")
                 .field("sfu_url", sfu_url)
@@ -304,6 +321,7 @@ impl std::fmt::Debug for ToWorker {
                 .field("playout_device", playout_device)
                 .field("camera_device", camera_device)
                 .field("camera_on", camera_on)
+                .field("volume", volume)
                 .finish(),
             Self::ListDevices => f.write_str("ListDevices"),
             Self::SetKey { identity, key } => f
@@ -333,6 +351,14 @@ impl std::fmt::Debug for ToWorker {
                 .field("index", index)
                 .field("url", url)
                 .field("jwt_len", &jwt.len())
+                .finish(),
+            Self::SetDeafened { deafened } => f
+                .debug_struct("SetDeafened")
+                .field("deafened", deafened)
+                .finish(),
+            Self::SetVolume { percent } => f
+                .debug_struct("SetVolume")
+                .field("percent", percent)
                 .finish(),
         }
     }
@@ -470,6 +496,10 @@ pub enum FromWorker {
     Muted {
         muted: bool,
     },
+    /// The answer to `SetDeafened`: remote audio is off (`true`) or on.
+    Deafened {
+        deafened: bool,
+    },
     Failed {
         code: FailureCode,
     },
@@ -535,6 +565,8 @@ const TO_LIST_DEVICES: u8 = 7;
 const TO_SET_CAMERA: u8 = 8;
 const TO_SET_SCREEN: u8 = 9;
 const TO_SUBSCRIBE: u8 = 10;
+const TO_SET_DEAFENED: u8 = 11;
+const TO_SET_VOLUME: u8 = 12;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -553,6 +585,7 @@ const FROM_VIDEO_FRAME: u8 = 13;
 const FROM_SCREEN: u8 = 14;
 const FROM_SCREEN_SHARER: u8 = 15;
 const FROM_CONNECTION: u8 = 16;
+const FROM_DEAFENED: u8 = 17;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -638,6 +671,16 @@ impl<'a> Reader<'a> {
         let connection = self.u8()?;
         if connection <= MAX_OTHER_CONNECTIONS {
             Ok(connection)
+        } else {
+            Err(DecodeError::InvalidValue)
+        }
+    }
+
+    /// A playout volume: 0 to [`MAX_VOLUME_PERCENT`].
+    fn volume(&mut self) -> Result<u8, DecodeError> {
+        let percent = self.u8()?;
+        if percent <= MAX_VOLUME_PERCENT {
+            Ok(percent)
         } else {
             Err(DecodeError::InvalidValue)
         }
@@ -778,6 +821,7 @@ impl ToWorker {
                 playout_device,
                 camera_device,
                 camera_on,
+                volume,
             } => {
                 out.push(TO_JOIN);
                 put_str(&mut out, sfu_url);
@@ -795,6 +839,7 @@ impl ToWorker {
                 put_str(&mut out, playout_device.as_deref().unwrap_or(""));
                 put_str(&mut out, camera_device.as_deref().unwrap_or(""));
                 out.push(u8::from(*camera_on));
+                out.push(*volume);
             }
             Self::ListDevices => out.push(TO_LIST_DEVICES),
             Self::SetKey { identity, key } => {
@@ -847,6 +892,14 @@ impl ToWorker {
                     }
                 }
             }
+            Self::SetDeafened { deafened } => {
+                out.push(TO_SET_DEAFENED);
+                out.push(u8::from(*deafened));
+            }
+            Self::SetVolume { percent } => {
+                out.push(TO_SET_VOLUME);
+                out.push(*percent);
+            }
         }
         out
     }
@@ -887,6 +940,7 @@ impl ToWorker {
                     playout_device: reader.device_choice()?,
                     camera_device: reader.device_choice()?,
                     camera_on: reader.bool()?,
+                    volume: reader.volume()?,
                 }
             }
             TO_LIST_DEVICES => Self::ListDevices,
@@ -949,6 +1003,12 @@ impl ToWorker {
                 };
                 Self::SetScreen { target, share }
             }
+            TO_SET_DEAFENED => Self::SetDeafened {
+                deafened: reader.bool()?,
+            },
+            TO_SET_VOLUME => Self::SetVolume {
+                percent: reader.volume()?,
+            },
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -1030,6 +1090,10 @@ impl FromWorker {
             Self::Muted { muted } => {
                 out.push(FROM_MUTED);
                 out.push(u8::from(*muted));
+            }
+            Self::Deafened { deafened } => {
+                out.push(FROM_DEAFENED);
+                out.push(u8::from(*deafened));
             }
             Self::Failed { code } => {
                 out.push(FROM_FAILED);
@@ -1115,6 +1179,9 @@ impl FromWorker {
             },
             FROM_MUTED => Self::Muted {
                 muted: reader.bool()?,
+            },
+            FROM_DEAFENED => Self::Deafened {
+                deafened: reader.bool()?,
             },
             FROM_FAILED => Self::Failed {
                 code: FailureCode::try_from(reader.u8()?)?,
@@ -1452,6 +1519,7 @@ mod tests {
             playout_device: None,
             camera_device: Some("usb#vid_046d&pid_0825#cam".to_owned()),
             camera_on: true,
+            volume: 65,
         }
     }
 
@@ -1474,6 +1542,7 @@ mod tests {
             playout_device: None,
             camera_device: None,
             camera_on: false,
+            volume: MAX_VOLUME_PERCENT,
         }
         .encode()
         .to_vec()
@@ -1533,6 +1602,12 @@ mod tests {
                 }),
                 share: 7,
             },
+            ToWorker::SetDeafened { deafened: true },
+            ToWorker::SetDeafened { deafened: false },
+            ToWorker::SetVolume { percent: 0 },
+            ToWorker::SetVolume {
+                percent: MAX_VOLUME_PERCENT,
+            },
         ]
     }
 
@@ -1556,6 +1631,8 @@ mod tests {
                 speaking: true,
             },
             FromWorker::Muted { muted: false },
+            FromWorker::Deafened { deafened: true },
+            FromWorker::Deafened { deafened: false },
             FromWorker::Left,
             FromWorker::Devices {
                 recording: vec![device("{0.0.1.00000000}.{6a2c}", "Microphone (Headset)")],
@@ -1869,11 +1946,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 11]),
+            ToWorker::decode(&[VERSION, 13]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 17]),
+            FromWorker::decode(&[VERSION, 18]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -2043,6 +2120,7 @@ mod tests {
             playout_device: Some(playout.to_owned()),
             camera_device: None,
             camera_on: false,
+            volume: MAX_VOLUME_PERCENT,
         }
     }
 
@@ -2488,7 +2566,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 6));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 7));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -2657,10 +2735,12 @@ mod tests {
             panic!("join decodes");
         };
         assert_eq!((camera_device, camera_on), (None, false));
-        // A version 2 Join is refused.
-        let mut old = join().encode().to_vec();
-        old[0] = 2;
-        assert_eq!(ToWorker::decode(&old), Err(DecodeError::UnknownVersion));
+        // A version 2 or 3 Join is refused.
+        for version in [2, 3] {
+            let mut old = join().encode().to_vec();
+            old[0] = version;
+            assert_eq!(ToWorker::decode(&old), Err(DecodeError::UnknownVersion));
+        }
     }
 
     /// GIVEN a camera ID or camera list over its limits
@@ -2693,6 +2773,7 @@ mod tests {
                 playout_device: None,
                 camera_device: Some(camera.to_owned()),
                 camera_on: true,
+                volume: 0,
             }
             .encode()
         };
@@ -2855,19 +2936,69 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire version (5)
+    /// GIVEN a message of the previous wire version (6)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
-    fn given_wire_version_5_when_decoded_then_it_is_refused() {
-        assert_eq!(VERSION, 6);
+    fn given_wire_version_6_when_decoded_then_it_is_refused() {
+        assert_eq!(VERSION, 7);
         assert_eq!(
-            ToWorker::decode(&[5, TO_LEAVE]),
+            ToWorker::decode(&[6, TO_LEAVE]),
             Err(DecodeError::UnknownVersion)
         );
         assert_eq!(
-            FromWorker::decode(&[5, FROM_CONNECTED]),
+            FromWorker::decode(&[6, FROM_CONNECTED]),
             Err(DecodeError::UnknownVersion)
         );
+    }
+
+    /// GIVEN a volume over 100 percent, a bad deafen flag, or a truncated
+    /// volume or deafen message
+    /// WHEN each is decoded
+    /// THEN it is rejected; 0 and 100 percent are accepted.
+    #[test]
+    fn given_bad_volume_or_deafen_fields_when_decoded_then_they_are_rejected() {
+        let invalid = Err(DecodeError::InvalidValue);
+        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_VOLUME, 101]), invalid);
+        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_VOLUME, 255]), invalid);
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_VOLUME]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_VOLUME, 0]),
+            Ok(ToWorker::SetVolume { percent: 0 })
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_VOLUME, 100]),
+            Ok(ToWorker::SetVolume { percent: 100 })
+        );
+        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_DEAFENED, 2]), invalid);
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_DEAFENED, 2]),
+            Err(DecodeError::InvalidValue)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_DEAFENED]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_DEAFENED, 1, 0]),
+            Err(DecodeError::TrailingBytes)
+        );
+    }
+
+    /// GIVEN a Join whose last byte, the volume, is over 100 percent
+    /// WHEN it is decoded
+    /// THEN it is rejected; the encoded volume round-trips.
+    #[test]
+    fn given_join_volume_when_decoded_then_it_is_bounded() {
+        let mut body = join().encode().to_vec();
+        let Ok(ToWorker::Join { volume, .. }) = ToWorker::decode(&body) else {
+            panic!("join decodes");
+        };
+        assert_eq!(volume, 65);
+        *body.last_mut().expect("volume byte") = MAX_VOLUME_PERCENT + 1;
+        assert_eq!(ToWorker::decode(&body), Err(DecodeError::InvalidValue));
     }
 }

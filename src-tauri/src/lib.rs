@@ -638,6 +638,24 @@ async fn call_mute(core: State<'_, CoreLink>, muted: bool) -> Result<CallStatus,
     relay(core.inner(), Call::CallMute { muted }).await
 }
 
+/// Deafens or undeafens the call: remote audio and the microphone go off,
+/// or come back (ADR-0055). The worker's answer arrives as a call change.
+#[tauri::command]
+async fn call_deafen(core: State<'_, CoreLink>, deafened: bool) -> Result<CallStatus, String> {
+    relay(core.inner(), Call::CallDeafen { deafened }).await
+}
+
+/// Sets the call playout volume, 0 to 100 percent, for the running call
+/// and later ones (ADR-0055). The core checks the range again.
+#[tauri::command]
+async fn call_volume(core: State<'_, CoreLink>, percent: u8) -> Result<CallStatus, String> {
+    let call = Call::CallVolume { percent };
+    if !call_video_within_limits(&call) {
+        return Err(INVALID_ARGUMENT.to_string());
+    }
+    relay(core.inner(), call).await
+}
+
 /// Turns the camera on or off. The worker's answer arrives as a call change.
 #[tauri::command]
 async fn call_camera(core: State<'_, CoreLink>, on: bool) -> Result<CallStatus, String> {
@@ -1896,6 +1914,8 @@ pub fn configure<R: Runtime>(
             call_join,
             call_leave,
             call_mute,
+            call_deafen,
+            call_volume,
             call_camera,
             call_screen,
             call_video_frame,

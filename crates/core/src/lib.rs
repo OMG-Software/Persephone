@@ -1231,6 +1231,13 @@ impl Core {
                 self.set_call_devices(recording.as_deref(), playout.as_deref(), camera.as_deref())
             }
             Call::CallMute { muted } => self.call_mute(*muted),
+            Call::CallDeafen { deafened } => self.call_deafen(*deafened),
+            Call::CallVolume { percent } => {
+                if !call_video_within_limits(call) {
+                    return Outcome::Error(ErrorCode::InvalidArgument);
+                }
+                self.call_volume(*percent)
+            }
             Call::CallCamera { on } => self.call_camera(*on),
             Call::CallScreen { on } => self.call_screen(*on),
             // Its picture reaches only `serve`.
@@ -2239,7 +2246,65 @@ impl Core {
         if let Err(code) = self.calls_open() {
             return Outcome::Error(code);
         }
-        let _ = self.calls.set_muted(muted);
+        self.queued_call_command(self.calls.set_muted(muted))
+    }
+
+    /// Deafens or undeafens (ADR-0055). Like mute, no call is not an error:
+    /// the reply is the call state, and the page sees there is none.
+    fn call_deafen(&self, deafened: bool) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        self.queued_call_command(self.calls.set_deafened(deafened))
+    }
+
+    /// The reply to a mute or deafen. No call is the call state, as the page
+    /// expects. A running call whose command queue is full did not take the
+    /// command, so the page gets `limit_exceeded` and not a status that looks
+    /// as if the command will happen.
+    fn queued_call_command(&self, queued: Result<(), calls::controller::CallError>) -> Outcome {
+        match queued {
+            Err(calls::controller::CallError::Busy) => Outcome::Error(ErrorCode::LimitExceeded),
+            _ => ok(&calls::status::status(&self.calls.state())),
+        }
+    }
+
+    /// Sets the call playout volume (ADR-0055): at once for a running call,
+    /// and saved in the profile's call device record for later calls. The
+    /// other choices in the record are kept. A record that cannot be read
+    /// is not replaced, because that would drop the user's device choice
+    /// without a word; the reply is then `unavailable`. Synthetic data and a
+    /// signed-out profile have no record and no call.
+    fn call_volume(&self, percent: u8) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        // A running call changes now, even if the save below fails.
+        let _ = self.calls.set_volume(percent);
+        if self.session.is_configured() {
+            let lease = match self.session.admit() {
+                Ok(lease) => lease,
+                Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
+                Err(session::AdmissionError::Saturated) => {
+                    return Outcome::Error(ErrorCode::LimitExceeded);
+                }
+            };
+            let stores = lease.stores();
+            let saved = stores.block_on(async {
+                let Ok(mut selection) = calls::devices::load(stores).await else {
+                    return Err(ErrorCode::Unavailable);
+                };
+                selection.volume = Some(percent);
+                if calls::devices::save(stores, &selection).await {
+                    Ok(())
+                } else {
+                    Err(ErrorCode::Internal)
+                }
+            });
+            if let Err(code) = saved {
+                return Outcome::Error(code);
+            }
+        }
         ok(&calls::status::status(&self.calls.state()))
     }
 
@@ -2350,6 +2415,7 @@ impl Core {
                 id: device.id,
                 name: device.name,
             };
+        let volume = selection.volume();
         let devices = persephone_contracts::CallDevices {
             supported: listing.supported,
             recording: listing.recording.into_iter().map(device).collect(),
@@ -2358,6 +2424,7 @@ impl Core {
             selected_recording: selection.recording,
             selected_playout: selection.playout,
             selected_camera: selection.camera,
+            volume,
             unreadable,
         };
         within_device_reply(&devices)?;
@@ -2387,17 +2454,19 @@ impl Core {
     }
 
     /// Saves the call devices; they apply to calls joined afterwards. A
-    /// device need not be connected now.
+    /// device need not be connected now. The saved volume is kept; when the
+    /// old record cannot be read, the new one has the default volume.
     fn set_call_devices(
         &self,
         recording: Option<&str>,
         playout: Option<&str>,
         camera: Option<&str>,
     ) -> Outcome {
-        let selection = calls::devices::Selection {
+        let mut selection = calls::devices::Selection {
             recording: recording.map(str::to_owned),
             playout: playout.map(str::to_owned),
             camera: camera.map(str::to_owned),
+            volume: None,
         };
         if !selection.is_valid() {
             return Outcome::Error(ErrorCode::InvalidArgument);
@@ -2412,10 +2481,14 @@ impl Core {
                 return Outcome::Error(ErrorCode::LimitExceeded);
             }
         };
-        if lease
-            .stores()
-            .block_on(calls::devices::save(lease.stores(), &selection))
-        {
+        let stores = lease.stores();
+        if stores.block_on(async {
+            selection.volume = calls::devices::load(stores)
+                .await
+                .ok()
+                .and_then(|saved| saved.volume);
+            calls::devices::save(stores, &selection).await
+        }) {
             Outcome::Ok(serde_json::Value::Null)
         } else {
             Outcome::Error(ErrorCode::Internal)
@@ -3596,6 +3669,7 @@ mod tests {
             selected_recording: None,
             selected_playout: None,
             selected_camera: None,
+            volume: 100,
             unreadable: false,
         };
         let ordinary = devices(

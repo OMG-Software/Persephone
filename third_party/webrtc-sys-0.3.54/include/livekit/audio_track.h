@@ -57,6 +57,9 @@ class AudioTrack : public MediaStreamTrack {
   void add_sink(const std::shared_ptr<NativeAudioSink>& sink) const;
   void remove_sink(const std::shared_ptr<NativeAudioSink>& sink) const;
 
+  // PERSEPHONE PATCH (ADR-0055): the playout gain of a remote audio track.
+  void set_volume(double volume) const;
+
  private:
   webrtc::AudioTrackInterface* track() const {
     return static_cast<webrtc::AudioTrackInterface*>(track_.get());

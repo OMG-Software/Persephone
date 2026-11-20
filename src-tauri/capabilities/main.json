@@ -41,6 +41,8 @@
     "allow-call-join",
     "allow-call-leave",
     "allow-call-mute",
+    "allow-call-deafen",
+    "allow-call-volume",
     "allow-call-camera",
     "allow-call-screen",
     "allow-call-video-frame",

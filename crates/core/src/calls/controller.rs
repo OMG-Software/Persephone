@@ -45,8 +45,8 @@ use matrix_sdk::{
     },
 };
 use persephone_call_protocol::{
-    CameraState, FailureCode, FrameKeyMsg, FromWorker, ScreenState, ToWorker, TurnServer,
-    VIDEO_TILES,
+    CameraState, FailureCode, FrameKeyMsg, FromWorker, MAX_VOLUME_PERCENT, ScreenState, ToWorker,
+    TurnServer, VIDEO_TILES,
 };
 use persephone_contracts::{CallCamera, CallParticipantRef, CallScreen, CallVideoTile};
 use std::{
@@ -114,6 +114,9 @@ pub enum CallError {
     /// No random key, or the worker queue refused it.
     Keys,
     NotInCall,
+    /// The running call's command queue is full: the command was not taken
+    /// and will not happen. The caller may try again.
+    Busy,
     /// `leave` ended this join before the call started.
     Cancelled,
     /// The session stopped admitting work during the join.
@@ -166,7 +169,13 @@ pub enum CallState {
     },
     Active {
         room_id: OwnedRoomId,
+        /// The microphone is muted, as the worker last said. Deafened implies
+        /// muted.
         muted: bool,
+        /// Remote audio is off, as the worker last said (ADR-0055).
+        deafened: bool,
+        /// The playout volume of remote audio, 0 to 100 percent.
+        volume: u8,
         /// At most [`MAX_CALL_MEMBERS`], other devices only.
         participants: Vec<Participant>,
         camera: CallCamera,
@@ -270,6 +279,52 @@ fn worker_key(key: &FrameKey) -> FrameKeyMsg {
     }
 }
 
+/// What the user asked of the microphone and the speakers (ADR-0055).
+/// Deafened turns off all remote audio and mutes the microphone; the mute
+/// the user chose is kept apart, so undeafening restores it. Unmuting while
+/// deafened also undeafens, so the user never talks without hearing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AudioWants {
+    muted: bool,
+    deafened: bool,
+}
+
+impl AudioWants {
+    fn microphone_muted(self) -> bool {
+        self.muted || self.deafened
+    }
+
+    /// The user mutes or unmutes. Returns the worker commands, in order.
+    fn set_muted(&mut self, muted: bool) -> Vec<ToWorker> {
+        self.muted = muted;
+        let mut out = Vec::with_capacity(2);
+        if !muted && self.deafened {
+            self.deafened = false;
+            out.push(ToWorker::SetDeafened { deafened: false });
+        }
+        out.push(ToWorker::SetMuted {
+            muted: self.microphone_muted(),
+        });
+        out
+    }
+
+    /// The user deafens or undeafens. Returns the worker commands, in order:
+    /// the microphone goes off before remote audio, and remote audio comes
+    /// back before the microphone.
+    fn set_deafened(&mut self, deafened: bool) -> Vec<ToWorker> {
+        self.deafened = deafened;
+        let microphone = ToWorker::SetMuted {
+            muted: self.microphone_muted(),
+        };
+        let speakers = ToWorker::SetDeafened { deafened };
+        if deafened {
+            vec![microphone, speakers]
+        } else {
+            vec![speakers, microphone]
+        }
+    }
+}
+
 /// What a worker event did to the view.
 #[derive(Debug, PartialEq, Eq)]
 enum Applied {
@@ -284,6 +339,9 @@ struct View {
     own_sfu: Url,
     connected: bool,
     muted: bool,
+    deafened: bool,
+    /// 0 to [`MAX_VOLUME_PERCENT`].
+    volume: u8,
     /// Other devices only.
     members: Vec<ActiveMember>,
     speaking: HashSet<String>,
@@ -324,6 +382,8 @@ impl View {
             own_sfu,
             connected: false,
             muted: false,
+            deafened: false,
+            volume: MAX_VOLUME_PERCENT,
             members: Vec::new(),
             speaking: HashSet::new(),
             keyed: HashSet::new(),
@@ -444,6 +504,22 @@ impl View {
                 .is_some_and(|(connection, identity)| self.accepts(*connection, identity))
         });
         (self.camera == CallCamera::On, remote)
+    }
+
+    /// Starts the view with the saved playout volume.
+    fn with_volume(mut self, volume: u8) -> Self {
+        self.volume = volume.min(MAX_VOLUME_PERCENT);
+        self
+    }
+
+    /// The volume changed; the worker does not answer a volume change.
+    fn set_volume(&mut self, volume: u8) -> Applied {
+        let volume = volume.min(MAX_VOLUME_PERCENT);
+        if self.volume == volume {
+            return Applied::Same;
+        }
+        self.volume = volume;
+        Applied::Changed
     }
 
     /// Starts the view with the picture store's stream numbers.
@@ -635,6 +711,15 @@ impl View {
                     Applied::Same
                 }
             }
+            FromWorker::Deafened { deafened } => {
+                let changed = self.deafened != *deafened;
+                self.deafened = *deafened;
+                if changed {
+                    Applied::Changed
+                } else {
+                    Applied::Same
+                }
+            }
             FromWorker::Failed { code } => Applied::End(EndReason::WorkerFailed(*code)),
             // The device list answers `ListDevices` only; in a call it is a
             // protocol violation.
@@ -654,6 +739,8 @@ impl View {
         CallState::Active {
             room_id: self.room_id.clone(),
             muted: self.muted,
+            deafened: self.deafened,
+            volume: self.volume,
             participants: self
                 .members
                 .iter()
@@ -871,6 +958,9 @@ struct RunHandle {
     /// The screen stops accepted and the share's portal session, shared
     /// with the call task.
     screen_control: Arc<Mutex<ScreenControl>>,
+    /// The latest playout volume. A watch keeps only the newest value, so a
+    /// fast slider never fills the command queue.
+    volume: watch::Sender<u8>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -878,6 +968,8 @@ struct RunHandle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Mute(bool),
+    /// Deafen or undeafen (ADR-0055).
+    Deafen(bool),
     /// A camera request and its number from [`VideoStore::camera_request`]
     /// (0 when the call has no video store).
     Camera {
@@ -1165,6 +1257,7 @@ impl CallController {
         let kill = call.link.kill_handle();
         let camera_wanted = call.camera_wanted.clone();
         let screen_control = call.screen_control.clone();
+        let volume = call.volume.clone();
         let mut call = Some(call);
         let halted = {
             // `leave` and the end of the session set their flag under this
@@ -1190,6 +1283,7 @@ impl CallController {
                         commands,
                         camera_wanted,
                         screen_control,
+                        volume,
                         task: Some(task),
                     });
                     guard.armed = false;
@@ -1394,6 +1488,7 @@ impl CallController {
             playout_device: scope.devices.playout.clone(),
             camera_device: scope.devices.camera.clone(),
             camera_on: scope.video && !portal_camera,
+            volume: scope.devices.volume(),
         };
         if link.send(join).is_err() {
             setup.link = Some(link);
@@ -1411,13 +1506,16 @@ impl CallController {
             own_keys,
             remote: RemoteKeys::new(),
             view: View::new(room_id.to_owned(), sfu.url, scope.video)
-                .with_video_streams(video_streams),
+                .with_video_streams(video_streams)
+                .with_volume(scope.devices.volume()),
             changes,
             incoming,
             failed,
             handles: std::mem::take(&mut setup.handles),
             tasks: std::mem::take(&mut setup.tasks),
             camera_wanted: Arc::new(AtomicBool::new(scope.video)),
+            audio: AudioWants::default(),
+            volume: watch::channel(scope.devices.volume()).0,
             portal: None,
             portal_capture: false,
             portal_sent: false,
@@ -1467,11 +1565,40 @@ impl CallController {
 
     /// Mutes or unmutes the microphone. The state shows the worker's answer.
     pub fn set_muted(&self, muted: bool) -> Result<(), CallError> {
+        self.queue_command(Command::Mute(muted))
+    }
+
+    /// Deafens or undeafens (ADR-0055): all remote audio goes off and the
+    /// microphone mutes, or remote audio comes back and the microphone
+    /// returns to the user's own mute choice. The state shows the worker's
+    /// answers.
+    pub fn set_deafened(&self, deafened: bool) -> Result<(), CallError> {
+        self.queue_command(Command::Deafen(deafened))
+    }
+
+    /// Gives the running call task a command. A full queue is `Busy`, not
+    /// `NotInCall`, so the caller can tell a dropped command from no call;
+    /// a task that has ended is no call.
+    fn queue_command(&self, command: Command) -> Result<(), CallError> {
         match &*self.inner.slot() {
-            Slot::Running(run) => run
-                .commands
-                .try_send(Command::Mute(muted))
-                .map_err(|_| CallError::NotInCall),
+            Slot::Running(run) => run.commands.try_send(command).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => CallError::Busy,
+                mpsc::error::TrySendError::Closed(_) => CallError::NotInCall,
+            }),
+            _ => Err(CallError::NotInCall),
+        }
+    }
+
+    /// Sets the playout volume of the running call, 0 to 100 percent. Only
+    /// the newest value is applied. The caller saves it for later calls.
+    /// The value is kept even before the call task watches it, which then
+    /// applies it when it starts.
+    pub fn set_volume(&self, percent: u8) -> Result<(), CallError> {
+        match &*self.inner.slot() {
+            Slot::Running(run) => {
+                run.volume.send_replace(percent.min(MAX_VOLUME_PERCENT));
+                Ok(())
+            }
             _ => Err(CallError::NotInCall),
         }
     }
@@ -1710,7 +1837,7 @@ impl Setup {
 
 /// How this device rings, or `None` when it must not: another member is in
 /// the call, the members cannot be read, or the room cannot take the ring
-/// (ADR-0052).
+/// (ADR-0055).
 async fn ring_plan(
     room: &matrix_sdk::Room,
     own_user: &matrix_sdk::ruma::UserId,
@@ -1900,6 +2027,10 @@ struct Call {
     /// The user's latest camera request. `set_camera` writes it before it
     /// queues the command; the task only reads it.
     camera_wanted: Arc<AtomicBool>,
+    /// The user's mute and deafen choice (ADR-0055).
+    audio: AudioWants,
+    /// The playout volume. The controller sends; the task subscribes.
+    volume: watch::Sender<u8>,
     /// The camera portal access request in flight (Linux portal path).
     /// Dropping it (the call ends) cancels the request.
     portal: Option<PortalTask>,
@@ -2779,6 +2910,24 @@ impl Call {
             .map_err(|_| EndReason::WorkerStopped)
     }
 
+    fn send_all(&self, messages: Vec<ToWorker>) -> Result<(), EndReason> {
+        messages
+            .into_iter()
+            .try_for_each(|message| self.send_worker(message))
+    }
+
+    /// The user moved the volume: the worker applies it to every remote
+    /// audio track, and the page sees it at once (the worker does not
+    /// answer a volume change).
+    fn volume_changed(&mut self, inner: &Inner, percent: u8) -> Result<(), EndReason> {
+        let percent = percent.min(MAX_VOLUME_PERCENT);
+        self.send_worker(ToWorker::SetVolume { percent })?;
+        if self.view.set_volume(percent) == Applied::Changed {
+            self.publish(inner);
+        }
+        Ok(())
+    }
+
     /// Publishes the view. The check for an unread screen command and the
     /// page write are one step under the lock that `set_screen` holds while
     /// it shows a command and counts it. While the handle has a screen
@@ -2891,6 +3040,10 @@ impl Call {
         let mut parked: Vec<Candidate> = Vec::new();
         let mut pending_own: Option<(Instant, FrameKeyMsg)> = None;
         let mut seen_self = false;
+        // A volume set between the Join and now is applied at once; when
+        // there was none, the worker gets the Join's volume again.
+        let mut volume = self.volume.subscribe();
+        volume.mark_changed();
         self.start_keys(inner).await?;
         // A video join on the portal path asks for the camera now (the join
         // sent `camera_on: false`).
@@ -2904,7 +3057,14 @@ impl Call {
                 _ = &mut *stop => return Ok(()),
                 () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
                 command = commands.recv() => match command {
-                    Some(Command::Mute(muted)) => self.send_worker(ToWorker::SetMuted { muted })?,
+                    Some(Command::Mute(muted)) => {
+                        let messages = self.audio.set_muted(muted);
+                        self.send_all(messages)?;
+                    }
+                    Some(Command::Deafen(deafened)) => {
+                        let messages = self.audio.set_deafened(deafened);
+                        self.send_all(messages)?;
+                    }
                     Some(Command::Camera { on, request }) => {
                         self.camera_command(inner, on, request)?;
                     }
@@ -2913,6 +3073,10 @@ impl Call {
                     }
                     None => return Ok(()),
                 },
+                Ok(()) = volume.changed() => {
+                    let percent = *volume.borrow_and_update();
+                    self.volume_changed(inner, percent)?;
+                }
                 remote = portal_done(&mut self.portal) => self.portal_finished(inner, remote)?,
                 (picked, cancelled) = screen_pick_done(&mut self.screen_pick) => {
                     if cancelled {
@@ -3543,6 +3707,163 @@ mod tests {
         let controller = controller(FakeHost::new(true, None));
         assert_eq!(controller.leave().await, Err(CallError::NotInCall));
         assert_eq!(controller.set_muted(true), Err(CallError::NotInCall));
+        assert_eq!(controller.set_deafened(true), Err(CallError::NotInCall));
+        assert_eq!(controller.set_volume(50), Err(CallError::NotInCall));
+    }
+
+    fn mic(muted: bool) -> ToWorker {
+        ToWorker::SetMuted { muted }
+    }
+
+    fn ears(deafened: bool) -> ToWorker {
+        ToWorker::SetDeafened { deafened }
+    }
+
+    /// GIVEN an unmuted call WHEN it is deafened and undeafened THEN the
+    /// microphone mutes before remote audio stops, and remote audio comes
+    /// back before the microphone opens again.
+    #[test]
+    fn given_an_unmuted_call_when_deafened_and_undeafened_then_the_mic_follows() {
+        let mut audio = AudioWants::default();
+        assert_eq!(audio.set_deafened(true), vec![mic(true), ears(true)]);
+        assert!(audio.microphone_muted());
+        assert_eq!(audio.set_deafened(false), vec![ears(false), mic(false)]);
+        assert!(!audio.microphone_muted());
+    }
+
+    /// GIVEN a muted call WHEN it is deafened and undeafened THEN the
+    /// microphone stays muted: undeafening restores the user's own mute.
+    #[test]
+    fn given_a_muted_call_when_undeafened_then_the_mic_stays_muted() {
+        let mut audio = AudioWants::default();
+        assert_eq!(audio.set_muted(true), vec![mic(true)]);
+        assert_eq!(audio.set_deafened(true), vec![mic(true), ears(true)]);
+        assert_eq!(audio.set_deafened(false), vec![ears(false), mic(true)]);
+    }
+
+    /// GIVEN a deafened call WHEN the user unmutes THEN remote audio comes
+    /// back first and then the microphone opens; WHEN the user mutes while
+    /// deafened THEN it stays deafened and an undeafen keeps the mute.
+    #[test]
+    fn given_a_deafened_call_when_unmuted_then_it_undeafens() {
+        let mut audio = AudioWants::default();
+        audio.set_deafened(true);
+        assert_eq!(audio.set_muted(false), vec![ears(false), mic(false)]);
+        assert_eq!(audio, AudioWants::default());
+
+        audio.set_deafened(true);
+        assert_eq!(audio.set_muted(true), vec![mic(true)]);
+        assert!(audio.deafened);
+        assert_eq!(audio.set_deafened(false), vec![ears(false), mic(true)]);
+    }
+
+    /// GIVEN a view WHEN the worker reports deafened, or the volume moves
+    /// THEN the page state shows it, and a repeat or out-of-range value
+    /// changes nothing more.
+    #[test]
+    fn given_deafen_and_volume_changes_then_the_view_shows_them() {
+        let mut view = view();
+        view.connected = true;
+        assert_eq!(
+            view.apply(&FromWorker::Deafened { deafened: true }),
+            Applied::Changed
+        );
+        assert_eq!(
+            view.apply(&FromWorker::Deafened { deafened: true }),
+            Applied::Same
+        );
+        assert_eq!(view.set_volume(40), Applied::Changed);
+        assert_eq!(view.set_volume(40), Applied::Same);
+        assert_eq!(view.set_volume(250), Applied::Changed);
+        let CallState::Active {
+            deafened, volume, ..
+        } = view.state()
+        else {
+            panic!("active");
+        };
+        assert!(deafened);
+        assert_eq!(volume, MAX_VOLUME_PERCENT);
+        let saved = View::new(
+            room_id!("!r:example.org").to_owned(),
+            Url::parse("https://sfu.example.org").unwrap(),
+            false,
+        )
+        .with_volume(25);
+        assert_eq!(saved.volume, 25);
+    }
+
+    /// GIVEN a running call task WHEN the volume changes THEN the worker gets
+    /// it and the page state shows it at once; the same volume again is sent
+    /// but publishes no change.
+    #[test]
+    fn given_a_running_call_when_the_volume_changes_then_the_worker_gets_it() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let inner = controller(FakeHost::new(true, None)).inner.clone();
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        call.view.connected = true;
+        call.volume_changed(&inner, 30).unwrap();
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetVolume { percent: 30 }
+        );
+        let CallState::Active { volume, .. } = inner.state.borrow().clone() else {
+            panic!("active");
+        };
+        assert_eq!(volume, 30);
+        call.volume_changed(&inner, 30).unwrap();
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetVolume { percent: 30 }
+        );
+        call.volume_changed(&inner, 200).unwrap();
+        assert_eq!(
+            to_worker.try_recv().unwrap(),
+            ToWorker::SetVolume {
+                percent: MAX_VOLUME_PERCENT
+            }
+        );
+    }
+
+    /// GIVEN a running call WHEN deafen and volume are asked for THEN the
+    /// deafen is queued for the task, and the volume is kept as the newest
+    /// value even while no task watches it.
+    #[test]
+    fn given_a_running_call_when_deafen_and_volume_are_set_then_the_task_gets_them() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _killed) = running_call(&calls, active_state());
+        assert_eq!(calls.set_deafened(true), Ok(()));
+        assert_eq!(commands.try_recv().unwrap(), Command::Deafen(true));
+        assert_eq!(calls.set_volume(10), Ok(()));
+        assert_eq!(calls.set_volume(70), Ok(()));
+        let Slot::Running(run) = &*calls.inner.slot() else {
+            panic!("running");
+        };
+        let watched = run.volume.subscribe();
+        assert_eq!(*watched.borrow(), 70, "only the newest value is kept");
+    }
+
+    /// GIVEN a running call whose command queue is full
+    /// WHEN mute or deafen is asked for
+    /// THEN each is refused as `Busy`, not taken as if there were no call;
+    /// once the task reads a command there is room again, and a call task
+    /// that has ended is `NotInCall`.
+    #[test]
+    fn given_a_full_command_queue_when_mute_or_deafen_is_set_then_it_is_busy() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _killed) = running_call(&calls, active_state());
+        while calls.set_deafened(true).is_ok() {}
+        assert_eq!(calls.set_deafened(false), Err(CallError::Busy));
+        assert_eq!(calls.set_muted(true), Err(CallError::Busy));
+        assert_eq!(commands.try_recv().unwrap(), Command::Deafen(true));
+        assert_eq!(calls.set_muted(true), Ok(()));
+        commands.close();
+        while commands.try_recv().is_ok() {}
+        drop(commands);
+        assert_eq!(calls.set_deafened(true), Err(CallError::NotInCall));
     }
 
     fn killer() -> (Arc<AtomicBool>, Arc<dyn WorkerProcess>) {
@@ -3570,6 +3891,7 @@ mod tests {
             commands,
             camera_wanted: Arc::new(AtomicBool::new(false)),
             screen_control: Arc::default(),
+            volume: watch::channel(MAX_VOLUME_PERCENT).0,
             task: None,
         });
         calls.stop_for_session_end();
@@ -3740,6 +4062,8 @@ mod tests {
             handles: Vec::new(),
             tasks: JoinSet::new(),
             camera_wanted: Arc::new(AtomicBool::new(false)),
+            audio: AudioWants::default(),
+            volume: watch::channel(MAX_VOLUME_PERCENT).0,
             portal: None,
             portal_capture: false,
             portal_sent: false,
@@ -4201,6 +4525,7 @@ mod tests {
             commands,
             camera_wanted: call.camera_wanted.clone(),
             screen_control: call.screen_control.clone(),
+            volume: call.volume.clone(),
             task: None,
         });
         run_call(
@@ -4432,6 +4757,7 @@ mod tests {
             commands,
             camera_wanted: Arc::new(AtomicBool::new(false)),
             screen_control: Arc::default(),
+            volume: watch::channel(MAX_VOLUME_PERCENT).0,
             task: None,
         });
         calls.inner.publish(state);
@@ -4442,6 +4768,8 @@ mod tests {
         CallState::Active {
             room_id: room_id!("!r:example.org").to_owned(),
             muted: false,
+            deafened: false,
+            volume: MAX_VOLUME_PERCENT,
             participants: Vec::new(),
             camera: CallCamera::Off,
             screen: CallScreen::Off,
@@ -4507,6 +4835,8 @@ mod tests {
         calls.inner.publish(CallState::Active {
             room_id: room_id!("!r:example.org").to_owned(),
             muted: false,
+            deafened: false,
+            volume: MAX_VOLUME_PERCENT,
             participants: Vec::new(),
             camera: CallCamera::On,
             screen: CallScreen::Off,
