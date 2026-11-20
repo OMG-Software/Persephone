@@ -12,12 +12,12 @@
 //! the worker ([`spawn_kept`]).
 
 use super::credentials::{other_sfu_alert, prompt, question_alert, yes};
-use crate::calls::worker::{CameraPath, StartError, WorkerExit, WorkerProcess};
+use crate::calls::worker::{CameraPath, StartError, WorkerAudio, WorkerExit, WorkerProcess};
 use crate::platform::call_host::{
     ContainedCallHost as Host, DIRECT_CONNECTION_TEXT, Launched, Launcher, other_sfu_text,
 };
 use crate::platform::unix_call::launched;
-use persephone_media_broker::{CallCamera, SeccompContainment, start_call_worker};
+use persephone_media_broker::{CallCamera, CallSound, SeccompContainment, start_call_worker};
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
@@ -106,12 +106,23 @@ impl WorkerProcess for KeptParent {
 }
 
 impl Launcher for LinuxLauncher {
-    fn launch(&self, exe: &Path, camera: CameraPath) -> Result<Launched, StartError> {
+    fn launch(
+        &self,
+        exe: &Path,
+        camera: CameraPath,
+        audio: &WorkerAudio,
+    ) -> Result<Launched, StartError> {
         let exe = exe.to_owned();
         let argument = camera_argument(camera);
+        // The broker checks the names again before they go into the
+        // worker's environment (ADR-0049).
+        let sound = CallSound {
+            source: audio.source.clone(),
+            sink: audio.sink.clone(),
+        };
         let (started, parent, _thread) = spawn_kept(move || {
             let profile = SeccompContainment::create_or_open("").map_err(|_| StartError::Launch)?;
-            start_call_worker(&profile, &exe, argument).map_err(|_| StartError::Launch)
+            start_call_worker(&profile, &exe, argument, &sound).map_err(|_| StartError::Launch)
         })?;
         let mut worker = launched(started);
         worker.process = Box::new(KeptParent {

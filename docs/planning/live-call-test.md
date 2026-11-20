@@ -616,6 +616,124 @@ not a pass; repeat it.
    turned off, the join is refused with the containment text ("The call did
    not start: its process could not be contained."). No worker stays
    running.
+5. Settings, Preferences, call devices. On the portal path the desktop asks
+   for camera access. Expected pass: after a grant the camera menu lists
+   the cameras (`pipewire:` IDs); after a refusal it lists none and the
+   page shows no error. The microphone and speaker menus list the sound
+   server's sources (no monitors) and sinks with `pulse:` IDs, and "System
+   default".
+6. Choose a microphone and a speaker that are not the system default, then
+   join a call. Expected pass: `pactl list source-outputs` and `pactl list
+   sink-inputs` show the worker's streams on the chosen devices, and
+   `/proc/<pid>/environ` of the worker holds `PULSE_SOURCE` and
+   `PULSE_SINK` with those names. Unplug or unload the chosen microphone,
+   then join again. Expected refusal: the join stops with the device text
+   and never uses the default microphone.
+
+### Linux device listing (measured 19 November 2026)
+
+The owner reported that Preferences showed no call devices on Linux after
+the camera portal's access dialog. This was a partial run: the device
+listing only, without the app, a call or the portal. It is not the live
+containment run above.
+
+- Host: Linux Mint 22.3 VM, kernel 6.14.0-37 (LSMs `landlock`, `yama`,
+  `apparmor` and others), headless PipeWire 1.0.5 with `pipewire-pulse`
+  (`libpulse0` 16.1), no sound card and no camera.
+- Code: `origin/main` 3a40b30, then the fixes on this branch. Debug
+  builds of `persephone-call-worker` with `CXX=clang++-21` and the pinned
+  libwebrtc, with and without `dev-uncontained`.
+- Method: a Python driver started the worker as
+  `crates/media-broker/src/linux.rs` does (new session, `no_new_privs`,
+  the call rlimits, descriptor 3 as the camera channel, only
+  `XDG_RUNTIME_DIR`, `HOME` and `LANG=C`), sent `ListDevices` and decoded
+  the answer. A connected socket to the user's own `pipewire-0` stood in for
+  the portal's `OpenPipeWireRemote` (sent as the core does, byte `c`). A
+  GStreamer `videotestsrc` node with media class `Video/Source` stood in
+  for a camera. The driver and logs stayed on the VM; gdb gave the
+  backtrace.
+
+Before the fixes (3a40b30), each of these stops the listing on its own:
+
+| Cause | Observed | What the page gets |
+| --- | --- | --- |
+| `RLIMIT_FSIZE` 0 from the broker | libpulse sizes its 64 MiB memfd pool with `ftruncate`; the worker dies with `SIGXFSZ` before `Devices`. `prlimit --fsize=0 pactl info` dies the same way. | "The call devices could not be listed." |
+| No Landlock rule for `$XDG_RUNTIME_DIR/pulse` | With the file limit lifted, libpulse reports "Failed to create secure directory (/run/user/1001/pulse): Permission denied"; the worker sends `Failed(AudioDevice)`. | The same error |
+| libwebrtc's weak `pw_*` stubs | With both lifted and a PipeWire remote, the worker dies with `SIGSEGV`: `pipewire::init` calls libwebrtc's `pw_init` stub, whose pointer is null. Also seen uncontained. Screen sharing (ADR-0053) uses the same connection code, so it was affected too (not run). | The same error |
+
+After the fixes (file limit 256 MiB, read rule on `$XDG_RUNTIME_DIR/pulse`,
+`webrtc::InitializePipeWire()` before `pw::init`), the contained worker
+(containment bits 0) answered `Devices` and exited 0. It listed
+`pipewire:persephone-testcam` ("TestCamera") over the PipeWire remote, and
+no camera without one. The build without `dev-uncontained` still refused
+to run without `no_new_privs` (`Failed(Containment)`, exit 3).
+
+The microphone and speaker lists stayed empty: with the `index:` filter
+turned off in a probe build, libwebrtc reported `index:0` "default:
+auto_null.monitor" for recording and `index:0` "default: Dummy Output" and
+`index:1` "Dummy Output" for playout. Its PulseAudio module gives no GUIDs,
+and ADR-0043 never lists or selects `index:` IDs. The owner then chose
+sound server names set at launch (ADR-0049); see the next record.
+
+Not covered: the real camera portal and its dialog, a real camera or
+sound card, the full app (core, broker and page), a call, a desktop
+session, other distributions, and a kernel without Landlock.
+
+### Linux microphones and speakers by name (measured 19 November 2026)
+
+The owner chose sound server names set at launch (ADR-0049). This was a
+partial run on the same VM and driver as the record above: the device list
+and the start of a join, without the app, an SFU or a call.
+
+- Code: this branch on top of 3a40b30, debug build of
+  `persephone-call-worker` without `dev-uncontained`. Containment bits 0
+  in every run.
+- Devices: `pactl load-module module-null-sink sink_name=vsink` and
+  `module-remap-source master=vsink.monitor source_name=vmic` (a source
+  that is not a monitor). `pipewire-pulse` restarts by socket activation
+  and then drops such modules, so they were loaded just before each run.
+- Join runs: the driver sent `Join` with the chosen IDs to
+  `wss://127.0.0.1:9/x`, which refuses connections. `Network` (4) means
+  that the device check, audio start and stage 2 passed and only the SFU
+  connection failed.
+
+| Run | Result |
+| --- | --- |
+| `ListDevices` | Recording `pulse:vmic` "VirtualMic"; playout `pulse:vsink` "VirtualSpeaker". `vsink.monitor` is left out, so the `monitor_of_sink` field is read at the right place. Without the virtual devices: no recording device and `pulse:auto_null` "Dummy Output". |
+| `pulse:vmic`, `pulse:vsink`, environment `PULSE_SOURCE=vmic`, `PULSE_SINK=vsink` | `Failed(Network)` |
+| No choice, no names in the environment | `Failed(Network)` |
+| `pulse:vmic`, no `PULSE_SOURCE` | `Failed(Protocol)` |
+| `pulse:vmic`, `PULSE_SOURCE=vsink.monitor` | `Failed(Protocol)` |
+| No choice, `PULSE_SINK=vsink` | `Failed(Protocol)` |
+| `pulse:gone`, `PULSE_SOURCE=gone` | `Failed(DeviceNotFound)` |
+| `pulse:vsink.monitor` as microphone, matching `PULSE_SOURCE` | `Failed(DeviceNotFound)` (monitors are not microphones) |
+| `index:0` as microphone | `Failed(DeviceNotFound)` |
+
+The client library sends a stream without a device name to the names in
+the environment: with a second sink and source and `vsink` and `vmic` as
+the defaults, `PULSE_SINK=vsink2 pacat` played to `vsink2`,
+`PULSE_SOURCE=vmic2 parec` recorded from `vmic2`, and a plain `pacat`
+played to `vsink`. libwebrtc opens such a stream at position 0 (read from
+`audio_device_pulse_linux.cc`, m137); its own stream on the chosen device
+was not observed, because no call connected.
+
+Read-only `/dev/shm` (after review, same day): the worker's Landlock rule
+for `/dev/shm` became read only, so no file it grows outlives it. With
+that build, the contained worker listed the same devices, a
+`pulse:vmic`/`pulse:vsink2` join reached `Failed(Network)`, and the
+PipeWire remote listed `pipewire:persephone-testcam`. Because the worker
+cannot stream without an SFU, `pacat` and `parec` ran under a Landlock
+wrapper with the worker's path rules and `/dev/shm` read only: playback to
+`vsink2` ran until stopped, and `parec` recorded 196608 bytes from `vmic`
+in 3 s. `/dev/shm` stayed empty; PipeWire and the client library used
+memfds.
+
+Not covered: a connected call with audio on the chosen devices, the core
+and broker launch path (covered by unit tests only), the page, a real
+sound card, a device unplugged during a call, PulseAudio without PipeWire
+(its pool may use `/dev/shm` files; the client then falls back to copying
+over the socket, not measured), and the Landlock wrapper is not the
+worker's seccomp filter.
 
 ### macOS
 

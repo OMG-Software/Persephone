@@ -152,7 +152,9 @@ Proposed option: "a contained call worker".
   record, play or connect.
 * A device is the libwebrtc device ID (on Windows the endpoint ID) and the
   OS name. IDs that LiveKit makes from a list position (`index:N`) are not
-  listed, because a hot-plug can move them to another device. Names are
+  listed, because a hot-plug can move them to another device. On Linux,
+  where libwebrtc has only such IDs, the worker lists sound server names
+  instead (`pulse:` IDs, ADR-0049). Names are
   untrusted text: the worker removes control characters and cuts them to
   256 bytes, the core normalizes them like display names (control and
   bidirectional formatting characters become U+FFFD), and the page shows
@@ -167,7 +169,10 @@ Proposed option: "a contained call worker".
 * A chosen device that is not connected stops the join with
   `DeviceNotFound`. The worker never falls back to another device, because
   that device could be a microphone the user did not choose. A record that
-  cannot be read stops the join too.
+  cannot be read stops the join too. On Linux the worker checks the device
+  before audio starts; if it goes away after that check or during the
+  call, the sound server moves the stream to its default, which the worker
+  cannot see (ADR-0049).
 * The same record keeps the call volume, which applies at once to a
   running call. Deafen and the volume are in [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md).
 

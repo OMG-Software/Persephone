@@ -46,15 +46,25 @@ runs" for the Linux camera.
 
 * The broker starts the call worker as it starts the media worker
   (ADR-0010): a new session, every descriptor above 2 closed, a parent-death
-  `SIGKILL`, `no_new_privs`, no core dumps, no file writes (`RLIMIT_FSIZE`
-  0), at most 256 descriptors and an address-space limit of 4 GiB. The
-  address-space limit is a bound, not the 512 MiB of the Windows Job:
-  libwebrtc reserves much more address space than it uses.
+  `SIGKILL`, `no_new_privs`, no core dumps, files of at most 256 MiB
+  (`RLIMIT_FSIZE`), at most 256 descriptors and an address-space limit of
+  4 GiB. The address-space limit is a bound, not the 512 MiB of the Windows
+  Job: libwebrtc reserves much more address space than it uses. The file
+  limit is not 0 (amended 19 November 2026): the sound server's client
+  library sizes its 64 MiB shared-memory pool, a memfd, with `ftruncate`,
+  and Linux counts memfd and `/dev/shm` files against `RLIMIT_FSIZE`. With
+  0 the kernel killed the worker with `SIGXFSZ` before it reached the sound
+  server. Landlock gives the worker no writable path (without V4L2), so
+  the only files it can grow are memfds, which go away with the worker.
+  The limit is per file: while the worker runs, it can hold up to 256
+  memfds of 256 MiB each in memory. This is not bounded in total, as CPU
+  use is not.
 * Descriptor 3 is one end of a Unix socket pair, the camera channel. It is
   the only extra descriptor.
 * The environment holds only `XDG_RUNTIME_DIR` and `HOME` (the sound
-  server's socket and cookie) and `LANG=C`. It has no
-  `DBUS_SESSION_BUS_ADDRESS`.
+  server's socket and cookie), `LANG=C`, and for a call with a chosen
+  microphone or speaker `PULSE_SOURCE` or `PULSE_SINK` (see "Linux:
+  microphones and speakers"). It has no `DBUS_SESSION_BUS_ADDRESS`.
 * One argument, `--camera=portal`, `--camera=v4l2` or `--camera=none`,
   tells the worker which camera path it may use (see "Linux: camera"). The
   worker refuses any other argument.
@@ -73,7 +83,15 @@ The worker applies two stages itself.
     restricts nothing, so it cannot block the sound server's socket by
     surprise. Read and execute: `/usr`, `/lib`, `/lib64`, `/etc`,
     `/run/systemd/resolve`, `/proc/self`. Read: `$HOME/.config/pulse`,
-    `/dev/urandom`, `/dev/null`. Read and write: `/dev/shm`. With
+    `$XDG_RUNTIME_DIR/pulse`, `/dev/urandom`, `/dev/null`, `/dev/shm`
+    (amended 19 November 2026: read only, so no file the worker writes
+    outlives it; the sound server's pool may be a file there, the worker's
+    pools are memfds, and recording, playback and the PipeWire camera
+    worked without write access). The client library opens `$XDG_RUNTIME_DIR/pulse` and checks
+    its owner before it connects to the socket in it (amended 19 November
+    2026: without the rule the check failed and no sound server was
+    reached). The rest of `$XDG_RUNTIME_DIR` (the session bus, PipeWire and
+    other sockets) gets no rule. With
     `--camera=v4l2` only: read and write on the `/dev/video*` nodes (and
     their device ioctls, ABI 5 or newer). No other path. Where the ABI
     has them, abstract Unix sockets and signals are scoped to the worker
@@ -254,6 +272,41 @@ The worker applies two stages itself.
 * Linux: the call worker links `libpipewire-0.3.so.0`, so the `.deb` and
   `.rpm` packages depend on it. Without it the worker does not start and
   audio calls fail too. The AppImage relies on the system's copy.
+* Linux: the statically linked libwebrtc defines weak `pw_*` stubs for its
+  own screen capture, and the worker's `pipewire` crate binds to them. The
+  stubs call through null pointers until libwebrtc loads PipeWire, so the
+  worker calls `webrtc::InitializePipeWire()` before its first PipeWire
+  call (19 November 2026). A libwebrtc update must keep that function or
+  replace this step.
+* Linux: microphones and speakers. libwebrtc's PulseAudio device module
+  (also used with `pipewire-pulse`) reports no device GUIDs, only list
+  positions (`index:N`), which ADR-0043 never lists or selects (measured
+  19 November 2026). The owner chose sound server names set at launch
+  (19 November 2026):
+  * The worker lists the sound server's sinks and sources itself, through
+    the PulseAudio client library that libwebrtc already loads (`dlopen`,
+    one short connection before stage 2, read only; `pulse.rs`). Monitor
+    sources are left out. Each ID is `pulse:` and the name; a name must be
+    1 to 128 bytes of ASCII letters, digits, `.`, `-`, `_` or `:`. No
+    Landlock or seccomp rule changes.
+  * A `pulse:` choice goes to the launch: the core gives the names to the
+    broker, which checks the name rule again and sets `PULSE_SOURCE` and
+    `PULSE_SINK`. libwebrtc then opens its default stream (position 0, no
+    device name), and the client library sends it to that name. The
+    worker never calls libwebrtc's device selection for these IDs.
+  * The sound server quietly uses its default for a name it does not have
+    (measured with `pipewire-pulse`: `PULSE_SINK=no_such_sink pacat` and
+    `pacat -d no_such_sink` both played to the default with exit code 0).
+    So the worker checks, before audio starts, that the `Join` choice
+    matches the environment (`Protocol` if not) and that the server has
+    the device now (`DeviceNotFound` if not). A device that goes away
+    after this check, or during the call, is moved by the sound server to
+    its default; the worker cannot see that. This differs from Windows,
+    where the endpoint ID stays bound.
+  * If the server cannot be asked (no library, no server, 3 s passed),
+    the lists keep the system default only, and a `pulse:` choice is
+    `DeviceNotFound`. Windows and macOS launchers ignore the names; a
+    `pulse:` choice there is `DeviceNotFound` too.
 
 ## Pros and Cons of the Options
 

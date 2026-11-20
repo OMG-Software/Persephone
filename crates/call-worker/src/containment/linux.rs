@@ -92,7 +92,9 @@ const FS_EXECUTE: u64 = 1 << 0;
 const FS_WRITE_FILE: u64 = 1 << 1;
 const FS_READ_FILE: u64 = 1 << 2;
 const FS_READ_DIR: u64 = 1 << 3;
+#[cfg(test)]
 const FS_REMOVE_FILE: u64 = 1 << 5;
+#[cfg(test)]
 const FS_MAKE_REG: u64 = 1 << 8;
 /// ABI 1 has the rights of bits 0 to 12.
 const FS_ABI1_ALL: u64 = (1 << 13) - 1;
@@ -153,8 +155,6 @@ fn abi_ok(abi: i64) -> bool {
 /// What a rule on a directory grants.
 const DIR_READ_EXEC: u64 = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR;
 const DIR_READ: u64 = FS_READ_FILE | FS_READ_DIR;
-const DIR_SHM: u64 =
-    FS_READ_FILE | FS_READ_DIR | FS_WRITE_FILE | FS_TRUNCATE | FS_MAKE_REG | FS_REMOVE_FILE;
 /// What a rule on a file grants. A rule on a file may hold only these.
 const FILE_RIGHTS: u64 = FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE | FS_TRUNCATE | FS_IOCTL_DEV;
 const FILE_READ: u64 = FS_READ_FILE;
@@ -166,11 +166,17 @@ struct PathRule {
     access: u64,
 }
 
-/// The path table of ADR-0049 for a camera mode. `home` is `$HOME`;
+/// The path table of ADR-0049 for a camera mode. `home` is `$HOME` and
+/// `runtime` is `$XDG_RUNTIME_DIR`; each is used only when absolute.
 /// `video_nodes` are the `/dev/video*` character devices found before the
 /// rules apply (used with `--camera=v4l2` only). Rights are cut to the file
 /// or directory kind and to the handled set when the rules are added.
-fn path_table(mode: CameraMode, home: Option<&Path>, video_nodes: &[PathBuf]) -> Vec<PathRule> {
+fn path_table(
+    mode: CameraMode,
+    home: Option<&Path>,
+    runtime: Option<&Path>,
+    video_nodes: &[PathBuf],
+) -> Vec<PathRule> {
     let rule = |path: &str, access| PathRule {
         path: PathBuf::from(path),
         access,
@@ -184,11 +190,21 @@ fn path_table(mode: CameraMode, home: Option<&Path>, video_nodes: &[PathBuf]) ->
         rule("/proc/self", DIR_READ_EXEC),
         rule("/dev/urandom", FILE_READ),
         rule("/dev/null", FILE_READ),
-        rule("/dev/shm", DIR_SHM),
+        rule("/dev/shm", DIR_READ),
     ];
     if let Some(home) = home.filter(|home| home.is_absolute()) {
         table.push(PathRule {
             path: home.join(".config/pulse"),
+            access: DIR_READ,
+        });
+    }
+    // The sound server's client library opens this directory and checks its
+    // owner before it connects to the socket in it; without the rule the
+    // check fails and no sound server is reached. Read only: the connect
+    // itself needs no Landlock right on the ABIs this code handles.
+    if let Some(runtime) = runtime.filter(|runtime| runtime.is_absolute()) {
+        table.push(PathRule {
+            path: runtime.join("pulse"),
             access: DIR_READ,
         });
     }
@@ -295,12 +311,13 @@ fn landlock(mode: CameraMode) -> Result<(), ()> {
     // SAFETY: the kernel returned a new descriptor that nothing else owns.
     let ruleset = unsafe { OwnedFd::from_raw_fd(raw as i32) };
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let nodes = if mode == CameraMode::V4l2 {
         find_video_nodes()
     } else {
         Vec::new()
     };
-    for rule in path_table(mode, home.as_deref(), &nodes) {
+    for rule in path_table(mode, home.as_deref(), runtime.as_deref(), &nodes) {
         // A path that does not exist or cannot be opened gets no rule. Rules
         // only allow, so the process ends up with less access, never more.
         let Some((fd, is_dir)) = open_path(&rule.path) else {
@@ -842,7 +859,12 @@ mod tests {
     #[test]
     fn given_portal_mode_then_the_table_has_the_adr_paths_and_no_camera() {
         let nodes = [PathBuf::from("/dev/video0")];
-        let table = path_table(CameraMode::Portal, Some(Path::new("/home/user")), &nodes);
+        let table = path_table(
+            CameraMode::Portal,
+            Some(Path::new("/home/user")),
+            Some(Path::new("/run/user/1000")),
+            &nodes,
+        );
         for dir in [
             "/usr",
             "/lib",
@@ -861,6 +883,15 @@ mod tests {
             DIR_READ
         );
         assert_eq!(
+            rule_for(&table, "/run/user/1000/pulse")
+                .expect("sound server directory")
+                .access,
+            DIR_READ
+        );
+        // Only the sound server's directory, not the rest of the runtime
+        // directory (the session bus, PipeWire and other sockets live there).
+        assert!(rule_for(&table, "/run/user/1000").is_none());
+        assert_eq!(
             rule_for(&table, "/dev/urandom").expect("urandom").access,
             FILE_READ
         );
@@ -868,16 +899,15 @@ mod tests {
             rule_for(&table, "/dev/null").expect("null").access,
             FILE_READ
         );
-        let shm = rule_for(&table, "/dev/shm").expect("shm");
-        assert_ne!(shm.access & FS_WRITE_FILE, 0);
-        assert_eq!(shm.access & FS_EXECUTE, 0);
+        // /dev/shm is read only: the sound server's own pool may be a file
+        // there, and the worker's pools are memfds. No file the worker
+        // writes outlives it.
+        assert_eq!(rule_for(&table, "/dev/shm").expect("shm").access, DIR_READ);
         assert!(rule_for(&table, "/dev/video0").is_none());
-        // No writable path other than /dev/shm, and no execute right outside
-        // the library and system directories.
+        // No writable path at all without V4L2.
         for rule in &table {
-            if rule.path != Path::new("/dev/shm") {
-                assert_eq!(rule.access & FS_WRITE_FILE, 0, "{:?}", rule.path);
-            }
+            let write = FS_WRITE_FILE | FS_TRUNCATE | FS_MAKE_REG | FS_REMOVE_FILE;
+            assert_eq!(rule.access & write, 0, "{:?}", rule.path);
         }
     }
 
@@ -886,28 +916,26 @@ mod tests {
     #[test]
     fn given_v4l2_mode_then_camera_nodes_get_device_rights() {
         let nodes = [PathBuf::from("/dev/video0"), PathBuf::from("/dev/video2")];
-        let table = path_table(CameraMode::V4l2, None, &nodes);
+        let table = path_table(CameraMode::V4l2, None, None, &nodes);
         for node in ["/dev/video0", "/dev/video2"] {
             assert_eq!(
                 rule_for(&table, node).expect(node).access,
                 FS_READ_FILE | FS_WRITE_FILE | FS_IOCTL_DEV
             );
         }
-        let none = path_table(CameraMode::None, None, &nodes);
+        let none = path_table(CameraMode::None, None, None, &nodes);
         assert!(rule_for(&none, "/dev/video0").is_none());
     }
 
-    /// GIVEN a missing or relative HOME THEN the sound server cookie path is
-    /// left out.
+    /// GIVEN a missing or relative HOME or XDG_RUNTIME_DIR THEN the sound
+    /// server's cookie and socket directory rules are left out.
     #[test]
-    fn given_bad_home_then_the_pulse_rule_is_left_out() {
-        for home in [None, Some(Path::new("relative/home")), Some(Path::new(""))] {
-            let table = path_table(CameraMode::None, home, &[]);
+    fn given_bad_home_or_runtime_then_the_pulse_rules_are_left_out() {
+        for dir in [None, Some(Path::new("relative/dir")), Some(Path::new(""))] {
+            let table = path_table(CameraMode::None, dir, dir, &[]);
             assert!(
-                table
-                    .iter()
-                    .all(|rule| !rule.path.ends_with(".config/pulse")),
-                "{home:?}"
+                table.iter().all(|rule| !rule.path.ends_with("pulse")),
+                "{dir:?}"
             );
         }
     }
@@ -966,7 +994,12 @@ mod tests {
             0
         );
         let nodes = [PathBuf::from("/dev/video0")];
-        for rule in path_table(CameraMode::V4l2, Some(Path::new("/h")), &nodes) {
+        for rule in path_table(
+            CameraMode::V4l2,
+            Some(Path::new("/h")),
+            Some(Path::new("/run/user/1")),
+            &nodes,
+        ) {
             assert_eq!(rule.access & !handled_fs(5), 0, "{:?}", rule.path);
         }
     }
@@ -979,5 +1012,94 @@ mod tests {
         if let Some(abi) = landlock_abi() {
             assert!((1..64).contains(&abi));
         }
+    }
+
+    /// GIVEN the worker's own Landlock rules applied on this kernel WHEN a
+    /// thread lists /dev/shm, reads a file there, creates one, opens one for
+    /// writing, truncates one and grows a memfd THEN only the reads and the
+    /// memfd work: no file the worker grows can outlive it. Landlock and
+    /// `no_new_privs` hold for the calling thread only, so the rules run on
+    /// a thread of their own and leave the other tests alone. (No child
+    /// process: a fork would copy other tests' descriptors until its exec.)
+    /// A kernel without Landlock ABI 3 has nothing to check: the worker does
+    /// not run there.
+    #[test]
+    fn given_worker_landlock_then_dev_shm_is_read_only() {
+        if !landlock_abi().is_some_and(abi_ok) || !Path::new("/dev/shm").is_dir() {
+            return;
+        }
+        let existing = Path::new("/dev/shm").join(format!(
+            "persephone-shm-probe-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let created = existing.with_extension("new");
+        std::fs::write(&existing, b"before").expect("the probe file is written");
+        let probe = existing.clone();
+        let results = std::thread::spawn(move || probe_shm(&probe))
+            .join()
+            .expect("the probe thread ends");
+        let after = std::fs::read(&existing);
+        let _ = std::fs::remove_file(&existing);
+        let _ = std::fs::remove_file(&created);
+        assert_eq!(
+            results,
+            [
+                ("list", "ok"),
+                ("read", "ok"),
+                ("create", "EACCES"),
+                ("write", "EACCES"),
+                ("truncate", "EACCES"),
+                ("memfd", "ok"),
+            ]
+        );
+        assert_eq!(after.expect("probe file kept"), b"before");
+        assert!(!created.exists());
+    }
+
+    /// The probe thread: applies the worker's rules to itself and tries each
+    /// access. The thread ends afterwards, so the rules end with it.
+    fn probe_shm(existing: &Path) -> [(&'static str, &'static str); 6] {
+        use std::fs::OpenOptions;
+        fn outcome(ok: bool) -> &'static str {
+            if ok { "ok" } else { "failed" }
+        }
+        fn denied(result: std::io::Result<std::fs::File>) -> &'static str {
+            match result {
+                Err(error) if error.raw_os_error() == Some(libc::EACCES) => "EACCES",
+                Err(_) => "other error",
+                Ok(_) => "allowed",
+            }
+        }
+        // SAFETY: prctl with integer arguments only; it sets this thread's
+        // flag.
+        let no_new_privs = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, NONE, NONE, NONE) };
+        assert_eq!(no_new_privs, 0);
+        landlock(CameraMode::None).expect("the worker's rules apply");
+        let list = std::fs::read_dir("/dev/shm").is_ok();
+        let read = std::fs::read(existing).is_ok_and(|bytes| bytes == b"before");
+        let create = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(existing.with_extension("new"));
+        let write = OpenOptions::new().write(true).open(existing);
+        let truncate = OpenOptions::new().write(true).truncate(true).open(existing);
+        // SAFETY: a fixed C string name and flags; the descriptor is owned
+        // below.
+        let raw = unsafe { libc::memfd_create(c"persephone-probe".as_ptr(), libc::MFD_CLOEXEC) };
+        let grown = raw >= 0 && {
+            // SAFETY: the kernel returned a new descriptor that nothing else
+            // owns.
+            let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+            file.set_len(64 * 1024 * 1024).is_ok()
+        };
+        [
+            ("list", outcome(list)),
+            ("read", outcome(read)),
+            ("create", denied(create)),
+            ("write", denied(write)),
+            ("truncate", denied(truncate)),
+            ("memfd", outcome(grown)),
+        ]
     }
 }

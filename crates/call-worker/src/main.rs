@@ -18,6 +18,8 @@ mod mapping;
 #[cfg(test)]
 mod native_volume_tests;
 mod output;
+#[cfg(target_os = "linux")]
+mod pulse;
 mod screen;
 mod session;
 mod video;

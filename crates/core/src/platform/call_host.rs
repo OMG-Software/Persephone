@@ -11,7 +11,7 @@ use crate::calls::screen::ScreenSource;
 use crate::calls::video::VideoStore;
 use crate::calls::worker::{
     CALL_WORKER_EXE, COMMAND_QUEUE, CallHost, CallWorkerLink, CameraPath, EVENT_QUEUE,
-    READY_TIMEOUT, StartError, WorkerProcess,
+    READY_TIMEOUT, StartError, WorkerAudio, WorkerProcess,
 };
 use persephone_call_protocol::{
     FromWorker, ReadError, ToWorker, WorkerItem, read_message, read_worker_item, write_message,
@@ -95,9 +95,16 @@ pub struct Launched {
 /// a direct connection.
 pub trait Launcher: Send + Sync {
     /// Starts the worker at `exe` under the OS containment with this camera
-    /// path. The worker must get no input before the host has checked its
-    /// `Ready` message and [`WorkerProcess::confirm_contained`].
-    fn launch(&self, exe: &Path, camera: CameraPath) -> Result<Launched, StartError>;
+    /// path and these sound server devices (Linux; the other OSes ignore
+    /// them, and the worker then refuses a `pulse:` choice). The worker must
+    /// get no input before the host has checked its `Ready` message and
+    /// [`WorkerProcess::confirm_contained`].
+    fn launch(
+        &self,
+        exe: &Path,
+        camera: CameraPath,
+        audio: &WorkerAudio,
+    ) -> Result<Launched, StartError>;
 
     /// The camera path to start the next worker with. Linux decides it from
     /// the session (ADR-0049); the other OSes have none.
@@ -225,7 +232,7 @@ impl<L: Launcher> CallHost for ContainedCallHost<L> {
         self.launcher.screen_source()
     }
 
-    fn start(&self) -> Result<CallWorkerLink, StartError> {
+    fn start(&self, audio: &WorkerAudio) -> Result<CallWorkerLink, StartError> {
         if !self.exe.is_file() {
             return Err(StartError::NoExe);
         }
@@ -236,7 +243,7 @@ impl<L: Launcher> CallHost for ContainedCallHost<L> {
             stdout,
             #[cfg(unix)]
             camera_channel,
-        } = self.launcher.launch(&self.exe, camera_path)?;
+        } = self.launcher.launch(&self.exe, camera_path, audio)?;
 
         let (first_tx, first_rx) = std_mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel(EVENT_QUEUE);
@@ -603,8 +610,14 @@ mod tests {
     }
 
     impl Launcher for Scripted {
-        fn launch(&self, _exe: &Path, camera: CameraPath) -> Result<Launched, StartError> {
+        fn launch(
+            &self,
+            _exe: &Path,
+            camera: CameraPath,
+            audio: &WorkerAudio,
+        ) -> Result<Launched, StartError> {
             assert_eq!(camera, self.path, "the host passes its camera path on");
+            assert_eq!(audio, &chosen(), "the host passes its sound devices on");
             // A pipe holds the canned stdout; a second one takes stdin.
             let (reader, writer) = std::io::pipe().unwrap();
             let mut writer = writer;
@@ -657,13 +670,18 @@ mod tests {
         (ContainedCallHost::with_launcher(exe, launcher), kills)
     }
 
+    /// The sound devices every scripted start passes.
+    fn chosen() -> WorkerAudio {
+        WorkerAudio::for_choice(Some("pulse:vmic"), None)
+    }
+
     /// GIVEN a worker that reports Ready with clear bits and that the OS
     /// confirms WHEN the host starts it THEN the link is returned with the
     /// camera path.
     #[test]
     fn given_ready_and_confirmed_when_started_then_the_link_is_returned() {
         let (host, kills) = scripted(0, true);
-        let link = host.start().expect("a link");
+        let link = host.start(&chosen()).expect("a link");
         assert_eq!(link.camera_path(), CameraPath::V4l2);
         assert_eq!(kills.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
@@ -675,7 +693,7 @@ mod tests {
     fn given_ready_but_not_confirmed_when_started_then_the_worker_is_killed() {
         let (host, kills) = scripted(0, false);
         assert_eq!(
-            host.start().err(),
+            host.start(&chosen()).err(),
             Some(StartError::Containment(NOT_CONFIRMED_BITS))
         );
         assert_eq!(kills.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -686,7 +704,10 @@ mod tests {
     #[test]
     fn given_ready_with_bits_when_started_then_the_worker_is_killed() {
         let (host, kills) = scripted(1 << 2, true);
-        assert_eq!(host.start().err(), Some(StartError::Containment(1 << 2)));
+        assert_eq!(
+            host.start(&chosen()).err(),
+            Some(StartError::Containment(1 << 2))
+        );
         assert_eq!(kills.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -696,7 +717,7 @@ mod tests {
     fn given_no_worker_file_when_started_then_no_exe() {
         let (mut host, kills) = scripted(0, true);
         host.exe = PathBuf::from("/nonexistent/persephone-call-worker");
-        assert_eq!(host.start().err(), Some(StartError::NoExe));
+        assert_eq!(host.start(&chosen()).err(), Some(StartError::NoExe));
         assert_eq!(kills.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

@@ -82,6 +82,34 @@ pub enum CameraPath {
     None,
 }
 
+/// The sound server names the call worker opens its microphone and speaker
+/// with (Linux, ADR-0049). Only `pulse:` choices give a name; every other
+/// choice, the device list and the other OSes use none. The launcher passes
+/// them as `PULSE_SOURCE` and `PULSE_SINK`, and the worker checks that they
+/// match the `Join` and are on the sound server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkerAudio {
+    /// The microphone (a sound server source).
+    pub source: Option<String>,
+    /// The speaker (a sound server sink).
+    pub sink: Option<String>,
+}
+
+impl WorkerAudio {
+    /// The names in the chosen device IDs. An ID that is not `pulse:` or
+    /// whose name breaks the name rule gives none.
+    pub fn for_choice(recording: Option<&str>, playout: Option<&str>) -> Self {
+        let name = |id: Option<&str>| {
+            id.and_then(persephone_call_protocol::pulse_name)
+                .map(str::to_owned)
+        };
+        Self {
+            source: name(recording),
+            sink: name(playout),
+        }
+    }
+}
+
 /// How the worker process ended, as the OS reported it. No worker text is
 /// involved: the core reads the status only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,7 +338,8 @@ pub trait CallHost: Send + Sync {
     /// Starts the worker, contains it before it runs, and waits for its
     /// `Ready`. Returns a link only when every containment bit is clear.
     /// Blocks for up to [`READY_TIMEOUT`]; call it from a blocking task.
-    fn start(&self) -> Result<CallWorkerLink, StartError>;
+    /// `audio` names the sound server devices on Linux (empty elsewhere).
+    fn start(&self, audio: &WorkerAudio) -> Result<CallWorkerLink, StartError>;
 
     /// Asks, in a native dialog owned by the core, whether this call may
     /// connect directly: the profile has a SOCKS5 proxy, and the SFU, the
@@ -354,7 +383,7 @@ pub fn platform() -> Arc<dyn CallHost> {
 pub struct Unsupported;
 
 impl CallHost for Unsupported {
-    fn start(&self) -> Result<CallWorkerLink, StartError> {
+    fn start(&self, _audio: &WorkerAudio) -> Result<CallWorkerLink, StartError> {
         Err(StartError::Unsupported)
     }
 
@@ -460,6 +489,37 @@ mod tests {
         (link, received, process)
     }
 
+    /// GIVEN device IDs of each kind WHEN the worker audio is built THEN
+    /// only safe `pulse:` names are kept, each for its own direction.
+    #[test]
+    fn given_device_choices_then_only_sound_server_names_reach_the_launch() {
+        let audio = WorkerAudio::for_choice(
+            Some("pulse:vmic"),
+            Some("pulse:alsa_output.pci-0000_00_1f.3"),
+        );
+        assert_eq!(audio.source.as_deref(), Some("vmic"));
+        assert_eq!(audio.sink.as_deref(), Some("alsa_output.pci-0000_00_1f.3"));
+        assert_eq!(WorkerAudio::for_choice(None, None), WorkerAudio::default());
+        assert_eq!(
+            WorkerAudio::for_choice(Some("{0.0.1.00000000}.{6a2c}"), Some("index:0")),
+            WorkerAudio::default()
+        );
+        assert_eq!(
+            WorkerAudio::for_choice(
+                Some("pulse:a b"),
+                Some(
+                    "pulse:x
+PULSE_SERVER=y"
+                )
+            ),
+            WorkerAudio::default()
+        );
+        assert_eq!(
+            WorkerAudio::for_choice(Some("pulse:"), None),
+            WorkerAudio::default()
+        );
+    }
+
     /// GIVEN a platform without reviewed call containment WHEN a call starts
     /// or asks to bypass the proxy THEN it is refused.
     #[test]
@@ -468,7 +528,10 @@ mod tests {
         assert!(!host.supported());
         assert!(!host.confirm_direct_connection());
         assert!(!host.confirm_other_sfu("sfu.example.org", false));
-        assert_eq!(host.start().err(), Some(StartError::Unsupported));
+        assert_eq!(
+            host.start(&WorkerAudio::default()).err(),
+            Some(StartError::Unsupported)
+        );
     }
 
     /// GIVEN each start error WHEN shown THEN it is a distinct fixed text,

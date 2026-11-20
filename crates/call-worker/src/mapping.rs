@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{
     FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_OTHER_CONNECTIONS,
-    MAX_PARTICIPANTS, MAX_VOLUME_PERCENT, MediaDevice, ToWorker,
+    MAX_PARTICIPANTS, MAX_VOLUME_PERCENT, MediaDevice, ToWorker, pulse_id, pulse_name,
 };
 
 /// The most `Speaking` messages sent in any one second.
@@ -67,6 +67,68 @@ pub fn bounded_device_list<'a>(
         }
     }
     list
+}
+
+/// The wire list of sound server devices from (name, description) pairs
+/// (Linux, ADR-0049). Each ID is `pulse:` and the name. A name that
+/// `valid_pulse_name` refuses is left out, so it can never reach the
+/// worker's environment in a later call. Otherwise as
+/// [`bounded_device_list`].
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn pulse_device_list<'a>(
+    devices: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<MediaDevice> {
+    let tagged: Vec<(String, &str)> = devices
+        .into_iter()
+        .filter_map(|(name, description)| pulse_id(name).map(|id| (id, description)))
+        .take(2 * MAX_DEVICES)
+        .collect();
+    bounded_device_list(tagged.iter().map(|(id, name)| (id.as_str(), *name)))
+}
+
+/// How a microphone or speaker choice is opened.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SoundPath {
+    /// Through libwebrtc's own device list (`choose_device`).
+    Listed,
+    /// By sound server name (Linux): libwebrtc opens its default stream, and
+    /// the client library sends it to the name the launcher put in the
+    /// environment. libwebrtc's device selection is left alone.
+    ServerName,
+}
+
+/// Checks a microphone or speaker choice against the sound server name in
+/// the worker's environment (`PULSE_SOURCE` or `PULSE_SINK`, set by the
+/// launcher) and the names the sound server has now (`None`: it could not be
+/// asked).
+///
+/// * A `pulse:` choice needs the same name in the environment, else
+///   `Protocol` (the core and the launch disagree), and a device of that
+///   name now, else `DeviceNotFound`. The check is needed: the sound server
+///   quietly uses its default for a name it does not have, and a chosen
+///   device must never fall back to another one.
+/// * Any other choice, or none, needs no name in the environment, else
+///   `Protocol` (the environment would move the default stream).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn sound_path(
+    wanted: Option<&str>,
+    environment: Option<&str>,
+    present: Option<&[&str]>,
+) -> Result<SoundPath, FailureCode> {
+    match wanted.and_then(pulse_name) {
+        Some(name) => {
+            if environment != Some(name) {
+                Err(FailureCode::Protocol)
+            } else if present.is_some_and(|names| names.contains(&name)) {
+                Ok(SoundPath::ServerName)
+            } else {
+                Err(FailureCode::DeviceNotFound)
+            }
+        }
+        None if environment.is_some() => Err(FailureCode::Protocol),
+        None => Ok(SoundPath::Listed),
+    }
 }
 
 /// What the worker saw in the room, reduced to what it reports.
@@ -471,6 +533,109 @@ mod tests {
         let list = bounded_device_list(ids.iter().map(|id| (id.as_str(), "n")));
         assert_eq!(list.len(), MAX_DEVICES);
         assert_eq!(list[0].id, "id0");
+    }
+
+    #[test]
+    fn given_sound_server_names_when_listed_then_only_safe_names_get_pulse_ids() {
+        // GIVEN good names, an unsafe name, an empty name and a repeat,
+        // WHEN listed, THEN each good name is a pulse: ID once, in order.
+        let list = pulse_device_list([
+            ("alsa_input.usb-Mic_01-00.analog-stereo", "USB Mic"),
+            ("bad name", "Space"),
+            ("", "Empty"),
+            ("x;rm", "Shell"),
+            ("vmic", "Virtual\u{7}"),
+            ("vmic", "Repeat"),
+        ]);
+        assert_eq!(
+            list,
+            vec![
+                MediaDevice {
+                    id: "pulse:alsa_input.usb-Mic_01-00.analog-stereo".into(),
+                    name: "USB Mic".into()
+                },
+                MediaDevice {
+                    id: "pulse:vmic".into(),
+                    name: "Virtual".into()
+                },
+            ]
+        );
+        let names: Vec<String> = (0..MAX_DEVICES + 5).map(|n| format!("s{n}")).collect();
+        let list = pulse_device_list(names.iter().map(|name| (name.as_str(), "n")));
+        assert_eq!(list.len(), MAX_DEVICES);
+    }
+
+    #[test]
+    fn given_a_pulse_choice_when_the_launch_and_server_agree_then_the_name_is_used() {
+        // GIVEN a pulse: choice, the same name in the environment and on the
+        // server, WHEN checked, THEN the default stream goes to that name.
+        assert_eq!(
+            sound_path(Some("pulse:vmic"), Some("vmic"), Some(&["other", "vmic"])),
+            Ok(SoundPath::ServerName)
+        );
+    }
+
+    #[test]
+    fn given_a_pulse_choice_when_the_device_is_gone_then_it_is_not_found() {
+        // GIVEN a pulse: choice that the server does not have, or a server
+        // that could not be asked, WHEN checked, THEN DeviceNotFound (never
+        // the server's quiet fallback to its default).
+        assert_eq!(
+            sound_path(Some("pulse:vmic"), Some("vmic"), Some(&["other"])),
+            Err(FailureCode::DeviceNotFound)
+        );
+        assert_eq!(
+            sound_path(Some("pulse:vmic"), Some("vmic"), Some(&[])),
+            Err(FailureCode::DeviceNotFound)
+        );
+        assert_eq!(
+            sound_path(Some("pulse:vmic"), Some("vmic"), None),
+            Err(FailureCode::DeviceNotFound)
+        );
+    }
+
+    #[test]
+    fn given_a_choice_and_launch_that_disagree_then_it_is_a_protocol_failure() {
+        // GIVEN a pulse: choice with no or another name in the environment,
+        // or a non-pulse choice with a name there, WHEN checked, THEN
+        // Protocol: the worker never opens a device nobody chose.
+        let present: &[&str] = &["vmic", "other"];
+        assert_eq!(
+            sound_path(Some("pulse:vmic"), None, Some(present)),
+            Err(FailureCode::Protocol)
+        );
+        assert_eq!(
+            sound_path(Some("pulse:vmic"), Some("other"), Some(present)),
+            Err(FailureCode::Protocol)
+        );
+        assert_eq!(
+            sound_path(None, Some("vmic"), Some(present)),
+            Err(FailureCode::Protocol)
+        );
+        assert_eq!(
+            sound_path(Some("{guid}"), Some("vmic"), Some(present)),
+            Err(FailureCode::Protocol)
+        );
+    }
+
+    #[test]
+    fn given_no_pulse_choice_and_no_launch_name_then_the_listed_path_is_kept() {
+        // GIVEN no choice, a GUID choice or an unsafe pulse: ID, and no name
+        // in the environment, WHEN checked, THEN libwebrtc's list decides
+        // (an unsafe pulse: ID is then not found there).
+        assert_eq!(sound_path(None, None, None), Ok(SoundPath::Listed));
+        assert_eq!(
+            sound_path(Some("{guid}"), None, None),
+            Ok(SoundPath::Listed)
+        );
+        assert_eq!(
+            sound_path(Some("pulse:bad name"), None, None),
+            Ok(SoundPath::Listed)
+        );
+        assert_eq!(
+            choose_device(Some("pulse:bad name"), ["{guid}"]),
+            Err(FailureCode::DeviceNotFound)
+        );
     }
 
     #[test]
