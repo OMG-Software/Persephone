@@ -46,6 +46,8 @@ pub const MAX_THIRD_PARTY_MODULES: usize = 128;
 pub const MAX_MODULE_ID_BYTES: usize = 512;
 /// The longest module path in a report.
 pub const MAX_MODULE_PATH_BYTES: usize = 1024;
+/// Most events one `timeline_events` call reads again.
+pub const MAX_TIMELINE_EVENTS: usize = 20;
 
 /// Bound shared local filters before relay. Matrix identifier syntax is checked
 /// again in the core. A missing date range never authorizes extra cache reads.
@@ -121,6 +123,15 @@ pub fn personal_call_within_limits(call: &Call) -> bool {
         | Call::SetPinned {
             room_id, event_id, ..
         } => text(room_id, MAX_ROOM_ID_BYTES) && text(event_id, MAX_EVENT_ID_BYTES),
+        Call::TimelineEvents { room_id, event_ids } => {
+            text(room_id, MAX_ROOM_ID_BYTES)
+                && (1..=MAX_TIMELINE_EVENTS).contains(&event_ids.len())
+                && event_ids.iter().enumerate().all(|(index, id)| {
+                    !id.is_empty()
+                        && text(id, MAX_EVENT_ID_BYTES)
+                        && !event_ids[..index].contains(id)
+                })
+        }
         Call::PinnedMessages { room_id } => text(room_id, MAX_ROOM_ID_BYTES),
         Call::Attachments {
             room_id,
@@ -187,6 +198,17 @@ pub enum Call {
     EventContext {
         room_id: String,
         event_id: String,
+    },
+    /// Read these events of a room again, decrypted with the keys the core
+    /// holds now: 1 to [`MAX_TIMELINE_EVENTS`] different event IDs. Replies
+    /// with a `TimelinePage` of their items (no cursor), in the given order;
+    /// an event that cannot be read is left out. The UI asks for loaded
+    /// items that were undecryptable. The core reads them only when room
+    /// keys arrived for the room since the last such call while it was
+    /// subscribed; otherwise the page has no items and nothing is fetched.
+    TimelineEvents {
+        room_id: String,
+        event_ids: Vec<String>,
     },
     PinnedMessages {
         room_id: String,
@@ -3618,6 +3640,92 @@ mod paste_tests {
                 receive::<_, Request>(&mut reader, &budgets),
                 Err(ReceiveError::Malformed)
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod timeline_events_wire_tests {
+    use super::*;
+
+    fn valid() -> serde_json::Value {
+        serde_json::json!({"command":"timeline_events","room_id":"!r:s","event_ids":["$a","$b"]})
+    }
+
+    /// GIVEN the exact wire form WHEN it is decoded THEN it is accepted
+    /// within the limits and encodes back to the same form.
+    #[test]
+    fn given_the_exact_wire_form_then_timeline_events_is_accepted() {
+        let call: Call = serde_json::from_value(valid()).unwrap();
+        assert_eq!(
+            call,
+            Call::TimelineEvents {
+                room_id: "!r:s".into(),
+                event_ids: vec!["$a".into(), "$b".into()],
+            }
+        );
+        assert!(personal_call_within_limits(&call));
+        assert_eq!(serde_json::to_value(call).unwrap(), valid());
+    }
+
+    /// GIVEN a missing field, a field of the wrong type, or an extra field
+    /// WHEN the call is decoded THEN it is refused.
+    #[test]
+    fn given_a_missing_wrong_or_extra_field_then_timeline_events_is_refused() {
+        for key in ["room_id", "event_ids"] {
+            let mut missing = valid();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(
+                serde_json::from_value::<Call>(missing).is_err(),
+                "missing {key}"
+            );
+        }
+        for (key, wrong) in [
+            ("room_id", serde_json::json!(["!r:s"])),
+            ("room_id", serde_json::Value::Null),
+            ("event_ids", serde_json::json!("$a")),
+            ("event_ids", serde_json::Value::Null),
+            ("event_ids", serde_json::json!([1])),
+            ("event_ids", serde_json::json!([null])),
+        ] {
+            let mut value = valid();
+            value[key] = wrong;
+            assert!(
+                serde_json::from_value::<Call>(value).is_err(),
+                "wrong {key}"
+            );
+        }
+        let mut extra = valid();
+        extra["cursor"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<Call>(extra).is_err());
+    }
+
+    /// GIVEN no event IDs, more than `MAX_TIMELINE_EVENTS`, a repeated, empty,
+    /// oversized or control-character ID, or an oversized room ID WHEN the
+    /// limits are checked THEN the call is refused; exactly the maximum of
+    /// different IDs is accepted.
+    #[test]
+    fn given_ids_outside_the_limits_then_timeline_events_is_refused() {
+        let call = |room_id: &str, event_ids: Vec<String>| Call::TimelineEvents {
+            room_id: room_id.into(),
+            event_ids,
+        };
+        let ids = |count: usize| (0..count).map(|n| format!("$e{n}")).collect::<Vec<_>>();
+        assert!(personal_call_within_limits(&call(
+            "!r:s",
+            ids(MAX_TIMELINE_EVENTS)
+        )));
+        for refused in [
+            call("!r:s", Vec::new()),
+            call("!r:s", ids(MAX_TIMELINE_EVENTS + 1)),
+            call("!r:s", vec!["$a".into(), "$b".into(), "$a".into()]),
+            call("!r:s", vec![String::new()]),
+            call("!r:s", vec!["é".repeat(MAX_EVENT_ID_BYTES / 2 + 1)]),
+            call("!r:s", vec!["$a\n".into()]),
+            call(&"é".repeat(MAX_ROOM_ID_BYTES / 2 + 1), ids(1)),
+            call("!r:\u{7}s", ids(1)),
+        ] {
+            assert!(!personal_call_within_limits(&refused), "{refused:?}");
         }
     }
 }

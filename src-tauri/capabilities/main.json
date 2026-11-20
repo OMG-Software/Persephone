@@ -13,6 +13,7 @@
     "allow-search-messages",
     "allow-jump-to-date",
     "allow-event-context",
+    "allow-timeline-events",
     "allow-pinned-messages",
     "allow-set-pinned",
     "allow-attachments",

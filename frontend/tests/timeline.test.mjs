@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mergeNewest, MAX_RETAINED_ITEMS } from '../src/timeline.ts';
+import {
+  mergeNewest,
+  MAX_REFETCHED_EVENTS,
+  MAX_RETAINED_ITEMS,
+  replaceUndecryptable,
+  undecryptableToRefetch
+} from '../src/timeline.ts';
 
 const message = (n) => ({ kind: 'message', event_id: `$${n}`, sender: '@a:example.invalid', body: `m${n}` });
 const range = (from, to) => Array.from({ length: to - from }, (_, i) => message(from + i));
@@ -179,4 +185,68 @@ test('GIVEN unread messages WHEN a room opens THEN the line goes before the olde
   assert.equal(firstUnread(items, 0, '@me:s'), null);
   assert.equal(newestEvent([...items, { kind: 'gap', next_cursor: null }]), '$4');
   assert.equal(newestEvent([]), null);
+});
+
+const locked = (n, notice = 'undecryptable') => ({
+  kind: 'notice',
+  event_id: `$${n}`,
+  sender: '@a:example.invalid',
+  notice,
+  origin_server_ts: null
+});
+const gap = { kind: 'gap', next_cursor: null };
+
+test('GIVEN undecryptable items above the newest page WHEN keys arrive THEN they are chosen, newest first', () => {
+  const items = [locked(1), message(2), gap, locked(3), locked(4, 'withheld'), message(5), locked(6), locked(7)];
+  // The newest page (6, 7) was just fetched again: only older items are read again.
+  const newest = [locked(6), locked(7)];
+  assert.deepEqual(undecryptableToRefetch(items, newest), ['$3', '$1']);
+});
+
+test('GIVEN more undecryptable items than one call reads THEN only the most recent are chosen, each once', () => {
+  const items = [...Array.from({ length: 30 }, (_, n) => locked(n)), locked(29)];
+  const chosen = undecryptableToRefetch(items, []);
+  assert.equal(chosen.length, MAX_REFETCHED_EVENTS);
+  assert.equal(chosen[0], '$29');
+  assert.equal(new Set(chosen).size, chosen.length, 'no event twice');
+  assert.deepEqual(undecryptableToRefetch(items, [], 2), ['$29', '$28']);
+  assert.deepEqual(undecryptableToRefetch([message(1), gap], []), [], 'nothing undecryptable');
+});
+
+test('GIVEN read-again items WHEN merged THEN only matching undecryptable items are replaced, in place', () => {
+  const items = [locked(1), message(2), locked(3, 'withheld'), gap, locked(4)];
+  const fresh = [
+    { ...message(1), body: 'now readable' },
+    { ...message(2), body: 'must not replace a message' },
+    { ...message(3), body: 'must not replace a withheld notice' },
+    { ...message(9), body: 'not loaded, not added' },
+    locked(4)
+  ];
+  const merged = replaceUndecryptable(items, fresh);
+  assert.equal(merged.length, items.length, 'nothing added or removed');
+  assert.deepEqual(merged[0], { ...message(1), body: 'now readable' });
+  assert.equal(merged[1], items[1]);
+  assert.equal(merged[2], items[2]);
+  assert.equal(merged[3], gap);
+  assert.deepEqual(merged[4], locked(4), 'still undecryptable');
+  assert.deepEqual(items[0], locked(1), 'the loaded list is not changed');
+});
+
+test('GIVEN a read-again edit THEN it replaces the notice, so the edit applies to its message', () => {
+  const items = [message(1), locked(2)];
+  const edit = {
+    kind: 'edit',
+    event_id: '$2',
+    sender: '@a:example.invalid',
+    origin_server_ts: null,
+    replaces: '$1',
+    body: 'edited'
+  };
+  assert.deepEqual(replaceUndecryptable(items, [edit]), [message(1), edit]);
+});
+
+test('GIVEN no matching undecryptable item THEN the same list is returned', () => {
+  const items = [message(1), locked(2, 'untrusted_sender')];
+  assert.equal(replaceUndecryptable(items, [message(1), message(2), gap]), items);
+  assert.equal(replaceUndecryptable(items, []), items);
 });

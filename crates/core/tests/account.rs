@@ -4490,3 +4490,313 @@ fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
     );
     assert_eq!(list(None), Outcome::Error(ErrorCode::Unavailable));
 }
+
+/// GIVEN a signed-in account with its room open and three events the
+/// homeserver serves by ID (a text message, an event encrypted with a key
+/// nobody has, and one whose answer is another event) WHEN the page asks to
+/// read loaded events again before any room key arrived THEN it gets no items
+/// and no event is fetched. WHEN keys may have arrived (a change of the
+/// ignore list marks every open room so, as arriving room keys do) THEN the
+/// events are read once, in the order asked, decrypted where possible: the
+/// message is a message and the encrypted event stays undecryptable. The
+/// mark is used up, so the next call fetches nothing. WHEN the homeserver
+/// answers with another event THEN the call is rejected and the mark is put
+/// back, so a later call reads again. WHEN an event read fails with a server
+/// error THEN that event is left out and the mark is kept; WHEN it fails
+/// with not found THEN the event is left out and the mark is used up. WHEN
+/// the room is not open THEN it is never marked.
+#[test]
+fn given_keys_arrived_then_timeline_events_reads_the_asked_events_once() {
+    let server = Homeserver::signed_in();
+    let encrypted = json!({"type":"m.room.encrypted","room_id":ROOM,"sender":USER,"event_id":"$locked","origin_server_ts":5,"content":{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEgAAAA","sender_key":"c2VuZGVyLWtleQ","device_id":"OTHER","session_id":"no-such-session"}});
+    let mut readable = text("$readable", "now readable");
+    readable["room_id"] = json!(ROOM);
+    let mut other = text("$other", "not the one asked for");
+    other["room_id"] = json!(ROOM);
+    server.runtime.block_on(async {
+        for (name, event) in [
+            ("locked", encrypted),
+            ("readable", readable),
+            ("swapped", other),
+        ] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(event))
+                .mount(&server.server)
+                .await;
+        }
+        for (name, status, errcode) in [("busy", 503, "M_UNKNOWN"), ("gone", 404, "M_NOT_FOUND")] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(json!({"errcode": errcode, "error": name})),
+                )
+                .mount(&server.server)
+                .await;
+        }
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/user/[^/]+/account_data/m\.ignored_user_list$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server.server)
+            .await;
+    });
+    let fetched = |name: &str| {
+        let plain = format!("/event/${name}");
+        let encoded = format!("/event/%24{name}");
+        server
+            .runtime
+            .block_on(server.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| {
+                let path = request.url.path();
+                path.ends_with(&plain) || path.ends_with(&encoded)
+            })
+            .count()
+    };
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("the room", || {
+        matches!(
+            call(
+                &core,
+                Call::Subscribe {
+                    room_id: ROOM.into()
+                }
+            ),
+            Outcome::Ok(_)
+        )
+    });
+    let read = |ids: &[&str]| {
+        call(
+            &core,
+            Call::TimelineEvents {
+                room_id: ROOM.into(),
+                event_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            },
+        )
+    };
+    let mark = || {
+        assert_eq!(
+            call(
+                &core,
+                Call::SetIgnoredUser {
+                    user_id: "@mallory:synthetic.test".into(),
+                    ignored: true,
+                }
+            ),
+            Outcome::Ok(Value::Null)
+        );
+    };
+
+    let page: TimelinePage = value(read(&["$locked", "$readable"]));
+    assert_eq!(page.room_id, ROOM);
+    assert!(page.items.is_empty(), "no keys arrived: {page:?}");
+    assert_eq!(page.next_cursor, None);
+    assert_eq!(
+        fetched("locked") + fetched("readable"),
+        0,
+        "nothing fetched"
+    );
+
+    mark();
+    let page: TimelinePage = value(read(&["$locked", "$readable"]));
+    assert_eq!(page.next_cursor, None);
+    match page.items.as_slice() {
+        [
+            TimelineItem::Notice {
+                event_id: locked,
+                notice: NoticeKind::Undecryptable,
+                ..
+            },
+            TimelineItem::Message {
+                event_id: message,
+                body,
+                ..
+            },
+        ] => {
+            assert_eq!(locked, "$locked");
+            assert_eq!(message, "$readable");
+            assert_eq!(body, "now readable");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!((fetched("locked"), fetched("readable")), (1, 1));
+
+    let page: TimelinePage = value(read(&["$locked", "$readable"]));
+    assert!(page.items.is_empty(), "the mark was used up");
+    assert_eq!((fetched("locked"), fetched("readable")), (1, 1));
+
+    mark();
+    assert_eq!(read(&["$swapped"]), Outcome::Error(ErrorCode::Rejected));
+    let page: TimelinePage = value(read(&["$readable"]));
+    assert_eq!(page.items.len(), 1, "the failed read put the mark back");
+    assert_eq!(fetched("readable"), 2);
+
+    mark();
+    let page: TimelinePage = value(read(&["$busy", "$readable"]));
+    assert_eq!(page.items.len(), 1, "the busy event is left out: {page:?}");
+    let page: TimelinePage = value(read(&["$busy", "$readable"]));
+    assert_eq!(page.items.len(), 1, "a server error kept the mark");
+    assert_eq!((fetched("busy"), fetched("readable")), (2, 4));
+
+    mark();
+    let page: TimelinePage = value(read(&["$gone", "$readable"]));
+    assert_eq!(
+        page.items.len(),
+        1,
+        "the missing event is left out: {page:?}"
+    );
+    let page: TimelinePage = value(read(&["$gone", "$readable"]));
+    assert!(page.items.is_empty(), "not found used up the mark");
+    assert_eq!((fetched("gone"), fetched("readable")), (1, 5));
+
+    assert_eq!(
+        call(
+            &core,
+            Call::Unsubscribe {
+                room_id: ROOM.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    mark();
+    let page: TimelinePage = value(read(&["$readable"]));
+    assert!(page.items.is_empty(), "a room not open is never marked");
+    assert_eq!(fetched("readable"), 5);
+}
+
+/// GIVEN an open room marked after keys arrived WHEN a reread event is an
+/// edit whose original message the homeserver answers only after the
+/// projection's time limit THEN the read is `unavailable` and the mark is
+/// kept, so the next call reads again.
+#[test]
+fn given_a_slow_edit_original_then_the_reread_is_unavailable_and_the_mark_is_kept() {
+    let server = Homeserver::signed_in();
+    let mut edit = edit_of("$edit", USER, "$slow", "changed");
+    edit["room_id"] = json!(ROOM);
+    let mut readable = text("$readable", "now readable");
+    readable["room_id"] = json!(ROOM);
+    let mut slow = text("$slow", "original");
+    slow["room_id"] = json!(ROOM);
+    server.runtime.block_on(async {
+        for (name, event, delay) in [
+            ("edit", edit, Duration::ZERO),
+            ("readable", readable, Duration::ZERO),
+            // Past the 10 s projection limit, within the 30 s request timeout.
+            ("slow", slow, Duration::from_secs(15)),
+        ] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(event)
+                        .set_delay(delay),
+                )
+                .mount(&server.server)
+                .await;
+        }
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/user/[^/]+/account_data/m\.ignored_user_list$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("the room", || {
+        matches!(
+            call(
+                &core,
+                Call::Subscribe {
+                    room_id: ROOM.into()
+                }
+            ),
+            Outcome::Ok(_)
+        )
+    });
+    let read = |ids: &[&str]| {
+        call(
+            &core,
+            Call::TimelineEvents {
+                room_id: ROOM.into(),
+                event_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            },
+        )
+    };
+    assert_eq!(
+        call(
+            &core,
+            Call::SetIgnoredUser {
+                user_id: "@mallory:synthetic.test".into(),
+                ignored: true,
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+
+    let started = Instant::now();
+    assert_eq!(read(&["$edit"]), Outcome::Error(ErrorCode::Unavailable));
+    assert!(
+        started.elapsed() < Duration::from_secs(14),
+        "the limit ended the read, not the answer: {:?}",
+        started.elapsed()
+    );
+    let page: TimelinePage = value(read(&["$readable"]));
+    assert_eq!(page.items.len(), 1, "the mark was kept: {page:?}");
+}
+
+/// GIVEN a signed-in account WHEN the page asks to read events again with
+/// no IDs, too many, a repeated or malformed ID, or a malformed room ID THEN
+/// the core refuses it before any request.
+#[test]
+fn given_bad_arguments_then_timeline_events_is_refused() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    let many: Vec<String> = (0..=persephone_core_protocol::MAX_TIMELINE_EVENTS)
+        .map(|n| format!("$e{n}"))
+        .collect();
+    for (room_id, event_ids) in [
+        (ROOM, Vec::new()),
+        (ROOM, many),
+        (ROOM, vec!["$a".to_owned(), "$a".to_owned()]),
+        (ROOM, vec!["not-an-event-id".to_owned()]),
+        ("room", vec!["$a".to_owned()]),
+    ] {
+        assert_eq!(
+            call(
+                &core,
+                Call::TimelineEvents {
+                    room_id: room_id.into(),
+                    event_ids: event_ids.clone(),
+                }
+            ),
+            Outcome::Error(ErrorCode::InvalidArgument),
+            "{room_id} {event_ids:?}"
+        );
+    }
+}

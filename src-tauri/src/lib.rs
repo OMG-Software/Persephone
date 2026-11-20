@@ -231,6 +231,18 @@ async fn event_context(
     personal_relay(core.inner(), Call::EventContext { room_id, event_id }).await
 }
 
+/// Read loaded undecryptable events of an open room again after room keys
+/// arrived: 1 to `MAX_TIMELINE_EVENTS` different event IDs, checked before
+/// relay and again in the core.
+#[tauri::command]
+async fn timeline_events(
+    core: State<'_, CoreLink>,
+    room_id: String,
+    event_ids: Vec<String>,
+) -> Result<TimelinePage, String> {
+    personal_relay(core.inner(), Call::TimelineEvents { room_id, event_ids }).await
+}
+
 /// List shared pin references and content visible to this account.
 #[tauri::command]
 async fn pinned_messages(
@@ -1895,6 +1907,7 @@ pub fn configure<R: Runtime>(
             search_messages,
             jump_to_date,
             event_context,
+            timeline_events,
             pinned_messages,
             set_pinned,
             attachments,

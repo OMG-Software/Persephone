@@ -34,6 +34,7 @@ pub mod account;
 pub mod account_changes;
 pub mod account_details;
 pub mod activity;
+pub mod backup_restore;
 pub mod calls;
 pub mod contacts;
 pub mod conversations;
@@ -140,6 +141,10 @@ struct Notifications {
     subscribed: BTreeSet<String>,
     /// Subscribed rooms changed since their last notification.
     pending: BTreeSet<String>,
+    /// Subscribed rooms that got room keys since their last
+    /// `timeline_events` call: only they read undecryptable events again.
+    /// A subset of `subscribed`.
+    keyed: BTreeSet<String>,
     /// The session changed state since the last notification.
     session_changed: bool,
     /// The room list changed since the last notification.
@@ -214,6 +219,7 @@ impl Hub {
         let mut notifications = lock(&self.notifications);
         notifications.subscribed.clear();
         notifications.pending.clear();
+        notifications.keyed.clear();
         notifications.room_list_changed = false;
         notifications.toast = None;
         notifications.toast_call = false;
@@ -335,6 +341,7 @@ impl SessionListener for Hub {
         let mut any = false;
         for room in &notifications.subscribed {
             if rooms.includes(room) {
+                notifications.keyed.insert(room.clone());
                 any |= notifications.pending.insert(room.clone());
             }
         }
@@ -550,6 +557,16 @@ enum Answer<'a> {
 impl Default for Core {
     fn default() -> Self {
         Self::new(views::Fixtures::default())
+    }
+}
+
+/// The reply to `timeline_events` when there is nothing to read.
+fn no_events(room_id: &str) -> persephone_contracts::TimelinePage {
+    persephone_contracts::TimelinePage {
+        room_id: room_id.to_owned(),
+        items: Vec::new(),
+        next_cursor: None,
+        names: Vec::new(),
     }
 }
 
@@ -813,6 +830,17 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            Call::TimelineEvents { room_id, event_ids } => {
+                match self.timeline_events(room_id, event_ids) {
+                    Ok(Some(call)) => Answer::Later(id, call),
+                    // Nothing to read: answered at once, with no worker.
+                    Ok(None) => Answer::Reply(Reply {
+                        id,
+                        outcome: ok(&no_events(room_id)),
+                    }),
+                    Err(code) => error(code),
+                }
+            }
             Call::LoadImage { room_id, event_id } => match self.load_image(room_id, event_id) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
@@ -982,6 +1010,13 @@ impl Core {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
+            Call::TimelineEvents { room_id, event_ids } => {
+                match self.timeline_events(room_id, event_ids) {
+                    Ok(Some(call)) => call(),
+                    Ok(None) => ok(&no_events(room_id)),
+                    Err(code) => Outcome::Error(code),
+                }
+            }
             Call::AppStatus {} => ok(&AppStatus {
                 version: env!("CARGO_PKG_VERSION").into(),
                 revision: REVISION.into(),
@@ -1028,6 +1063,7 @@ impl Core {
                 let mut notifications = lock(&self.hub.notifications);
                 notifications.subscribed.remove(room_id);
                 notifications.pending.remove(room_id);
+                notifications.keyed.remove(room_id);
                 Outcome::Ok(serde_json::Value::Null)
             }
             Call::LockSession {} => {
@@ -1335,6 +1371,78 @@ impl Core {
             // Profile reads can overlap without mutating their records.
             _ => None,
         })
+    }
+
+    /// Reads loaded undecryptable events of a subscribed room again
+    /// (`room_tools::timeline_events`), only when room keys arrived for it
+    /// since the last such call. Otherwise `None`: the caller answers at once
+    /// with no items, with no worker and no request, so a page that asks
+    /// after every change costs nothing. The mark is taken once the read is
+    /// admitted. It is put back when the read fails, or when an event was
+    /// left out that a later read may get, so a later change asks again. A
+    /// lease is held from admission to the reply, which is fenced against
+    /// lock and sign-out.
+    fn timeline_events<'a>(
+        &'a self,
+        room_id: &str,
+        event_ids: &[String],
+    ) -> Result<Option<LongCall<'a>>, ErrorCode> {
+        let call = Call::TimelineEvents {
+            room_id: room_id.to_owned(),
+            event_ids: event_ids.to_vec(),
+        };
+        if !persephone_core_protocol::personal_call_within_limits(&call)
+            || !valid_room_id(room_id)
+            || !event_ids.iter().all(|id| valid_event_id(id))
+        {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        if !self.session.is_configured() {
+            return Err(ErrorCode::NotFound);
+        }
+        let room = room_id.to_owned();
+        if !lock(&self.hub.notifications).keyed.contains(&room) {
+            return Ok(None);
+        }
+        let slot = self.room_reads.begin()?;
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        if !lock(&self.hub.notifications).keyed.remove(&room) {
+            // Another call took the mark meanwhile and reads them.
+            return Ok(None);
+        }
+        let ids = event_ids.to_vec();
+        Ok(Some(Box::new(move || {
+            let _slot = slot;
+            let stores = lease.stores();
+            let result = stores.block_on(room_tools::timeline_events(
+                &client,
+                &self.matrix,
+                &room,
+                &ids,
+            ));
+            {
+                let _context = stores.runtime().enter();
+                drop(client);
+            }
+            // A failure, or an event left out that a later read may get.
+            if !matches!(result, Ok((_, false))) {
+                let mut notifications = lock(&self.hub.notifications);
+                if notifications.subscribed.contains(&room) {
+                    notifications.keyed.insert(room.clone());
+                }
+            }
+            lease
+                .commit(|| match result {
+                    Ok((page, _)) => bounded(&page),
+                    Err(code) => Outcome::Error(code),
+                })
+                .unwrap_or(Outcome::Error(ErrorCode::Locked))
+        })))
     }
 
     /// Local profile operations and explicit abuse operations. Retain a lease
@@ -4841,6 +4949,31 @@ mod tests {
             ["!a:s", "!c:s"]
         );
         assert!(!notifications.room_list_changed);
+    }
+
+    /// GIVEN one open room WHEN room keys arrive for it and for a room not
+    /// open THEN only the open room is marked for `timeline_events`; WHEN
+    /// other changes arrive THEN nothing is marked; WHEN the session changes
+    /// THEN every mark is dropped with the subscriptions.
+    #[test]
+    fn given_room_keys_then_only_open_rooms_are_marked_for_reading_again() {
+        let hub = Hub::default();
+        lock(&hub.notifications).subscribed.insert("!a:s".into());
+        hub.rooms_changed(&["!a:s".into()]);
+        hub.outbox_changed("!a:s");
+        assert!(lock(&hub.notifications).keyed.is_empty(), "no keys yet");
+        hub.room_keys_arrived(&KeyRooms::Listed(["!a:s".into(), "!b:s".into()].into()));
+        assert_eq!(
+            lock(&hub.notifications).keyed.iter().collect::<Vec<_>>(),
+            ["!a:s"]
+        );
+        hub.session_changed();
+        assert!(lock(&hub.notifications).keyed.is_empty());
+        hub.room_keys_arrived(&KeyRooms::All);
+        assert!(
+            lock(&hub.notifications).keyed.is_empty(),
+            "nothing is open after the change"
+        );
     }
 
     /// GIVEN no room changed WHEN the account's direct-message rooms change

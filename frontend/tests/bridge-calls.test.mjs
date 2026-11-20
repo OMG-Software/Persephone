@@ -111,6 +111,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.searchMessages('hello', '!r:s', { sender: '@a:s', fromMs: 1, beforeMs: 2 }), 'search_messages', { term: 'hello', roomId: '!r:s', filters: { sender: '@a:s', fromMs: 1, beforeMs: 2 } }],
     [() => bridge.jumpToDate('!r:s', 123), 'jump_to_date', { roomId: '!r:s', timestampMs: 123 }],
     [() => bridge.eventContext('!r:s', '$e'), 'event_context', { roomId: '!r:s', eventId: '$e' }],
+    [() => bridge.readEventsAgain('!r:s', ['$a', '$b']), 'timeline_events', { roomId: '!r:s', eventIds: ['$a', '$b'] }],
     [() => bridge.pinnedMessages('!r:s'), 'pinned_messages', { roomId: '!r:s' }],
     [() => bridge.setPinned('!r:s', '$e', true), 'set_pinned', { roomId: '!r:s', eventId: '$e', pinned: true }],
     [() => bridge.setPinned('!r:s', '$e', false), 'set_pinned', { roomId: '!r:s', eventId: '$e', pinned: false }],
