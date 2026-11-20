@@ -17,6 +17,7 @@
     callButton,
     callReasonNote,
     cameraAvailable,
+    keptReasonRoom,
     hasVideo,
     inCall,
     liveRings,
@@ -859,9 +860,10 @@
   const callReasonText = $derived(
     selected === null ? null : callReasonNote(selected, callReasonFor, callView)
   );
+  // The click is forgotten once its note goes: a room change, a ready room
+  // or a hidden button. A later block then needs a new click.
   $effect(() => {
-    selected;
-    callReasonFor = null;
+    callReasonFor = keptReasonRoom(selected, callReasonFor, callView);
   });
 
   // Ask again whether the shown room can take a call when the room or the
@@ -923,6 +925,8 @@
     if (!selected || callPending) return;
     if (callView?.disabled) {
       // A button that cannot start a call says why, rather than nothing.
+      // An earlier join error would hide that answer, so this click ends it.
+      callJoinText = null;
       callReasonFor = selected;
       return;
     }

@@ -19,6 +19,7 @@ import {
   VIDEO_CALL_LABEL,
   callButton,
   callReasonNote,
+  keptReasonRoom,
   STARTING_TEXT,
   cameraButton,
   screenButton,
@@ -116,6 +117,23 @@ test('GIVEN a shown note WHEN the room becomes ready, the button hides, or no re
   const here = callButton('!r:s', ready(), status({ phase: 'active', roomId: '!r:s' }), false);
   assert.equal(callReasonNote('!r:s', '!r:s', here), null);
   assert.equal(callReasonNote('!r:s', '!r:s', callButton('!r:s', null, IDLE_CALL, false)), null);
+});
+
+test('GIVEN a click on a blocked room WHEN it becomes ready and then blocked again THEN the note does not come back without a new click', () => {
+  const blocked = callButton('!r:s', ready({ available: false, reason: 'server_unreachable' }), IDLE_CALL, false);
+  const open = callButton('!r:s', ready(), IDLE_CALL, false);
+  let asked = keptReasonRoom('!r:s', '!r:s', blocked);
+  assert.equal(asked, '!r:s');
+  asked = keptReasonRoom('!r:s', asked, open);
+  assert.equal(asked, null);
+  asked = keptReasonRoom('!r:s', asked, blocked);
+  assert.equal(callReasonNote('!r:s', asked, blocked), null);
+});
+
+test('GIVEN a click on a blocked room WHEN another room or no room is shown THEN the click is forgotten', () => {
+  const blocked = callButton('!b:s', ready({ available: false, reason: 'not_encrypted' }), IDLE_CALL, false);
+  assert.equal(keptReasonRoom('!b:s', '!r:s', blocked), null);
+  assert.equal(keptReasonRoom(null, '!r:s', blocked), null);
 });
 
 test('GIVEN an ended call WHEN the button is built THEN calls can start again', () => {

@@ -151,6 +151,19 @@ export function callReasonNote(
   return view.reason;
 }
 
+/**
+ * The click that [`callReasonNote`] keeps: `asked` while its note shows,
+ * otherwise `null`. A note that goes (the room is ready, the button hides,
+ * the room changes) needs a new click to come back.
+ */
+export function keptReasonRoom(
+  roomId: string | null,
+  asked: string | null,
+  view: CallButtonView | null
+): string | null {
+  return roomId !== null && callReasonNote(roomId, asked, view) !== null ? asked : null;
+}
+
 export const VIDEO_CALL_LABEL = 'Video call';
 
 /**
