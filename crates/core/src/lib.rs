@@ -93,7 +93,7 @@ use persephone_core_protocol::{
 use persephone_media_protocol::{ReceivedFrame, ResourceBudgets};
 use pick::ImagePicker;
 use serde::Serialize;
-use session::{Session, SessionListener};
+use session::{Session, SessionListener, SignOutRefused};
 use std::{
     collections::BTreeSet,
     io::{Read, Write},
@@ -1178,11 +1178,18 @@ impl Core {
                     .verify(verification::Action::StartMember(room_id.clone(), member))),
                 _ => Outcome::Error(ErrorCode::InvalidArgument),
             },
-            Call::SignOut {} => {
-                match self.session.sign_out(LOCK_TIMEOUT, || self.announce_lock()) {
+            Call::SignOut { discard_keys } => {
+                match self
+                    .session
+                    .sign_out(LOCK_TIMEOUT, *discard_keys, || self.announce_lock())
+                {
                     Ok(state) => ok(&state),
                     // Too much work in progress: nothing was signed out.
-                    Err(_) => Outcome::Error(ErrorCode::LimitExceeded),
+                    Err(SignOutRefused::Saturated) => Outcome::Error(ErrorCode::LimitExceeded),
+                    // The page asks the user before it tries again.
+                    Err(SignOutRefused::KeysNotBackedUp) => {
+                        Outcome::Error(ErrorCode::KeysNotBackedUp)
+                    }
                 }
             }
             Call::LoadImage { room_id, event_id } => match self.load_image(room_id, event_id) {

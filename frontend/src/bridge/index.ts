@@ -385,9 +385,12 @@ export function register(homeserver: string, username: string): Promise<AccountS
  * Signs out: the core revokes the session if the homeserver can be reached
  * and deletes this device's local profile, keys first. The outcome arrives as
  * a session change; Persephone must then be restarted to sign in again.
+ * Without `discardKeys` the core refuses with `keys_not_backed_up` while this
+ * device's room keys are not all in a key backup; `true` is the user's choice
+ * to lose them.
  */
-export function signOut(): Promise<StoreState> {
-  return invoke<StoreState>('sign_out');
+export function signOut(discardKeys: boolean): Promise<StoreState> {
+  return invoke<StoreState>('sign_out', { discardKeys });
 }
 
 /** The account's encryption state. Codes only. */

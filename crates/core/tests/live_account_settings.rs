@@ -449,7 +449,7 @@ fn live_account_settings() {
     ));
     let gone = runtime.block_on(second.whoami()).is_err();
     println!("RESULT change_password_sign_out {again:?} other_session_signed_out={gone}");
-    let _ = call(&core, Call::SignOut {});
+    let _ = call(&core, Call::SignOut { discard_keys: true });
     drop(second);
     drop(bob);
 }

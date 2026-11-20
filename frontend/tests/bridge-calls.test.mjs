@@ -156,6 +156,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     ],
     [() => bridge.loadRoomPicture('!r:s'), 'load_room_picture', { roomId: '!r:s' }],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
+    [() => bridge.signOut(false), 'sign_out', { discardKeys: false }],
+    [() => bridge.signOut(true), 'sign_out', { discardKeys: true }],
     [() => bridge.newSessions(), 'new_sessions', {}],
     [() => bridge.thirdPartyModules(), 'third_party_modules', {}],
     [() => bridge.displaySession(), 'display_session', {}],
