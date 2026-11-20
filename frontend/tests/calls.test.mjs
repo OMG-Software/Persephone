@@ -499,3 +499,39 @@ test('GIVEN sends that fail WHEN they settle THEN only a failure of the last val
   await settle();
   assert.deepEqual(outcomes, [true, false, true], 'a saved value before a failed last one does not hide it');
 });
+
+test('GIVEN a send that waits WHEN the sender is cleared and that send fails THEN nothing is reported, and a value set after the clear reports its own outcome', async () => {
+  const outcomes = [];
+  const gates = [];
+  const latest = new LatestOnly(
+    (value) =>
+      new Promise((resolve, reject) => {
+        gates.push(() => (value < 0 ? reject(new Error('locked')) : resolve()));
+      }),
+    (failed) => outcomes.push(failed)
+  );
+  const settle = async () => {
+    gates.shift()();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  latest.set(-1);
+  latest.clear();
+  await settle();
+  assert.deepEqual(outcomes, [], 'a failure from before the clear is not reported');
+  assert.equal(latest.busy, false);
+
+  latest.set(-2);
+  latest.clear();
+  latest.set(30);
+  await settle();
+  assert.deepEqual(outcomes, [], 'the disowned send is still not reported');
+  await settle();
+  assert.deepEqual(outcomes, [false], 'the value set after the clear was saved');
+
+  latest.set(-3);
+  latest.clear();
+  latest.set(-4);
+  await settle();
+  await settle();
+  assert.deepEqual(outcomes, [false, true], 'a failure after the clear is reported');
+});

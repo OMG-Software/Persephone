@@ -416,12 +416,17 @@ export function volumeText(percent: number): string {
  * is always sent. `settled` runs when no send waits and none is due. It is
  * told whether the last send failed: a failure that a later send replaced
  * does not count, because the later value is the one that matters.
+ * `clear()` also disowns a send that is still waiting (a session change): its
+ * outcome is not reported, and `settled` runs only after a send that started
+ * after the latest `clear()`.
  */
 export class LatestOnly<T> {
   #send: (value: T) => Promise<void>;
   #settled: (failed: boolean) => void;
   #sending = false;
   #next: { value: T } | null = null;
+  // Goes up on each `clear()`; a send started in an older epoch is disowned.
+  #epoch = 0;
 
   constructor(send: (value: T) => Promise<void>, settled: (failed: boolean) => void = () => {}) {
     this.#send = send;
@@ -434,9 +439,13 @@ export class LatestOnly<T> {
     if (!this.#sending) void this.#run();
   }
 
-  /** Drops a value that has not gone yet (a session change). */
+  /**
+   * Drops a value that has not gone yet, and disowns a send that waits (a
+   * session change): its failure is never reported.
+   */
   clear(): void {
     this.#next = null;
+    this.#epoch += 1;
   }
 
   /** True while a send waits or a value is due. */
@@ -447,18 +456,23 @@ export class LatestOnly<T> {
   async #run(): Promise<void> {
     this.#sending = true;
     let failed = false;
+    // Whether the last finished send started after the latest `clear()`.
+    let owned = false;
     while (this.#next !== null) {
       const { value } = this.#next;
       this.#next = null;
+      const epoch = this.#epoch;
+      let sendFailed = false;
       try {
         await this.#send(value);
-        failed = false;
       } catch {
-        failed = true;
+        sendFailed = true;
       }
+      owned = epoch === this.#epoch;
+      if (owned) failed = sendFailed;
     }
     this.#sending = false;
-    this.#settled(failed);
+    if (owned) this.#settled(failed);
   }
 }
 
