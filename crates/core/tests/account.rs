@@ -2189,8 +2189,9 @@ fn given_keys_not_in_a_backup_then_sign_out_is_refused_until_the_user_accepts_th
 /// GIVEN other work still running (a held lease) WHEN signing out without
 /// discarding keys THEN new work is held back while the sign-out waits for
 /// the running work, so no sync round or send can add a key after the backup
-/// check; once that work ends, the check runs, refuses, and new work is
-/// admitted again with the account still signed in.
+/// check, while a running call's operations still pass; once that work ends,
+/// the check runs, refuses, and new work is admitted again with the account
+/// still signed in.
 #[test]
 fn given_running_work_then_the_backup_check_waits_for_it_and_holds_new_work_back() {
     let server = Homeserver::signed_in();
@@ -2207,6 +2208,14 @@ fn given_running_work_then_the_backup_check_waits_for_it_and_holds_new_work_back
             matches!(core.session().admit(), Err(AdmissionError::Saturated))
         });
         assert!(!signing_out.is_finished(), "waits for the running work");
+        // A running call's operation still passes: a refused sign-out must
+        // not end the call.
+        let (lease, client) = (core.session().admission())().expect("a call is admitted");
+        {
+            let _runtime = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
         drop(running);
         assert_eq!(
             signing_out.join().unwrap(),

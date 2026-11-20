@@ -209,8 +209,9 @@ struct Inner {
     stores: Option<Arc<Stores>>,
     generation: u64,
     active: usize,
-    /// A sign-out is checking the key backup: new work is refused as
-    /// saturated until it gives up or the lock closes admission.
+    /// A sign-out is checking the key backup: new work other than a running
+    /// call's ([`Shared::admit_while`]) is refused as saturated until it
+    /// gives up or the lock closes admission.
     held: bool,
 }
 
@@ -400,6 +401,16 @@ fn lock(shared: &Shared) -> MutexGuard<'_, Inner> {
 
 impl Shared {
     fn admit(self: &Arc<Self>) -> Result<Lease, AdmissionError> {
+        self.admit_while(false)
+    }
+
+    /// `through_hold` admits work while a sign-out holds new work back. Only
+    /// a running call's operations pass: refusing them would end the call
+    /// although the sign-out may still be refused. They add no room key a
+    /// history needs: membership state, delayed events and Olm to-device
+    /// call keys are not Megolm, and the one encrypted event, the ring when a
+    /// call starts, only keeps this device from reading its own ring.
+    fn admit_while(self: &Arc<Self>, through_hold: bool) -> Result<Lease, AdmissionError> {
         let mut inner = lock(self);
         let Some(stores) = inner
             .stores
@@ -408,7 +419,7 @@ impl Shared {
         else {
             return Err(AdmissionError::Locked);
         };
-        if inner.active >= MAX_LEASES || inner.held {
+        if inner.active >= MAX_LEASES || (inner.held && !through_hold) {
             return Err(AdmissionError::Saturated);
         }
         inner.active += 1;
@@ -420,7 +431,14 @@ impl Shared {
     }
 
     fn with_client(self: &Arc<Self>) -> Result<Option<(Lease, Client)>, AdmissionError> {
-        let lease = self.admit()?;
+        self.with_client_while(false)
+    }
+
+    fn with_client_while(
+        self: &Arc<Self>,
+        through_hold: bool,
+    ) -> Result<Option<(Lease, Client)>, AdmissionError> {
+        let lease = self.admit_while(through_hold)?;
         let client = guard(&self.account)
             .as_ref()
             .map(|account| account.client.clone());
@@ -1658,7 +1676,9 @@ impl Session {
     /// holds the session's shared state, never a client.
     pub fn admission(&self) -> Admission {
         let shared = self.shared.clone();
-        Arc::new(move || shared.with_client().ok().flatten())
+        // A call outlives a sign-out's check of the key backup: it stops
+        // only when the lock closes admission.
+        Arc::new(move || shared.with_client_while(true).ok().flatten())
     }
 
     /// Restores a saved account without a prompt and starts syncing. Does
