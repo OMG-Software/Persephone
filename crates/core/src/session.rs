@@ -23,9 +23,12 @@
 //!
 //! Encryption setup (`security.rs`) runs on its own thread, one lease per
 //! step, like sync. So do changing the recovery key (ADR-0021) and
-//! verifying another of the account's devices. Its prompts run on
-//! short-lived threads without a lease, so a prompt left open never holds up
-//! a lock; an answer given after a lock (or a lock and unlock) is dropped.
+//! verifying another of the account's devices. After recovery with the
+//! recovery key, the same thread downloads the key backup's room keys, one
+//! room per lease, in ticks with no other work (`backup_restore.rs`). Its
+//! prompts run on short-lived threads without a lease, so a prompt left open
+//! never holds up a lock; an answer given after a lock (or a lock and
+//! unlock) is dropped.
 //!
 //! Turning the profile passphrase on or off (ADR-0050) asks on a short-lived
 //! thread without a lease, like the other prompts. Only the file switch that
@@ -39,6 +42,7 @@
 
 use crate::account;
 use crate::activity;
+use crate::backup_restore::{self, Restore};
 use crate::contacts;
 use crate::credentials::{CredentialSource, NewPassword, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
@@ -1047,6 +1051,9 @@ fn run_security(
     // read here rather than during sync so a member-list request never holds
     // up sync. The account's direct marks do not count.
     let mut flow: Option<Flow> = None;
+    // The rooms whose backup keys are still to be downloaded after a
+    // recovery (`backup_restore.rs`). Only this session's loop holds it.
+    let mut restore = Restore::default();
     let incoming: Arc<Mutex<Option<Noted>>> = Arc::default();
     let recorder = incoming.clone();
     let own = user_id.clone();
@@ -1084,6 +1091,18 @@ fn run_security(
         let active = flow.as_ref().is_some_and(|flow| !flow.is_over());
         let waiting = guard(&incoming).is_some();
         if command.is_none() && !active && !waiting && Instant::now() < next_refresh {
+            // Nothing else to do in this tick: restore one room's keys, if a
+            // restore is under way. Commands, verification and the status
+            // refresh come first.
+            if !restore.is_empty()
+                && !restore_step(shared, generation, &mut restore, |lease, room| {
+                    lease
+                        .stores()
+                        .block_on(backup_restore::restore_room(&client, room))
+                })
+            {
+                break;
+            }
             continue;
         }
         let lease = match shared.admit() {
@@ -1142,7 +1161,18 @@ fn run_security(
                         }
                     }
                     Some(SecurityCommand::Recover(key)) => {
-                        (security::recover(&client, &key).await.err(), None)
+                        match security::recover(&client, &key).await {
+                            Ok(()) => {
+                                // A new recovery replaces a restore under way.
+                                restore = if client.encryption().backups().are_enabled().await {
+                                    Restore::new(backup_restore::joined_rooms(&client))
+                                } else {
+                                    Restore::default()
+                                };
+                                (None, None)
+                            }
+                            Err(error) => (Some(error), None),
+                        }
                     }
                     Some(SecurityCommand::SetUpRecovery { source }) => {
                         match security::enable_recovery(&client).await {
@@ -1284,6 +1314,44 @@ fn run_security(
     client.remove_event_handler(room_handler);
     drop(flow);
     drop(client);
+}
+
+/// Downloads the backup's keys for the next room of `restore` with `download`,
+/// under a lease of its own (`backup_restore.rs`). Returns `false` when the
+/// security loop must stop: the session locked or is no longer the one of
+/// `generation`; the restore is then ended. A room that finds no free lease is
+/// put back for the next tick and is not a failure.
+fn restore_step(
+    shared: &Arc<Shared>,
+    generation: u64,
+    restore: &mut Restore,
+    download: impl FnOnce(&Lease, &matrix_sdk::ruma::RoomId) -> bool,
+) -> bool {
+    let Some(room) = restore.take_next() else {
+        return true;
+    };
+    let lease = match shared.admit() {
+        Ok(lease) if lease.generation() == generation => lease,
+        Ok(_) | Err(AdmissionError::Locked) => {
+            restore.stop();
+            return false;
+        }
+        Err(AdmissionError::Saturated) => {
+            restore.defer(room);
+            return true;
+        }
+    };
+    let restored = download(&lease, &room);
+    // A lock that began during the download ends the restore: the next lease
+    // would be refused anyway, and the keys already imported stay.
+    let current = lease.commit(|| ()).is_ok();
+    drop(lease);
+    if !current {
+        restore.stop();
+        return false;
+    }
+    restore.record(restored);
+    true
 }
 
 /// The sending loop: one message at a time in queue order, one lease per
@@ -3556,6 +3624,121 @@ mod tests {
             5,
             "the saved setting is kept"
         );
+    }
+
+    fn rooms(names: &[&str]) -> Restore {
+        Restore::new(
+            names
+                .iter()
+                .map(|name| OwnedRoomId::try_from(*name).unwrap()),
+        )
+    }
+
+    /// GIVEN an open session and a restore of three rooms WHEN the steps run
+    /// THEN each room is downloaded in order under a lease of its own, which
+    /// is the only one held and ends before the next step.
+    #[test]
+    fn given_a_restore_then_each_room_has_its_own_lease() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let generation = session.shared.open_generation().expect("open");
+        let mut restore = rooms(&["!a:s", "!b:s", "!c:s"]);
+        let mut seen = Vec::new();
+        while !restore.is_empty() {
+            let going_on =
+                restore_step(&session.shared, generation, &mut restore, |lease, room| {
+                    assert_eq!(lease.generation(), generation);
+                    assert_eq!(lock(&session.shared).active, 1, "one lease, this room's");
+                    seen.push(room.to_string());
+                    true
+                });
+            assert!(going_on);
+            assert_eq!(lock(&session.shared).active, 0, "the lease ended");
+        }
+        assert_eq!(seen, ["!a:s", "!b:s", "!c:s"]);
+    }
+
+    /// GIVEN a restore WHEN the session is locked, or locked and opened
+    /// again (a new generation), before a step THEN the step downloads
+    /// nothing, the restore ends and the loop is told to stop.
+    #[test]
+    fn given_a_lock_or_a_new_session_then_the_restore_stops_before_downloading() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let old = session.shared.open_generation().expect("open");
+        assert_eq!(
+            session.lock(Duration::from_secs(5), || {}).0,
+            StoreState::Locked
+        );
+        let mut restore = rooms(&["!a:s", "!b:s"]);
+        let going_on = restore_step(&session.shared, old, &mut restore, |_, _| {
+            panic!("no download after a lock")
+        });
+        assert!(!going_on);
+        assert!(restore.is_empty());
+
+        assert_eq!(session.unlock(), StoreState::Unlocking);
+        assert_eq!(settled(&session), StoreState::Protected);
+        let mut restore = rooms(&["!a:s", "!b:s"]);
+        let going_on = restore_step(&session.shared, old, &mut restore, |_, _| {
+            panic!("no download for the old session")
+        });
+        assert!(!going_on, "the new session is not the restore's");
+        assert!(restore.is_empty());
+        assert_eq!(lock(&session.shared).active, 0);
+    }
+
+    /// GIVEN a restore WHEN a lock begins while a room downloads THEN that
+    /// room's lease ends, the remaining rooms are dropped and the loop is
+    /// told to stop.
+    #[test]
+    fn given_a_lock_during_a_download_then_the_rest_of_the_restore_is_dropped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let generation = session.shared.open_generation().expect("open");
+        let mut restore = rooms(&["!a:s", "!b:s", "!c:s"]);
+        let going_on = restore_step(&session.shared, generation, &mut restore, |_, _| {
+            session.close_admission(|| {});
+            true
+        });
+        assert!(!going_on);
+        assert!(restore.is_empty());
+        assert_eq!(lock(&session.shared).active, 0);
+        assert_eq!(
+            session.lock(Duration::from_secs(5), || {}).0,
+            StoreState::Locked
+        );
+    }
+
+    /// GIVEN every lease in use WHEN a restore step runs THEN it downloads
+    /// nothing, keeps the room for the next tick and lets the loop go on.
+    #[test]
+    fn given_no_free_lease_then_the_room_waits_for_the_next_tick() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let generation = session.shared.open_generation().expect("open");
+        let held: Vec<_> = (0..MAX_LEASES)
+            .map(|_| session.shared.admit().expect("a lease"))
+            .collect();
+        let mut restore = rooms(&["!a:s", "!b:s"]);
+        let going_on = restore_step(&session.shared, generation, &mut restore, |_, _| {
+            panic!("no lease, no download")
+        });
+        assert!(going_on);
+        assert_eq!(restore.len(), 2);
+        drop(held);
+        let mut first = None;
+        assert!(restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            |_, room| {
+                first = Some(room.to_string());
+                true
+            }
+        ));
+        assert_eq!(first.as_deref(), Some("!a:s"));
+        assert_eq!(restore.len(), 1);
     }
 
     /// GIVEN a write meant for the session before a lock WHEN it arrives

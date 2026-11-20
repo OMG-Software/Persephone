@@ -235,6 +235,16 @@ export function eventContext(roomId: string, eventId: string): Promise<FocusedTi
   return invoke<FocusedTimeline>('event_context', { roomId, eventId });
 }
 
+/**
+ * Read loaded undecryptable events of an open room again (1 to
+ * `MAX_REFETCHED_EVENTS` different IDs). The core reads them only when room
+ * keys arrived for the room since the last such call; otherwise the page has
+ * no items.
+ */
+export function readEventsAgain(roomId: string, eventIds: string[]): Promise<TimelinePage> {
+  return invoke<TimelinePage>('timeline_events', { roomId, eventIds });
+}
+
 /** Read shared room pins and the core's current management permission. */
 export function pinnedMessages(roomId: string): Promise<PinnedMessages> {
   return invoke<PinnedMessages>('pinned_messages', { roomId });

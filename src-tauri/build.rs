@@ -23,6 +23,7 @@ fn main() {
             "search_messages",
             "jump_to_date",
             "event_context",
+            "timeline_events",
             "pinned_messages",
             "set_pinned",
             "attachments",

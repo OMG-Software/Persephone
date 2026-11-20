@@ -26,6 +26,8 @@ struct FakeCore {
     verified_member: Mutex<Option<(String, String)>>,
     // The room and bytes of the last pasted image that reached the core.
     pasted: Mutex<Option<(String, Vec<u8>)>>,
+    // The room and event IDs of the last `timeline_events` that reached the core.
+    timeline_events: Mutex<Option<(String, Vec<String>)>>,
     // What the stored account settings say about capture protection.
     capture_protection: AtomicBool,
 }
@@ -37,6 +39,7 @@ impl FakeCore {
             calls: AtomicUsize::new(0),
             verified_member: Mutex::new(None),
             pasted: Mutex::new(None),
+            timeline_events: Mutex::new(None),
             capture_protection: AtomicBool::new(true),
         })
     }
@@ -48,6 +51,9 @@ impl CoreTransport for FakeCore {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Call::VerifyMember { room_id, user_id } = &call {
             *self.verified_member.lock().unwrap() = Some((room_id.clone(), user_id.clone()));
+        }
+        if let Call::TimelineEvents { room_id, event_ids } = &call {
+            *self.timeline_events.lock().unwrap() = Some((room_id.clone(), event_ids.clone()));
         }
         if !self.available {
             return Err(CoreError::Unavailable);
@@ -66,6 +72,13 @@ impl CoreTransport for FakeCore {
             Call::JumpToDate { room_id, .. } | Call::EventContext { room_id, .. } => Ok(
                 serde_json::json!({"page":{"roomId":room_id,"items":[],"nextCursor":null,"names":[]},"eventId":"$match"}),
             ),
+            // A reply item with a field outside the contract must not reach the page.
+            Call::TimelineEvents { room_id, .. } if room_id == "!leaky:s" => Ok(
+                serde_json::json!({"roomId":room_id,"items":[],"nextCursor":null,"names":[],"accessToken":"x"}),
+            ),
+            Call::TimelineEvents { room_id, .. } => {
+                Ok(serde_json::json!({"roomId":room_id,"items":[],"nextCursor":null,"names":[]}))
+            }
             Call::PinnedMessages { room_id } => Ok(
                 serde_json::json!({"roomId":room_id,"eventIds":["$match"],"items":[],"canManage":true,"truncated":false}),
             ),
@@ -918,6 +931,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-search-messages",
             "allow-jump-to-date",
             "allow-event-context",
+            "allow-timeline-events",
             "allow-pinned-messages",
             "allow-set-pinned",
             "allow-attachments",
@@ -1070,6 +1084,59 @@ fn given_view_commands_then_replies_are_relayed_and_checked_against_contracts() 
         error(serde_json::json!({"roomId": "!bad-reply:example.invalid", "cursor": null})),
         "core_unavailable"
     );
+}
+
+/// GIVEN valid arguments WHEN the page asks to read events again THEN the
+/// room and event IDs reach the core unchanged and the contract-checked page
+/// comes back. GIVEN no IDs, too many, a repeated, empty, oversized or
+/// control-character ID, an oversized room ID, a missing or extra argument,
+/// or a remote origin THEN nothing reaches the core. GIVEN a reply with a
+/// field outside the contract THEN the page gets only a generic error.
+#[test]
+fn given_timeline_events_then_only_validated_arguments_are_relayed() {
+    let fake = FakeCore::new(true);
+    let app = app_with(fake.clone());
+    let window = create_main_window(&app).unwrap();
+    let ids = |count: usize| (0..count).map(|n| format!("$e{n}")).collect::<Vec<_>>();
+    let max = persephone_core_protocol::MAX_TIMELINE_EVENTS;
+
+    let body = serde_json::json!({"roomId": "!r:s", "eventIds": ids(max)});
+    let page = invoke_on(&window, "timeline_events", app_origin(), body.clone()).unwrap();
+    assert_eq!(
+        page,
+        serde_json::json!({"roomId": "!r:s", "items": [], "nextCursor": null, "names": []})
+    );
+    assert_eq!(
+        fake.timeline_events.lock().unwrap().clone(),
+        Some(("!r:s".to_owned(), ids(max)))
+    );
+    let calls = fake.calls.load(Ordering::SeqCst);
+    assert_eq!(calls, 1);
+
+    for bad in [
+        serde_json::json!({"roomId": "!r:s", "eventIds": []}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": ids(max + 1)}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": ["$a", "$a"]}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": [""]}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": ["x".repeat(256)]}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": ["$a\n"]}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": "$a"}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": [1]}),
+        serde_json::json!({"roomId": "x".repeat(256), "eventIds": ["$a"]}),
+        serde_json::json!({"roomId": "!r:s"}),
+        serde_json::json!({"eventIds": ["$a"]}),
+    ] {
+        assert!(
+            invoke_on(&window, "timeline_events", app_origin(), bad.clone()).is_err(),
+            "{bad}"
+        );
+    }
+    assert!(invoke_on(&window, "timeline_events", "https://evil.invalid", body).is_err());
+    assert_eq!(fake.calls.load(Ordering::SeqCst), calls, "nothing relayed");
+
+    let leaky = serde_json::json!({"roomId": "!leaky:s", "eventIds": ["$a"]});
+    let error = invoke_on(&window, "timeline_events", app_origin(), leaky).unwrap_err();
+    assert_eq!(error, serde_json::json!("core_unavailable"));
 }
 
 #[test]

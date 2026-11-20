@@ -14,7 +14,7 @@ use persephone_contracts::{
     AttachmentKind, AttachmentPage, FocusedTimeline, LocalSearchFilters, PinnedMessages,
     TimelineItem, TimelinePage,
 };
-use persephone_core_protocol::{ErrorCode, MAX_EVENT_ID_BYTES};
+use persephone_core_protocol::{ErrorCode, MAX_EVENT_ID_BYTES, MAX_TIMELINE_EVENTS};
 use std::time::Duration;
 use tokio::time::{Instant, timeout_at};
 
@@ -24,6 +24,8 @@ const MAX_PIN_STATE_IDS: usize = 512;
 const MAX_SCAN: usize = 100;
 const MAX_ATTACHMENTS: usize = 50;
 const PIN_READ_BUDGET: Duration = Duration::from_secs(10);
+/// Longest all events of one `timeline_events` call may take to read.
+const EVENT_READ_BUDGET: Duration = Duration::from_secs(20);
 
 /// Reject oversized or invalid Matrix event IDs before room network operations.
 fn event_id(raw: &str) -> Result<&EventId, ErrorCode> {
@@ -90,6 +92,61 @@ pub async fn event_context(
     raw: &str,
 ) -> Result<FocusedTimeline, ErrorCode> {
     focused_context(client, views, room, raw, None).await
+}
+
+/// Read up to [`MAX_TIMELINE_EVENTS`] events of a joined room again from the
+/// homeserver, decrypted with the keys held now, so items that were
+/// undecryptable can be replaced. Each event is one request, all within
+/// [`EVENT_READ_BUDGET`]; an event that cannot be read is left out, and the
+/// rest are not read once the budget is spent. The items keep the request's
+/// order and the page rules (ignored senders, checked edits, the byte budget).
+pub async fn timeline_events(
+    client: &Client,
+    views: &MatrixViews,
+    room: &str,
+    raw: &[String],
+) -> Result<TimelinePage, ErrorCode> {
+    if raw.is_empty() || raw.len() > MAX_TIMELINE_EVENTS {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    let ids = raw
+        .iter()
+        .map(|id| event_id(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let joined = joined_room(client, room)?;
+    let deadline = Instant::now() + EVENT_READ_BUDGET;
+    let mut chunk = Vec::with_capacity(ids.len());
+    for id in ids {
+        match timeout_at(deadline, joined.event(id, None)).await {
+            // The homeserver must answer with the event asked for.
+            Ok(Ok(event)) if event.event_id() == Some(id) => chunk.push(event),
+            Ok(Ok(_)) => return Err(ErrorCode::Rejected),
+            Ok(Err(_)) => {}
+            Err(_) => break,
+        }
+    }
+    let mut items: Vec<_> = views
+        .project_chunk(client, &joined, &chunk)
+        .await?
+        .into_iter()
+        .filter(|item| item_id(item).is_some_and(|id| raw.iter().any(|asked| asked == id)))
+        .collect();
+    loop {
+        let names = crate::matrix_views::page_names(&joined, &items, &[]).await;
+        let page = TimelinePage {
+            room_id: room.to_owned(),
+            items,
+            next_cursor: None,
+            names,
+        };
+        // An empty page (no items, so no names) always fits.
+        if fits(&page) || page.items.is_empty() {
+            return Ok(page);
+        }
+        // Keep the first items, which the page asked for first.
+        items = page.items;
+        items.pop();
+    }
 }
 
 /// Select a visible date target from the same bounded, validated context.

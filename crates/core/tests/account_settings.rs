@@ -942,6 +942,10 @@ struct KeyState {
     backup: Option<Value>,
     deleted_backups: Vec<String>,
     batch: u64,
+    /// Joined rooms that sync names, with whether each is encrypted.
+    rooms: Vec<(String, bool)>,
+    /// The backup reads of one room's keys: the path and query of each.
+    room_key_reads: Vec<String>,
 }
 
 /// A homeserver that keeps keys and account data, so that setting up and
@@ -1056,6 +1060,14 @@ impl wiremock::Respond for KeyServer {
             } else {
                 not_found("M_NOT_FOUND")
             }
+        } else if path.starts_with("/_matrix/client/v3/room_keys/keys/") && http == "GET" {
+            // Room IDs travel percent-encoded in the path.
+            state.room_key_reads.push(format!(
+                "{}?{}",
+                path.replace("%21", "!").replace("%3A", ":"),
+                request.url.query().unwrap_or_default()
+            ));
+            ok(json!({"sessions":{}}))
         } else if path.starts_with("/_matrix/client/v3/room_keys/") {
             ok(json!({"etag":"1","count":0}))
         } else if path == "/_matrix/client/v3/sync" {
@@ -1065,8 +1077,22 @@ impl wiremock::Respond for KeyServer {
                 .iter()
                 .map(|(kind, content)| json!({"type":kind,"content":content}))
                 .collect();
+            let mut join = serde_json::Map::new();
+            for (room, encrypted) in &state.rooms {
+                let mut events = vec![
+                    json!({"type":"m.room.member","state_key":USER,"sender":USER,"event_id":format!("$m{room}"),"origin_server_ts":1,"content":{"membership":"join"}}),
+                ];
+                if *encrypted {
+                    events.push(json!({"type":"m.room.encryption","state_key":"","sender":USER,"event_id":format!("$e{room}"),"origin_server_ts":1,"content":{"algorithm":"m.megolm.v1.aes-sha2"}}));
+                }
+                join.insert(
+                    room.clone(),
+                    json!({"state":{"events":events},"timeline":{"events":[],"limited":false}}),
+                );
+            }
             ok(json!({
                 "next_batch": format!("k{}", state.batch),
+                "rooms": {"join": join},
                 "account_data": {"events": account_data},
                 "to_device": {"events": []},
                 "device_lists": {"changed": [USER], "left": []},
@@ -1169,6 +1195,108 @@ fn given_recovery_then_the_key_changes_only_after_a_yes_and_is_saved_by_the_core
     });
     assert_eq!(security(&core).error, None);
     assert_eq!(answers.changes_asked.load(Ordering::SeqCst), 2);
+}
+
+/// GIVEN an account with recovery set up on one device, and three joined
+/// rooms WHEN a new device signs in THEN it reads no room's backup keys; WHEN
+/// it recovers with the recovery key THEN the core reads the backup's keys
+/// for each room that may be encrypted, once each and from the backup's
+/// version. This mock syncs without sliding sync, so the SDK does not know
+/// yet that the third room is plain, and it counts as maybe encrypted; a
+/// room known to be plain is left out (`backup_restore` unit tests).
+#[test]
+fn given_recovery_on_a_new_device_then_the_backup_keys_of_each_room_are_read_once() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let keys = KeyServer::default();
+    let server = runtime.block_on(async {
+        let server = MockServer::builder().start().await;
+        Mock::given(any())
+            .respond_with(keys.clone())
+            .mount(&server)
+            .await;
+        server
+    });
+    let start = |dir: &Path, answers: Arc<Answers>| {
+        let core = Core::default()
+            .with_credentials(answers)
+            .with_session(common::open_session(dir));
+        let _ = call(
+            &core,
+            Call::SignIn {
+                homeserver: server.uri(),
+            },
+        );
+        wait_for("sign-in", || {
+            core.session().account_status().state == AccountState::SignedIn
+        });
+        core
+    };
+
+    // The first device sets up encryption and recovery.
+    let first_dir = TempDir::new().unwrap();
+    let first_answers = Answers::new();
+    let first = start(first_dir.path(), first_answers.clone());
+    wait_for("no identity", || {
+        security(&first).identity == IdentityState::None
+    });
+    first_answers.answer(&[Ok(PASSWORD)]);
+    let _ = call(&first, Call::SetUpEncryption {});
+    wait_for("recovery", || {
+        let status = security(&first);
+        status.operation == SecurityOperation::Idle
+            && status.identity == IdentityState::Verified
+            && status.recovery == RecoveryState::Enabled
+    });
+    wait_for("the key", || first_answers.shown.lock().unwrap().len() == 1);
+    let recovery_key = first_answers.shown.lock().unwrap()[0].clone();
+    let _ = call(&first, Call::LockSession {});
+    drop(first);
+
+    // The new device: the account now has rooms, two of them encrypted.
+    keys.0.lock().unwrap().rooms = vec![
+        ("!secret:synthetic.test".into(), true),
+        ("!plain:synthetic.test".into(), false),
+        ("!private:synthetic.test".into(), true),
+    ];
+    let second_dir = TempDir::new().unwrap();
+    let answers = Answers::new();
+    let second = start(second_dir.path(), answers.clone());
+    wait_for("an unverified device", || {
+        security(&second).identity == IdentityState::Unverified
+    });
+    wait_for("the three rooms", || {
+        let list: Value = value(call(&second, Call::RoomList {}));
+        list["rooms"]
+            .as_array()
+            .is_some_and(|rooms| rooms.len() == 3)
+    });
+    assert!(
+        keys.0.lock().unwrap().room_key_reads.is_empty(),
+        "nothing is read before recovery"
+    );
+
+    answers.answer(&[Ok(&recovery_key)]);
+    let _ = call(&second, Call::RecoverWithKey {});
+    wait_for("the recovery", || {
+        let status = security(&second);
+        status.operation == SecurityOperation::Idle && status.identity == IdentityState::Verified
+    });
+    assert_eq!(security(&second).error, None);
+    wait_for("the backup keys of the three rooms", || {
+        keys.0.lock().unwrap().room_key_reads.len() >= 3
+    });
+    // One room per tick: another read would come within a few ticks.
+    std::thread::sleep(Duration::from_secs(1));
+    let mut reads = keys.0.lock().unwrap().room_key_reads.clone();
+    reads.sort();
+    assert_eq!(
+        reads,
+        [
+            "/_matrix/client/v3/room_keys/keys/!plain:synthetic.test?version=1",
+            "/_matrix/client/v3/room_keys/keys/!private:synthetic.test?version=1",
+            "/_matrix/client/v3/room_keys/keys/!secret:synthetic.test?version=1",
+        ]
+    );
 }
 
 /// GIVEN a homeserver that keeps a key backup whose key no device here has

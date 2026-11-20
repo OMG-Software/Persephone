@@ -100,6 +100,8 @@
     mergeNewest,
     newestEvent,
     quoteOf,
+    replaceUndecryptable,
+    undecryptableToRefetch,
     type Quote
   } from './timeline';
   import { TypingNotifier } from './typing';
@@ -166,6 +168,7 @@
     signInWithOidc,
     register,
     subscribeRoom,
+    readEventsAgain,
     timelinePage,
     resetProfile,
     unlockSession,
@@ -1811,6 +1814,8 @@
         if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
         items = mergeNewest(items, page.items);
         senderNames = withNames(senderNames, page, true);
+        await refetchUndecryptable(roomId, generation, contentEpoch, page.items);
+        if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
         if (signedIn) {
           loadActivity(roomId, generation);
           await loadPending(roomId, generation);
@@ -1822,6 +1827,35 @@
       refreshing = false;
       // A change in a room opened while this fetch ran.
       if (changedAgain && selected && !opening) refresh(selected, sessionGeneration);
+    }
+  }
+
+  /**
+   * After a change, read loaded undecryptable items above the newest page
+   * again: the newest page shows only its own events decrypted with keys that
+   * arrived. The core reads them from the homeserver only when room keys
+   * arrived for the room; otherwise it answers at once with no items. Items
+   * are replaced in place, so the scroll position is not set. A stale or
+   * failed result changes nothing; after a failed read the core keeps its
+   * mark, so the next change asks again.
+   */
+  async function refetchUndecryptable(
+    roomId: string,
+    generation: number,
+    contentEpoch: number,
+    newest: TimelineItem[]
+  ) {
+    if (!signedIn) return;
+    const eventIds = undecryptableToRefetch(items, newest);
+    if (eventIds.length === 0) return;
+    try {
+      const page = await readEventsAgain(roomId, eventIds);
+      if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
+      if (page.roomId !== roomId || page.items.length === 0) return;
+      items = replaceUndecryptable(items, page.items);
+      senderNames = withNames(senderNames, page, false);
+    } catch {
+      // Best effort: the notices stay as they are until the next change.
     }
   }
 
