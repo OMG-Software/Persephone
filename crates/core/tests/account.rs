@@ -4569,6 +4569,94 @@ fn given_keys_arrived_then_timeline_events_reads_the_asked_events_once() {
     assert_eq!(fetched("readable"), 5);
 }
 
+/// GIVEN an open room marked after keys arrived WHEN a reread event is an
+/// edit whose original message the homeserver answers only after the
+/// projection's time limit THEN the read is `unavailable` and the mark is
+/// kept, so the next call reads again.
+#[test]
+fn given_a_slow_edit_original_then_the_reread_is_unavailable_and_the_mark_is_kept() {
+    let server = Homeserver::signed_in();
+    let mut edit = edit_of("$edit", USER, "$slow", "changed");
+    edit["room_id"] = json!(ROOM);
+    let mut readable = text("$readable", "now readable");
+    readable["room_id"] = json!(ROOM);
+    let mut slow = text("$slow", "original");
+    slow["room_id"] = json!(ROOM);
+    server.runtime.block_on(async {
+        for (name, event, delay) in [
+            ("edit", edit, Duration::ZERO),
+            ("readable", readable, Duration::ZERO),
+            // Past the 10 s projection limit, within the 30 s request timeout.
+            ("slow", slow, Duration::from_secs(15)),
+        ] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(event)
+                        .set_delay(delay),
+                )
+                .mount(&server.server)
+                .await;
+        }
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/user/[^/]+/account_data/m\.ignored_user_list$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("the room", || {
+        matches!(
+            call(
+                &core,
+                Call::Subscribe {
+                    room_id: ROOM.into()
+                }
+            ),
+            Outcome::Ok(_)
+        )
+    });
+    let read = |ids: &[&str]| {
+        call(
+            &core,
+            Call::TimelineEvents {
+                room_id: ROOM.into(),
+                event_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            },
+        )
+    };
+    assert_eq!(
+        call(
+            &core,
+            Call::SetIgnoredUser {
+                user_id: "@mallory:synthetic.test".into(),
+                ignored: true,
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+
+    let started = Instant::now();
+    assert_eq!(read(&["$edit"]), Outcome::Error(ErrorCode::Unavailable));
+    assert!(
+        started.elapsed() < Duration::from_secs(14),
+        "the limit ended the read, not the answer: {:?}",
+        started.elapsed()
+    );
+    let page: TimelinePage = value(read(&["$readable"]));
+    assert_eq!(page.items.len(), 1, "the mark was kept: {page:?}");
+}
+
 /// GIVEN a signed-in account WHEN the page asks to read events again with
 /// no IDs, too many, a repeated or malformed ID, or a malformed room ID THEN
 /// the core refuses it before any request.
