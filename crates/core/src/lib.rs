@@ -2246,8 +2246,7 @@ impl Core {
         if let Err(code) = self.calls_open() {
             return Outcome::Error(code);
         }
-        let _ = self.calls.set_muted(muted);
-        ok(&calls::status::status(&self.calls.state()))
+        self.queued_call_command(self.calls.set_muted(muted))
     }
 
     /// Deafens or undeafens (ADR-0055). Like mute, no call is not an error:
@@ -2256,8 +2255,18 @@ impl Core {
         if let Err(code) = self.calls_open() {
             return Outcome::Error(code);
         }
-        let _ = self.calls.set_deafened(deafened);
-        ok(&calls::status::status(&self.calls.state()))
+        self.queued_call_command(self.calls.set_deafened(deafened))
+    }
+
+    /// The reply to a mute or deafen. No call is the call state, as the page
+    /// expects. A running call whose command queue is full did not take the
+    /// command, so the page gets `limit_exceeded` and not a status that looks
+    /// as if the command will happen.
+    fn queued_call_command(&self, queued: Result<(), calls::controller::CallError>) -> Outcome {
+        match queued {
+            Err(calls::controller::CallError::Busy) => Outcome::Error(ErrorCode::LimitExceeded),
+            _ => ok(&calls::status::status(&self.calls.state())),
+        }
     }
 
     /// Sets the call playout volume (ADR-0055): at once for a running call,

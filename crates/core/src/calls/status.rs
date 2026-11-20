@@ -63,7 +63,9 @@ pub fn join_error(error: CallError) -> Option<CallJoinError> {
         CallError::Membership => CallJoinError::Membership,
         CallError::OpenId | CallError::Sfu(_) => CallJoinError::CallServer,
         CallError::Keys => CallJoinError::Keys,
-        CallError::NotInCall | CallError::Cancelled | CallError::SessionEnded => return None,
+        CallError::NotInCall | CallError::Busy | CallError::Cancelled | CallError::SessionEnded => {
+            return None;
+        }
     })
 }
 
@@ -436,6 +438,7 @@ mod tests {
         }
         for error in [
             CallError::NotInCall,
+            CallError::Busy,
             CallError::Cancelled,
             CallError::SessionEnded,
         ] {

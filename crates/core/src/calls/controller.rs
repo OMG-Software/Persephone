@@ -114,6 +114,9 @@ pub enum CallError {
     /// No random key, or the worker queue refused it.
     Keys,
     NotInCall,
+    /// The running call's command queue is full: the command was not taken
+    /// and will not happen. The caller may try again.
+    Busy,
     /// `leave` ended this join before the call started.
     Cancelled,
     /// The session stopped admitting work during the join.
@@ -1562,13 +1565,7 @@ impl CallController {
 
     /// Mutes or unmutes the microphone. The state shows the worker's answer.
     pub fn set_muted(&self, muted: bool) -> Result<(), CallError> {
-        match &*self.inner.slot() {
-            Slot::Running(run) => run
-                .commands
-                .try_send(Command::Mute(muted))
-                .map_err(|_| CallError::NotInCall),
-            _ => Err(CallError::NotInCall),
-        }
+        self.queue_command(Command::Mute(muted))
     }
 
     /// Deafens or undeafens (ADR-0055): all remote audio goes off and the
@@ -1576,11 +1573,18 @@ impl CallController {
     /// returns to the user's own mute choice. The state shows the worker's
     /// answers.
     pub fn set_deafened(&self, deafened: bool) -> Result<(), CallError> {
+        self.queue_command(Command::Deafen(deafened))
+    }
+
+    /// Gives the running call task a command. A full queue is `Busy`, not
+    /// `NotInCall`, so the caller can tell a dropped command from no call;
+    /// a task that has ended is no call.
+    fn queue_command(&self, command: Command) -> Result<(), CallError> {
         match &*self.inner.slot() {
-            Slot::Running(run) => run
-                .commands
-                .try_send(Command::Deafen(deafened))
-                .map_err(|_| CallError::NotInCall),
+            Slot::Running(run) => run.commands.try_send(command).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => CallError::Busy,
+                mpsc::error::TrySendError::Closed(_) => CallError::NotInCall,
+            }),
             _ => Err(CallError::NotInCall),
         }
     }
@@ -3840,6 +3844,26 @@ mod tests {
         };
         let watched = run.volume.subscribe();
         assert_eq!(*watched.borrow(), 70, "only the newest value is kept");
+    }
+
+    /// GIVEN a running call whose command queue is full
+    /// WHEN mute or deafen is asked for
+    /// THEN each is refused as `Busy`, not taken as if there were no call;
+    /// once the task reads a command there is room again, and a call task
+    /// that has ended is `NotInCall`.
+    #[test]
+    fn given_a_full_command_queue_when_mute_or_deafen_is_set_then_it_is_busy() {
+        let calls = controller(FakeHost::new(true, None));
+        let (_store, mut commands, _killed) = running_call(&calls, active_state());
+        while calls.set_deafened(true).is_ok() {}
+        assert_eq!(calls.set_deafened(false), Err(CallError::Busy));
+        assert_eq!(calls.set_muted(true), Err(CallError::Busy));
+        assert_eq!(commands.try_recv().unwrap(), Command::Deafen(true));
+        assert_eq!(calls.set_muted(true), Ok(()));
+        commands.close();
+        while commands.try_recv().is_ok() {}
+        drop(commands);
+        assert_eq!(calls.set_deafened(true), Err(CallError::NotInCall));
     }
 
     fn killer() -> (Arc<AtomicBool>, Arc<dyn WorkerProcess>) {
