@@ -30,7 +30,7 @@ use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
 use super::video::{Notifier, Picture, VideoStore};
 use super::worker::{
-    CallHost, CallWorkerLink, StartError, WorkerExit, WorkerProcess, exit_is_crash,
+    CallHost, CallWorkerLink, StartError, WorkerAudio, WorkerExit, WorkerProcess, exit_is_crash,
 };
 use super::{MAX_CALL_MEMBERS, keys::FrameKey};
 use crate::session::Admission;
@@ -701,9 +701,12 @@ fn turn_for_worker(turn: Option<TurnServers>) -> Vec<TurnServer> {
 }
 
 /// Starts the contained worker. It runs before any Matrix side effect.
-async fn start_worker(host: &Arc<dyn CallHost>) -> Result<CallWorkerLink, CallError> {
+async fn start_worker(
+    host: &Arc<dyn CallHost>,
+    audio: WorkerAudio,
+) -> Result<CallWorkerLink, CallError> {
     let host = host.clone();
-    match tokio::task::spawn_blocking(move || host.start()).await {
+    match tokio::task::spawn_blocking(move || host.start(&audio)).await {
         Ok(Ok(link)) => Ok(link),
         Ok(Err(error)) => Err(CallError::Worker(error)),
         Err(_) => Err(CallError::Worker(StartError::Launch)),
@@ -1236,7 +1239,12 @@ impl CallController {
         flags.halt()?;
 
         // 4. The worker, before any Matrix side effect.
-        let link = start_worker(&self.inner.host).await?;
+        // The chosen sound server devices go to the launch (Linux).
+        let audio = WorkerAudio::for_choice(
+            scope.devices.recording.as_deref(),
+            scope.devices.playout.as_deref(),
+        );
+        let link = start_worker(&self.inner.host, audio).await?;
         *plain(kill) = Some(link.kill_handle());
         // Pictures go to the store from now on; the store ends with the call.
         let store = link.video();
@@ -3392,6 +3400,8 @@ mod tests {
         other_answer: AtomicBool,
         /// Each question about another SFU: the host and the proxy flag.
         asked: Mutex<Vec<(String, bool)>>,
+        /// The sound server names of the last start.
+        audio: Mutex<Option<WorkerAudio>>,
     }
 
     impl FakeHost {
@@ -3403,6 +3413,7 @@ mod tests {
                 starts: AtomicUsize::new(0),
                 other_answer: AtomicBool::new(false),
                 asked: Mutex::new(Vec::new()),
+                audio: Mutex::new(None),
             })
         }
 
@@ -3418,8 +3429,9 @@ mod tests {
     }
 
     impl CallHost for FakeHost {
-        fn start(&self) -> Result<CallWorkerLink, StartError> {
+        fn start(&self, audio: &WorkerAudio) -> Result<CallWorkerLink, StartError> {
             self.starts.fetch_add(1, Ordering::SeqCst);
+            *self.audio.lock().unwrap() = Some(audio.clone());
             if let Some(error) = self.start_error {
                 return Err(error);
             }
@@ -3489,11 +3501,22 @@ mod tests {
     async fn given_failed_containment_then_no_worker_runs() {
         let host: Arc<dyn CallHost> = FakeHost::new(true, Some(StartError::Containment(4)));
         assert!(matches!(
-            start_worker(&host).await,
+            start_worker(&host, WorkerAudio::default()).await,
             Err(CallError::Worker(StartError::Containment(4)))
         ));
         let host: Arc<dyn CallHost> = FakeHost::new(true, None);
-        assert!(start_worker(&host).await.is_ok());
+        assert!(start_worker(&host, WorkerAudio::default()).await.is_ok());
+    }
+
+    /// GIVEN a saved microphone and speaker by sound server name WHEN the
+    /// worker starts THEN the host gets both names for its launch.
+    #[tokio::test]
+    async fn given_sound_server_choices_then_the_launch_gets_their_names() {
+        let fake = FakeHost::new(true, None);
+        let host: Arc<dyn CallHost> = fake.clone();
+        let audio = WorkerAudio::for_choice(Some("pulse:vmic"), Some("pulse:vsink"));
+        assert!(start_worker(&host, audio.clone()).await.is_ok());
+        assert_eq!(*fake.audio.lock().unwrap(), Some(audio));
     }
 
     /// GIVEN a call in progress WHEN another join is claimed THEN it is

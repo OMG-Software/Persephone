@@ -49,9 +49,11 @@ use zeroize::Zeroizing;
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
-    ConnectFault, RoomChange, Slot, Slots, SpeakingTracker, apply, bounded_device_list,
+    ConnectFault, RoomChange, Slot, Slots, SoundPath, SpeakingTracker, apply, bounded_device_list,
     choose_device, failure_for_connect, valid_identity,
 };
+#[cfg(target_os = "linux")]
+use crate::mapping::{pulse_device_list, sound_path};
 use crate::output::{Closed, Output, PictureSink};
 use crate::screen;
 use crate::video::{
@@ -133,14 +135,23 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     });
     options.rtc_config = rtc_config;
 
+    // A microphone or speaker chosen by sound server name is checked before
+    // audio starts; libwebrtc then opens its default stream (ADR-0049).
+    let paths = match sound_paths(recording_device.as_deref(), playout_device.as_deref()).await {
+        Ok(paths) => paths,
+        Err(code) => return fail(output, code).await,
+    };
     let audio = match start_audio() {
         Ok(audio) => audio,
         Err(code) => return fail(output, code).await,
     };
+    fn listed(wanted: Option<&str>, path: SoundPath) -> Option<&str> {
+        wanted.filter(|_| path == SoundPath::Listed)
+    }
     if let Err(code) = select_devices(
         &audio,
-        recording_device.as_deref(),
-        playout_device.as_deref(),
+        listed(recording_device.as_deref(), paths[0]),
+        listed(playout_device.as_deref(), paths[1]),
     ) {
         return fail(output, code).await;
     }
@@ -286,6 +297,17 @@ pub async fn list_devices(output: &Output) -> u8 {
             .map(|device| (device.id.as_str(), device.name.as_str())),
     );
     drop(audio);
+    // Linux: the sound server's own names replace libwebrtc's positions,
+    // which are never listed (ADR-0049). Without an answer the lists stay
+    // as they are: system default only.
+    #[cfg(target_os = "linux")]
+    let (recording, playout) = match tokio::task::spawn_blocking(crate::pulse::query).await {
+        Ok(Some(lists)) => (
+            pulse_device_list(lists.sources.iter().map(|(n, d)| (n.as_str(), d.as_str()))),
+            pulse_device_list(lists.sinks.iter().map(|(n, d)| (n.as_str(), d.as_str()))),
+        ),
+        _ => (recording, playout),
+    };
     // Listing cameras opens none. It runs off the runtime threads: the
     // platform calls block.
     let cameras = tokio::task::spawn_blocking(camera::list)
@@ -299,6 +321,60 @@ pub async fn list_devices(output: &Output) -> u8 {
         return EXIT_FAILED;
     }
     EXIT_DONE
+}
+
+/// Linux (ADR-0049): how the chosen microphone and speaker are opened. A
+/// `pulse:` choice needs its name in `PULSE_SOURCE` or `PULSE_SINK` (set by
+/// the launcher) and on the sound server now (`mapping::sound_path`).
+#[cfg(target_os = "linux")]
+async fn sound_paths(
+    recording: Option<&str>,
+    playout: Option<&str>,
+) -> Result<[SoundPath; 2], FailureCode> {
+    let source = launch_name("PULSE_SOURCE")?;
+    let sink = launch_name("PULSE_SINK")?;
+    let named = [recording, playout]
+        .into_iter()
+        .flatten()
+        .any(|id| persephone_call_protocol::pulse_name(id).is_some());
+    let lists = if named {
+        tokio::task::spawn_blocking(crate::pulse::query)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    fn names(list: &[(String, String)]) -> Vec<&str> {
+        list.iter().map(|(name, _)| name.as_str()).collect()
+    }
+    let sources = lists.as_ref().map(|lists| names(&lists.sources));
+    let sinks = lists.as_ref().map(|lists| names(&lists.sinks));
+    Ok([
+        sound_path(recording, source.as_deref(), sources.as_deref())?,
+        sound_path(playout, sink.as_deref(), sinks.as_deref())?,
+    ])
+}
+
+/// One sound server name from the environment. A value that is not UTF-8
+/// cannot match any choice.
+#[cfg(target_os = "linux")]
+fn launch_name(key: &str) -> Result<Option<String>, FailureCode> {
+    match std::env::var(key) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(FailureCode::Protocol),
+    }
+}
+
+/// Other systems have no sound server names: every choice goes through
+/// libwebrtc's list, where a `pulse:` ID is not found.
+#[cfg(not(target_os = "linux"))]
+async fn sound_paths(
+    _recording: Option<&str>,
+    _playout: Option<&str>,
+) -> Result<[SoundPath; 2], FailureCode> {
+    Ok([SoundPath::Listed; 2])
 }
 
 /// Applies the chosen microphone and speaker. `None` keeps the system default.

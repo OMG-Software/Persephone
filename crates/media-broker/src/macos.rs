@@ -85,7 +85,9 @@ pub fn start_call_worker(
         command.pre_exec(|| {
             unix::new_session()?;
             unix::cloexec_each_above_stderr()?;
-            unix::set_call_limits(None)
+            // No file writes. The Linux bound (a memfd sound pool) was not
+            // measured here; macOS keeps 0 until a Mac run needs more.
+            unix::set_call_limits(None, 0)
         });
     }
     let spawned = unix::spawn(command, confirm)?;

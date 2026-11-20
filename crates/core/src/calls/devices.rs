@@ -10,7 +10,7 @@
 //!   audio stack. Device names are untrusted operating system text: they are
 //!   normalized like display names and bounded before the page sees them.
 
-use super::worker::{CallHost, StartError};
+use super::worker::{CallHost, StartError, WorkerAudio};
 use crate::{store::Stores, views::project_name};
 use matrix_sdk_crypto::store::CryptoStore;
 use persephone_call_protocol::{
@@ -141,7 +141,10 @@ pub fn list(host: &dyn CallHost, cancel: &AtomicBool) -> Result<Listing, ListErr
     if !host.supported() {
         return Ok(Listing::default());
     }
-    let mut link = host.start().map_err(ListError::Start)?;
+    // The list names no sound server device: it opens none.
+    let mut link = host
+        .start(&WorkerAudio::default())
+        .map_err(ListError::Start)?;
     // Portal path (Linux): listing asks the portal for access, so the desktop
     // may show its dialog. Without access no cameras are listed; microphones
     // and speakers still are.
@@ -259,7 +262,8 @@ mod tests {
     }
 
     impl CallHost for Host {
-        fn start(&self) -> Result<CallWorkerLink, StartError> {
+        fn start(&self, audio: &WorkerAudio) -> Result<CallWorkerLink, StartError> {
+            assert_eq!(audio, &WorkerAudio::default(), "the list names no device");
             self.started.store(true, Ordering::SeqCst);
             self.start?;
             let (commands, mut command_rx) = mpsc::channel(8);
