@@ -14,7 +14,7 @@ use persephone_core::{
     Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
     credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
     serve,
-    session::AdmissionError,
+    session::SignOutRefused,
 };
 use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
 use serde_json::{Value, json};
@@ -2100,7 +2100,7 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
     let dir = TempDir::new().unwrap();
     {
         let core = signed_in_core(&server, dir.path());
-        let state: StoreState = value(call(&core, Call::SignOut {}));
+        let state: StoreState = value(call(&core, Call::SignOut { discard_keys: true }));
         assert_eq!(state, StoreState::RestartRequired);
         assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
         let status = core.session().account_status();
@@ -2149,6 +2149,43 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
     );
 }
 
+/// GIVEN a signed-in device with no key backup WHEN signing out without
+/// choosing to lose its room keys THEN the call is refused with
+/// `keys_not_backed_up` and nothing changes: no logout request, no sign-out
+/// marker, the key is kept and the account stays signed in and usable. The
+/// same sign-out with the choice made then completes.
+#[test]
+fn given_keys_not_in_a_backup_then_sign_out_is_refused_until_the_user_accepts_the_loss() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    assert_eq!(
+        call(
+            &core,
+            Call::SignOut {
+                discard_keys: false
+            }
+        ),
+        Outcome::Error(ErrorCode::KeysNotBackedUp)
+    );
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    assert!(
+        !dir.path().join("signed-out").exists(),
+        "no sign-out recorded"
+    );
+    assert!(dir.path().join("store-key.v1").exists(), "key kept");
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedIn
+    );
+    assert!(matches!(call(&core, Call::RoomList {}), Outcome::Ok(_)));
+
+    let state: StoreState = value(call(&core, Call::SignOut { discard_keys: true }));
+    assert_eq!(state, StoreState::RestartRequired);
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
+    assert!(!dir.path().join("store-key.v1").exists());
+}
+
 /// When the server cannot revoke, sign-out still completes locally and says
 /// the server session may remain.
 #[test]
@@ -2157,7 +2194,7 @@ fn given_the_server_cannot_revoke_then_sign_out_still_wipes_and_warns() {
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
     server.fail_logout();
-    let state: StoreState = value(call(&core, Call::SignOut {}));
+    let state: StoreState = value(call(&core, Call::SignOut { discard_keys: true }));
     assert_eq!(state, StoreState::RestartRequired);
     assert_eq!(
         core.session().account_status().error,
@@ -2384,7 +2421,12 @@ fn given_a_refused_refresh_token_then_the_session_ends() {
 fn given_no_account_then_sign_out_changes_nothing() {
     let dir = TempDir::new().unwrap();
     let core = make_core(dir.path(), Fixed::new(Ok(())));
-    let state: StoreState = value(call(&core, Call::SignOut {}));
+    let state: StoreState = value(call(
+        &core,
+        Call::SignOut {
+            discard_keys: false,
+        },
+    ));
     assert_eq!(state, StoreState::Protected);
     assert!(dir.path().join("store-key.v1").exists());
 }
@@ -2403,8 +2445,8 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
         leases.push(lease);
     }
     assert_eq!(
-        core.session().sign_out(Duration::ZERO, || {}),
-        Err(AdmissionError::Saturated)
+        core.session().sign_out(Duration::ZERO, true, || {}),
+        Err(SignOutRefused::Saturated)
     );
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
     assert!(dir.path().join("store-key.v1").exists(), "nothing deleted");
@@ -2419,7 +2461,8 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
             leases.clear();
         });
         assert_eq!(
-            core.session().sign_out(Duration::from_secs(10), || {}),
+            core.session()
+                .sign_out(Duration::from_secs(10), true, || {}),
             Ok(StoreState::RestartRequired)
         );
     });
@@ -2481,7 +2524,7 @@ fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_e
     let announced = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         let signing_out = scope.spawn(|| {
-            core.session().sign_out(Duration::from_secs(10), || {
+            core.session().sign_out(Duration::from_secs(10), true, || {
                 announced.fetch_add(1, Ordering::SeqCst);
             })
         });

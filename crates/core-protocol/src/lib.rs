@@ -308,7 +308,14 @@ pub enum Call {
     /// Sign out: revoke the session on the homeserver if it can be reached,
     /// then delete this device's local profile (keys first). Replies with the
     /// resulting store state.
-    SignOut {},
+    ///
+    /// Without `discard_keys`, the core first makes sure this device's room
+    /// keys are in the key backup. When they are not, nothing changes and the
+    /// call fails with [`ErrorCode::KeysNotBackedUp`]. `discard_keys` is the
+    /// user's choice to sign out and lose them.
+    SignOut {
+        discard_keys: bool,
+    },
     /// The account's encryption state (codes only).
     SecurityStatus {},
     /// Set up cross-signing and recovery for an account without an identity.
@@ -1072,6 +1079,9 @@ pub enum ErrorCode {
     /// failed its integrity check, or the server refused the file (a 4xx
     /// status other than 404 or 429). Trying again gives the same answer.
     Rejected,
+    /// Sign-out did not start: this device's room keys are not all in a key
+    /// backup, so signing out would lose encrypted history.
+    KeysNotBackedUp,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2093,6 +2103,16 @@ mod tests {
                 r#"{"id":1,"call":{"command":"three_pids"}}"#,
             ),
             (
+                Call::SignOut {
+                    discard_keys: false,
+                },
+                r#"{"id":1,"call":{"command":"sign_out","discard_keys":false}}"#,
+            ),
+            (
+                Call::SignOut { discard_keys: true },
+                r#"{"id":1,"call":{"command":"sign_out","discard_keys":true}}"#,
+            ),
+            (
                 Call::RequestEmailToken {
                     email: "a@example.org".into(),
                 },
@@ -2437,6 +2457,9 @@ mod tests {
             br#"{"id":1,"call":{"command":"register","homeserver":"https://h","username":"al","token":"x"}}"#,
             br#"{"id":1,"call":{"command":"register","username":"al"}}"#,
             br#"{"id":1,"call":{"command":"sign_out","keep_data":true}}"#,
+            br#"{"id":1,"call":{"command":"sign_out"}}"#,
+            br#"{"id":1,"call":{"command":"sign_out","discard_keys":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"sign_out","discard_keys":true,"keep_data":true}}"#,
             br#"{"id":1,"call":{"command":"security_status","user":"@a:s"}}"#,
             br#"{"id":1,"call":{"command":"call_readiness"}}"#,
             br#"{"id":1,"call":{"command":"call_readiness","room_id":"!r:s","video":true}}"#,

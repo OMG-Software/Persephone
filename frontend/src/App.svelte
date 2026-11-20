@@ -365,6 +365,9 @@
   let switching = $state(false);
   // Sign-out deletes this device's keys, so it asks once more first.
   let confirmingSignOut = $state(false);
+  // The core refused the sign-out: this device's room keys are not all in a
+  // key backup. The question then states the loss and offers recovery.
+  let signOutLosesKeys = $state(false);
   // What the window shows besides the room: settings, and the jump palette.
   let view = $state<'chat' | 'settings'>('chat');
   let settingsTab = $state<SettingsTab>('security');
@@ -586,6 +589,7 @@
 
   function closeSettings() {
     confirmingSignOut = false;
+    signOutLosesKeys = false;
     view = 'chat';
   }
 
@@ -1198,6 +1202,7 @@
     textSending = false;
     // A question about the old session no longer applies.
     confirmingSignOut = false;
+    signOutLosesKeys = false;
     view = 'chat';
     paletteOpen = false;
     newConversationOpen = false;
@@ -1577,21 +1582,29 @@
     }
   }
 
-  /** Start sign-out without waiting for draft persistence; the core attempts server logout before locking. */
-  async function confirmSignOut() {
+  /** Start sign-out without waiting for draft persistence; the core attempts server logout before locking.
+   * `discardKeys` is the user's choice to lose room keys that are not in a key backup. */
+  async function confirmSignOut(discardKeys: boolean) {
     if (switching) return;
     confirmingSignOut = false;
+    signOutLosesKeys = false;
     switching = true;
     const generation = sessionGeneration;
     try {
-      const store = await draftKeeper.protect(signOut);
+      const store = await draftKeeper.protect(() => signOut(discardKeys));
       if (generation === sessionGeneration && status) status = { ...status, store };
     } catch (reason) {
       if (generation === sessionGeneration) {
-        error =
-          String(reason) === 'limit_exceeded'
-            ? 'Persephone is busy, so signing out did not start. Try again.'
-            : describe(reason);
+        if (String(reason) === 'keys_not_backed_up') {
+          // Nothing changed. Ask again, with the loss stated.
+          signOutLosesKeys = true;
+          confirmingSignOut = true;
+        } else {
+          error =
+            String(reason) === 'limit_exceeded'
+              ? 'Persephone is busy, so signing out did not start. Try again.'
+              : describe(reason);
+        }
       }
     } finally {
       switching = false;
@@ -2798,13 +2811,56 @@
           {#if signedIn}
             <div class="panel">
               <h3>Sign out</h3>
-              {#if confirmingSignOut}
+              {#if confirmingSignOut && signOutLosesKeys}
+                <div class="confirm" role="alertdialog" aria-labelledby="sign-out-question">
+                  <p id="sign-out-question">
+                    This device's message keys are not all in a key backup. If you sign out now,
+                    you lose the encrypted history this device can read, unless another of your
+                    signed-in devices has the keys. Set up recovery first to keep them.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    onclick={() => {
+                      confirmingSignOut = false;
+                      signOutLosesKeys = false;
+                      openSettings('security');
+                    }}
+                  >
+                    Set up recovery
+                  </button>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    class="danger"
+                    onclick={() => confirmSignOut(true)}
+                  >
+                    Sign out and lose history
+                  </button>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    class="secondary"
+                    onclick={() => {
+                      confirmingSignOut = false;
+                      signOutLosesKeys = false;
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              {:else if confirmingSignOut}
                 <div class="confirm" role="alertdialog" aria-labelledby="sign-out-question">
                   <p id="sign-out-question">
                     Sign out and delete this device's keys and local data? Encrypted history this
                     device could read may not be readable again.
                   </p>
-                  <button type="button" disabled={switching} class="danger" onclick={confirmSignOut}>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    class="danger"
+                    onclick={() => confirmSignOut(false)}
+                  >
                     Sign out
                   </button>
                   <button

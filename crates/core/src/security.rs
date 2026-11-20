@@ -38,6 +38,7 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{IdentityState, RecoveryState, SecurityError};
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// The identity state from the local store and `published`, what the
@@ -197,6 +198,27 @@ pub async fn backup_unusable(client: &Client, recovery: RecoveryState) -> bool {
         RecoveryState::Disabled => backups.exists_on_server().await.unwrap_or(false),
         RecoveryState::Enabled | RecoveryState::Unknown => false,
     }
+}
+
+/// Longest wait, before a sign-out, for room keys this device has not yet
+/// uploaded to the key backup.
+pub const BACKUP_UPLOAD_WAIT: Duration = Duration::from_secs(15);
+
+/// Whether this device's room keys are all in the key backup, so signing out
+/// loses no encrypted history. False when the backup is not enabled on this
+/// device, or when the remaining keys did not finish uploading within
+/// `wait`: an upload error, a backup deleted or replaced meanwhile, or a
+/// timeout. Waiting also starts the upload of keys received since the last
+/// one.
+pub async fn keys_backed_up(client: &Client, wait: Duration) -> bool {
+    let backups = client.encryption().backups();
+    if !backups.are_enabled().await {
+        return false;
+    }
+    matches!(
+        tokio::time::timeout(wait, backups.wait_for_steady_state()).await,
+        Ok(Ok(()))
+    )
 }
 
 /// Deletes the homeserver's key backup and starts a new one with new secret

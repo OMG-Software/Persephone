@@ -103,7 +103,11 @@ impl CoreTransport for FakeCore {
             // A state outside the contract must not reach the page.
             Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
             Call::ResetProfile {} => Ok(serde_json::json!("unlocking")),
-            Call::SignOut {} => Ok(serde_json::json!("restart_required")),
+            // This fake device's keys are never in a backup.
+            Call::SignOut {
+                discard_keys: false,
+            } => Err(CoreError::Core(ErrorCode::KeysNotBackedUp)),
+            Call::SignOut { discard_keys: true } => Ok(serde_json::json!("restart_required")),
             Call::SecurityStatus {} => Ok(
                 serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false}),
             ),
@@ -1315,12 +1319,25 @@ fn given_sign_in_then_only_the_homeserver_crosses_and_replies_are_checked() {
         calls,
         "oversized URL never reached the core"
     );
-    let signed_out = get_ipc_response(
-        &window,
-        request("sign_out", app_origin(), serde_json::json!({})),
-    )
-    .map(|reply| reply.deserialize::<serde_json::Value>().unwrap());
-    assert_eq!(signed_out, Ok(serde_json::json!("restart_required")));
+    let sign_out = |args: serde_json::Value| {
+        get_ipc_response(&window, request("sign_out", app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert!(sign_out(serde_json::json!({})).is_err());
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "a sign-out without the key choice never reached the core"
+    );
+    assert_eq!(
+        sign_out(serde_json::json!({"discardKeys": false})).unwrap_err(),
+        "keys_not_backed_up"
+    );
+    assert_eq!(
+        sign_out(serde_json::json!({"discardKeys": true})),
+        Ok(serde_json::json!("restart_required"))
+    );
 }
 
 /// Registration relays only the homeserver URL and the username; the reason

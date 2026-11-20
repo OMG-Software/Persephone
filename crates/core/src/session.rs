@@ -119,6 +119,16 @@ pub enum AdmissionError {
     Saturated,
 }
 
+/// Why [`Session::sign_out`] did not start. Nothing changed in either case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignOutRefused {
+    /// Every lease stayed in use until the timeout.
+    Saturated,
+    /// This device's room keys are not all in a key backup, and the caller
+    /// did not choose to lose them.
+    KeysNotBackedUp,
+}
+
 /// Proof that leased work drained before the stores closed. It says nothing
 /// about work outside the owner.
 #[derive(Debug)]
@@ -2081,6 +2091,12 @@ impl Session {
     /// deleted under it. A failed revocation still signs out locally and is
     /// reported as `session_not_revoked`.
     ///
+    /// Signing out deletes this device's room keys. Unless `discard_keys` is
+    /// set, the sign-out first makes sure they are all in the key backup
+    /// (waiting up to [`security::BACKUP_UPLOAD_WAIT`] for keys not yet
+    /// uploaded); when they are not, nothing changes and `KeysNotBackedUp` is
+    /// returned. The check runs under the lease, before anything is recorded.
+    ///
     /// Returns the resulting state; without a signed-in account nothing
     /// changes. A saturated session is waited for up to `timeout` (leases
     /// last one request or one sync round); after that the sign-out has not
@@ -2088,8 +2104,9 @@ impl Session {
     pub fn sign_out(
         &self,
         timeout: Duration,
+        discard_keys: bool,
         announce: impl FnOnce(),
-    ) -> Result<StoreState, AdmissionError> {
+    ) -> Result<StoreState, SignOutRefused> {
         let Some(dir) = self.profile.clone() else {
             return Ok(self.state());
         };
@@ -2098,6 +2115,16 @@ impl Session {
         let (began, revoked) = loop {
             match self.with_client() {
                 Ok(Some((lease, client))) => {
+                    // Before anything changes: refusing here leaves the
+                    // account signed in, with its keys.
+                    if !discard_keys
+                        && !lease.stores().block_on(security::keys_backed_up(
+                            &client,
+                            security::BACKUP_UPLOAD_WAIT,
+                        ))
+                    {
+                        return Err(SignOutRefused::KeysNotBackedUp);
+                    }
                     // Before the request: an interrupted sign-out must never
                     // restore this account on the next start.
                     let began = store::begin_sign_out(&dir).is_ok();
@@ -2121,7 +2148,7 @@ impl Session {
                 Err(AdmissionError::Saturated) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(error) => return Err(error),
+                Err(AdmissionError::Saturated) => return Err(SignOutRefused::Saturated),
             }
         };
         let marked = store::mark_signed_out(&dir, revoked).is_ok() && began;

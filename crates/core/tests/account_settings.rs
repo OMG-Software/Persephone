@@ -640,7 +640,7 @@ fn given_a_homeserver_without_phone_support_then_each_case_has_its_code() {
             ),
             AccountChange::MediumNotSupported
         );
-        let _ = call(&core, Call::SignOut {});
+        let _ = call(&core, Call::SignOut { discard_keys: true });
     }
     let dir = TempDir::new().unwrap();
     {
@@ -655,7 +655,7 @@ fn given_a_homeserver_without_phone_support_then_each_case_has_its_code() {
         let listed: ThreePidList = value(call(&core, Call::ThreePids {}));
         assert!(listed.pending.is_none(), "nothing waits");
         assert!(listed.three_pids.is_empty(), "M_UNRECOGNIZED lists none");
-        let _ = call(&core, Call::SignOut {});
+        let _ = call(&core, Call::SignOut { discard_keys: true });
     }
     let dir = TempDir::new().unwrap();
     let server = Homeserver::start(None);

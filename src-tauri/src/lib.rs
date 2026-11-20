@@ -88,6 +88,7 @@ const NOT_FOUND: &str = "not_found";
 const LIMIT_EXCEEDED: &str = "limit_exceeded";
 const LOCKED: &str = "locked";
 const REJECTED: &str = "rejected";
+const KEYS_NOT_BACKED_UP: &str = "keys_not_backed_up";
 
 fn page_error(error: CoreError) -> String {
     match error {
@@ -96,6 +97,7 @@ fn page_error(error: CoreError) -> String {
         CoreError::Core(ErrorCode::LimitExceeded) => LIMIT_EXCEEDED,
         CoreError::Core(ErrorCode::Locked) => LOCKED,
         CoreError::Core(ErrorCode::Rejected) => REJECTED,
+        CoreError::Core(ErrorCode::KeysNotBackedUp) => KEYS_NOT_BACKED_UP,
         CoreError::Core(ErrorCode::Unavailable | ErrorCode::Internal)
         | CoreError::Unavailable
         | CoreError::BadReply => UNAVAILABLE,
@@ -584,10 +586,12 @@ async fn register(
 }
 
 /// Signs out: the core revokes the session if it can and deletes this
-/// device's local profile. Replies with the resulting store state.
+/// device's local profile. Replies with the resulting store state. Without
+/// `discard_keys` the core refuses (`keys_not_backed_up`) while this device's
+/// room keys are not all in a key backup.
 #[tauri::command]
-async fn sign_out(core: State<'_, CoreLink>) -> Result<StoreState, String> {
-    relay(core.inner(), Call::SignOut {}).await
+async fn sign_out(core: State<'_, CoreLink>, discard_keys: bool) -> Result<StoreState, String> {
+    relay(core.inner(), Call::SignOut { discard_keys }).await
 }
 
 /// The account's encryption state. Codes only.
