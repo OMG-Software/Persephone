@@ -14,7 +14,7 @@ use persephone_core::{
     Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
     credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
     serve,
-    session::SignOutRefused,
+    session::{AdmissionError, SignOutRefused},
 };
 use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
 use serde_json::{Value, json};
@@ -2184,6 +2184,62 @@ fn given_keys_not_in_a_backup_then_sign_out_is_refused_until_the_user_accepts_th
     assert_eq!(state, StoreState::RestartRequired);
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
     assert!(!dir.path().join("store-key.v1").exists());
+}
+
+/// GIVEN other work still running (a held lease) WHEN signing out without
+/// discarding keys THEN new work is held back while the sign-out waits for
+/// the running work, so no sync round or send can add a key after the backup
+/// check; once that work ends, the check runs, refuses, and new work is
+/// admitted again with the account still signed in.
+#[test]
+fn given_running_work_then_the_backup_check_waits_for_it_and_holds_new_work_back() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let running = core.session().admit().unwrap();
+    std::thread::scope(|scope| {
+        let signing_out = scope.spawn(|| {
+            core.session()
+                .sign_out(Duration::from_secs(10), false, || {})
+        });
+        // A lease taken before the hold starts is let go at once.
+        wait_for("the hold on new work", || {
+            matches!(core.session().admit(), Err(AdmissionError::Saturated))
+        });
+        assert!(!signing_out.is_finished(), "waits for the running work");
+        drop(running);
+        assert_eq!(
+            signing_out.join().unwrap(),
+            Err(SignOutRefused::KeysNotBackedUp)
+        );
+    });
+    assert!(core.session().admit().is_ok(), "new work admitted again");
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    assert!(dir.path().join("store-key.v1").exists(), "key kept");
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedIn
+    );
+}
+
+/// GIVEN work that does not end before the timeout WHEN signing out without
+/// discarding keys THEN the sign-out reports that it did not start
+/// (`Saturated`), changes nothing, and admits new work again.
+#[test]
+fn given_running_work_that_does_not_end_then_sign_out_does_not_start() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let running = core.session().admit().unwrap();
+    assert_eq!(
+        core.session()
+            .sign_out(Duration::from_millis(300), false, || {}),
+        Err(SignOutRefused::Saturated)
+    );
+    assert!(core.session().admit().is_ok(), "new work admitted again");
+    drop(running);
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    assert!(dir.path().join("store-key.v1").exists(), "key kept");
 }
 
 /// When the server cannot revoke, sign-out still completes locally and says

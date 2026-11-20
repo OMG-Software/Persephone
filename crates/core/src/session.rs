@@ -115,7 +115,8 @@ const SECURITY_STACK_BYTES: usize = 8 * 1024 * 1024;
 pub enum AdmissionError {
     /// The session is not open (locked, locking or never unlocked).
     Locked,
-    /// [`MAX_LEASES`] leases are outstanding.
+    /// [`MAX_LEASES`] leases are outstanding, or a sign-out holds new work
+    /// back while it checks the key backup.
     Saturated,
 }
 
@@ -208,6 +209,9 @@ struct Inner {
     stores: Option<Arc<Stores>>,
     generation: u64,
     active: usize,
+    /// A sign-out is checking the key backup: new work is refused as
+    /// saturated until it gives up or the lock closes admission.
+    held: bool,
 }
 
 struct ActiveAccount {
@@ -404,7 +408,7 @@ impl Shared {
         else {
             return Err(AdmissionError::Locked);
         };
-        if inner.active >= MAX_LEASES {
+        if inner.active >= MAX_LEASES || inner.held {
             return Err(AdmissionError::Saturated);
         }
         inner.active += 1;
@@ -1574,6 +1578,7 @@ impl Session {
                     stores,
                     generation: 0,
                     active: 0,
+                    held: false,
                 }),
                 drained: Condvar::new(),
                 status: Mutex::new(AccountStatus::signed_out()),
@@ -1973,6 +1978,40 @@ impl Session {
         Ok(self.account_status())
     }
 
+    /// Holds new work back, for a sign-out that holds one lease, and waits
+    /// until `deadline` for every other lease to end. Returns false when they
+    /// did not end in time or another sign-out already holds; new work is
+    /// then admitted as before. On true the hold stays until
+    /// [`Session::release_new_work`] or the lock closes admission.
+    fn hold_new_work(&self, deadline: Instant) -> bool {
+        let mut inner = lock(&self.shared);
+        if inner.held {
+            return false;
+        }
+        inner.held = true;
+        while inner.active > 1 {
+            let now = Instant::now();
+            if now >= deadline || inner.state != StoreState::Protected {
+                drop(inner);
+                self.release_new_work();
+                return false;
+            }
+            inner = self
+                .shared
+                .drained
+                .wait_timeout(inner, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        true
+    }
+
+    /// Admits new work again after [`Session::hold_new_work`].
+    fn release_new_work(&self) {
+        lock(&self.shared).held = false;
+        self.shared.drained.notify_all();
+    }
+
     /// The start of a lock: a protected session stops admitting work, moves
     /// to the next generation and runs `announce`, once, so the page clears
     /// before anything waits. Leases already held keep running; the lock
@@ -1983,6 +2022,8 @@ impl Session {
         if inner.state != StoreState::Protected {
             return;
         }
+        // A sign-out's hold ends here: nothing is admitted from now on.
+        inner.held = false;
         inner.state = match inner.generation.checked_add(1) {
             Some(next) => {
                 inner.generation = next;
@@ -2095,7 +2136,12 @@ impl Session {
     /// set, the sign-out first makes sure they are all in the key backup
     /// (waiting up to [`security::BACKUP_UPLOAD_WAIT`] for keys not yet
     /// uploaded); when they are not, nothing changes and `KeysNotBackedUp` is
-    /// returned. The check runs under the lease, before anything is recorded.
+    /// returned. The check runs under the lease, before anything is recorded,
+    /// and only once no other work runs: new work is held back (as
+    /// `Saturated`) and the work already running gets until `timeout` to
+    /// finish, so no sync round or send adds a key after the check. Work that
+    /// does not finish in time, or another sign-out already checking, gives
+    /// `Saturated`. A refusal admits new work again.
     ///
     /// Returns the resulting state; without a signed-in account nothing
     /// changes. A saturated session is waited for up to `timeout` (leases
@@ -2116,14 +2162,21 @@ impl Session {
             match self.with_client() {
                 Ok(Some((lease, client))) => {
                     // Before anything changes: refusing here leaves the
-                    // account signed in, with its keys.
-                    if !discard_keys
-                        && !lease.stores().block_on(security::keys_backed_up(
+                    // account signed in, with its keys. A sync round or a
+                    // send can still add room keys, so new work is held back
+                    // and running work finishes first; the hold lasts until
+                    // the lock below closes admission.
+                    if !discard_keys {
+                        if !self.hold_new_work(deadline) {
+                            return Err(SignOutRefused::Saturated);
+                        }
+                        if !lease.stores().block_on(security::keys_backed_up(
                             &client,
                             security::BACKUP_UPLOAD_WAIT,
-                        ))
-                    {
-                        return Err(SignOutRefused::KeysNotBackedUp);
+                        )) {
+                            self.release_new_work();
+                            return Err(SignOutRefused::KeysNotBackedUp);
+                        }
                     }
                     // Before the request: an interrupted sign-out must never
                     // restore this account on the next start.
