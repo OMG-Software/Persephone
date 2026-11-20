@@ -1,6 +1,6 @@
 [package]
 name = "persephone-call-worker"
-version = "0.0.1"
+version = "0.2.0"
 description = "Contained call worker process: joins one LiveKit room with frame encryption and platform audio (ADR-0043)"
 edition.workspace = true
 license.workspace = true
