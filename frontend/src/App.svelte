@@ -434,6 +434,8 @@
   let opening = false;
   let refreshing = false;
   let changedAgain = false;
+  // Whether a read of older undecryptable events is running (at most one).
+  let rereading = false;
 
   // Fixed text per store state; the core sends codes only.
   const storeText: Record<StoreState, string> = {
@@ -1814,8 +1816,8 @@
         if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
         items = mergeNewest(items, page.items);
         senderNames = withNames(senderNames, page, true);
-        await refetchUndecryptable(roomId, generation, contentEpoch, page.items);
-        if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
+        // Not awaited: newer pages do not wait for older events.
+        void refetchUndecryptable(roomId, generation, contentEpoch, page.items);
         if (signedIn) {
           loadActivity(roomId, generation);
           await loadPending(roomId, generation);
@@ -1838,6 +1840,10 @@
    * are replaced in place, so the scroll position is not set. A stale or
    * failed result changes nothing; after a failed read the core keeps its
    * mark, so the next change asks again.
+   *
+   * It runs beside `refresh`, which does not wait for it. At most one read
+   * runs at a time; a change during it does not ask again, and the core keeps
+   * any new mark for the next change.
    */
   async function refetchUndecryptable(
     roomId: string,
@@ -1845,9 +1851,10 @@
     contentEpoch: number,
     newest: TimelineItem[]
   ) {
-    if (!signedIn) return;
+    if (!signedIn || rereading) return;
     const eventIds = undecryptableToRefetch(items, newest);
     if (eventIds.length === 0) return;
+    rereading = true;
     try {
       const page = await readEventsAgain(roomId, eventIds);
       if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
@@ -1856,6 +1863,8 @@
       senderNames = withNames(senderNames, page, false);
     } catch {
       // Best effort: the notices stay as they are until the next change.
+    } finally {
+      rereading = false;
     }
   }
 

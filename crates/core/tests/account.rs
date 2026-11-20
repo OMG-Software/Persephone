@@ -4393,8 +4393,10 @@ fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
 /// message is a message and the encrypted event stays undecryptable. The
 /// mark is used up, so the next call fetches nothing. WHEN the homeserver
 /// answers with another event THEN the call is rejected and the mark is put
-/// back, so a later call reads again. WHEN the room is not open THEN it is
-/// never marked.
+/// back, so a later call reads again. WHEN an event read fails with a server
+/// error THEN that event is left out and the mark is kept; WHEN it fails
+/// with not found THEN the event is left out and the mark is used up. WHEN
+/// the room is not open THEN it is never marked.
 #[test]
 fn given_keys_arrived_then_timeline_events_reads_the_asked_events_once() {
     let server = Homeserver::signed_in();
@@ -4414,6 +4416,18 @@ fn given_keys_arrived_then_timeline_events_reads_the_asked_events_once() {
                     r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
                 )))
                 .respond_with(ResponseTemplate::new(200).set_body_json(event))
+                .mount(&server.server)
+                .await;
+        }
+        for (name, status, errcode) in [("busy", 503, "M_UNKNOWN"), ("gone", 404, "M_NOT_FOUND")] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(json!({"errcode": errcode, "error": name})),
+                )
                 .mount(&server.server)
                 .await;
         }
@@ -4522,6 +4536,24 @@ fn given_keys_arrived_then_timeline_events_reads_the_asked_events_once() {
     assert_eq!(page.items.len(), 1, "the failed read put the mark back");
     assert_eq!(fetched("readable"), 2);
 
+    mark();
+    let page: TimelinePage = value(read(&["$busy", "$readable"]));
+    assert_eq!(page.items.len(), 1, "the busy event is left out: {page:?}");
+    let page: TimelinePage = value(read(&["$busy", "$readable"]));
+    assert_eq!(page.items.len(), 1, "a server error kept the mark");
+    assert_eq!((fetched("busy"), fetched("readable")), (2, 4));
+
+    mark();
+    let page: TimelinePage = value(read(&["$gone", "$readable"]));
+    assert_eq!(
+        page.items.len(),
+        1,
+        "the missing event is left out: {page:?}"
+    );
+    let page: TimelinePage = value(read(&["$gone", "$readable"]));
+    assert!(page.items.is_empty(), "not found used up the mark");
+    assert_eq!((fetched("gone"), fetched("readable")), (1, 5));
+
     assert_eq!(
         call(
             &core,
@@ -4534,7 +4566,7 @@ fn given_keys_arrived_then_timeline_events_reads_the_asked_events_once() {
     mark();
     let page: TimelinePage = value(read(&["$readable"]));
     assert!(page.items.is_empty(), "a room not open is never marked");
-    assert_eq!(fetched("readable"), 2);
+    assert_eq!(fetched("readable"), 5);
 }
 
 /// GIVEN a signed-in account WHEN the page asks to read events again with

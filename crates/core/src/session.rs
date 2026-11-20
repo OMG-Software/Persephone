@@ -1094,12 +1094,20 @@ fn run_security(
             // Nothing else to do in this tick: restore one room's keys, if a
             // restore is under way. Commands, verification and the status
             // refresh come first.
-            if !restore.is_empty()
-                && !restore_step(shared, generation, &mut restore, |lease, room| {
-                    lease
-                        .stores()
-                        .block_on(backup_restore::restore_room(&client, room))
-                })
+            let now = Instant::now();
+            if restore.wants_step(now)
+                && !restore_step(
+                    shared,
+                    generation,
+                    &mut restore,
+                    now,
+                    |_| backup_restore::joined_rooms(&client),
+                    |lease, room| {
+                        lease
+                            .stores()
+                            .block_on(backup_restore::restore_room(&client, room))
+                    },
+                )
             {
                 break;
             }
@@ -1164,8 +1172,9 @@ fn run_security(
                         match security::recover(&client, &key).await {
                             Ok(()) => {
                                 // A new recovery replaces a restore under way.
+                                // Its first step reads the joined rooms.
                                 restore = if client.encryption().backups().are_enabled().await {
-                                    Restore::new(backup_restore::joined_rooms(&client))
+                                    Restore::start(Instant::now())
                                 } else {
                                     Restore::default()
                                 };
@@ -1316,33 +1325,37 @@ fn run_security(
     drop(client);
 }
 
-/// Downloads the backup's keys for the next room of `restore` with `download`,
-/// under a lease of its own (`backup_restore.rs`). Returns `false` when the
-/// security loop must stop: the session locked or is no longer the one of
-/// `generation`; the restore is then ended. A room that finds no free lease is
-/// put back for the next tick and is not a failure.
+/// One step of `restore` at `now`, under a lease of its own
+/// (`backup_restore.rs`): when a scan is due, adds the rooms `scan` finds;
+/// then downloads the backup's keys for the next room with `download`.
+/// Returns `false` when the security loop must stop: the session locked or
+/// is no longer the one of `generation`; the restore is then ended. When no
+/// lease is free, the step does nothing and the room waits for the next tick;
+/// that is not a failure.
 fn restore_step(
     shared: &Arc<Shared>,
     generation: u64,
     restore: &mut Restore,
+    now: Instant,
+    scan: impl FnOnce(&Lease) -> Vec<OwnedRoomId>,
     download: impl FnOnce(&Lease, &matrix_sdk::ruma::RoomId) -> bool,
 ) -> bool {
-    let Some(room) = restore.take_next() else {
+    if !restore.wants_step(now) {
         return true;
-    };
+    }
     let lease = match shared.admit() {
         Ok(lease) if lease.generation() == generation => lease,
         Ok(_) | Err(AdmissionError::Locked) => {
             restore.stop();
             return false;
         }
-        Err(AdmissionError::Saturated) => {
-            restore.defer(room);
-            return true;
-        }
+        Err(AdmissionError::Saturated) => return true,
     };
-    let restored = download(&lease, &room);
-    // A lock that began during the download ends the restore: the next lease
+    if restore.scan_due(now) {
+        restore.add_scanned(scan(&lease), now);
+    }
+    let restored = restore.take_next().map(|room| download(&lease, &room));
+    // A lock that began during the step ends the restore: the next lease
     // would be refused anyway, and the keys already imported stay.
     let current = lease.commit(|| ()).is_ok();
     drop(lease);
@@ -1350,7 +1363,9 @@ fn restore_step(
         restore.stop();
         return false;
     }
-    restore.record(restored);
+    if let Some(restored) = restored {
+        restore.record(restored);
+    }
     true
 }
 
@@ -3626,6 +3641,10 @@ mod tests {
         );
     }
 
+    fn no_scan(_: &Lease) -> Vec<OwnedRoomId> {
+        panic!("this restore does not scan")
+    }
+
     fn rooms(names: &[&str]) -> Restore {
         Restore::new(
             names
@@ -3645,17 +3664,69 @@ mod tests {
         let mut restore = rooms(&["!a:s", "!b:s", "!c:s"]);
         let mut seen = Vec::new();
         while !restore.is_empty() {
-            let going_on =
-                restore_step(&session.shared, generation, &mut restore, |lease, room| {
+            let going_on = restore_step(
+                &session.shared,
+                generation,
+                &mut restore,
+                Instant::now(),
+                no_scan,
+                |lease, room| {
                     assert_eq!(lease.generation(), generation);
                     assert_eq!(lock(&session.shared).active, 1, "one lease, this room's");
                     seen.push(room.to_string());
                     true
-                });
+                },
+            );
             assert!(going_on);
             assert_eq!(lock(&session.shared).active, 0, "the lease ended");
         }
         assert_eq!(seen, ["!a:s", "!b:s", "!c:s"]);
+    }
+
+    /// GIVEN a restore started at recovery WHEN its first step runs THEN it
+    /// reads the joined rooms under the step's own lease and downloads the
+    /// first one; WHEN the next step runs before the scan interval THEN it
+    /// does not scan again and downloads the next room.
+    #[test]
+    fn given_a_started_restore_then_the_step_scans_under_its_lease() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let generation = session.shared.open_generation().expect("open");
+        let now = Instant::now();
+        let mut restore = Restore::start(now);
+        let mut seen = Vec::new();
+        assert!(restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            now,
+            |lease| {
+                assert_eq!(lease.generation(), generation);
+                assert_eq!(lock(&session.shared).active, 1, "the step's lease");
+                ["!a:s", "!b:s"]
+                    .iter()
+                    .map(|name| OwnedRoomId::try_from(*name).unwrap())
+                    .collect()
+            },
+            |_, room| {
+                seen.push(room.to_string());
+                true
+            },
+        ));
+        assert!(restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            now,
+            no_scan,
+            |_, room| {
+                seen.push(room.to_string());
+                true
+            },
+        ));
+        assert_eq!(seen, ["!a:s", "!b:s"]);
+        assert!(!restore.wants_step(now), "nothing left until the next scan");
+        assert_eq!(lock(&session.shared).active, 0);
     }
 
     /// GIVEN a restore WHEN the session is locked, or locked and opened
@@ -3671,18 +3742,28 @@ mod tests {
             StoreState::Locked
         );
         let mut restore = rooms(&["!a:s", "!b:s"]);
-        let going_on = restore_step(&session.shared, old, &mut restore, |_, _| {
-            panic!("no download after a lock")
-        });
+        let going_on = restore_step(
+            &session.shared,
+            old,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, _| panic!("no download after a lock"),
+        );
         assert!(!going_on);
         assert!(restore.is_empty());
 
         assert_eq!(session.unlock(), StoreState::Unlocking);
         assert_eq!(settled(&session), StoreState::Protected);
         let mut restore = rooms(&["!a:s", "!b:s"]);
-        let going_on = restore_step(&session.shared, old, &mut restore, |_, _| {
-            panic!("no download for the old session")
-        });
+        let going_on = restore_step(
+            &session.shared,
+            old,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, _| panic!("no download for the old session"),
+        );
         assert!(!going_on, "the new session is not the restore's");
         assert!(restore.is_empty());
         assert_eq!(lock(&session.shared).active, 0);
@@ -3697,10 +3778,17 @@ mod tests {
         let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
         let generation = session.shared.open_generation().expect("open");
         let mut restore = rooms(&["!a:s", "!b:s", "!c:s"]);
-        let going_on = restore_step(&session.shared, generation, &mut restore, |_, _| {
-            session.close_admission(|| {});
-            true
-        });
+        let going_on = restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, _| {
+                session.close_admission(|| {});
+                true
+            },
+        );
         assert!(!going_on);
         assert!(restore.is_empty());
         assert_eq!(lock(&session.shared).active, 0);
@@ -3721,9 +3809,14 @@ mod tests {
             .map(|_| session.shared.admit().expect("a lease"))
             .collect();
         let mut restore = rooms(&["!a:s", "!b:s"]);
-        let going_on = restore_step(&session.shared, generation, &mut restore, |_, _| {
-            panic!("no lease, no download")
-        });
+        let going_on = restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, _| panic!("no lease, no download"),
+        );
         assert!(going_on);
         assert_eq!(restore.len(), 2);
         drop(held);
@@ -3732,6 +3825,8 @@ mod tests {
             &session.shared,
             generation,
             &mut restore,
+            Instant::now(),
+            no_scan,
             |_, room| {
                 first = Some(room.to_string());
                 true

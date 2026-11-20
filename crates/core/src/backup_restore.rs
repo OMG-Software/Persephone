@@ -12,6 +12,10 @@
 //! * One room per step, each step with its own lease and at most
 //!   [`ROOM_RESTORE_TIMEOUT`], the longest one sync request may take. A lock
 //!   waits for one room at most, and so does a security command.
+//! * Recovery does not wait for the room list. For [`RESTORE_SCAN_WINDOW`]
+//!   after recovery, the joined rooms are read again every
+//!   [`RESTORE_SCAN_INTERVAL`], so rooms that sync later (Sliding Sync loads
+//!   the list in batches) are added at the end of the queue.
 //! * Each room is tried once. [`MAX_RESTORE_FAILURES`] failures in a row end
 //!   the restore (the homeserver is likely unreachable). A lock or a new
 //!   session ends it too; nothing is retried later. Keys not restored then
@@ -31,7 +35,10 @@ use matrix_sdk::{
     Client, EncryptionState,
     ruma::{MilliSecondsSinceUnixEpoch, OwnedRoomId, RoomId},
 };
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    time::{Duration, Instant},
+};
 
 /// Most rooms one restore downloads keys for: the room list's limit
 /// (`views::MAX_ROOMS`).
@@ -42,21 +49,39 @@ pub const MAX_RESTORE_ROOMS: usize = crate::views::MAX_ROOMS;
 pub const ROOM_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Failed rooms in a row that end a restore.
 pub const MAX_RESTORE_FAILURES: u8 = 3;
+/// How long after recovery rooms that synced since are added to the restore.
+pub const RESTORE_SCAN_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Time between two reads of the joined rooms in that window: the sync poll.
+pub const RESTORE_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The rooms a restore has still to do, in order.
 #[derive(Debug, Default)]
 pub struct Restore {
     rooms: VecDeque<OwnedRoomId>,
+    /// Every room this restore has queued, so that each is tried once. At
+    /// most [`MAX_RESTORE_ROOMS`].
+    queued: HashSet<OwnedRoomId>,
     failures: u8,
+    /// While the scan window is open: the next scan and the window's end.
+    scan: Option<(Instant, Instant)>,
 }
 
 impl Restore {
-    /// A restore of `rooms`, in this order; rooms after the first
-    /// [`MAX_RESTORE_ROOMS`] are left out.
+    /// A restore of `rooms`, in this order, that adds no rooms later; rooms
+    /// after the first [`MAX_RESTORE_ROOMS`] are left out.
     pub fn new(rooms: impl IntoIterator<Item = OwnedRoomId>) -> Self {
+        let mut restore = Self::default();
+        restore.extend(rooms);
+        restore
+    }
+
+    /// A restore that starts at `now` with no rooms. Its first step reads
+    /// the joined rooms, and later steps read them again until
+    /// [`RESTORE_SCAN_WINDOW`] has passed.
+    pub fn start(now: Instant) -> Self {
         Self {
-            rooms: rooms.into_iter().take(MAX_RESTORE_ROOMS).collect(),
-            failures: 0,
+            scan: Some((now, now + RESTORE_SCAN_WINDOW)),
+            ..Self::default()
         }
     }
 
@@ -68,15 +93,43 @@ impl Restore {
         self.rooms.len()
     }
 
+    /// Whether a step has work at `now`: a queued room or a scan.
+    pub fn wants_step(&self, now: Instant) -> bool {
+        !self.rooms.is_empty() || self.scan_due(now)
+    }
+
+    /// Whether the joined rooms are to be read again at `now`.
+    pub fn scan_due(&self, now: Instant) -> bool {
+        self.queued.len() < MAX_RESTORE_ROOMS
+            && self
+                .scan
+                .is_some_and(|(next, end)| next <= now && now < end)
+    }
+
+    /// Adds the scanned `rooms` that this restore has not queued yet, in
+    /// this order, at the end of the queue. The next scan is due
+    /// [`RESTORE_SCAN_INTERVAL`] after `now`.
+    pub fn add_scanned(&mut self, rooms: impl IntoIterator<Item = OwnedRoomId>, now: Instant) {
+        if let Some((next, _)) = &mut self.scan {
+            *next = now + RESTORE_SCAN_INTERVAL;
+        }
+        self.extend(rooms);
+    }
+
+    fn extend(&mut self, rooms: impl IntoIterator<Item = OwnedRoomId>) {
+        for room in rooms {
+            if self.queued.len() >= MAX_RESTORE_ROOMS {
+                break;
+            }
+            if self.queued.insert(room.clone()) {
+                self.rooms.push_back(room);
+            }
+        }
+    }
+
     /// The next room to restore; it leaves the queue.
     pub fn take_next(&mut self) -> Option<OwnedRoomId> {
         self.rooms.pop_front()
-    }
-
-    /// Puts back a room that was not tried (no lease was free), so it is the
-    /// next one. It does not count as a failure.
-    pub fn defer(&mut self, room: OwnedRoomId) {
-        self.rooms.push_front(room);
     }
 
     /// Records the outcome of one room. After [`MAX_RESTORE_FAILURES`]
@@ -92,9 +145,11 @@ impl Restore {
         }
     }
 
-    /// Ends the restore: the remaining rooms are not tried.
+    /// Ends the restore: the remaining rooms are not tried, and no rooms are
+    /// added.
     pub fn stop(&mut self) {
         self.rooms.clear();
+        self.scan = None;
     }
 }
 
@@ -204,20 +259,56 @@ mod tests {
         assert_eq!(restore.take_next(), None);
     }
 
-    /// GIVEN a room that could not start (no lease) WHEN it is deferred THEN
-    /// it is the next room and is not a failure.
+    /// GIVEN a restore started at recovery WHEN the joined rooms are read
+    /// again in the scan window THEN only rooms not queued before are added,
+    /// at the end; scans come once per interval and stop at the window's end
+    /// or when the restore stops.
     #[test]
-    fn given_a_deferred_room_then_it_is_next_and_not_a_failure() {
-        let mut restore = Restore::new([owned_room_id!("!a:s"), owned_room_id!("!b:s")]);
-        let room = restore.take_next().unwrap();
-        for _ in 0..u8::MAX {
-            restore.defer(room.clone());
-            assert_eq!(restore.take_next().as_ref(), Some(&room));
-        }
-        restore.defer(room);
-        assert_eq!(restore.len(), 2);
-        restore.stop();
+    fn given_rooms_that_sync_later_then_a_scan_adds_each_room_once() {
+        let now = Instant::now();
+        let mut restore = Restore::start(now);
         assert!(restore.is_empty());
+        assert!(restore.wants_step(now), "the first scan is due at once");
+        restore.add_scanned([owned_room_id!("!a:s"), owned_room_id!("!b:s")], now);
+        assert!(!restore.scan_due(now), "one scan per interval");
+        assert_eq!(restore.take_next().unwrap().as_str(), "!a:s");
+
+        let later = now + RESTORE_SCAN_INTERVAL;
+        assert!(restore.scan_due(later));
+        restore.add_scanned(
+            [
+                owned_room_id!("!a:s"),
+                owned_room_id!("!c:s"),
+                owned_room_id!("!b:s"),
+            ],
+            later,
+        );
+        let queue: Vec<_> = std::iter::from_fn(|| restore.take_next()).collect();
+        assert_eq!(queue, [owned_room_id!("!b:s"), owned_room_id!("!c:s")]);
+
+        assert!(
+            !restore.wants_step(now + RESTORE_SCAN_WINDOW),
+            "window ended"
+        );
+        restore.stop();
+        assert!(!restore.scan_due(later + RESTORE_SCAN_INTERVAL), "stopped");
+        assert!(!Restore::new([owned_room_id!("!a:s")]).scan_due(now));
+    }
+
+    /// GIVEN scans that find more rooms than the limit in total WHEN they
+    /// are added THEN the restore queues `MAX_RESTORE_ROOMS` rooms at most
+    /// and scans no more.
+    #[test]
+    fn given_scans_past_the_limit_then_the_restore_is_bounded() {
+        let now = Instant::now();
+        let mut restore = Restore::start(now);
+        let room = |n: usize| OwnedRoomId::try_from(format!("!r{n:04}:s")).unwrap();
+        restore.add_scanned((0..MAX_RESTORE_ROOMS - 1).map(room), now);
+        while restore.take_next().is_some() {}
+        let later = now + RESTORE_SCAN_INTERVAL;
+        restore.add_scanned((0..MAX_RESTORE_ROOMS + 5).map(room), later);
+        assert_eq!(restore.len(), 1, "only one place was left");
+        assert!(!restore.scan_due(later + RESTORE_SCAN_INTERVAL));
     }
 
     /// GIVEN joined rooms WHEN they are ordered THEN plain rooms are left

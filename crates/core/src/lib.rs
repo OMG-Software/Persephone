@@ -560,6 +560,16 @@ impl Default for Core {
     }
 }
 
+/// The reply to `timeline_events` when there is nothing to read.
+fn no_events(room_id: &str) -> persephone_contracts::TimelinePage {
+    persephone_contracts::TimelinePage {
+        room_id: room_id.to_owned(),
+        items: Vec::new(),
+        next_cursor: None,
+        names: Vec::new(),
+    }
+}
+
 fn ok<T: Serialize>(value: &T) -> Outcome {
     serde_json::to_value(value).map_or(Outcome::Error(ErrorCode::Internal), Outcome::Ok)
 }
@@ -822,7 +832,12 @@ impl Core {
             },
             Call::TimelineEvents { room_id, event_ids } => {
                 match self.timeline_events(room_id, event_ids) {
-                    Ok(call) => Answer::Later(id, call),
+                    Ok(Some(call)) => Answer::Later(id, call),
+                    // Nothing to read: answered at once, with no worker.
+                    Ok(None) => Answer::Reply(Reply {
+                        id,
+                        outcome: ok(&no_events(room_id)),
+                    }),
                     Err(code) => error(code),
                 }
             }
@@ -997,7 +1012,8 @@ impl Core {
             },
             Call::TimelineEvents { room_id, event_ids } => {
                 match self.timeline_events(room_id, event_ids) {
-                    Ok(call) => call(),
+                    Ok(Some(call)) => call(),
+                    Ok(None) => ok(&no_events(room_id)),
                     Err(code) => Outcome::Error(code),
                 }
             }
@@ -1352,16 +1368,18 @@ impl Core {
 
     /// Reads loaded undecryptable events of a subscribed room again
     /// (`room_tools::timeline_events`), only when room keys arrived for it
-    /// since the last such call; otherwise answers with no items and fetches
-    /// nothing, so a page that asks after every change costs no requests.
-    /// The mark is taken once the read is admitted, and put back when the
-    /// read fails, so a later change asks again. A lease is held from
-    /// admission to the reply, which is fenced against lock and sign-out.
+    /// since the last such call. Otherwise `None`: the caller answers at once
+    /// with no items, with no worker and no request, so a page that asks
+    /// after every change costs nothing. The mark is taken once the read is
+    /// admitted. It is put back when the read fails, or when an event was
+    /// left out that a later read may get, so a later change asks again. A
+    /// lease is held from admission to the reply, which is fenced against
+    /// lock and sign-out.
     fn timeline_events<'a>(
         &'a self,
         room_id: &str,
         event_ids: &[String],
-    ) -> Result<LongCall<'a>, ErrorCode> {
+    ) -> Result<Option<LongCall<'a>>, ErrorCode> {
         let call = Call::TimelineEvents {
             room_id: room_id.to_owned(),
             event_ids: event_ids.to_vec(),
@@ -1376,14 +1394,8 @@ impl Core {
             return Err(ErrorCode::NotFound);
         }
         let room = room_id.to_owned();
-        let unchanged = persephone_contracts::TimelinePage {
-            room_id: room.clone(),
-            items: Vec::new(),
-            next_cursor: None,
-            names: Vec::new(),
-        };
         if !lock(&self.hub.notifications).keyed.contains(&room) {
-            return Ok(Box::new(move || ok(&unchanged)));
+            return Ok(None);
         }
         let slot = self.room_reads.begin()?;
         let (lease, client) = match self.session.with_client() {
@@ -1394,10 +1406,10 @@ impl Core {
         };
         if !lock(&self.hub.notifications).keyed.remove(&room) {
             // Another call took the mark meanwhile and reads them.
-            return Ok(Box::new(move || ok(&unchanged)));
+            return Ok(None);
         }
         let ids = event_ids.to_vec();
-        Ok(Box::new(move || {
+        Ok(Some(Box::new(move || {
             let _slot = slot;
             let stores = lease.stores();
             let result = stores.block_on(room_tools::timeline_events(
@@ -1410,7 +1422,8 @@ impl Core {
                 let _context = stores.runtime().enter();
                 drop(client);
             }
-            if result.is_err() {
+            // A failure, or an event left out that a later read may get.
+            if !matches!(result, Ok((_, false))) {
                 let mut notifications = lock(&self.hub.notifications);
                 if notifications.subscribed.contains(&room) {
                     notifications.keyed.insert(room.clone());
@@ -1418,11 +1431,11 @@ impl Core {
             }
             lease
                 .commit(|| match result {
-                    Ok(page) => bounded(&page),
+                    Ok((page, _)) => bounded(&page),
                     Err(code) => Outcome::Error(code),
                 })
                 .unwrap_or(Outcome::Error(ErrorCode::Locked))
-        }))
+        })))
     }
 
     /// Local profile operations and explicit abuse operations. Retain a lease
