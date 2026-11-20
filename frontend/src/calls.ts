@@ -136,6 +136,34 @@ export function callButton(
   return { hidden: false, disabled: false, label, reason: null };
 }
 
+/**
+ * The visible note after a click on a call button that cannot start a call.
+ * `asked` is the room where that click was, or `null`. The note follows the
+ * current view: it changes or goes when the reason does, and a room change
+ * removes it. A disabled button without a reason has nothing to say.
+ */
+export function callReasonNote(
+  roomId: string,
+  asked: string | null,
+  view: CallButtonView | null
+): string | null {
+  if (asked !== roomId || view === null || view.hidden || !view.disabled) return null;
+  return view.reason;
+}
+
+/**
+ * The click that [`callReasonNote`] keeps: `asked` while its note shows,
+ * otherwise `null`. A note that goes (the room is ready, the button hides,
+ * the room changes) needs a new click to come back.
+ */
+export function keptReasonRoom(
+  roomId: string | null,
+  asked: string | null,
+  view: CallButtonView | null
+): string | null {
+  return roomId !== null && callReasonNote(roomId, asked, view) !== null ? asked : null;
+}
+
 export const VIDEO_CALL_LABEL = 'Video call';
 
 /**

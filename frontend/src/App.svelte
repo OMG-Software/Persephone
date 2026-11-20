@@ -15,7 +15,9 @@
     JOIN_ERROR_TEXT,
     STARTING_TEXT,
     callButton,
+    callReasonNote,
     cameraAvailable,
+    keptReasonRoom,
     hasVideo,
     inCall,
     liveRings,
@@ -851,6 +853,18 @@
   const videoView = $derived(
     selected === null ? null : videoCallButton(selected, readiness, callState, callPending)
   );
+  // The room where a click on a call button asked why no call can start.
+  // The answer is visible text; the button's own description reaches only
+  // screen readers.
+  let callReasonFor = $state<string | null>(null);
+  const callReasonText = $derived(
+    selected === null ? null : callReasonNote(selected, callReasonFor, callView)
+  );
+  // The click is forgotten once its note goes: a room change, a ready room
+  // or a hidden button. A later block then needs a new click.
+  $effect(() => {
+    callReasonFor = keptReasonRoom(selected, callReasonFor, callView);
+  });
 
   // Ask again whether the shown room can take a call when the room or the
   // call changes. Speaking changes alone do not.
@@ -908,7 +922,15 @@
   }
 
   async function startCall(video: boolean) {
-    if (!selected || callPending || callView?.disabled) return;
+    if (!selected || callPending) return;
+    if (callView?.disabled) {
+      // A button that cannot start a call says why, rather than nothing.
+      // An earlier join error would hide that answer, so this click ends it.
+      callJoinText = null;
+      callReasonFor = selected;
+      return;
+    }
+    callReasonFor = null;
     await runJoin(selected, video);
   }
 
@@ -3182,6 +3204,11 @@
                 <p class="call-notice error" role="alert">
                   <span>{callJoinText}</span>
                   <button type="button" class="secondary" onclick={() => (callJoinText = null)}>Dismiss</button>
+                </p>
+              {:else if callReasonText}
+                <p class="call-notice note" role="status">
+                  <span>{callReasonText}</span>
+                  <button type="button" class="secondary" onclick={() => (callReasonFor = null)}>Dismiss</button>
                 </p>
               {/if}
             {/snippet}
