@@ -274,27 +274,35 @@ button:disabled {
   color: var(--danger-text);
 }
 
-.primary:hover:not(:disabled) {
+.primary:hover:not(:disabled, [aria-disabled='true']) {
   background: var(--accent-hover);
 }
 
-.secondary:hover:not(:disabled),
-.danger:hover:not(:disabled) {
+.secondary:hover:not(:disabled, [aria-disabled='true']),
+.danger:hover:not(:disabled, [aria-disabled='true']) {
   background: var(--hover);
 }
 
-.secondary:hover:not(:disabled) {
+.secondary:hover:not(:disabled, [aria-disabled='true']) {
   border-color: var(--ink3);
 }
 
 /* Disabled controls share one flat look in every theme: no accent, no
-   border, dimmed text. */
+   border, dimmed text. A control that is `aria-disabled` stays focusable,
+   so a screen reader can read why, but it looks the same. */
 .primary:disabled,
 .secondary:disabled,
-.danger:disabled {
+.danger:disabled,
+.primary[aria-disabled='true'],
+.secondary[aria-disabled='true'],
+.danger[aria-disabled='true'] {
   border-color: transparent;
   background: var(--disabled-bg);
   color: var(--disabled-ink);
+}
+
+button[aria-disabled='true'] {
+  cursor: default;
 }
 
 .wide {
