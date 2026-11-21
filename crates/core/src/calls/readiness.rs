@@ -179,7 +179,7 @@ impl SfuService {
 /// What the homeserver said about an SFU.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Discovery {
-    /// The first usable transport, in the server's order.
+    /// The chosen usable transport (see [`read_answer`]).
     Offered(SfuService),
     /// It offers no transport.
     NoneOffered,
@@ -227,9 +227,13 @@ pub fn transport(entry: &Value, own_server: &str) -> Option<SfuService> {
     })
 }
 
-/// The first usable transport of `list`. A missing or empty list offers
-/// none; a list that is not an array, or that has no usable entry among the
-/// first [`MAX_TRANSPORT_ENTRIES`], is unsupported.
+/// The usable transport of `list` that Element Call would choose: the first
+/// usable type `livekit` entry, else the first usable `m.livekit` entry.
+/// `matrix-js-sdk` ignores `m.livekit`, so a server that lists it before a
+/// `livekit` entry (as Synapse's example does) gets the `livekit` entry, the
+/// same one that Element Call uses. A missing or empty list offers none; a
+/// list that is not an array, or that has no usable entry among the first
+/// [`MAX_TRANSPORT_ENTRIES`], is unsupported.
 fn read_list(list: Option<&Value>, own_server: &str) -> Discovery {
     let Some(list) = list else {
         return Discovery::NoneOffered;
@@ -240,16 +244,23 @@ fn read_list(list: Option<&Value>, own_server: &str) -> Discovery {
     if entries.is_empty() {
         return Discovery::NoneOffered;
     }
-    entries
-        .iter()
-        .take(MAX_TRANSPORT_ENTRIES)
-        .find_map(|entry| transport(entry, own_server))
-        .map_or(Discovery::Unsupported, Discovery::Offered)
+    let usable = || {
+        entries
+            .iter()
+            .take(MAX_TRANSPORT_ENTRIES)
+            .filter_map(|entry| Some((entry, transport(entry, own_server)?)))
+    };
+    usable()
+        .find(|(entry, _)| entry["type"] == "livekit")
+        .or_else(|| usable().next())
+        .map_or(Discovery::Unsupported, |(_, service)| {
+            Discovery::Offered(service)
+        })
 }
 
 /// Reads a transports answer whose list is the member `member`
-/// (`transports` on the stable path, `rtc_transports` on the unstable one).
-/// An answer over [`MAX_TRANSPORTS_BYTES`] or that is not a JSON object is
+/// (`transports` on the stable path, `rtc_transports` on the unstable one),
+/// choosing its entry as [`read_list`] says. An answer over [`MAX_TRANSPORTS_BYTES`] or that is not a JSON object is
 /// unsupported.
 pub fn read_answer(body: &[u8], member: &str, own_server: &str) -> Discovery {
     if body.len() > MAX_TRANSPORTS_BYTES {
@@ -276,7 +287,7 @@ pub fn read_well_known(body: &[u8], own_server: &str) -> Discovery {
     }
 }
 
-/// The homeserver's first usable LiveKit transport (ADR-0056).
+/// The homeserver's LiveKit transport, chosen as `read_list` says (ADR-0056).
 pub async fn sfu_transport(client: &matrix_sdk::Client) -> Result<Discovery, ReadinessError> {
     let well_known = client
         .user_id()
@@ -555,6 +566,38 @@ pub(crate) mod tests {
             read_answer(b"<html>", "transports", OWN),
             Discovery::Unsupported
         );
+    }
+
+    /// GIVEN an `m.livekit` entry before a `livekit` entry, as in Synapse's
+    /// example WHEN read THEN the `livekit` entry is taken, as Element Call
+    /// takes it; GIVEN only `m.livekit` entries, or an unusable `livekit` one
+    /// WHEN read THEN the first usable `m.livekit` entry is taken.
+    #[test]
+    fn given_m_livekit_first_then_the_livekit_entry_is_taken() {
+        let answer =
+            |value: serde_json::Value| read_answer(value.to_string().as_bytes(), "transports", OWN);
+        let synapse = offered(answer(json!({ "transports": [
+            { "type": "m.livekit", "url": "wss://sfu.example.org" },
+            { "type": "livekit", "url": "wss://sfu.example.org",
+              "livekit_service_url": "https://jwt.example.org" },
+        ] })));
+        assert_eq!(synapse.flow, Flow::OpenId);
+        assert_eq!(synapse.advertised, "https://jwt.example.org");
+
+        let merovingian = offered(answer(json!({ "transports": [
+            { "type": "m.livekit", "url": "wss://m.example.org" },
+            { "type": "livekit", "url": "wss://l.example.org" },
+        ] })));
+        assert_eq!(merovingian.flow, Flow::Homeserver);
+        assert_eq!(merovingian.advertised, "wss://l.example.org");
+
+        let only_m = offered(answer(json!({ "transports": [
+            { "type": "livekit", "url": "https://wrong.example.org" },
+            { "type": "m.livekit", "url": "wss://a.example.org" },
+            { "type": "m.livekit", "url": "wss://b.example.org" },
+        ] })));
+        assert_eq!(only_m.flow, Flow::Homeserver);
+        assert_eq!(only_m.advertised, "wss://a.example.org");
     }
 
     /// GIVEN a usable entry after the first eight, or an answer over the byte

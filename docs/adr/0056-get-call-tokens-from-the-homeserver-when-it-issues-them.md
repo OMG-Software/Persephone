@@ -180,7 +180,12 @@ homeservers without a server change and without a change to ADR-0004.
     describe that form, and Element Call does not read it, because
     `matrix-js-sdk` ignores the type. Calls with Element Call need a type
     `livekit` entry, as in Synapse's example.
-* The first usable entry in the server's order is used.
+* The entry Element Call would choose is used: the first usable type
+  `livekit` entry in the server's order, else the first usable `m.livekit`
+  entry. `matrix-js-sdk` ignores `m.livekit`, so with Synapse's example
+  (`m.livekit` first, then `livekit` with `livekit_service_url`) Element Call
+  uses the OpenID flow, and so does Persephone. A homeserver that lists
+  `m.livekit` but has no `get_token` route still works.
 * The readiness reason follows the answer:
   * A request that cannot be made or finished, or an error status other than
     404 `M_UNRECOGNIZED`: `server_unreachable`.
