@@ -62,7 +62,7 @@ pub fn home<'a>(member: &'a ActiveMember, own: &Url) -> Home<'a> {
     if first.is_some_and(|first| first.as_str() == own.as_str()) {
         return Home::Own;
     }
-    if first.is_some_and(|first| first.scheme() != "https") {
+    if first.is_some_and(|first| matches!(first.scheme(), "wss" | "ws")) {
         return Home::Nowhere;
     }
     member
@@ -347,6 +347,15 @@ mod tests {
         let then_service = member("a", &["wss://sfu.b.example", "https://sfu.c.example"]);
         assert_eq!(home(&then_service, &own_wss), Home::Nowhere);
         assert_eq!(home(&then_service, &own()), Home::Nowhere);
+        let plain = member("a", &["ws://127.0.0.1:7880", "https://sfu.c.example"]);
+        assert_eq!(home(&plain, &own()), Home::Nowhere);
+        // A first JWT service that cannot be another SFU (a loopback `http`
+        // one of the development feature) is skipped, as an IP literal is.
+        let loopback = member("a", &["http://127.0.0.1:8080/jwt", "https://sfu.c.example"]);
+        assert_eq!(
+            home(&loopback, &own()),
+            Home::Other(&url("https://sfu.c.example"))
+        );
     }
 
     /// GIVEN transports with IPv4 or IPv6 literal hosts

@@ -229,4 +229,110 @@ mod tests {
             Some(RequestError::Network)
         );
     }
+
+    /// A client signed in to `server` with an expired access token and a
+    /// refresh token.
+    async fn expired(server: &MockServer) -> matrix_sdk::Client {
+        use matrix_sdk::{
+            SessionMeta, SessionTokens, authentication::matrix::MatrixSession,
+            config::RequestConfig, ruma::user_id,
+        };
+        Mock::given(method("GET"))
+            .and(path("/_matrix/client/versions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "versions": ["v1.11"] })),
+            )
+            .mount(server)
+            .await;
+        let client = matrix_sdk::Client::builder()
+            .homeserver_url(server.uri())
+            .request_config(RequestConfig::new().disable_retry())
+            .build()
+            .await
+            .unwrap();
+        client
+            .restore_session(MatrixSession {
+                meta: SessionMeta {
+                    user_id: user_id!("@alice:synthetic.test").to_owned(),
+                    device_id: "PERSEPHONE".into(),
+                },
+                tokens: SessionTokens {
+                    access_token: "old-token".into(),
+                    refresh_token: Some("synthetic-refresh-token".into()),
+                },
+            })
+            .await
+            .unwrap();
+        client
+    }
+
+    /// Answers each request that carries `token` with `answer`, `times` times.
+    async fn with_token(server: &MockServer, token: &str, answer: ResponseTemplate, times: u64) {
+        Mock::given(method("GET"))
+            .and(path(AT))
+            .and(header("authorization", format!("Bearer {token}").as_str()))
+            .respond_with(answer)
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    fn unknown_token() -> ResponseTemplate {
+        ResponseTemplate::new(401).set_body_json(json!({ "errcode": "M_UNKNOWN_TOKEN" }))
+    }
+
+    /// Expects `times` refreshes, each giving `new-token`.
+    async fn refresh(server: &MockServer, times: u64) {
+        Mock::given(method("POST"))
+            .and(path("/_matrix/client/v3/refresh"))
+            .and(wiremock::matchers::body_json(
+                json!({ "refresh_token": "synthetic-refresh-token" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({ "access_token": "new-token", "refresh_token": "next-refresh-token" }),
+            ))
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    /// GIVEN an expired access token and a refresh token WHEN asked THEN the
+    /// first request carries the old token, the token is refreshed once, and
+    /// the one retry carries the new token and its answer comes back.
+    #[tokio::test]
+    async fn given_an_expired_token_then_one_refresh_and_a_retry_with_the_new_token() {
+        let server = MockServer::start().await;
+        let client = expired(&server).await;
+        with_token(&server, "old-token", unknown_token(), 1).await;
+        refresh(&server, 1).await;
+        with_token(
+            &server,
+            "new-token",
+            ResponseTemplate::new(200).set_body_string("ok"),
+            1,
+        )
+        .await;
+        let answer = send(&client, Method::GET, AT, None, 1024, WAIT)
+            .await
+            .unwrap();
+        assert!(answer.is_success());
+        assert_eq!(answer.body.as_slice(), b"ok");
+        assert_eq!(client.access_token().as_deref(), Some("new-token"));
+    }
+
+    /// GIVEN a refreshed token that the server also refuses WHEN asked THEN
+    /// the retry's 401 comes back as an answer, after one refresh and one
+    /// retry only.
+    #[tokio::test]
+    async fn given_the_retry_is_refused_too_then_its_answer_comes_back() {
+        let server = MockServer::start().await;
+        let client = expired(&server).await;
+        with_token(&server, "old-token", unknown_token(), 1).await;
+        refresh(&server, 1).await;
+        with_token(&server, "new-token", unknown_token(), 1).await;
+        let answer = send(&client, Method::GET, AT, None, 1024, WAIT)
+            .await
+            .unwrap();
+        assert_eq!(answer.status, 401);
+    }
 }
