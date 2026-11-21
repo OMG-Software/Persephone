@@ -1497,6 +1497,116 @@ fn given_native_sliding_sync_then_it_is_used_and_rooms_arrive() {
 /// core's next round fails: what the core sends reaches no later test's
 /// homeserver. With a pooled mock server, the next test that took it received
 /// the rounds, and the Sliding Sync test counted them as classic fallback.
+impl Homeserver {
+    /// Answers presence changes with 200 from now on.
+    fn accept_presence(&self) {
+        self.runtime.block_on(
+            Mock::given(method("PUT"))
+                .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .mount(&self.server),
+        );
+    }
+
+    /// The `set_presence` value of each classic sync request, in order;
+    /// `online` where the request leaves it out, as the spec defaults it.
+    fn sync_presence(&self) -> Vec<String> {
+        self.requests_matching("/_matrix/client/v3/sync")
+            .into_iter()
+            .map(|(url, _)| {
+                url.split(['?', '&'])
+                    .find_map(|pair| pair.strip_prefix("set_presence="))
+                    .unwrap_or("online")
+                    .to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The bodies of the presence changes sent, in order.
+fn presence_puts(server: &Homeserver) -> Vec<Value> {
+    server
+        .requests_matching("/_matrix/client/v3/presence/")
+        .into_iter()
+        .map(|(_, body)| body)
+        .collect()
+}
+
+/// GIVEN a homeserver whose sync answers at once, as when another client of
+/// the account keeps changing its presence WHEN Persephone syncs THEN only
+/// its first request changes the presence, and every later one sends
+/// `offline`, which leaves it as it is (ADR-0057).
+#[test]
+fn given_sync_rounds_that_return_at_once_then_presence_is_not_set_again_and_again() {
+    let server = Homeserver::signed_in();
+    server.accept_presence();
+    let dir = TempDir::new().unwrap();
+    let _core = signed_in_core(&server, dir.path());
+    wait_for("three sync rounds", || server.sync_presence().len() >= 3);
+    std::thread::sleep(Duration::from_secs(2));
+    let sent = server.sync_presence();
+    assert_eq!(sent[0], "online", "{sent:?}");
+    assert!(sent[1..].iter().all(|value| value == "offline"), "{sent:?}");
+    assert!(presence_puts(&server).is_empty());
+}
+
+/// GIVEN quick changes of the shared presence WHEN they are sent THEN at most
+/// one request a second changes it, the newest choice arrives last, and once
+/// sharing is off nothing changes it any more (ADR-0057).
+#[test]
+fn given_quick_presence_changes_then_at_most_one_is_sent_each_second() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    let server = Homeserver::signed_in();
+    server.accept_presence();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the first sync", || !server.sync_presence().is_empty());
+    let set = |share_presence, presence| {
+        let saved = call(
+            &core,
+            Call::SetAccountSettings {
+                settings: AccountSettings {
+                    share_presence,
+                    presence,
+                    ..AccountSettings::default()
+                },
+            },
+        );
+        assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    };
+    let started = Instant::now();
+    for presence in [
+        PresenceStatus::Unavailable,
+        PresenceStatus::Offline,
+        PresenceStatus::Online,
+        PresenceStatus::Offline,
+        PresenceStatus::Unavailable,
+    ] {
+        set(true, presence);
+    }
+    wait_for("the newest change", || {
+        presence_puts(&server).last() == Some(&json!({"presence": "unavailable"}))
+    });
+    let seconds = started.elapsed().as_secs_f64();
+    let puts = presence_puts(&server).len();
+    // The first sync wrote the presence just before the changes, so even
+    // the first change waits for the next second.
+    assert!(
+        (puts as f64) <= seconds + 1.0,
+        "{puts} changes in {seconds:.1} s"
+    );
+    set(false, PresenceStatus::Online);
+    let before = (presence_puts(&server).len(), server.sync_presence().len());
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(presence_puts(&server).len(), before.0);
+    let later = server.sync_presence();
+    assert!(later.len() > before.1, "sync carried on");
+    assert!(
+        later[before.1..].iter().all(|value| value == "offline"),
+        "{later:?}"
+    );
+}
+
 #[test]
 fn given_a_core_left_syncing_when_its_homeserver_is_dropped_then_its_rounds_reach_nothing() {
     let homeserver = Homeserver::signed_in();

@@ -935,7 +935,9 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       loadRoomPictures: settings.loadRoomPictures,
       captureProtection: settings.captureProtection,
       timelineEvents: timelineEvents(settings.timelineEvents),
-      theme: settings.theme
+      theme: settings.theme,
+      sharePresence: settings.sharePresence,
+      presence: settings.presence
     }
   });
 }

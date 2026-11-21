@@ -67,7 +67,9 @@ test('GIVEN an account whose settings have not loaded THEN Enter sends, sizes ar
       creation: true,
       upgrades: true
     },
-    theme: 'orange'
+    theme: 'orange',
+    sharePresence: true,
+    presence: 'online'
   });
 });
 

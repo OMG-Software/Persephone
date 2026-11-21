@@ -79,6 +79,10 @@ pub struct RoomSummary {
     /// no names.
     #[serde(default)]
     pub has_call: bool,
+    /// The contact's presence, as their homeserver last reported it
+    /// (ADR-0057). None when there is no contact, or it is not known.
+    #[serde(default)]
+    pub contact_presence: Option<PresenceStatus>,
 }
 
 /// The length of a [`RoomSummary::picture_id`], in hex characters.
@@ -1406,6 +1410,37 @@ pub struct AccountSettings {
     pub timeline_events: TimelineEvents,
     /// The colours of the interface. Grey and orange by default.
     pub theme: Theme,
+    /// Tell the homeserver this account's presence. On by default. When
+    /// off, no request of this account changes its presence (ADR-0057).
+    pub share_presence: bool,
+    /// The presence this account shares while `share_presence` is on.
+    /// Online by default.
+    pub presence: PresenceStatus,
+}
+
+/// A Matrix presence state (`m.presence`). Read only from one of the three
+/// names, like [`Theme`].
+#[derive(Clone, Copy, Debug, Default, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceStatus {
+    #[default]
+    Online,
+    /// Away (idle).
+    Unavailable,
+    Offline,
+}
+
+impl<'de> Deserialize<'de> for PresenceStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        const NAMES: &[&str] = &["online", "unavailable", "offline"];
+        let name = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        match name.as_ref() {
+            "online" => Ok(Self::Online),
+            "unavailable" => Ok(Self::Unavailable),
+            "offline" => Ok(Self::Offline),
+            other => Err(serde::de::Error::unknown_variant(other, NAMES)),
+        }
+    }
 }
 
 /// The colour themes of the interface, all dark. Only the page reads the
@@ -1533,6 +1568,8 @@ impl Default for AccountSettings {
             capture_protection: true,
             timeline_events: TimelineEvents::default(),
             theme: Theme::Orange,
+            share_presence: true,
+            presence: PresenceStatus::Online,
         }
     }
 }
@@ -2428,6 +2465,7 @@ pub fn sample_room_summary() -> RoomSummary {
         contact: Some("@alice:server.invalid".into()),
         picture_id: Some("0123456789abcdef".into()),
         has_call: true,
+        contact_presence: Some(PresenceStatus::Unavailable),
     }
 }
 
@@ -2621,6 +2659,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", ThirdPartyModules::decl(&config)),
         format!("export {}", TimelineEvents::decl(&config)),
         format!("export {}", Theme::decl(&config)),
+        format!("export {}", PresenceStatus::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
         format!("export {}", RoomActivity::decl(&config)),
         format!("export {}", RoomServer::decl(&config)),
@@ -2826,6 +2865,7 @@ mod personal_contract_tests {
         )
         .unwrap();
         assert!(!summary.has_call);
+        assert_eq!(summary.contact_presence, None);
     }
 
     /// Reject missing, duplicate, or invalid nullable fields and unsafe timestamps.

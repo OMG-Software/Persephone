@@ -135,7 +135,9 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           loadRoomPictures: true,
           captureProtection: false,
           timelineEvents: { ...ALL_SHOWN, leaves: false },
-          theme: 'red'
+          theme: 'red',
+          sharePresence: false,
+          presence: 'unavailable'
         }),
       'set_account_settings',
       {
@@ -151,7 +153,9 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           loadRoomPictures: true,
           captureProtection: false,
           timelineEvents: { ...ALL_SHOWN, leaves: false },
-          theme: 'red'
+          theme: 'red',
+          sharePresence: false,
+          presence: 'unavailable'
         }
       }
     ],
@@ -249,6 +253,8 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       captureProtection: true,
       timelineEvents: { ...ALL_SHOWN, polls: false },
       theme: 'blue',
+      sharePresence: true,
+      presence: 'offline',
       accent: 'green'
     })
   );
@@ -265,7 +271,9 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       loadRoomPictures: false,
       captureProtection: true,
       timelineEvents: ALL_SHOWN,
-      theme: 'blue'
+      theme: 'blue',
+      sharePresence: true,
+      presence: 'offline'
     }
   });
 });

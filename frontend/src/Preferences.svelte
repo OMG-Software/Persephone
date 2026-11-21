@@ -14,6 +14,7 @@
     type SettingsPatch
   } from './preferences';
   import { DEFAULT_THEME, THEMES, themeOf } from './themes.ts';
+  import { PRESENCE_CHOICES, presenceOf } from './presence.ts';
 
   // This account's preferences. The settings are kept in its encrypted
   // profile through the caller; the notification level is the account's
@@ -253,6 +254,32 @@
     <p class="note">
       Both are off by default: each tells the homeserver and everyone in the room when you are
       active. You still see other people's. Your other devices always learn what you have read.
+    </p>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={settings.sharePresence}
+        onchange={(event) => onchange({ sharePresence: event.currentTarget.checked })}
+      />
+      <span>Share your presence</span>
+    </label>
+    <label for="presence">Your presence</label>
+    <select
+      id="presence"
+      class="field"
+      value={presenceOf(settings.presence)}
+      disabled={!settings.sharePresence}
+      onchange={(event) => onchange({ presence: presenceOf(event.currentTarget.value) })}
+    >
+      {#each PRESENCE_CHOICES as choice (choice.value)}
+        <option value={choice.value}>{choice.label}</option>
+      {/each}
+    </select>
+    <p class="note">
+      On by default: people who share a room with you can see whether you are online. Persephone
+      changes your presence at most once a second. When sharing is off, it never changes it, and
+      your other signed-in apps decide what people see. You still see other people's presence.
     </p>
     <label class="switch-row">
       <input

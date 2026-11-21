@@ -479,7 +479,7 @@ impl CoreTransport for FakeCore {
                 "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false,
                 "captureProtection": self.capture_protection.load(Ordering::SeqCst),
                 "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
-                "theme": "red"
+                "theme": "red", "sharePresence": true, "presence": "online"
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
@@ -2181,7 +2181,7 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
             "interfaceTextPercent": 100, "desktopNotifications": false,
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
             "notificationNames": true, "loadRoomPictures": false, "captureProtection": true, "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
-            "theme": theme}})
+            "theme": theme, "sharePresence": true, "presence": "online"}})
     };
     let settings = |enter_sends: bool| settings_with(enter_sends, "orange");
     assert_eq!(
@@ -3678,7 +3678,7 @@ fn given_account_settings_then_capture_protection_follows_only_successful_calls(
             "notificationNames": true, "loadRoomPictures": false,
             "captureProtection": capture_protection,
             "timelineEvents": {"joins": true, "leaves": true, "invitations": true, "removals": true, "joinRequests": true, "displayNames": true, "profilePictures": true, "roomName": true, "topic": true, "roomPicture": true, "encryption": true, "joinRule": true, "historyVisibility": true, "permissions": true, "addresses": true, "pinnedMessages": true, "guestAccess": true, "serverAccess": true, "creation": true, "upgrades": true},
-            "theme": "orange"}})
+            "theme": "orange", "sharePresence": true, "presence": "online"}})
     };
     assert!(invoke("set_account_settings", saved(true, false)).is_ok());
     assert!(!capture.wanted());

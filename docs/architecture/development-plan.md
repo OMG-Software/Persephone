@@ -489,8 +489,10 @@ controls; measure packaged behavior and include allocation-pressure tests.
 ## Privacy, diagnostics, and delivery
 
 Default to hidden notification content, no telemetry, no external previews, and
-no optional typing/read-receipt/online-presence announcements. Configure and test
-SDK behavior explicitly; absence of an app call does not prove absence of traffic.
+no optional typing/read-receipt announcements. Presence is shared as online by
+default, at most one write a second, and can be turned off (ADR-0057). Configure
+and test SDK behavior explicitly; absence of an app call does not prove absence of
+traffic: the SDK sent `online` with every sync request until ADR-0057.
 Clipboard copies and external links require intentional actions and URI policy.
 These measures reduce disclosures; they do not conceal Matrix membership or
 traffic patterns or establish anonymity. Tor/proxy routing needs a separate plan.

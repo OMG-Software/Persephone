@@ -40,7 +40,7 @@ use matrix_sdk::{
     config::{RequestConfig, StoreConfig, SyncSettings},
     cross_process_lock::CrossProcessLockConfig,
     encryption::{BackupDownloadStrategy, EncryptionSettings},
-    ruma::{api::error::ErrorKind, events::StateEventType},
+    ruma::{api::error::ErrorKind, events::StateEventType, presence::PresenceState},
     sliding_sync::{SlidingSync, SlidingSyncList, SlidingSyncMode, Version, VersionBuilder},
 };
 use matrix_sdk_crypto::{
@@ -430,10 +430,20 @@ pub async fn select_engine(client: &Client) -> Result<Engine, SignInError> {
 
 /// Runs one complete sync round and returns the rooms it touched. Callers
 /// must not cancel it midway: the SDK processes the response after the
-/// request returns.
-pub async fn sync_round(client: &Client, engine: &Engine) -> Result<Vec<String>, SignInError> {
+/// request returns. The request carries `presence` as its `set_presence`
+/// (ADR-0057); the SDK's own default would send `online` every time.
+pub async fn sync_round(
+    client: &Client,
+    engine: &Engine,
+    presence: PresenceState,
+) -> Result<Vec<String>, SignInError> {
     match engine {
         Engine::Sliding(sliding) => {
+            // Sliding Sync reads the client's value; this sends no request.
+            client
+                .set_presence(presence, None, false)
+                .await
+                .map_err(|_| SignInError::SyncFailed)?;
             let summary = sliding
                 .sync_once()
                 .await
@@ -442,7 +452,11 @@ pub async fn sync_round(client: &Client, engine: &Engine) -> Result<Vec<String>,
         }
         Engine::Classic => {
             let response = client
-                .sync_once(SyncSettings::default().timeout(SYNC_POLL))
+                .sync_once(
+                    SyncSettings::default()
+                        .timeout(SYNC_POLL)
+                        .set_presence(presence),
+                )
                 .await
                 .map_err(|_| SignInError::SyncFailed)?;
             Ok(response

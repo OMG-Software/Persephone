@@ -228,7 +228,12 @@ pictureId: string | null,
  * Another device is in this room's call now (ADR-0052). A flag only:
  * no names.
  */
-hasCall: boolean, };
+hasCall: boolean, 
+/**
+ * The contact's presence, as their homeserver last reported it
+ * (ADR-0057). None when there is no contact, or it is not known.
+ */
+contactPresence: PresenceStatus | null, };
 
 export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
@@ -480,6 +485,8 @@ serverAccess: boolean, creation: boolean, upgrades: boolean, };
 
 export type Theme = "orange" | "red" | "blue";
 
+export type PresenceStatus = "online" | "unavailable" | "offline";
+
 export type AccountSettings = { 
 /**
  * Enter sends a message; otherwise it starts a new line. On by default.
@@ -546,7 +553,17 @@ timelineEvents: TimelineEvents,
 /**
  * The colours of the interface. Grey and orange by default.
  */
-theme: Theme, };
+theme: Theme, 
+/**
+ * Tell the homeserver this account's presence. On by default. When
+ * off, no request of this account changes its presence (ADR-0057).
+ */
+sharePresence: boolean, 
+/**
+ * The presence this account shares while `share_presence` is on.
+ * Online by default.
+ */
+presence: PresenceStatus, };
 
 export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
 
@@ -749,7 +766,8 @@ export const roomSummaryFixture = {
   "encryption": "encrypted",
   "contact": "@alice:server.invalid",
   "pictureId": "0123456789abcdef",
-  "hasCall": true
+  "hasCall": true,
+  "contactPresence": "unavailable"
 } as const satisfies RoomSummary;
 
 export const timelinePageFixture = {

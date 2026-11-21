@@ -42,7 +42,10 @@ export const DEFAULT_SETTINGS: AccountSettings = {
     creation: true,
     upgrades: true
   },
-  theme: DEFAULT_THEME
+  theme: DEFAULT_THEME,
+  // Presence is shared, as online, until the account changes it (ADR-0057).
+  sharePresence: true,
+  presence: 'online'
 };
 
 /** The idle-lock choices offered, in minutes; 0 never locks (ADR-0025). */

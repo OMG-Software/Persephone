@@ -3308,6 +3308,29 @@ mark {
   font-weight: 600;
 }
 
+.presence-mark {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.presence-mark.online {
+  background: var(--presence);
+}
+
+/* Away: a ring in the presence colour, so it differs by shape too. */
+.presence-mark.unavailable {
+  border: 2px solid var(--presence);
+  box-sizing: border-box;
+}
+
+.presence-mark.offline {
+  border: 2px solid var(--ink3);
+  box-sizing: border-box;
+}
+
 .call-mark {
   display: inline-flex;
   flex: none;

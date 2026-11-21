@@ -51,6 +51,7 @@ use crate::media::ImageUpload;
 use crate::notifications;
 use crate::outbox::{Content, Outbox};
 use crate::passphrase::Unlock;
+use crate::presence;
 use crate::recovery_file;
 use crate::registration::{self, Registered};
 use crate::security;
@@ -67,6 +68,7 @@ use matrix_sdk::{
             GlobalAccountDataEvent,
             direct::DirectEventContent,
             key::verification::request::ToDeviceKeyVerificationRequestEvent,
+            presence::PresenceEvent,
             room::{
                 member::SyncRoomMemberEvent,
                 message::{MessageType, OriginalSyncRoomMessageEvent},
@@ -363,6 +365,10 @@ struct Shared {
     idle_lock_minutes: AtomicU16,
     /// Who is typing in each room, from the sync.
     typing: Arc<activity::Typing>,
+    /// When this account's presence may change next (ADR-0057).
+    presence: Mutex<presence::Writer>,
+    /// The presence of the direct-message contacts.
+    contacts_presence: Arc<presence::Book>,
     security: Mutex<SecurityShared>,
     outbox: Mutex<Outbox>,
 }
@@ -739,6 +745,7 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
     shared
         .idle_lock_minutes
         .store(loaded.idle_lock_minutes, Ordering::SeqCst);
+    *guard(&shared.presence) = presence::Writer::new(loaded.share_presence, loaded.presence);
     let installed = lease.commit(|| {
         *guard(&shared.health) = SyncHealth::default();
         *guard(&shared.account) = Some(ActiveAccount {
@@ -847,6 +854,24 @@ fn run_sync(
             std::future::ready(())
         })
     };
+    // Contacts' presence from classic sync (ADR-0057); Sliding Sync has none.
+    // Contacts whose shown presence changed, at most one entry each.
+    let presence_changed: Arc<Mutex<Vec<OwnedUserId>>> = Arc::default();
+    let presence_handler = {
+        let _context = runtime.enter();
+        let book = shared.contacts_presence.clone();
+        let changed = presence_changed.clone();
+        client.add_event_handler(move |event: PresenceEvent| {
+            let status = presence::status(&event.content.presence);
+            if book.note(&event.sender, status, Instant::now()) {
+                let mut changed = guard(&changed);
+                if !changed.contains(&event.sender) && changed.len() < presence::MAX_CONTACTS {
+                    changed.push(event.sender);
+                }
+            }
+            std::future::ready(())
+        })
+    };
     // Incoming call rings and call flags (ADR-0052).
     let ring_handlers = {
         let _context = runtime.enter();
@@ -940,13 +965,21 @@ fn run_sync(
                     .map(Box::pin);
             }
             attempted_at = observed_time();
-            let rooms =
-                account::sync_round(&client, engine.as_ref().expect("selected above")).await;
+            let carried = presence_before_round(shared, &client).await;
+            let engine = engine.as_ref().expect("selected above");
+            let rooms = account::sync_round(&client, engine, carried).await;
             // Saved even when the round failed: the SDK may have refreshed the
             // token, spending the old refresh token, before the error.
             saved_token =
                 account::save_if_refreshed(&client, lease.stores(), saved_token.take()).await;
-            let rooms = rooms?;
+            let mut rooms = rooms?;
+            let looks_up = matches!(engine, account::Engine::Sliding(_));
+            let changed = std::mem::take(&mut *guard(&presence_changed));
+            for room in contacts_presence(shared, &client, looks_up, changed).await {
+                if !rooms.contains(&room) {
+                    rooms.push(room);
+                }
+            }
             let keyed = match keys.as_mut() {
                 Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
                 None => None,
@@ -1044,6 +1077,7 @@ fn run_sync(
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
     client.remove_event_handler(typing_handler);
+    client.remove_event_handler(presence_handler);
     for handler in ring_handlers {
         client.remove_event_handler(handler);
     }
@@ -1053,6 +1087,83 @@ fn run_sync(
     drop(keys);
     drop(engine);
     drop(client);
+}
+
+/// Sends a waiting presence change, then gives the `set_presence` value of
+/// the next sync request (ADR-0057). A failed or timed-out `PUT` waits for
+/// another round; it changes nothing twice, so a repeat is harmless.
+async fn presence_before_round(
+    shared: &Shared,
+    client: &Client,
+) -> matrix_sdk::ruma::presence::PresenceState {
+    let put = guard(&shared.presence).take_put(Instant::now());
+    if let Some(state) = put {
+        let sent = tokio::time::timeout(
+            presence::LOOKUP_TIMEOUT,
+            client.set_presence(state.clone(), None, true),
+        )
+        .await;
+        if !matches!(sent, Ok(Ok(()))) {
+            guard(&shared.presence).retry(state);
+        }
+    }
+    guard(&shared.presence).for_sync(Instant::now())
+}
+
+/// Tracks the direct-message contacts' presence after a round. For the due
+/// ones, Sliding Sync (`looks_up`) asks the homeserver, and classic sync
+/// reads the SDK's store. Returns the rooms whose contact's presence
+/// changed, including the contacts in `changed` from classic sync's events.
+/// A failed lookup keeps the presence as it was.
+async fn contacts_presence(
+    shared: &Shared,
+    client: &Client,
+    looks_up: bool,
+    mut changed: Vec<OwnedUserId>,
+) -> Vec<String> {
+    use matrix_sdk::ruma::api::client::presence::get_presence;
+    let mut rooms = client.joined_rooms();
+    rooms.sort_by(|a, b| a.room_id().cmp(b.room_id()));
+    let contacts: Vec<(OwnedRoomId, OwnedUserId)> = rooms
+        .iter()
+        .filter_map(|room| {
+            contacts::contact_of(client, room).map(|user| (room.room_id().to_owned(), user))
+        })
+        .take(presence::MAX_CONTACTS)
+        .collect();
+    let book = &shared.contacts_presence;
+    book.track(contacts.iter().map(|(_, user)| &**user));
+    for user in book.due(Instant::now()) {
+        let status = if looks_up {
+            let asked = tokio::time::timeout(
+                presence::LOOKUP_TIMEOUT,
+                client.send(get_presence::v3::Request::new(user.clone())),
+            )
+            .await;
+            match asked {
+                Ok(Ok(response)) => presence::status(&response.presence),
+                _ => continue,
+            }
+        } else {
+            // Classic sync: the SDK's store keeps the newest event, also of
+            // a round before the contact was tracked. No request is made.
+            match client.state_store().get_presence_event(&user).await {
+                Ok(Some(raw)) => match raw.deserialize() {
+                    Ok(event) => presence::status(&event.content.presence),
+                    Err(_) => continue,
+                },
+                _ => continue,
+            }
+        };
+        if book.note(&user, status, Instant::now()) {
+            changed.push(user);
+        }
+    }
+    contacts
+        .into_iter()
+        .filter(|(_, user)| changed.contains(user))
+        .map(|(room, _)| room.to_string())
+        .collect()
 }
 
 /// An incoming verification request as sync saw it: the sender, the flow ID,
@@ -1696,6 +1807,8 @@ impl Session {
                 send_receipts: AtomicBool::new(false),
                 idle_lock_minutes: AtomicU16::new(0),
                 typing: Arc::default(),
+                presence: Mutex::default(),
+                contacts_presence: Arc::default(),
             }),
             transition: Arc::new(Mutex::new(())),
         }
@@ -2178,6 +2291,7 @@ impl Session {
         *guard(&self.shared.security) = SecurityShared::default();
         guard(&self.shared.outbox).clear();
         self.shared.typing.clear();
+        self.shared.contacts_presence.clear();
         // No lease remains, so the sync loop is between rounds and will see
         // the lock at its next admission; join it, then drop the client inside
         // the stores' runtime before closing them.
@@ -2530,6 +2644,11 @@ impl Session {
         &self.shared.typing
     }
 
+    /// The presence of the direct-message contacts (ADR-0057).
+    pub fn contacts_presence(&self) -> &presence::Book {
+        &self.shared.contacts_presence
+    }
+
     /// Replaces this account's settings. `Ok(false)` when the store could
     /// not be written.
     pub fn set_account_settings(&self, value: AccountSettings) -> Result<bool, AdmissionError> {
@@ -2559,6 +2678,7 @@ impl Session {
                     shared
                         .idle_lock_minutes
                         .store(value.idle_lock_minutes, Ordering::SeqCst);
+                    guard(&shared.presence).configure(value.share_presence, value.presence);
                 })
                 .is_ok();
         Ok(committed)
