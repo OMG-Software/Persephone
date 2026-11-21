@@ -386,7 +386,7 @@ struct LiveRoom {
     round: AtomicUsize,
     /// Also report `PLAIN`, a room that is not encrypted.
     plain: bool,
-    /// Also report `DM`, a direct-message room with `CONTACT`.
+    /// Also report `DM`, a direct-message room with `CONTACT`, who is away.
     dm: bool,
 }
 
@@ -432,7 +432,9 @@ impl wiremock::Respond for LiveRoom {
             rooms[PLAIN] = json!({"state":{"events":plain_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
         }
         let mut account_data = json!([]);
+        let mut presence = json!([]);
         if self.dm {
+            presence = json!([{"type":"m.presence","sender":CONTACT,"content":{"presence":"unavailable"}}]);
             rooms[DM] = json!({"summary":{"m.joined_member_count":2,"m.invited_member_count":0},"state":{"events":dm_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             rooms[GROUP] = json!({"summary":{"m.joined_member_count":3,"m.invited_member_count":0},"state":{"events":group_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             account_data = json!([{"type":"m.direct","content":{CONTACT:[DM, GROUP]}}]);
@@ -440,6 +442,7 @@ impl wiremock::Respond for LiveRoom {
         ResponseTemplate::new(200).set_body_json(json!({
             "next_batch": format!("classic-{n}"),
             "account_data":{"events":account_data},
+            "presence":{"events":presence},
             "rooms":{"join":rooms},
             "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
         }))
@@ -1720,6 +1723,33 @@ fn given_a_refused_presence_change_then_it_is_not_sent_again() {
         "{:?}",
         server.sync_presence()
     );
+}
+
+/// GIVEN a direct-message contact whose classic sync reports them away WHEN
+/// the page lists rooms THEN the contact's room carries their presence, and
+/// a room without a contact carries none (ADR-0057).
+#[test]
+fn given_a_contacts_presence_then_their_room_in_the_list_carries_it() {
+    use persephone_contracts::PresenceStatus;
+    let server = Homeserver::signed_in();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut list = RoomList {
+        rooms: Vec::new(),
+        truncated: false,
+    };
+    wait_for("the contact's presence in the room list", || {
+        list = value(call(&core, Call::RoomList {}));
+        list.rooms
+            .iter()
+            .any(|room| room.room_id == DM && room.contact_presence.is_some())
+    });
+    assert!(list.rooms.iter().any(|room| room.room_id == GROUP));
+    for room in &list.rooms {
+        let expected = (room.room_id == DM).then_some(PresenceStatus::Unavailable);
+        assert_eq!(room.contact_presence, expected, "{}", room.room_id);
+    }
 }
 
 /// GIVEN a core that a test left signed in and syncing, never locked WHEN that
