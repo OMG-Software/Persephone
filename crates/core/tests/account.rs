@@ -1511,7 +1511,12 @@ impl Homeserver {
     /// The `set_presence` value of each classic sync request, in order;
     /// `online` where the request leaves it out, as the spec defaults it.
     fn sync_presence(&self) -> Vec<String> {
-        self.requests_matching("/_matrix/client/v3/sync")
+        self.presence_sent_to("/_matrix/client/v3/sync")
+    }
+
+    /// As [`Self::sync_presence`], for the requests to `endpoint`.
+    fn presence_sent_to(&self, endpoint: &str) -> Vec<String> {
+        self.requests_matching(endpoint)
             .into_iter()
             .map(|(url, _)| {
                 url.split(['?', '&'])
@@ -1548,6 +1553,54 @@ fn given_sync_rounds_that_return_at_once_then_presence_is_not_set_again_and_agai
     assert_eq!(sent[0], "online", "{sent:?}");
     assert!(sent[1..].iter().all(|value| value == "offline"), "{sent:?}");
     assert!(presence_puts(&server).is_empty());
+}
+
+/// GIVEN native Sliding Sync, whose rounds here return at once WHEN it syncs
+/// and the presence changes THEN its requests carry the writer's value as
+/// classic ones do: only the first changes the presence, setting the value
+/// makes no request, and the change is one `PUT` (ADR-0057).
+#[test]
+fn given_sliding_sync_then_its_requests_carry_the_writers_presence() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.accept_presence();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("three sliding rounds", || {
+        server.presence_sent_to(SLIDING).len() >= 3
+    });
+    let sent = server.presence_sent_to(SLIDING);
+    assert_eq!(sent[0], "online", "{sent:?}");
+    assert!(sent[1..].iter().all(|value| value == "offline"), "{sent:?}");
+    assert!(
+        presence_puts(&server).is_empty(),
+        "no request sets the value"
+    );
+    assert!(server.sync_presence().is_empty(), "no classic fallback");
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                presence: PresenceStatus::Unavailable,
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    wait_for("the change", || !presence_puts(&server).is_empty());
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        presence_puts(&server),
+        vec![json!({"presence": "unavailable"})]
+    );
 }
 
 /// GIVEN quick changes of the shared presence WHEN they are sent THEN at most

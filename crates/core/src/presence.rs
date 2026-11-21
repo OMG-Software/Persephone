@@ -30,8 +30,10 @@ use std::{
 pub const MIN_WRITE_GAP: Duration = Duration::from_secs(1);
 /// The shortest time between two sync requests that carry this account's
 /// presence. It stays below the 30 seconds after which Synapse takes a user
-/// that stopped syncing as offline, with room for one 5-second poll.
-pub const SYNC_CARRY_GAP: Duration = Duration::from_secs(20);
+/// that stopped syncing as offline, with room for one round between: a
+/// 5-second poll and the contacts' lookups, which run at once within one
+/// [`LOOKUP_TIMEOUT`]. A `PUT` in that round counts as activity itself.
+pub const SYNC_CARRY_GAP: Duration = Duration::from_secs(15);
 /// Most contacts whose presence is kept.
 pub const MAX_CONTACTS: usize = 32;
 /// Most presence lookups in one sync round.
@@ -269,21 +271,21 @@ mod tests {
     }
 
     /// GIVEN sharing is on WHEN sync rounds follow each other quickly THEN
-    /// only one request each 20 seconds carries the presence, and the others
+    /// only one request each 15 seconds carries the presence, and the others
     /// carry `offline`, which leaves it as it is.
     #[test]
-    fn given_quick_sync_rounds_then_presence_is_carried_once_in_twenty_seconds() {
+    fn given_quick_sync_rounds_then_presence_is_carried_once_in_fifteen_seconds() {
         let start = Instant::now();
         let mut writer = Writer::new(true, PresenceStatus::Online);
         assert_eq!(writer.for_sync(start), PresenceState::Online);
         let mut carried = 0;
-        for step in 1..200u64 {
+        for step in 1..150u64 {
             let at = start + Duration::from_millis(step * 100);
             if writer.for_sync(at) != PresenceState::Offline {
                 carried += 1;
             }
         }
-        assert_eq!(carried, 0, "no carry within 20 s of the first");
+        assert_eq!(carried, 0, "no carry within 15 s of the first");
         assert_eq!(
             writer.for_sync(start + SYNC_CARRY_GAP),
             PresenceState::Online

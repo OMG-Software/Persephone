@@ -1121,7 +1121,6 @@ async fn contacts_presence(
     looks_up: bool,
     mut changed: Vec<OwnedUserId>,
 ) -> Vec<String> {
-    use matrix_sdk::ruma::api::client::presence::get_presence;
     let mut rooms = client.joined_rooms();
     rooms.sort_by(|a, b| a.room_id().cmp(b.room_id()));
     let contacts: Vec<(OwnedRoomId, OwnedUserId)> = rooms
@@ -1133,29 +1132,18 @@ async fn contacts_presence(
         .collect();
     let book = &shared.contacts_presence;
     book.track(contacts.iter().map(|(_, user)| &**user));
-    for user in book.due(Instant::now()) {
-        let status = if looks_up {
-            let asked = tokio::time::timeout(
-                presence::LOOKUP_TIMEOUT,
-                client.send(get_presence::v3::Request::new(user.clone())),
-            )
-            .await;
-            match asked {
-                Ok(Ok(response)) => presence::status(&response.presence),
-                _ => continue,
-            }
-        } else {
-            // Classic sync: the SDK's store keeps the newest event, also of
-            // a round before the contact was tracked. No request is made.
-            match client.state_store().get_presence_event(&user).await {
-                Ok(Some(raw)) => match raw.deserialize() {
-                    Ok(event) => presence::status(&event.content.presence),
-                    Err(_) => continue,
-                },
-                _ => continue,
-            }
-        };
-        if book.note(&user, status, Instant::now()) {
+    let due = book.due(Instant::now());
+    // Both at once, so a round waits for one timeout at most: the round
+    // must not delay the next carried presence past the homeserver's
+    // timeout (`presence::SYNC_CARRY_GAP`).
+    let (first, second) = tokio::join!(
+        presence_of(client, due.first(), looks_up),
+        presence_of(client, due.get(1), looks_up),
+    );
+    for (user, status) in due.into_iter().zip([first, second]) {
+        if let Some(status) = status
+            && book.note(&user, status, Instant::now())
+        {
             changed.push(user);
         }
     }
@@ -1164,6 +1152,37 @@ async fn contacts_presence(
         .filter(|(_, user)| changed.contains(user))
         .map(|(room, _)| room.to_string())
         .collect()
+}
+
+// `contacts_presence` asks for exactly two contacts at once.
+const _: () = assert!(presence::LOOKUPS_PER_ROUND == 2);
+
+/// A contact's presence, or `None` when it could not be read (or there is
+/// no `user`). Sliding Sync (`looks_up`) asks the homeserver, within
+/// [`presence::LOOKUP_TIMEOUT`]. Classic sync reads the SDK's store, which
+/// keeps the newest event, also of a round before the contact was tracked;
+/// no request is made.
+async fn presence_of(
+    client: &Client,
+    user: Option<&OwnedUserId>,
+    looks_up: bool,
+) -> Option<Option<persephone_contracts::PresenceStatus>> {
+    use matrix_sdk::ruma::api::client::presence::get_presence;
+    let user = user?;
+    if looks_up {
+        let asked = tokio::time::timeout(
+            presence::LOOKUP_TIMEOUT,
+            client.send(get_presence::v3::Request::new(user.clone())),
+        )
+        .await;
+        return match asked {
+            Ok(Ok(response)) => Some(presence::status(&response.presence)),
+            _ => None,
+        };
+    }
+    let raw = client.state_store().get_presence_event(user).await.ok()??;
+    let event = raw.deserialize().ok()?;
+    Some(presence::status(&event.content.presence))
 }
 
 /// An incoming verification request as sync saw it: the sender, the flow ID,
