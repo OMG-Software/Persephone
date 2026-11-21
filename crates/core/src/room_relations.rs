@@ -1,5 +1,6 @@
 //! Bounded reads for pin replacement relations only. Other SDK responses do
 //! not use this limit. The caller owns the total deadline and session lease.
+use crate::bounded::{self, RequestError};
 use matrix_sdk::{
     Client, Room,
     deserialized_responses::{TimelineEvent, TimelineEventKind},
@@ -16,7 +17,6 @@ use matrix_sdk::{
 use persephone_core_protocol::ErrorCode;
 use serde::Deserialize;
 use std::borrow::Cow;
-use zeroize::Zeroizing;
 
 pub(crate) const MAX_RELATION_BYTES: usize = 256 * 1024;
 const MAX_RELATIONS: usize = 20;
@@ -82,59 +82,32 @@ pub(crate) async fn replacements(
     Ok(events)
 }
 
-/// Refresh only after a bounded Matrix unknown-token response. Rebuild the
-/// authorization header from the SDK session, and retry at most once.
+/// Read one page through the shared bounded request, which caps each body
+/// (error bodies too), refreshes the token at most once after an unknown
+/// token answer, and retries at most once.
 async fn request_page(client: &Client, url: &str) -> Result<Page, ErrorCode> {
-    for attempt in 0..2 {
-        let token = Zeroizing::new(client.access_token().ok_or(ErrorCode::Locked)?);
-        let response = client
-            .http_client()
-            .get(url)
-            .bearer_auth(token.as_str())
-            .send()
-            .await
-            .map_err(|_| ErrorCode::Unavailable)?;
-        let status = response.status();
-        let body = read_body(response).await?;
-        if status.is_success() {
-            return parse_page(&body);
-        }
-        if attempt == 0 && status.as_u16() == 401 {
-            #[derive(Deserialize)]
-            struct MatrixError {
-                errcode: String,
-            }
-            if serde_json::from_slice::<MatrixError>(&body)
-                .is_ok_and(|error| error.errcode == "M_UNKNOWN_TOKEN")
-            {
-                client
-                    .refresh_access_token()
-                    .await
-                    .map_err(|_| ErrorCode::Unavailable)?;
-                continue;
-            }
-        }
+    let answer = bounded::send_to(
+        client,
+        reqwest::Method::GET,
+        url,
+        None,
+        MAX_RELATION_BYTES,
+        None,
+    )
+    .await
+    .map_err(error_code)?;
+    if !answer.is_success() {
         return Err(ErrorCode::Unavailable);
     }
-    Err(ErrorCode::Unavailable)
+    parse_page(&answer.body)
 }
 
-/// Check body size before extending the buffer, including error responses.
-async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, ErrorCode> {
-    if response
-        .content_length()
-        .is_some_and(|size| size > MAX_RELATION_BYTES as u64)
-    {
-        return Err(ErrorCode::LimitExceeded);
+fn error_code(error: RequestError) -> ErrorCode {
+    match error {
+        RequestError::TooLarge(_) => ErrorCode::LimitExceeded,
+        RequestError::NoSession => ErrorCode::Locked,
+        RequestError::Network => ErrorCode::Unavailable,
     }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| ErrorCode::Unavailable)? {
-        if chunk.len() > MAX_RELATION_BYTES.saturating_sub(body.len()) {
-            return Err(ErrorCode::LimitExceeded);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 /// Reject incomplete pages and excessive raw events before SDK decryption.
@@ -148,12 +121,13 @@ fn parse_page(body: &[u8]) -> Result<Page, ErrorCode> {
 #[cfg(test)]
 /// Exercise the shared body cap and complete-page parser without a Matrix session.
 async fn read_page(response: reqwest::Response) -> Result<Page, ErrorCode> {
-    let success = response.status().is_success();
-    let body = read_body(response).await?;
-    if !success {
+    let answer = bounded::read(response, MAX_RELATION_BYTES)
+        .await
+        .map_err(error_code)?;
+    if !answer.is_success() {
         return Err(ErrorCode::Unavailable);
     }
-    parse_page(&body)
+    parse_page(&answer.body)
 }
 
 #[cfg(test)]

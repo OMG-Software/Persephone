@@ -7,7 +7,7 @@
 use super::MAX_CALL_MEMBERS;
 use super::controller::{CallError, CallState, EndReason, now_ms};
 use super::membership::{EVENT_TYPE, participant_identity, read_members};
-use super::readiness::sfu_transport;
+use super::readiness::{Discovery, sfu_transport};
 use super::worker::StartError;
 use matrix_sdk::{
     Client, RoomState,
@@ -51,6 +51,7 @@ pub fn join_error(error: CallError) -> Option<CallJoinError> {
         CallError::NotJoined => CallJoinError::NotJoined,
         CallError::NotEncrypted => CallJoinError::NotEncrypted,
         CallError::NoSfu => CallJoinError::NoCallServer,
+        CallError::SfuUnsupported => CallJoinError::CallServerUnsupported,
         CallError::Declined => CallJoinError::Declined,
         CallError::ProxyUnreadable => CallJoinError::ProxyUnreadable,
         CallError::DeviceSettingUnreadable => CallJoinError::DeviceSettingUnreadable,
@@ -155,6 +156,8 @@ pub enum RoomFacts {
 pub enum ServerFacts {
     Offered,
     None,
+    /// It offers transports, but none that Persephone can use (ADR-0056).
+    Unsupported,
     Unreachable,
 }
 
@@ -185,6 +188,7 @@ pub fn server_reason(server: ServerFacts) -> Option<CallUnavailable> {
     match server {
         ServerFacts::Offered => None,
         ServerFacts::None => Some(CallUnavailable::NoCallServer),
+        ServerFacts::Unsupported => Some(CallUnavailable::CallServerUnsupported),
         ServerFacts::Unreachable => Some(CallUnavailable::ServerUnreachable),
     }
 }
@@ -230,8 +234,9 @@ pub async fn readiness(client: &Client, room_id: &RoomId, supported: bool) -> Ca
     let reason = match local_reason(supported, facts) {
         Some(reason) => Some(reason),
         None => server_reason(match sfu_transport(client).await {
-            Ok(Some(_)) => ServerFacts::Offered,
-            Ok(None) => ServerFacts::None,
+            Ok(Discovery::Offered(_)) => ServerFacts::Offered,
+            Ok(Discovery::NoneOffered) => ServerFacts::None,
+            Ok(Discovery::Unsupported) => ServerFacts::Unsupported,
             Err(_) => ServerFacts::Unreachable,
         }),
     };
@@ -402,6 +407,10 @@ mod tests {
             (CallError::NotJoined, CallJoinError::NotJoined),
             (CallError::NotEncrypted, CallJoinError::NotEncrypted),
             (CallError::NoSfu, CallJoinError::NoCallServer),
+            (
+                CallError::SfuUnsupported,
+                CallJoinError::CallServerUnsupported,
+            ),
             (CallError::Declined, CallJoinError::Declined),
             (CallError::ProxyUnreadable, CallJoinError::ProxyUnreadable),
             (
@@ -568,6 +577,10 @@ mod tests {
         assert_eq!(
             server_reason(ServerFacts::None),
             Some(CallUnavailable::NoCallServer)
+        );
+        assert_eq!(
+            server_reason(ServerFacts::Unsupported),
+            Some(CallUnavailable::CallServerUnsupported)
         );
         assert_eq!(
             server_reason(ServerFacts::Unreachable),

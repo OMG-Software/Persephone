@@ -52,19 +52,27 @@ pub fn is_other_host(url: &Url) -> bool {
 /// A member whose first acceptable transport is the own SFU is on the own
 /// SFU only, so it is never taken from another. Otherwise its other SFU is
 /// the first acceptable transport that differs from the own one (as the
-/// parsed URL string) and whose host is a DNS name.
+/// parsed URL string), whose host is a DNS name and that is a JWT service
+/// (`https`). An SFU that only a homeserver issues tokens for (`wss`,
+/// ADR-0056) is never another SFU: this core cannot get a token for it.
+/// A member whose first transport is such an SFU publishes there, so it is
+/// nowhere, not on a later JWT service.
 pub fn home<'a>(member: &'a ActiveMember, own: &Url) -> Home<'a> {
-    if member
-        .transports
-        .first()
-        .is_some_and(|first| first.as_str() == own.as_str())
-    {
+    let first = member.transports.first();
+    if first.is_some_and(|first| first.as_str() == own.as_str()) {
         return Home::Own;
+    }
+    if first.is_some_and(|first| matches!(first.scheme(), "wss" | "ws")) {
+        return Home::Nowhere;
     }
     member
         .transports
         .iter()
-        .find(|transport| transport.as_str() != own.as_str() && is_other_host(transport))
+        .find(|transport| {
+            transport.as_str() != own.as_str()
+                && transport.scheme() == "https"
+                && is_other_host(transport)
+        })
         .map_or(Home::Nowhere, Home::Other)
 }
 
@@ -280,6 +288,7 @@ mod tests {
             user_id: OwnedUserId::try_from(format!("@{name}:example.org")).unwrap(),
             device_id: OwnedDeviceId::from("D"),
             identity: format!("@{name}:example.org:D"),
+            backend_identities: vec![format!("@{name}:example.org:D")],
             service_url: transports[0].clone(),
             transports,
             joined_ts: 0,
@@ -319,6 +328,33 @@ mod tests {
         assert_eq!(
             home(&path, &own()),
             Home::Other(&url("https://sfu.own.example/other"))
+        );
+    }
+
+    /// GIVEN a member on an SFU that its homeserver issues tokens for (`wss`)
+    /// WHEN its home is asked
+    /// THEN it is the own SFU when the own SFU is that one, else it is never
+    /// another SFU and is nowhere, also with a later JWT service, because it
+    /// publishes on its first transport (ADR-0056).
+    #[test]
+    fn given_a_homeserver_flow_sfu_then_it_is_never_another_sfu() {
+        let own_wss = url("wss://sfu.own.example:7443");
+        let same = member("a", &["wss://sfu.own.example:7443"]);
+        assert_eq!(home(&same, &own_wss), Home::Own);
+        let elsewhere = member("a", &["wss://sfu.b.example"]);
+        assert_eq!(home(&elsewhere, &own()), Home::Nowhere);
+        assert_eq!(home(&elsewhere, &own_wss), Home::Nowhere);
+        let then_service = member("a", &["wss://sfu.b.example", "https://sfu.c.example"]);
+        assert_eq!(home(&then_service, &own_wss), Home::Nowhere);
+        assert_eq!(home(&then_service, &own()), Home::Nowhere);
+        let plain = member("a", &["ws://127.0.0.1:7880", "https://sfu.c.example"]);
+        assert_eq!(home(&plain, &own()), Home::Nowhere);
+        // A first JWT service that cannot be another SFU (a loopback `http`
+        // one of the development feature) is skipped, as an IP literal is.
+        let loopback = member("a", &["http://127.0.0.1:8080/jwt", "https://sfu.c.example"]);
+        assert_eq!(
+            home(&loopback, &own()),
+            Home::Other(&url("https://sfu.c.example"))
         );
     }
 

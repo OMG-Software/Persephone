@@ -118,6 +118,11 @@ Proposed option: "a contained call worker".
   no user information, and the length limit. The advertised string is kept
   byte for byte. The core still writes the legacy form in its own
   membership, because Element Call's compatibility mode reads that form.
+  Replaced in part by
+  [ADR-0056](0056-get-call-tokens-from-the-homeserver-when-it-issues-them.md):
+  a `url` transport names the SFU (`wss://`), and its token comes from the
+  homeserver. An `https://` `url` is no longer accepted. The core reads the
+  transports with its own requests, not with `discover_rtc_transports()`.
 * SFU token: an OpenID token from the homeserver, sent to the
   transport's `/sfu/get`. The response URL must be `wss://`.
 * Frame keys: a new 32-byte random key for each rotation, with indices

@@ -20,11 +20,11 @@ use super::encryption_keys::{self, IncomingKey};
 use super::incoming::{self, Candidate};
 use super::keys::{KeyError, Outgoing, OwnKeys, Recipients, RemoteKeys};
 use super::membership::{
-    ActiveMember, DELAYED_LEAVE_RESTART, EVENT_TYPE, MEMBERSHIP_REFRESH, leave_content,
-    own_membership, own_state_key, participant_identity, read_members,
+    ActiveMember, DELAYED_LEAVE_RESTART, EVENT_TYPE, MEMBERSHIP_REFRESH, hashed_identity,
+    leave_content, own_membership, own_state_key, participant_identity, read_members,
 };
 use super::other_sfu::{Home, MAX_OTHER_SFUS, OtherSfus, Plan, home, is_other_host};
-use super::readiness::{TurnServers, sfu_transport, turn_servers};
+use super::readiness::{Discovery, Flow, TurnServers, sfu_transport, turn_servers};
 use super::rings::{self, Plan as RingPlan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
@@ -50,7 +50,7 @@ use persephone_call_protocol::{
 };
 use persephone_contracts::{CallCamera, CallParticipantRef, CallScreen, CallVideoTile};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     future::Future,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -83,6 +83,13 @@ const MAX_PARKED: usize = 8;
 /// How long such a key is held back.
 const PARK_TIME: Duration = Duration::from_secs(30);
 
+/// Wait before a key that did not fit in the worker queue goes again.
+const UNSENT_RETRY: Duration = Duration::from_millis(200);
+
+/// Most remote keys of one member waiting for room in the worker queue: every
+/// stored key under each of at most two backend identities.
+const MAX_UNSENT_PER_MEMBER: usize = 2 * crate::calls::keys::MAX_KEYS_PER_MEMBER;
+
 /// Waiting commands for the running call.
 const COMMAND_QUEUE: usize = 8;
 
@@ -95,8 +102,11 @@ pub enum CallError {
     /// The room is not encrypted, or its state is unknown. A call never
     /// runs without frame encryption.
     NotEncrypted,
-    /// The homeserver offers no usable SFU, or could not be asked.
+    /// The homeserver offers no SFU, or could not be asked.
     NoSfu,
+    /// The homeserver offers SFUs, but none that Persephone can use
+    /// (ADR-0056).
+    SfuUnsupported,
     /// The profile has a proxy and the user did not allow a direct call.
     Declined,
     /// The profile's proxy setting could not be read.
@@ -214,27 +224,36 @@ pub async fn proxy_configured(stores: &crate::store::Stores) -> Result<bool, Cal
 // ---------------------------------------------------------------------
 // Pure parts.
 
-/// Who joined and left since the last look, by participant identity.
+/// One membership: the device (`{user}:{device}`) and its `membershipID`.
+/// Two devices may share a membership ID (ADR-0056), so the ID alone does not
+/// name a member; a device that joins again with a new ID is a new
+/// membership.
+type MemberKey = (String, String);
+
+fn member_key(member: &ActiveMember) -> MemberKey {
+    (
+        participant_identity(&member.user_id, &member.device_id),
+        member.identity.clone(),
+    )
+}
+
+/// Who joined and left since the last look, by membership.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct MemberDiff {
-    joined: Vec<String>,
-    left: Vec<String>,
+    joined: Vec<MemberKey>,
+    left: Vec<MemberKey>,
 }
 
 /// The change from `known` to `current`.
-fn diff_members(known: &BTreeSet<String>, current: &[ActiveMember]) -> MemberDiff {
-    let now: BTreeSet<&str> = current.iter().map(|m| m.identity.as_str()).collect();
+fn diff_members(known: &BTreeSet<MemberKey>, current: &[ActiveMember]) -> MemberDiff {
+    let now: BTreeSet<MemberKey> = current.iter().map(member_key).collect();
     MemberDiff {
         joined: current
             .iter()
-            .filter(|m| !known.contains(&m.identity))
-            .map(|m| m.identity.clone())
+            .map(member_key)
+            .filter(|key| !known.contains(key))
             .collect(),
-        left: known
-            .iter()
-            .filter(|id| !now.contains(id.as_str()))
-            .cloned()
-            .collect(),
+        left: known.difference(&now).cloned().collect(),
     }
 }
 
@@ -259,13 +278,13 @@ fn key_action(
 fn recipients(
     outgoing: &Outgoing,
     members: &[ActiveMember],
-    joined: &[String],
+    joined: &[MemberKey],
 ) -> Vec<(OwnedUserId, OwnedDeviceId)> {
     members
         .iter()
         .filter(|m| match outgoing.recipients {
             Recipients::AllMembers => true,
-            Recipients::NewMembersOnly => joined.contains(&m.identity),
+            Recipients::NewMembersOnly => joined.contains(&member_key(m)),
         })
         .take(MAX_CALL_MEMBERS)
         .map(|m| (m.user_id.clone(), m.device_id.clone()))
@@ -401,26 +420,44 @@ impl View {
         }
     }
 
-    fn is_member(&self, identity: &str) -> bool {
-        self.members.iter().any(|m| m.identity == identity)
-    }
-
-    /// Whether the member `identity` shares a screen: a connection that
-    /// speaks for the member said so.
-    fn is_sharing(&self, identity: &str) -> bool {
-        self.sharing
+    /// The member whose device `identity` names, as frame keys name a
+    /// member: `{user}:{device}` of the authenticated sender (ADR-0056).
+    fn key_member(&self, identity: &str) -> Option<&ActiveMember> {
+        self.members
             .iter()
-            .any(|(connection, id)| id == identity && self.accepts(*connection, id))
+            .find(|m| participant_identity(&m.user_id, &m.device_id) == identity)
     }
 
-    /// Whether a participant of this worker connection may stand for the
-    /// member `identity` (ADR-0054). Connection 0 speaks for the members on
+    /// Whether `identity` names a current member's device (see
+    /// [`View::key_member`]).
+    fn is_member(&self, identity: &str) -> bool {
+        self.key_member(identity).is_some()
+    }
+
+    /// The member that a worker participant identity stands for: one of its
+    /// backend identities (ADR-0056).
+    fn backend_member(&self, participant: &str) -> Option<&ActiveMember> {
+        self.members
+            .iter()
+            .find(|m| m.backend_identities.iter().any(|id| id == participant))
+    }
+
+    /// Whether `member` shares a screen: a connection that speaks for the
+    /// member said so for one of its backend identities.
+    fn is_sharing(&self, member: &ActiveMember) -> bool {
+        self.sharing.iter().any(|(connection, id)| {
+            member.backend_identities.contains(id) && self.accepts(*connection, id)
+        })
+    }
+
+    /// Whether the participant `identity` of this worker connection may
+    /// stand for a member (ADR-0054). Connection 0 speaks for the members on
     /// the own SFU. Connection `n` (1 to 3) speaks only for members whose
     /// membership names the SFU of that connection. Anything else is
     /// ignored: a member on another SFU also shows as a silent participant
     /// on the own SFU, and an SFU can name any identity.
     fn accepts(&self, connection: u8, identity: &str) -> bool {
-        let Some(member) = self.members.iter().find(|m| m.identity == identity) else {
+        let Some(member) = self.backend_member(identity) else {
             return false;
         };
         match home(member, &self.own_sfu) {
@@ -432,8 +469,19 @@ impl View {
 
     fn set_members(&mut self, members: Vec<ActiveMember>) {
         self.members = members;
-        let present: HashSet<&str> = self.members.iter().map(|m| m.identity.as_str()).collect();
-        self.speaking.retain(|id| present.contains(id.as_str()));
+        // `speaking` holds worker participant identities, `keyed` holds
+        // devices as keys name them.
+        let present: HashSet<String> = self
+            .members
+            .iter()
+            .map(|m| participant_identity(&m.user_id, &m.device_id))
+            .collect();
+        let backends: HashSet<&str> = self
+            .members
+            .iter()
+            .flat_map(|m| m.backend_identities.iter().map(String::as_str))
+            .collect();
+        self.speaking.retain(|id| backends.contains(id.as_str()));
         self.keyed.retain(|id| present.contains(id.as_str()));
         // `sharing` keeps hints of identities that are not members yet: the
         // worker can hear of a share before the membership arrives.
@@ -552,7 +600,7 @@ impl View {
             let Some(member) = slot
                 .as_ref()
                 .filter(|(connection, identity)| self.accepts(*connection, identity))
-                .and_then(|(_, identity)| self.members.iter().find(|m| m.identity == *identity))
+                .and_then(|(_, identity)| self.backend_member(identity))
             else {
                 continue;
             };
@@ -595,7 +643,7 @@ impl View {
                 // it. An identity that is not a member yet is kept with its
                 // connection, up to the bound; it shows once its membership
                 // names that connection's SFU.
-                let member = self.is_member(identity);
+                let member = self.backend_member(identity).is_some();
                 if member && !self.accepts(*connection, identity) {
                     return Applied::Same;
                 }
@@ -748,14 +796,19 @@ impl View {
                 .map(|m| Participant {
                     user_id: m.user_id.clone(),
                     device_id: m.device_id.clone(),
-                    speaking: self.speaking.contains(&m.identity),
+                    speaking: m
+                        .backend_identities
+                        .iter()
+                        .any(|id| self.speaking.contains(id)),
                     reachable: match home(m, &self.own_sfu) {
                         Home::Own => true,
                         Home::Other(url) => self.other.is_connected(url),
                         Home::Nowhere => false,
                     },
-                    keyed: self.keyed.contains(&m.identity),
-                    sharing: self.is_sharing(&m.identity),
+                    keyed: self
+                        .keyed
+                        .contains(&participant_identity(&m.user_id, &m.device_id)),
+                    sharing: self.is_sharing(m),
                 })
                 .collect(),
             camera: self.camera,
@@ -1326,9 +1379,11 @@ impl CallController {
 
         // 3. An SFU; TURN is optional.
         let sfu = match sfu_transport(client).await {
-            Ok(Some(service)) => service,
-            _ => return Err(CallError::NoSfu),
+            Ok(Discovery::Offered(service)) => service,
+            Ok(Discovery::Unsupported) => return Err(CallError::SfuUnsupported),
+            Ok(Discovery::NoneOffered) | Err(_) => return Err(CallError::NoSfu),
         };
+        let focus = sfu.focus(room_id.as_str());
         let turn = turn_servers(client).await.ok().flatten();
         flags.halt()?;
 
@@ -1392,7 +1447,7 @@ impl CallController {
                     state_key: state_key.clone(),
                     user_id: user_id.clone(),
                     device_id: device_id.clone(),
-                    sfu_url: sfu.advertised.clone(),
+                    focus: focus.clone(),
                     created_ts,
                     video: scope.video,
                 },
@@ -1417,14 +1472,7 @@ impl CallController {
         flags.halt()?;
 
         // 6. Own membership.
-        let content = own_membership(
-            room_id.as_str(),
-            &device_id,
-            &user_id,
-            &sfu.advertised,
-            Some(created_ts),
-            scope.video,
-        );
+        let content = own_membership(&device_id, &user_id, &focus, Some(created_ts), scope.video);
         // Set before the send: a timeout or a lost answer may hide a write.
         setup.membership_sent = true;
         let membership = time::timeout(
@@ -1458,20 +1506,42 @@ impl CallController {
             );
         }
 
-        // 7. The SFU grant.
-        let openid = client
-            .send(request_openid_token::v3::Request::new(user_id.clone()))
-            .await
-            .map_err(|_| CallError::OpenId)?;
-        let body = sfu::request_body(room_id, &device_id, &OpenIdToken::from(openid));
-        let grant = sfu::get_grant(client.http_client(), &sfu.url, &body)
-            .await
-            .map_err(CallError::Sfu)?;
+        // 7. The SFU grant: from the JWT service, or from the homeserver
+        // (ADR-0056). The LiveKit identity follows the flow.
+        let own_identity = participant_identity(&user_id, &device_id);
+        let (grant, own_backend) = match sfu.flow {
+            Flow::OpenId => {
+                let openid = client
+                    .send(request_openid_token::v3::Request::new(user_id.clone()))
+                    .await
+                    .map_err(|_| CallError::OpenId)?;
+                let body = sfu::request_body(room_id, &device_id, &OpenIdToken::from(openid));
+                let grant = sfu::get_grant(client.http_client(), &sfu.url, &body)
+                    .await
+                    .map_err(CallError::Sfu)?;
+                (grant, own_identity.clone())
+            }
+            Flow::Homeserver => {
+                let server_name = user_id.server_name().to_string();
+                let grant = sfu::get_homeserver_grant(
+                    client,
+                    sfu::TokenFor {
+                        sfu: &sfu.url,
+                        advertised: &sfu.advertised,
+                        server_name: &server_name,
+                        room_id,
+                        member_id: &own_identity,
+                    },
+                )
+                .await
+                .map_err(CallError::Sfu)?;
+                (grant, hashed_identity(&user_id, &own_identity))
+            }
+        };
         flags.halt()?;
 
         // 8. Keys, then the worker joins.
         let own_keys = OwnKeys::new(Instant::now()).map_err(|_| CallError::Keys)?;
-        let own_identity = participant_identity(&user_id, &device_id);
         let link = setup.link.take().ok_or(CallError::Keys)?;
         // On the portal path the worker needs the PipeWire remote before its
         // camera opens. The call task asks the portal first and then turns
@@ -1482,7 +1552,7 @@ impl CallController {
             jwt: grant.jwt.clone(),
             turn: turn_for_worker(turn),
             relay_only: false,
-            own_identity: own_identity.clone(),
+            own_identity: own_backend,
             own_key: worker_key(own_keys.current()),
             recording_device: scope.devices.recording.clone(),
             playout_device: scope.devices.playout.clone(),
@@ -1505,6 +1575,8 @@ impl CallController {
             own_device: device_id,
             own_keys,
             remote: RemoteKeys::new(),
+            unsent: BTreeMap::new(),
+            unsent_retry: None,
             view: View::new(room_id.to_owned(), sfu.url, scope.video)
                 .with_video_streams(video_streams)
                 .with_volume(scope.devices.volume()),
@@ -1931,8 +2003,8 @@ struct KeeperMembership {
     state_key: String,
     user_id: OwnedUserId,
     device_id: OwnedDeviceId,
-    /// As advertised (`SfuService::advertised`).
-    sfu_url: String,
+    /// The `foci_preferred` entry (`SfuService::focus`).
+    focus: serde_json::Value,
     created_ts: u64,
     /// The `m.call.intent` of the join; a refresh keeps it.
     video: bool,
@@ -1985,10 +2057,9 @@ async fn keeper(
                             return;
                         };
                         let content = own_membership(
-                            membership.room_id.as_str(),
                             &membership.device_id,
                             &membership.user_id,
-                            &membership.sfu_url,
+                            &membership.focus,
                             Some(membership.created_ts),
                             membership.video,
                         );
@@ -2018,6 +2089,13 @@ struct Call {
     own_device: OwnedDeviceId,
     own_keys: OwnKeys,
     remote: RemoteKeys,
+    /// Remote keys the worker queue had no room for, by member device
+    /// (`{user}:{device}`): each a backend identity and a key index, oldest
+    /// first. Only current members go in, each with at most
+    /// [`MAX_UNSENT_PER_MEMBER`] keys.
+    unsent: BTreeMap<String, VecDeque<(String, u8)>>,
+    /// When the keys of `unsent` go again.
+    unsent_retry: Option<Instant>,
     view: View,
     changes: mpsc::Receiver<()>,
     incoming: mpsc::Receiver<Candidate>,
@@ -2910,6 +2988,103 @@ impl Call {
             .map_err(|_| EndReason::WorkerStopped)
     }
 
+    /// Notes keys of `device` (a backend identity and a key index each) that
+    /// must still go to the worker, oldest first. A key already waiting is
+    /// not added twice, and past [`MAX_UNSENT_PER_MEMBER`] the oldest goes.
+    fn mark_unsent(&mut self, device: String, keys: impl IntoIterator<Item = (String, u8)>) {
+        let waiting = self.unsent.entry(device).or_default();
+        for key in keys {
+            if !waiting.contains(&key) {
+                waiting.push_back(key);
+            }
+        }
+        while waiting.len() > MAX_UNSENT_PER_MEMBER {
+            waiting.pop_front();
+        }
+        self.unsent_retry
+            .get_or_insert_with(|| Instant::now() + UNSENT_RETRY);
+    }
+
+    /// Gives the worker the keys in `unsent`, oldest first, while its queue
+    /// has room. Each goes with the bytes stored for its index now, and only
+    /// while its device is a member that still has that backend identity;
+    /// otherwise it is dropped. A key that goes is not sent again, so a
+    /// retry with little room goes on where the last one stopped. A device
+    /// is shown as keyed once a key of it was queued and none of its keys
+    /// waits, so each of its backend identities has the key: `true` when
+    /// that changed what the page shows. Only a closed queue is an error.
+    fn send_unsent(&mut self) -> Result<bool, EndReason> {
+        self.unsent_retry = None;
+        let mut keyed = false;
+        let mut pending = std::mem::take(&mut self.unsent).into_iter();
+        while let Some((device, mut waiting)) = pending.next() {
+            let Some(backends) = self
+                .view
+                .key_member(&device)
+                .map(|m| m.backend_identities.clone())
+            else {
+                continue;
+            };
+            let mut sent = false;
+            while let Some((identity, index)) = waiting.front() {
+                // Only the key that goes is copied out of the store.
+                let stored = if backends.contains(identity) {
+                    self.remote.get(&device, *index)
+                } else {
+                    None
+                };
+                let Some(bytes) = stored else {
+                    waiting.pop_front();
+                    continue;
+                };
+                let key = ToWorker::SetKey {
+                    identity: identity.clone(),
+                    key: FrameKeyMsg {
+                        index: *index,
+                        bytes: Zeroizing::new(bytes.to_vec()),
+                    },
+                };
+                if !self.queue_worker(key)? {
+                    // Devices that left drop out here too, so the map holds
+                    // only current members.
+                    self.unsent.insert(device, waiting);
+                    let view = &self.view;
+                    self.unsent
+                        .extend(pending.filter(|(device, _)| view.key_member(device).is_some()));
+                    self.unsent_retry = Some(Instant::now() + UNSENT_RETRY);
+                    return Ok(keyed);
+                }
+                waiting.pop_front();
+                sent = true;
+            }
+            if sent {
+                keyed |= self.view.keyed.insert(device);
+            }
+        }
+        Ok(keyed)
+    }
+
+    /// Switches the worker to the own key in `pending`, which is due. When
+    /// the queue is full, the switch waits for the next retry instead of
+    /// ending the call: the members already have the key, and the old one
+    /// stays in use until then.
+    fn apply_own_key(&self, pending: &mut Option<(Instant, FrameKeyMsg)>) -> Result<(), EndReason> {
+        if let Some((_, key)) = pending.take()
+            && !self.queue_worker(ToWorker::SetOwnKey { key: key.clone() })?
+        {
+            *pending = Some((Instant::now() + UNSENT_RETRY, key));
+        }
+        Ok(())
+    }
+
+    /// Queues `message` when the worker's queue has room: `false` when it is
+    /// full. Only a closed queue is an error.
+    fn queue_worker(&self, message: ToWorker) -> Result<bool, EndReason> {
+        self.link
+            .try_queue(message)
+            .map_err(|_| EndReason::WorkerStopped)
+    }
+
     fn send_all(&self, messages: Vec<ToWorker>) -> Result<(), EndReason> {
         messages
             .into_iter()
@@ -3053,6 +3228,7 @@ impl Call {
         let wake = plain(&self.screen_control).wake.clone();
         loop {
             let due = pending_own.as_ref().map(|(at, _)| *at);
+            let retry = self.unsent_retry;
             tokio::select! {
                 _ = &mut *stop => return Ok(()),
                 () = wake.notified() => self.take_waiting_stop(inner, u64::MAX)?,
@@ -3116,9 +3292,15 @@ impl Call {
                         Some(at) => time::sleep_until(at.into()).await,
                         None => std::future::pending().await,
                     }
+                } => self.apply_own_key(&mut pending_own)?,
+                () = async {
+                    match retry {
+                        Some(at) => time::sleep_until(at.into()).await,
+                        None => std::future::pending().await,
+                    }
                 } => {
-                    if let Some((_, key)) = pending_own.take() {
-                        self.send_worker(ToWorker::SetOwnKey { key })?;
+                    if self.send_unsent()? {
+                        self.publish(inner);
                     }
                 }
             }
@@ -3140,20 +3322,18 @@ impl Call {
         let Some(all) = self.read_members().await? else {
             return Ok(());
         };
-        let has_self = all.iter().any(|m| m.identity == self.own_identity);
+        let has_self = all.iter().any(|m| is_own(m, &self.own_identity));
         if has_self {
             *seen_self = true;
         } else if *seen_self {
             return Err(EndReason::MembershipLost);
         }
         let current = others(all, &self.own_identity);
-        let known: BTreeSet<String> = self
-            .view
-            .members
-            .iter()
-            .map(|m| m.identity.clone())
-            .collect();
+        let known: BTreeSet<MemberKey> = self.view.members.iter().map(member_key).collect();
         let diff = diff_members(&known, &current);
+        // The worker knows members by their backend identities, which can
+        // change with a membership (ADR-0056).
+        let backends = backend_changes(&self.view.members, &current);
         self.view.set_members(current);
         // The video filter follows the members at once, so a later error
         // cannot leave a departed member's picture allowed. A video stream
@@ -3162,16 +3342,26 @@ impl Call {
         if !diff.left.is_empty() {
             let view = &self.view;
             self.remote.retain_members(|id| view.is_member(id));
-            for identity in &diff.left {
-                // The tile keeps its track: the worker still receives it, and
-                // the member filter hides the tile and drops its picture
-                // until the membership returns. `ParticipantLeft` and
-                // `VideoStopped` end the assignment.
-                self.send_worker(ToWorker::RemoveParticipant {
-                    identity: identity.clone(),
-                })?;
+        }
+        // These go only when the queue has room: a full queue must not end
+        // the call, and only a closed one does. The worker ignores
+        // `RemoveParticipant`, so one that does not fit is not sent again.
+        for identity in backends.removed {
+            // The tile keeps its track: the worker still receives it, and
+            // the member filter hides the tile and drops its picture
+            // until the membership returns. `ParticipantLeft` and
+            // `VideoStopped` end the assignment.
+            if !self.queue_worker(ToWorker::RemoveParticipant { identity })? {
+                break;
             }
         }
+        // A member that now has another backend identity keeps its keys
+        // under the new one too.
+        for (device, added) in backends.added {
+            let keys = replay_keys(&self.remote.indices_of(&device), &added);
+            self.mark_unsent(device, keys);
+        }
+        self.send_unsent()?;
         if let Some(outgoing) = key_action(&diff, &mut self.own_keys, Instant::now())
             .map_err(|_| EndReason::KeysUnavailable)?
         {
@@ -3211,11 +3401,30 @@ impl Call {
                 index,
                 bytes,
             }) => {
-                self.view.keyed.insert(identity.clone());
-                self.send_worker(ToWorker::SetKey {
+                // The worker decrypts by LiveKit identity, so the key goes
+                // under each backend identity of the member (ADR-0056).
+                // `accept` took the key only for a current member's device,
+                // by the same match as `key_member`, so the member is found.
+                // Should that ever fail, or should the member have no backend
+                // identity (two devices with one membership ID), the key
+                // reaches no worker participant and is not shown as keyed.
+                let Some(backends) = self
+                    .view
+                    .key_member(&identity)
+                    .map(|m| m.backend_identities.clone())
+                    .filter(|backends| !backends.is_empty())
+                else {
+                    return Ok(());
+                };
+                // The key goes as a waiting key does, so one rule says when
+                // the member is shown as keyed: once each of its backend
+                // identities has it. What does not fit goes at the retry.
+                drop(bytes);
+                self.mark_unsent(
                     identity,
-                    key: FrameKeyMsg { index, bytes },
-                })?;
+                    backends.into_iter().map(|backend| (backend, index)),
+                );
+                self.send_unsent()?;
                 self.publish(inner);
             }
             Err(refusal) if refusal.is_early() => {
@@ -3274,11 +3483,72 @@ impl Call {
     }
 }
 
+/// The keys to give under a member's new backend identities `added`: every
+/// stored key index, at most [`crate::calls::keys::MAX_KEYS_PER_MEMBER`],
+/// under each identity, in the order of `indices` (oldest first). Key indices wrap at 256
+/// and a late key may arrive after a newer one, so neither the index nor the
+/// arrival order says which key the member uses; all of them go. They wait
+/// for room in the worker queue, so they cannot end the call.
+fn replay_keys(indices: &[u8], added: &[String]) -> Vec<(String, u8)> {
+    indices
+        .iter()
+        .flat_map(|index| added.iter().map(|identity| (identity.clone(), *index)))
+        .collect()
+}
+
+/// What the worker must hear when the members change (ADR-0056).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BackendChanges {
+    /// Backend identities that no current member has any more.
+    removed: Vec<String>,
+    /// For each device (`{user}:{device}`, as keys name it) that stayed,
+    /// the backend identities it has now and did not have before.
+    added: Vec<(String, Vec<String>)>,
+}
+
+/// The backend identity changes from `old` to `new`, matched by device.
+fn backend_changes(old: &[ActiveMember], new: &[ActiveMember]) -> BackendChanges {
+    let mut changes = BackendChanges::default();
+    // An identity is removed only when no current member has it: it can
+    // move from a device that left to another device of the same user.
+    let current: BTreeSet<&String> = new.iter().flat_map(|m| &m.backend_identities).collect();
+    for before in old {
+        let device = participant_identity(&before.user_id, &before.device_id);
+        let after = new
+            .iter()
+            .find(|m| m.user_id == before.user_id && m.device_id == before.device_id);
+        let now: &[String] = after.map_or(&[], |m| &m.backend_identities);
+        changes.removed.extend(
+            before
+                .backend_identities
+                .iter()
+                .filter(|id| !now.contains(id) && !current.contains(id))
+                .cloned(),
+        );
+        let added: Vec<String> = now
+            .iter()
+            .filter(|id| !before.backend_identities.contains(id))
+            .cloned()
+            .collect();
+        if !added.is_empty() {
+            changes.added.push((device, added));
+        }
+    }
+    changes
+}
+
+/// Whether `member` is this device: `own_identity` is `{user}:{device}`.
+/// The device decides, not the membership ID, which another device may also
+/// name (ADR-0056).
+fn is_own(member: &ActiveMember, own_identity: &str) -> bool {
+    participant_identity(&member.user_id, &member.device_id) == own_identity
+}
+
 /// The other devices of `members`.
 fn others(members: Vec<ActiveMember>, own_identity: &str) -> Vec<ActiveMember> {
     members
         .into_iter()
-        .filter(|m| m.identity != own_identity)
+        .filter(|m| !is_own(m, own_identity))
         .collect()
 }
 
@@ -3330,8 +3600,10 @@ mod tests {
         let user_id = OwnedUserId::try_from(user).unwrap();
         let device_id = OwnedDeviceId::from(device);
         let service_url = Url::parse(sfu).unwrap();
+        let identity = participant_identity(&user_id, &device_id);
         ActiveMember {
-            identity: participant_identity(&user_id, &device_id),
+            backend_identities: vec![identity.clone()],
+            identity,
             user_id,
             device_id,
             transports: vec![service_url.clone()],
@@ -3341,12 +3613,32 @@ mod tests {
         }
     }
 
-    fn known(ids: &[&str]) -> BTreeSet<String> {
-        ids.iter().map(|s| (*s).to_owned()).collect()
+    /// GIVEN this device with a custom membership ID and another device that
+    /// names this device's identity as its membership ID WHEN the other
+    /// members are taken THEN this device goes by its device and the other
+    /// one stays (ADR-0056).
+    #[test]
+    fn given_shared_identity_strings_then_only_this_device_is_left_out() {
+        let mut own = member("@a:example.org", "A", "https://sfu.example.org");
+        own.identity = "custom".to_owned();
+        let mut copy = member("@b:example.org", "B", "https://sfu.example.org");
+        copy.identity = "@a:example.org:A".to_owned();
+        let rest = others(vec![own.clone(), copy.clone()], "@a:example.org:A");
+        assert_eq!(rest, [copy]);
+        assert!(is_own(&own, "@a:example.org:A"));
+    }
+
+    /// The membership of a device whose membership ID is `{user}:{device}`.
+    fn key(id: &str) -> MemberKey {
+        (id.to_owned(), id.to_owned())
+    }
+
+    fn known(ids: &[&str]) -> BTreeSet<MemberKey> {
+        ids.iter().map(|id| key(id)).collect()
     }
 
     /// GIVEN known members and a new list WHEN diffed THEN joined and left
-    /// are named by identity.
+    /// are named by membership.
     #[test]
     fn given_a_changed_member_list_then_the_diff_names_joined_and_left() {
         let current = [
@@ -3354,12 +3646,63 @@ mod tests {
             member("@c:example.org", "C", "https://sfu.example.org"),
         ];
         let diff = diff_members(&known(&["@a:example.org:A", "@b:example.org:B"]), &current);
-        assert_eq!(diff.joined, ["@c:example.org:C"]);
-        assert_eq!(diff.left, ["@b:example.org:B"]);
+        assert_eq!(diff.joined, [key("@c:example.org:C")]);
+        assert_eq!(diff.left, [key("@b:example.org:B")]);
         assert_eq!(
             diff_members(&known(&["@a:example.org:A"]), &current[..1]),
             MemberDiff::default()
         );
+    }
+
+    /// GIVEN two devices of one user with one membership ID WHEN the second
+    /// joins THEN it is a join and only it gets the young key; WHEN the first
+    /// leaves THEN it is a leave, so the key rotates; WHEN a device names a
+    /// new membership ID THEN it is a leave and a join (ADR-0056).
+    #[test]
+    fn given_a_shared_membership_id_then_each_device_joins_and_leaves() {
+        let shared = |device: &str| {
+            let mut m = member("@b:example.org", device, "https://sfu.example.org");
+            m.identity = "shared".to_owned();
+            m
+        };
+        let b1 = ("@b:example.org:B1".to_owned(), "shared".to_owned());
+        let b2 = ("@b:example.org:B2".to_owned(), "shared".to_owned());
+        let both = [shared("B1"), shared("B2")];
+
+        let diff = diff_members(&BTreeSet::from([b1.clone()]), &both);
+        assert_eq!(
+            diff,
+            MemberDiff {
+                joined: vec![b2.clone()],
+                left: vec![]
+            }
+        );
+        let now = Instant::now();
+        let mut own = OwnKeys::new(now).unwrap();
+        let outgoing = key_action(&diff, &mut own, now).unwrap().unwrap();
+        assert_eq!(outgoing.recipients, Recipients::NewMembersOnly);
+        assert_eq!(
+            recipients(&outgoing, &both, &diff.joined),
+            [(owned_user_id!("@b:example.org"), owned_device_id!("B2"))]
+        );
+
+        let diff = diff_members(&BTreeSet::from([b1.clone(), b2.clone()]), &both[1..]);
+        assert_eq!(
+            diff,
+            MemberDiff {
+                joined: vec![],
+                left: vec![b1]
+            }
+        );
+
+        let mut renamed = shared("B2");
+        renamed.identity = "new".to_owned();
+        let diff = diff_members(&BTreeSet::from([b2.clone()]), &[renamed]);
+        assert_eq!(
+            diff.joined,
+            [("@b:example.org:B2".to_owned(), "new".to_owned())]
+        );
+        assert_eq!(diff.left, [b2]);
     }
 
     /// GIVEN a young key WHEN one member joins THEN the key goes only to the
@@ -3374,7 +3717,7 @@ mod tests {
             member("@b:example.org", "B", "https://sfu.example.org"),
         ];
         let joined = MemberDiff {
-            joined: vec!["@b:example.org:B".to_owned()],
+            joined: vec![key("@b:example.org:B")],
             left: vec![],
         };
         let first = key_action(&joined, &mut own, now).unwrap().unwrap();
@@ -3387,8 +3730,8 @@ mod tests {
         );
 
         let left = MemberDiff {
-            joined: vec!["@b:example.org:B".to_owned()],
-            left: vec!["@x:example.org:X".to_owned()],
+            joined: vec![key("@b:example.org:B")],
+            left: vec![key("@x:example.org:X")],
         };
         let second = key_action(&left, &mut own, now).unwrap().unwrap();
         assert_eq!(second.recipients, Recipients::AllMembers);
@@ -3408,7 +3751,7 @@ mod tests {
         let start = Instant::now();
         let mut own = OwnKeys::new(start).unwrap();
         let diff = MemberDiff {
-            joined: vec!["@b:example.org:B".to_owned()],
+            joined: vec![key("@b:example.org:B")],
             left: vec![],
         };
         let later = start + Duration::from_secs(60);
@@ -3492,6 +3835,128 @@ mod tests {
         assert!(participants[0].speaking);
         view.set_members(vec![member("@b:example.org", "B", "https://x.example.org")]);
         assert!(view.speaking.is_empty());
+    }
+
+    /// GIVEN stored keys whose indices wrapped, and a late older key WHEN
+    /// they are given under new backend identities THEN every key goes under
+    /// each identity, in stored order, so the key in use is never left out.
+    #[test]
+    fn given_stored_keys_then_all_are_replayed_under_each_new_identity() {
+        let added = ["h".to_owned(), "d".to_owned()];
+        assert!(replay_keys(&[], &added).is_empty());
+        // 255 then 0 is a wrap; 254 arrived late.
+        assert_eq!(
+            replay_keys(&[255, 0, 254], &added),
+            [255, 255, 0, 0, 254, 254]
+                .iter()
+                .zip(added.iter().cycle())
+                .map(|(index, id)| (id.clone(), *index))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// GIVEN members that leave, stay, or change their backend identities
+    /// WHEN the change is read THEN each identity no member has is removed,
+    /// and each staying device names only its new identities (ADR-0056).
+    #[test]
+    fn given_member_changes_then_backend_changes_follow_the_devices() {
+        let with = |user: &str, device: &str, ids: &[&str]| {
+            let mut m = member(user, device, "https://sfu.example.org");
+            m.backend_identities = ids.iter().map(|id| (*id).to_owned()).collect();
+            m
+        };
+        let old = [
+            with("@a:example.org", "A", &["@a:example.org:A"]),
+            with("@b:example.org", "B", &["hash-b", "@b:example.org:B"]),
+            with("@c:example.org", "C", &["@c:example.org:C"]),
+        ];
+        let mut a_changed = with("@a:example.org", "A", &["hash-a"]);
+        // A new membership ID is a leave and a join, but the device stays.
+        a_changed.identity = "new-id".to_owned();
+        let new = [
+            a_changed,
+            with("@b:example.org", "B", &["hash-b", "@b:example.org:B"]),
+            with("@d:example.org", "D", &["@d:example.org:D"]),
+        ];
+        assert_eq!(
+            backend_changes(&old, &new),
+            BackendChanges {
+                removed: vec!["@a:example.org:A".to_owned(), "@c:example.org:C".to_owned()],
+                added: vec![("@a:example.org:A".to_owned(), vec!["hash-a".to_owned()])],
+            }
+        );
+        assert_eq!(backend_changes(&new, &new), BackendChanges::default());
+
+        // An identity that moves to another device that a current member has
+        // is not removed.
+        let moved_from = [with("@e:example.org", "E1", &["hash-e"])];
+        let moved_to = [with("@e:example.org", "E2", &["hash-e"])];
+        assert_eq!(
+            backend_changes(&moved_from, &moved_to),
+            BackendChanges::default()
+        );
+    }
+
+    /// GIVEN a member whose membership ID is not `{user}:{device}` WHEN a key
+    /// names its device THEN the key finds the member, and a key naming the
+    /// membership ID does not (ADR-0056).
+    #[test]
+    fn given_a_custom_membership_id_then_keys_find_the_member_by_device() {
+        let mut view = view();
+        let mut a = member("@a:example.org", "A", "https://sfu.example.org");
+        a.identity = "custom-id".to_owned();
+        view.set_members(vec![a]);
+        assert!(view.is_member("@a:example.org:A"));
+        assert!(!view.is_member("custom-id"));
+        view.keyed.insert("@a:example.org:A".to_owned());
+        view.apply(&FromWorker::Connected);
+        let CallState::Active { participants, .. } = view.state() else {
+            panic!("expected an active call");
+        };
+        assert!(participants[0].keyed);
+    }
+
+    /// GIVEN a member on an SFU whose homeserver issues tokens, known to
+    /// LiveKit by its hashed identity WHEN the worker reports that identity
+    /// or the plain membership ID THEN only the hashed identity stands for
+    /// the member (ADR-0056).
+    #[test]
+    fn given_a_hashed_backend_identity_then_only_it_stands_for_the_member() {
+        let sfu = "wss://sfu.example.org:7443";
+        let mut view = View::new(
+            room_id!("!r:example.org").to_owned(),
+            Url::parse(sfu).unwrap(),
+            false,
+        );
+        let mut a = member("@a:example.org", "A", sfu);
+        let hashed = hashed_identity(&a.user_id, &a.identity);
+        a.backend_identities = vec![hashed.clone()];
+        view.set_members(vec![a]);
+        view.apply(&FromWorker::Connected);
+        let speak = |id: &str| FromWorker::Speaking {
+            connection: 0,
+            identity: id.to_owned(),
+            speaking: true,
+        };
+        assert_eq!(view.apply(&speak("@a:example.org:A")), Applied::Same);
+        assert_eq!(view.apply(&speak(&hashed)), Applied::Changed);
+        let CallState::Active { participants, .. } = view.state() else {
+            panic!("expected an active call");
+        };
+        assert!(participants[0].speaking);
+        assert!(participants[0].reachable);
+        assert_eq!(
+            view.apply(&FromWorker::VideoStarted {
+                tile: 1,
+                connection: 0,
+                identity: hashed,
+            }),
+            Applied::Changed
+        );
+        assert_eq!(view.video_tiles().len(), 1);
+        view.set_members(Vec::new());
+        assert!(view.speaking.is_empty());
+        assert!(view.video_tiles().is_empty());
     }
 
     /// GIVEN a stopped worker WHEN its exit status is read THEN a crash status
@@ -4055,6 +4520,8 @@ mod tests {
             own_device: owned_device_id!("A"),
             own_keys: OwnKeys::new(Instant::now()).unwrap(),
             remote: RemoteKeys::new(),
+            unsent: BTreeMap::new(),
+            unsent_retry: None,
             view: view().with_video_streams(video_streams),
             changes,
             incoming,
@@ -4093,6 +4560,201 @@ mod tests {
             _incoming: incoming_tx,
             _failed: failed_tx,
         }
+    }
+
+    /// Fills the fake worker queue, then frees `room` places in it.
+    fn fill_queue(call: &Call, to_worker: &mut mpsc::Receiver<ToWorker>, room: usize) {
+        while call
+            .queue_worker(ToWorker::SetMuted { muted: true })
+            .unwrap()
+        {}
+        for _ in 0..room {
+            to_worker.try_recv().unwrap();
+        }
+    }
+
+    /// The `SetKey` commands the fake worker received, as identity and index.
+    fn set_keys(to_worker: &mut mpsc::Receiver<ToWorker>) -> Vec<(String, u8)> {
+        let mut sent = Vec::new();
+        while let Ok(message) = to_worker.try_recv() {
+            if let ToWorker::SetKey { identity, key } = message {
+                sent.push((identity, key.index));
+            }
+        }
+        sent
+    }
+
+    /// GIVEN a member with two backend identities and a queue with room for
+    /// one key WHEN its key is sent THEN it is not shown as keyed until the
+    /// key went under the second identity too.
+    #[tokio::test]
+    async fn given_a_key_under_one_of_two_identities_then_the_member_is_not_keyed_yet() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let device = "@b:example.org:B".to_owned();
+        let mut b = member("@b:example.org", "B", "https://sfu.example.org");
+        b.backend_identities = vec!["hash-b".to_owned(), device.clone()];
+        call.view.set_members(vec![b]);
+        call.remote.insert(&device, 1, &[1; 16], &|_| true).unwrap();
+
+        fill_queue(&call, &mut to_worker, 1);
+        call.mark_unsent(
+            device.clone(),
+            [("hash-b".to_owned(), 1), (device.clone(), 1)],
+        );
+        assert!(!call.send_unsent().unwrap());
+        assert_eq!(set_keys(&mut to_worker), [("hash-b".to_owned(), 1)]);
+        assert!(!call.view.keyed.contains(&device));
+
+        fill_queue(&call, &mut to_worker, 1);
+        assert!(call.send_unsent().unwrap());
+        assert_eq!(set_keys(&mut to_worker), [(device.clone(), 1)]);
+        assert!(call.view.keyed.contains(&device));
+    }
+
+    /// GIVEN keys waiting for the worker and a queue with room for one WHEN
+    /// they are retried THEN each retry goes on with the next key, so every
+    /// key arrives once; a key whose member left or whose backend identity
+    /// went is dropped; and a closed queue ends the call as a stopped worker.
+    #[tokio::test]
+    async fn given_little_queue_room_then_unsent_keys_go_on_where_they_stopped() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let device = "@b:example.org:B".to_owned();
+        let b = || member("@b:example.org", "B", "https://sfu.example.org");
+        call.view.set_members(vec![b()]);
+        for index in 1..=2 {
+            call.remote
+                .insert(&device, index, &[index; 16], &|_| true)
+                .unwrap();
+        }
+        let waiting = [(device.clone(), 1), (device.clone(), 2)];
+
+        fill_queue(&call, &mut to_worker, 0);
+        call.mark_unsent(device.clone(), waiting.clone());
+        assert!(!call.send_unsent().unwrap());
+        assert!(call.unsent_retry.is_some(), "a full queue keeps the keys");
+        assert!(
+            !call.view.keyed.contains(&device),
+            "no key reached the worker"
+        );
+
+        // Each pass has room for one key: the first, then the second. The
+        // device is shown as keyed once none of its keys waits.
+        for (pass, expected) in waiting.iter().enumerate() {
+            fill_queue(&call, &mut to_worker, 1);
+            assert_eq!(call.send_unsent().unwrap(), pass == 1);
+            assert_eq!(set_keys(&mut to_worker), std::slice::from_ref(expected));
+            assert_eq!(call.view.keyed.contains(&device), pass == 1);
+        }
+        assert!(call.unsent.is_empty());
+        assert_eq!(call.unsent_retry, None);
+
+        // A full queue keeps the keys of current members only.
+        fill_queue(&call, &mut to_worker, 0);
+        call.mark_unsent(device.clone(), waiting.clone());
+        call.mark_unsent(
+            "@z:example.org:Z".to_owned(),
+            [("@z:example.org:Z".to_owned(), 1)],
+        );
+        call.send_unsent().unwrap();
+        assert_eq!(call.unsent.keys().collect::<Vec<_>>(), [&device]);
+        while to_worker.try_recv().is_ok() {}
+        call.send_unsent().unwrap();
+        assert!(call.unsent.is_empty());
+        set_keys(&mut to_worker);
+
+        call.mark_unsent(
+            device.clone(),
+            [("gone-id".to_owned(), 1), (device.clone(), 9)],
+        );
+        call.send_unsent().unwrap();
+        assert!(
+            set_keys(&mut to_worker).is_empty(),
+            "no such identity or key"
+        );
+        call.mark_unsent(device.clone(), waiting.clone());
+        call.view.set_members(Vec::new());
+        call.send_unsent().unwrap();
+        assert!(
+            set_keys(&mut to_worker).is_empty(),
+            "a member that left gets no key"
+        );
+        assert!(call.unsent.is_empty());
+
+        call.view.set_members(vec![b()]);
+        call.mark_unsent(device, waiting);
+        drop(to_worker);
+        assert!(matches!(call.send_unsent(), Err(EndReason::WorkerStopped)));
+    }
+
+    /// GIVEN more keys waiting for one member than are kept WHEN more come
+    /// THEN the oldest go and a repeated key is kept once.
+    #[test]
+    fn given_many_unsent_keys_then_only_the_newest_are_kept() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut call = fixture.call;
+        let device = "@b:example.org:B".to_owned();
+        let count = MAX_UNSENT_PER_MEMBER + 3;
+        let keys: Vec<(String, u8)> = (0..count)
+            .map(|i| (device.clone(), u8::try_from(i).unwrap()))
+            .collect();
+        call.mark_unsent(device.clone(), keys.clone());
+        call.mark_unsent(device.clone(), [keys[count - 1].clone()]);
+        let kept: Vec<_> = call.unsent[&device].iter().cloned().collect();
+        assert_eq!(kept, keys[3..]);
+    }
+
+    /// GIVEN a due own key and a full worker queue WHEN it is applied THEN
+    /// the call goes on and the key waits; WHEN the queue has room THEN the
+    /// worker switches to it; WHEN the queue is closed THEN the call ends.
+    #[tokio::test]
+    async fn given_a_full_queue_then_a_due_own_key_waits() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let key = FrameKeyMsg {
+            index: 3,
+            bytes: Zeroizing::new(vec![3; 16]),
+        };
+        let due = Instant::now();
+        let mut pending = Some((due, key.clone()));
+
+        fill_queue(&call, &mut to_worker, 0);
+        call.apply_own_key(&mut pending).unwrap();
+        let (retry, waiting) = pending.clone().expect("the key waits");
+        assert!(retry > due);
+        assert_eq!(waiting, key);
+
+        while to_worker.try_recv().is_ok() {}
+        call.apply_own_key(&mut pending).unwrap();
+        assert_eq!(pending, None);
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetOwnKey { key: sent }) if sent == key
+        ));
+
+        let mut pending = Some((due, key));
+        drop(to_worker);
+        assert!(matches!(
+            call.apply_own_key(&mut pending),
+            Err(EndReason::WorkerStopped)
+        ));
     }
 
     /// Ends a portal request that produced no remote.
@@ -6270,7 +6932,7 @@ mod tests {
             }),
             Applied::Changed
         );
-        assert!(!view.is_sharing("@a:example.org:A"));
+        assert!(!view.members.iter().any(|m| view.is_sharing(m)));
         assert!(!view.sharing.contains(&(0, "@a:example.org:A".to_owned())));
         assert!(view.video_tiles().is_empty());
     }

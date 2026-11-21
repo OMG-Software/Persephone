@@ -26,6 +26,7 @@
 * [0046 - Do not block same-user attach to the Linux core](0046-do-not-block-same-user-attach-to-the-linux-core.md)
 * [0047 - Report loaded code on Linux and macOS](0047-report-loaded-code-on-linux-and-macos.md)
 * [0050 - Make the profile passphrase optional and off by default](0050-make-the-profile-passphrase-optional-and-off-by-default.md)
+* [0056 - Get call tokens from the homeserver when it issues them](0056-get-call-tokens-from-the-homeserver-when-it-issues-them.md)
 
 ## Proposed Records
 

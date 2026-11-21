@@ -179,3 +179,5 @@ for other members.
 * [ADR-0043](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)
 * [ADR-0048](0048-add-camera-video-to-calls-in-the-call-worker.md)
 * [ADR-0053](0053-share-the-screen-in-calls-on-linux-and-windows.md)
+* Refined by [ADR-0056](0056-get-call-tokens-from-the-homeserver-when-it-issues-them.md):
+  the `/get_token` homeserver flow for the own SFU
