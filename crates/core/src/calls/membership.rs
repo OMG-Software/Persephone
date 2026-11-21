@@ -107,8 +107,10 @@ pub fn leave_content() -> Value {
 pub struct ActiveMember {
     pub user_id: OwnedUserId,
     pub device_id: OwnedDeviceId,
-    /// The member's `membershipID`, or `{user}:{device}` without one. Keys
-    /// and member changes go by this identity.
+    /// The member's `membershipID`, or `{user}:{device}` without one. Leave
+    /// and join changes go by this identity; frame keys and worker
+    /// participants go by `{user}:{device}` ([`participant_identity`]) and
+    /// [`ActiveMember::backend_identities`].
     pub identity: String,
     /// The LiveKit participant identities the member may have on an SFU
     /// (ADR-0056): the hashed identity when a transport has `url`, and

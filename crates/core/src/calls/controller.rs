@@ -50,7 +50,7 @@ use persephone_call_protocol::{
 };
 use persephone_contracts::{CallCamera, CallParticipantRef, CallScreen, CallVideoTile};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     future::Future,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -83,9 +83,12 @@ const MAX_PARKED: usize = 8;
 /// How long such a key is held back.
 const PARK_TIME: Duration = Duration::from_secs(30);
 
-/// Wait before the remote keys that did not fit in the worker queue go
-/// again.
+/// Wait before a key that did not fit in the worker queue goes again.
 const UNSENT_RETRY: Duration = Duration::from_millis(200);
+
+/// Most remote keys of one member waiting for room in the worker queue: the
+/// newest [`REPLAYED_KEYS`] under each of at most two backend identities.
+const MAX_UNSENT_PER_MEMBER: usize = 2 * REPLAYED_KEYS;
 
 /// Waiting commands for the running call.
 const COMMAND_QUEUE: usize = 8;
@@ -1563,7 +1566,7 @@ impl CallController {
             own_device: device_id,
             own_keys,
             remote: RemoteKeys::new(),
-            unsent: BTreeSet::new(),
+            unsent: BTreeMap::new(),
             unsent_retry: None,
             view: View::new(room_id.to_owned(), sfu.url, scope.video)
                 .with_video_streams(video_streams)
@@ -2077,10 +2080,11 @@ struct Call {
     own_device: OwnedDeviceId,
     own_keys: OwnKeys,
     remote: RemoteKeys,
-    /// Member devices (`{user}:{device}`) whose newest keys the worker may
-    /// not have, because its queue was full. Only current members go in, so
-    /// it holds at most one entry per member.
-    unsent: BTreeSet<String>,
+    /// Remote keys the worker queue had no room for, by member device
+    /// (`{user}:{device}`): each a backend identity and a key index, oldest
+    /// first. Only current members go in, each with at most
+    /// [`MAX_UNSENT_PER_MEMBER`] keys.
+    unsent: BTreeMap<String, VecDeque<(String, u8)>>,
     /// When the keys of `unsent` go again.
     unsent_retry: Option<Instant>,
     view: View,
@@ -2975,23 +2979,33 @@ impl Call {
             .map_err(|_| EndReason::WorkerStopped)
     }
 
-    /// Notes that the worker may lack the newest keys of `device`, so they
-    /// go again at the next retry.
-    fn mark_unsent(&mut self, device: String) {
-        self.unsent.insert(device);
+    /// Notes keys of `device` (a backend identity and a key index each) that
+    /// must still go to the worker, oldest first. A key already waiting is
+    /// not added twice, and past [`MAX_UNSENT_PER_MEMBER`] the oldest goes.
+    fn mark_unsent(&mut self, device: String, keys: impl IntoIterator<Item = (String, u8)>) {
+        let waiting = self.unsent.entry(device).or_default();
+        for key in keys {
+            if !waiting.contains(&key) {
+                waiting.push_back(key);
+            }
+        }
+        while waiting.len() > MAX_UNSENT_PER_MEMBER {
+            waiting.pop_front();
+        }
         self.unsent_retry
             .get_or_insert_with(|| Instant::now() + UNSENT_RETRY);
     }
 
-    /// Gives the worker the newest [`REPLAYED_KEYS`] stored keys of each
-    /// device in `unsent`, under the backend identities the device has now.
-    /// A device that is no member any more is left out. When the queue is
-    /// full, the devices not done wait for the next retry; only a closed
-    /// queue is an error.
+    /// Gives the worker the keys in `unsent`, oldest first, while its queue
+    /// has room. Each goes with the bytes stored for its index now, and only
+    /// while its device is a member that still has that backend identity;
+    /// otherwise it is dropped. A key that goes is not sent again, so a
+    /// retry with little room goes on where the last one stopped. Only a
+    /// closed queue is an error.
     fn send_unsent(&mut self) -> Result<(), EndReason> {
         self.unsent_retry = None;
-        let mut devices = std::mem::take(&mut self.unsent).into_iter();
-        while let Some(device) = devices.next() {
+        let mut pending = std::mem::take(&mut self.unsent).into_iter();
+        while let Some((device, mut waiting)) = pending.next() {
             let Some(backends) = self
                 .view
                 .key_member(&device)
@@ -3000,23 +3014,40 @@ impl Call {
                 continue;
             };
             let keys = self.remote.keys_of(&device);
-            for (index, bytes) in replayed(&keys) {
-                for identity in &backends {
-                    let key = ToWorker::SetKey {
-                        identity: identity.clone(),
-                        key: FrameKeyMsg {
-                            index: *index,
-                            bytes: bytes.clone(),
-                        },
-                    };
-                    if !self.queue_worker(key)? {
-                        self.unsent.insert(device);
-                        self.unsent.extend(devices);
-                        self.unsent_retry = Some(Instant::now() + UNSENT_RETRY);
-                        return Ok(());
-                    }
+            while let Some((identity, index)) = waiting.front() {
+                let stored = keys.iter().find(|(stored, _)| stored == index);
+                let (Some((_, bytes)), true) = (stored, backends.contains(identity)) else {
+                    waiting.pop_front();
+                    continue;
+                };
+                let key = ToWorker::SetKey {
+                    identity: identity.clone(),
+                    key: FrameKeyMsg {
+                        index: *index,
+                        bytes: bytes.clone(),
+                    },
+                };
+                if !self.queue_worker(key)? {
+                    self.unsent.insert(device, waiting);
+                    self.unsent.extend(pending);
+                    self.unsent_retry = Some(Instant::now() + UNSENT_RETRY);
+                    return Ok(());
                 }
+                waiting.pop_front();
             }
+        }
+        Ok(())
+    }
+
+    /// Switches the worker to the own key in `pending`, which is due. When
+    /// the queue is full, the switch waits for the next retry instead of
+    /// ending the call: the members already have the key, and the old one
+    /// stays in use until then.
+    fn apply_own_key(&self, pending: &mut Option<(Instant, FrameKeyMsg)>) -> Result<(), EndReason> {
+        if let Some((_, key)) = pending.take()
+            && !self.queue_worker(ToWorker::SetOwnKey { key: key.clone() })?
+        {
+            *pending = Some((Instant::now() + UNSENT_RETRY, key));
         }
         Ok(())
     }
@@ -3236,11 +3267,7 @@ impl Call {
                         Some(at) => time::sleep_until(at.into()).await,
                         None => std::future::pending().await,
                     }
-                } => {
-                    if let Some((_, key)) = pending_own.take() {
-                        self.send_worker(ToWorker::SetOwnKey { key })?;
-                    }
-                }
+                } => self.apply_own_key(&mut pending_own)?,
                 () = async {
                     match retry {
                         Some(at) => time::sleep_until(at.into()).await,
@@ -3305,9 +3332,14 @@ impl Call {
             }
         }
         // A member that now has another backend identity keeps its keys
-        // under the new one too.
-        for (device, _) in backends.added {
-            self.mark_unsent(device);
+        // under the new one too: the newest [`REPLAYED_KEYS`], which hold
+        // the key in use and the one about to be.
+        for (device, added) in backends.added {
+            let keys: Vec<(String, u8)> = replayed(&self.remote.keys_of(&device))
+                .iter()
+                .flat_map(|(index, _)| added.iter().map(|identity| (identity.clone(), *index)))
+                .collect();
+            self.mark_unsent(device, keys);
         }
         self.send_unsent()?;
         if let Some(outgoing) = key_action(&diff, &mut self.own_keys, Instant::now())
@@ -3353,27 +3385,30 @@ impl Call {
                 // under each backend identity of the member (ADR-0056).
                 // `accept` took the key only for a current member's device,
                 // by the same match as `key_member`, so the member is found.
-                // Should that ever fail, the key is not shown as keyed.
+                // Should that ever fail, or should the member have no backend
+                // identity (two devices with one membership ID), the key
+                // reaches no worker participant and is not shown as keyed.
                 let Some(backends) = self
                     .view
                     .key_member(&identity)
                     .map(|m| m.backend_identities.clone())
+                    .filter(|backends| !backends.is_empty())
                 else {
                     return Ok(());
                 };
                 self.view.keyed.insert(identity.clone());
-                // A key that does not fit in the queue goes again with the
-                // member's other newest keys.
-                for backend in backends {
+                // Keys that do not fit in the queue go at the next retry.
+                for (sent, backend) in backends.iter().enumerate() {
                     let key = ToWorker::SetKey {
-                        identity: backend,
+                        identity: backend.clone(),
                         key: FrameKeyMsg {
                             index,
                             bytes: bytes.clone(),
                         },
                     };
                     if !self.queue_worker(key)? {
-                        self.mark_unsent(identity);
+                        let rest = backends[sent..].iter().map(|b| (b.clone(), index));
+                        self.mark_unsent(identity, rest);
                         break;
                     }
                 }
@@ -4372,7 +4407,7 @@ mod tests {
             own_device: owned_device_id!("A"),
             own_keys: OwnKeys::new(Instant::now()).unwrap(),
             remote: RemoteKeys::new(),
-            unsent: BTreeSet::new(),
+            unsent: BTreeMap::new(),
             unsent_retry: None,
             view: view().with_video_streams(video_streams),
             changes,
@@ -4414,13 +4449,34 @@ mod tests {
         }
     }
 
-    /// GIVEN a member's stored keys and a full worker queue WHEN they are
-    /// given again THEN the call goes on and the keys wait; WHEN the queue
-    /// has room THEN they go under the member's backend identity; WHEN the
-    /// member has left THEN nothing goes; WHEN the queue is closed THEN the
-    /// call ends as a stopped worker.
+    /// Fills the fake worker queue, then frees `room` places in it.
+    fn fill_queue(call: &Call, to_worker: &mut mpsc::Receiver<ToWorker>, room: usize) {
+        while call
+            .queue_worker(ToWorker::SetMuted { muted: true })
+            .unwrap()
+        {}
+        for _ in 0..room {
+            to_worker.try_recv().unwrap();
+        }
+    }
+
+    /// The `SetKey` commands the fake worker received, as identity and index.
+    fn set_keys(to_worker: &mut mpsc::Receiver<ToWorker>) -> Vec<(String, u8)> {
+        let mut sent = Vec::new();
+        while let Ok(message) = to_worker.try_recv() {
+            if let ToWorker::SetKey { identity, key } = message {
+                sent.push((identity, key.index));
+            }
+        }
+        sent
+    }
+
+    /// GIVEN keys waiting for the worker and a queue with room for one WHEN
+    /// they are retried THEN each retry goes on with the next key, so every
+    /// key arrives once; a key whose member left or whose backend identity
+    /// went is dropped; and a closed queue ends the call as a stopped worker.
     #[tokio::test]
-    async fn given_a_full_queue_then_unsent_keys_go_later_and_a_closed_one_ends_the_call() {
+    async fn given_little_queue_room_then_unsent_keys_go_on_where_they_stopped() {
         let fixture = test_call(
             no_admission(),
             Arc::new(Flags::default()),
@@ -4428,55 +4484,109 @@ mod tests {
         );
         let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
         let device = "@b:example.org:B".to_owned();
-        call.view.set_members(vec![member(
-            "@b:example.org",
-            "B",
-            "https://sfu.example.org",
-        )]);
-        for index in 0..3 {
+        let b = || member("@b:example.org", "B", "https://sfu.example.org");
+        call.view.set_members(vec![b()]);
+        for index in 1..=2 {
             call.remote
                 .insert(&device, index, &[index; 16], &|_| true)
                 .unwrap();
         }
-        while call
-            .queue_worker(ToWorker::SetMuted { muted: true })
-            .unwrap()
-        {}
+        let waiting = [(device.clone(), 1), (device.clone(), 2)];
 
-        call.mark_unsent(device.clone());
+        fill_queue(&call, &mut to_worker, 0);
+        call.mark_unsent(device.clone(), waiting.clone());
         call.send_unsent().unwrap();
-        assert!(call.unsent.contains(&device), "a full queue keeps the keys");
-        assert!(call.unsent_retry.is_some());
+        assert!(call.unsent_retry.is_some(), "a full queue keeps the keys");
 
-        while to_worker.try_recv().is_ok() {}
-        call.send_unsent().unwrap();
-        let mut sent = Vec::new();
-        while let Ok(message) = to_worker.try_recv() {
-            if let ToWorker::SetKey { identity, key } = message {
-                sent.push((identity, key.index));
-            }
+        // Each pass has room for one key: the first, then the second.
+        for expected in &waiting {
+            fill_queue(&call, &mut to_worker, 1);
+            call.send_unsent().unwrap();
+            assert_eq!(set_keys(&mut to_worker), std::slice::from_ref(expected));
         }
-        assert_eq!(sent, [(device.clone(), 1), (device.clone(), 2)]);
         assert!(call.unsent.is_empty());
         assert_eq!(call.unsent_retry, None);
 
-        call.mark_unsent(device.clone());
+        call.mark_unsent(
+            device.clone(),
+            [("gone-id".to_owned(), 1), (device.clone(), 9)],
+        );
+        call.send_unsent().unwrap();
+        assert!(
+            set_keys(&mut to_worker).is_empty(),
+            "no such identity or key"
+        );
+        call.mark_unsent(device.clone(), waiting.clone());
         call.view.set_members(Vec::new());
         call.send_unsent().unwrap();
         assert!(
-            to_worker.try_recv().is_err(),
+            set_keys(&mut to_worker).is_empty(),
             "a member that left gets no key"
         );
         assert!(call.unsent.is_empty());
 
-        call.view.set_members(vec![member(
-            "@b:example.org",
-            "B",
-            "https://sfu.example.org",
-        )]);
-        call.mark_unsent(device);
+        call.view.set_members(vec![b()]);
+        call.mark_unsent(device, waiting);
         drop(to_worker);
         assert!(matches!(call.send_unsent(), Err(EndReason::WorkerStopped)));
+    }
+
+    /// GIVEN more keys waiting for one member than are kept WHEN more come
+    /// THEN the oldest go and a repeated key is kept once.
+    #[test]
+    fn given_many_unsent_keys_then_only_the_newest_are_kept() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut call = fixture.call;
+        let device = "@b:example.org:B".to_owned();
+        let keys: Vec<(String, u8)> = (0..10).map(|i| (device.clone(), i)).collect();
+        call.mark_unsent(device.clone(), keys.clone());
+        call.mark_unsent(device.clone(), [(device.clone(), 9)]);
+        let kept: Vec<_> = call.unsent[&device].iter().cloned().collect();
+        assert_eq!(kept, keys[10 - MAX_UNSENT_PER_MEMBER..]);
+    }
+
+    /// GIVEN a due own key and a full worker queue WHEN it is applied THEN
+    /// the call goes on and the key waits; WHEN the queue has room THEN the
+    /// worker switches to it; WHEN the queue is closed THEN the call ends.
+    #[tokio::test]
+    async fn given_a_full_queue_then_a_due_own_key_waits() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let key = FrameKeyMsg {
+            index: 3,
+            bytes: Zeroizing::new(vec![3; 16]),
+        };
+        let due = Instant::now();
+        let mut pending = Some((due, key.clone()));
+
+        fill_queue(&call, &mut to_worker, 0);
+        call.apply_own_key(&mut pending).unwrap();
+        let (retry, waiting) = pending.clone().expect("the key waits");
+        assert!(retry > due);
+        assert_eq!(waiting, key);
+
+        while to_worker.try_recv().is_ok() {}
+        call.apply_own_key(&mut pending).unwrap();
+        assert_eq!(pending, None);
+        assert!(matches!(
+            to_worker.try_recv(),
+            Ok(ToWorker::SetOwnKey { key: sent }) if sent == key
+        ));
+
+        let mut pending = Some((due, key));
+        drop(to_worker);
+        assert!(matches!(
+            call.apply_own_key(&mut pending),
+            Err(EndReason::WorkerStopped)
+        ));
     }
 
     /// Ends a portal request that produced no remote.

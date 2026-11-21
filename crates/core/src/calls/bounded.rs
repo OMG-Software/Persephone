@@ -70,12 +70,11 @@ pub async fn send(
         Some(value) => Some(serde_json::to_vec(value).map_err(|_| RequestError::Network)?),
         None => None,
     };
-    for attempt in 0..2 {
-        let token = Zeroizing::new(client.access_token().ok_or(RequestError::NoSession)?);
+    let attempt = async |token: &str| {
         let mut request = client
             .http_client()
             .request(method.clone(), &url)
-            .bearer_auth(token.as_str())
+            .bearer_auth(token)
             .timeout(timeout);
         if let Some(payload) = &payload {
             request = request
@@ -83,25 +82,28 @@ pub async fn send(
                 .body(payload.clone());
         }
         let response = request.send().await.map_err(|_| RequestError::Network)?;
-        let answer = read(response, max).await?;
-        if attempt == 0
-            && answer.status == 401
-            && errcode(&answer.body).as_deref() == Some("M_UNKNOWN_TOKEN")
-        {
-            // Another request may have refreshed the token meanwhile; then
-            // the retry uses the current one without a second refresh.
-            let current = Zeroizing::new(client.access_token().unwrap_or_default());
-            if *current == *token {
-                client
-                    .refresh_access_token()
-                    .await
-                    .map_err(|_| RequestError::Network)?;
-            }
-            continue;
-        }
+        read(response, max).await
+    };
+    let token = Zeroizing::new(client.access_token().ok_or(RequestError::NoSession)?);
+    let answer = attempt(&token).await?;
+    if answer.status != 401 || errcode(&answer.body).as_deref() != Some("M_UNKNOWN_TOKEN") {
         return Ok(answer);
     }
-    Err(RequestError::Network)
+    // The token expired. Another request may have refreshed it meanwhile;
+    // then the retry uses the current one without a second refresh. The
+    // retry's answer goes to the caller as it is, also a second 401.
+    let unchanged = client
+        .access_token()
+        .map(Zeroizing::new)
+        .is_some_and(|current| *current == *token);
+    if unchanged {
+        client
+            .refresh_access_token()
+            .await
+            .map_err(|_| RequestError::Network)?;
+    }
+    let token = Zeroizing::new(client.access_token().ok_or(RequestError::NoSession)?);
+    attempt(&token).await
 }
 
 /// Reads at most `max` bytes, checking the declared length first and each
