@@ -64,7 +64,6 @@ use matrix_sdk::{
     Client, Room,
     ruma::{
         OwnedRoomId, OwnedUserId,
-        api::error::{ErrorKind, RetryAfter},
         events::{
             GlobalAccountDataEvent,
             direct::DirectEventContent,
@@ -1110,7 +1109,7 @@ async fn presence_before_round(
             Ok(Err(error)) => match error.as_client_api_error() {
                 Some(answer) => presence::answered(
                     answer.status_code.as_u16(),
-                    rate_limit_wait(error.client_api_error_kind()),
+                    presence::rate_limit_wait(error.client_api_error_kind(), SystemTime::now()),
                 ),
                 // No answer that can be read: it may have been applied.
                 None => presence::PutEnd::Unknown,
@@ -1121,17 +1120,6 @@ async fn presence_before_round(
         guard(&shared.presence).put_ended(state, end, Instant::now());
     }
     guard(&shared.presence).for_sync(Instant::now())
-}
-
-/// The wait a rate-limit error asks for, if it says one.
-fn rate_limit_wait(kind: Option<&ErrorKind>) -> Option<Duration> {
-    let Some(ErrorKind::LimitExceeded(limit)) = kind else {
-        return None;
-    };
-    match limit.retry_after.as_ref()? {
-        RetryAfter::Delay(wait) => Some(*wait),
-        RetryAfter::DateTime(at) => Some(at.duration_since(SystemTime::now()).unwrap_or_default()),
-    }
 }
 
 /// Tracks the direct-message contacts' presence after a round. For the due

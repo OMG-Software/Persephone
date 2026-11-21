@@ -87,7 +87,10 @@ alive on Synapse without a separate timer.
   refused with another 4xx, such as 403 where presence is turned off, is not
   sent again, by `PUT` or carried by a sync request, until the setting
   changes. A 408 or 425 is sent again like a failure, and a 499 like a
-  timeout. "Appear offline" is sent
+  timeout. The 15-second carry is the presence's keep-alive, so a failing
+  `PUT`'s backoff does not hold it back; a rate limit and a refusal do. The
+  sync request's own failures are retried by the sync loop and do not reach
+  the writer. "Appear offline" is sent
   by its `PUT` alone, also when a session starts. Turning sharing off sends
   nothing more.
 * `presence::Book` keeps the presence of at most 32 direct-message contacts.
@@ -119,7 +122,8 @@ alive on Synapse without a separate timer.
   is online. The account's homeserver, the servers of rooms it shares, and
   their members learn this.
 * A changed setting reaches the homeserver at the start of the next sync
-  round, up to about 6 seconds later.
+  round: up to about 6 seconds later, or about 11 when a Sliding Sync round
+  also waits for its 5-second contact lookups.
 * "Appear offline" is not kept against other clients: another client that
   says online wins until it stops.
 * The 15-second carry relies on Synapse's 30-second sync timeout: a carry

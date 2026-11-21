@@ -17,12 +17,16 @@
 //!   [`LOOKUPS_PER_ROUND`] of them in a round, each at most once in
 //!   [`LOOKUP_AGE`], or once in [`WANTED_AGE`] when the page opens their room.
 
-use matrix_sdk::ruma::{OwnedUserId, UserId, presence::PresenceState};
+use matrix_sdk::ruma::{
+    OwnedUserId, UserId,
+    api::error::{ErrorKind, RetryAfter},
+    presence::PresenceState,
+};
 use persephone_contracts::PresenceStatus;
 use std::{
     collections::VecDeque,
     sync::{Mutex, MutexGuard},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// The shortest time between two requests that change this account's
@@ -124,6 +128,18 @@ pub enum PutEnd {
     /// so the same request would be refused again: dropped until the setting
     /// changes.
     Refused,
+}
+
+/// The wait a rate-limit error asks for at `now`, if it says one: a delay,
+/// or the time until the given time, zero when that has passed.
+pub fn rate_limit_wait(kind: Option<&ErrorKind>, now: SystemTime) -> Option<Duration> {
+    let Some(ErrorKind::LimitExceeded(limit)) = kind else {
+        return None;
+    };
+    match limit.retry_after.as_ref()? {
+        RetryAfter::Delay(wait) => Some(*wait),
+        RetryAfter::DateTime(at) => Some(at.duration_since(now).unwrap_or_default()),
+    }
 }
 
 /// How a `PUT` the homeserver answered with the error `status` ended.
@@ -611,6 +627,36 @@ mod tests {
                 Some(PresenceState::Unavailable)
             );
         }
+    }
+
+    /// GIVEN rate-limit errors with a delay, a time, a past time or no wait,
+    /// and another error WHEN their wait is read THEN a 429 ends as limited
+    /// for that wait, and as failed only when it says none.
+    #[test]
+    fn given_rate_limit_errors_then_their_wait_is_read() {
+        use matrix_sdk::ruma::api::error::LimitExceededErrorData;
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let limited = |retry_after| {
+            let mut data = LimitExceededErrorData::new();
+            data.retry_after = retry_after;
+            ErrorKind::LimitExceeded(data)
+        };
+        let delay = limited(Some(RetryAfter::Delay(Duration::from_secs(60))));
+        let at = limited(Some(RetryAfter::DateTime(now + Duration::from_secs(90))));
+        let past = limited(Some(RetryAfter::DateTime(now - Duration::from_secs(5))));
+        let none = limited(None);
+        let wait = |kind: &ErrorKind| rate_limit_wait(Some(kind), now);
+        assert_eq!(wait(&delay), Some(Duration::from_secs(60)));
+        assert_eq!(wait(&at), Some(Duration::from_secs(90)));
+        assert_eq!(wait(&past), Some(Duration::ZERO));
+        assert_eq!(wait(&none), None);
+        assert_eq!(wait(&ErrorKind::Forbidden), None);
+        assert_eq!(rate_limit_wait(None, now), None);
+        assert_eq!(
+            answered(429, wait(&delay)),
+            PutEnd::Limited(Duration::from_secs(60))
+        );
+        assert_eq!(answered(429, wait(&none)), PutEnd::Failed);
     }
 
     /// GIVEN a refused `PUT` WHEN later sync requests run THEN none carries
