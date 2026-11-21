@@ -4006,6 +4006,13 @@ mod tests {
         );
         assert!(!going_on, "the new session is not the restore's");
         assert!(restore.is_empty());
+        // The unlock publishes `protected` before its own look for a saved
+        // account (`restore`), which holds a lease for a moment; wait for it
+        // so only a lease of the step would remain.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lock(&session.shared).active != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(lock(&session.shared).active, 0);
     }
 
