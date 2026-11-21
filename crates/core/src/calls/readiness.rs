@@ -336,7 +336,8 @@ async fn discover(
         return Ok(Discovery::NoneOffered);
     };
     // The file is optional, so its absence or an unreadable one offers
-    // none. A request that fails or a server error is not an answer.
+    // none: `fetch` gives `Rejected` for a body over its limit as well.
+    // A request that fails or a server error is not an answer.
     match discovery::fetch(client.http_client(), url).await {
         Ok((200, body)) => Ok(read_well_known(&body, &own_server)),
         Ok((404, _)) | Err(ErrorCode::Rejected) => Ok(Discovery::NoneOffered),
@@ -833,6 +834,21 @@ pub(crate) mod tests {
         assert!(
             discover(&client, Some(broken)).await.is_err(),
             "a server error is not an answer"
+        );
+        // A document over the ADR-0027 limit is unreadable, so it offers
+        // none: the homeserver answered, so it is not unreachable.
+        Mock::given(method("GET"))
+            .and(path("/huge"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("x".repeat(discovery::MAX_WELL_KNOWN_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        let huge = Url::parse(&format!("{}/huge", server.uri())).unwrap();
+        assert_eq!(
+            discover(&client, Some(huge)).await.unwrap(),
+            Discovery::NoneOffered
         );
         assert_eq!(
             discover(&client, None).await.unwrap(),
