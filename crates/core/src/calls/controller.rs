@@ -3278,11 +3278,16 @@ impl Call {
             }) => {
                 // The worker decrypts by LiveKit identity, so the key goes
                 // under each backend identity of the member (ADR-0056).
-                let backends = self
+                // `accept` took the key only for a current member's device,
+                // by the same match as `key_member`, so the member is found.
+                // Should that ever fail, the key is not shown as keyed.
+                let Some(backends) = self
                     .view
                     .key_member(&identity)
                     .map(|m| m.backend_identities.clone())
-                    .unwrap_or_default();
+                else {
+                    return Ok(());
+                };
                 self.view.keyed.insert(identity);
                 for backend in backends {
                     self.send_worker(ToWorker::SetKey {
