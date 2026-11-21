@@ -240,6 +240,13 @@ homeservers without a server change and without a change to ADR-0004.
   * If any of its acceptable entries has `livekit_service_url`, it has
     `{user}:{device}`.
   * The own device uses the same rules for its own published entry.
+  * An identity that another member also has is given to neither. Two
+    devices that name one `membershipID` both lose the hashed identity. The
+    count includes devices that the member limit cuts, so a cut device
+    cannot leave the identity to a kept one. Such a member can have no
+    backend identity: it gets no frame keys, and its frames are ignored.
+    This fails closed. Keeping the identity would give one device's keys
+    under an identity that the other device can also claim in LiveKit.
 * The core calculates the hashes. It gives the worker each member's frame
   keys under each of that member's backend identities. The worker gets only
   the identity strings.
