@@ -3043,8 +3043,12 @@ impl Call {
                     },
                 };
                 if !self.queue_worker(key)? {
+                    // Devices that left drop out here too, so the map holds
+                    // only current members.
                     self.unsent.insert(device, waiting);
-                    self.unsent.extend(pending);
+                    let view = &self.view;
+                    self.unsent
+                        .extend(pending.filter(|(device, _)| view.key_member(device).is_some()));
                     self.unsent_retry = Some(Instant::now() + UNSENT_RETRY);
                     return Ok(keyed);
                 }
@@ -3313,7 +3317,7 @@ impl Call {
         let Some(all) = self.read_members().await? else {
             return Ok(());
         };
-        let has_self = all.iter().any(|m| m.identity == self.own_identity);
+        let has_self = all.iter().any(|m| is_own(m, &self.own_identity));
         if has_self {
             *seen_self = true;
         } else if *seen_self {
@@ -3537,11 +3541,18 @@ fn backend_changes(old: &[ActiveMember], new: &[ActiveMember]) -> BackendChanges
     changes
 }
 
+/// Whether `member` is this device: `own_identity` is `{user}:{device}`.
+/// The device decides, not the membership ID, which another device may also
+/// name (ADR-0056).
+fn is_own(member: &ActiveMember, own_identity: &str) -> bool {
+    participant_identity(&member.user_id, &member.device_id) == own_identity
+}
+
 /// The other devices of `members`.
 fn others(members: Vec<ActiveMember>, own_identity: &str) -> Vec<ActiveMember> {
     members
         .into_iter()
-        .filter(|m| m.identity != own_identity)
+        .filter(|m| !is_own(m, own_identity))
         .collect()
 }
 
@@ -3604,6 +3615,21 @@ mod tests {
             joined_ts: 1,
             expires_ts: u64::MAX,
         }
+    }
+
+    /// GIVEN this device with a custom membership ID and another device that
+    /// names this device's identity as its membership ID WHEN the other
+    /// members are taken THEN this device goes by its device and the other
+    /// one stays (ADR-0056).
+    #[test]
+    fn given_shared_identity_strings_then_only_this_device_is_left_out() {
+        let mut own = member("@a:example.org", "A", "https://sfu.example.org");
+        own.identity = "custom".to_owned();
+        let mut copy = member("@b:example.org", "B", "https://sfu.example.org");
+        copy.identity = "@a:example.org:A".to_owned();
+        let rest = others(vec![own.clone(), copy.clone()], "@a:example.org:A");
+        assert_eq!(rest, [copy]);
+        assert!(is_own(&own, "@a:example.org:A"));
     }
 
     /// The membership of a device whose membership ID is `{user}:{device}`.
@@ -4594,6 +4620,20 @@ mod tests {
         }
         assert!(call.unsent.is_empty());
         assert_eq!(call.unsent_retry, None);
+
+        // A full queue keeps the keys of current members only.
+        fill_queue(&call, &mut to_worker, 0);
+        call.mark_unsent(device.clone(), waiting.clone());
+        call.mark_unsent(
+            "@z:example.org:Z".to_owned(),
+            [("@z:example.org:Z".to_owned(), 1)],
+        );
+        call.send_unsent().unwrap();
+        assert_eq!(call.unsent.keys().collect::<Vec<_>>(), [&device]);
+        while to_worker.try_recv().is_ok() {}
+        call.send_unsent().unwrap();
+        assert!(call.unsent.is_empty());
+        set_keys(&mut to_worker);
 
         call.mark_unsent(
             device.clone(),

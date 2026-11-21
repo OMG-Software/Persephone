@@ -167,16 +167,17 @@ pub fn active_members(
             .cmp(&b.joined_ts)
             .then_with(|| a.identity.cmp(&b.identity))
     });
-    members.truncate(MAX_CALL_MEMBERS);
     // Two devices of one user may name the same membership ID, and so the
     // same hashed identity. Such an identity cannot say which device it
-    // is, so neither keeps it.
+    // is, so neither keeps it. All members count, also those cut below, so
+    // a device past the limit cannot leave its identity to another.
     let mut seen: HashMap<String, usize> = HashMap::new();
     for member in &members {
         for id in &member.backend_identities {
             *seen.entry(id.clone()).or_default() += 1;
         }
     }
+    members.truncate(MAX_CALL_MEMBERS);
     for member in &mut members {
         member
             .backend_identities
@@ -769,6 +770,37 @@ mod tests {
         assert_eq!(members.len(), MAX_CALL_MEMBERS);
         assert_eq!(members[0].identity, "@u0:example.org:DEV");
         assert!(members.windows(2).all(|w| w[0].joined_ts <= w[1].joined_ts));
+    }
+
+    /// GIVEN a device past the member limit that shares a membership ID with
+    /// a kept device WHEN read THEN the kept device loses the shared hashed
+    /// identity too, so the cut device cannot publish as it.
+    #[test]
+    fn given_a_cut_device_with_a_shared_membership_id_then_the_identity_goes() {
+        let url_only = json!([{ "type": "livekit", "url": "wss://sfu.example.org" }]);
+        let mut events: Vec<_> = (0..MAX_CALL_MEMBERS)
+            .map(|i| {
+                good(
+                    &format!("@u{i}:example.org"),
+                    "DEV",
+                    NOW - 10_000 + i as u64,
+                )
+            })
+            .collect();
+        for (device, ts) in [("A", NOW - 20_000), ("B", NOW - 1)] {
+            let mut e = good("@s:example.org", device, ts);
+            e.content["membershipID"] = json!("shared");
+            e.content["foci_preferred"] = url_only.clone();
+            events.push(e);
+        }
+        let members = active_members(events, NOW);
+        assert_eq!(members.len(), MAX_CALL_MEMBERS);
+        let kept = members
+            .iter()
+            .find(|m| m.device_id == "A")
+            .expect("the older shared device is kept");
+        assert!(members.iter().all(|m| m.device_id != "B"), "B is cut");
+        assert!(kept.backend_identities.is_empty());
     }
 
     /// GIVEN more events than the examine limit WHEN read THEN later events are not examined.

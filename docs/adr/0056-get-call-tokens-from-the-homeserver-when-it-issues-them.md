@@ -140,14 +140,16 @@ homeservers without a server change and without a change to ADR-0004.
   1. The stable path `GET /_matrix/client/v1/rtc/transports`, member
      `transports`.
   2. On 404 `M_UNRECOGNIZED`, the unstable path, member `rtc_transports`.
-  3. On 404 `M_UNRECOGNIZED`, the `org.matrix.msc4143.rtc_foci` member of the
-     account's `.well-known/matrix/client` document, or the `m.rtc_foci`
-     member when the first name is absent. The core reads it with the bounded
-     fetch policy of ADR-0027.
+  3. On 404 `M_UNRECOGNIZED` from the unstable path too, the
+     `org.matrix.msc4143.rtc_foci` member of the account's
+     `.well-known/matrix/client` document, or the `m.rtc_foci` member when
+     the first name is absent. The core reads it with the bounded fetch
+     policy of ADR-0027.
 * A missing list member is an empty list. An empty list does not fall back,
   as in the SDK.
-* The core reads at most 16 KiB of an answer and examines at most 8 entries.
-  It skips an entry that is not an object.
+* The core reads at most 16 KiB of a transports answer, and at most 64 KiB
+  of the `.well-known` document (ADR-0027). It examines at most 8 entries of
+  a list and skips an entry that is not an object.
 * Each entry is one of these. The rules follow Element Call 0.28.2:
   * Type `livekit` with `livekit_service_url`, with or without `url`: the
     OpenID flow of ADR-0043, with no change.

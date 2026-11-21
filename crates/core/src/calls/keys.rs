@@ -399,8 +399,8 @@ mod tests {
         assert!(remote.get("c", 0).is_none());
     }
 
-    /// GIVEN stored keys WHEN a member's keys are listed THEN they come
-    /// oldest first with their bytes, and an unknown member has none.
+    /// GIVEN stored keys WHEN a member's key indices are listed THEN they
+    /// come oldest first, and an unknown member has none.
     #[test]
     fn given_stored_keys_then_indices_of_lists_them_oldest_first() {
         let mut remote = RemoteKeys::new();
