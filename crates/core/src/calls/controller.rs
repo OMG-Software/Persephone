@@ -3516,6 +3516,9 @@ struct BackendChanges {
 /// The backend identity changes from `old` to `new`, matched by device.
 fn backend_changes(old: &[ActiveMember], new: &[ActiveMember]) -> BackendChanges {
     let mut changes = BackendChanges::default();
+    // An identity is removed only when no current member has it: it can
+    // move from a device that left to another device of the same user.
+    let current: BTreeSet<&String> = new.iter().flat_map(|m| &m.backend_identities).collect();
     for before in old {
         let device = participant_identity(&before.user_id, &before.device_id);
         let after = new
@@ -3526,7 +3529,7 @@ fn backend_changes(old: &[ActiveMember], new: &[ActiveMember]) -> BackendChanges
             before
                 .backend_identities
                 .iter()
-                .filter(|id| !now.contains(id))
+                .filter(|id| !now.contains(id) && !current.contains(id))
                 .cloned(),
         );
         let added: Vec<String> = now
@@ -3890,6 +3893,15 @@ mod tests {
             }
         );
         assert_eq!(backend_changes(&new, &new), BackendChanges::default());
+
+        // An identity that moves to another device that a current member has
+        // is not removed.
+        let moved_from = [with("@e:example.org", "E1", &["hash-e"])];
+        let moved_to = [with("@e:example.org", "E2", &["hash-e"])];
+        assert_eq!(
+            backend_changes(&moved_from, &moved_to),
+            BackendChanges::default()
+        );
     }
 
     /// GIVEN a member whose membership ID is not `{user}:{device}` WHEN a key
