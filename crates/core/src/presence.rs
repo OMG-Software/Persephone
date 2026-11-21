@@ -52,6 +52,10 @@ pub const WANTED_AGE: Duration = Duration::from_secs(60);
 pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest wait for the `PUT` of a changed presence.
 pub const PUT_TIMEOUT: Duration = Duration::from_secs(5);
+/// After a `PUT` whose end is not known, how long after the next sent one
+/// the current choice is sent once more, in case the unknown one reached
+/// the homeserver after it.
+pub const CONFIRM_DELAY: Duration = Duration::from_secs(30);
 
 /// The Matrix state of a status.
 pub fn state(status: PresenceStatus) -> PresenceState {
@@ -88,15 +92,23 @@ pub struct Writer {
     /// gave that time.
     retry_at: Option<Instant>,
     retry_gap: Duration,
+    /// A `PUT` ended without a known result: it may still reach the
+    /// homeserver, after a newer one.
+    uncertain: bool,
 }
 
 /// How a `PUT` ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PutEnd {
     Sent,
-    /// A network failure, a timeout, a server error or a rate limit: sent
-    /// again after a growing wait.
+    /// Not applied, such as a rate limit (429): sent again after a growing
+    /// wait.
     Failed,
+    /// No known result, such as a timeout, a network failure or a server
+    /// error: it may have been applied, or may still be. Sent again like a
+    /// failed one, and the next sent change is confirmed once more after
+    /// [`CONFIRM_DELAY`].
+    Unknown,
     /// The homeserver refused it (a client error other than a rate limit),
     /// so the same request would be refused again: dropped until the setting
     /// changes.
@@ -155,21 +167,34 @@ impl Writer {
     }
 
     /// Records how the `PUT` of `put` ended at `now`. A failed one is put
-    /// back, unless a newer change waits or sharing was turned off since,
-    /// and waits [`RETRY_GAP_MIN`], twice as long after each failure in a
-    /// row, at most [`RETRY_GAP_MAX`]. A refused one is not sent again.
+    /// back and waits [`RETRY_GAP_MIN`], twice as long after each failure in
+    /// a row, at most [`RETRY_GAP_MAX`]; unless a newer change waits or
+    /// sharing was turned off since, which keeps the newer state as
+    /// `configure` left it. A refused one is not sent again.
     pub fn put_ended(&mut self, put: PresenceState, end: PutEnd, now: Instant) {
+        let current = self.share && self.pending.is_none() && state(self.status) == put;
         match end {
-            PutEnd::Sent | PutEnd::Refused => {
+            PutEnd::Sent => {
+                self.retry_at = None;
+                self.retry_gap = Duration::ZERO;
+                // An earlier `PUT` may still arrive after this one: send the
+                // newest choice once more, later.
+                if std::mem::take(&mut self.uncertain) && current {
+                    self.pending = Some(self.status);
+                    self.retry_at = Some(now + CONFIRM_DELAY);
+                }
+            }
+            PutEnd::Refused => {
                 self.retry_at = None;
                 self.retry_gap = Duration::ZERO;
             }
-            PutEnd::Failed => {
-                if self.share && self.pending.is_none() && state(self.status) == put {
+            PutEnd::Failed | PutEnd::Unknown => {
+                self.uncertain |= end == PutEnd::Unknown;
+                if current {
                     self.pending = Some(self.status);
+                    self.retry_gap = (self.retry_gap * 2).clamp(RETRY_GAP_MIN, RETRY_GAP_MAX);
+                    self.retry_at = Some(now + self.retry_gap);
                 }
-                self.retry_gap = (self.retry_gap * 2).clamp(RETRY_GAP_MIN, RETRY_GAP_MAX);
-                self.retry_at = Some(now + self.retry_gap);
             }
         }
     }
@@ -429,6 +454,46 @@ mod tests {
             writer.take_put(sent + MIN_WRITE_GAP),
             Some(PresenceState::Unavailable)
         );
+    }
+
+    /// GIVEN a `PUT` in flight WHEN a newer choice is made before it fails
+    /// THEN the newer choice is sent at the next second, not after the
+    /// older one's backoff.
+    #[test]
+    fn given_a_newer_choice_during_a_failing_put_then_it_is_not_delayed() {
+        let start = Instant::now();
+        let mut writer = Writer::new(true, PresenceStatus::Online);
+        writer.configure(true, PresenceStatus::Unavailable);
+        let put = writer.take_put(start).unwrap();
+        writer.configure(true, PresenceStatus::Offline);
+        writer.put_ended(put, PutEnd::Unknown, start + Duration::from_millis(100));
+        assert_eq!(
+            writer.take_put(start + MIN_WRITE_GAP),
+            Some(PresenceState::Offline)
+        );
+    }
+
+    /// GIVEN a `PUT` whose end is not known WHEN a newer choice is sent
+    /// THEN the newer choice is sent once more after 30 seconds, in case the
+    /// older request reached the homeserver after it, and then no more.
+    #[test]
+    fn given_an_unknown_put_then_the_next_sent_choice_is_confirmed_once() {
+        let start = Instant::now();
+        let mut writer = Writer::new(true, PresenceStatus::Online);
+        writer.configure(true, PresenceStatus::Unavailable);
+        let put = writer.take_put(start).unwrap();
+        writer.configure(true, PresenceStatus::Offline);
+        writer.put_ended(put, PutEnd::Unknown, start + PUT_TIMEOUT);
+        let sent = start + PUT_TIMEOUT + MIN_WRITE_GAP;
+        let offline = writer.take_put(sent).unwrap();
+        writer.put_ended(offline, PutEnd::Sent, sent);
+        let confirm = sent + CONFIRM_DELAY;
+        assert_eq!(writer.take_put(confirm - MIN_WRITE_GAP), None);
+        assert_eq!(writer.take_put(confirm), Some(PresenceState::Offline));
+        writer.put_ended(PresenceState::Offline, PutEnd::Sent, confirm);
+        for step in 1..600u64 {
+            assert_eq!(writer.take_put(confirm + Duration::from_secs(step)), None);
+        }
     }
 
     /// GIVEN a `PUT` the homeserver refuses WHEN it ends THEN it is not sent

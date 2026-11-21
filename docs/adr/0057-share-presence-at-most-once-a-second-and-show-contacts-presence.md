@@ -73,7 +73,11 @@ alive on Synapse without a separate timer.
 * A changed setting waits for one `PUT`, which the sync loop sends before its
   next round, under the same 1-second limit. The newest change wins. A
   failed or timed-out `PUT`, or one refused with 429, is sent again after 2
-  seconds, twice as long after each failure in a row, at most 5 minutes. One
+  seconds, twice as long after each failure in a row, at most 5 minutes,
+  unless a newer change was made while it was in flight: the newer change
+  does not wait for the older one's backoff. A timed-out `PUT`, a network
+  failure or a 5xx may still be applied after a newer one, so the next
+  sent change is sent once more 30 seconds later. One
   refused with another 4xx, such as 403 where presence is turned off, is not
   sent again until the setting changes. "Appear offline" is sent
   by its `PUT` alone, also when a session starts. Turning sharing off sends

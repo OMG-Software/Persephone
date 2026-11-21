@@ -1106,17 +1106,22 @@ async fn presence_before_round(
         .await;
         let end = match sent {
             Ok(Ok(())) => presence::PutEnd::Sent,
-            // A client error other than a rate limit (429) would be refused
-            // again, for example 403 where presence is turned off.
-            Ok(Err(error))
-                if error.as_client_api_error().is_some_and(|error| {
-                    let code = error.status_code.as_u16();
-                    (400..500).contains(&code) && code != 429
-                }) =>
-            {
-                presence::PutEnd::Refused
+            Ok(Err(error)) => {
+                match error
+                    .as_client_api_error()
+                    .map(|error| error.status_code.as_u16())
+                {
+                    // Rate limited: not applied.
+                    Some(429) => presence::PutEnd::Failed,
+                    // Any other client error would be refused again, for
+                    // example 403 where presence is turned off.
+                    Some(code) if (400..500).contains(&code) => presence::PutEnd::Refused,
+                    // A server error or no answer: it may have been applied.
+                    _ => presence::PutEnd::Unknown,
+                }
             }
-            _ => presence::PutEnd::Failed,
+            // Timed out: the request may still reach the homeserver.
+            Err(_) => presence::PutEnd::Unknown,
         };
         guard(&shared.presence).put_ended(state, end, Instant::now());
     }
