@@ -86,9 +86,9 @@ const PARK_TIME: Duration = Duration::from_secs(30);
 /// Wait before a key that did not fit in the worker queue goes again.
 const UNSENT_RETRY: Duration = Duration::from_millis(200);
 
-/// Most remote keys of one member waiting for room in the worker queue: the
-/// newest [`REPLAYED_KEYS`] under each of at most two backend identities.
-const MAX_UNSENT_PER_MEMBER: usize = 2 * REPLAYED_KEYS;
+/// Most remote keys of one member waiting for room in the worker queue: every
+/// stored key under each of at most two backend identities.
+const MAX_UNSENT_PER_MEMBER: usize = 2 * crate::calls::keys::MAX_KEYS_PER_MEMBER;
 
 /// Waiting commands for the running call.
 const COMMAND_QUEUE: usize = 8;
@@ -224,27 +224,36 @@ pub async fn proxy_configured(stores: &crate::store::Stores) -> Result<bool, Cal
 // ---------------------------------------------------------------------
 // Pure parts.
 
-/// Who joined and left since the last look, by participant identity.
+/// One membership: the device (`{user}:{device}`) and its `membershipID`.
+/// Two devices may share a membership ID (ADR-0056), so the ID alone does not
+/// name a member; a device that joins again with a new ID is a new
+/// membership.
+type MemberKey = (String, String);
+
+fn member_key(member: &ActiveMember) -> MemberKey {
+    (
+        participant_identity(&member.user_id, &member.device_id),
+        member.identity.clone(),
+    )
+}
+
+/// Who joined and left since the last look, by membership.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct MemberDiff {
-    joined: Vec<String>,
-    left: Vec<String>,
+    joined: Vec<MemberKey>,
+    left: Vec<MemberKey>,
 }
 
 /// The change from `known` to `current`.
-fn diff_members(known: &BTreeSet<String>, current: &[ActiveMember]) -> MemberDiff {
-    let now: BTreeSet<&str> = current.iter().map(|m| m.identity.as_str()).collect();
+fn diff_members(known: &BTreeSet<MemberKey>, current: &[ActiveMember]) -> MemberDiff {
+    let now: BTreeSet<MemberKey> = current.iter().map(member_key).collect();
     MemberDiff {
         joined: current
             .iter()
-            .filter(|m| !known.contains(&m.identity))
-            .map(|m| m.identity.clone())
+            .map(member_key)
+            .filter(|key| !known.contains(key))
             .collect(),
-        left: known
-            .iter()
-            .filter(|id| !now.contains(id.as_str()))
-            .cloned()
-            .collect(),
+        left: known.difference(&now).cloned().collect(),
     }
 }
 
@@ -269,13 +278,13 @@ fn key_action(
 fn recipients(
     outgoing: &Outgoing,
     members: &[ActiveMember],
-    joined: &[String],
+    joined: &[MemberKey],
 ) -> Vec<(OwnedUserId, OwnedDeviceId)> {
     members
         .iter()
         .filter(|m| match outgoing.recipients {
             Recipients::AllMembers => true,
-            Recipients::NewMembersOnly => joined.contains(&m.identity),
+            Recipients::NewMembersOnly => joined.contains(&member_key(m)),
         })
         .take(MAX_CALL_MEMBERS)
         .map(|m| (m.user_id.clone(), m.device_id.clone()))
@@ -3307,12 +3316,7 @@ impl Call {
             return Err(EndReason::MembershipLost);
         }
         let current = others(all, &self.own_identity);
-        let known: BTreeSet<String> = self
-            .view
-            .members
-            .iter()
-            .map(|m| m.identity.clone())
-            .collect();
+        let known: BTreeSet<MemberKey> = self.view.members.iter().map(member_key).collect();
         let diff = diff_members(&known, &current);
         // The worker knows members by their backend identities, which can
         // change with a membership (ADR-0056).
@@ -3339,13 +3343,9 @@ impl Call {
             }
         }
         // A member that now has another backend identity keeps its keys
-        // under the new one too: the newest [`REPLAYED_KEYS`], which hold
-        // the key in use and the one about to be.
+        // under the new one too.
         for (device, added) in backends.added {
-            let keys: Vec<(String, u8)> = replayed(&self.remote.keys_of(&device))
-                .iter()
-                .flat_map(|(index, _)| added.iter().map(|identity| (identity.clone(), *index)))
-                .collect();
+            let keys = replay_keys(&self.remote.keys_of(&device), &added);
             self.mark_unsent(device, keys);
         }
         self.send_unsent()?;
@@ -3482,13 +3482,16 @@ impl Call {
     }
 }
 
-/// Most stored keys of one member given again under a new backend identity.
-const REPLAYED_KEYS: usize = 2;
-
-/// The newest [`REPLAYED_KEYS`] of `keys`, which are oldest first, in that
-/// order.
-fn replayed<T>(keys: &[T]) -> &[T] {
-    &keys[keys.len().saturating_sub(REPLAYED_KEYS)..]
+/// The keys to give under a member's new backend identities `added`: every
+/// stored key, at most [`crate::calls::keys::MAX_KEYS_PER_MEMBER`], under each
+/// identity, in the order of `keys` (oldest first). Key indices wrap at 256
+/// and a late key may arrive after a newer one, so neither the index nor the
+/// arrival order says which key the member uses; all of them go. They wait
+/// for room in the worker queue, so they cannot end the call.
+fn replay_keys<B>(keys: &[(u8, B)], added: &[String]) -> Vec<(String, u8)> {
+    keys.iter()
+        .flat_map(|(index, _)| added.iter().map(|identity| (identity.clone(), *index)))
+        .collect()
 }
 
 /// What the worker must hear when the members change (ADR-0056).
@@ -3598,12 +3601,17 @@ mod tests {
         }
     }
 
-    fn known(ids: &[&str]) -> BTreeSet<String> {
-        ids.iter().map(|s| (*s).to_owned()).collect()
+    /// The membership of a device whose membership ID is `{user}:{device}`.
+    fn key(id: &str) -> MemberKey {
+        (id.to_owned(), id.to_owned())
+    }
+
+    fn known(ids: &[&str]) -> BTreeSet<MemberKey> {
+        ids.iter().map(|id| key(id)).collect()
     }
 
     /// GIVEN known members and a new list WHEN diffed THEN joined and left
-    /// are named by identity.
+    /// are named by membership.
     #[test]
     fn given_a_changed_member_list_then_the_diff_names_joined_and_left() {
         let current = [
@@ -3611,12 +3619,63 @@ mod tests {
             member("@c:example.org", "C", "https://sfu.example.org"),
         ];
         let diff = diff_members(&known(&["@a:example.org:A", "@b:example.org:B"]), &current);
-        assert_eq!(diff.joined, ["@c:example.org:C"]);
-        assert_eq!(diff.left, ["@b:example.org:B"]);
+        assert_eq!(diff.joined, [key("@c:example.org:C")]);
+        assert_eq!(diff.left, [key("@b:example.org:B")]);
         assert_eq!(
             diff_members(&known(&["@a:example.org:A"]), &current[..1]),
             MemberDiff::default()
         );
+    }
+
+    /// GIVEN two devices of one user with one membership ID WHEN the second
+    /// joins THEN it is a join and only it gets the young key; WHEN the first
+    /// leaves THEN it is a leave, so the key rotates; WHEN a device names a
+    /// new membership ID THEN it is a leave and a join (ADR-0056).
+    #[test]
+    fn given_a_shared_membership_id_then_each_device_joins_and_leaves() {
+        let shared = |device: &str| {
+            let mut m = member("@b:example.org", device, "https://sfu.example.org");
+            m.identity = "shared".to_owned();
+            m
+        };
+        let b1 = ("@b:example.org:B1".to_owned(), "shared".to_owned());
+        let b2 = ("@b:example.org:B2".to_owned(), "shared".to_owned());
+        let both = [shared("B1"), shared("B2")];
+
+        let diff = diff_members(&BTreeSet::from([b1.clone()]), &both);
+        assert_eq!(
+            diff,
+            MemberDiff {
+                joined: vec![b2.clone()],
+                left: vec![]
+            }
+        );
+        let now = Instant::now();
+        let mut own = OwnKeys::new(now).unwrap();
+        let outgoing = key_action(&diff, &mut own, now).unwrap().unwrap();
+        assert_eq!(outgoing.recipients, Recipients::NewMembersOnly);
+        assert_eq!(
+            recipients(&outgoing, &both, &diff.joined),
+            [(owned_user_id!("@b:example.org"), owned_device_id!("B2"))]
+        );
+
+        let diff = diff_members(&BTreeSet::from([b1.clone(), b2.clone()]), &both[1..]);
+        assert_eq!(
+            diff,
+            MemberDiff {
+                joined: vec![],
+                left: vec![b1]
+            }
+        );
+
+        let mut renamed = shared("B2");
+        renamed.identity = "new".to_owned();
+        let diff = diff_members(&BTreeSet::from([b2.clone()]), &[renamed]);
+        assert_eq!(
+            diff.joined,
+            [("@b:example.org:B2".to_owned(), "new".to_owned())]
+        );
+        assert_eq!(diff.left, [b2]);
     }
 
     /// GIVEN a young key WHEN one member joins THEN the key goes only to the
@@ -3631,7 +3690,7 @@ mod tests {
             member("@b:example.org", "B", "https://sfu.example.org"),
         ];
         let joined = MemberDiff {
-            joined: vec!["@b:example.org:B".to_owned()],
+            joined: vec![key("@b:example.org:B")],
             left: vec![],
         };
         let first = key_action(&joined, &mut own, now).unwrap().unwrap();
@@ -3644,8 +3703,8 @@ mod tests {
         );
 
         let left = MemberDiff {
-            joined: vec!["@b:example.org:B".to_owned()],
-            left: vec!["@x:example.org:X".to_owned()],
+            joined: vec![key("@b:example.org:B")],
+            left: vec![key("@x:example.org:X")],
         };
         let second = key_action(&left, &mut own, now).unwrap().unwrap();
         assert_eq!(second.recipients, Recipients::AllMembers);
@@ -3665,7 +3724,7 @@ mod tests {
         let start = Instant::now();
         let mut own = OwnKeys::new(start).unwrap();
         let diff = MemberDiff {
-            joined: vec!["@b:example.org:B".to_owned()],
+            joined: vec![key("@b:example.org:B")],
             left: vec![],
         };
         let later = start + Duration::from_secs(60);
@@ -3751,16 +3810,23 @@ mod tests {
         assert!(view.speaking.is_empty());
     }
 
-    /// GIVEN a member's stored keys, oldest first WHEN they are given again
-    /// under a new backend identity THEN only the newest two go, oldest of
-    /// them first, so a member with many keys cannot fill the worker queue.
+    /// GIVEN stored keys whose indices wrapped, and a late older key WHEN
+    /// they are given under new backend identities THEN every key goes under
+    /// each identity, in stored order, so the key in use is never left out.
     #[test]
-    fn given_stored_keys_then_only_the_newest_two_are_replayed() {
-        assert_eq!(replayed::<u8>(&[]), &[] as &[u8]);
-        assert_eq!(replayed(&[7]), &[7]);
-        assert_eq!(replayed(&[1, 2]), &[1, 2]);
-        let many: Vec<u8> = (0..16).collect();
-        assert_eq!(replayed(&many), &[14, 15]);
+    fn given_stored_keys_then_all_are_replayed_under_each_new_identity() {
+        let added = ["h".to_owned(), "d".to_owned()];
+        assert!(replay_keys::<()>(&[], &added).is_empty());
+        // 255 then 0 is a wrap; 254 arrived late.
+        let keys = [(255, ()), (0, ()), (254, ())];
+        assert_eq!(
+            replay_keys(&keys, &added),
+            [255, 255, 0, 0, 254, 254]
+                .iter()
+                .zip(added.iter().cycle())
+                .map(|(index, id)| (id.clone(), *index))
+                .collect::<Vec<_>>()
+        );
     }
 
     /// GIVEN members that leave, stay, or change their backend identities
@@ -4560,11 +4626,14 @@ mod tests {
         );
         let mut call = fixture.call;
         let device = "@b:example.org:B".to_owned();
-        let keys: Vec<(String, u8)> = (0..10).map(|i| (device.clone(), i)).collect();
+        let count = MAX_UNSENT_PER_MEMBER + 3;
+        let keys: Vec<(String, u8)> = (0..count)
+            .map(|i| (device.clone(), u8::try_from(i).unwrap()))
+            .collect();
         call.mark_unsent(device.clone(), keys.clone());
-        call.mark_unsent(device.clone(), [(device.clone(), 9)]);
+        call.mark_unsent(device.clone(), [keys[count - 1].clone()]);
         let kept: Vec<_> = call.unsent[&device].iter().cloned().collect();
-        assert_eq!(kept, keys[10 - MAX_UNSENT_PER_MEMBER..]);
+        assert_eq!(kept, keys[3..]);
     }
 
     /// GIVEN a due own key and a full worker queue WHEN it is applied THEN

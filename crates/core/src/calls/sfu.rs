@@ -102,6 +102,9 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
     }
     let mut value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
     let object = value.as_object_mut().ok_or(Refusal::NotJson)?;
+    // The JWT leaves the parsed answer first, so a refused URL leaves no
+    // ordinary copy of it either.
+    let jwt = checked_jwt(object)?;
 
     let raw_url = object
         .get("url")
@@ -115,10 +118,7 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
         return Err(Refusal::BadUrl);
     }
 
-    Ok(SfuGrant {
-        url,
-        jwt: checked_jwt(object)?,
-    })
+    Ok(SfuGrant { url, jwt })
 }
 
 /// The `jwt` member of an answer: three non-empty parts of visible ASCII, at
