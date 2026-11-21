@@ -498,6 +498,9 @@ pub(super) mod tests {
             // matrix-js-sdk ignores m.livekit, so the OpenID form needs the
             // type it reads.
             json!({ "type": "m.livekit", "livekit_service_url": "https://jwt.example.org" }),
+            // A `url` names the SFU, never a JWT service (ADR-0056 replaces
+            // the ADR-0043 amendment that read it so).
+            json!({ "type": "m.livekit", "url": "https://jwt.example.org" }),
         ];
         if !cfg!(feature = "dev-disposable-servers") {
             bad.push(json!({ "type": "livekit", "url": "ws://127.0.0.1:7880" }));

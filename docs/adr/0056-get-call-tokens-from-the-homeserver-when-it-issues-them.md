@@ -141,8 +141,9 @@ homeservers without a server change and without a change to ADR-0004.
      `transports`.
   2. On 404 `M_UNRECOGNIZED`, the unstable path, member `rtc_transports`.
   3. On 404 `M_UNRECOGNIZED`, the `org.matrix.msc4143.rtc_foci` member of the
-     account's `.well-known/matrix/client` document. The core reads it with
-     the bounded fetch policy of ADR-0027.
+     account's `.well-known/matrix/client` document, or the `m.rtc_foci`
+     member when the first name is absent. The core reads it with the bounded
+     fetch policy of ADR-0027.
 * A missing list member is an empty list. An empty list does not fall back,
   as in the SDK.
 * The core reads at most 16 KiB of an answer and examines at most 8 entries.
@@ -158,7 +159,21 @@ homeservers without a server change and without a change to ADR-0004.
     must be the server name of the own user ID, else the entry is skipped.
   * Any other entry is skipped.
   * This replaces the ADR-0043 amendment of 19 November 2026, which read an
-    `m.livekit` `url` as an `https://` JWT service URL.
+    `m.livekit` `url` as an `https://` JWT service URL. That amendment had no
+    source for the `https://` reading. No standard form is lost:
+    * The Synapse configuration manual describes `url` as the WebSocket URL
+      of the LiveKit SFU, and `livekit_service_url` as the deprecated HTTP
+      URL of the authorization service. Its example `url` is a `wss://` URL.
+      (Read on 21 November 2026 through a fetch summary, not verbatim.)
+    * Merovingian advertises a `wss://` `url` for both types.
+    * `matrix-js-sdk` ignores type `m.livekit`, so Element Call never reads
+      that form.
+    An entry with an `https://` `url` and no `livekit_service_url` is skipped.
+    The core does not send an OpenID token to a URL that the server names as
+    an SFU.
+  * Type `m.livekit` with `livekit_service_url` is skipped. Element Call does
+    not read it either, because `matrix-js-sdk` ignores the type. Calls with
+    Element Call need a type `livekit` entry.
 * The first usable entry in the server's order is used.
 * The readiness reason follows the answer:
   * A request that cannot be made or finished, or an error status other than
