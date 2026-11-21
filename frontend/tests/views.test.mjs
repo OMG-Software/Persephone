@@ -99,6 +99,39 @@ test('room names render as isolated, escaped text with capped unread counts', ()
   assert.match(html, /<nav aria-label="Rooms">/);
 });
 
+test('GIVEN direct-message rooms WHEN a contact presence is known THEN a labelled dot shows it, and no other room gets one', () => {
+  const room = (id, contact, contactPresence) => ({
+    roomId: id,
+    displayName: id,
+    unreadCount: 0,
+    encryption: 'encrypted',
+    contact,
+    contactPresence
+  });
+  const { body: html } = render(RoomList, {
+    props: {
+      rooms: [
+        room('!a:s', '@a:s', 'online'),
+        room('!b:s', '@b:s', 'unavailable'),
+        room('!c:s', '@c:s', 'offline'),
+        room('!d:s', '@d:s', null),
+        // Not a direct-message room: a presence is ignored.
+        room('!e:s', null, 'online'),
+        // A value this page does not know shows nothing.
+        room('!f:s', '@f:s', '<b>busy</b>')
+      ],
+      truncated: false,
+      selected: null,
+      onselect: () => {}
+    }
+  });
+  assert.match(html, /class="presence-mark online" role="img" aria-label="Online"/);
+  assert.match(html, /class="presence-mark unavailable" role="img" aria-label="Away"/);
+  assert.match(html, /class="presence-mark offline" role="img" aria-label="Offline"/);
+  assert.equal((html.match(/presence-mark/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /busy/);
+});
+
 test('timeline bodies keep their text, are direction-isolated and never parsed as HTML', () => {
   const { body: html } = render(Timeline, {
     props: {
@@ -1169,7 +1202,9 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     loadRoomPictures: false,
     captureProtection: true,
     timelineEvents: Object.fromEntries(EVENT_KEYS.map((key) => [key, key !== 'leaves'])),
-    theme: 'orange'
+    theme: 'orange',
+    sharePresence: true,
+    presence: 'online'
   };
   const html = render(Preferences, {
     props: { settings, failure: null, mac: false, profilePassphrase: true, onchange: () => {} }
@@ -1183,6 +1218,38 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
       onchange: () => {}
     }
   }).body;
+  // Presence is shared as online by default, and its status can be chosen
+  // while sharing is on (ADR-0057).
+  assert.match(html, /<span>Share your presence<\/span>/);
+  assert.match(html, /<label for="presence">Your presence<\/label>/);
+  assert.match(html, /<option value="unavailable">Away<\/option>/);
+  assert.match(html, /at most once a second/);
+  const unshared = render(Preferences, {
+    props: {
+      settings: { ...settings, sharePresence: false },
+      failure: null,
+      mac: false,
+      profilePassphrase: true,
+      onchange: () => {}
+    }
+  }).body;
+  assert.match(unshared, /<select id="presence" class="field" disabled/);
+  assert.doesNotMatch(html, /<select id="presence" class="field" disabled/);
+  // The menu shows the saved status, not the default.
+  const away = render(Preferences, {
+    props: {
+      settings: { ...settings, presence: 'unavailable' },
+      failure: null,
+      mac: false,
+      profilePassphrase: true,
+      onchange: () => {}
+    }
+  }).body;
+  const menu = (page) => page.slice(page.indexOf('<select id="presence"'), page.indexOf('</select>', page.indexOf('<select id="presence"')));
+  assert.match(menu(away), /<option value="unavailable" selected/);
+  assert.doesNotMatch(menu(away), /<option value="online" selected/);
+  assert.match(menu(html), /<option value="online" selected/);
+
   assert.match(nameless, /says only that a message arrived: no names, no message/);
   assert.match(html, /Show who wrote and in which room/);
   assert.match(html, /<label for="chat-text-size">Message text</);

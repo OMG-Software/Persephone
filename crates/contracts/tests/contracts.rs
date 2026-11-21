@@ -1,9 +1,10 @@
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountState, AccountStatus, AppStatus, CHAT_TEXT_PERCENT_MAX,
     ConversationStart, DeviceList, DisplayName, INTERFACE_TEXT_PERCENT_MAX, InviteList, JoinedRoom,
-    NotificationLevel, NotificationSettings, ProfileList, PublicRoomPage, RoomCreation, RoomInvite,
-    RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, Theme, ThreePidList, TimelineEvents,
-    UserSearch, generated_typescript, sample_room_summary, sample_timeline_page,
+    NotificationLevel, NotificationSettings, PresenceStatus, ProfileList, PublicRoomPage,
+    RoomCreation, RoomInvite, RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, Theme,
+    ThreePidList, TimelineEvents, UserSearch, generated_typescript, sample_room_summary,
+    sample_timeline_page,
 };
 
 #[test]
@@ -529,7 +530,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"captureProtection":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"orange"}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"captureProtection":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true},"theme":"orange","sharePresence":true,"presence":"online"}"#
     );
     // Every kind of room change shows by default.
     assert_eq!(defaults.timeline_events, TimelineEvents::default());
@@ -566,6 +567,35 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         );
     }
     assert!(serde_json::from_str::<AccountSettings>(&without_theme).is_err());
+    // GIVEN settings from the page WHEN presence is shared as online by
+    // default THEN a missing presence field, or a status that is not one
+    // of the three names, is refused (ADR-0057).
+    assert!(defaults.share_presence);
+    assert_eq!(defaults.presence, PresenceStatus::Online);
+    for (status, name) in [
+        (PresenceStatus::Online, r#""online""#),
+        (PresenceStatus::Unavailable, r#""unavailable""#),
+        (PresenceStatus::Offline, r#""offline""#),
+    ] {
+        assert_eq!(serde_json::to_string(&status).unwrap(), name);
+        assert_eq!(
+            serde_json::from_str::<PresenceStatus>(name).unwrap(),
+            status
+        );
+    }
+    for sent in [
+        complete.replace(r#","sharePresence":true"#, ""),
+        complete.replace(r#","presence":"online""#, ""),
+        complete.replace(r#""sharePresence":true"#, r#""sharePresence":"yes""#),
+        complete.replace(r#""presence":"online""#, r#""presence":"busy""#),
+        complete.replace(r#""presence":"online""#, r#""presence":{"online":null}"#),
+    ] {
+        assert_ne!(sent, complete);
+        assert!(
+            serde_json::from_str::<AccountSettings>(&sent).is_err(),
+            "{sent}"
+        );
+    }
     for invalid in [
         r#"{}"#,
         r#"{"enterSends":false}"#,

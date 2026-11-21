@@ -15,7 +15,7 @@
 
 use crate::store::Stores;
 use matrix_sdk_crypto::store::CryptoStore;
-use persephone_contracts::{AccountSettings, Theme, TimelineEvents};
+use persephone_contracts::{AccountSettings, PresenceStatus, Theme, TimelineEvents};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -42,6 +42,9 @@ struct Stored {
     /// Kept as any value, read by [`theme`]: a theme name from another
     /// build must not make the whole record unreadable.
     theme: Value,
+    share_presence: bool,
+    /// Kept as any value, read by [`presence`], like the theme.
+    presence: Value,
 }
 
 impl Default for Stored {
@@ -68,6 +71,8 @@ impl From<AccountSettings> for Stored {
                 _ => Map::new(),
             },
             theme: serde_json::to_value(settings.theme).unwrap_or(Value::Null),
+            share_presence: settings.share_presence,
+            presence: serde_json::to_value(settings.presence).unwrap_or(Value::Null),
         }
     }
 }
@@ -76,6 +81,12 @@ impl From<AccountSettings> for Stored {
 /// know, or a value that is not a name, reads as the default theme.
 fn theme(stored: &Value) -> Theme {
     Theme::deserialize(stored).unwrap_or_default()
+}
+
+/// The shared presence from a stored value, leniently: anything but one of
+/// the three names reads as online.
+fn presence(stored: &Value) -> PresenceStatus {
+    PresenceStatus::deserialize(stored).unwrap_or_default()
 }
 
 /// The timeline's switches from a stored map, leniently: a switch the map
@@ -110,6 +121,8 @@ impl From<Stored> for AccountSettings {
             capture_protection: stored.capture_protection,
             timeline_events: timeline_events(&stored.timeline_events),
             theme: theme(&stored.theme),
+            share_presence: stored.share_presence,
+            presence: presence(&stored.presence),
         };
         if settings.idle_lock_minutes > persephone_contracts::IDLE_LOCK_MINUTES_MAX {
             settings.idle_lock_minutes = defaults.idle_lock_minutes;
@@ -188,6 +201,8 @@ mod tests {
                 ..TimelineEvents::default()
             },
             theme: Theme::Blue,
+            share_presence: false,
+            presence: PresenceStatus::Unavailable,
         };
         let bytes = serde_json::to_vec(&Stored::from(changed)).unwrap();
         assert_eq!(decode(&bytes), changed);
@@ -251,6 +266,25 @@ mod tests {
                 },
                 "{record}"
             );
+        }
+    }
+
+    /// GIVEN a record from before the presence settings, or one with a
+    /// damaged presence WHEN read THEN presence is shared as online, and
+    /// the other settings are kept (ADR-0057).
+    #[test]
+    fn given_an_old_or_damaged_presence_record_then_online_is_shared() {
+        let old = decode(br#"{"enter_sends":false}"#);
+        assert!(old.share_presence && !old.enter_sends);
+        assert_eq!(old.presence, PresenceStatus::Online);
+        let off = decode(br#"{"share_presence":false,"presence":"offline"}"#);
+        assert!(!off.share_presence);
+        assert_eq!(off.presence, PresenceStatus::Offline);
+        for value in [r#""busy""#, "null", "1", r#"{"online":null}"#] {
+            let record = format!(r#"{{"enter_sends":false,"presence":{value}}}"#);
+            let read = decode(record.as_bytes());
+            assert_eq!(read.presence, PresenceStatus::Online, "{record}");
+            assert!(!read.enter_sends, "{record}");
         }
     }
 

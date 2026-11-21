@@ -205,6 +205,36 @@ impl wiremock::Respond for SlidingJoin {
     }
 }
 
+/// Native Sliding Sync with only `DM`, a direct-message room with `CONTACT`,
+/// listed as direct in the account data. Sliding Sync carries no presence.
+struct SlidingDirect;
+
+impl wiremock::Respond for SlidingDirect {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+        let wanted = body["lists"]["rooms"]["required_state"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let state: Vec<Value> = dm_state()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| wanted.iter().any(|entry| requested(entry, event)))
+            .cloned()
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "pos":"sliding-pos","lists":{"rooms":{"count":1}},
+            "rooms":{DM:{"initial":true,"joined_count":2,"invited_count":0,"required_state":state,"timeline":[],"num_live":0,"notification_count":0,"highlight_count":0}},
+            "extensions":{
+                "account_data":{"global":[{"type":"m.direct","content":{CONTACT:[DM]}}]},
+                "e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},
+                "to_device":{"events":[],"next_batch":"to-device-pos"}
+            }
+        }))
+    }
+}
+
 /// The Sliding Sync answer for `ROOM` with `timeline` and the homeserver's
 /// joined and invited `counts`: only the state the request's list asks for,
 /// less the `withheld` event types.
@@ -386,7 +416,9 @@ struct LiveRoom {
     round: AtomicUsize,
     /// Also report `PLAIN`, a room that is not encrypted.
     plain: bool,
-    /// Also report `DM`, a direct-message room with `CONTACT`.
+    /// Also report `DM`, a direct-message room with `CONTACT`, who is away.
+    /// Only the first round reports their presence, before the core tracks
+    /// them, so the core has to read it from the SDK's store.
     dm: bool,
 }
 
@@ -432,7 +464,11 @@ impl wiremock::Respond for LiveRoom {
             rooms[PLAIN] = json!({"state":{"events":plain_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
         }
         let mut account_data = json!([]);
+        let mut presence = json!([]);
         if self.dm {
+            if n == 0 {
+                presence = json!([{"type":"m.presence","sender":CONTACT,"content":{"presence":"unavailable"}}]);
+            }
             rooms[DM] = json!({"summary":{"m.joined_member_count":2,"m.invited_member_count":0},"state":{"events":dm_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             rooms[GROUP] = json!({"summary":{"m.joined_member_count":3,"m.invited_member_count":0},"state":{"events":group_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             account_data = json!([{"type":"m.direct","content":{CONTACT:[DM, GROUP]}}]);
@@ -440,9 +476,20 @@ impl wiremock::Respond for LiveRoom {
         ResponseTemplate::new(200).set_body_json(json!({
             "next_batch": format!("classic-{n}"),
             "account_data":{"events":account_data},
+            "presence":{"events":presence},
             "rooms":{"join":rooms},
             "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
         }))
+    }
+}
+
+/// An empty `200` answer that records when each request arrived.
+struct Stamped(Arc<std::sync::Mutex<Vec<Instant>>>);
+
+impl Respond for Stamped {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.0.lock().unwrap().push(Instant::now());
+        ResponseTemplate::new(200).set_body_json(json!({}))
     }
 }
 
@@ -1490,6 +1537,335 @@ fn given_native_sliding_sync_then_it_is_used_and_rooms_arrive() {
     );
     let state: StoreState = value(call(&core, Call::LockSession {}));
     assert_eq!(state, StoreState::RestartRequired);
+}
+
+impl Homeserver {
+    /// Answers presence changes with 200 from now on.
+    fn accept_presence(&self) {
+        self.runtime.block_on(
+            Mock::given(method("PUT"))
+                .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .mount(&self.server),
+        );
+    }
+
+    /// The `set_presence` value of each classic sync request, in order;
+    /// `online` where the request leaves it out, as the spec defaults it.
+    fn sync_presence(&self) -> Vec<String> {
+        self.presence_sent_to("/_matrix/client/v3/sync")
+    }
+
+    /// As [`Self::sync_presence`], for the requests to `endpoint`.
+    fn presence_sent_to(&self, endpoint: &str) -> Vec<String> {
+        self.requests_matching(endpoint)
+            .into_iter()
+            .map(|(url, _)| {
+                url.split(['?', '&'])
+                    .find_map(|pair| pair.strip_prefix("set_presence="))
+                    .unwrap_or("online")
+                    .to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The bodies of the presence changes sent, in order: `PUT` requests only,
+/// not the lookups (`GET`) of contacts' presence.
+fn presence_puts(server: &Homeserver) -> Vec<Value> {
+    server
+        .runtime
+        .block_on(server.server.received_requests())
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "PUT"
+                && request
+                    .url
+                    .path()
+                    .starts_with("/_matrix/client/v3/presence/")
+        })
+        .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+        .collect()
+}
+
+/// GIVEN a homeserver whose sync answers at once, as when another client of
+/// the account keeps changing its presence WHEN Persephone syncs THEN only
+/// its first request changes the presence, and every later one sends
+/// `offline`, which leaves it as it is (ADR-0057).
+#[test]
+fn given_sync_rounds_that_return_at_once_then_presence_is_not_set_again_and_again() {
+    let server = Homeserver::signed_in();
+    server.accept_presence();
+    let dir = TempDir::new().unwrap();
+    let _core = signed_in_core(&server, dir.path());
+    wait_for("three sync rounds", || server.sync_presence().len() >= 3);
+    std::thread::sleep(Duration::from_secs(2));
+    let sent = server.sync_presence();
+    assert_eq!(sent[0], "online", "{sent:?}");
+    assert!(sent[1..].iter().all(|value| value == "offline"), "{sent:?}");
+    assert!(presence_puts(&server).is_empty());
+}
+
+/// GIVEN native Sliding Sync, whose rounds here return at once WHEN it syncs
+/// and the presence changes THEN its requests carry the writer's value as
+/// classic ones do: only the first changes the presence, setting the value
+/// makes no request, and the change is one `PUT` (ADR-0057).
+#[test]
+fn given_sliding_sync_then_its_requests_carry_the_writers_presence() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.accept_presence();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("three sliding rounds", || {
+        server.presence_sent_to(SLIDING).len() >= 3
+    });
+    let sent = server.presence_sent_to(SLIDING);
+    assert_eq!(sent[0], "online", "{sent:?}");
+    assert!(sent[1..].iter().all(|value| value == "offline"), "{sent:?}");
+    assert!(
+        presence_puts(&server).is_empty(),
+        "no request sets the value"
+    );
+    assert!(server.sync_presence().is_empty(), "no classic fallback");
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                presence: PresenceStatus::Unavailable,
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    wait_for("the change", || !presence_puts(&server).is_empty());
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        presence_puts(&server),
+        vec![json!({"presence": "unavailable"})]
+    );
+}
+
+/// GIVEN changes of the shared presence every 300 ms for 3 seconds WHEN they
+/// are sent THEN the `PUT`s that arrive are at least a second apart, the
+/// newest choice arrives last, and once sharing is off nothing changes it
+/// any more (ADR-0057). Sync rounds come every 500 ms, so without the limit
+/// the `PUT`s would come that often.
+#[test]
+fn given_quick_presence_changes_then_at_most_one_is_sent_each_second() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    let server = Homeserver::signed_in();
+    let arrived = Arc::new(std::sync::Mutex::new(Vec::new()));
+    server.runtime.block_on(
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(Stamped(arrived.clone()))
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the first sync", || !server.sync_presence().is_empty());
+    // The first sync carried the presence; the next carry would come
+    // `SYNC_CARRY_GAP` (15 s) later while sharing is on.
+    let first_carry = Instant::now();
+    let set = |share_presence, presence| {
+        let saved = call(
+            &core,
+            Call::SetAccountSettings {
+                settings: AccountSettings {
+                    share_presence,
+                    presence,
+                    ..AccountSettings::default()
+                },
+            },
+        );
+        assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    };
+    for step in 0..10 {
+        let presence = if step % 2 == 0 {
+            PresenceStatus::Unavailable
+        } else {
+            PresenceStatus::Online
+        };
+        set(true, presence);
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    set(true, PresenceStatus::Offline);
+    wait_for("the newest change", || {
+        presence_puts(&server).last() == Some(&json!({"presence": "offline"}))
+    });
+    let arrived = arrived.lock().unwrap().clone();
+    assert!(arrived.len() >= 2, "{} changes sent", arrived.len());
+    for pair in arrived.windows(2) {
+        // The limit holds where the core sends; arrival adds a little jitter.
+        let gap = pair[1].duration_since(pair[0]);
+        assert!(
+            gap >= Duration::from_millis(900),
+            "two changes {gap:?} apart"
+        );
+    }
+    // Sharing off: wait for two more sync requests, so the round that may
+    // have begun before the change has ended, then past the time of the
+    // next carry. Nothing may change the presence meanwhile.
+    set(false, PresenceStatus::Online);
+    let changed = server.sync_presence().len();
+    wait_for("a round after the change", || {
+        server.sync_presence().len() >= changed + 2
+    });
+    let before = (presence_puts(&server).len(), server.sync_presence().len());
+    let carry_due = first_carry + Duration::from_secs(16);
+    wait_for("the time of the next carry", || {
+        Instant::now() >= carry_due && server.sync_presence().len() > before.1
+    });
+    assert_eq!(presence_puts(&server).len(), before.0, "no change sent");
+    let later = server.sync_presence();
+    assert!(
+        later[before.1..].iter().all(|value| value == "offline"),
+        "{later:?}"
+    );
+}
+
+/// GIVEN a homeserver that refuses presence changes, as one with presence
+/// turned off answers 403 WHEN the presence changes THEN it is sent once and
+/// not again on later rounds, by `PUT` or by sync (ADR-0057).
+#[test]
+fn given_a_refused_presence_change_then_it_is_not_sent_again() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    let server = Homeserver::signed_in();
+    server.runtime.block_on(
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(
+                    json!({"errcode": "M_FORBIDDEN", "error": "Presence is disabled"}),
+                ),
+            )
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the first sync", || !server.sync_presence().is_empty());
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                presence: PresenceStatus::Unavailable,
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    wait_for("the refused change", || !presence_puts(&server).is_empty());
+    let rounds = server.sync_presence().len();
+    wait_for("six more rounds", || {
+        server.sync_presence().len() >= rounds + 6
+    });
+    assert_eq!(presence_puts(&server).len(), 1);
+    assert!(
+        server.sync_presence()[rounds..]
+            .iter()
+            .all(|sent| sent == "offline"),
+        "{:?}",
+        server.sync_presence()
+    );
+}
+
+/// GIVEN a direct-message contact whose classic sync reports them away WHEN
+/// the page lists rooms THEN the contact's room carries their presence, and
+/// a room without a contact carries none (ADR-0057).
+#[test]
+fn given_a_contacts_presence_then_their_room_in_the_list_carries_it() {
+    use persephone_contracts::PresenceStatus;
+    let server = Homeserver::signed_in();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut list = RoomList {
+        rooms: Vec::new(),
+        truncated: false,
+    };
+    wait_for("the contact's presence in the room list", || {
+        list = value(call(&core, Call::RoomList {}));
+        list.rooms
+            .iter()
+            .any(|room| room.room_id == DM && room.contact_presence.is_some())
+    });
+    assert!(list.rooms.iter().any(|room| room.room_id == GROUP));
+    for room in &list.rooms {
+        let expected = (room.room_id == DM).then_some(PresenceStatus::Unavailable);
+        assert_eq!(room.contact_presence, expected, "{}", room.room_id);
+    }
+}
+
+/// GIVEN Sliding Sync, which carries no presence, and a direct-message
+/// contact WHEN the core syncs THEN it asks the homeserver for the contact's
+/// presence once, and their room in the list carries it; opening the room
+/// right after does not ask again, as the presence is recent (ADR-0057).
+#[test]
+fn given_sliding_sync_then_a_contacts_presence_is_looked_up_once_and_listed() {
+    use persephone_contracts::PresenceStatus;
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    let lookups = Arc::new(AtomicUsize::new(0));
+    server.runtime.block_on(async {
+        Mock::given(method("POST"))
+            .and(path(SLIDING))
+            .respond_with(SlidingDirect)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(Counted(
+                ResponseTemplate::new(200).set_body_json(json!({"presence":"unavailable"})),
+                lookups.clone(),
+            ))
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut list = RoomList {
+        rooms: Vec::new(),
+        truncated: false,
+    };
+    wait_for("the contact's presence in the room list", || {
+        list = value(call(&core, Call::RoomList {}));
+        list.rooms
+            .iter()
+            .any(|room| room.room_id == DM && room.contact_presence.is_some())
+    });
+    let dm = list.rooms.iter().find(|room| room.room_id == DM).unwrap();
+    assert_eq!(dm.contact.as_deref(), Some(CONTACT));
+    assert_eq!(dm.contact_presence, Some(PresenceStatus::Unavailable));
+    assert!(server.sync_presence().is_empty(), "no classic fallback");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    let _ = call(&core, Call::ContactStatus { room_id: DM.into() });
+    let rounds = server.presence_sent_to(SLIDING).len();
+    wait_for("three more sliding rounds", || {
+        server.presence_sent_to(SLIDING).len() >= rounds + 3
+    });
+    assert_eq!(
+        lookups.load(Ordering::SeqCst),
+        1,
+        "a recent presence is not asked again"
+    );
 }
 
 /// GIVEN a core that a test left signed in and syncing, never locked WHEN that

@@ -6,6 +6,7 @@
   import IconAction from './IconAction.svelte';
   import RoomPicture from './RoomPicture.svelte';
   import type { RoomPictures } from './roomPictures';
+  import { presenceLabel } from './presence.ts';
 
   let {
     rooms,
@@ -44,6 +45,7 @@
     <ul aria-label={group.name}>
     {#each group.rooms as room (room.roomId)}
       {@const favourite = favourites.has(room.roomId)}
+      {@const presence = room.contact ? presenceLabel(room.contactPresence) : null}
       <li class="room-item" class:favourite>
         <button
           type="button"
@@ -57,6 +59,14 @@
             <Icon name="hash" class="hash" />
           </RoomPicture>
           <bdi class="room-name">{room.displayName ?? room.roomId}</bdi>
+          {#if presence}
+            <span
+              class="presence-mark {room.contactPresence}"
+              role="img"
+              aria-label={presence}
+              title={presence}
+            ></span>
+          {/if}
           {#if room.hasCall}
             <span class="call-mark" role="img" aria-label="Call in progress"><Icon name="phone" /></span>
           {/if}

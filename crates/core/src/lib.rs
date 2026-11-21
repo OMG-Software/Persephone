@@ -57,6 +57,7 @@ pub mod passphrase;
 pub mod personal;
 pub mod pick;
 pub mod platform;
+pub mod presence;
 pub mod profiles;
 pub mod prompt_text;
 pub mod proxy;
@@ -1038,9 +1039,11 @@ impl Core {
                 Source::Fixtures => ok(&lock(&self.fixtures).room_list()),
                 Source::Locked => Outcome::Error(ErrorCode::Locked),
                 Source::SignedOut => ok(&empty_rooms()),
-                Source::Matrix(_lease, client) => {
-                    ok(&MatrixViews::room_list(&client, &self.hub.call_rooms))
-                }
+                Source::Matrix(_lease, client) => ok(&MatrixViews::room_list(
+                    &client,
+                    &self.hub.call_rooms,
+                    self.session.contacts_presence(),
+                )),
             },
             Call::TimelinePage { room_id, cursor } => {
                 let page = match self.source() {
@@ -3302,9 +3305,18 @@ impl Core {
             Source::Locked => Err(ErrorCode::Locked),
             // Synthetic rooms have no contacts.
             Source::Fixtures | Source::SignedOut => Err(ErrorCode::NotFound),
-            Source::Matrix(lease, client) => lease
-                .stores()
-                .block_on(MatrixViews::contact_status(&client, room_id)),
+            Source::Matrix(lease, client) => {
+                // Opening a contact's room asks for their presence again
+                // soon, unless it is recent (ADR-0057).
+                if let Some(contact) = MatrixViews::contact(&client, room_id) {
+                    self.session
+                        .contacts_presence()
+                        .want(&contact, std::time::Instant::now());
+                }
+                lease
+                    .stores()
+                    .block_on(MatrixViews::contact_status(&client, room_id))
+            }
         };
         match status {
             Ok(status) => ok(&status),
