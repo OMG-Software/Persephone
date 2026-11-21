@@ -161,19 +161,23 @@ homeservers without a server change and without a change to ADR-0004.
   * This replaces the ADR-0043 amendment of 19 November 2026, which read an
     `m.livekit` `url` as an `https://` JWT service URL. That amendment had no
     source for the `https://` reading. No standard form is lost:
-    * The Synapse configuration manual describes `url` as the WebSocket URL
-      of the LiveKit SFU, and `livekit_service_url` as the deprecated HTTP
-      URL of the authorization service. Its example `url` is a `wss://` URL.
-      (Read on 21 November 2026 through a fetch summary, not verbatim.)
+    * The Synapse configuration manual, section `matrix_rtc`
+      (`docs/usage/configuration/config_documentation.md` on the `develop`
+      branch, read on 21 November 2026), describes `url` as "The WebSocket
+      URL of the LiveKit SFU", required for type `m.livekit`. It names
+      `livekit_service_url` only for type `livekit` and calls it
+      "Deprecated". Its example advertises `m.livekit` with a `wss://` `url`
+      and `livekit` with that `url` and a `livekit_service_url`.
     * Merovingian advertises a `wss://` `url` for both types.
     * `matrix-js-sdk` ignores type `m.livekit`, so Element Call never reads
       that form.
     An entry with an `https://` `url` and no `livekit_service_url` is skipped.
     The core does not send an OpenID token to a URL that the server names as
     an SFU.
-  * Type `m.livekit` with `livekit_service_url` is skipped. Element Call does
-    not read it either, because `matrix-js-sdk` ignores the type. Calls with
-    Element Call need a type `livekit` entry.
+  * Type `m.livekit` with `livekit_service_url` is skipped. Synapse does not
+    describe that form, and Element Call does not read it, because
+    `matrix-js-sdk` ignores the type. Calls with Element Call need a type
+    `livekit` entry, as in Synapse's example.
 * The first usable entry in the server's order is used.
 * The readiness reason follows the answer:
   * A request that cannot be made or finished, or an error status other than
