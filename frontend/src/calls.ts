@@ -37,6 +37,7 @@ export const JOIN_ERROR_TEXT: Record<CallJoinError, string> = {
   not_joined: 'Join the room to start a call.',
   not_encrypted: 'Calls need an encrypted room.',
   no_call_server: 'Your homeserver has no call service.',
+  call_server_unsupported: "Your homeserver's call service is not one Persephone supports.",
   declined: 'The call was not started.',
   unsupported_platform: 'Calls are not available on this system yet.',
   containment: 'The call did not start: its process could not be contained.',

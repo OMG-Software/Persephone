@@ -166,7 +166,8 @@ homeservers without a server change and without a change to ADR-0004.
   * An empty list: `no_call_server`.
   * An answer that cannot be read, or a list with no usable entry: a new code,
     `call_server_unsupported`, with the text "Your homeserver's call service
-    is not one Persephone supports."
+    is not one Persephone supports." A join that finds this answer fails with
+    a join error of the same name and text.
 
 ### Token
 

@@ -2225,6 +2225,9 @@ pub enum CallJoinError {
     NotJoined,
     NotEncrypted,
     NoCallServer,
+    /// The homeserver offers a call server, but none that Persephone can
+    /// use (ADR-0056).
+    CallServerUnsupported,
     /// The profile has a proxy and the user did not allow a direct call.
     Declined,
     UnsupportedPlatform,

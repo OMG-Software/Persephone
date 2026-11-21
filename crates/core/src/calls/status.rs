@@ -51,6 +51,7 @@ pub fn join_error(error: CallError) -> Option<CallJoinError> {
         CallError::NotJoined => CallJoinError::NotJoined,
         CallError::NotEncrypted => CallJoinError::NotEncrypted,
         CallError::NoSfu => CallJoinError::NoCallServer,
+        CallError::SfuUnsupported => CallJoinError::CallServerUnsupported,
         CallError::Declined => CallJoinError::Declined,
         CallError::ProxyUnreadable => CallJoinError::ProxyUnreadable,
         CallError::DeviceSettingUnreadable => CallJoinError::DeviceSettingUnreadable,
@@ -406,6 +407,10 @@ mod tests {
             (CallError::NotJoined, CallJoinError::NotJoined),
             (CallError::NotEncrypted, CallJoinError::NotEncrypted),
             (CallError::NoSfu, CallJoinError::NoCallServer),
+            (
+                CallError::SfuUnsupported,
+                CallJoinError::CallServerUnsupported,
+            ),
             (CallError::Declined, CallJoinError::Declined),
             (CallError::ProxyUnreadable, CallJoinError::ProxyUnreadable),
             (

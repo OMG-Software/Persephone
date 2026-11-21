@@ -105,7 +105,7 @@ sharing: boolean, };
 
 export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "worker_crashed" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found";
 
-export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
+export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "call_server_unsupported" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
 
 export type CallCamera = "off" | "starting" | "on" | "not_found" | "unavailable";
 

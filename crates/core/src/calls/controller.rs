@@ -95,8 +95,11 @@ pub enum CallError {
     /// The room is not encrypted, or its state is unknown. A call never
     /// runs without frame encryption.
     NotEncrypted,
-    /// The homeserver offers no usable SFU, or could not be asked.
+    /// The homeserver offers no SFU, or could not be asked.
     NoSfu,
+    /// The homeserver offers SFUs, but none that Persephone can use
+    /// (ADR-0056).
+    SfuUnsupported,
     /// The profile has a proxy and the user did not allow a direct call.
     Declined,
     /// The profile's proxy setting could not be read.
@@ -1361,7 +1364,8 @@ impl CallController {
         // 3. An SFU; TURN is optional.
         let sfu = match sfu_transport(client).await {
             Ok(Discovery::Offered(service)) => service,
-            _ => return Err(CallError::NoSfu),
+            Ok(Discovery::Unsupported) => return Err(CallError::SfuUnsupported),
+            Ok(Discovery::NoneOffered) | Err(_) => return Err(CallError::NoSfu),
         };
         let focus = sfu.focus(room_id.as_str());
         let turn = turn_servers(client).await.ok().flatten();
