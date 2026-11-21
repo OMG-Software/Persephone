@@ -1235,6 +1235,20 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
   }).body;
   assert.match(unshared, /<select id="presence" class="field" disabled/);
   assert.doesNotMatch(html, /<select id="presence" class="field" disabled/);
+  // The menu shows the saved status, not the default.
+  const away = render(Preferences, {
+    props: {
+      settings: { ...settings, presence: 'unavailable' },
+      failure: null,
+      mac: false,
+      profilePassphrase: true,
+      onchange: () => {}
+    }
+  }).body;
+  const menu = (page) => page.slice(page.indexOf('<select id="presence"'), page.indexOf('</select>', page.indexOf('<select id="presence"')));
+  assert.match(menu(away), /<option value="unavailable" selected/);
+  assert.doesNotMatch(menu(away), /<option value="online" selected/);
+  assert.match(menu(html), /<option value="online" selected/);
 
   assert.match(nameless, /says only that a message arrived: no names, no message/);
   assert.match(html, /Show who wrote and in which room/);
