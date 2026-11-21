@@ -200,16 +200,20 @@ struct Focus {
     has_url: bool,
     /// It has `livekit_service_url`: the member may use `{user}:{device}`.
     has_service: bool,
+    /// Its type is `m.livekit`, which `matrix-js-sdk` ignores.
+    m_livekit: bool,
 }
 
 /// The acceptable transport of one `foci_preferred` entry, by the rules of
 /// [`livekit_entry`], which discovery uses too.
 fn focus(entry: &Value) -> Option<Focus> {
+    let m_livekit = entry["type"] == "m.livekit";
     let entry = livekit_entry(entry)?;
     Some(Focus {
         has_url: entry.sfu.is_some(),
         has_service: entry.service.is_some(),
         url: entry.service.or(entry.sfu)?.1,
+        m_livekit,
     })
 }
 
@@ -244,16 +248,19 @@ fn parse_member(event: &MemberEvent, now_ms: u64) -> Option<ActiveMember> {
     if expires_ts <= now_ms {
         return None;
     }
-    // Every acceptable LiveKit transport, in the member's order, at most
-    // [`MAX_FOCI`] examined. One that is not acceptable is skipped; a member
-    // with none is not used.
-    let foci: Vec<Focus> = content
+    // Every acceptable LiveKit transport, at most [`MAX_FOCI`] examined, with
+    // type `livekit` entries before `m.livekit` ones and else in the
+    // member's order: `matrix-js-sdk` ignores `m.livekit`, so an Element Call
+    // member uses its first `livekit` entry, as discovery chooses. One that
+    // is not acceptable is skipped; a member with none is not used.
+    let mut foci: Vec<Focus> = content
         .get("foci_preferred")?
         .as_array()?
         .iter()
         .take(MAX_FOCI)
         .filter_map(focus)
         .collect();
+    foci.sort_by_key(|f| f.m_livekit);
     let service_url = foci.first()?.url.clone();
     let identity = match content.get("membershipID").and_then(Value::as_str) {
         Some(id) if id.len() <= MAX_IDENTITY_BYTES && !id.chars().any(char::is_control) => {
@@ -526,8 +533,9 @@ mod tests {
     }
 
     /// GIVEN the homeserver and OpenID focus forms, alone and mixed WHEN read
-    /// THEN the first acceptable one in the member's order is used, and an
-    /// entry with both URLs is compared by its service URL.
+    /// THEN the first acceptable `livekit` entry is used, else the first
+    /// acceptable `m.livekit` one, and an entry with both URLs is compared by
+    /// its service URL.
     #[test]
     fn given_homeserver_focus_form_then_accepted() {
         let sfu = json!({ "type": "m.livekit", "url": "wss://sfu.example.org" });
@@ -548,7 +556,19 @@ mod tests {
                 vec![legacy.clone(), sfu.clone()],
                 "https://legacy.example.org/jwt",
             ),
-            (vec![sfu.clone(), legacy.clone()], "wss://sfu.example.org/"),
+            // Synapse's order: `m.livekit` first. Element Call uses the
+            // `livekit` entry, so the member is on it.
+            (
+                vec![sfu.clone(), legacy.clone()],
+                "https://legacy.example.org/jwt",
+            ),
+            (
+                vec![
+                    sfu.clone(),
+                    json!({ "type": "livekit", "url": "wss://sfu.example.org:7443" }),
+                ],
+                "wss://sfu.example.org:7443/",
+            ),
             (vec![both], "https://both.example.org/jwt"),
             // A malformed entry is passed over for a later good one.
             (

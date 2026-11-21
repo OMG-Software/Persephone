@@ -3010,8 +3010,9 @@ impl Call {
     /// while its device is a member that still has that backend identity;
     /// otherwise it is dropped. A key that goes is not sent again, so a
     /// retry with little room goes on where the last one stopped. A device
-    /// is shown as keyed once one of its keys is queued: `true` when that
-    /// changed what the page shows. Only a closed queue is an error.
+    /// is shown as keyed once a key of it was queued and none of its keys
+    /// waits, so each of its backend identities has the key: `true` when
+    /// that changed what the page shows. Only a closed queue is an error.
     fn send_unsent(&mut self) -> Result<bool, EndReason> {
         self.unsent_retry = None;
         let mut keyed = false;
@@ -3024,6 +3025,7 @@ impl Call {
             else {
                 continue;
             };
+            let mut sent = false;
             while let Some((identity, index)) = waiting.front() {
                 // Only the key that goes is copied out of the store.
                 let stored = if backends.contains(identity) {
@@ -3053,7 +3055,10 @@ impl Call {
                     return Ok(keyed);
                 }
                 waiting.pop_front();
-                keyed |= self.view.keyed.insert(device.clone());
+                sent = true;
+            }
+            if sent {
+                keyed |= self.view.keyed.insert(device);
             }
         }
         Ok(keyed)
@@ -3411,27 +3416,15 @@ impl Call {
                 else {
                     return Ok(());
                 };
-                // Keys that do not fit in the queue go at the next retry. The
-                // member is shown as keyed only once a key is queued for it.
-                let mut queued = false;
-                for (sent, backend) in backends.iter().enumerate() {
-                    let key = ToWorker::SetKey {
-                        identity: backend.clone(),
-                        key: FrameKeyMsg {
-                            index,
-                            bytes: bytes.clone(),
-                        },
-                    };
-                    if !self.queue_worker(key)? {
-                        let rest = backends[sent..].iter().map(|b| (b.clone(), index));
-                        self.mark_unsent(identity.clone(), rest);
-                        break;
-                    }
-                    queued = true;
-                }
-                if queued {
-                    self.view.keyed.insert(identity);
-                }
+                // The key goes as a waiting key does, so one rule says when
+                // the member is shown as keyed: once each of its backend
+                // identities has it. What does not fit goes at the retry.
+                drop(bytes);
+                self.mark_unsent(
+                    identity,
+                    backends.into_iter().map(|backend| (backend, index)),
+                );
+                self.send_unsent()?;
                 self.publish(inner);
             }
             Err(refusal) if refusal.is_early() => {
@@ -4591,6 +4584,38 @@ mod tests {
         sent
     }
 
+    /// GIVEN a member with two backend identities and a queue with room for
+    /// one key WHEN its key is sent THEN it is not shown as keyed until the
+    /// key went under the second identity too.
+    #[tokio::test]
+    async fn given_a_key_under_one_of_two_identities_then_the_member_is_not_keyed_yet() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (mut call, mut to_worker) = (fixture.call, fixture.to_worker);
+        let device = "@b:example.org:B".to_owned();
+        let mut b = member("@b:example.org", "B", "https://sfu.example.org");
+        b.backend_identities = vec!["hash-b".to_owned(), device.clone()];
+        call.view.set_members(vec![b]);
+        call.remote.insert(&device, 1, &[1; 16], &|_| true).unwrap();
+
+        fill_queue(&call, &mut to_worker, 1);
+        call.mark_unsent(
+            device.clone(),
+            [("hash-b".to_owned(), 1), (device.clone(), 1)],
+        );
+        assert!(!call.send_unsent().unwrap());
+        assert_eq!(set_keys(&mut to_worker), [("hash-b".to_owned(), 1)]);
+        assert!(!call.view.keyed.contains(&device));
+
+        fill_queue(&call, &mut to_worker, 1);
+        assert!(call.send_unsent().unwrap());
+        assert_eq!(set_keys(&mut to_worker), [(device.clone(), 1)]);
+        assert!(call.view.keyed.contains(&device));
+    }
+
     /// GIVEN keys waiting for the worker and a queue with room for one WHEN
     /// they are retried THEN each retry goes on with the next key, so every
     /// key arrives once; a key whose member left or whose backend identity
@@ -4623,12 +4648,12 @@ mod tests {
         );
 
         // Each pass has room for one key: the first, then the second. The
-        // device is shown as keyed once the first is queued.
+        // device is shown as keyed once none of its keys waits.
         for (pass, expected) in waiting.iter().enumerate() {
             fill_queue(&call, &mut to_worker, 1);
-            assert_eq!(call.send_unsent().unwrap(), pass == 0);
+            assert_eq!(call.send_unsent().unwrap(), pass == 1);
             assert_eq!(set_keys(&mut to_worker), std::slice::from_ref(expected));
-            assert!(call.view.keyed.contains(&device));
+            assert_eq!(call.view.keyed.contains(&device), pass == 1);
         }
         assert!(call.unsent.is_empty());
         assert_eq!(call.unsent_retry, None);

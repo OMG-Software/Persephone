@@ -225,8 +225,10 @@ homeservers without a server change and without a change to ADR-0004.
   `livekit`, also when the chosen entry was `m.livekit`, because
   `matrix-js-sdk` ignores `m.livekit`.
 * The membership reader also accepts type `livekit` with `url` as a
-  transport. A member's SFU is the first acceptable entry, as ADR-0054
-  says. An entry with `livekit_service_url` is compared by that string,
+  transport. A member's SFU is the first acceptable type `livekit` entry,
+  else the first acceptable `m.livekit` entry, as for discovery: an Element
+  Call member uses its first `livekit` entry, because `matrix-js-sdk`
+  ignores `m.livekit`. Otherwise the rule of ADR-0054 is unchanged. An entry with `livekit_service_url` is compared by that string,
   also when it has `url` too, because such an entry uses the OpenID flow.
   An entry with only `url` is compared by its `url` string. A `url`-only
   entry that is not the own SFU is never another SFU: the core cannot get
