@@ -1492,11 +1492,6 @@ fn given_native_sliding_sync_then_it_is_used_and_rooms_arrive() {
     assert_eq!(state, StoreState::RestartRequired);
 }
 
-/// GIVEN a core that a test left signed in and syncing, never locked WHEN that
-/// test's homeserver is dropped THEN its address refuses connections and the
-/// core's next round fails: what the core sends reaches no later test's
-/// homeserver. With a pooled mock server, the next test that took it received
-/// the rounds, and the Sliding Sync test counted them as classic fallback.
 impl Homeserver {
     /// Answers presence changes with 200 from now on.
     fn accept_presence(&self) {
@@ -1720,6 +1715,11 @@ fn given_a_refused_presence_change_then_it_is_not_sent_again() {
     assert_eq!(presence_puts(&server).len(), 1);
 }
 
+/// GIVEN a core that a test left signed in and syncing, never locked WHEN that
+/// test's homeserver is dropped THEN its address refuses connections and the
+/// core's next round fails: what the core sends reaches no later test's
+/// homeserver. With a pooled mock server, the next test that took it received
+/// the rounds, and the Sliding Sync test counted them as classic fallback.
 #[test]
 fn given_a_core_left_syncing_when_its_homeserver_is_dropped_then_its_rounds_reach_nothing() {
     let homeserver = Homeserver::signed_in();

@@ -10,6 +10,9 @@ flood the homeserver. The owner asked for presence to be set and shown
 without flooding, at most once a second, shared as online by default, with a
 setting to turn sharing off.
 
+Number 0056 is taken by "Get call tokens from the homeserver when it issues
+them", proposed in an open change (pull request 83) that is not merged yet.
+
 ## Context and Problem Statement
 
 Persephone made no presence call of its own, but matrix-sdk 0.19 sends

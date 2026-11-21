@@ -1100,7 +1100,7 @@ async fn presence_before_round(
     let put = guard(&shared.presence).take_put(Instant::now());
     if let Some(state) = put {
         let sent = tokio::time::timeout(
-            presence::LOOKUP_TIMEOUT,
+            presence::PUT_TIMEOUT,
             client.set_presence(state.clone(), None, true),
         )
         .await;

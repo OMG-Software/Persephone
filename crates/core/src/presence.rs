@@ -32,7 +32,8 @@ pub const MIN_WRITE_GAP: Duration = Duration::from_secs(1);
 /// presence. It stays below the 30 seconds after which Synapse takes a user
 /// that stopped syncing as offline, with room for one round between: a
 /// 5-second poll and the contacts' lookups, which run at once within one
-/// [`LOOKUP_TIMEOUT`]. A `PUT` in that round counts as activity itself.
+/// [`LOOKUP_TIMEOUT`]. A `PUT` in that round ([`PUT_TIMEOUT`]) counts as activity
+/// itself.
 pub const SYNC_CARRY_GAP: Duration = Duration::from_secs(15);
 /// The wait before a failed `PUT` is sent again; it doubles with each
 /// failure in a row, up to [`RETRY_GAP_MAX`].
@@ -49,6 +50,8 @@ pub const LOOKUP_AGE: Duration = Duration::from_secs(5 * 60);
 pub const WANTED_AGE: Duration = Duration::from_secs(60);
 /// The longest wait for one lookup.
 pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest wait for the `PUT` of a changed presence.
+pub const PUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The Matrix state of a status.
 pub fn state(status: PresenceStatus) -> PresenceState {
@@ -172,9 +175,11 @@ impl Writer {
     }
 
     /// The `set_presence` value of the next sync request. Only `online` and
-    /// `unavailable` change the presence, and so count as a write: an
-    /// `offline` sync request leaves it as it is, and an `offline` status is
-    /// sent by its `PUT` alone.
+    /// `unavailable` change the presence, and so count as a write. The
+    /// `offline` this returns otherwise sets nothing: with it, the spec says,
+    /// the client "is not marked as being online when it uses this API", and
+    /// Synapse does not change the presence. Leaving the parameter out would
+    /// mean `online`. An `offline` status is sent by its `PUT` alone.
     pub fn for_sync(&mut self, now: Instant) -> PresenceState {
         let carries = self.share
             && self.status != PresenceStatus::Offline
