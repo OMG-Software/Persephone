@@ -153,6 +153,8 @@ homeservers without a server change and without a change to ADR-0004.
     keeps the advertised string with no change. An optional `server_name`
     must be the server name of the own user ID, else the entry is skipped.
   * Any other entry is skipped.
+  * This replaces the ADR-0043 amendment of 19 November 2026, which read an
+    `m.livekit` `url` as an `https://` JWT service URL.
 * The first usable entry in the server's order is used.
 * The readiness reason follows the answer:
   * A request that cannot be made or finished, or an error status other than
@@ -193,8 +195,11 @@ homeservers without a server change and without a change to ADR-0004.
   `matrix-js-sdk` ignores `m.livekit`.
 * The membership reader also accepts type `livekit` with `url` as a
   transport. A member's SFU is the first acceptable entry, as ADR-0054
-  says. An entry with `url` is compared by its `url` string, and an entry
-  with only `livekit_service_url` by that string.
+  says. An entry with `livekit_service_url` is compared by that string,
+  also when it has `url` too, because such an entry uses the OpenID flow.
+  An entry with only `url` is compared by its `url` string. A `url`-only
+  entry that is not the own SFU is never another SFU: the core cannot get
+  a token for it.
 * The backend identities of a member follow Element Call:
   * If any of its acceptable entries has `url`, it has the hashed identity
     `unpadded standard base64(SHA-256(JSON [user_id, member_id]))`. The JSON

@@ -20,11 +20,11 @@ use super::encryption_keys::{self, IncomingKey};
 use super::incoming::{self, Candidate};
 use super::keys::{KeyError, Outgoing, OwnKeys, Recipients, RemoteKeys};
 use super::membership::{
-    ActiveMember, DELAYED_LEAVE_RESTART, EVENT_TYPE, MEMBERSHIP_REFRESH, leave_content,
-    own_membership, own_state_key, participant_identity, read_members,
+    ActiveMember, DELAYED_LEAVE_RESTART, EVENT_TYPE, MEMBERSHIP_REFRESH, hashed_identity,
+    leave_content, own_membership, own_state_key, participant_identity, read_members,
 };
 use super::other_sfu::{Home, MAX_OTHER_SFUS, OtherSfus, Plan, home, is_other_host};
-use super::readiness::{TurnServers, sfu_transport, turn_servers};
+use super::readiness::{Discovery, Flow, TurnServers, sfu_transport, turn_servers};
 use super::rings::{self, Plan as RingPlan, Watch};
 use super::screen::{ScreenGrant, ScreenRefusal, ScreenSource};
 use super::sfu::{self, OpenIdToken, SfuError, SfuGrant};
@@ -401,26 +401,36 @@ impl View {
         }
     }
 
+    /// Whether `identity` (a membership ID, as keys name members) is a
+    /// current member.
     fn is_member(&self, identity: &str) -> bool {
         self.members.iter().any(|m| m.identity == identity)
     }
 
-    /// Whether the member `identity` shares a screen: a connection that
-    /// speaks for the member said so.
-    fn is_sharing(&self, identity: &str) -> bool {
-        self.sharing
+    /// The member that a worker participant identity stands for: one of its
+    /// backend identities (ADR-0056).
+    fn backend_member(&self, participant: &str) -> Option<&ActiveMember> {
+        self.members
             .iter()
-            .any(|(connection, id)| id == identity && self.accepts(*connection, id))
+            .find(|m| m.backend_identities.iter().any(|id| id == participant))
     }
 
-    /// Whether a participant of this worker connection may stand for the
-    /// member `identity` (ADR-0054). Connection 0 speaks for the members on
+    /// Whether `member` shares a screen: a connection that speaks for the
+    /// member said so for one of its backend identities.
+    fn is_sharing(&self, member: &ActiveMember) -> bool {
+        self.sharing.iter().any(|(connection, id)| {
+            member.backend_identities.contains(id) && self.accepts(*connection, id)
+        })
+    }
+
+    /// Whether the participant `identity` of this worker connection may
+    /// stand for a member (ADR-0054). Connection 0 speaks for the members on
     /// the own SFU. Connection `n` (1 to 3) speaks only for members whose
     /// membership names the SFU of that connection. Anything else is
     /// ignored: a member on another SFU also shows as a silent participant
     /// on the own SFU, and an SFU can name any identity.
     fn accepts(&self, connection: u8, identity: &str) -> bool {
-        let Some(member) = self.members.iter().find(|m| m.identity == identity) else {
+        let Some(member) = self.backend_member(identity) else {
             return false;
         };
         match home(member, &self.own_sfu) {
@@ -432,8 +442,15 @@ impl View {
 
     fn set_members(&mut self, members: Vec<ActiveMember>) {
         self.members = members;
+        // `speaking` holds worker participant identities, `keyed` holds
+        // membership IDs.
         let present: HashSet<&str> = self.members.iter().map(|m| m.identity.as_str()).collect();
-        self.speaking.retain(|id| present.contains(id.as_str()));
+        let backends: HashSet<&str> = self
+            .members
+            .iter()
+            .flat_map(|m| m.backend_identities.iter().map(String::as_str))
+            .collect();
+        self.speaking.retain(|id| backends.contains(id.as_str()));
         self.keyed.retain(|id| present.contains(id.as_str()));
         // `sharing` keeps hints of identities that are not members yet: the
         // worker can hear of a share before the membership arrives.
@@ -552,7 +569,7 @@ impl View {
             let Some(member) = slot
                 .as_ref()
                 .filter(|(connection, identity)| self.accepts(*connection, identity))
-                .and_then(|(_, identity)| self.members.iter().find(|m| m.identity == *identity))
+                .and_then(|(_, identity)| self.backend_member(identity))
             else {
                 continue;
             };
@@ -595,7 +612,7 @@ impl View {
                 // it. An identity that is not a member yet is kept with its
                 // connection, up to the bound; it shows once its membership
                 // names that connection's SFU.
-                let member = self.is_member(identity);
+                let member = self.backend_member(identity).is_some();
                 if member && !self.accepts(*connection, identity) {
                     return Applied::Same;
                 }
@@ -748,14 +765,17 @@ impl View {
                 .map(|m| Participant {
                     user_id: m.user_id.clone(),
                     device_id: m.device_id.clone(),
-                    speaking: self.speaking.contains(&m.identity),
+                    speaking: m
+                        .backend_identities
+                        .iter()
+                        .any(|id| self.speaking.contains(id)),
                     reachable: match home(m, &self.own_sfu) {
                         Home::Own => true,
                         Home::Other(url) => self.other.is_connected(url),
                         Home::Nowhere => false,
                     },
                     keyed: self.keyed.contains(&m.identity),
-                    sharing: self.is_sharing(&m.identity),
+                    sharing: self.is_sharing(m),
                 })
                 .collect(),
             camera: self.camera,
@@ -1326,9 +1346,10 @@ impl CallController {
 
         // 3. An SFU; TURN is optional.
         let sfu = match sfu_transport(client).await {
-            Ok(Some(service)) => service,
+            Ok(Discovery::Offered(service)) => service,
             _ => return Err(CallError::NoSfu),
         };
+        let focus = sfu.focus(room_id.as_str());
         let turn = turn_servers(client).await.ok().flatten();
         flags.halt()?;
 
@@ -1392,7 +1413,7 @@ impl CallController {
                     state_key: state_key.clone(),
                     user_id: user_id.clone(),
                     device_id: device_id.clone(),
-                    sfu_url: sfu.advertised.clone(),
+                    focus: focus.clone(),
                     created_ts,
                     video: scope.video,
                 },
@@ -1417,14 +1438,7 @@ impl CallController {
         flags.halt()?;
 
         // 6. Own membership.
-        let content = own_membership(
-            room_id.as_str(),
-            &device_id,
-            &user_id,
-            &sfu.advertised,
-            Some(created_ts),
-            scope.video,
-        );
+        let content = own_membership(&device_id, &user_id, &focus, Some(created_ts), scope.video);
         // Set before the send: a timeout or a lost answer may hide a write.
         setup.membership_sent = true;
         let membership = time::timeout(
@@ -1458,20 +1472,42 @@ impl CallController {
             );
         }
 
-        // 7. The SFU grant.
-        let openid = client
-            .send(request_openid_token::v3::Request::new(user_id.clone()))
-            .await
-            .map_err(|_| CallError::OpenId)?;
-        let body = sfu::request_body(room_id, &device_id, &OpenIdToken::from(openid));
-        let grant = sfu::get_grant(client.http_client(), &sfu.url, &body)
-            .await
-            .map_err(CallError::Sfu)?;
+        // 7. The SFU grant: from the JWT service, or from the homeserver
+        // (ADR-0056). The LiveKit identity follows the flow.
+        let own_identity = participant_identity(&user_id, &device_id);
+        let (grant, own_backend) = match sfu.flow {
+            Flow::OpenId => {
+                let openid = client
+                    .send(request_openid_token::v3::Request::new(user_id.clone()))
+                    .await
+                    .map_err(|_| CallError::OpenId)?;
+                let body = sfu::request_body(room_id, &device_id, &OpenIdToken::from(openid));
+                let grant = sfu::get_grant(client.http_client(), &sfu.url, &body)
+                    .await
+                    .map_err(CallError::Sfu)?;
+                (grant, own_identity.clone())
+            }
+            Flow::Homeserver => {
+                let server_name = user_id.server_name().to_string();
+                let grant = sfu::get_homeserver_grant(
+                    client,
+                    sfu::TokenFor {
+                        sfu: &sfu.url,
+                        advertised: &sfu.advertised,
+                        server_name: &server_name,
+                        room_id,
+                        member_id: &own_identity,
+                    },
+                )
+                .await
+                .map_err(CallError::Sfu)?;
+                (grant, hashed_identity(&user_id, &own_identity))
+            }
+        };
         flags.halt()?;
 
         // 8. Keys, then the worker joins.
         let own_keys = OwnKeys::new(Instant::now()).map_err(|_| CallError::Keys)?;
-        let own_identity = participant_identity(&user_id, &device_id);
         let link = setup.link.take().ok_or(CallError::Keys)?;
         // On the portal path the worker needs the PipeWire remote before its
         // camera opens. The call task asks the portal first and then turns
@@ -1482,7 +1518,7 @@ impl CallController {
             jwt: grant.jwt.clone(),
             turn: turn_for_worker(turn),
             relay_only: false,
-            own_identity: own_identity.clone(),
+            own_identity: own_backend,
             own_key: worker_key(own_keys.current()),
             recording_device: scope.devices.recording.clone(),
             playout_device: scope.devices.playout.clone(),
@@ -1931,8 +1967,8 @@ struct KeeperMembership {
     state_key: String,
     user_id: OwnedUserId,
     device_id: OwnedDeviceId,
-    /// As advertised (`SfuService::advertised`).
-    sfu_url: String,
+    /// The `foci_preferred` entry (`SfuService::focus`).
+    focus: serde_json::Value,
     created_ts: u64,
     /// The `m.call.intent` of the join; a refresh keeps it.
     video: bool,
@@ -1985,10 +2021,9 @@ async fn keeper(
                             return;
                         };
                         let content = own_membership(
-                            membership.room_id.as_str(),
                             &membership.device_id,
                             &membership.user_id,
-                            &membership.sfu_url,
+                            &membership.focus,
                             Some(membership.created_ts),
                             membership.video,
                         );
@@ -3154,6 +3189,8 @@ impl Call {
             .map(|m| m.identity.clone())
             .collect();
         let diff = diff_members(&known, &current);
+        // The worker knows a departed member by its backend identities.
+        let departed = backends_of(&self.view.members, &diff.left);
         self.view.set_members(current);
         // The video filter follows the members at once, so a later error
         // cannot leave a departed member's picture allowed. A video stream
@@ -3162,14 +3199,12 @@ impl Call {
         if !diff.left.is_empty() {
             let view = &self.view;
             self.remote.retain_members(|id| view.is_member(id));
-            for identity in &diff.left {
+            for identity in departed {
                 // The tile keeps its track: the worker still receives it, and
                 // the member filter hides the tile and drops its picture
                 // until the membership returns. `ParticipantLeft` and
                 // `VideoStopped` end the assignment.
-                self.send_worker(ToWorker::RemoveParticipant {
-                    identity: identity.clone(),
-                })?;
+                self.send_worker(ToWorker::RemoveParticipant { identity })?;
             }
         }
         if let Some(outgoing) = key_action(&diff, &mut self.own_keys, Instant::now())
@@ -3211,11 +3246,19 @@ impl Call {
                 index,
                 bytes,
             }) => {
-                self.view.keyed.insert(identity.clone());
-                self.send_worker(ToWorker::SetKey {
-                    identity,
-                    key: FrameKeyMsg { index, bytes },
-                })?;
+                // The worker decrypts by LiveKit identity, so the key goes
+                // under each backend identity of the member (ADR-0056).
+                let backends = backends_of(&self.view.members, std::slice::from_ref(&identity));
+                self.view.keyed.insert(identity);
+                for backend in backends {
+                    self.send_worker(ToWorker::SetKey {
+                        identity: backend,
+                        key: FrameKeyMsg {
+                            index,
+                            bytes: bytes.clone(),
+                        },
+                    })?;
+                }
                 self.publish(inner);
             }
             Err(refusal) if refusal.is_early() => {
@@ -3274,6 +3317,16 @@ impl Call {
     }
 }
 
+/// The backend identities (ADR-0056) of the members whose membership ID is
+/// in `identities`, in member order. The worker knows members by these.
+fn backends_of(members: &[ActiveMember], identities: &[String]) -> Vec<String> {
+    members
+        .iter()
+        .filter(|m| identities.contains(&m.identity))
+        .flat_map(|m| m.backend_identities.iter().cloned())
+        .collect()
+}
+
 /// The other devices of `members`.
 fn others(members: Vec<ActiveMember>, own_identity: &str) -> Vec<ActiveMember> {
     members
@@ -3330,8 +3383,10 @@ mod tests {
         let user_id = OwnedUserId::try_from(user).unwrap();
         let device_id = OwnedDeviceId::from(device);
         let service_url = Url::parse(sfu).unwrap();
+        let identity = participant_identity(&user_id, &device_id);
         ActiveMember {
-            identity: participant_identity(&user_id, &device_id),
+            backend_identities: vec![identity.clone()],
+            identity,
             user_id,
             device_id,
             transports: vec![service_url.clone()],
@@ -3492,6 +3547,72 @@ mod tests {
         assert!(participants[0].speaking);
         view.set_members(vec![member("@b:example.org", "B", "https://x.example.org")]);
         assert!(view.speaking.is_empty());
+    }
+
+    /// GIVEN members with one or two backend identities WHEN the identities
+    /// of some are asked THEN each named member gives all of its own, and
+    /// nobody else's (keys and leaves go to every one, ADR-0056).
+    #[test]
+    fn given_members_then_backends_of_names_each_of_their_identities() {
+        let mut a = member("@a:example.org", "A", "wss://sfu.example.org");
+        a.backend_identities = vec!["hash-a".to_owned(), "@a:example.org:A".to_owned()];
+        let b = member("@b:example.org", "B", "https://sfu.example.org");
+        let members = [a, b];
+        assert_eq!(
+            backends_of(&members, &["@a:example.org:A".to_owned()]),
+            ["hash-a", "@a:example.org:A"]
+        );
+        assert_eq!(
+            backends_of(
+                &members,
+                &["@b:example.org:B".to_owned(), "@c:example.org:C".to_owned()]
+            ),
+            ["@b:example.org:B"]
+        );
+        assert!(backends_of(&members, &[]).is_empty());
+    }
+
+    /// GIVEN a member on an SFU whose homeserver issues tokens, known to
+    /// LiveKit by its hashed identity WHEN the worker reports that identity
+    /// or the plain membership ID THEN only the hashed identity stands for
+    /// the member (ADR-0056).
+    #[test]
+    fn given_a_hashed_backend_identity_then_only_it_stands_for_the_member() {
+        let sfu = "wss://sfu.example.org:7443";
+        let mut view = View::new(
+            room_id!("!r:example.org").to_owned(),
+            Url::parse(sfu).unwrap(),
+            false,
+        );
+        let mut a = member("@a:example.org", "A", sfu);
+        let hashed = hashed_identity(&a.user_id, &a.identity);
+        a.backend_identities = vec![hashed.clone()];
+        view.set_members(vec![a]);
+        view.apply(&FromWorker::Connected);
+        let speak = |id: &str| FromWorker::Speaking {
+            connection: 0,
+            identity: id.to_owned(),
+            speaking: true,
+        };
+        assert_eq!(view.apply(&speak("@a:example.org:A")), Applied::Same);
+        assert_eq!(view.apply(&speak(&hashed)), Applied::Changed);
+        let CallState::Active { participants, .. } = view.state() else {
+            panic!("expected an active call");
+        };
+        assert!(participants[0].speaking);
+        assert!(participants[0].reachable);
+        assert_eq!(
+            view.apply(&FromWorker::VideoStarted {
+                tile: 1,
+                connection: 0,
+                identity: hashed,
+            }),
+            Applied::Changed
+        );
+        assert_eq!(view.video_tiles().len(), 1);
+        view.set_members(Vec::new());
+        assert!(view.speaking.is_empty());
+        assert!(view.video_tiles().is_empty());
     }
 
     /// GIVEN a stopped worker WHEN its exit status is read THEN a crash status
@@ -6270,7 +6391,7 @@ mod tests {
             }),
             Applied::Changed
         );
-        assert!(!view.is_sharing("@a:example.org:A"));
+        assert!(!view.members.iter().any(|m| view.is_sharing(m)));
         assert!(!view.sharing.contains(&(0, "@a:example.org:A".to_owned())));
         assert!(view.video_tiles().is_empty());
     }

@@ -1,13 +1,21 @@
-//! The LiveKit JWT service request (ADR-0043).
+//! The LiveKit token requests (ADR-0043, ADR-0056).
 //!
-//! A call needs a short-lived LiveKit access token for one SFU room. The
-//! service at the transport's URL gives one in exchange for an OpenID token
-//! from this account's homeserver (`POST {service}/sfu/get`). The answer is
-//! untrusted: it is size-capped while read, and its URL and token are checked
-//! before the call worker sees them.
+//! A call needs a short-lived LiveKit access token for one SFU room. There
+//! are two ways to get one:
+//!
+//! * The OpenID flow: the JWT service at the transport's URL gives one in
+//!   exchange for an OpenID token from this account's homeserver
+//!   (`POST {service}/sfu/get`).
+//! * The homeserver flow (MSC4195): the homeserver itself gives one for the
+//!   SFU it advertised (`POST /_matrix/client/v1/rtc/livekit/get_token`).
+//!
+//! Every answer is untrusted: it is size-capped, and its token (and for
+//! `/sfu/get` its URL) is checked before the call worker sees it.
 
 use super::{MAX_URL_BYTES, is_service_url};
+use matrix_sdk::config::RequestConfig;
 use matrix_sdk::ruma::{DeviceId, RoomId, api::client::account::request_openid_token};
+use serde_json::Map;
 use serde_json::{Value, json};
 use std::time::Duration;
 use url::Url;
@@ -107,6 +115,15 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
         return Err(Refusal::BadUrl);
     }
 
+    Ok(SfuGrant {
+        url,
+        jwt: checked_jwt(object)?,
+    })
+}
+
+/// The `jwt` member of an answer: three non-empty parts of visible ASCII, at
+/// most [`MAX_JWT_BYTES`].
+fn checked_jwt(object: &Map<String, Value>) -> Result<Zeroizing<String>, Refusal> {
     let jwt = object
         .get("jwt")
         .and_then(Value::as_str)
@@ -119,16 +136,28 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
     {
         return Err(Refusal::BadJwt);
     }
+    Ok(Zeroizing::new(jwt.to_owned()))
+}
+
+/// Checks a homeserver `get_token` answer (ADR-0056). Only `jwt` is read;
+/// the SFU is the advertised `sfu`, never a URL from the answer.
+pub fn parse_token(body: &[u8], sfu: &Url) -> Result<SfuGrant, Refusal> {
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(Refusal::TooLarge);
+    }
+    let value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
+    let object = value.as_object().ok_or(Refusal::NotJson)?;
     Ok(SfuGrant {
-        url,
-        jwt: Zeroizing::new(jwt.to_owned()),
+        url: sfu.clone(),
+        jwt: checked_jwt(object)?,
     })
 }
 
 /// Why the request failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SfuError {
-    /// The service URL is not `https` (or a development loopback).
+    /// The service URL is not `https`, or the SFU URL is not `wss` (or a
+    /// development loopback).
     InsecureServiceUrl,
     /// The request could not be made or finished.
     Network,
@@ -196,6 +225,119 @@ async fn post(
         buffer.extend_from_slice(&chunk);
     }
     parse_grant(&buffer).map_err(SfuError::Refused)
+}
+
+/// The MSC4195 `get_token` requests (ADR-0056). The stable path is in an
+/// `unstable` arm only so that ruma always selects it. The answer is read as
+/// raw bytes and checked by [`parse_token`].
+mod api {
+    macro_rules! get_token {
+        ($name:ident, $path:literal) => {
+            pub mod $name {
+                use matrix_sdk::ruma::api::{
+                    auth_scheme::AccessToken, metadata, request, response,
+                };
+
+                metadata! {
+                    method: POST,
+                    rate_limited: false,
+                    authentication: AccessToken,
+                    history: {
+                        unstable => $path,
+                    }
+                }
+
+                #[request]
+                pub struct Request {
+                    pub url: String,
+                    pub server_name: String,
+                    pub room_id: String,
+                    pub slot_id: String,
+                    pub member_id: String,
+                }
+
+                #[response]
+                pub struct Response {
+                    #[ruma_api(raw_body)]
+                    pub body: Vec<u8>,
+                }
+            }
+        };
+    }
+
+    get_token!(stable, "/_matrix/client/v1/rtc/livekit/get_token");
+    get_token!(
+        unstable,
+        "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
+    );
+}
+
+/// What a homeserver token is for (ADR-0056).
+pub struct TokenFor<'a> {
+    /// The advertised SFU URL, parsed.
+    pub sfu: &'a Url,
+    /// The advertised SFU URL string, with no change: the homeserver
+    /// compares it byte for byte.
+    pub advertised: &'a str,
+    /// The server name of the own user ID.
+    pub server_name: &'a str,
+    pub room_id: &'a RoomId,
+    /// This device's `membershipID`.
+    pub member_id: &'a str,
+}
+
+/// The MSC4195 `slot_id` of the call: the `m.call` application with the
+/// empty `call_id` that Persephone writes.
+pub const SLOT_ID: &str = "m.call#ROOM";
+
+/// Asks the own homeserver for a token for its SFU (ADR-0056). The request
+/// goes through the SDK client, so the access token, token refresh, TLS 1.3,
+/// the proxy and the no-redirect policy apply. The stable path is asked
+/// first; the unstable path only on 404 `M_UNRECOGNIZED`.
+pub async fn get_homeserver_grant(
+    client: &matrix_sdk::Client,
+    to: TokenFor<'_>,
+) -> Result<SfuGrant, SfuError> {
+    if !is_service_url(to.sfu, "wss", "ws") {
+        return Err(SfuError::InsecureServiceUrl);
+    }
+    let config = RequestConfig::short_retry().timeout(REQUEST_TIMEOUT);
+    let send = async {
+        let stable = api::stable::Request {
+            url: to.advertised.to_owned(),
+            server_name: to.server_name.to_owned(),
+            room_id: to.room_id.to_string(),
+            slot_id: SLOT_ID.to_owned(),
+            member_id: to.member_id.to_owned(),
+        };
+        match client.send(stable).with_request_config(config).await {
+            Ok(response) => Ok(response.body),
+            Err(error) if error.is_endpoint_not_implemented() => {
+                let unstable = api::unstable::Request {
+                    url: to.advertised.to_owned(),
+                    server_name: to.server_name.to_owned(),
+                    room_id: to.room_id.to_string(),
+                    slot_id: SLOT_ID.to_owned(),
+                    member_id: to.member_id.to_owned(),
+                };
+                client
+                    .send(unstable)
+                    .with_request_config(config)
+                    .await
+                    .map(|response| response.body)
+            }
+            Err(error) => Err(error),
+        }
+    };
+    let body = tokio::time::timeout(REQUEST_TIMEOUT, send)
+        .await
+        .map_err(|_| SfuError::Network)?
+        .map_err(|error| match error.as_client_api_error() {
+            Some(api) => SfuError::Status(api.status_code.as_u16()),
+            None => SfuError::Network,
+        })?;
+    let body = Zeroizing::new(body);
+    parse_token(&body, to.sfu).map_err(SfuError::Refused)
 }
 
 #[cfg(test)]
@@ -484,5 +626,179 @@ mod tests {
             post(&client(), &url, &json!({})).await.unwrap_err(),
             SfuError::Refused(Refusal::BadUrl)
         );
+    }
+
+    const STABLE_TOKEN: &str = "/_matrix/client/v1/rtc/livekit/get_token";
+    const UNSTABLE_TOKEN: &str =
+        "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token";
+    const SFU: &str = "wss://sfu.example.org:7443";
+
+    fn token_for<'a>(sfu: &'a Url, room: &'a RoomId) -> TokenFor<'a> {
+        TokenFor {
+            sfu,
+            advertised: SFU,
+            server_name: "synthetic.test",
+            room_id: room,
+            member_id: "@alice:synthetic.test:PERSEPHONE",
+        }
+    }
+
+    fn expected_body() -> Value {
+        json!({
+            "url": SFU,
+            "server_name": "synthetic.test",
+            "room_id": "!r:synthetic.test",
+            "slot_id": "m.call#ROOM",
+            "member_id": "@alice:synthetic.test:PERSEPHONE",
+        })
+    }
+
+    /// GIVEN a homeserver answer WHEN checked THEN only `jwt` is read, the
+    /// SFU is the advertised one, and a bad or oversized answer is refused.
+    #[test]
+    fn given_token_answers_then_jwt_checked_and_sfu_kept() {
+        let sfu = Url::parse(SFU).unwrap();
+        let grant = parse_token(
+            json!({ "jwt": JWT, "url": "wss://evil.example.org" })
+                .to_string()
+                .as_bytes(),
+            &sfu,
+        )
+        .unwrap();
+        assert_eq!(grant.url, sfu);
+        assert_eq!(grant.jwt.as_str(), JWT);
+        for (body, refusal) in [
+            (json!({ "jwt": "a.b" }).to_string(), Refusal::BadJwt),
+            (json!({}).to_string(), Refusal::BadJwt),
+            ("[]".to_owned(), Refusal::NotJson),
+            ("x".repeat(MAX_RESPONSE_BYTES + 1), Refusal::TooLarge),
+        ] {
+            assert_eq!(parse_token(body.as_bytes(), &sfu).unwrap_err(), refusal);
+        }
+    }
+
+    /// GIVEN a homeserver with the stable token path WHEN a token is asked
+    /// THEN the body has the advertised URL, own server, room, slot and
+    /// member ID, no OpenID token, and the unstable path is not asked.
+    #[tokio::test]
+    async fn given_stable_token_path_then_used_with_the_body() {
+        let server = MockServer::start().await;
+        let client = crate::calls::readiness::tests::signed_in(&server).await;
+        Mock::given(method("POST"))
+            .and(path(STABLE_TOKEN))
+            .and(wiremock::matchers::body_json(expected_body()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": JWT })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path(UNSTABLE_TOKEN))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let sfu = Url::parse(SFU).unwrap();
+        let room = room_id!("!r:synthetic.test");
+        let grant = get_homeserver_grant(&client, token_for(&sfu, room))
+            .await
+            .unwrap();
+        assert_eq!(grant.url, sfu);
+        assert_eq!(grant.jwt.as_str(), JWT);
+    }
+
+    /// GIVEN a homeserver with only the unstable token path WHEN a token is
+    /// asked THEN the unstable path gives it.
+    #[tokio::test]
+    async fn given_only_unstable_token_path_then_used() {
+        let server = MockServer::start().await;
+        let client = crate::calls::readiness::tests::signed_in(&server).await;
+        Mock::given(method("POST"))
+            .and(path(STABLE_TOKEN))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(json!({ "errcode": "M_UNRECOGNIZED", "error": "no" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(UNSTABLE_TOKEN))
+            .and(wiremock::matchers::body_json(expected_body()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": JWT })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let sfu = Url::parse(SFU).unwrap();
+        let grant = get_homeserver_grant(&client, token_for(&sfu, room_id!("!r:synthetic.test")))
+            .await
+            .unwrap();
+        assert_eq!(grant.jwt.as_str(), JWT);
+    }
+
+    /// GIVEN a refusal, a server failure or a bad answer WHEN a token is
+    /// asked THEN the status or refusal is returned, and a refusal other than
+    /// `M_UNRECOGNIZED` does not try the unstable path.
+    #[tokio::test]
+    async fn given_token_failures_then_errors() {
+        for (status, body, expected) in [
+            (
+                403,
+                json!({ "errcode": "M_FORBIDDEN", "error": "no" }),
+                SfuError::Status(403),
+            ),
+            (
+                500,
+                json!({ "errcode": "M_UNKNOWN", "error": "no" }),
+                SfuError::Status(500),
+            ),
+            (
+                404,
+                json!({ "errcode": "M_NOT_FOUND", "error": "no" }),
+                SfuError::Status(404),
+            ),
+            (
+                200,
+                json!({ "jwt": "bad" }),
+                SfuError::Refused(Refusal::BadJwt),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let client = crate::calls::readiness::tests::signed_in(&server).await;
+            Mock::given(method("POST"))
+                .and(path(STABLE_TOKEN))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            Mock::given(path(UNSTABLE_TOKEN))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": JWT })))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let sfu = Url::parse(SFU).unwrap();
+            let got = get_homeserver_grant(&client, token_for(&sfu, room_id!("!r:synthetic.test")))
+                .await
+                .unwrap_err();
+            assert_eq!(got, expected, "{status}");
+        }
+    }
+
+    /// GIVEN an SFU URL that is not `wss` WHEN a token is asked THEN it is
+    /// refused before any request.
+    #[tokio::test]
+    async fn given_insecure_sfu_then_refused_without_request() {
+        let server = MockServer::start().await;
+        let client = crate::calls::readiness::tests::signed_in(&server).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": JWT })))
+            .expect(0)
+            .mount(&server)
+            .await;
+        for bad in ["https://sfu.example.org", "wss://u:p@sfu.example.org"] {
+            let sfu = Url::parse(bad).unwrap();
+            assert_eq!(
+                get_homeserver_grant(&client, token_for(&sfu, room_id!("!r:synthetic.test")))
+                    .await
+                    .unwrap_err(),
+                SfuError::InsecureServiceUrl
+            );
+        }
     }
 }

@@ -4,11 +4,15 @@
 //! default compatibility mode. One event per device, with the state key
 //! `_{user}_{device}_m.call`. Own content is built exactly. Other members'
 //! events are untrusted: [`active_members`] keeps only those that are
-//! well-formed, unexpired, written by the user they name, and that point at an
-//! HTTPS LiveKit service.
+//! well-formed, unexpired, written by the user they name, and that name a
+//! LiveKit transport: an `https` JWT service or a `wss` SFU (ADR-0056).
 
 use super::{MAX_CALL_MEMBERS, MAX_IDENTITY_BYTES, MAX_MEMBER_EVENTS, is_service_url};
-use matrix_sdk::ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId, events::StateEventType};
+use matrix_sdk::ruma::{
+    DeviceId, OwnedDeviceId, OwnedUserId, UserId,
+    events::StateEventType,
+    serde::{Base64, base64::Standard},
+};
 use matrix_sdk_base::deserialized_responses::RawAnySyncOrStrippedState;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -44,22 +48,35 @@ pub fn own_state_key(user_id: &UserId, device_id: &DeviceId) -> String {
     format!("_{user_id}_{device_id}_m.call")
 }
 
-/// The LiveKit participant identity of a device.
+/// The LiveKit participant identity of a device on a JWT service (the
+/// OpenID flow), and the `membershipID` this device writes.
 pub fn participant_identity(user_id: &UserId, device_id: &DeviceId) -> String {
     format!("{user_id}:{device_id}")
 }
 
+/// The MSC4195 LiveKit participant identity that a homeserver token gives
+/// (ADR-0056): unpadded standard base64 of the SHA-256 of the JSON array
+/// `[user_id, member_id]`, as `JSON.stringify` writes it.
+pub fn hashed_identity(user_id: &UserId, member_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    // Two strings cannot fail to serialize. serde_json escapes strings as
+    // `JSON.stringify` does: the short escapes, `\u00XX` in lower case for
+    // the other controls, and nothing else.
+    let json = serde_json::to_string(&[user_id.as_str(), member_id]).unwrap_or_default();
+    Base64::<Standard, _>::new(Sha256::digest(json.as_bytes()).to_vec()).encode()
+}
+
 /// The content of this device's membership event.
 ///
-/// `livekit_alias` is the room ID, as the Rust SDK's LiveKit focus requires.
-/// `created_ts` is set on a refresh, so the join time survives it.
+/// `focus` is the one `foci_preferred` entry, from `SfuService::focus`
+/// (ADR-0056). `created_ts` is set on a refresh, so the join time survives
+/// it.
 /// `m.call.intent` is `"video"` when the call was joined with `video`, else
 /// `"audio"`. It is fixed at the join and not changed by the camera button.
 pub fn own_membership(
-    room_id: &str,
     device_id: &DeviceId,
     user_id: &UserId,
-    service_url: &str,
+    focus: &Value,
     created_ts: Option<u64>,
     video: bool,
 ) -> Value {
@@ -70,11 +87,7 @@ pub fn own_membership(
         "device_id": device_id.as_str(),
         "expires": MEMBERSHIP_EXPIRES.as_millis() as u64,
         "focus_active": { "type": "livekit", "focus_selection": "multi_sfu" },
-        "foci_preferred": [{
-            "type": "livekit",
-            "livekit_service_url": service_url,
-            "livekit_alias": room_id,
-        }],
+        "foci_preferred": [focus],
         "membershipID": participant_identity(user_id, device_id),
         "m.call.intent": if video { "video" } else { "audio" },
     });
@@ -94,15 +107,22 @@ pub fn leave_content() -> Value {
 pub struct ActiveMember {
     pub user_id: OwnedUserId,
     pub device_id: OwnedDeviceId,
-    /// The LiveKit participant identity.
+    /// The member's `membershipID`, or `{user}:{device}` without one. Keys
+    /// and member changes go by this identity.
     pub identity: String,
+    /// The LiveKit participant identities the member may have on an SFU
+    /// (ADR-0056): the hashed identity when a transport has `url`, and
+    /// `{user}:{device}` when one has `livekit_service_url`. One or two,
+    /// never empty.
+    pub backend_identities: Vec<String>,
     /// The first acceptable LiveKit transport of the member, which is where
     /// it publishes (ADR-0043). It is `transports[0]`.
     pub service_url: Url,
     /// Every acceptable LiveKit transport in `foci_preferred`, in the
-    /// member's order, at most [`MAX_FOCI`] examined. An acceptable one has
-    /// an `https` URL of at most [`MAX_URL_BYTES`] bytes and no user
-    /// information. ADR-0054 picks another SFU from here.
+    /// member's order, at most [`MAX_FOCI`] examined, each as the URL it is
+    /// compared by: `livekit_service_url` (`https`) when the entry has one,
+    /// else `url` (`wss`). The URL has at most [`MAX_URL_BYTES`] bytes and no
+    /// user information. ADR-0054 picks another SFU from here.
     pub transports: Vec<Url>,
     pub joined_ts: u64,
     pub expires_ts: u64,
@@ -153,20 +173,55 @@ fn valid_device_id(device: &str) -> bool {
         && device.bytes().all(|b| b.is_ascii_graphic())
 }
 
-/// The acceptable LiveKit service URL of one `foci_preferred` entry.
-fn focus_url(focus: &Value) -> Option<Url> {
-    let key = match focus.get("type").and_then(Value::as_str)? {
-        "livekit" => "livekit_service_url",
-        "m.livekit" => "url",
-        _ => return None,
-    };
-    let raw_url = focus.get(key)?.as_str()?;
+/// One acceptable `foci_preferred` entry (ADR-0056).
+struct Focus {
+    /// The URL the entry is compared by.
+    url: Url,
+    /// It has an acceptable `url`: the member may use the hashed identity.
+    has_url: bool,
+    /// It has `livekit_service_url`: the member may use `{user}:{device}`.
+    has_service: bool,
+}
+
+/// A bounded, acceptable URL of `scheme` (or a development loopback of
+/// `plain`) from `value`.
+fn transport_url(value: Option<&Value>, scheme: &str, plain: &str) -> Option<Url> {
+    let raw_url = value?.as_str()?;
     if raw_url.len() > super::MAX_URL_BYTES {
         return None;
     }
     Url::parse(raw_url)
         .ok()
-        .filter(|url| is_service_url(url, "https", "http"))
+        .filter(|url| is_service_url(url, scheme, plain))
+}
+
+/// The acceptable transport of one `foci_preferred` entry, by the rules of
+/// `readiness::transport`: type `livekit` with an `https`
+/// `livekit_service_url`, or type `livekit` or `m.livekit` with a `wss`
+/// `url` and no `livekit_service_url`.
+fn focus(entry: &Value) -> Option<Focus> {
+    let kind = entry.get("type")?.as_str()?;
+    if kind != "livekit" && kind != "m.livekit" {
+        return None;
+    }
+    let sfu = transport_url(entry.get("url"), "wss", "ws");
+    match entry.get("livekit_service_url") {
+        Some(service) => {
+            if kind != "livekit" {
+                return None;
+            }
+            Some(Focus {
+                url: transport_url(Some(service), "https", "http")?,
+                has_url: sfu.is_some(),
+                has_service: true,
+            })
+        }
+        None => Some(Focus {
+            url: sfu?,
+            has_url: true,
+            has_service: false,
+        }),
+    }
 }
 
 fn parse_member(event: &MemberEvent, now_ms: u64) -> Option<ActiveMember> {
@@ -201,27 +256,37 @@ fn parse_member(event: &MemberEvent, now_ms: u64) -> Option<ActiveMember> {
         return None;
     }
     // Every acceptable LiveKit transport, in the member's order, at most
-    // [`MAX_FOCI`] examined. The legacy form has `type` `livekit` and
-    // `livekit_service_url`; the newer form has `type` `m.livekit` and `url`.
-    // One that is not acceptable is skipped; a member with none is not used.
-    let transports: Vec<Url> = content
+    // [`MAX_FOCI`] examined. One that is not acceptable is skipped; a member
+    // with none is not used.
+    let foci: Vec<Focus> = content
         .get("foci_preferred")?
         .as_array()?
         .iter()
         .take(MAX_FOCI)
-        .filter_map(focus_url)
+        .filter_map(focus)
         .collect();
-    let service_url = transports.first()?.clone();
+    let service_url = foci.first()?.url.clone();
     let identity = match content.get("membershipID").and_then(Value::as_str) {
         Some(id) if id.len() <= MAX_IDENTITY_BYTES && !id.chars().any(char::is_control) => {
             id.to_owned()
         }
         _ => participant_identity(&event.sender, &device_id),
     };
+    // As Element Call 0.28.2: the hash of the sender and the membership ID
+    // for a homeserver token, the sender and the device for a JWT service.
+    let mut backend_identities = Vec::with_capacity(2);
+    if foci.iter().any(|f| f.has_url) {
+        backend_identities.push(hashed_identity(&event.sender, &identity));
+    }
+    if foci.iter().any(|f| f.has_service) {
+        backend_identities.push(participant_identity(&event.sender, &device_id));
+    }
+    let transports = foci.into_iter().map(|f| f.url).collect();
     Some(ActiveMember {
         user_id: event.sender.clone(),
         device_id,
         identity,
+        backend_identities,
         service_url,
         transports,
         joined_ts,
@@ -271,6 +336,11 @@ mod tests {
         Url::parse(SERVICE).unwrap()
     }
 
+    /// The OpenID flow focus for `service`, as `SfuService::focus` makes it.
+    fn openid(service: &str) -> Value {
+        json!({ "type": "livekit", "livekit_service_url": service, "livekit_alias": "!r:example.org" })
+    }
+
     fn event(sender: &str, device: &str, ts: u64, content: Value) -> MemberEvent {
         MemberEvent {
             state_key: format!("_{sender}_{device}_m.call"),
@@ -282,10 +352,9 @@ mod tests {
 
     fn good(sender: &str, device: &str, ts: u64) -> MemberEvent {
         let content = own_membership(
-            "!r:example.org",
             &OwnedDeviceId::from(device),
             &OwnedUserId::try_from(sender).unwrap(),
-            SERVICE,
+            &openid(SERVICE),
             None,
             false,
         );
@@ -296,10 +365,9 @@ mod tests {
     #[test]
     fn given_own_membership_then_exact_content() {
         let content = own_membership(
-            "!r:example.org",
             device_id!("DEV"),
             user_id!("@a:example.org"),
-            SERVICE,
+            &openid(SERVICE),
             None,
             false,
         );
@@ -322,19 +390,17 @@ mod tests {
             })
         );
         let refreshed = own_membership(
-            "!r:example.org",
             device_id!("DEV"),
             user_id!("@a:example.org"),
-            SERVICE,
+            &openid(SERVICE),
             Some(42),
             false,
         );
         assert_eq!(refreshed["created_ts"], 42);
         let video = own_membership(
-            "!r:example.org",
             device_id!("DEV"),
             user_id!("@a:example.org"),
-            SERVICE,
+            &openid(SERVICE),
             Some(42),
             true,
         );
@@ -344,17 +410,18 @@ mod tests {
             video["created_ts"], 42,
             "a video refresh keeps the join time"
         );
+        let homeserver = json!({ "type": "livekit", "url": "wss://sfu.example.org" });
         let bare = own_membership(
-            "!r:example.org",
             device_id!("DEV"),
             user_id!("@a:example.org"),
-            "https://livekit.example.org",
+            &homeserver,
             None,
             false,
         );
         assert_eq!(
-            bare["foci_preferred"][0]["livekit_service_url"], "https://livekit.example.org",
-            "the service URL is written as given, with no slash added"
+            bare["foci_preferred"],
+            json!([homeserver]),
+            "the focus is written as given"
         );
         assert_eq!(leave_content(), json!({}));
         assert_eq!(
@@ -434,7 +501,7 @@ mod tests {
             {"type": "livekit", "livekit_service_url": "https://first.example/jwt"},
             {"type": "livekit", "livekit_service_url": "https://second.example/jwt"},
             {"type": "livekit", "livekit_service_url": 7},
-            {"type": "m.livekit", "url": "https://third.example/jwt"},
+            {"type": "m.livekit", "url": "wss://third.example"},
         ]);
         let members = active_members([e], NOW);
         let urls: Vec<&str> = members[0].transports.iter().map(Url::as_str).collect();
@@ -443,7 +510,7 @@ mod tests {
             [
                 "https://first.example/jwt",
                 "https://second.example/jwt",
-                "https://third.example/jwt"
+                "wss://third.example/"
             ]
         );
         assert_eq!(members[0].service_url.as_str(), "https://first.example/jwt");
@@ -469,23 +536,31 @@ mod tests {
         );
     }
 
-    /// GIVEN the newer and legacy focus forms, alone and mixed WHEN read THEN the first acceptable one in the member's order is used.
+    /// GIVEN the homeserver and OpenID focus forms, alone and mixed WHEN read
+    /// THEN the first acceptable one in the member's order is used, and an
+    /// entry with both URLs is compared by its service URL.
     #[test]
-    fn given_newer_focus_form_then_accepted() {
-        let newer = json!({ "type": "m.livekit", "url": "https://newer.example.org" });
+    fn given_homeserver_focus_form_then_accepted() {
+        let sfu = json!({ "type": "m.livekit", "url": "wss://sfu.example.org" });
         let legacy = json!({
             "type": "livekit", "livekit_service_url": "https://legacy.example.org/jwt"
         });
+        let both = json!({
+            "type": "livekit", "url": "wss://sfu.example.org",
+            "livekit_service_url": "https://both.example.org/jwt"
+        });
         let cases = [
-            (vec![newer.clone()], "https://newer.example.org/"),
+            (vec![sfu.clone()], "wss://sfu.example.org/"),
             (
-                vec![legacy.clone(), newer.clone()],
+                vec![json!({ "type": "livekit", "url": "wss://sfu.example.org:7443" })],
+                "wss://sfu.example.org:7443/",
+            ),
+            (
+                vec![legacy.clone(), sfu.clone()],
                 "https://legacy.example.org/jwt",
             ),
-            (
-                vec![newer.clone(), legacy.clone()],
-                "https://newer.example.org/",
-            ),
+            (vec![sfu.clone(), legacy.clone()], "wss://sfu.example.org/"),
+            (vec![both], "https://both.example.org/jwt"),
             // A malformed entry is passed over for a later good one.
             (
                 vec![json!({ "type": "m.livekit", "url": 5 }), legacy.clone()],
@@ -493,10 +568,10 @@ mod tests {
             ),
             (
                 vec![
-                    json!({ "type": "m.livekit", "url": "http://x.example.org" }),
-                    newer,
+                    json!({ "type": "m.livekit", "url": "https://x.example.org" }),
+                    sfu,
                 ],
-                "https://newer.example.org/",
+                "wss://sfu.example.org/",
             ),
         ];
         for (foci, expected) in cases {
@@ -507,20 +582,88 @@ mod tests {
         }
     }
 
-    /// GIVEN malformed newer focus entries only WHEN read THEN the event is skipped.
+    /// GIVEN malformed focus entries only WHEN read THEN the event is skipped.
     #[test]
-    fn given_malformed_newer_focus_then_skipped() {
-        for bad in [
+    fn given_malformed_focus_then_skipped() {
+        let mut bad = vec![
             json!({ "type": "m.livekit" }),
             json!({ "type": "m.livekit", "url": "not a url" }),
-            json!({ "type": "m.livekit", "url": "https://u:p@x.example.org" }),
+            json!({ "type": "m.livekit", "url": "wss://u:p@x.example.org" }),
+            json!({ "type": "m.livekit", "url": "https://x.example.org" }),
             json!({ "type": "m.livekit", "livekit_service_url": "https://x.example.org" }),
             json!({ "type": "livekit", "url": "https://x.example.org" }),
-        ] {
+            json!({ "type": "livekit", "livekit_service_url": 5, "url": "wss://x.example.org" }),
+            json!({ "type": "livekit", "url": format!("wss://x.example.org/{}", "a".repeat(super::super::MAX_URL_BYTES)) }),
+        ];
+        if !cfg!(feature = "dev-disposable-servers") {
+            bad.push(json!({ "type": "livekit", "url": "ws://127.0.0.1:7880" }));
+        }
+        for bad in bad {
             let mut e = good("@a:example.org", "DEV", NOW);
             e.content["foci_preferred"] = json!([bad]);
             assert!(active_members([e], NOW).is_empty(), "{bad}");
         }
+    }
+
+    /// GIVEN the MSC4195 example WHEN hashed THEN the identity is the one
+    /// the proposal gives.
+    #[test]
+    fn given_msc4195_example_then_its_hashed_identity() {
+        assert_eq!(
+            hashed_identity(user_id!("@alice:example.com"), "memberABC"),
+            "M3VnsLXrkbxIDINXO64u8PZzFyD9ZYFiQULR2dshWYs"
+        );
+    }
+
+    /// GIVEN each focus form WHEN read THEN the backend identities follow
+    /// Element Call: hashed with the membership ID for `url`, the sender and
+    /// device for `livekit_service_url`, and both for an entry with both.
+    #[test]
+    fn given_each_focus_form_then_its_backend_identities() {
+        let user = user_id!("@a:example.org");
+        let hashed = hashed_identity(user, "@a:example.org:DEV");
+        let cases = [
+            (
+                json!([openid(SERVICE)]),
+                vec!["@a:example.org:DEV".to_owned()],
+            ),
+            (
+                json!([{ "type": "livekit", "url": "wss://sfu.example.org" }]),
+                vec![hashed.clone()],
+            ),
+            (
+                json!([{ "type": "livekit", "url": "wss://sfu.example.org",
+                         "livekit_service_url": SERVICE }]),
+                vec![hashed.clone(), "@a:example.org:DEV".to_owned()],
+            ),
+            (
+                json!([{ "type": "m.livekit", "url": "wss://sfu.example.org" }, openid(SERVICE)]),
+                vec![hashed, "@a:example.org:DEV".to_owned()],
+            ),
+        ];
+        for (foci, expected) in cases {
+            let mut e = good("@a:example.org", "DEV", NOW);
+            e.content["foci_preferred"] = foci.clone();
+            assert_eq!(
+                active_members([e], NOW)[0].backend_identities,
+                expected,
+                "{foci}"
+            );
+        }
+
+        // The hash takes the membership ID; the OpenID identity does not.
+        let mut e = good("@a:example.org", "DEV", NOW);
+        e.content["membershipID"] = json!("custom-id");
+        e.content["foci_preferred"] = json!([
+            { "type": "livekit", "url": "wss://sfu.example.org", "livekit_service_url": SERVICE }
+        ]);
+        assert_eq!(
+            active_members([e], NOW)[0].backend_identities,
+            [
+                hashed_identity(user, "custom-id"),
+                "@a:example.org:DEV".to_owned()
+            ]
+        );
     }
 
     /// GIVEN a wrong application, scope, call id, device id or lifetime WHEN read THEN the event is skipped.

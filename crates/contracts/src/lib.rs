@@ -2147,6 +2147,9 @@ pub enum CallUnavailable {
     NotPermitted,
     /// The homeserver offers no call server.
     NoCallServer,
+    /// The homeserver offers a call server, but none that Persephone can
+    /// use (ADR-0056).
+    CallServerUnsupported,
     /// The homeserver could not be asked.
     ServerUnreachable,
 }

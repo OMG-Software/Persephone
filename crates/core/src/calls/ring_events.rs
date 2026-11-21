@@ -785,6 +785,7 @@ mod tests {
             user_id: OwnedUserId::try_from(user).unwrap(),
             device_id: "DEVICE".into(),
             identity: format!("{user}:DEVICE"),
+            backend_identities: vec![format!("{user}:DEVICE")],
             service_url: "https://sfu.synthetic.test".parse().unwrap(),
             transports: vec!["https://sfu.synthetic.test".parse().unwrap()],
             joined_ts: 1_000,

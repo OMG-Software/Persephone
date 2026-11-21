@@ -71,7 +71,7 @@ canStartNewBackup: boolean,
  */
 profilePassphrase: boolean, };
 
-export type CallUnavailable = "unsupported_platform" | "not_joined" | "not_encrypted" | "not_permitted" | "no_call_server" | "server_unreachable";
+export type CallUnavailable = "unsupported_platform" | "not_joined" | "not_encrypted" | "not_permitted" | "no_call_server" | "call_server_unsupported" | "server_unreachable";
 
 export type CallReadiness = { available: boolean, 
 /**

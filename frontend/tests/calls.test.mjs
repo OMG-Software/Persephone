@@ -53,7 +53,7 @@ const ready = (over) => ({ available: true, reason: null, activeMembers: 0, ...o
 
 test('GIVEN every call code in the contract WHEN its text is read THEN each is plain, non-empty text, except a normal leave', () => {
   const codes = {
-    unavailable: ['unsupported_platform', 'not_joined', 'not_encrypted', 'not_permitted', 'no_call_server', 'server_unreachable'],
+    unavailable: ['unsupported_platform', 'not_joined', 'not_encrypted', 'not_permitted', 'no_call_server', 'call_server_unsupported', 'server_unreachable'],
     join: ['already_in_call', 'not_joined', 'not_encrypted', 'no_call_server', 'declined', 'unsupported_platform', 'containment', 'no_worker', 'no_delayed_events', 'membership', 'call_server', 'keys', 'proxy_unreadable', 'device_setting_unreadable'],
     end: ['connection_failed', 'audio_device', 'device_not_found', 'containment', 'worker_stopped', 'worker_crashed', 'membership_lost', 'keys_unavailable', 'session_ended', 'internal']
   };

@@ -28,6 +28,7 @@ export const UNAVAILABLE_TEXT: Record<CallUnavailable, string> = {
   not_encrypted: 'Calls need an encrypted room.',
   not_permitted: 'You do not have permission to start a call in this room.',
   no_call_server: 'Your homeserver has no call service.',
+  call_server_unsupported: "Your homeserver's call service is not one Persephone supports.",
   server_unreachable: 'Cannot reach your homeserver to check for calls.'
 };
 
