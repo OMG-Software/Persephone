@@ -34,6 +34,11 @@ pub const MIN_WRITE_GAP: Duration = Duration::from_secs(1);
 /// 5-second poll and the contacts' lookups, which run at once within one
 /// [`LOOKUP_TIMEOUT`]. A `PUT` in that round counts as activity itself.
 pub const SYNC_CARRY_GAP: Duration = Duration::from_secs(15);
+/// The wait before a failed `PUT` is sent again; it doubles with each
+/// failure in a row, up to [`RETRY_GAP_MAX`].
+pub const RETRY_GAP_MIN: Duration = Duration::from_secs(2);
+/// The longest wait before a failed `PUT` is sent again.
+pub const RETRY_GAP_MAX: Duration = Duration::from_secs(5 * 60);
 /// Most contacts whose presence is kept.
 pub const MAX_CONTACTS: usize = 32;
 /// Most presence lookups in one sync round.
@@ -76,6 +81,23 @@ pub struct Writer {
     pending: Option<PresenceStatus>,
     last_write: Option<Instant>,
     last_carry: Option<Instant>,
+    /// After a failed `PUT`: when it may be sent again, and the wait that
+    /// gave that time.
+    retry_at: Option<Instant>,
+    retry_gap: Duration,
+}
+
+/// How a `PUT` ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PutEnd {
+    Sent,
+    /// A network failure, a timeout, a server error or a rate limit: sent
+    /// again after a growing wait.
+    Failed,
+    /// The homeserver refused it (a client error other than a rate limit),
+    /// so the same request would be refused again: dropped until the setting
+    /// changes.
+    Refused,
 }
 
 impl Writer {
@@ -105,6 +127,11 @@ impl Writer {
         } else {
             self.pending
         };
+        if changed || !share {
+            // A new choice is sent at once, whatever failed before.
+            self.retry_at = None;
+            self.retry_gap = Duration::ZERO;
+        }
     }
 
     fn may_write(&self, now: Instant) -> bool {
@@ -112,21 +139,35 @@ impl Writer {
             .is_none_or(|last| now.saturating_duration_since(last) >= MIN_WRITE_GAP)
     }
 
-    /// The waiting change to `PUT` now, or `None`: nothing waits, or the
-    /// last write was too recent. Taking it counts as a write.
+    /// The waiting change to `PUT` now, or `None`: nothing waits, the last
+    /// write was too recent, or a failed one waits its retry. Taking it
+    /// counts as a write.
     pub fn take_put(&mut self, now: Instant) -> Option<PresenceState> {
-        if self.pending.is_none() || !self.may_write(now) {
+        let retry_due = self.retry_at.is_none_or(|at| now >= at);
+        if self.pending.is_none() || !self.may_write(now) || !retry_due {
             return None;
         }
         self.last_write = Some(now);
         self.pending.take().map(state)
     }
 
-    /// Puts back a change whose `PUT` failed, unless a newer one waits or
-    /// sharing was turned off since.
-    pub fn retry(&mut self, failed: PresenceState) {
-        if self.share && self.pending.is_none() && state(self.status) == failed {
-            self.pending = Some(self.status);
+    /// Records how the `PUT` of `put` ended at `now`. A failed one is put
+    /// back, unless a newer change waits or sharing was turned off since,
+    /// and waits [`RETRY_GAP_MIN`], twice as long after each failure in a
+    /// row, at most [`RETRY_GAP_MAX`]. A refused one is not sent again.
+    pub fn put_ended(&mut self, put: PresenceState, end: PutEnd, now: Instant) {
+        match end {
+            PutEnd::Sent | PutEnd::Refused => {
+                self.retry_at = None;
+                self.retry_gap = Duration::ZERO;
+            }
+            PutEnd::Failed => {
+                if self.share && self.pending.is_none() && state(self.status) == put {
+                    self.pending = Some(self.status);
+                }
+                self.retry_gap = (self.retry_gap * 2).clamp(RETRY_GAP_MIN, RETRY_GAP_MAX);
+                self.retry_at = Some(now + self.retry_gap);
+            }
         }
     }
 
@@ -331,7 +372,7 @@ mod tests {
             assert_eq!(writer.take_put(at), None);
             assert_eq!(writer.for_sync(at), PresenceState::Offline);
         }
-        writer.retry(PresenceState::Unavailable);
+        writer.put_ended(PresenceState::Unavailable, PutEnd::Failed, start);
         assert_eq!(writer.take_put(start + Duration::from_secs(200)), None);
     }
 
@@ -350,25 +391,57 @@ mod tests {
         }
     }
 
-    /// GIVEN a failed `PUT` WHEN retried THEN it is sent again, unless a
-    /// newer change replaced it.
+    /// GIVEN a `PUT` that keeps failing WHEN retried THEN each retry waits
+    /// twice as long as the one before, at most five minutes, and a newer
+    /// change replaces it and is sent at once.
     #[test]
-    fn given_a_failed_put_then_it_waits_again_unless_replaced() {
+    fn given_a_failing_put_then_its_retries_back_off_unless_replaced() {
         let start = Instant::now();
         let mut writer = Writer::new(true, PresenceStatus::Online);
         writer.configure(true, PresenceStatus::Unavailable);
-        let failed = writer.take_put(start).unwrap();
-        writer.retry(failed);
-        assert_eq!(writer.take_put(start), None, "within a second");
+        let mut at = start;
+        let put = writer.take_put(at).expect("due");
+        writer.put_ended(put, PutEnd::Failed, at);
+        let mut gaps = Vec::new();
+        for _ in 0..10 {
+            let next = (1..=400u64)
+                .map(|step| at + Duration::from_secs(step))
+                .find(|&when| writer.take_put(when).is_some())
+                .expect("retried within 400 s");
+            gaps.push((next - at).as_secs());
+            writer.put_ended(PresenceState::Unavailable, PutEnd::Failed, next);
+            at = next;
+        }
+        assert_eq!(gaps, [2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
+        // A newer change skips the backoff; the one-second limit still holds.
+        writer.configure(true, PresenceStatus::Online);
+        assert_eq!(writer.take_put(at), None, "within a second of the last");
+        let sent = at + MIN_WRITE_GAP;
+        assert_eq!(writer.take_put(sent), Some(PresenceState::Online));
+        writer.put_ended(PresenceState::Online, PutEnd::Sent, sent);
+        writer.configure(true, PresenceStatus::Unavailable);
         assert_eq!(
-            writer.take_put(start + MIN_WRITE_GAP),
+            writer.take_put(sent + MIN_WRITE_GAP),
             Some(PresenceState::Unavailable)
         );
-        writer.configure(true, PresenceStatus::Online);
-        writer.retry(PresenceState::Unavailable);
+    }
+
+    /// GIVEN a `PUT` the homeserver refuses WHEN it ends THEN it is not sent
+    /// again until the setting changes.
+    #[test]
+    fn given_a_refused_put_then_it_is_not_sent_again_until_the_setting_changes() {
+        let start = Instant::now();
+        let mut writer = Writer::new(true, PresenceStatus::Online);
+        writer.configure(true, PresenceStatus::Unavailable);
+        let put = writer.take_put(start).unwrap();
+        writer.put_ended(put, PutEnd::Refused, start);
+        for step in 1..1000u64 {
+            assert_eq!(writer.take_put(start + Duration::from_secs(step)), None);
+        }
+        writer.configure(true, PresenceStatus::Offline);
         assert_eq!(
-            writer.take_put(start + 2 * MIN_WRITE_GAP),
-            Some(PresenceState::Online)
+            writer.take_put(start + Duration::from_secs(1000)),
+            Some(PresenceState::Offline)
         );
     }
 

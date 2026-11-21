@@ -1528,12 +1528,22 @@ impl Homeserver {
     }
 }
 
-/// The bodies of the presence changes sent, in order.
+/// The bodies of the presence changes sent, in order: `PUT` requests only,
+/// not the lookups (`GET`) of contacts' presence.
 fn presence_puts(server: &Homeserver) -> Vec<Value> {
     server
-        .requests_matching("/_matrix/client/v3/presence/")
-        .into_iter()
-        .map(|(_, body)| body)
+        .runtime
+        .block_on(server.server.received_requests())
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "PUT"
+                && request
+                    .url
+                    .path()
+                    .starts_with("/_matrix/client/v3/presence/")
+        })
+        .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
         .collect()
 }
 
@@ -1614,6 +1624,9 @@ fn given_quick_presence_changes_then_at_most_one_is_sent_each_second() {
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
     wait_for("the first sync", || !server.sync_presence().is_empty());
+    // The first sync carried the presence; the next carry would come
+    // `SYNC_CARRY_GAP` (15 s) later while sharing is on.
+    let first_carry = Instant::now();
     let set = |share_presence, presence| {
         let saved = call(
             &core,
@@ -1648,16 +1661,63 @@ fn given_quick_presence_changes_then_at_most_one_is_sent_each_second() {
         (puts as f64) <= seconds + 1.0,
         "{puts} changes in {seconds:.1} s"
     );
+    // Sharing off: wait for two more sync requests, so the round that may
+    // have begun before the change has ended, then past the time of the
+    // next carry. Nothing may change the presence meanwhile.
     set(false, PresenceStatus::Online);
+    let changed = server.sync_presence().len();
+    wait_for("a round after the change", || {
+        server.sync_presence().len() >= changed + 2
+    });
     let before = (presence_puts(&server).len(), server.sync_presence().len());
-    std::thread::sleep(Duration::from_secs(2));
-    assert_eq!(presence_puts(&server).len(), before.0);
+    let carry_due = first_carry + Duration::from_secs(16);
+    wait_for("the time of the next carry", || {
+        Instant::now() >= carry_due && server.sync_presence().len() > before.1
+    });
+    assert_eq!(presence_puts(&server).len(), before.0, "no change sent");
     let later = server.sync_presence();
-    assert!(later.len() > before.1, "sync carried on");
     assert!(
         later[before.1..].iter().all(|value| value == "offline"),
         "{later:?}"
     );
+}
+
+/// GIVEN a homeserver that refuses presence changes, as one with presence
+/// turned off answers 403 WHEN the presence changes THEN it is sent once and
+/// not again on later rounds (ADR-0057).
+#[test]
+fn given_a_refused_presence_change_then_it_is_not_sent_again() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    let server = Homeserver::signed_in();
+    server.runtime.block_on(
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(
+                    json!({"errcode": "M_FORBIDDEN", "error": "Presence is disabled"}),
+                ),
+            )
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the first sync", || !server.sync_presence().is_empty());
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                presence: PresenceStatus::Unavailable,
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    wait_for("the refused change", || !presence_puts(&server).is_empty());
+    let rounds = server.sync_presence().len();
+    wait_for("six more rounds", || {
+        server.sync_presence().len() >= rounds + 6
+    });
+    assert_eq!(presence_puts(&server).len(), 1);
 }
 
 #[test]

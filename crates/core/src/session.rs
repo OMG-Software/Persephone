@@ -1090,8 +1090,9 @@ fn run_sync(
 }
 
 /// Sends a waiting presence change, then gives the `set_presence` value of
-/// the next sync request (ADR-0057). A failed or timed-out `PUT` waits for
-/// another round; it changes nothing twice, so a repeat is harmless.
+/// the next sync request (ADR-0057). A failed or timed-out `PUT` is sent
+/// again after a growing wait; it changes nothing twice, so a repeat is
+/// harmless. A refused one is not sent again until the setting changes.
 async fn presence_before_round(
     shared: &Shared,
     client: &Client,
@@ -1103,9 +1104,21 @@ async fn presence_before_round(
             client.set_presence(state.clone(), None, true),
         )
         .await;
-        if !matches!(sent, Ok(Ok(()))) {
-            guard(&shared.presence).retry(state);
-        }
+        let end = match sent {
+            Ok(Ok(())) => presence::PutEnd::Sent,
+            // A client error other than a rate limit (429) would be refused
+            // again, for example 403 where presence is turned off.
+            Ok(Err(error))
+                if error.as_client_api_error().is_some_and(|error| {
+                    let code = error.status_code.as_u16();
+                    (400..500).contains(&code) && code != 429
+                }) =>
+            {
+                presence::PutEnd::Refused
+            }
+            _ => presence::PutEnd::Failed,
+        };
+        guard(&shared.presence).put_ended(state, end, Instant::now());
     }
     guard(&shared.presence).for_sync(Instant::now())
 }

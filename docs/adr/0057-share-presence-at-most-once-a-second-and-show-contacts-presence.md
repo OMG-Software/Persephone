@@ -68,8 +68,11 @@ alive on Synapse without a separate timer.
   client-server API defines as not marking the user online. Classic sync gets
   the value per request; Sliding Sync reads it from the client.
 * A changed setting waits for one `PUT`, which the sync loop sends before its
-  next round, under the same 1-second limit. The newest change wins, and a
-  failed or timed-out `PUT` waits for the next round. "Appear offline" is sent
+  next round, under the same 1-second limit. The newest change wins. A
+  failed or timed-out `PUT`, or one refused with 429, is sent again after 2
+  seconds, twice as long after each failure in a row, at most 5 minutes. One
+  refused with another 4xx, such as 403 where presence is turned off, is not
+  sent again until the setting changes. "Appear offline" is sent
   by its `PUT` alone, also when a session starts. Turning sharing off sends
   nothing more.
 * `presence::Book` keeps the presence of at most 32 direct-message contacts.
