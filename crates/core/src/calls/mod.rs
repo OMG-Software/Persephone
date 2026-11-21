@@ -41,6 +41,7 @@
 //! Every limit below applies before data is kept. Malformed input is skipped
 //! or refused; nothing here panics on peer data.
 
+mod bounded;
 pub mod controller;
 pub mod delayed;
 pub mod devices;
@@ -95,4 +96,61 @@ pub(crate) fn is_service_url(url: &url::Url, secure: &str, plain: &str) -> bool 
             Some(Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
             _ => false,
         }
+}
+
+/// One LiveKit transport entry: a homeserver's advertised transport or a
+/// member's `foci_preferred` entry (ADR-0056). Discovery and the membership
+/// reader both read entries with [`livekit_entry`], so they cannot differ.
+pub(crate) struct LiveKitEntry {
+    /// The acceptable `https` `livekit_service_url`, as advertised and
+    /// parsed: the entry uses the OpenID flow.
+    pub service: Option<(String, url::Url)>,
+    /// The acceptable `wss` `url`, as advertised and parsed.
+    pub sfu: Option<(String, url::Url)>,
+}
+
+/// The advertised string and its parse, when `value` is a string of at
+/// most [`MAX_URL_BYTES`] that [`is_service_url`] accepts.
+fn acceptable_url(
+    value: &serde_json::Value,
+    secure: &str,
+    plain: &str,
+) -> Option<(String, url::Url)> {
+    let advertised = value.as_str().filter(|raw| raw.len() <= MAX_URL_BYTES)?;
+    let url = url::Url::parse(advertised)
+        .ok()
+        .filter(|url| is_service_url(url, secure, plain))?;
+    Some((advertised.to_owned(), url))
+}
+
+/// Reads one entry by the rules of Element Call 0.28.2. `None` to skip it:
+///
+/// * The type must be `livekit` or `m.livekit`.
+/// * An entry with `livekit_service_url` must be type `livekit` (the type
+///   `matrix-js-sdk` reads) with an acceptable `https` URL. Its `url`, if
+///   acceptable, is kept too.
+/// * An entry without it must have an acceptable `wss` `url`.
+pub(crate) fn livekit_entry(entry: &serde_json::Value) -> Option<LiveKitEntry> {
+    let kind = entry.get("type")?.as_str()?;
+    if kind != "livekit" && kind != "m.livekit" {
+        return None;
+    }
+    let sfu = entry
+        .get("url")
+        .and_then(|url| acceptable_url(url, "wss", "ws"));
+    match entry.get("livekit_service_url") {
+        Some(service) => {
+            if kind != "livekit" {
+                return None;
+            }
+            Some(LiveKitEntry {
+                service: Some(acceptable_url(service, "https", "http")?),
+                sfu,
+            })
+        }
+        None => Some(LiveKitEntry {
+            service: None,
+            sfu: Some(sfu?),
+        }),
+    }
 }

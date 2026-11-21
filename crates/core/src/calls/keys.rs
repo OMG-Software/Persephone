@@ -222,6 +222,17 @@ impl RemoteKeys {
     pub fn member_count(&self) -> usize {
         self.members.len()
     }
+
+    /// The stored keys of `identity`, oldest inserted first.
+    pub fn keys_of(&self, identity: &str) -> Vec<(u8, Zeroizing<Vec<u8>>)> {
+        self.members.get(identity).map_or_else(Vec::new, |member| {
+            member
+                .order
+                .iter()
+                .filter_map(|index| Some((*index, member.keys.get(index)?.clone())))
+                .collect()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -388,5 +399,21 @@ mod tests {
         assert!(remote.get("a", 0).is_none());
         assert!(remote.get("b", 0).is_some());
         assert!(remote.get("c", 0).is_none());
+    }
+
+    /// GIVEN stored keys WHEN a member's keys are listed THEN they come
+    /// oldest first with their bytes, and an unknown member has none.
+    #[test]
+    fn given_stored_keys_then_keys_of_lists_them_oldest_first() {
+        let mut remote = RemoteKeys::new();
+        remote.insert("a", 3, &[3; 16], &yes).unwrap();
+        remote.insert("a", 1, &[1; 16], &yes).unwrap();
+        let keys: Vec<(u8, Vec<u8>)> = remote
+            .keys_of("a")
+            .into_iter()
+            .map(|(index, bytes)| (index, bytes.to_vec()))
+            .collect();
+        assert_eq!(keys, [(3, vec![3; 16]), (1, vec![1; 16])]);
+        assert!(remote.keys_of("b").is_empty());
     }
 }

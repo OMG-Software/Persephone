@@ -10,8 +10,9 @@ homeserver that issues LiveKit tokens itself. Sync worked. The owner asked
 for a decision record for the MSC4195 homeserver token flow, which
 [ADR-0054](0054-connect-to-call-members-on-other-sfus.md) left out. The
 owner accepted this record on 20 November 2026, after the Element Call
-facts below were checked in source. The design is accepted; it is not
-implemented or verified live.
+facts below were checked in source. The design is accepted and
+implemented by the change that follows this record; it is not verified
+live.
 
 ## Context and Problem Statement
 
@@ -129,9 +130,12 @@ homeservers without a server change and without a change to ADR-0004.
 
 ### Discovery
 
-* The core asks for the transports with a request type of its own. It sends
-  the request through the SDK client, so the access token, token refresh,
-  TLS 1.3 and the profile proxy apply.
+* The core asks for the transports with a request of its own. It sends the
+  request through the SDK's HTTP client with the session's access token, so
+  TLS 1.3, the profile proxy and the no-redirect policy apply. It does not
+  use `Client::send`, because that reads a whole answer before it can be
+  checked. An unknown access token (401 `M_UNKNOWN_TOKEN`) permits one SDK
+  token refresh and one retry, as for the bounded relation reads.
 * Order:
   1. The stable path `GET /_matrix/client/v1/rtc/transports`, member
      `transports`.
@@ -168,8 +172,8 @@ homeservers without a server change and without a change to ADR-0004.
 
 * The core posts to the stable token path. On 404 `M_UNRECOGNIZED` it posts
   to the unstable `io.element.msc4195` path, which is the only path that
-  Element Call 0.28.2 uses. The request goes through the SDK client and
-  follows no redirect.
+  Element Call 0.28.2 uses. The request is sent as the transports request
+  is, and follows no redirect.
 * The body is the same as Element Call's:
   * `url`: the advertised string, with no change.
   * `server_name`: the server name of the own user ID.

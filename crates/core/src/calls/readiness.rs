@@ -9,14 +9,13 @@
 //! `url` and no `livekit_service_url`, the form a homeserver that issues
 //! tokens itself advertises (MSC4195). The order is the stable MSC4143 path,
 //! then the unstable path, then the `.well-known` `rtc_foci` member, each
-//! next one only on 404 `M_UNRECOGNIZED`.
+//! next one only on 404 `M_UNRECOGNIZED`. The answers are capped while they
+//! are read (`bounded`).
 
-use super::{MAX_URL_BYTES, is_service_url};
+use super::bounded::{self, RequestError};
+use super::livekit_entry;
 use crate::discovery;
-use matrix_sdk::{
-    config::RequestConfig,
-    ruma::api::{client::voip::get_turn_server_info, error::ErrorKind},
-};
+use matrix_sdk::ruma::api::{client::voip::get_turn_server_info, error::ErrorKind};
 use serde_json::{Map, Value, json};
 use std::time::Duration;
 use url::Url;
@@ -52,6 +51,8 @@ impl std::fmt::Debug for TurnServers {
 #[derive(Debug)]
 pub enum ReadinessError {
     Http(matrix_sdk::HttpError),
+    /// A transports request failed, or the server refused it.
+    Transports,
 }
 
 fn valid_turn_uri(uri: &str) -> bool {
@@ -112,6 +113,12 @@ pub const MAX_TRANSPORTS_BYTES: usize = 16 * 1024;
 
 /// Most entries of one transport list examined.
 pub const MAX_TRANSPORT_ENTRIES: usize = 8;
+
+/// The stable MSC4143 transports path.
+const TRANSPORTS_STABLE: &str = "/_matrix/client/v1/rtc/transports";
+
+/// The unstable MSC4143 transports path.
+const TRANSPORTS_UNSTABLE: &str = "/_matrix/client/unstable/org.matrix.msc4143/rtc/transports";
 
 /// How the token for an SFU is got (ADR-0056).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,11 +186,6 @@ pub enum Discovery {
     Unsupported,
 }
 
-/// A copy of `url` when it is at most [`MAX_URL_BYTES`] long.
-fn bounded_copy(url: &str) -> Option<String> {
-    (url.len() <= MAX_URL_BYTES).then(|| url.to_owned())
-}
-
 /// The usable transport of one list entry, or `None` to skip it.
 ///
 /// * Type `livekit` with `livekit_service_url`, with or without `url`: the
@@ -195,19 +197,8 @@ fn bounded_copy(url: &str) -> Option<String> {
 /// Loopback `http` and `ws` URLs pass only with the `dev-disposable-servers`
 /// feature.
 pub fn transport(entry: &Value, own_server: &str) -> Option<SfuService> {
-    let entry = entry.as_object()?;
-    let kind = entry.get("type")?.as_str()?;
-    if kind != "livekit" && kind != "m.livekit" {
-        return None;
-    }
-    if let Some(service) = entry.get("livekit_service_url") {
-        if kind != "livekit" {
-            return None;
-        }
-        let advertised = bounded_copy(service.as_str()?)?;
-        let url = Url::parse(&advertised)
-            .ok()
-            .filter(|url| is_service_url(url, "https", "http"))?;
+    let entry_fields = livekit_entry(entry)?;
+    if let Some((advertised, url)) = entry_fields.service {
         return Some(SfuService {
             flow: Flow::OpenId,
             url,
@@ -215,10 +206,7 @@ pub fn transport(entry: &Value, own_server: &str) -> Option<SfuService> {
             server_name: None,
         });
     }
-    let advertised = bounded_copy(entry.get("url")?.as_str()?)?;
-    let url = Url::parse(&advertised)
-        .ok()
-        .filter(|url| is_service_url(url, "wss", "ws"))?;
+    let (advertised, url) = entry_fields.sfu?;
     let server_name = match entry.get("server_name") {
         None => None,
         Some(name) => {
@@ -286,57 +274,6 @@ pub fn read_well_known(body: &[u8], own_server: &str) -> Discovery {
     }
 }
 
-/// The transports requests. Each answer is read as raw bytes and checked
-/// here. The stable path is in an `unstable` arm only so that ruma always
-/// selects it; ruma has no stable path for it yet.
-mod api {
-    pub mod transports_v1 {
-        use matrix_sdk::ruma::api::{auth_scheme::AccessToken, metadata, request, response};
-
-        metadata! {
-            method: GET,
-            rate_limited: false,
-            authentication: AccessToken,
-            history: {
-                unstable => "/_matrix/client/v1/rtc/transports",
-            }
-        }
-
-        #[request]
-        #[derive(Default)]
-        pub struct Request {}
-
-        #[response]
-        pub struct Response {
-            #[ruma_api(raw_body)]
-            pub body: Vec<u8>,
-        }
-    }
-
-    pub mod transports_unstable {
-        use matrix_sdk::ruma::api::{auth_scheme::AccessToken, metadata, request, response};
-
-        metadata! {
-            method: GET,
-            rate_limited: false,
-            authentication: AccessToken,
-            history: {
-                unstable => "/_matrix/client/unstable/org.matrix.msc4143/rtc/transports",
-            }
-        }
-
-        #[request]
-        #[derive(Default)]
-        pub struct Request {}
-
-        #[response]
-        pub struct Response {
-            #[ruma_api(raw_body)]
-            pub body: Vec<u8>,
-        }
-    }
-}
-
 /// The homeserver's first usable LiveKit transport (ADR-0056).
 pub async fn sfu_transport(client: &matrix_sdk::Client) -> Result<Discovery, ReadinessError> {
     let well_known = client
@@ -356,27 +293,31 @@ async fn discover(
         .user_id()
         .map(|user| user.server_name().to_string())
         .unwrap_or_default();
-    match client
-        .send(api::transports_v1::Request::default())
-        .with_request_config(RequestConfig::short_retry())
+    for (path, member) in [
+        (TRANSPORTS_STABLE, "transports"),
+        (TRANSPORTS_UNSTABLE, "rtc_transports"),
+    ] {
+        match bounded::send(
+            client,
+            reqwest::Method::GET,
+            path,
+            None,
+            MAX_TRANSPORTS_BYTES,
+            discovery::DISCOVERY_TIMEOUT,
+        )
         .await
-    {
-        Ok(response) => return Ok(read_answer(&response.body, "transports", &own_server)),
-        Err(error) if !error.is_endpoint_not_implemented() => {
-            return Err(ReadinessError::Http(error));
+        {
+            Ok(answer) if answer.is_success() => {
+                return Ok(read_answer(&answer.body, member, &own_server));
+            }
+            Ok(answer) if answer.is_not_implemented() => {}
+            // An answer that cannot be read is unsupported, as one over
+            // the limit that `read_answer` would refuse.
+            Err(RequestError::TooLarge(status)) if (200..300).contains(&status) => {
+                return Ok(Discovery::Unsupported);
+            }
+            Ok(_) | Err(_) => return Err(ReadinessError::Transports),
         }
-        Err(_) => {}
-    }
-    match client
-        .send(api::transports_unstable::Request::default())
-        .with_request_config(RequestConfig::short_retry())
-        .await
-    {
-        Ok(response) => return Ok(read_answer(&response.body, "rtc_transports", &own_server)),
-        Err(error) if !error.is_endpoint_not_implemented() => {
-            return Err(ReadinessError::Http(error));
-        }
-        Err(_) => {}
     }
     let Some(url) = well_known else {
         return Ok(Discovery::NoneOffered);
@@ -390,6 +331,7 @@ async fn discover(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use crate::calls::MAX_URL_BYTES;
     use matrix_sdk::{
         Client, SessionMeta, SessionTokens, authentication::matrix::MatrixSession,
         config::RequestConfig, ruma::user_id,
@@ -870,5 +812,24 @@ pub(super) mod tests {
                 .await;
             assert!(sfu_transport(&client).await.is_err(), "{status}");
         }
+    }
+
+    /// GIVEN a transports answer over the limit WHEN asked THEN it is
+    /// refused while it is read, as an answer Persephone cannot use.
+    #[tokio::test]
+    async fn given_an_oversized_answer_then_unsupported() {
+        let server = MockServer::start().await;
+        let client = signed_in(&server).await;
+        Mock::given(method("GET"))
+            .and(path(STABLE_PATH))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("x".repeat(MAX_TRANSPORTS_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        assert_eq!(
+            sfu_transport(&client).await.unwrap(),
+            Discovery::Unsupported
+        );
     }
 }

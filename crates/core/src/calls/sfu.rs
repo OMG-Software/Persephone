@@ -12,8 +12,8 @@
 //! Every answer is untrusted: it is size-capped, and its token (and for
 //! `/sfu/get` its URL) is checked before the call worker sees it.
 
+use super::bounded::{self, RequestError};
 use super::{MAX_URL_BYTES, is_service_url};
-use matrix_sdk::config::RequestConfig;
 use matrix_sdk::ruma::{DeviceId, RoomId, api::client::account::request_openid_token};
 use serde_json::Map;
 use serde_json::{Value, json};
@@ -227,50 +227,11 @@ async fn post(
     parse_grant(&buffer).map_err(SfuError::Refused)
 }
 
-/// The MSC4195 `get_token` requests (ADR-0056). The stable path is in an
-/// `unstable` arm only so that ruma always selects it. The answer is read as
-/// raw bytes and checked by [`parse_token`].
-mod api {
-    macro_rules! get_token {
-        ($name:ident, $path:literal) => {
-            pub mod $name {
-                use matrix_sdk::ruma::api::{
-                    auth_scheme::AccessToken, metadata, request, response,
-                };
+/// The stable MSC4195 token path.
+const TOKEN_STABLE: &str = "/_matrix/client/v1/rtc/livekit/get_token";
 
-                metadata! {
-                    method: POST,
-                    rate_limited: false,
-                    authentication: AccessToken,
-                    history: {
-                        unstable => $path,
-                    }
-                }
-
-                #[request]
-                pub struct Request {
-                    pub url: String,
-                    pub server_name: String,
-                    pub room_id: String,
-                    pub slot_id: String,
-                    pub member_id: String,
-                }
-
-                #[response]
-                pub struct Response {
-                    #[ruma_api(raw_body)]
-                    pub body: Vec<u8>,
-                }
-            }
-        };
-    }
-
-    get_token!(stable, "/_matrix/client/v1/rtc/livekit/get_token");
-    get_token!(
-        unstable,
-        "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token"
-    );
-}
+/// The unstable MSC4195 token path, the only one Element Call 0.28.2 uses.
+const TOKEN_UNSTABLE: &str = "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token";
 
 /// What a homeserver token is for (ADR-0056).
 pub struct TokenFor<'a> {
@@ -290,10 +251,22 @@ pub struct TokenFor<'a> {
 /// empty `call_id` that Persephone writes.
 pub const SLOT_ID: &str = "m.call#ROOM";
 
+/// The JSON body of a `get_token` request.
+pub fn token_body(to: &TokenFor<'_>) -> Value {
+    json!({
+        "url": to.advertised,
+        "server_name": to.server_name,
+        "room_id": to.room_id.as_str(),
+        "slot_id": SLOT_ID,
+        "member_id": to.member_id,
+    })
+}
+
 /// Asks the own homeserver for a token for its SFU (ADR-0056). The request
-/// goes through the SDK client, so the access token, token refresh, TLS 1.3,
-/// the proxy and the no-redirect policy apply. The stable path is asked
-/// first; the unstable path only on 404 `M_UNRECOGNIZED`.
+/// goes through the SDK's HTTP client with the session's access token, so
+/// TLS 1.3, the proxy and the no-redirect policy apply, and the answer is
+/// capped at [`MAX_RESPONSE_BYTES`] while it is read. The stable path is
+/// asked first; the unstable path only on 404 `M_UNRECOGNIZED`.
 pub async fn get_homeserver_grant(
     client: &matrix_sdk::Client,
     to: TokenFor<'_>,
@@ -301,43 +274,32 @@ pub async fn get_homeserver_grant(
     if !is_service_url(to.sfu, "wss", "ws") {
         return Err(SfuError::InsecureServiceUrl);
     }
-    let config = RequestConfig::short_retry().timeout(REQUEST_TIMEOUT);
-    let send = async {
-        let stable = api::stable::Request {
-            url: to.advertised.to_owned(),
-            server_name: to.server_name.to_owned(),
-            room_id: to.room_id.to_string(),
-            slot_id: SLOT_ID.to_owned(),
-            member_id: to.member_id.to_owned(),
-        };
-        match client.send(stable).with_request_config(config).await {
-            Ok(response) => Ok(response.body),
-            Err(error) if error.is_endpoint_not_implemented() => {
-                let unstable = api::unstable::Request {
-                    url: to.advertised.to_owned(),
-                    server_name: to.server_name.to_owned(),
-                    room_id: to.room_id.to_string(),
-                    slot_id: SLOT_ID.to_owned(),
-                    member_id: to.member_id.to_owned(),
-                };
-                client
-                    .send(unstable)
-                    .with_request_config(config)
-                    .await
-                    .map(|response| response.body)
-            }
-            Err(error) => Err(error),
-        }
+    let body = token_body(&to);
+    let ask = |path| {
+        bounded::send(
+            client,
+            reqwest::Method::POST,
+            path,
+            Some(&body),
+            MAX_RESPONSE_BYTES,
+            REQUEST_TIMEOUT,
+        )
     };
-    let body = tokio::time::timeout(REQUEST_TIMEOUT, send)
-        .await
-        .map_err(|_| SfuError::Network)?
-        .map_err(|error| match error.as_client_api_error() {
-            Some(api) => SfuError::Status(api.status_code.as_u16()),
-            None => SfuError::Network,
-        })?;
-    let body = Zeroizing::new(body);
-    parse_token(&body, to.sfu).map_err(SfuError::Refused)
+    let mut answer = ask(TOKEN_STABLE).await;
+    if answer
+        .as_ref()
+        .is_ok_and(bounded::Answer::is_not_implemented)
+    {
+        answer = ask(TOKEN_UNSTABLE).await;
+    }
+    let answer = answer.map_err(|error| match error {
+        RequestError::TooLarge(_) => SfuError::Refused(Refusal::TooLarge),
+        RequestError::Network | RequestError::NoSession => SfuError::Network,
+    })?;
+    if !answer.is_success() {
+        return Err(SfuError::Status(answer.status));
+    }
+    parse_token(&answer.body, to.sfu).map_err(SfuError::Refused)
 }
 
 #[cfg(test)]
@@ -800,5 +762,27 @@ mod tests {
                 SfuError::InsecureServiceUrl
             );
         }
+    }
+
+    /// GIVEN a token answer over the limit WHEN a token is asked THEN it is
+    /// refused while it is read.
+    #[tokio::test]
+    async fn given_an_oversized_token_answer_then_refused() {
+        let server = MockServer::start().await;
+        let client = crate::calls::readiness::tests::signed_in(&server).await;
+        Mock::given(method("POST"))
+            .and(path(STABLE_TOKEN))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("x".repeat(MAX_RESPONSE_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        let sfu = Url::parse(SFU).unwrap();
+        assert_eq!(
+            get_homeserver_grant(&client, token_for(&sfu, room_id!("!r:synthetic.test")))
+                .await
+                .unwrap_err(),
+            SfuError::Refused(Refusal::TooLarge)
+        );
     }
 }

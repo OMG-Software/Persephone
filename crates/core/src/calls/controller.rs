@@ -401,10 +401,18 @@ impl View {
         }
     }
 
-    /// Whether `identity` (a membership ID, as keys name members) is a
-    /// current member.
+    /// The member whose device `identity` names, as frame keys name a
+    /// member: `{user}:{device}` of the authenticated sender (ADR-0056).
+    fn key_member(&self, identity: &str) -> Option<&ActiveMember> {
+        self.members
+            .iter()
+            .find(|m| participant_identity(&m.user_id, &m.device_id) == identity)
+    }
+
+    /// Whether `identity` names a current member's device (see
+    /// [`View::key_member`]).
     fn is_member(&self, identity: &str) -> bool {
-        self.members.iter().any(|m| m.identity == identity)
+        self.key_member(identity).is_some()
     }
 
     /// The member that a worker participant identity stands for: one of its
@@ -443,8 +451,12 @@ impl View {
     fn set_members(&mut self, members: Vec<ActiveMember>) {
         self.members = members;
         // `speaking` holds worker participant identities, `keyed` holds
-        // membership IDs.
-        let present: HashSet<&str> = self.members.iter().map(|m| m.identity.as_str()).collect();
+        // devices as keys name them.
+        let present: HashSet<String> = self
+            .members
+            .iter()
+            .map(|m| participant_identity(&m.user_id, &m.device_id))
+            .collect();
         let backends: HashSet<&str> = self
             .members
             .iter()
@@ -774,7 +786,9 @@ impl View {
                         Home::Other(url) => self.other.is_connected(url),
                         Home::Nowhere => false,
                     },
-                    keyed: self.keyed.contains(&m.identity),
+                    keyed: self
+                        .keyed
+                        .contains(&participant_identity(&m.user_id, &m.device_id)),
                     sharing: self.is_sharing(m),
                 })
                 .collect(),
@@ -3189,8 +3203,9 @@ impl Call {
             .map(|m| m.identity.clone())
             .collect();
         let diff = diff_members(&known, &current);
-        // The worker knows a departed member by its backend identities.
-        let departed = backends_of(&self.view.members, &diff.left);
+        // The worker knows members by their backend identities, which can
+        // change with a membership (ADR-0056).
+        let backends = backend_changes(&self.view.members, &current);
         self.view.set_members(current);
         // The video filter follows the members at once, so a later error
         // cannot leave a departed member's picture allowed. A video stream
@@ -3199,12 +3214,27 @@ impl Call {
         if !diff.left.is_empty() {
             let view = &self.view;
             self.remote.retain_members(|id| view.is_member(id));
-            for identity in departed {
-                // The tile keeps its track: the worker still receives it, and
-                // the member filter hides the tile and drops its picture
-                // until the membership returns. `ParticipantLeft` and
-                // `VideoStopped` end the assignment.
-                self.send_worker(ToWorker::RemoveParticipant { identity })?;
+        }
+        for identity in backends.removed {
+            // The tile keeps its track: the worker still receives it, and
+            // the member filter hides the tile and drops its picture
+            // until the membership returns. `ParticipantLeft` and
+            // `VideoStopped` end the assignment.
+            self.send_worker(ToWorker::RemoveParticipant { identity })?;
+        }
+        // A member that now has another backend identity keeps its keys
+        // under the new one too.
+        for (device, added) in backends.added {
+            for (index, bytes) in self.remote.keys_of(&device) {
+                for identity in &added {
+                    self.send_worker(ToWorker::SetKey {
+                        identity: identity.clone(),
+                        key: FrameKeyMsg {
+                            index,
+                            bytes: bytes.clone(),
+                        },
+                    })?;
+                }
             }
         }
         if let Some(outgoing) = key_action(&diff, &mut self.own_keys, Instant::now())
@@ -3248,7 +3278,11 @@ impl Call {
             }) => {
                 // The worker decrypts by LiveKit identity, so the key goes
                 // under each backend identity of the member (ADR-0056).
-                let backends = backends_of(&self.view.members, std::slice::from_ref(&identity));
+                let backends = self
+                    .view
+                    .key_member(&identity)
+                    .map(|m| m.backend_identities.clone())
+                    .unwrap_or_default();
                 self.view.keyed.insert(identity);
                 for backend in backends {
                     self.send_worker(ToWorker::SetKey {
@@ -3317,14 +3351,42 @@ impl Call {
     }
 }
 
-/// The backend identities (ADR-0056) of the members whose membership ID is
-/// in `identities`, in member order. The worker knows members by these.
-fn backends_of(members: &[ActiveMember], identities: &[String]) -> Vec<String> {
-    members
-        .iter()
-        .filter(|m| identities.contains(&m.identity))
-        .flat_map(|m| m.backend_identities.iter().cloned())
-        .collect()
+/// What the worker must hear when the members change (ADR-0056).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BackendChanges {
+    /// Backend identities that no current member has any more.
+    removed: Vec<String>,
+    /// For each device (`{user}:{device}`, as keys name it) that stayed,
+    /// the backend identities it has now and did not have before.
+    added: Vec<(String, Vec<String>)>,
+}
+
+/// The backend identity changes from `old` to `new`, matched by device.
+fn backend_changes(old: &[ActiveMember], new: &[ActiveMember]) -> BackendChanges {
+    let mut changes = BackendChanges::default();
+    for before in old {
+        let device = participant_identity(&before.user_id, &before.device_id);
+        let after = new
+            .iter()
+            .find(|m| m.user_id == before.user_id && m.device_id == before.device_id);
+        let now: &[String] = after.map_or(&[], |m| &m.backend_identities);
+        changes.removed.extend(
+            before
+                .backend_identities
+                .iter()
+                .filter(|id| !now.contains(id))
+                .cloned(),
+        );
+        let added: Vec<String> = now
+            .iter()
+            .filter(|id| !before.backend_identities.contains(id))
+            .cloned()
+            .collect();
+        if !added.is_empty() {
+            changes.added.push((device, added));
+        }
+    }
+    changes
 }
 
 /// The other devices of `members`.
@@ -3549,27 +3611,56 @@ mod tests {
         assert!(view.speaking.is_empty());
     }
 
-    /// GIVEN members with one or two backend identities WHEN the identities
-    /// of some are asked THEN each named member gives all of its own, and
-    /// nobody else's (keys and leaves go to every one, ADR-0056).
+    /// GIVEN members that leave, stay, or change their backend identities
+    /// WHEN the change is read THEN each identity no member has is removed,
+    /// and each staying device names only its new identities (ADR-0056).
     #[test]
-    fn given_members_then_backends_of_names_each_of_their_identities() {
-        let mut a = member("@a:example.org", "A", "wss://sfu.example.org");
-        a.backend_identities = vec!["hash-a".to_owned(), "@a:example.org:A".to_owned()];
-        let b = member("@b:example.org", "B", "https://sfu.example.org");
-        let members = [a, b];
+    fn given_member_changes_then_backend_changes_follow_the_devices() {
+        let with = |user: &str, device: &str, ids: &[&str]| {
+            let mut m = member(user, device, "https://sfu.example.org");
+            m.backend_identities = ids.iter().map(|id| (*id).to_owned()).collect();
+            m
+        };
+        let old = [
+            with("@a:example.org", "A", &["@a:example.org:A"]),
+            with("@b:example.org", "B", &["hash-b", "@b:example.org:B"]),
+            with("@c:example.org", "C", &["@c:example.org:C"]),
+        ];
+        let mut a_changed = with("@a:example.org", "A", &["hash-a"]);
+        // A new membership ID is a leave and a join, but the device stays.
+        a_changed.identity = "new-id".to_owned();
+        let new = [
+            a_changed,
+            with("@b:example.org", "B", &["hash-b", "@b:example.org:B"]),
+            with("@d:example.org", "D", &["@d:example.org:D"]),
+        ];
         assert_eq!(
-            backends_of(&members, &["@a:example.org:A".to_owned()]),
-            ["hash-a", "@a:example.org:A"]
+            backend_changes(&old, &new),
+            BackendChanges {
+                removed: vec!["@a:example.org:A".to_owned(), "@c:example.org:C".to_owned()],
+                added: vec![("@a:example.org:A".to_owned(), vec!["hash-a".to_owned()])],
+            }
         );
-        assert_eq!(
-            backends_of(
-                &members,
-                &["@b:example.org:B".to_owned(), "@c:example.org:C".to_owned()]
-            ),
-            ["@b:example.org:B"]
-        );
-        assert!(backends_of(&members, &[]).is_empty());
+        assert_eq!(backend_changes(&new, &new), BackendChanges::default());
+    }
+
+    /// GIVEN a member whose membership ID is not `{user}:{device}` WHEN a key
+    /// names its device THEN the key finds the member, and a key naming the
+    /// membership ID does not (ADR-0056).
+    #[test]
+    fn given_a_custom_membership_id_then_keys_find_the_member_by_device() {
+        let mut view = view();
+        let mut a = member("@a:example.org", "A", "https://sfu.example.org");
+        a.identity = "custom-id".to_owned();
+        view.set_members(vec![a]);
+        assert!(view.is_member("@a:example.org:A"));
+        assert!(!view.is_member("custom-id"));
+        view.keyed.insert("@a:example.org:A".to_owned());
+        view.apply(&FromWorker::Connected);
+        let CallState::Active { participants, .. } = view.state() else {
+            panic!("expected an active call");
+        };
+        assert!(participants[0].keyed);
     }
 
     /// GIVEN a member on an SFU whose homeserver issues tokens, known to

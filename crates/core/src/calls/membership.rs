@@ -7,7 +7,7 @@
 //! well-formed, unexpired, written by the user they name, and that name a
 //! LiveKit transport: an `https` JWT service or a `wss` SFU (ADR-0056).
 
-use super::{MAX_CALL_MEMBERS, MAX_IDENTITY_BYTES, MAX_MEMBER_EVENTS, is_service_url};
+use super::{MAX_CALL_MEMBERS, MAX_IDENTITY_BYTES, MAX_MEMBER_EVENTS, livekit_entry};
 use matrix_sdk::ruma::{
     DeviceId, OwnedDeviceId, OwnedUserId, UserId,
     events::StateEventType,
@@ -183,45 +183,15 @@ struct Focus {
     has_service: bool,
 }
 
-/// A bounded, acceptable URL of `scheme` (or a development loopback of
-/// `plain`) from `value`.
-fn transport_url(value: Option<&Value>, scheme: &str, plain: &str) -> Option<Url> {
-    let raw_url = value?.as_str()?;
-    if raw_url.len() > super::MAX_URL_BYTES {
-        return None;
-    }
-    Url::parse(raw_url)
-        .ok()
-        .filter(|url| is_service_url(url, scheme, plain))
-}
-
 /// The acceptable transport of one `foci_preferred` entry, by the rules of
-/// `readiness::transport`: type `livekit` with an `https`
-/// `livekit_service_url`, or type `livekit` or `m.livekit` with a `wss`
-/// `url` and no `livekit_service_url`.
+/// [`livekit_entry`], which discovery uses too.
 fn focus(entry: &Value) -> Option<Focus> {
-    let kind = entry.get("type")?.as_str()?;
-    if kind != "livekit" && kind != "m.livekit" {
-        return None;
-    }
-    let sfu = transport_url(entry.get("url"), "wss", "ws");
-    match entry.get("livekit_service_url") {
-        Some(service) => {
-            if kind != "livekit" {
-                return None;
-            }
-            Some(Focus {
-                url: transport_url(Some(service), "https", "http")?,
-                has_url: sfu.is_some(),
-                has_service: true,
-            })
-        }
-        None => Some(Focus {
-            url: sfu?,
-            has_url: true,
-            has_service: false,
-        }),
-    }
+    let entry = livekit_entry(entry)?;
+    Some(Focus {
+        has_url: entry.sfu.is_some(),
+        has_service: entry.service.is_some(),
+        url: entry.service.or(entry.sfu)?.1,
+    })
 }
 
 fn parse_member(event: &MemberEvent, now_ms: u64) -> Option<ActiveMember> {
