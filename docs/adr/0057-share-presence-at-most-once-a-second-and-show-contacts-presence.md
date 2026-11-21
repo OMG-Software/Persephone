@@ -107,7 +107,11 @@ alive on Synapse without a separate timer.
 * No request sequence can change the presence more than once a second.
 * A second client of the account that wants another state can no longer
   start a flood; at most one change in 15 seconds comes from Persephone.
-* Sharing can be turned off. Persephone then never changes the presence.
+* Sharing can be turned off. Persephone then sends no `PUT` and its sync
+  requests send `offline`, which the client-server API defines as not
+  marking the user online. A homeserver that applied it as a change, and
+  one that times the user out, would show the account offline;
+  Merovingian's behaviour is not measured.
 
 ### Negative Consequences
 

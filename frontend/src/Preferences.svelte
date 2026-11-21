@@ -278,8 +278,9 @@
     </select>
     <p class="note">
       On by default: people who share a room with you can see whether you are online. Persephone
-      changes your presence at most once a second. When sharing is off, it never changes it, and
-      your other signed-in apps decide what people see. You still see other people's presence.
+      changes your presence at most once a second. When sharing is off, Persephone stops setting
+      your presence. Your homeserver may show you offline after a while, and your other signed-in
+      apps decide what people see. You still see other people's presence.
     </p>
     <label class="switch-row">
       <input

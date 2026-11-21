@@ -483,6 +483,16 @@ impl wiremock::Respond for LiveRoom {
     }
 }
 
+/// An empty `200` answer that records when each request arrived.
+struct Stamped(Arc<std::sync::Mutex<Vec<Instant>>>);
+
+impl Respond for Stamped {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.0.lock().unwrap().push(Instant::now());
+        ResponseTemplate::new(200).set_body_json(json!({}))
+    }
+}
+
 /// A response that counts the requests it answered. It counts answers, not
 /// matches: a mock that has used up its answers matches nothing more.
 struct Counted(ResponseTemplate, Arc<AtomicUsize>);
@@ -1645,14 +1655,22 @@ fn given_sliding_sync_then_its_requests_carry_the_writers_presence() {
     );
 }
 
-/// GIVEN quick changes of the shared presence WHEN they are sent THEN at most
-/// one request a second changes it, the newest choice arrives last, and once
-/// sharing is off nothing changes it any more (ADR-0057).
+/// GIVEN changes of the shared presence every 300 ms for 3 seconds WHEN they
+/// are sent THEN the `PUT`s that arrive are at least a second apart, the
+/// newest choice arrives last, and once sharing is off nothing changes it
+/// any more (ADR-0057). Sync rounds come every 500 ms, so without the limit
+/// the `PUT`s would come that often.
 #[test]
 fn given_quick_presence_changes_then_at_most_one_is_sent_each_second() {
     use persephone_contracts::{AccountSettings, PresenceStatus};
     let server = Homeserver::signed_in();
-    server.accept_presence();
+    let arrived = Arc::new(std::sync::Mutex::new(Vec::new()));
+    server.runtime.block_on(
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(Stamped(arrived.clone()))
+            .mount(&server.server),
+    );
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
     wait_for("the first sync", || !server.sync_presence().is_empty());
@@ -1672,27 +1690,29 @@ fn given_quick_presence_changes_then_at_most_one_is_sent_each_second() {
         );
         assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
     };
-    let started = Instant::now();
-    for presence in [
-        PresenceStatus::Unavailable,
-        PresenceStatus::Offline,
-        PresenceStatus::Online,
-        PresenceStatus::Offline,
-        PresenceStatus::Unavailable,
-    ] {
+    for step in 0..10 {
+        let presence = if step % 2 == 0 {
+            PresenceStatus::Unavailable
+        } else {
+            PresenceStatus::Online
+        };
         set(true, presence);
+        std::thread::sleep(Duration::from_millis(300));
     }
+    set(true, PresenceStatus::Offline);
     wait_for("the newest change", || {
-        presence_puts(&server).last() == Some(&json!({"presence": "unavailable"}))
+        presence_puts(&server).last() == Some(&json!({"presence": "offline"}))
     });
-    let seconds = started.elapsed().as_secs_f64();
-    let puts = presence_puts(&server).len();
-    // The first sync wrote the presence just before the changes, so even
-    // the first change waits for the next second.
-    assert!(
-        (puts as f64) <= seconds + 1.0,
-        "{puts} changes in {seconds:.1} s"
-    );
+    let arrived = arrived.lock().unwrap().clone();
+    assert!(arrived.len() >= 2, "{} changes sent", arrived.len());
+    for pair in arrived.windows(2) {
+        // The limit holds where the core sends; arrival adds a little jitter.
+        let gap = pair[1].duration_since(pair[0]);
+        assert!(
+            gap >= Duration::from_millis(900),
+            "two changes {gap:?} apart"
+        );
+    }
     // Sharing off: wait for two more sync requests, so the round that may
     // have begun before the change has ended, then past the time of the
     // next carry. Nothing may change the presence meanwhile.
