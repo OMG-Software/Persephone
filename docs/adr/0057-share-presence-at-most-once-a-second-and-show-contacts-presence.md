@@ -85,7 +85,9 @@ alive on Synapse without a separate timer.
   for that wait, kept within 2 seconds and 5 minutes, also for a newer
   choice. One
   refused with another 4xx, such as 403 where presence is turned off, is not
-  sent again until the setting changes. "Appear offline" is sent
+  sent again, by `PUT` or carried by a sync request, until the setting
+  changes. A 408 or 425 is sent again like a failure, and a 499 like a
+  timeout. "Appear offline" is sent
   by its `PUT` alone, also when a session starts. Turning sharing off sends
   nothing more.
 * `presence::Book` keeps the presence of at most 32 direct-message contacts.

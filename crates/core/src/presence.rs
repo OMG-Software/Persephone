@@ -98,6 +98,9 @@ pub struct Writer {
     /// A rate limit asked for no presence write before this time. A new
     /// choice does not end it.
     quiet_until: Option<Instant>,
+    /// The homeserver refused the current choice: no sync request carries
+    /// it until the setting changes.
+    refused: bool,
 }
 
 /// How a `PUT` ended.
@@ -121,6 +124,24 @@ pub enum PutEnd {
     /// so the same request would be refused again: dropped until the setting
     /// changes.
     Refused,
+}
+
+/// How a `PUT` the homeserver answered with the error `status` ended.
+/// `wait` is the wait a rate limit (429) asks for, if it says one.
+pub fn answered(status: u16, wait: Option<Duration>) -> PutEnd {
+    match status {
+        429 => wait.map_or(PutEnd::Failed, PutEnd::Limited),
+        // Not processed: the request took too long to arrive, or came too
+        // early.
+        408 | 425 => PutEnd::Failed,
+        // A proxy gave up on the request, which may still be applied.
+        499 => PutEnd::Unknown,
+        // Any other client error would be refused again, for example 403
+        // where presence is turned off.
+        400..=499 => PutEnd::Refused,
+        // A server error: it may have been applied.
+        _ => PutEnd::Unknown,
+    }
 }
 
 impl Writer {
@@ -154,6 +175,7 @@ impl Writer {
             // A new choice is sent at once, whatever failed before.
             self.retry_at = None;
             self.retry_gap = Duration::ZERO;
+            self.refused = false;
         }
     }
 
@@ -199,6 +221,8 @@ impl Writer {
             PutEnd::Refused => {
                 self.retry_at = None;
                 self.retry_gap = Duration::ZERO;
+                // A newer choice waiting for its `PUT` still gets one try.
+                self.refused |= current;
             }
             PutEnd::Limited(wait) => {
                 let wait = wait.clamp(RETRY_GAP_MIN, RETRY_GAP_MAX);
@@ -228,6 +252,7 @@ impl Writer {
     /// mean `online`. An `offline` status is sent by its `PUT` alone.
     pub fn for_sync(&mut self, now: Instant) -> PresenceState {
         let carries = self.share
+            && !self.refused
             && self.status != PresenceStatus::Offline
             && self.may_write(now)
             && self
@@ -586,6 +611,52 @@ mod tests {
                 Some(PresenceState::Unavailable)
             );
         }
+    }
+
+    /// GIVEN a refused `PUT` WHEN later sync requests run THEN none carries
+    /// the refused choice, until the setting changes.
+    #[test]
+    fn given_a_refused_put_then_no_sync_carries_it_until_the_setting_changes() {
+        let start = Instant::now();
+        let mut writer = Writer::new(true, PresenceStatus::Online);
+        writer.configure(true, PresenceStatus::Unavailable);
+        let put = writer.take_put(start).unwrap();
+        writer.put_ended(put, PutEnd::Refused, start);
+        for step in 1..120u64 {
+            let now = start + Duration::from_secs(step);
+            assert_eq!(writer.for_sync(now), PresenceState::Offline);
+        }
+        let changed = start + Duration::from_secs(120);
+        writer.configure(true, PresenceStatus::Online);
+        assert_eq!(writer.take_put(changed), Some(PresenceState::Online));
+        writer.put_ended(PresenceState::Online, PutEnd::Sent, changed);
+        assert_eq!(
+            writer.for_sync(changed + SYNC_CARRY_GAP),
+            PresenceState::Online
+        );
+    }
+
+    /// GIVEN error answers to a `PUT` WHEN they are read THEN only a client
+    /// error that would come again is a refusal; a request timeout, a too
+    /// early answer, a closed request, a rate limit and a server error are
+    /// sent again.
+    #[test]
+    fn given_error_answers_then_only_lasting_client_errors_are_refusals() {
+        let wait = Duration::from_secs(9);
+        for (status, end) in [
+            (400, PutEnd::Refused),
+            (403, PutEnd::Refused),
+            (404, PutEnd::Refused),
+            (408, PutEnd::Failed),
+            (425, PutEnd::Failed),
+            (499, PutEnd::Unknown),
+            (500, PutEnd::Unknown),
+            (503, PutEnd::Unknown),
+        ] {
+            assert_eq!(answered(status, None), end, "{status}");
+        }
+        assert_eq!(answered(429, None), PutEnd::Failed);
+        assert_eq!(answered(429, Some(wait)), PutEnd::Limited(wait));
     }
 
     /// GIVEN a `PUT` the homeserver refuses WHEN it ends THEN it is not sent

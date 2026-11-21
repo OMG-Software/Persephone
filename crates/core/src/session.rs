@@ -1107,21 +1107,14 @@ async fn presence_before_round(
         .await;
         let end = match sent {
             Ok(Ok(())) => presence::PutEnd::Sent,
-            Ok(Err(error)) => {
-                match error
-                    .as_client_api_error()
-                    .map(|error| error.status_code.as_u16())
-                {
-                    // Rate limited: not applied. Keep the wait it asks for.
-                    Some(429) => rate_limit_wait(error.client_api_error_kind())
-                        .map_or(presence::PutEnd::Failed, presence::PutEnd::Limited),
-                    // Any other client error would be refused again, for
-                    // example 403 where presence is turned off.
-                    Some(code) if (400..500).contains(&code) => presence::PutEnd::Refused,
-                    // A server error or no answer: it may have been applied.
-                    _ => presence::PutEnd::Unknown,
-                }
-            }
+            Ok(Err(error)) => match error.as_client_api_error() {
+                Some(answer) => presence::answered(
+                    answer.status_code.as_u16(),
+                    rate_limit_wait(error.client_api_error_kind()),
+                ),
+                // No answer that can be read: it may have been applied.
+                None => presence::PutEnd::Unknown,
+            },
             // Timed out: the request may still reach the homeserver.
             Err(_) => presence::PutEnd::Unknown,
         };

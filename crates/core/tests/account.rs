@@ -1679,7 +1679,7 @@ fn given_quick_presence_changes_then_at_most_one_is_sent_each_second() {
 
 /// GIVEN a homeserver that refuses presence changes, as one with presence
 /// turned off answers 403 WHEN the presence changes THEN it is sent once and
-/// not again on later rounds (ADR-0057).
+/// not again on later rounds, by `PUT` or by sync (ADR-0057).
 #[test]
 fn given_a_refused_presence_change_then_it_is_not_sent_again() {
     use persephone_contracts::{AccountSettings, PresenceStatus};
@@ -1713,6 +1713,13 @@ fn given_a_refused_presence_change_then_it_is_not_sent_again() {
         server.sync_presence().len() >= rounds + 6
     });
     assert_eq!(presence_puts(&server).len(), 1);
+    assert!(
+        server.sync_presence()[rounds..]
+            .iter()
+            .all(|sent| sent == "offline"),
+        "{:?}",
+        server.sync_presence()
+    );
 }
 
 /// GIVEN a core that a test left signed in and syncing, never locked WHEN that
