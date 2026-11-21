@@ -53,15 +53,17 @@ pub fn is_other_host(url: &Url) -> bool {
 /// SFU only, so it is never taken from another. Otherwise its other SFU is
 /// the first acceptable transport that differs from the own one (as the
 /// parsed URL string), whose host is a DNS name and that is a JWT service
-/// (`https`). An SFU that only the own homeserver issues tokens for (`wss`,
+/// (`https`). An SFU that only a homeserver issues tokens for (`wss`,
 /// ADR-0056) is never another SFU: this core cannot get a token for it.
+/// A member whose first transport is such an SFU publishes there, so it is
+/// nowhere, not on a later JWT service.
 pub fn home<'a>(member: &'a ActiveMember, own: &Url) -> Home<'a> {
-    if member
-        .transports
-        .first()
-        .is_some_and(|first| first.as_str() == own.as_str())
-    {
+    let first = member.transports.first();
+    if first.is_some_and(|first| first.as_str() == own.as_str()) {
         return Home::Own;
+    }
+    if first.is_some_and(|first| first.scheme() != "https") {
+        return Home::Nowhere;
     }
     member
         .transports
@@ -332,7 +334,8 @@ mod tests {
     /// GIVEN a member on an SFU that its homeserver issues tokens for (`wss`)
     /// WHEN its home is asked
     /// THEN it is the own SFU when the own SFU is that one, else it is never
-    /// another SFU, and a later JWT service is taken instead (ADR-0056).
+    /// another SFU and is nowhere, also with a later JWT service, because it
+    /// publishes on its first transport (ADR-0056).
     #[test]
     fn given_a_homeserver_flow_sfu_then_it_is_never_another_sfu() {
         let own_wss = url("wss://sfu.own.example:7443");
@@ -342,10 +345,8 @@ mod tests {
         assert_eq!(home(&elsewhere, &own()), Home::Nowhere);
         assert_eq!(home(&elsewhere, &own_wss), Home::Nowhere);
         let then_service = member("a", &["wss://sfu.b.example", "https://sfu.c.example"]);
-        assert_eq!(
-            home(&then_service, &own_wss),
-            Home::Other(&url("https://sfu.c.example"))
-        );
+        assert_eq!(home(&then_service, &own_wss), Home::Nowhere);
+        assert_eq!(home(&then_service, &own()), Home::Nowhere);
     }
 
     /// GIVEN transports with IPv4 or IPv6 literal hosts

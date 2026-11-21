@@ -88,10 +88,15 @@ pub async fn send(
             && answer.status == 401
             && errcode(&answer.body).as_deref() == Some("M_UNKNOWN_TOKEN")
         {
-            client
-                .refresh_access_token()
-                .await
-                .map_err(|_| RequestError::Network)?;
+            // Another request may have refreshed the token meanwhile; then
+            // the retry uses the current one without a second refresh.
+            let current = Zeroizing::new(client.access_token().unwrap_or_default());
+            if *current == *token {
+                client
+                    .refresh_access_token()
+                    .await
+                    .map_err(|_| RequestError::Network)?;
+            }
             continue;
         }
         return Ok(answer);

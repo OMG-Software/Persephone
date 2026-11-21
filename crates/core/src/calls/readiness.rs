@@ -16,6 +16,7 @@ use super::bounded::{self, RequestError};
 use super::livekit_entry;
 use crate::discovery;
 use matrix_sdk::ruma::api::{client::voip::get_turn_server_info, error::ErrorKind};
+use persephone_core_protocol::ErrorCode;
 use serde_json::{Map, Value, json};
 use std::time::Duration;
 use url::Url;
@@ -51,7 +52,8 @@ impl std::fmt::Debug for TurnServers {
 #[derive(Debug)]
 pub enum ReadinessError {
     Http(matrix_sdk::HttpError),
-    /// A transports request failed, or the server refused it.
+    /// A transports or `.well-known` request failed, or the server refused
+    /// it.
     Transports,
 }
 
@@ -322,10 +324,13 @@ async fn discover(
     let Some(url) = well_known else {
         return Ok(Discovery::NoneOffered);
     };
-    Ok(match discovery::fetch(client.http_client(), url).await {
-        Ok((200, body)) => read_well_known(&body, &own_server),
-        _ => Discovery::NoneOffered,
-    })
+    // The file is optional, so its absence or an unreadable one offers
+    // none. A request that fails or a server error is not an answer.
+    match discovery::fetch(client.http_client(), url).await {
+        Ok((200, body)) => Ok(read_well_known(&body, &own_server)),
+        Ok((404, _)) | Err(ErrorCode::Rejected) => Ok(Discovery::NoneOffered),
+        Ok(_) | Err(_) => Err(ReadinessError::Transports),
+    }
 }
 
 #[cfg(test)]
@@ -772,6 +777,16 @@ pub(super) mod tests {
         assert_eq!(
             discover(&client, Some(missing)).await.unwrap(),
             Discovery::NoneOffered
+        );
+        Mock::given(method("GET"))
+            .and(path("/broken"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let broken = Url::parse(&format!("{}/broken", server.uri())).unwrap();
+        assert!(
+            discover(&client, Some(broken)).await.is_err(),
+            "a server error is not an answer"
         );
         assert_eq!(
             discover(&client, None).await.unwrap(),

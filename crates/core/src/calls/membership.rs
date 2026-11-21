@@ -112,8 +112,9 @@ pub struct ActiveMember {
     pub identity: String,
     /// The LiveKit participant identities the member may have on an SFU
     /// (ADR-0056): the hashed identity when a transport has `url`, and
-    /// `{user}:{device}` when one has `livekit_service_url`. One or two,
-    /// never empty.
+    /// `{user}:{device}` when one has `livekit_service_url`. One that another
+    /// member also has (two devices with one membership ID) is left out, so
+    /// it may be empty.
     pub backend_identities: Vec<String>,
     /// The first acceptable LiveKit transport of the member, which is where
     /// it publishes (ADR-0043). It is `transports[0]`.
@@ -164,6 +165,20 @@ pub fn active_members(
             .then_with(|| a.identity.cmp(&b.identity))
     });
     members.truncate(MAX_CALL_MEMBERS);
+    // Two devices of one user may name the same membership ID, and so the
+    // same hashed identity. Such an identity cannot say which device it
+    // is, so neither keeps it.
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for member in &members {
+        for id in &member.backend_identities {
+            *seen.entry(id.clone()).or_default() += 1;
+        }
+    }
+    for member in &mut members {
+        member
+            .backend_identities
+            .retain(|id| seen.get(id).copied() == Some(1));
+    }
     members
 }
 
@@ -633,6 +648,44 @@ mod tests {
                 hashed_identity(user, "custom-id"),
                 "@a:example.org:DEV".to_owned()
             ]
+        );
+    }
+
+    /// GIVEN two devices of one user with the same membership ID WHEN read
+    /// THEN neither keeps the shared hashed identity, because it cannot say
+    /// which device it is; each keeps its own `{user}:{device}` identity.
+    #[test]
+    fn given_shared_membership_id_then_no_hashed_identity() {
+        let both = json!([
+            { "type": "livekit", "url": "wss://sfu.example.org", "livekit_service_url": SERVICE }
+        ]);
+        let events = ["DEV", "DEV2"].map(|device| {
+            let mut e = good("@a:example.org", device, NOW);
+            e.content["membershipID"] = json!("shared");
+            e.content["foci_preferred"] = both.clone();
+            e
+        });
+        let members = active_members(events, NOW);
+        assert_eq!(members.len(), 2);
+        for member in &members {
+            assert_eq!(
+                member.backend_identities,
+                [format!("@a:example.org:{}", member.device_id)]
+            );
+        }
+
+        // Only `url`: nothing is left, so the member has no backend identity.
+        let only_url = json!([{ "type": "livekit", "url": "wss://sfu.example.org" }]);
+        let events = ["DEV", "DEV2"].map(|device| {
+            let mut e = good("@a:example.org", device, NOW);
+            e.content["membershipID"] = json!("shared");
+            e.content["foci_preferred"] = only_url.clone();
+            e
+        });
+        assert!(
+            active_members(events, NOW)
+                .iter()
+                .all(|member| member.backend_identities.is_empty())
         );
     }
 

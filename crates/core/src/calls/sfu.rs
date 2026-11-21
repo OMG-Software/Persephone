@@ -100,8 +100,8 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
     if body.len() > MAX_RESPONSE_BYTES {
         return Err(Refusal::TooLarge);
     }
-    let value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
-    let object = value.as_object().ok_or(Refusal::NotJson)?;
+    let mut value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
+    let object = value.as_object_mut().ok_or(Refusal::NotJson)?;
 
     let raw_url = object
         .get("url")
@@ -123,11 +123,14 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
 
 /// The `jwt` member of an answer: three non-empty parts of visible ASCII, at
 /// most [`MAX_JWT_BYTES`].
-fn checked_jwt(object: &Map<String, Value>) -> Result<Zeroizing<String>, Refusal> {
-    let jwt = object
-        .get("jwt")
-        .and_then(Value::as_str)
-        .ok_or(Refusal::BadJwt)?;
+///
+/// The string is moved out of the parsed answer into zeroized memory before
+/// it is checked, so no ordinary copy of it is left, also when it is refused.
+fn checked_jwt(object: &mut Map<String, Value>) -> Result<Zeroizing<String>, Refusal> {
+    let jwt = match object.remove("jwt") {
+        Some(Value::String(jwt)) => Zeroizing::new(jwt),
+        _ => return Err(Refusal::BadJwt),
+    };
     let parts: Vec<&str> = jwt.split('.').collect();
     if jwt.len() > MAX_JWT_BYTES
         || !jwt.bytes().all(|b| b.is_ascii_graphic())
@@ -136,7 +139,7 @@ fn checked_jwt(object: &Map<String, Value>) -> Result<Zeroizing<String>, Refusal
     {
         return Err(Refusal::BadJwt);
     }
-    Ok(Zeroizing::new(jwt.to_owned()))
+    Ok(jwt)
 }
 
 /// Checks a homeserver `get_token` answer (ADR-0056). Only `jwt` is read;
@@ -145,8 +148,8 @@ pub fn parse_token(body: &[u8], sfu: &Url) -> Result<SfuGrant, Refusal> {
     if body.len() > MAX_RESPONSE_BYTES {
         return Err(Refusal::TooLarge);
     }
-    let value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
-    let object = value.as_object().ok_or(Refusal::NotJson)?;
+    let mut value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
+    let object = value.as_object_mut().ok_or(Refusal::NotJson)?;
     Ok(SfuGrant {
         url: sfu.clone(),
         jwt: checked_jwt(object)?,

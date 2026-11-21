@@ -2963,6 +2963,14 @@ impl Call {
             .map_err(|_| EndReason::WorkerStopped)
     }
 
+    /// Queues `message` when the worker's queue has room: `false` when it is
+    /// full. Only a closed queue is an error.
+    fn queue_worker(&self, message: ToWorker) -> Result<bool, EndReason> {
+        self.link
+            .try_queue(message)
+            .map_err(|_| EndReason::WorkerStopped)
+    }
+
     fn send_all(&self, messages: Vec<ToWorker>) -> Result<(), EndReason> {
         messages
             .into_iter()
@@ -3219,25 +3227,36 @@ impl Call {
             let view = &self.view;
             self.remote.retain_members(|id| view.is_member(id));
         }
+        // These go only when the queue has room: a full queue must not end
+        // the call, and only a closed one does. The worker ignores
+        // `RemoveParticipant`; a key that does not fit comes again with the
+        // member's next key.
         for identity in backends.removed {
             // The tile keeps its track: the worker still receives it, and
             // the member filter hides the tile and drops its picture
             // until the membership returns. `ParticipantLeft` and
             // `VideoStopped` end the assignment.
-            self.send_worker(ToWorker::RemoveParticipant { identity })?;
+            if !self.queue_worker(ToWorker::RemoveParticipant { identity })? {
+                break;
+            }
         }
         // A member that now has another backend identity keeps its keys
-        // under the new one too.
-        for (device, added) in backends.added {
-            for (index, bytes) in self.remote.keys_of(&device) {
+        // under the new one too: the newest [`REPLAYED_KEYS`], which hold
+        // the key in use and the one about to be.
+        'replay: for (device, added) in backends.added {
+            let keys = self.remote.keys_of(&device);
+            for (index, bytes) in replayed(&keys) {
                 for identity in &added {
-                    self.send_worker(ToWorker::SetKey {
+                    let key = ToWorker::SetKey {
                         identity: identity.clone(),
                         key: FrameKeyMsg {
-                            index,
+                            index: *index,
                             bytes: bytes.clone(),
                         },
-                    })?;
+                    };
+                    if !self.queue_worker(key)? {
+                        break 'replay;
+                    }
                 }
             }
         }
@@ -3358,6 +3377,15 @@ impl Call {
             })
             .await;
     }
+}
+
+/// Most stored keys of one member given again under a new backend identity.
+const REPLAYED_KEYS: usize = 2;
+
+/// The newest [`REPLAYED_KEYS`] of `keys`, which are oldest first, in that
+/// order.
+fn replayed<T>(keys: &[T]) -> &[T] {
+    &keys[keys.len().saturating_sub(REPLAYED_KEYS)..]
 }
 
 /// What the worker must hear when the members change (ADR-0056).
@@ -3618,6 +3646,18 @@ mod tests {
         assert!(participants[0].speaking);
         view.set_members(vec![member("@b:example.org", "B", "https://x.example.org")]);
         assert!(view.speaking.is_empty());
+    }
+
+    /// GIVEN a member's stored keys, oldest first WHEN they are given again
+    /// under a new backend identity THEN only the newest two go, oldest of
+    /// them first, so a member with many keys cannot fill the worker queue.
+    #[test]
+    fn given_stored_keys_then_only_the_newest_two_are_replayed() {
+        assert_eq!(replayed::<u8>(&[]), &[] as &[u8]);
+        assert_eq!(replayed(&[7]), &[7]);
+        assert_eq!(replayed(&[1, 2]), &[1, 2]);
+        let many: Vec<u8> = (0..16).collect();
+        assert_eq!(replayed(&many), &[14, 15]);
     }
 
     /// GIVEN members that leave, stay, or change their backend identities
