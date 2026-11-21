@@ -205,6 +205,36 @@ impl wiremock::Respond for SlidingJoin {
     }
 }
 
+/// Native Sliding Sync with only `DM`, a direct-message room with `CONTACT`,
+/// listed as direct in the account data. Sliding Sync carries no presence.
+struct SlidingDirect;
+
+impl wiremock::Respond for SlidingDirect {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+        let wanted = body["lists"]["rooms"]["required_state"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let state: Vec<Value> = dm_state()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| wanted.iter().any(|entry| requested(entry, event)))
+            .cloned()
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "pos":"sliding-pos","lists":{"rooms":{"count":1}},
+            "rooms":{DM:{"initial":true,"joined_count":2,"invited_count":0,"required_state":state,"timeline":[],"num_live":0,"notification_count":0,"highlight_count":0}},
+            "extensions":{
+                "account_data":{"global":[{"type":"m.direct","content":{CONTACT:[DM]}}]},
+                "e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},
+                "to_device":{"events":[],"next_batch":"to-device-pos"}
+            }
+        }))
+    }
+}
+
 /// The Sliding Sync answer for `ROOM` with `timeline` and the homeserver's
 /// joined and invited `counts`: only the state the request's list asks for,
 /// less the `withheld` event types.
@@ -387,6 +417,8 @@ struct LiveRoom {
     /// Also report `PLAIN`, a room that is not encrypted.
     plain: bool,
     /// Also report `DM`, a direct-message room with `CONTACT`, who is away.
+    /// Only the first round reports their presence, before the core tracks
+    /// them, so the core has to read it from the SDK's store.
     dm: bool,
 }
 
@@ -434,7 +466,9 @@ impl wiremock::Respond for LiveRoom {
         let mut account_data = json!([]);
         let mut presence = json!([]);
         if self.dm {
-            presence = json!([{"type":"m.presence","sender":CONTACT,"content":{"presence":"unavailable"}}]);
+            if n == 0 {
+                presence = json!([{"type":"m.presence","sender":CONTACT,"content":{"presence":"unavailable"}}]);
+            }
             rooms[DM] = json!({"summary":{"m.joined_member_count":2,"m.invited_member_count":0},"state":{"events":dm_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             rooms[GROUP] = json!({"summary":{"m.joined_member_count":3,"m.invited_member_count":0},"state":{"events":group_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             account_data = json!([{"type":"m.direct","content":{CONTACT:[DM, GROUP]}}]);
@@ -1750,6 +1784,68 @@ fn given_a_contacts_presence_then_their_room_in_the_list_carries_it() {
         let expected = (room.room_id == DM).then_some(PresenceStatus::Unavailable);
         assert_eq!(room.contact_presence, expected, "{}", room.room_id);
     }
+}
+
+/// GIVEN Sliding Sync, which carries no presence, and a direct-message
+/// contact WHEN the core syncs THEN it asks the homeserver for the contact's
+/// presence once, and their room in the list carries it; opening the room
+/// right after does not ask again, as the presence is recent (ADR-0057).
+#[test]
+fn given_sliding_sync_then_a_contacts_presence_is_looked_up_once_and_listed() {
+    use persephone_contracts::PresenceStatus;
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    let lookups = Arc::new(AtomicUsize::new(0));
+    server.runtime.block_on(async {
+        Mock::given(method("POST"))
+            .and(path(SLIDING))
+            .respond_with(SlidingDirect)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(Counted(
+                ResponseTemplate::new(200).set_body_json(json!({"presence":"unavailable"})),
+                lookups.clone(),
+            ))
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut list = RoomList {
+        rooms: Vec::new(),
+        truncated: false,
+    };
+    wait_for("the contact's presence in the room list", || {
+        list = value(call(&core, Call::RoomList {}));
+        list.rooms
+            .iter()
+            .any(|room| room.room_id == DM && room.contact_presence.is_some())
+    });
+    let dm = list.rooms.iter().find(|room| room.room_id == DM).unwrap();
+    assert_eq!(dm.contact.as_deref(), Some(CONTACT));
+    assert_eq!(dm.contact_presence, Some(PresenceStatus::Unavailable));
+    assert!(server.sync_presence().is_empty(), "no classic fallback");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    let _ = call(&core, Call::ContactStatus { room_id: DM.into() });
+    let rounds = server.presence_sent_to(SLIDING).len();
+    wait_for("three more sliding rounds", || {
+        server.presence_sent_to(SLIDING).len() >= rounds + 3
+    });
+    assert_eq!(
+        lookups.load(Ordering::SeqCst),
+        1,
+        "a recent presence is not asked again"
+    );
 }
 
 /// GIVEN a core that a test left signed in and syncing, never locked WHEN that
