@@ -80,7 +80,10 @@ alive on Synapse without a separate timer.
   sent change of the current choice is sent once more 30 seconds later.
   Among the requests that reach the homeserver, the newest change wins only
   if no older request arrives after that confirmation; the confirmation
-  covers a late request, not every possible delay. One
+  covers a late request, not every possible delay. A 429 that says how long
+  to wait (`retry_after_ms`) stops every presence write, by `PUT` or sync,
+  for that wait, kept within 2 seconds and 5 minutes, also for a newer
+  choice. One
   refused with another 4xx, such as 403 where presence is turned off, is not
   sent again until the setting changes. "Appear offline" is sent
   by its `PUT` alone, also when a session starts. Turning sharing off sends
@@ -91,7 +94,8 @@ alive on Synapse without a separate timer.
   loop asks `GET /presence/{userId}/status` for at most 2 contacts a round,
   both at once and within 5 seconds, so a round adds at most 5 seconds, each at most once in 5 minutes, or once in a
   minute after the page opens the contact's room. A failed lookup keeps the
-  old value. A lock clears the book.
+  old value; one for an opened room is asked again after a minute until it
+  is answered. A lock clears the book.
 * `RoomSummary.contactPresence` carries a contact's state to the page. The
   room list shows a labelled dot for online, away and offline, and nothing
   for an unknown state.

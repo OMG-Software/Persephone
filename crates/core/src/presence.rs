@@ -95,15 +95,23 @@ pub struct Writer {
     /// A `PUT` ended without a known result: it may still reach the
     /// homeserver, after a newer one.
     uncertain: bool,
+    /// A rate limit asked for no presence write before this time. A new
+    /// choice does not end it.
+    quiet_until: Option<Instant>,
 }
 
 /// How a `PUT` ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PutEnd {
     Sent,
-    /// Not applied, such as a rate limit (429): sent again after a growing
-    /// wait.
+    /// Not applied, such as a rate limit (429) that says no wait: sent
+    /// again after a growing wait.
     Failed,
+    /// Rate limited (429) with the wait the homeserver asks for. No presence
+    /// write, by `PUT` or sync, comes before it ends, at least
+    /// [`RETRY_GAP_MIN`] and at most [`RETRY_GAP_MAX`]; then it is sent
+    /// again like a failed one.
+    Limited(Duration),
     /// No known result, such as a timeout, a network failure or a server
     /// error: it may have been applied, or may still be. Sent again like a
     /// failed one, and the next sent change is confirmed once more after
@@ -150,8 +158,10 @@ impl Writer {
     }
 
     fn may_write(&self, now: Instant) -> bool {
-        self.last_write
-            .is_none_or(|last| now.saturating_duration_since(last) >= MIN_WRITE_GAP)
+        self.quiet_until.is_none_or(|until| now >= until)
+            && self
+                .last_write
+                .is_none_or(|last| now.saturating_duration_since(last) >= MIN_WRITE_GAP)
     }
 
     /// The waiting change to `PUT` now, or `None`: nothing waits, the last
@@ -189,6 +199,15 @@ impl Writer {
             PutEnd::Refused => {
                 self.retry_at = None;
                 self.retry_gap = Duration::ZERO;
+            }
+            PutEnd::Limited(wait) => {
+                let wait = wait.clamp(RETRY_GAP_MIN, RETRY_GAP_MAX);
+                self.quiet_until = Some(now + wait);
+                if current {
+                    self.pending = Some(self.status);
+                    self.retry_gap = wait;
+                    self.retry_at = Some(now + wait);
+                }
             }
             PutEnd::Failed | PutEnd::Unknown => {
                 self.uncertain |= end == PutEnd::Unknown;
@@ -299,7 +318,7 @@ impl Book {
     /// is younger than [`WANTED_AGE`].
     pub fn want(&self, user: &UserId, now: Instant) {
         if let Some(entry) = self.entries().iter_mut().find(|entry| entry.user == user) {
-            entry.wanted = entry
+            entry.wanted |= entry
                 .checked
                 .is_none_or(|checked| now.saturating_duration_since(checked) >= WANTED_AGE);
         }
@@ -307,16 +326,18 @@ impl Book {
 
     /// At most [`LOOKUPS_PER_ROUND`] contacts to ask for: wanted ones first,
     /// then those never asked, then the oldest past [`LOOKUP_AGE`]. Each is
-    /// marked as asked now, so a failed lookup waits its turn again.
+    /// marked as asked now, so a failed lookup waits its turn again: a
+    /// wanted one stays wanted until an answer arrives, and is asked again
+    /// after [`WANTED_AGE`].
     pub fn due(&self, now: Instant) -> Vec<OwnedUserId> {
         let mut entries = self.entries();
         let mut due: Vec<&mut Entry> = entries
             .iter_mut()
             .filter(|entry| {
-                entry.wanted
-                    || entry
-                        .checked
-                        .is_none_or(|checked| now.saturating_duration_since(checked) >= LOOKUP_AGE)
+                let age = if entry.wanted { WANTED_AGE } else { LOOKUP_AGE };
+                entry
+                    .checked
+                    .is_none_or(|checked| now.saturating_duration_since(checked) >= age)
             })
             .collect();
         due.sort_by_key(|entry| (!entry.wanted, entry.checked));
@@ -324,7 +345,6 @@ impl Book {
             .take(LOOKUPS_PER_ROUND)
             .map(|entry| {
                 entry.checked = Some(now);
-                entry.wanted = false;
                 entry.user.clone()
             })
             .collect()
@@ -524,6 +544,50 @@ mod tests {
         assert_eq!(writer.take_put(confirm + RETRY_GAP_MAX), None);
     }
 
+    /// GIVEN a `PUT` rate limited with a wait WHEN the choice changes during
+    /// that wait THEN no presence write, by `PUT` or sync, comes before it
+    /// ends, and the newest choice is sent then.
+    #[test]
+    fn given_a_rate_limit_with_a_wait_then_no_write_comes_before_it_ends() {
+        let start = Instant::now();
+        let mut writer = Writer::new(true, PresenceStatus::Online);
+        writer.configure(true, PresenceStatus::Unavailable);
+        let put = writer.take_put(start).unwrap();
+        let wait = Duration::from_secs(60);
+        writer.put_ended(put, PutEnd::Limited(wait), start);
+        writer.configure(true, PresenceStatus::Online);
+        for step in 1..60u64 {
+            let now = start + Duration::from_secs(step);
+            assert_eq!(writer.take_put(now), None);
+            assert_eq!(writer.for_sync(now), PresenceState::Offline);
+        }
+        assert_eq!(writer.take_put(start + wait), Some(PresenceState::Online));
+    }
+
+    /// GIVEN rate limits asking for no wait or for hours WHEN they end THEN
+    /// the wait is kept within 2 seconds and 5 minutes.
+    #[test]
+    fn given_a_rate_limit_wait_out_of_bounds_then_it_is_clamped() {
+        let start = Instant::now();
+        for (asked, kept) in [
+            (Duration::ZERO, RETRY_GAP_MIN),
+            (Duration::from_secs(7200), RETRY_GAP_MAX),
+        ] {
+            let mut writer = Writer::new(true, PresenceStatus::Online);
+            writer.configure(true, PresenceStatus::Unavailable);
+            let put = writer.take_put(start).unwrap();
+            writer.put_ended(put, PutEnd::Limited(asked), start);
+            assert_eq!(
+                writer.take_put(start + kept - Duration::from_millis(1)),
+                None
+            );
+            assert_eq!(
+                writer.take_put(start + kept),
+                Some(PresenceState::Unavailable)
+            );
+        }
+    }
+
     /// GIVEN a `PUT` the homeserver refuses WHEN it ends THEN it is not sent
     /// again until the setting changes.
     #[test]
@@ -583,5 +647,25 @@ mod tests {
         assert_eq!(book.due(later), vec![users[1].clone()]);
         let all = start + WANTED_AGE + LOOKUP_AGE;
         assert_eq!(book.due(all).len(), LOOKUPS_PER_ROUND);
+    }
+
+    /// GIVEN an opened contact's room WHEN its lookup fails THEN it is asked
+    /// again a minute later, not after five, and an answer ends that.
+    #[test]
+    fn given_a_failed_wanted_lookup_then_it_is_asked_again_each_minute() {
+        let book = Book::default();
+        let start = Instant::now();
+        let contact = user("u0");
+        book.track([&*contact]);
+        assert_eq!(book.due(start), vec![contact.clone()]);
+        let opened = start + WANTED_AGE;
+        book.want(&contact, opened);
+        assert_eq!(book.due(opened), vec![contact.clone()]);
+        book.want(&contact, opened + Duration::from_secs(1));
+        assert!(book.due(opened + Duration::from_secs(1)).is_empty());
+        let retry = opened + WANTED_AGE;
+        assert_eq!(book.due(retry), vec![contact.clone()]);
+        book.note(&contact, Some(PresenceStatus::Online), retry);
+        assert!(book.due(retry + WANTED_AGE).is_empty());
     }
 }
