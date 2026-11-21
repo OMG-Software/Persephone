@@ -3024,10 +3024,14 @@ impl Call {
             else {
                 continue;
             };
-            let keys = self.remote.keys_of(&device);
             while let Some((identity, index)) = waiting.front() {
-                let stored = keys.iter().find(|(stored, _)| stored == index);
-                let (Some((_, bytes)), true) = (stored, backends.contains(identity)) else {
+                // Only the key that goes is copied out of the store.
+                let stored = if backends.contains(identity) {
+                    self.remote.get(&device, *index)
+                } else {
+                    None
+                };
+                let Some(bytes) = stored else {
                     waiting.pop_front();
                     continue;
                 };
@@ -3035,7 +3039,7 @@ impl Call {
                     identity: identity.clone(),
                     key: FrameKeyMsg {
                         index: *index,
-                        bytes: bytes.clone(),
+                        bytes: Zeroizing::new(bytes.to_vec()),
                     },
                 };
                 if !self.queue_worker(key)? {
@@ -3345,7 +3349,7 @@ impl Call {
         // A member that now has another backend identity keeps its keys
         // under the new one too.
         for (device, added) in backends.added {
-            let keys = replay_keys(&self.remote.keys_of(&device), &added);
+            let keys = replay_keys(&self.remote.indices_of(&device), &added);
             self.mark_unsent(device, keys);
         }
         self.send_unsent()?;
@@ -3483,14 +3487,15 @@ impl Call {
 }
 
 /// The keys to give under a member's new backend identities `added`: every
-/// stored key, at most [`crate::calls::keys::MAX_KEYS_PER_MEMBER`], under each
-/// identity, in the order of `keys` (oldest first). Key indices wrap at 256
+/// stored key index, at most [`crate::calls::keys::MAX_KEYS_PER_MEMBER`],
+/// under each identity, in the order of `indices` (oldest first). Key indices wrap at 256
 /// and a late key may arrive after a newer one, so neither the index nor the
 /// arrival order says which key the member uses; all of them go. They wait
 /// for room in the worker queue, so they cannot end the call.
-fn replay_keys<B>(keys: &[(u8, B)], added: &[String]) -> Vec<(String, u8)> {
-    keys.iter()
-        .flat_map(|(index, _)| added.iter().map(|identity| (identity.clone(), *index)))
+fn replay_keys(indices: &[u8], added: &[String]) -> Vec<(String, u8)> {
+    indices
+        .iter()
+        .flat_map(|index| added.iter().map(|identity| (identity.clone(), *index)))
         .collect()
 }
 
@@ -3816,11 +3821,10 @@ mod tests {
     #[test]
     fn given_stored_keys_then_all_are_replayed_under_each_new_identity() {
         let added = ["h".to_owned(), "d".to_owned()];
-        assert!(replay_keys::<()>(&[], &added).is_empty());
+        assert!(replay_keys(&[], &added).is_empty());
         // 255 then 0 is a wrap; 254 arrived late.
-        let keys = [(255, ()), (0, ()), (254, ())];
         assert_eq!(
-            replay_keys(&keys, &added),
+            replay_keys(&[255, 0, 254], &added),
             [255, 255, 0, 0, 254, 254]
                 .iter()
                 .zip(added.iter().cycle())
