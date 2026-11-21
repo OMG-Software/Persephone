@@ -178,8 +178,10 @@ impl Writer {
                 self.retry_at = None;
                 self.retry_gap = Duration::ZERO;
                 // An earlier `PUT` may still arrive after this one: send the
-                // newest choice once more, later.
-                if std::mem::take(&mut self.uncertain) && current {
+                // newest choice once more, later. Keep the mark while a
+                // newer choice waits, so that choice gets the confirmation.
+                if self.uncertain && current {
+                    self.uncertain = false;
                     self.pending = Some(self.status);
                     self.retry_at = Some(now + CONFIRM_DELAY);
                 }
@@ -494,6 +496,32 @@ mod tests {
         for step in 1..600u64 {
             assert_eq!(writer.take_put(confirm + Duration::from_secs(step)), None);
         }
+    }
+
+    /// GIVEN a `PUT` whose end is not known WHEN the choice changes again
+    /// while the next `PUT` is in flight THEN that `PUT` does not take the
+    /// confirmation: the newest choice is sent and then confirmed once.
+    #[test]
+    fn given_a_change_during_the_put_after_an_unknown_one_then_the_newest_is_confirmed() {
+        let start = Instant::now();
+        let mut writer = Writer::new(true, PresenceStatus::Online);
+        writer.configure(true, PresenceStatus::Unavailable);
+        let online = writer.take_put(start).unwrap();
+        writer.put_ended(online, PutEnd::Unknown, start + PUT_TIMEOUT);
+        writer.configure(true, PresenceStatus::Online);
+        let away_at = start + PUT_TIMEOUT + MIN_WRITE_GAP;
+        writer.configure(true, PresenceStatus::Unavailable);
+        let away = writer.take_put(away_at).unwrap();
+        writer.configure(true, PresenceStatus::Offline);
+        writer.put_ended(away, PutEnd::Sent, away_at);
+        let sent = away_at + MIN_WRITE_GAP;
+        assert_eq!(writer.take_put(sent), Some(PresenceState::Offline));
+        writer.put_ended(PresenceState::Offline, PutEnd::Sent, sent);
+        let confirm = sent + CONFIRM_DELAY;
+        assert_eq!(writer.take_put(confirm - MIN_WRITE_GAP), None);
+        assert_eq!(writer.take_put(confirm), Some(PresenceState::Offline));
+        writer.put_ended(PresenceState::Offline, PutEnd::Sent, confirm);
+        assert_eq!(writer.take_put(confirm + RETRY_GAP_MAX), None);
     }
 
     /// GIVEN a `PUT` the homeserver refuses WHEN it ends THEN it is not sent
