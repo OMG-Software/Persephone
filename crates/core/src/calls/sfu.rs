@@ -12,8 +12,8 @@
 //! Every answer is untrusted: it is size-capped, and its token (and for
 //! `/sfu/get` its URL) is checked before the call worker sees it.
 
-use super::bounded::{self, RequestError};
 use super::{MAX_URL_BYTES, is_service_url};
+use crate::bounded::{self, RequestError};
 use matrix_sdk::ruma::{DeviceId, RoomId, api::client::account::request_openid_token};
 use serde_json::Map;
 use serde_json::{Value, json};

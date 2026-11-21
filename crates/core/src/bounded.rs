@@ -1,12 +1,13 @@
-//! Bounded client-server requests for the call service (ADR-0056).
+//! Bounded client-server requests: the call transport and token requests
+//! (ADR-0056) and the pin replacement relations read (`room_relations`).
 //!
 //! The SDK's `Client::send` reads a whole answer into memory before it is
-//! decoded, so it cannot cap the call transport and token answers. These
-//! requests go through the SDK's HTTP client instead (TLS 1.3, the profile
-//! proxy, no redirects) with the session's access token, as
-//! `room_relations` does. Each body, error bodies included, is capped while
-//! it is read. An unknown access token permits one SDK refresh and one
-//! retry; any other failure is returned.
+//! decoded, so it cannot cap these answers. These requests go through the
+//! SDK's HTTP client instead (TLS 1.3, the profile proxy, no redirects) with
+//! the session's access token. Each body, error bodies included, is capped
+//! while it is read. An unknown access token permits one SDK refresh and one
+//! retry; any other failure is returned. This is the only copy of that
+//! refresh and retry rule.
 
 use reqwest::Method;
 use serde_json::Value;
@@ -66,6 +67,19 @@ pub async fn send(
         "{}{path}",
         client.homeserver().as_str().trim_end_matches('/')
     );
+    send_to(client, method, &url, json, max, Some(timeout)).await
+}
+
+/// As [`send`], to a complete homeserver `url`. Without `timeout`, the
+/// caller owns the deadline.
+pub async fn send_to(
+    client: &matrix_sdk::Client,
+    method: Method,
+    url: &str,
+    json: Option<&Value>,
+    max: usize,
+    timeout: Option<Duration>,
+) -> Result<Answer, RequestError> {
     let payload = match json {
         Some(value) => Some(serde_json::to_vec(value).map_err(|_| RequestError::Network)?),
         None => None,
@@ -73,9 +87,11 @@ pub async fn send(
     let attempt = async |token: &str| {
         let mut request = client
             .http_client()
-            .request(method.clone(), &url)
-            .bearer_auth(token)
-            .timeout(timeout);
+            .request(method.clone(), url)
+            .bearer_auth(token);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
         if let Some(payload) = &payload {
             request = request
                 .header("content-type", "application/json")
@@ -108,7 +124,10 @@ pub async fn send(
 
 /// Reads at most `max` bytes, checking the declared length first and each
 /// chunk before the buffer grows.
-async fn read(mut response: reqwest::Response, max: usize) -> Result<Answer, RequestError> {
+pub(crate) async fn read(
+    mut response: reqwest::Response,
+    max: usize,
+) -> Result<Answer, RequestError> {
     let status = response.status().as_u16();
     if response
         .content_length()

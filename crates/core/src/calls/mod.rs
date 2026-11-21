@@ -41,7 +41,6 @@
 //! Every limit below applies before data is kept. Malformed input is skipped
 //! or refused; nothing here panics on peer data.
 
-mod bounded;
 pub mod controller;
 pub mod delayed;
 pub mod devices;

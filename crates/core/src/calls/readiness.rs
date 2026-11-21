@@ -12,8 +12,8 @@
 //! next one only on 404 `M_UNRECOGNIZED`. The answers are capped while they
 //! are read (`bounded`).
 
-use super::bounded::{self, RequestError};
 use super::livekit_entry;
+use crate::bounded::{self, RequestError};
 use crate::discovery;
 use matrix_sdk::ruma::api::{client::voip::get_turn_server_info, error::ErrorKind};
 use persephone_core_protocol::ErrorCode;
@@ -334,7 +334,7 @@ async fn discover(
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::calls::MAX_URL_BYTES;
     use matrix_sdk::{
@@ -351,7 +351,7 @@ pub(super) mod tests {
     const RTC_PATH: &str = "/_matrix/client/unstable/org.matrix.msc4143/rtc/transports";
 
     /// A client signed in to `server` as `@alice:synthetic.test`, without retries.
-    pub(in crate::calls) async fn signed_in(server: &MockServer) -> Client {
+    pub(crate) async fn signed_in(server: &MockServer) -> Client {
         Mock::given(method("GET"))
             .and(path("/_matrix/client/versions"))
             .respond_with(

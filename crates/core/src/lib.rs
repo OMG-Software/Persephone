@@ -35,6 +35,7 @@ pub mod account_changes;
 pub mod account_details;
 pub mod activity;
 pub mod backup_restore;
+mod bounded;
 pub mod calls;
 pub mod contacts;
 pub mod conversations;
