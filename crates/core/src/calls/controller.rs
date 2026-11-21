@@ -3000,10 +3000,12 @@ impl Call {
     /// has room. Each goes with the bytes stored for its index now, and only
     /// while its device is a member that still has that backend identity;
     /// otherwise it is dropped. A key that goes is not sent again, so a
-    /// retry with little room goes on where the last one stopped. Only a
-    /// closed queue is an error.
-    fn send_unsent(&mut self) -> Result<(), EndReason> {
+    /// retry with little room goes on where the last one stopped. A device
+    /// is shown as keyed once one of its keys is queued: `true` when that
+    /// changed what the page shows. Only a closed queue is an error.
+    fn send_unsent(&mut self) -> Result<bool, EndReason> {
         self.unsent_retry = None;
+        let mut keyed = false;
         let mut pending = std::mem::take(&mut self.unsent).into_iter();
         while let Some((device, mut waiting)) = pending.next() {
             let Some(backends) = self
@@ -3031,12 +3033,13 @@ impl Call {
                     self.unsent.insert(device, waiting);
                     self.unsent.extend(pending);
                     self.unsent_retry = Some(Instant::now() + UNSENT_RETRY);
-                    return Ok(());
+                    return Ok(keyed);
                 }
                 waiting.pop_front();
+                keyed |= self.view.keyed.insert(device.clone());
             }
         }
-        Ok(())
+        Ok(keyed)
     }
 
     /// Switches the worker to the own key in `pending`, which is due. When
@@ -3273,7 +3276,11 @@ impl Call {
                         Some(at) => time::sleep_until(at.into()).await,
                         None => std::future::pending().await,
                     }
-                } => self.send_unsent()?,
+                } => {
+                    if self.send_unsent()? {
+                        self.publish(inner);
+                    }
+                }
             }
         }
     }
@@ -3396,8 +3403,9 @@ impl Call {
                 else {
                     return Ok(());
                 };
-                self.view.keyed.insert(identity.clone());
-                // Keys that do not fit in the queue go at the next retry.
+                // Keys that do not fit in the queue go at the next retry. The
+                // member is shown as keyed only once a key is queued for it.
+                let mut queued = false;
                 for (sent, backend) in backends.iter().enumerate() {
                     let key = ToWorker::SetKey {
                         identity: backend.clone(),
@@ -3408,9 +3416,13 @@ impl Call {
                     };
                     if !self.queue_worker(key)? {
                         let rest = backends[sent..].iter().map(|b| (b.clone(), index));
-                        self.mark_unsent(identity, rest);
+                        self.mark_unsent(identity.clone(), rest);
                         break;
                     }
+                    queued = true;
+                }
+                if queued {
+                    self.view.keyed.insert(identity);
                 }
                 self.publish(inner);
             }
@@ -4495,14 +4507,20 @@ mod tests {
 
         fill_queue(&call, &mut to_worker, 0);
         call.mark_unsent(device.clone(), waiting.clone());
-        call.send_unsent().unwrap();
+        assert!(!call.send_unsent().unwrap());
         assert!(call.unsent_retry.is_some(), "a full queue keeps the keys");
+        assert!(
+            !call.view.keyed.contains(&device),
+            "no key reached the worker"
+        );
 
-        // Each pass has room for one key: the first, then the second.
-        for expected in &waiting {
+        // Each pass has room for one key: the first, then the second. The
+        // device is shown as keyed once the first is queued.
+        for (pass, expected) in waiting.iter().enumerate() {
             fill_queue(&call, &mut to_worker, 1);
-            call.send_unsent().unwrap();
+            assert_eq!(call.send_unsent().unwrap(), pass == 0);
             assert_eq!(set_keys(&mut to_worker), std::slice::from_ref(expected));
+            assert!(call.view.keyed.contains(&device));
         }
         assert!(call.unsent.is_empty());
         assert_eq!(call.unsent_retry, None);
