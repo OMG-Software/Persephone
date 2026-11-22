@@ -293,3 +293,40 @@ test('GIVEN existing groups WHEN the room-group dialog shows THEN it offers thei
   assert.match(html, /<datalist id="room-section-groups"><option value="&lt;img src=x onerror=alert\(1\)>"><\/option><option value="Work"><\/option><\/datalist>/);
   assert.doesNotMatch(html, /<img/);
 });
+
+test('GIVEN members with presence WHEN listed THEN each known status is a labelled dot on the picture, and none shows otherwise', () => {
+  const html = members({
+    rows: [
+      row('@amy:s', 'verified', { presence: 'online' }),
+      row('@bob:s', 'verified', { presence: 'unavailable' }),
+      row('@cat:s', 'verified', { presence: 'offline' }),
+      row('@dan:s', 'verified', { presence: null }),
+      row('@eve:s', 'verified', { presence: '<b>online</b>' })
+    ]
+  });
+  assert.match(html, /<span class="presence-avatar"><span class="avatar small [^"]*" aria-hidden="true">[^<]*<\/span> <span class="presence-mark online" role="img" aria-label="Online" title="Online"><\/span>/);
+  assert.match(html, /class="presence-mark unavailable" role="img" aria-label="Away" title="Away"/);
+  assert.match(html, /class="presence-mark offline" role="img" aria-label="Offline" title="Offline"/);
+  assert.equal((html.match(/presence-mark/g) ?? []).length, 3, 'nothing for an unknown status');
+  assert.doesNotMatch(html, /<b>/);
+});
+
+test('GIVEN a menu with trigger content WHEN it renders THEN that content is the button, its label the accessible name, and no tip shows', () => {
+  const html = shown(
+    render(Menu, {
+      props: {
+        id: 'presence-menu',
+        label: 'Your presence: Away',
+        items: [{ label: 'Away', checked: true, onselect() {} }],
+        side: 'above',
+        trigger: createRawSnippet(() => ({ render: () => '<span class="presence-text">Away</span>' }))
+      }
+    }).body
+  );
+  assert.match(html, /<button id="presence-menu-button" type="button" class="text-menu-trigger menu-trigger" aria-label="Your presence: Away" aria-haspopup="menu" aria-expanded="false"[^>]*><span class="presence-text">Away<\/span><\/button>/);
+  assert.doesNotMatch(html, /action-tip/);
+  const plain = shown(render(Menu, { props: { id: 'm', label: 'More', items: [] } }).body);
+  assert.match(plain, /class="icon-button menu-trigger"/);
+  assert.doesNotMatch(plain, /aria-label=/, 'an icon trigger is named by its hidden text');
+  assert.match(plain, /<span class="action-tip"[^>]*>More<\/span>/);
+});

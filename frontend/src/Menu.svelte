@@ -6,25 +6,33 @@
     disabled?: boolean;
     // Draws a line above the item, to group commands.
     separated?: boolean;
+    // Makes the item one choice of several (a menu item radio): whether it
+    // is the current one.
+    checked?: boolean;
+    // A class for a mark drawn before the label, such as a presence dot.
+    mark?: string;
   };
 </script>
 
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import Icon, { type IconName } from './Icon.svelte';
   import { menuTarget } from './menu.ts';
 
   // A menu button (WAI-ARIA menu button pattern). The trigger shows only an
   // icon; its label shows as a tooltip and is its accessible name. Arrow
   // keys, Home and End move between commands; Escape closes the menu and
-  // returns focus to the trigger; Tab or a click outside closes it.
+  // returns focus to the trigger; Tab or a click outside closes it. With a
+  // `trigger` snippet the trigger shows that content instead, and no tip.
   let {
     id,
     label,
     icon = 'more',
     items,
     align = 'end',
-    tip = 'below'
+    side = 'below',
+    tip = 'below',
+    trigger: content
   }: {
     // Unique in the page: names the list and links it to the trigger.
     id: string;
@@ -33,7 +41,11 @@
     items: MenuItem[];
     // Which edge of the trigger the list lines up with.
     align?: 'start' | 'end';
+    // Whether the list opens below the trigger or above it.
+    side?: 'below' | 'above';
     tip?: 'above' | 'below' | 'start';
+    // Visible trigger content; `label` stays its accessible name.
+    trigger?: Snippet;
   } = $props();
 
   let open = $state(false);
@@ -43,7 +55,8 @@
   let list = $state<HTMLElement | null>(null);
 
   const enabled = () => items.map((item) => !item.disabled);
-  const commands = () => (list ? [...list.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')] : []);
+  const commands = () =>
+    list ? [...list.querySelectorAll<HTMLButtonElement>('[role="menuitem"], [role="menuitemradio"]')] : [];
 
   /** Open the list and focus its first or last enabled command. */
   async function show(key: 'Home' | 'End') {
@@ -114,7 +127,8 @@
     bind:this={trigger}
     id={id + '-button'}
     type="button"
-    class="icon-button menu-trigger"
+    class={content ? 'text-menu-trigger menu-trigger' : 'icon-button menu-trigger'}
+    aria-label={content ? label : undefined}
     aria-haspopup="menu"
     aria-expanded={open}
     aria-controls={open ? id : undefined}
@@ -123,21 +137,35 @@
     onblur={() => (dismissed = false)}
     onmouseleave={() => (dismissed = false)}
   >
-    <Icon name={icon} />
-    <span class="visually-hidden">{label}</span>
+    {#if content}
+      {@render content()}
+    {:else}
+      <Icon name={icon} />
+      <span class="visually-hidden">{label}</span>
+    {/if}
   </button>
-  <span class="action-tip" class:dismissed={dismissed || open} aria-hidden="true">{label}</span>
+  {#if !content}
+    <span class="action-tip" class:dismissed={dismissed || open} aria-hidden="true">{label}</span>
+  {/if}
   {#if open}
-    <ul {id} class="menu-list align-{align}" role="menu" aria-labelledby={id + '-button'} bind:this={list}>
+    <ul
+      {id}
+      class="menu-list align-{align} side-{side}"
+      role="menu"
+      aria-labelledby={id + '-button'}
+      bind:this={list}
+    >
       {#each items as item, index (item.label)}
         <li role="none" class:separated={item.separated}>
           <button
             type="button"
-            role="menuitem"
+            role={item.checked === undefined ? 'menuitem' : 'menuitemradio'}
+            aria-checked={item.checked}
             tabindex="-1"
             disabled={item.disabled}
             onclick={() => choose(item)}
-            onkeydown={(event) => commandKey(event, index)}>{item.label}</button
+            onkeydown={(event) => commandKey(event, index)}
+            >{#if item.mark}<span class="menu-mark {item.mark}" aria-hidden="true"></span>{/if}{item.label}</button
           >
         </li>
       {/each}

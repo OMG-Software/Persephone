@@ -26,6 +26,7 @@
     | 'shield-off'
     | 'chevron-left'
     | 'chevron-right'
+    | 'chevron-up'
     | 'globe'
     | 'phone'
     | 'mic'
@@ -113,6 +114,8 @@
     <path d="m15 6-6 6 6 6" />
   {:else if name === 'chevron-right'}
     <path d="m9 6 6 6-6 6" />
+  {:else if name === 'chevron-up'}
+    <path d="m6 15 6-6 6 6" />
   {:else if name === 'close'}
     <path d="M6 6l12 12M18 6 6 18" />
   {:else if name === 'star'}

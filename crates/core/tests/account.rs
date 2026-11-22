@@ -1806,6 +1806,139 @@ fn given_a_contacts_presence_then_their_room_in_the_list_carries_it() {
     }
 }
 
+/// GIVEN classic sync, which reported the contact away before anyone listed
+/// the room's members WHEN the page lists them THEN the next listing carries
+/// that presence from the SDK's store, with no lookup (ADR-0057).
+#[test]
+fn given_classic_sync_then_the_listed_members_presence_is_read_from_the_store() {
+    use persephone_contracts::{PresenceStatus, RoomReaders};
+    let server = Homeserver::signed_in();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let contact = || match call(&core, Call::RoomReaders { room_id: DM.into() }) {
+        Outcome::Ok(value) => serde_json::from_value::<RoomReaders>(value)
+            .unwrap()
+            .readers
+            .into_iter()
+            .find(|reader| reader.user_id == CONTACT)
+            .and_then(|reader| reader.presence),
+        _ => None,
+    };
+    wait_for("the contact's presence in the member listing", || {
+        contact().is_some()
+    });
+    assert_eq!(contact(), Some(PresenceStatus::Unavailable));
+    let lookups = server
+        .runtime
+        .block_on(server.server.received_requests())
+        .unwrap_or_default();
+    assert!(
+        !lookups
+            .iter()
+            .any(|request| request.method.as_str() == "GET"
+                && request
+                    .url
+                    .path()
+                    .starts_with("/_matrix/client/v3/presence/")),
+        "classic sync asks no presence"
+    );
+}
+
+/// Answers a presence lookup: `CONTACT` is away, anyone else online.
+struct PresenceByUser(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Respond for PresenceByUser {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let user = request.url.path().replace("%40", "@").replace("%3A", ":");
+        self.0.lock().unwrap().push(user.clone());
+        let presence = if user.contains(CONTACT) {
+            "unavailable"
+        } else {
+            "online"
+        };
+        ResponseTemplate::new(200).set_body_json(json!({"presence": presence}))
+    }
+}
+
+/// GIVEN Sliding Sync, which carries no presence, WHEN the page lists a
+/// room's members THEN the core asks for each listed member's presence once
+/// in the next rounds, and the next listing carries it (ADR-0057).
+#[test]
+fn given_sliding_sync_then_the_listed_members_presence_is_looked_up_once() {
+    use persephone_contracts::{PresenceStatus, RoomReaders};
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    server.runtime.block_on(async {
+        Mock::given(method("POST"))
+            .and(path(SLIDING))
+            .respond_with(SlidingDirect)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(PresenceByUser(asked.clone()))
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/[^/]*dm[^/]*/members$",
+            ))
+            .respond_with(Members(
+                dm_state().as_array().unwrap()[1..3].to_vec().into(),
+            ))
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let readers = || match call(&core, Call::RoomReaders { room_id: DM.into() }) {
+        Outcome::Ok(value) => Some(serde_json::from_value::<RoomReaders>(value).unwrap()),
+        _ => None,
+    };
+    let mut listed = None;
+    wait_for("the members' presence in the listing", || {
+        listed = readers();
+        listed.as_ref().is_some_and(|listed| {
+            listed.readers.len() == 2
+                && listed
+                    .readers
+                    .iter()
+                    .all(|reader| reader.presence.is_some())
+        })
+    });
+    for reader in listed.unwrap().readers {
+        let expected = if reader.own {
+            PresenceStatus::Online
+        } else {
+            PresenceStatus::Unavailable
+        };
+        assert_eq!(reader.presence, Some(expected), "{}", reader.user_id);
+    }
+    let rounds = server.presence_sent_to(SLIDING).len();
+    wait_for("three more sliding rounds", || {
+        server.presence_sent_to(SLIDING).len() >= rounds + 3
+    });
+    let asked = asked.lock().unwrap().clone();
+    let members = asked.iter().filter(|user| user.contains(USER)).count();
+    assert_eq!(members, 1, "this account is asked once: {asked:?}");
+    // The contact is asked once as a contact and once as a member.
+    assert!(
+        asked.iter().filter(|user| user.contains(CONTACT)).count() <= 2,
+        "{asked:?}"
+    );
+}
+
 /// GIVEN Sliding Sync, which carries no presence, and a direct-message
 /// contact WHEN the core syncs THEN it asks the homeserver for the contact's
 /// presence once, and their room in the list carries it; opening the room

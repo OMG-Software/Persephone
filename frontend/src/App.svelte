@@ -2983,6 +2983,9 @@
         {preferences}
         userId={signedIn ? status.account.userId : null}
         {ownName}
+        presence={signedIn ? settings : null}
+        onpresence={signedIn ? (patch) => settingsKeeper.change(patch) : undefined}
+        presenceFailure={settingsFailure}
         {shortcut}
         onselect={open}
         onsearch={() => (paletteOpen = rooms !== null)}
