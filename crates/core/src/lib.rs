@@ -1956,8 +1956,14 @@ impl Core {
                 })),
                 Work::RoomReaders(room_id) => self
                     .with_matrix(generation, async |client| {
-                        room_settings::readers(&client, room_id, &self.member_refreshes, generation)
-                            .await
+                        room_settings::readers(
+                            &client,
+                            room_id,
+                            &self.member_refreshes,
+                            generation,
+                            self.session.members_presence(),
+                        )
+                        .await
                     })
                     .and_then(|readers| match bounded(&readers) {
                         Outcome::Ok(value) => Ok(value),

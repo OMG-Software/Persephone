@@ -1608,6 +1608,10 @@ pub struct RoomReader {
     pub refused: u32,
     /// This account: its other devices read the room too.
     pub own: bool,
+    /// The member's presence, as their homeserver last reported it
+    /// (ADR-0057). None when it is not known yet.
+    #[serde(default)]
+    pub presence: Option<PresenceStatus>,
 }
 
 /// Reply of `room_readers`: who can read a room's new messages, at most 100

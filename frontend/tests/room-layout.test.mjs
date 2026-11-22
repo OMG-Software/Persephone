@@ -220,7 +220,7 @@ test('GIVEN the stylesheet WHEN the timeline and tooltips are laid out THEN noth
   assert.match(rule('.sidebar-actions > .tip-below > .action-tip'), /left:\s*0/);
 });
 
-const reader = (userId, trust, own = false) => ({ userId, trust, receiving: 1, refused: 0, own });
+const reader = (userId, trust, own = false, presence = null) => ({ userId, trust, receiving: 1, refused: 0, own, presence });
 const member = (userId, displayName, membership = 'join') => ({
   userId, displayName, membership, level: 0, own: false, canKick: false, canBan: false, canUnban: false, canChangeLevel: false
 });
@@ -263,4 +263,19 @@ test('GIVEN a member\'s trust WHEN marked THEN only unverified offers Verify, an
   assert.equal(mark('unknown'), 'unknown');
   assert.equal(mark('trusted_anyway'), 'unknown');
   assert.equal(mark('unverified', true), 'own', 'this account is never offered for verification');
+});
+
+test('GIVEN readers with presence WHEN joined THEN each row keeps a known status, and anything else is not known', () => {
+  const rows = memberRows(
+    [
+      reader('@a:s', 'verified', false, 'online'),
+      reader('@b:s', 'verified', false, 'unavailable'),
+      reader('@c:s', 'verified', false, 'offline'),
+      reader('@d:s', 'verified', false, 'busy'),
+      { userId: '@e:s', trust: 'verified', receiving: 1, refused: 0, own: false }
+    ],
+    null,
+    null
+  );
+  assert.deepEqual(rows.map((row) => row.presence), ['online', 'unavailable', 'offline', null, null]);
 });

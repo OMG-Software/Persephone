@@ -4,9 +4,11 @@
   import AccountText from './AccountText.svelte';
   import Icon from './Icon.svelte';
   import Invites from './Invites.svelte';
+  import Menu from './Menu.svelte';
   import RoomList from './RoomList.svelte';
   import type { RoomPictures } from './roomPictures';
   import { avatarColour, initials } from './people';
+  import { ownPresence, presenceMenu, type PresencePatch } from './presence.ts';
 
   let {
     rooms,
@@ -16,6 +18,8 @@
     preferences = [],
     userId,
     ownName = null,
+    presence = null,
+    onpresence,
     shortcut,
     onselect,
     onsearch,
@@ -42,6 +46,10 @@
     userId: string | null;
     // The account's display name, or null when none is set.
     ownName?: string | null;
+    // The account's presence settings, or null when there is no account.
+    presence?: { sharePresence: boolean; presence: unknown } | null;
+    // Saves a presence change; without it, no presence menu shows.
+    onpresence?: (patch: PresencePatch) => void;
     // The jump shortcut as this system writes it, such as "Ctrl K".
     shortcut: string;
     onselect: (roomId: string) => void;
@@ -66,6 +74,9 @@
     // Shown above the account footer, such as a prompt to verify this device.
     notice?: Snippet;
   } = $props();
+
+  const own = $derived(presence ? ownPresence(presence) : null);
+  const presenceItems = $derived(presence && onpresence ? presenceMenu(presence, onpresence) : []);
 </script>
 
 <aside class="sidebar" aria-label="Navigation" style:width={width === undefined ? undefined : width + 'px'}>
@@ -140,8 +151,29 @@
   {@render notice?.()}
   <div class="account-footer">
     {#if userId}
-      <span class="avatar small {avatarColour(userId)}" aria-hidden="true">{initials(userId)}</span>
-      <AccountText {userId} name={ownName} />
+      <span class="presence-avatar">
+        <span class="avatar small {avatarColour(userId)}" aria-hidden="true">{initials(userId)}</span>
+        {#if own && own.status !== 'hidden'}
+          <span class="presence-mark {own.status}" aria-hidden="true"></span>
+        {/if}
+      </span>
+      <AccountText {userId} name={ownName}>
+        {#if own && onpresence}
+          <Menu
+            id="presence-menu"
+            label={'Your presence: ' + own.label}
+            items={presenceItems}
+            align="start"
+            side="above"
+          >
+            {#snippet trigger()}
+              <span class="presence-mark {own.status}" aria-hidden="true"></span>
+              <span class="presence-text">{own.label}</span>
+              <Icon name="chevron-up" />
+            {/snippet}
+          </Menu>
+        {/if}
+      </AccountText>
     {:else}
       <span class="avatar small c3" aria-hidden="true">?</span>
       <div class="account-text">

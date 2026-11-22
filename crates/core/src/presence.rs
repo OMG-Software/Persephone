@@ -16,9 +16,12 @@
 //!   loop asks `GET /presence/{userId}/status` for at most
 //!   [`LOOKUPS_PER_ROUND`] of them in a round, each at most once in
 //!   [`LOOKUP_AGE`], or once in [`WANTED_AGE`] when the page opens their room.
+//!   [`Members`] keeps, the same way, the presence of at most [`MAX_MEMBERS`]
+//!   members of the one room whose member panel the page last listed, with
+//!   at most [`MEMBER_LOOKUPS_PER_ROUND`] lookups in a round.
 
 use matrix_sdk::ruma::{
-    OwnedUserId, UserId,
+    OwnedRoomId, OwnedUserId, RoomId, UserId,
     api::error::{ErrorKind, RetryAfter},
     presence::PresenceState,
 };
@@ -46,8 +49,13 @@ pub const RETRY_GAP_MIN: Duration = Duration::from_secs(2);
 pub const RETRY_GAP_MAX: Duration = Duration::from_secs(5 * 60);
 /// Most contacts whose presence is kept.
 pub const MAX_CONTACTS: usize = 32;
-/// Most presence lookups in one sync round.
+/// Most contact presence lookups in one sync round.
 pub const LOOKUPS_PER_ROUND: usize = 2;
+/// Most room members whose presence is kept: as many as a member panel
+/// lists.
+pub const MAX_MEMBERS: usize = persephone_core_protocol::MAX_LISTED_MEMBERS;
+/// Most member presence lookups in one sync round, besides the contacts'.
+pub const MEMBER_LOOKUPS_PER_ROUND: usize = 4;
 /// How long a looked-up presence is used before it is asked again.
 pub const LOOKUP_AGE: Duration = Duration::from_secs(5 * 60);
 /// How old a presence may be before opening the contact's room asks again.
@@ -293,27 +301,45 @@ struct Entry {
     wanted: bool,
 }
 
-/// The presence of the account's direct-message contacts, at most
-/// [`MAX_CONTACTS`]. A lock clears it with the rest of the session.
-#[derive(Default)]
+/// The presence of at most `capacity` users: by default the account's
+/// direct-message contacts, at most [`MAX_CONTACTS`], at most
+/// [`LOOKUPS_PER_ROUND`] asked a round. A lock clears it with the rest of
+/// the session.
 pub struct Book {
     entries: Mutex<VecDeque<Entry>>,
+    capacity: usize,
+    lookups: usize,
+}
+
+impl Default for Book {
+    fn default() -> Self {
+        Self::new(MAX_CONTACTS, LOOKUPS_PER_ROUND)
+    }
 }
 
 impl Book {
+    /// A book of at most `capacity` users, at most `lookups` due a round.
+    pub fn new(capacity: usize, lookups: usize) -> Self {
+        Self {
+            entries: Mutex::default(),
+            capacity,
+            lookups,
+        }
+    }
+
     fn entries(&self) -> MutexGuard<'_, VecDeque<Entry>> {
         self.entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Keeps only `contacts`, the first [`MAX_CONTACTS`] of them, and adds
-    /// those not known yet.
+    /// Keeps only `contacts`, the first `capacity` of them, and adds those
+    /// not known yet.
     pub fn track<'a>(&self, contacts: impl IntoIterator<Item = &'a UserId>) {
         let mut entries = self.entries();
         let mut kept = VecDeque::new();
         for user in contacts {
-            if kept.len() == MAX_CONTACTS {
+            if kept.len() == self.capacity {
                 break;
             }
             if kept.iter().any(|entry: &Entry| entry.user == user) {
@@ -365,7 +391,7 @@ impl Book {
         }
     }
 
-    /// At most [`LOOKUPS_PER_ROUND`] contacts to ask for: wanted ones first,
+    /// At most `lookups` contacts to ask for: wanted ones first,
     /// then those never asked, then the oldest past [`LOOKUP_AGE`]. Each is
     /// marked as asked now, so a failed lookup waits its turn again: a
     /// wanted one stays wanted until an answer arrives, and is asked again
@@ -383,7 +409,7 @@ impl Book {
             .collect();
         due.sort_by_key(|entry| (!entry.wanted, entry.checked));
         due.into_iter()
-            .take(LOOKUPS_PER_ROUND)
+            .take(self.lookups)
             .map(|entry| {
                 entry.checked = Some(now);
                 entry.user.clone()
@@ -393,6 +419,55 @@ impl Book {
 
     pub fn clear(&self) {
         self.entries().clear();
+    }
+}
+
+/// The presence of the members the page's member panel last listed, for
+/// one room at a time: at most [`MAX_MEMBERS`], at most
+/// [`MEMBER_LOOKUPS_PER_ROUND`] asked a round. Presence belongs to the user,
+/// not the room, so a member listed in the next room too keeps theirs.
+pub struct Members {
+    room: Mutex<Option<OwnedRoomId>>,
+    book: Book,
+}
+
+impl Default for Members {
+    fn default() -> Self {
+        Self {
+            room: Mutex::default(),
+            book: Book::new(MAX_MEMBERS, MEMBER_LOOKUPS_PER_ROUND),
+        }
+    }
+}
+
+impl Members {
+    fn shown(&self) -> MutexGuard<'_, Option<OwnedRoomId>> {
+        self.room
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The page listed `members` of `room`: only they are kept, the first
+    /// [`MAX_MEMBERS`] of them.
+    pub fn show<'a>(&self, room: &RoomId, members: impl IntoIterator<Item = &'a UserId>) {
+        let mut shown = self.shown();
+        self.book.track(members);
+        *shown = Some(room.to_owned());
+    }
+
+    /// The room whose members are kept, if any.
+    pub fn room(&self) -> Option<OwnedRoomId> {
+        self.shown().clone()
+    }
+
+    pub fn book(&self) -> &Book {
+        &self.book
+    }
+
+    pub fn clear(&self) {
+        let mut shown = self.shown();
+        self.book.clear();
+        *shown = None;
     }
 }
 
@@ -784,5 +859,42 @@ mod tests {
         assert_eq!(book.due(retry), vec![contact.clone()]);
         book.note(&contact, Some(PresenceStatus::Online), retry);
         assert!(book.due(retry + WANTED_AGE).is_empty());
+    }
+
+    /// GIVEN a member panel's members WHEN another room's panel is listed
+    /// THEN only its first 100 members are kept, a member of both rooms keeps
+    /// their presence, and at most four are asked a round.
+    #[test]
+    fn given_member_panels_then_one_room_is_kept_bounded() {
+        let members = Members::default();
+        let now = Instant::now();
+        let first = matrix_sdk::ruma::room_id!("!first:example.org");
+        let second = matrix_sdk::ruma::room_id!("!second:example.org");
+        let users: Vec<OwnedUserId> = (0..120).map(|n| user(&format!("m{n:03}"))).collect();
+        members.show(first, users[..2].iter().map(|user| &**user));
+        assert!(
+            members
+                .book()
+                .note(&users[0], Some(PresenceStatus::Unavailable), now)
+        );
+        assert!(
+            members
+                .book()
+                .note(&users[1], Some(PresenceStatus::Online), now)
+        );
+        members.show(second, users[1..].iter().map(|user| &**user));
+        assert_eq!(members.room().as_deref(), Some(second));
+        assert_eq!(members.book().get(&users[0]), None, "not listed now");
+        assert_eq!(members.book().get(&users[1]), Some(PresenceStatus::Online));
+        assert_eq!(members.book().entries().len(), MAX_MEMBERS);
+        assert!(
+            !members
+                .book()
+                .note(&users[110], Some(PresenceStatus::Online), now)
+        );
+        assert_eq!(members.book().due(now).len(), MEMBER_LOOKUPS_PER_ROUND);
+        members.clear();
+        assert_eq!(members.room(), None);
+        assert!(members.book().due(now).is_empty());
     }
 }

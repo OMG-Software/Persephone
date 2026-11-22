@@ -10,6 +10,12 @@ flood the homeserver. The owner asked for presence to be set and shown
 without flooding, at most once a second, shared as online by default, with a
 setting to turn sharing off.
 
+On 22 November 2026 the owner asked to set the presence from the account
+footer, under the account name, and to see the presence of the members in
+the member panel: green online, yellow away, grey offline. Asked what a red
+"unavailable" state should be, the owner chose to keep the three Matrix
+states only.
+
 Number 0056 is taken by "Get call tokens from the homeserver when it issues
 them", proposed in an open change (pull request 83) that is not merged yet.
 
@@ -101,9 +107,25 @@ alive on Synapse without a separate timer.
   minute after the page opens the contact's room. A failed lookup keeps the
   old value; one for an opened room is asked again after a minute until it
   is answered. A lock clears the book.
-* `RoomSummary.contactPresence` carries a contact's state to the page. The
-  room list shows a labelled dot for online, away and offline, and nothing
-  for an unknown state.
+* `presence::Members` keeps, the same way, the presence of at most 100
+  members of the one room whose member panel the page last listed (the
+  panel lists at most 100). Listing another room keeps only its members. A
+  classic sync `m.presence` event of a listed member is noted at once, and
+  the SDK's store is read for those not seen yet. With Sliding Sync the
+  sync loop asks `GET /presence/{userId}/status` for at most 4 of them a
+  round, each at most once in 5 minutes, all at once and at the same time
+  as the contacts' lookups, so a round still adds at most 5 seconds. When a
+  listed member's shown presence changes, the room is reported as changed
+  and the page lists the members again. A lock clears it.
+* `RoomSummary.contactPresence` and `RoomReader.presence` carry the states
+  to the page. The room list and the member panel show a labelled dot:
+  green and full for online, a yellow crescent for away (`unavailable`), a
+  grey ring for offline, and nothing for an unknown state. The shapes
+  differ as well as the colours.
+* The account footer shows the account's choice under its name, with a dot
+  on its picture, and opens a menu of the three statuses and "Do not share
+  presence". Choosing a status there also turns sharing on. Preferences →
+  Privacy keeps the same two settings.
 
 ### Positive Consequences
 
@@ -133,6 +155,13 @@ alive on Synapse without a separate timer.
   carried requests. Merovingian's behaviour is not measured.
 * Lookups with Sliding Sync tell the homeserver which contacts' presence the
   account asks for, and add up to 2 requests a round.
+* While a member panel lists members whose presence is not known, Sliding
+  Sync rounds add up to 4 more lookups, which tell the homeserver which
+  room's members the account looks at. A panel of 100 members is complete
+  after about 25 rounds, about 2 minutes; until then some members show no
+  dot.
+* Matrix has no "busy" state. The owner kept the three spec states, so no
+  red state is shown or offered.
 * Tested with unit, protocol, IPC and frontend tests only. No live run
   against Merovingian or Synapse is recorded.
 

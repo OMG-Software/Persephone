@@ -575,7 +575,12 @@ export type RoomReader = { userId: string, trust: ContactTrust, receiving: numbe
 /**
  * This account: its other devices read the room too.
  */
-own: boolean, };
+own: boolean, 
+/**
+ * The member's presence, as their homeserver last reported it
+ * (ADR-0057). None when it is not known yet.
+ */
+presence: PresenceStatus | null, };
 
 export type RoomReaders = { readers: Array<RoomReader>, truncated: boolean, };
 

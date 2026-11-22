@@ -369,6 +369,8 @@ struct Shared {
     presence: Mutex<presence::Writer>,
     /// The presence of the direct-message contacts.
     contacts_presence: Arc<presence::Book>,
+    /// The presence of the members the member panel last listed.
+    members_presence: Arc<presence::Members>,
     security: Mutex<SecurityShared>,
     outbox: Mutex<Outbox>,
 }
@@ -854,15 +856,22 @@ fn run_sync(
             std::future::ready(())
         })
     };
-    // Contacts' presence from classic sync (ADR-0057); Sliding Sync has none.
-    // Contacts whose shown presence changed, at most one entry each.
+    // Contacts' and listed members' presence from classic sync (ADR-0057);
+    // Sliding Sync has none. Contacts whose shown presence changed, at most
+    // one entry each, and whether a listed member's did.
     let presence_changed: Arc<Mutex<Vec<OwnedUserId>>> = Arc::default();
+    let members_changed: Arc<AtomicBool> = Arc::default();
     let presence_handler = {
         let _context = runtime.enter();
         let book = shared.contacts_presence.clone();
+        let members = shared.members_presence.clone();
         let changed = presence_changed.clone();
+        let members_noted = members_changed.clone();
         client.add_event_handler(move |event: PresenceEvent| {
             let status = presence::status(&event.content.presence);
+            if members.book().note(&event.sender, status, Instant::now()) {
+                members_noted.store(true, Ordering::Relaxed);
+            }
             if book.note(&event.sender, status, Instant::now()) {
                 let mut changed = guard(&changed);
                 if !changed.contains(&event.sender) && changed.len() < presence::MAX_CONTACTS {
@@ -975,7 +984,13 @@ fn run_sync(
             let mut rooms = rooms?;
             let looks_up = matches!(engine, account::Engine::Sliding(_));
             let changed = std::mem::take(&mut *guard(&presence_changed));
-            for room in contacts_presence(shared, &client, looks_up, changed).await {
+            let noted = members_changed.swap(false, Ordering::Relaxed);
+            // Both at once, so their lookups add one timeout to the round.
+            let (contact_rooms, members_room) = tokio::join!(
+                contacts_presence(shared, &client, looks_up, changed),
+                members_presence(shared, &client, looks_up, noted),
+            );
+            for room in contact_rooms.into_iter().chain(members_room) {
                 if !rooms.contains(&room) {
                     rooms.push(room);
                 }
@@ -1168,6 +1183,41 @@ async fn contacts_presence(
 
 // `contacts_presence` asks for exactly two contacts at once.
 const _: () = assert!(presence::LOOKUPS_PER_ROUND == 2);
+
+/// Looks up the due presence of the members the member panel last listed,
+/// all at once, like [`contacts_presence`]. Returns their room when a shown
+/// presence changed, here or (`noted`) from classic sync's events, so the
+/// page lists the members again. A failed lookup keeps the presence as it
+/// was.
+async fn members_presence(
+    shared: &Shared,
+    client: &Client,
+    looks_up: bool,
+    noted: bool,
+) -> Option<String> {
+    let members = &shared.members_presence;
+    let room = members.room()?;
+    let book = members.book();
+    let due = book.due(Instant::now());
+    let (first, second, third, fourth) = tokio::join!(
+        presence_of(client, due.first(), looks_up),
+        presence_of(client, due.get(1), looks_up),
+        presence_of(client, due.get(2), looks_up),
+        presence_of(client, due.get(3), looks_up),
+    );
+    let mut changed = noted;
+    for (user, status) in due.iter().zip([first, second, third, fourth]) {
+        if let Some(status) = status {
+            changed |= book.note(user, status, Instant::now());
+        }
+    }
+    // The page may have listed another room meanwhile; its own listing
+    // shows what is known.
+    (changed && members.room().as_ref() == Some(&room)).then(|| room.to_string())
+}
+
+// `members_presence` asks for exactly four members at once.
+const _: () = assert!(presence::MEMBER_LOOKUPS_PER_ROUND == 4);
 
 /// A contact's presence, or `None` when it could not be read (or there is
 /// no `user`). Sliding Sync (`looks_up`) asks the homeserver, within
@@ -1840,6 +1890,7 @@ impl Session {
                 typing: Arc::default(),
                 presence: Mutex::default(),
                 contacts_presence: Arc::default(),
+                members_presence: Arc::default(),
             }),
             transition: Arc::new(Mutex::new(())),
         }
@@ -2323,6 +2374,7 @@ impl Session {
         guard(&self.shared.outbox).clear();
         self.shared.typing.clear();
         self.shared.contacts_presence.clear();
+        self.shared.members_presence.clear();
         // No lease remains, so the sync loop is between rounds and will see
         // the lock at its next admission; join it, then drop the client inside
         // the stores' runtime before closing them.
@@ -2678,6 +2730,11 @@ impl Session {
     /// The presence of the direct-message contacts (ADR-0057).
     pub fn contacts_presence(&self) -> &presence::Book {
         &self.shared.contacts_presence
+    }
+
+    /// The presence of the members the member panel last listed.
+    pub fn members_presence(&self) -> &presence::Members {
+        &self.shared.members_presence
     }
 
     /// Replaces this account's settings. `Ok(false)` when the store could
