@@ -756,6 +756,12 @@ kbd {
   height: 12px;
 }
 
+.presence-failure {
+  color: var(--danger-text);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
 .account-text {
   display: flex;
   flex: 1;

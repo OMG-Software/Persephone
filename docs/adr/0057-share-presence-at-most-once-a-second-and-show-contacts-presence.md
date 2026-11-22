@@ -114,9 +114,12 @@ alive on Synapse without a separate timer.
   the SDK's store is read for those not seen yet. With Sliding Sync the
   sync loop asks `GET /presence/{userId}/status` for at most 4 of them a
   round, each at most once in 5 minutes, all at once and at the same time
-  as the contacts' lookups, so a round still adds at most 5 seconds. When a
-  listed member's shown presence changes, the room is reported as changed
-  and the page lists the members again. A lock clears it.
+  as the contacts' lookups, so a round still adds at most 5 seconds. An
+  open member panel lists its members again each minute; members are
+  looked up only while their room was listed in the last 150 seconds, so
+  the lookups stop soon after the panel closes. When a listed member's
+  shown presence changes, the room listed at that moment is reported as
+  changed and the page lists the members again. A lock clears it.
 * `RoomSummary.contactPresence` and `RoomReader.presence` carry the states
   to the page. The room list and the member panel show a labelled dot:
   green and full for online, a yellow crescent for away (`unavailable`), a
@@ -155,9 +158,10 @@ alive on Synapse without a separate timer.
   carried requests. Merovingian's behaviour is not measured.
 * Lookups with Sliding Sync tell the homeserver which contacts' presence the
   account asks for, and add up to 2 requests a round.
-* While a member panel lists members whose presence is not known, Sliding
-  Sync rounds add up to 4 more lookups, which tell the homeserver which
-  room's members the account looks at. A panel of 100 members is complete
+* While a member panel is open, or up to 150 seconds after it closes,
+  Sliding Sync rounds add up to 4 more lookups, which tell the homeserver
+  which room's members the account looks at. An open panel also lists its
+  members again each minute, from the local stores. A panel of 100 members is complete
   after about 25 rounds, about 2 minutes; until then some members show no
   dot.
 * Matrix has no "busy" state. The owner kept the three spec states, so no

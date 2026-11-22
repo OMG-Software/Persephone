@@ -20,6 +20,7 @@
     ownName = null,
     presence = null,
     onpresence,
+    presenceFailure = null,
     shortcut,
     onselect,
     onsearch,
@@ -50,6 +51,9 @@
     presence?: { sharePresence: boolean; presence: unknown } | null;
     // Saves a presence change; without it, no presence menu shows.
     onpresence?: (patch: PresencePatch) => void;
+    // Why the last settings change was not saved, shown under the menu: a
+    // failed save puts the menu back to the saved choice.
+    presenceFailure?: string | null;
     // The jump shortcut as this system writes it, such as "Ctrl K".
     shortcut: string;
     onselect: (roomId: string) => void;
@@ -172,6 +176,9 @@
               <Icon name="chevron-up" />
             {/snippet}
           </Menu>
+          {#if presenceFailure}
+            <span class="presence-failure" role="alert">{presenceFailure}</span>
+          {/if}
         {/if}
       </AccountText>
     {:else}

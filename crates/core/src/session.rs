@@ -1185,10 +1185,13 @@ async fn contacts_presence(
 const _: () = assert!(presence::LOOKUPS_PER_ROUND == 2);
 
 /// Looks up the due presence of the members the member panel last listed,
-/// all at once, like [`contacts_presence`]. Returns their room when a shown
-/// presence changed, here or (`noted`) from classic sync's events, so the
-/// page lists the members again. A failed lookup keeps the presence as it
-/// was.
+/// all at once, like [`contacts_presence`], while that listing is recent
+/// (`presence::MEMBER_LISTING_AGE`). Returns the room listed now when a
+/// shown presence changed, here or (`noted`) from classic sync's events, so
+/// the page lists its members again. The page may have listed another room
+/// during the lookups: the book is shared, so that room's listing shows a
+/// member of both rooms with the new presence. A failed lookup keeps the
+/// presence as it was.
 async fn members_presence(
     shared: &Shared,
     client: &Client,
@@ -1196,7 +1199,7 @@ async fn members_presence(
     noted: bool,
 ) -> Option<String> {
     let members = &shared.members_presence;
-    let room = members.room()?;
+    members.listed(Instant::now())?;
     let book = members.book();
     let due = book.due(Instant::now());
     let (first, second, third, fourth) = tokio::join!(
@@ -1211,9 +1214,10 @@ async fn members_presence(
             changed |= book.note(user, status, Instant::now());
         }
     }
-    // The page may have listed another room meanwhile; its own listing
-    // shows what is known.
-    (changed && members.room().as_ref() == Some(&room)).then(|| room.to_string())
+    if !changed {
+        return None;
+    }
+    members.listed(Instant::now()).map(|room| room.to_string())
 }
 
 // `members_presence` asks for exactly four members at once.

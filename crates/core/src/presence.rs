@@ -56,6 +56,9 @@ pub const LOOKUPS_PER_ROUND: usize = 2;
 pub const MAX_MEMBERS: usize = persephone_core_protocol::MAX_LISTED_MEMBERS;
 /// Most member presence lookups in one sync round, besides the contacts'.
 pub const MEMBER_LOOKUPS_PER_ROUND: usize = 4;
+/// How long after the page last listed a room's members their presence is
+/// still looked up. An open member panel lists them again each minute.
+pub const MEMBER_LISTING_AGE: Duration = Duration::from_secs(150);
 /// How long a looked-up presence is used before it is asked again.
 pub const LOOKUP_AGE: Duration = Duration::from_secs(5 * 60);
 /// How old a presence may be before opening the contact's room asks again.
@@ -424,10 +427,12 @@ impl Book {
 
 /// The presence of the members the page's member panel last listed, for
 /// one room at a time: at most [`MAX_MEMBERS`], at most
-/// [`MEMBER_LOOKUPS_PER_ROUND`] asked a round. Presence belongs to the user,
-/// not the room, so a member listed in the next room too keeps theirs.
+/// [`MEMBER_LOOKUPS_PER_ROUND`] asked a round, and only while that listing
+/// is younger than [`MEMBER_LISTING_AGE`]. Presence belongs to the user, not
+/// the room, so a member listed in the next room too keeps theirs.
 pub struct Members {
-    room: Mutex<Option<OwnedRoomId>>,
+    /// The listed room, and when the page last listed it.
+    room: Mutex<Option<(OwnedRoomId, Instant)>>,
     book: Book,
 }
 
@@ -441,23 +446,38 @@ impl Default for Members {
 }
 
 impl Members {
-    fn shown(&self) -> MutexGuard<'_, Option<OwnedRoomId>> {
+    fn shown(&self) -> MutexGuard<'_, Option<(OwnedRoomId, Instant)>> {
         self.room
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The page listed `members` of `room`: only they are kept, the first
-    /// [`MAX_MEMBERS`] of them.
-    pub fn show<'a>(&self, room: &RoomId, members: impl IntoIterator<Item = &'a UserId>) {
+    /// The page listed `members` of `room` at `now`: only they are kept,
+    /// the first [`MAX_MEMBERS`] of them.
+    pub fn show<'a>(
+        &self,
+        room: &RoomId,
+        members: impl IntoIterator<Item = &'a UserId>,
+        now: Instant,
+    ) {
         let mut shown = self.shown();
         self.book.track(members);
-        *shown = Some(room.to_owned());
+        *shown = Some((room.to_owned(), now));
     }
 
     /// The room whose members are kept, if any.
     pub fn room(&self) -> Option<OwnedRoomId> {
-        self.shown().clone()
+        self.shown().as_ref().map(|(room, _)| room.clone())
+    }
+
+    /// The room whose members are kept, if the page listed it less than
+    /// [`MEMBER_LISTING_AGE`] before `now`: a closed panel lists nothing,
+    /// so its members are no longer looked up.
+    pub fn listed(&self, now: Instant) -> Option<OwnedRoomId> {
+        self.shown()
+            .as_ref()
+            .filter(|(_, at)| now.saturating_duration_since(*at) < MEMBER_LISTING_AGE)
+            .map(|(room, _)| room.clone())
     }
 
     pub fn book(&self) -> &Book {
@@ -871,7 +891,7 @@ mod tests {
         let first = matrix_sdk::ruma::room_id!("!first:example.org");
         let second = matrix_sdk::ruma::room_id!("!second:example.org");
         let users: Vec<OwnedUserId> = (0..120).map(|n| user(&format!("m{n:03}"))).collect();
-        members.show(first, users[..2].iter().map(|user| &**user));
+        members.show(first, users[..2].iter().map(|user| &**user), now);
         assert!(
             members
                 .book()
@@ -882,7 +902,7 @@ mod tests {
                 .book()
                 .note(&users[1], Some(PresenceStatus::Online), now)
         );
-        members.show(second, users[1..].iter().map(|user| &**user));
+        members.show(second, users[1..].iter().map(|user| &**user), now);
         assert_eq!(members.room().as_deref(), Some(second));
         assert_eq!(members.book().get(&users[0]), None, "not listed now");
         assert_eq!(members.book().get(&users[1]), Some(PresenceStatus::Online));
@@ -896,5 +916,25 @@ mod tests {
         members.clear();
         assert_eq!(members.room(), None);
         assert!(members.book().due(now).is_empty());
+    }
+
+    /// GIVEN a listing WHEN the page lists no more THEN the room counts as
+    /// listed until the listing is older than its age, and a new listing
+    /// starts that again.
+    #[test]
+    fn given_no_new_listing_then_the_members_are_no_longer_listed() {
+        let members = Members::default();
+        let start = Instant::now();
+        let room = matrix_sdk::ruma::room_id!("!room:example.org");
+        assert_eq!(members.listed(start), None);
+        members.show(room, [&*user("m0")], start);
+        let almost = start + MEMBER_LISTING_AGE - Duration::from_secs(1);
+        assert_eq!(members.listed(almost).as_deref(), Some(room));
+        assert_eq!(members.listed(start + MEMBER_LISTING_AGE), None);
+        members.show(room, [&*user("m0")], start + MEMBER_LISTING_AGE);
+        assert_eq!(
+            members.listed(start + MEMBER_LISTING_AGE).as_deref(),
+            Some(room)
+        );
     }
 }

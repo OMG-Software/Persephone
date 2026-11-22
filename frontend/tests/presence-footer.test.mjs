@@ -66,3 +66,18 @@ test('GIVEN no save callback or no account WHEN the footer renders THEN no prese
   assert.doesNotMatch(footer({ presence: { sharePresence: true, presence: 'online' } }), /presence-menu/);
   assert.doesNotMatch(footer({ userId: null, presence: null, onpresence() {} }), /presence/);
 });
+
+test('GIVEN a failed save WHEN the footer renders THEN the reason shows under the presence menu as an alert', () => {
+  const html = footer({
+    presence: { sharePresence: true, presence: 'online' },
+    onpresence() {},
+    presenceFailure: 'The setting could not be saved to this account.'
+  });
+  const menu = html.indexOf('id="presence-menu-button"');
+  const alert = html.indexOf('<span class="presence-failure" role="alert">The setting could not be saved to this account.</span>');
+  assert.ok(menu >= 0 && alert > menu, 'after the menu');
+  assert.doesNotMatch(
+    footer({ presence: { sharePresence: true, presence: 'online' }, onpresence() {} }),
+    /presence-failure/
+  );
+});

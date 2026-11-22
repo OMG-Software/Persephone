@@ -728,7 +728,11 @@ pub async fn readers(
         .map(ToOwned::to_owned)
         .collect();
     drop(all);
-    presence.show(room.room_id(), members.iter().map(|user| &**user));
+    presence.show(
+        room.room_id(),
+        members.iter().map(|user| &**user),
+        std::time::Instant::now(),
+    );
     let encryption = client.encryption();
     let mut readers = Vec::with_capacity(members.len());
     for user in members {
