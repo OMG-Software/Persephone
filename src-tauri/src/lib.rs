@@ -442,6 +442,11 @@ impl Subscriptions {
                     let _ = channel.send("security");
                 }
             }
+            Event::AccountChanged {} => {
+                if let Some(channel) = self.session().as_ref() {
+                    let _ = channel.send("account");
+                }
+            }
             Event::CallChanged {} => {
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("calls");

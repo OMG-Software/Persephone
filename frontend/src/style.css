@@ -234,6 +234,11 @@ button:disabled {
   font-size: 12.5px;
 }
 
+/* The homeserver refused the account's presence (issue 86). */
+.note.presence-refused {
+  color: var(--danger-text);
+}
+
 /* Icons: 24-unit stroke glyphs (handoff "Icons"). */
 .icon {
   flex: none;

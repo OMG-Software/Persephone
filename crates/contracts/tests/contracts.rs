@@ -199,23 +199,34 @@ fn app_status_serializes_camel_case_and_rejects_unknown_fields() {
             state: AccountState::SignInFailed,
             user_id: None,
             error: Some(SignInError::InvalidCredentials),
+            presence_refused: false,
         },
     };
     assert_eq!(
         serde_json::to_value(&status).unwrap(),
         serde_json::json!({
             "version": "0.0.0", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing",
-            "account": {"state": "sign_in_failed", "userId": null, "error": "invalid_credentials"}
+            "account": {"state": "sign_in_failed", "userId": null, "error": "invalid_credentials", "presenceRefused": false}
         })
     );
-    let account = r#""account":{"state":"signed_out","userId":null,"error":null}"#;
+    // A refused presence is a flag only: no server text crosses (issue 86).
+    let refused: AccountStatus = serde_json::from_str(
+        r#"{"state":"signed_in","userId":"@a:s","error":null,"presenceRefused":true}"#,
+    )
+    .unwrap();
+    assert!(refused.presence_refused);
+    let account =
+        r#""account":{"state":"signed_out","userId":null,"error":null,"presenceRefused":false}"#;
     for invalid in [
         format!(r#"{{"version":"0","revision":"unknown","milestone":"P1","store":"protected",{account},"extra":1}}"#),
         r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected"}"#.to_string(),
         format!(r#"{{"version":"0","milestone":"P1","store":"protected",{account}}}"#),
         format!(r#"{{"version":"0","revision":"unknown","milestone":"P1","store":"plaintext",{account}}}"#),
-        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected","account":{"state":"signed_in","userId":"@a:s","error":null,"accessToken":"x"}}"#.to_string(),
-        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected","account":{"state":"logged_in","userId":null,"error":null}}"#.to_string(),
+        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected","account":{"state":"signed_in","userId":"@a:s","error":null,"presenceRefused":false,"accessToken":"x"}}"#.to_string(),
+        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected","account":{"state":"logged_in","userId":null,"error":null,"presenceRefused":false}}"#.to_string(),
+        // The flag is required, and is a flag: no reason text.
+        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected","account":{"state":"signed_out","userId":null,"error":null}}"#.to_string(),
+        r#"{"version":"0","revision":"unknown","milestone":"P1","store":"protected","account":{"state":"signed_in","userId":"@a:s","error":null,"presenceRefused":"Presence is disabled"}}"#.to_string(),
     ] {
         assert!(
             serde_json::from_str::<AppStatus>(&invalid).is_err(),

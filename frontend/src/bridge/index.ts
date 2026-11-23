@@ -330,7 +330,10 @@ export async function subscribeRoom(
  * (ask `callStatus`; it clears nothing), and `onCallVideo` when a new video
  * picture is waiting (ask `callVideoFrame` for each active tile; it clears
  * nothing), and `onRings` when an incoming call ring started, ended or
- * changed (ask `callRings`; it clears nothing). Anything else counts as a session change, which clears the page.
+ * changed (ask `callRings`; it clears nothing), and `onAccount` when the
+ * account's status changed within its session, such as the homeserver
+ * refusing its presence (ask `appStatus`; it clears nothing). Anything else
+ * counts as a session change, which clears the page.
  */
 export async function watchSession(
   onSession: () => void,
@@ -339,7 +342,8 @@ export async function watchSession(
   onModules: () => void,
   onCalls: () => void,
   onCallVideo: () => void,
-  onRings: () => void
+  onRings: () => void,
+  onAccount: () => void
 ): Promise<void> {
   const channel = new Channel<string>((message) =>
     message === 'rooms'
@@ -354,9 +358,11 @@ export async function watchSession(
               ? onCallVideo()
               : message === 'rings'
                 ? onRings()
-                : message === 'diagnostics'
-                  ? void followDiagnostics()
-                  : onSession()
+                : message === 'account'
+                  ? onAccount()
+                  : message === 'diagnostics'
+                    ? void followDiagnostics()
+                    : onSession()
   );
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     installPageDiagnostics(window);

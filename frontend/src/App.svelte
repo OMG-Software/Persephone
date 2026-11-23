@@ -99,6 +99,7 @@
     type SettingsPatch
   } from './preferences';
   import { applyTheme } from './themes.ts';
+  import { presenceNotice } from './presence.ts';
   import { OwnNameKeeper } from './ownName';
   import { PASTE_UNSUPPORTED, attachErrorText, sendImageErrorText, type ImageDraft, type PastedImage } from './image';
   import { RoomPictures } from './roomPictures';
@@ -213,6 +214,9 @@
   // A security reply replaces the shown one only if it is newer, as for rooms.
   let securityRequest = 0;
   let securityShown = 0;
+  // Orders the account status reads after an `account` event.
+  let accountRequest = 0;
+  let accountShown = 0;
   // The other person in the selected direct-message room, if it is one.
   let contact = $state<ContactStatus | null>(null);
   // Members of the selected room whose identity changed (ADR-0007), and
@@ -494,6 +498,11 @@
   // Signed in, signed out, or no profile (synthetic data only).
   const profileOpen = $derived(status?.store === 'protected');
   const signedIn = $derived(profileOpen && status?.account.state === 'signed_in');
+  // The homeserver refused the presence this account chose, so it is not
+  // shared until the setting changes (issue 86). A flag only: no server text.
+  const presenceRefused = $derived(
+    signedIn && settings.sharePresence && status?.account.presenceRefused === true
+  );
   // Keep the pictures in step with the listed rooms; load each by itself only
   // when the account turned that on.
   $effect(() => {
@@ -1411,6 +1420,28 @@
     }
   }
 
+  /**
+   * The account's status changed within its session, such as a presence
+   * refusal: read it again and take only that flag, clearing nothing. A
+   * change of account or state arrives as a session event instead.
+   */
+  async function refreshAccount() {
+    const generation = sessionGeneration;
+    const request = ++accountRequest;
+    let reply: AppStatus;
+    try {
+      reply = await appStatus();
+    } catch {
+      // The next account or session event tries again.
+      return;
+    }
+    if (generation !== sessionGeneration || request <= accountShown || !status) return;
+    accountShown = request;
+    const same =
+      reply.account.state === status.account.state && reply.account.userId === status.account.userId;
+    if (same) status = { ...status, account: { ...status.account, presenceRefused: reply.account.presenceRefused } };
+  }
+
   // The account's encryption state changed: fetch it again. Nothing else
   // changes.
   async function refreshSecurity() {
@@ -1702,7 +1733,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings);
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings, refreshAccount);
     } catch {
       unavailable = true;
       return;
@@ -2834,6 +2865,7 @@
             failure={settingsFailure}
             {mac}
             profilePassphrase={passphraseOn === true}
+            {presenceRefused}
             onchange={changeSettings}
           />
         {:else}
@@ -3008,7 +3040,7 @@
         {ownName}
         presence={signedIn ? settings : null}
         onpresence={signedIn ? (patch) => settingsKeeper.change(patch) : undefined}
-        presenceFailure={settingsFailure}
+        presenceFailure={presenceNotice(settingsFailure, presenceRefused)}
         {shortcut}
         onselect={open}
         onsearch={() => (paletteOpen = rooms !== null)}

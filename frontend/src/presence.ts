@@ -3,6 +3,21 @@
 
 import type { PresenceStatus } from '../../crates/contracts/generated/contracts';
 
+/**
+ * Shown next to the presence controls while the homeserver refuses the
+ * account's presence (issue 86). Fixed text: the server's own error text is
+ * untrusted and never shown.
+ */
+export const PRESENCE_REFUSED = 'Your homeserver does not accept your presence, so it is not shared.';
+
+/**
+ * What the account footer shows under its presence menu: a failed save
+ * first, as it is the newest thing the user did, then a refusal.
+ */
+export function presenceNotice(failure: string | null, refused: boolean): string | null {
+  return failure ?? (refused ? PRESENCE_REFUSED : null);
+}
+
 /** The statuses the account can share, in menu order. */
 export const PRESENCE_CHOICES: readonly { value: PresenceStatus; label: string }[] = [
   { value: 'online', label: 'Online' },

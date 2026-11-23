@@ -1,4 +1,5 @@
 import type {
+  AccountStatus,
   AppStatus,
   CallCamera,
   CallScreen,
@@ -33,7 +34,7 @@ import type {
   TimelineItem,
 } from "../generated/contracts.js";
 
-const account = { state: "signed_out", userId: null, error: null } as const;
+const account = { state: "signed_out", userId: null, error: null, presenceRefused: false } as const;
 
 const invalidTag: TimelineItem = {
   // @ts-expect-error only serialized snake-case enum tags are valid
@@ -77,7 +78,7 @@ const unknownAccountState: AppStatus = {
   milestone: "P1",
   store: "protected",
   // @ts-expect-error only the core's account states are valid
-  account: { state: "logged_in", userId: null, error: null },
+  account: { state: "logged_in", userId: null, error: null, presenceRefused: false },
 };
 
 const unknownNotice: TimelineItem = {
@@ -179,10 +180,24 @@ const missingStore: AppStatus = { version: "0", revision: "unknown", milestone: 
 // @ts-expect-error the revision is required
 const missingRevision: AppStatus = { version: "0", milestone: "P1", store: "protected", account };
 
+// @ts-expect-error a presence refusal is a flag, never the server's text
+const refusalText: AccountStatus["presenceRefused"] = "Presence is disabled";
+
+const missingRefusal: AppStatus = {
+  version: "0",
+  revision: "unknown",
+  milestone: "P1",
+  store: "protected",
+  // @ts-expect-error whether presence is refused is always stated
+  account: { state: "signed_out", userId: null, error: null },
+};
+
 void invalidTag;
 void invalidName;
 void unknownStore;
 void missingStore;
+void refusalText;
+void missingRefusal;
 void missingRevision;
 void unknownAccountState;
 void unknownNotice;

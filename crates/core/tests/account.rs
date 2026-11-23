@@ -1867,6 +1867,57 @@ fn given_a_refused_presence_change_then_it_is_not_sent_again() {
         "{:?}",
         server.sync_presence()
     );
+    // The page learns of the refusal from `app_status`, as a flag (issue 86).
+    let status: persephone_contracts::AppStatus = value(call(&core, Call::AppStatus {}));
+    assert!(status.account.presence_refused);
+    // Turning sharing off ends it, and sends nothing.
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                share_presence: false,
+                presence: PresenceStatus::Unavailable,
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    assert!(!core.session().account_status().presence_refused);
+    assert_eq!(presence_puts(&server).len(), 1);
+}
+
+/// GIVEN a homeserver that accepts presence changes WHEN the presence changes
+/// THEN `app_status` reports no refusal (issue 86).
+#[test]
+fn given_an_accepted_presence_change_then_no_refusal_is_reported() {
+    use persephone_contracts::{AccountSettings, AppStatus, PresenceStatus};
+    let server = Homeserver::signed_in();
+    server.runtime.block_on(
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                presence: PresenceStatus::Unavailable,
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    wait_for("the change", || !presence_puts(&server).is_empty());
+    let rounds = server.sync_presence().len();
+    wait_for("two more rounds", || {
+        server.sync_presence().len() >= rounds + 2
+    });
+    let status: AppStatus = value(call(&core, Call::AppStatus {}));
+    assert_eq!(status.account.state, AccountState::SignedIn);
+    assert!(!status.account.presence_refused);
 }
 
 /// GIVEN a direct-message contact whose classic sync reports them away WHEN
@@ -2089,6 +2140,88 @@ fn given_sliding_sync_then_a_contacts_presence_is_looked_up_once_and_listed() {
         1,
         "a recent presence is not asked again"
     );
+}
+
+/// GIVEN Sliding Sync and a contact whose presence was looked up longer than
+/// `WANTED_AGE` ago, but not yet `LOOKUP_AGE` ago WHEN the page opens their
+/// room (`ContactStatus`) THEN the next rounds ask the homeserver for it once
+/// more; without the room being opened, they do not (ADR-0057, issue 85).
+///
+/// The book measures age with `Instant`, so the test records the earlier
+/// lookup at a past instant instead of waiting a minute.
+#[test]
+fn given_an_older_presence_when_the_contacts_room_is_opened_then_it_is_asked_again() {
+    use matrix_sdk::ruma::UserId;
+    use persephone_contracts::PresenceStatus;
+    use persephone_core::presence::{LOOKUP_AGE, WANTED_AGE};
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    let lookups = Arc::new(AtomicUsize::new(0));
+    server.runtime.block_on(async {
+        Mock::given(method("POST"))
+            .and(path(SLIDING))
+            .respond_with(SlidingDirect)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(Counted(
+                ResponseTemplate::new(200).set_body_json(json!({"presence":"unavailable"})),
+                lookups.clone(),
+            ))
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the contact's presence in the room list", || {
+        let list: RoomList = value(call(&core, Call::RoomList {}));
+        list.rooms
+            .iter()
+            .any(|room| room.room_id == DM && room.contact_presence.is_some())
+    });
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    // The answer above was recorded twice `WANTED_AGE` ago: old enough to be
+    // asked again when the room opens, too young to be asked by age alone.
+    let earlier = WANTED_AGE * 2;
+    assert!(earlier < LOOKUP_AGE);
+    // `Instant` counts from boot: just after one, it cannot go back that far
+    // yet. Wait until it can, at most `earlier`, so the checks always run.
+    let at = loop {
+        if let Some(at) = Instant::now().checked_sub(earlier) {
+            break at;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    let contact = UserId::parse(CONTACT).unwrap();
+    core.session()
+        .contacts_presence()
+        .note(&contact, Some(PresenceStatus::Unavailable), at);
+    let rounds = || server.presence_sent_to(SLIDING).len();
+    let before = rounds();
+    wait_for("three more sliding rounds", || rounds() >= before + 3);
+    assert_eq!(
+        lookups.load(Ordering::SeqCst),
+        1,
+        "an unopened room's presence waits for LOOKUP_AGE"
+    );
+
+    // Only the lookup matters here, not how the status reads.
+    let _ = call(&core, Call::ContactStatus { room_id: DM.into() });
+    wait_for("the contact's presence to be asked again", || {
+        lookups.load(Ordering::SeqCst) >= 2
+    });
+    let before = rounds();
+    wait_for("three more sliding rounds", || rounds() >= before + 3);
+    assert_eq!(lookups.load(Ordering::SeqCst), 2, "asked again once");
 }
 
 /// GIVEN a core that a test left signed in and syncing, never locked WHEN that

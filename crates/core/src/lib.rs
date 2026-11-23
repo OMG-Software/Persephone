@@ -155,6 +155,9 @@ struct Notifications {
     room_list_changed: bool,
     /// The account's encryption state changed since the last notification.
     security_changed: bool,
+    /// The account's status changed within its session since the last
+    /// notification.
+    account_changed: bool,
     /// The call changed since the last notification.
     calls_changed: bool,
     /// A call video picture arrived since the last notification. At most one
@@ -369,6 +372,14 @@ impl SessionListener for Hub {
         let mut notifications = lock(&self.notifications);
         if !notifications.security_changed {
             notifications.security_changed = true;
+            self.changed.notify_all();
+        }
+    }
+
+    fn account_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.account_changed {
+            notifications.account_changed = true;
             self.changed.notify_all();
         }
     }
@@ -3714,6 +3725,7 @@ impl Core {
                 && !notifications.session_changed
                 && !notifications.room_list_changed
                 && !notifications.security_changed
+                && !notifications.account_changed
                 && !notifications.calls_changed
                 && !notifications.rings_changed
                 && !notifications.modules_changed
@@ -3761,6 +3773,8 @@ impl Core {
             .then_some(Event::RoomListChanged {});
         let security = std::mem::take(&mut notifications.security_changed)
             .then_some(Event::SecurityChanged {});
+        let account =
+            std::mem::take(&mut notifications.account_changed).then_some(Event::AccountChanged {});
         let call =
             std::mem::take(&mut notifications.calls_changed).then_some(Event::CallChanged {});
         let rings =
@@ -3787,6 +3801,7 @@ impl Core {
                 .into_iter()
                 .chain(list)
                 .chain(security)
+                .chain(account)
                 .chain(call)
                 .chain(rings)
                 .chain(video)
@@ -5294,6 +5309,19 @@ mod tests {
         let notifications = lock(&hub.notifications);
         assert!(notifications.room_list_changed);
         assert!(notifications.pending.is_empty(), "no room content changed");
+    }
+
+    /// GIVEN the account's status changes twice within its session, as when
+    /// the homeserver refuses its presence WHEN events are taken THEN one
+    /// content-free `account_changed` leaves, and no `session_changed`, so the
+    /// page keeps what it shows (issue 86).
+    #[test]
+    fn given_account_changes_then_one_account_event_and_no_session_event() {
+        let core = Core::default();
+        core.hub.account_changed();
+        core.hub.account_changed();
+        assert_eq!(core.take_events(), Some(vec![Event::AccountChanged {}]));
+        assert!(!lock(&core.hub.notifications).account_changed);
     }
 
     /// Answers the diagnostic log's question with a fixed answer.

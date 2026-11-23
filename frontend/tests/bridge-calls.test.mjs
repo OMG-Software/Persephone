@@ -391,12 +391,13 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
     () => seen.push('modules'),
     () => seen.push('calls'),
     () => seen.push('callVideo'),
-    () => seen.push('rings')
+    () => seen.push('rings'),
+    () => seen.push('account')
   );
-  for (const message of ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls', 'callvideo', 'rings', 'Rings', 'diagnostics']) {
+  for (const message of ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls', 'callvideo', 'rings', 'Rings', 'diagnostics', 'account', 'Account']) {
     channel.onmessage(message);
   }
-  assert.deepEqual(seen, ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'session', 'calls', 'session', 'rings', 'session']);
+  assert.deepEqual(seen, ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'session', 'calls', 'session', 'rings', 'session', 'account', 'session']);
   // Watching asks the log's state once, and the `diagnostics` message asks again
   // instead of clearing the page.
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -418,7 +419,7 @@ test('GIVEN the diagnostic log on WHEN a status read fails THEN the page keeps f
     return null;
   });
   const nothing = () => {};
-  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing);
+  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing);
   assert.equal(bridge.diagnosticsOn(), true);
   status = null;
   channel.onmessage('diagnostics');
@@ -445,7 +446,7 @@ test('GIVEN the diagnostic log WHEN it is on THEN host calls are noted by name a
     return null;
   });
   const nothing = () => {};
-  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing);
+  await bridge.watchSession(nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing);
   assert.equal(bridge.diagnosticsOn(), true);
   await bridge.proxySetting();
   await assert.rejects(bridge.setProxySetting('127.0.0.1:1'));

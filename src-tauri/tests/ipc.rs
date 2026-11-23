@@ -100,7 +100,7 @@ impl CoreTransport for FakeCore {
             | Call::SetIgnoredUser { .. }
             | Call::ReportAbuse { .. } => Ok(serde_json::Value::Null),
             Call::AppStatus {} => Ok(
-                serde_json::json!({"version": "9.9.9", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}}),
+                serde_json::json!({"version": "9.9.9", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null, "presenceRefused": false}}),
             ),
             Call::RoomList {} => Ok(serde_json::json!({
                 "rooms": [{"roomId": "!r:example.invalid", "displayName": "<b>x</b>", "unreadCount": 2, "encryption": "encrypted"}],
@@ -312,24 +312,26 @@ impl CoreTransport for FakeCore {
             ),
             Call::Register { username, .. } => match username.as_str() {
                 "taken" => Ok(
-                    serde_json::json!({"state": "sign_in_failed", "userId": null, "error": "username_taken"}),
+                    serde_json::json!({"state": "sign_in_failed", "userId": null, "error": "username_taken", "presenceRefused": false}),
                 ),
                 // A reason outside the contract is refused.
                 "odd" => Ok(
-                    serde_json::json!({"state": "sign_in_failed", "userId": null, "error": "password_was_hunter2"}),
+                    serde_json::json!({"state": "sign_in_failed", "userId": null, "error": "password_was_hunter2", "presenceRefused": false}),
                 ),
-                _ => Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null})),
+                _ => Ok(
+                    serde_json::json!({"state": "signing_in", "userId": null, "error": null, "presenceRefused": false}),
+                ),
             },
-            Call::SignInWithOidc { .. } => {
-                Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
-            }
+            Call::SignInWithOidc { .. } => Ok(
+                serde_json::json!({"state": "signing_in", "userId": null, "error": null, "presenceRefused": false}),
+            ),
             Call::SignIn { homeserver } => match homeserver.as_str() {
-                "https://matrix.example.org" => {
-                    Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
-                }
+                "https://matrix.example.org" => Ok(
+                    serde_json::json!({"state": "signing_in", "userId": null, "error": null, "presenceRefused": false}),
+                ),
                 // A reply carrying a secret is refused by the contract.
                 _ => Ok(
-                    serde_json::json!({"state": "signed_in", "userId": "@a:s", "error": null, "accessToken": "x"}),
+                    serde_json::json!({"state": "signed_in", "userId": "@a:s", "error": null, "presenceRefused": false, "accessToken": "x"}),
                 ),
             },
             Call::TimelinePage { room_id, cursor } => match (room_id.as_str(), cursor.as_deref()) {
@@ -798,7 +800,7 @@ fn given_allowed_command_from_app_origin_then_typed_status_is_returned() {
     // The reply is the core's answer, relayed and shape-checked by the UI.
     assert_eq!(
         reply,
-        serde_json::json!({"version": "9.9.9", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null}})
+        serde_json::json!({"version": "9.9.9", "revision": "0123456789ab", "milestone": "P1", "store": "key_missing", "account": {"state": "signed_out", "userId": null, "error": null, "presenceRefused": false}})
     );
 }
 
@@ -1333,6 +1335,7 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     subscriptions.dispatch(Event::CallChanged {});
     subscriptions.dispatch(Event::CallVideo {});
     subscriptions.dispatch(Event::ModulesChanged {});
+    subscriptions.dispatch(Event::AccountChanged {});
     subscriptions.dispatch(Event::DiagnosticsChanged { on: false });
     let delivered = delivered.lock().unwrap().clone();
     assert!(
@@ -1341,6 +1344,10 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     );
     assert!(
         delivered.contains(&(3, r#""security""#.into())),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&(3, r#""account""#.into())),
         "{delivered:?}"
     );
     assert!(
@@ -1397,7 +1404,9 @@ fn given_sign_in_then_only_the_homeserver_crosses_and_replies_are_checked() {
     };
     assert_eq!(
         invoke(serde_json::json!({"homeserver": "https://matrix.example.org"})),
-        Ok(serde_json::json!({"state": "signing_in", "userId": null, "error": null}))
+        Ok(
+            serde_json::json!({"state": "signing_in", "userId": null, "error": null, "presenceRefused": false})
+        )
     );
     assert_eq!(
         invoke(serde_json::json!({"homeserver": "https://evil.example"})).unwrap_err(),

@@ -2067,6 +2067,11 @@ pub struct AccountStatus {
     /// The signed-in Matrix user ID, at most 255 bytes.
     pub user_id: Option<String>,
     pub error: Option<SignInError>,
+    /// The homeserver refused this account's presence choice with a lasting
+    /// client error, such as 403 where presence is turned off, so it is not
+    /// shared until the setting changes (ADR-0057). False when not signed
+    /// in. A rate limit is not a refusal. No server text is carried.
+    pub presence_refused: bool,
 }
 
 impl AccountStatus {
@@ -2075,6 +2080,7 @@ impl AccountStatus {
             state: AccountState::SignedOut,
             user_id: None,
             error: None,
+            presence_refused: false,
         }
     }
 }

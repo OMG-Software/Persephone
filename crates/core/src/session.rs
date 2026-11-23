@@ -159,6 +159,10 @@ pub trait SessionListener: Send + Sync {
     fn rooms_changed(&self, rooms: &[String]);
     /// The account's status changed.
     fn session_changed(&self);
+    /// The account's status changed within the same session, such as a
+    /// presence refusal: what the page shows stays, and it reads the status
+    /// again.
+    fn account_changed(&self) {}
     /// The account's encryption state changed.
     fn security_changed(&self) {}
     /// A message the user sent in this room changed state.
@@ -461,6 +465,15 @@ impl Shared {
         guard(&self.listener).clone()
     }
 
+    /// The homeserver refused this account's presence choice, or a new
+    /// choice ended that refusal: the page reads `app_status` again. Called
+    /// with no lock held.
+    fn presence_refusal_changed(&self) {
+        if let Some(listener) = self.listener() {
+            listener.account_changed();
+        }
+    }
+
     /// The generation of the open session, or `None` while it is not open.
     fn open_generation(&self) -> Option<u64> {
         let inner = lock(self);
@@ -584,6 +597,7 @@ impl Drop for Lease {
 
 fn failed(error: SignInError) -> AccountStatus {
     AccountStatus {
+        presence_refused: false,
         state: AccountState::SignInFailed,
         user_id: None,
         error: Some(error),
@@ -601,6 +615,7 @@ fn same_signed_in_account(before: &AccountStatus, after: &AccountStatus) -> bool
 
 fn signed_in(user_id: &str, error: Option<SignInError>) -> AccountStatus {
     AccountStatus {
+        presence_refused: false,
         state: AccountState::SignedIn,
         // Matrix user IDs are at most 255 bytes; anything else is not shown.
         user_id: (user_id.len() <= 255 && !user_id.chars().any(char::is_control))
@@ -1141,7 +1156,15 @@ async fn presence_before_round(
             // Timed out: the request may still reach the homeserver.
             Err(_) => presence::PutEnd::Unknown,
         };
-        guard(&shared.presence).put_ended(state, end, Instant::now());
+        let refused = {
+            let mut writer = guard(&shared.presence);
+            let before = writer.refused();
+            writer.put_ended(state, end, Instant::now());
+            !before && writer.refused()
+        };
+        if refused {
+            shared.presence_refusal_changed();
+        }
     }
     guard(&shared.presence).for_sync(Instant::now())
 }
@@ -1938,8 +1961,13 @@ impl Session {
         }
     }
 
+    /// The account's status. `presence_refused` is read from the presence
+    /// writer, and only while signed in (issue 86).
     pub fn account_status(&self) -> AccountStatus {
-        guard(&self.shared.status).clone()
+        let mut status = guard(&self.shared.status).clone();
+        status.presence_refused =
+            status.state == AccountState::SignedIn && guard(&self.shared.presence).refused();
+        status
     }
 
     /// False only for [`Session::not_configured`]: the core then serves only
@@ -1998,6 +2026,7 @@ impl Session {
                 return Ok(status.clone());
             }
             *status = AccountStatus {
+                presence_refused: false,
                 state: AccountState::SigningIn,
                 user_id: None,
                 error: None,
@@ -2102,6 +2131,7 @@ impl Session {
                 return Ok(status.clone());
             }
             *status = AccountStatus {
+                presence_refused: false,
                 state: AccountState::SigningIn,
                 user_id: None,
                 error: None,
@@ -2252,6 +2282,7 @@ impl Session {
                 return Ok(status.clone());
             }
             *status = AccountStatus {
+                presence_refused: false,
                 state: AccountState::SigningIn,
                 user_id: None,
                 error: None,
@@ -2523,6 +2554,7 @@ impl Session {
         let (state, _) = self.lock(timeout, || {});
         // The sync loop has been joined, so this status is not overwritten.
         self.shared.set_status(AccountStatus {
+            presence_refused: false,
             state: AccountState::SignedOut,
             user_id: None,
             error: if !marked {
@@ -2566,6 +2598,7 @@ impl Session {
         self.shared.ended.store(false, Ordering::SeqCst);
         // The sync loop has stopped, so this status is not overwritten.
         self.shared.set_status(AccountStatus {
+            presence_refused: false,
             state: AccountState::SignedOut,
             user_id: None,
             error: Some(if marked {
@@ -2760,8 +2793,9 @@ impl Session {
         let saved = lease
             .stores()
             .block_on(settings::save(lease.stores(), value));
-        let committed = saved
-            && lease
+        // Whether the new settings ended a presence refusal, once committed.
+        let committed = if saved {
+            lease
                 .commit(|| {
                     let shared = &self.shared;
                     shared
@@ -2779,10 +2813,19 @@ impl Session {
                     shared
                         .idle_lock_minutes
                         .store(value.idle_lock_minutes, Ordering::SeqCst);
-                    guard(&shared.presence).configure(value.share_presence, value.presence);
+                    let mut writer = guard(&shared.presence);
+                    let refused = writer.refused();
+                    writer.configure(value.share_presence, value.presence);
+                    refused && !writer.refused()
                 })
-                .is_ok();
-        Ok(committed)
+                .ok()
+        } else {
+            None
+        };
+        if committed == Some(true) {
+            self.shared.presence_refusal_changed();
+        }
+        Ok(committed.is_some())
     }
 
     /// The signed-in account's user ID and its homeserver as the prompts
@@ -3388,6 +3431,7 @@ fn restore(shared: &Arc<Shared>) {
 /// The account after a sign-out whose revocation was not confirmed.
 fn not_revoked() -> AccountStatus {
     AccountStatus {
+        presence_refused: false,
         state: AccountState::SignedOut,
         user_id: None,
         error: Some(SignInError::SessionNotRevoked),

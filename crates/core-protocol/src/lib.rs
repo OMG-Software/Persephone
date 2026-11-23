@@ -1054,6 +1054,11 @@ pub enum Event {
     /// The account's encryption state changed: ask for `security_status`.
     /// Coalesced; it does not clear what the UI shows.
     SecurityChanged {},
+    /// The account's status changed within the same session, such as the
+    /// homeserver refusing its presence: ask for `app_status`. Content-free
+    /// and coalesced like `SecurityChanged`; it does not clear what the UI
+    /// shows.
+    AccountChanged {},
     /// The call changed state, or its participants did: ask for
     /// `call_status`. Coalesced; it carries no call data.
     CallChanged {},
@@ -1670,6 +1675,7 @@ mod tests {
         let calls = CoreMessage::Event(Event::CallChanged {});
         let video = CoreMessage::Event(Event::CallVideo {});
         let modules = CoreMessage::Event(Event::ModulesChanged {});
+        let account = CoreMessage::Event(Event::AccountChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
         send(&mut wire, &session).unwrap();
@@ -1698,9 +1704,16 @@ mod tests {
             String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"modules_changed":{}}}"#),
             "wire form of the modules event"
         );
+        send(&mut wire, &account).unwrap();
+        assert!(
+            String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"account_changed":{}}}"#),
+            "wire form of the account event"
+        );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session, list, security, calls, video, modules] {
+        for expected in [
+            reply, event, session, list, security, calls, video, modules, account,
+        ] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -1715,6 +1728,9 @@ mod tests {
             br#"{"event":{"room_list_changed":{"rooms":[]}}}"#,
             br#"{"event":{"security_changed":{"identity":"verified"}}}"#,
             br#"{"event":{"security_changed":{"recovery_key":"x"}}}"#,
+            // Content-free: no reason text crosses with a presence refusal.
+            br#"{"event":{"account_changed":{"error":"Presence is disabled"}}}"#,
+            br#"{"event":"account_changed"}"#,
             br#"{"event":{"call_changed":{"room_id":"!r:s"}}}"#,
             br#"{"event":{"call_changed":{"participants":[]}}}"#,
             br#"{"event":"call_changed"}"#,

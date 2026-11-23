@@ -8,7 +8,14 @@ export type AccountStatus = { state: AccountState,
 /**
  * The signed-in Matrix user ID, at most 255 bytes.
  */
-userId: string | null, error: SignInError | null, };
+userId: string | null, error: SignInError | null, 
+/**
+ * The homeserver refused this account's presence choice with a lasting
+ * client error, such as 403 where presence is turned off, so it is not
+ * shared until the setting changes (ADR-0057). False when not signed
+ * in. A rate limit is not a refusal. No server text is carried.
+ */
+presenceRefused: boolean, };
 
 export type AppStatus = { 
 /**
