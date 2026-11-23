@@ -638,7 +638,6 @@ pub(crate) async fn page_names(
         .collect()
 }
 
-/// What a state event changed, or `None` for a change not shown.
 /// Whether a member event changes nothing: a membership sent again with the
 /// same content. It is not a line of its own, because nothing happened.
 fn member_unchanged(event: &AnySyncStateEvent) -> bool {
@@ -649,6 +648,7 @@ fn member_unchanged(event: &AnySyncStateEvent) -> bool {
     )
 }
 
+/// What a state event changed, or `None` for a change not shown.
 fn state_change(event: &AnySyncStateEvent) -> Option<StateChange> {
     use crate::room_settings::{history_visibility, join_rule};
     Some(match event {
@@ -1505,11 +1505,7 @@ mod tests {
     fn change_of(event: &TimelineEvent) -> Option<StateChange> {
         match project(event) {
             Some(TimelineItem::State { change, .. }) => Some(change),
-            None
-            | Some(TimelineItem::Other {
-                event: OtherEvent::State,
-                ..
-            }) => None,
+            None => None,
             Some(other) => panic!("a state item or nothing: {other:?}"),
         }
     }
@@ -2108,9 +2104,16 @@ mod tests {
             ),
             Some(StateChange::GuestAccess { allowed: false })
         );
+        // A type with no room change is a generic state line, not a change.
         assert_eq!(
-            room("org.example.custom", serde_json::json!({ "x": 1 })),
-            None
+            other_of(&state_event(
+                "org.example.custom",
+                A,
+                "",
+                serde_json::json!({ "x": 1 }),
+                None
+            )),
+            Some((OtherEvent::State, "org.example.custom".into()))
         );
     }
 
