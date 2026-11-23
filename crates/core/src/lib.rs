@@ -854,22 +854,35 @@ impl Core {
         }))
     }
 
-    /// Turns the log off, off the serving loop: it waits for the writer to
-    /// drain and flush. One at a time; a second "off" while one runs is
-    /// refused before a thread is started, but still cancels an "on" that
-    /// waits for the user.
-    fn diagnostics_off(&self) -> Result<LongCall<'_>, ErrorCode> {
+    /// Turns the log off. Every "off" cancels an "on" that waits for the
+    /// user. Only an "off" with a writer to drain gets a thread, because the
+    /// drain waits for the writer to write and flush: one at a time, and a
+    /// second one meanwhile is refused before a thread is started. An "off"
+    /// for a log that is already off is answered at once (`Ok(None)`).
+    /// So the drain threads, also those whose reply waits for a UI that
+    /// stopped reading, are bounded by the user's own "yes" answers in the
+    /// core's window: only a "yes" turns the log on again.
+    fn diagnostics_off(&self) -> Result<Option<LongCall<'_>>, ErrorCode> {
+        let log = diagnostics::global();
         if self.diagnostics_stopping.swap(true, Ordering::SeqCst) {
-            diagnostics::global().cancel_pending_on();
+            log.cancel_pending_on();
             return Err(ErrorCode::LimitExceeded);
         }
         let stopping = ClearOnDrop(&self.diagnostics_stopping);
-        Ok(Box::new(move || {
+        log.cancel_pending_on();
+        // Checked after the cancel, so no later "on" passes its check. An
+        // "on" that passed it just before may still finish; it then sends
+        // `diagnostics_changed`, so the page shows the log on and can ask
+        // again.
+        if !log.is_on() {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(move || {
             diagnostics::global().turn_off();
             drop(stopping);
             self.hub.diagnostics_changed();
             Outcome::Ok(serde_json::Value::Bool(false))
-        }))
+        })))
     }
 
     /// The UI host's or the page's records, checked against the protocol's
@@ -1015,7 +1028,11 @@ impl Core {
                 Err(code) => error(code),
             },
             Call::SetDiagnostics { on: false } => match self.diagnostics_off() {
-                Ok(call) => Answer::Later(id, call),
+                Ok(Some(call)) => Answer::Later(id, call),
+                Ok(None) => Answer::Reply(Reply {
+                    id,
+                    outcome: Outcome::Ok(serde_json::Value::Bool(false)),
+                }),
                 Err(code) => error(code),
             },
             Call::AcceptInvite { .. }
@@ -5379,12 +5396,14 @@ mod tests {
         assert!(!core.diagnostics_status().available);
     }
 
-    /// GIVEN an "off" that is not finished WHEN the UI sends more THEN each
-    /// is refused before a thread is started, and still cancels a pending
-    /// "on"; once the first ends, an "off" is taken again.
+    /// GIVEN the log on and an "off" that is not finished WHEN the UI sends
+    /// more THEN each is refused before a thread is started, and still
+    /// cancels a pending "on"; GIVEN the log off THEN an "off" is answered
+    /// at once, with no thread, also when the UI does not read replies.
     #[test]
     fn given_an_off_running_when_more_arrive_then_refused() {
         let _global = global_log_test();
+        let dir = tempfile::tempdir().unwrap();
         let core = Core::default();
         let off = |id| {
             core.answer(&Request {
@@ -5392,6 +5411,23 @@ mod tests {
                 call: Call::SetDiagnostics { on: false },
             })
         };
+        let at_once = |answer: Answer<'_>| {
+            matches!(
+                answer,
+                Answer::Reply(Reply {
+                    outcome: Outcome::Ok(serde_json::Value::Bool(false)),
+                    ..
+                })
+            )
+        };
+        let epoch = diagnostics::global().epoch();
+        for id in 20..30 {
+            assert!(at_once(off(id)), "request {id}: off needs no thread");
+        }
+        assert!(diagnostics::global().epoch() >= epoch + 10);
+        diagnostics::global()
+            .turn_on(&diagnostics::path_in(dir.path()))
+            .unwrap();
         let first = off(1);
         assert!(matches!(first, Answer::Later(1, _)));
         let epoch = diagnostics::global().epoch();
@@ -5408,10 +5444,14 @@ mod tests {
             );
         }
         assert!(diagnostics::global().epoch() >= epoch + 8);
-        // Dropped unrun (as at a profile switch), it frees the slot. It is
-        // not run here: the log is shared by the tests of this process.
+        // Dropped unrun (as at a profile switch), it frees the slot.
         drop(first);
-        assert!(matches!(off(10), Answer::Later(10, _)));
+        let Answer::Later(10, drain) = off(10) else {
+            panic!("an off with a writer to drain is a long call");
+        };
+        assert_eq!(drain(), Outcome::Ok(serde_json::Value::Bool(false)));
+        assert!(!diagnostics::global().is_on());
+        assert!(at_once(off(11)));
     }
 
     /// GIVEN requests that succeeded, failed and are still running WHEN they

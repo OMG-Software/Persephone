@@ -170,7 +170,16 @@ impl Forwarder {
     /// [`MAX_DIAGNOSTIC_BATCH_BYTES`] as JSON: a count of dropped records
     /// first, if any. Waits up to `wait` for a record while the queue is
     /// empty or the log is off; empty when off or when none came.
+    #[cfg(test)]
     pub fn take_batch(&self, wait: Duration) -> Vec<DiagnosticRecord> {
+        self.take_counted(wait).0
+    }
+
+    /// [`Forwarder::take_batch`], and how many records the batch stands
+    /// for: the dropped ones its count names, and the others. A batch that
+    /// is refused gives this number back to [`Forwarder::count_refused`], so
+    /// the count never shrinks to the one record that carried it.
+    pub fn take_counted(&self, wait: Duration) -> (Vec<DiagnosticRecord>, u64) {
         let mut queue = lock(&self.queue);
         if queue.is_empty() || !self.is_on() {
             queue = self
@@ -180,7 +189,7 @@ impl Forwarder {
                 .0;
         }
         if !self.is_on() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let mut batch = Vec::new();
         // The brackets of the JSON array.
@@ -206,7 +215,8 @@ impl Forwarder {
             bytes += size + 1;
             batch.extend(queue.pop_front());
         }
-        batch
+        let others = batch.len() as u64 - u64::from(dropped > 0);
+        (batch, dropped + others)
     }
 }
 
@@ -261,11 +271,10 @@ pub fn install(core: CoreLink) {
         .name("diagnostics".into())
         .spawn(move || {
             loop {
-                let records = global().take_batch(Duration::from_secs(1));
+                let (records, count) = global().take_counted(Duration::from_secs(1));
                 if records.is_empty() {
                     continue;
                 }
-                let count = records.len() as u64;
                 let call = Call::DiagnosticRecords {
                     source: RecordSource::Ui,
                     records,
@@ -395,6 +404,29 @@ mod tests {
         let batch = forwarder.take_batch(Duration::ZERO);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].message, "3 records dropped: over the limit");
+    }
+
+    /// GIVEN a count of 10 dropped records WHEN the batches that carry it
+    /// are refused again and again THEN the count stays 10, and records
+    /// lost with it are added, never the count record itself.
+    #[test]
+    fn given_refused_count_batches_then_the_count_never_shrinks() {
+        let forwarder = Forwarder::default();
+        forwarder.set_on(true);
+        forwarder.count_refused(10);
+        for _ in 0..3 {
+            let (batch, lost) = forwarder.take_counted(Duration::ZERO);
+            assert_eq!(batch[0].message, "10 records dropped: over the limit");
+            assert_eq!(lost, 10);
+            forwarder.count_refused(lost);
+        }
+        forwarder.push(RecordLevel::Info, "t", "kept");
+        let (batch, lost) = forwarder.take_counted(Duration::ZERO);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(lost, 11);
+        forwarder.count_refused(lost);
+        let (batch, _) = forwarder.take_counted(Duration::ZERO);
+        assert_eq!(batch[0].message, "11 records dropped: over the limit");
     }
 
     /// GIVEN a value whose text is far over the limit WHEN it is formatted

@@ -132,11 +132,10 @@
   {/if}
   {#if failure}
     <p role="alert" class="error">{failure}</p>
-    {#if !loaded}
-      <!-- Nothing else reads the state again until it changes. -->
-      <div class="actions">
-        <button type="button" class="secondary" onclick={retry}>Try again</button>
-      </div>
-    {/if}
+    <!-- Also after a good read: while the log is off, nothing else reads
+         the state again until it changes. A read does nothing else. -->
+    <div class="actions">
+      <button type="button" class="secondary" onclick={retry}>Try again</button>
+    </div>
   {/if}
 </div>

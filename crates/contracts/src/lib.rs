@@ -2794,6 +2794,18 @@ mod personal_contract_tests {
         fixture::<PinnedMessages>(include_str!("../fixtures/pinned-messages.json"));
         fixture::<AttachmentPage>(include_str!("../fixtures/attachment-page.json"));
         fixture::<ConnectionHealth>(include_str!("../fixtures/connection-health.json"));
+        fixture::<DiagnosticsStatus>(include_str!("../fixtures/diagnostics-status.json"));
+        // No file yet (never turned on in this run): the path is explicit
+        // null, and a missing field is refused.
+        let unused = r#"{"on":false,"full":false,"failed":false,"available":true,"path":null}"#;
+        fixture::<DiagnosticsStatus>(unused);
+        assert!(
+            serde_json::from_str::<DiagnosticsStatus>(
+                r#"{"on":false,"full":false,"available":true,"path":null}"#
+            )
+            .is_err(),
+            "`failed` is required"
+        );
         fixture::<CallReadiness>(include_str!("../fixtures/call-readiness.json"));
         fixture::<CallStatus>(include_str!("../fixtures/call-status.json"));
         fixture::<CallRings>(include_str!("../fixtures/call-rings.json"));

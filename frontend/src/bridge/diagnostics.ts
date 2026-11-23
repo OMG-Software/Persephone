@@ -32,22 +32,47 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 // One batch at a time: while the core does not answer, later batches wait
 // in `waiting` (bounded) instead of piling up as calls.
 let flying = false;
+// How many records the last batch stands for: the dropped ones its count
+// names, and the others. A refused batch adds this back, so the count never
+// shrinks to the one record that carried it, nor counts that record.
+let lastBatchStandsFor = 0;
 const listeners = new Set<(on: boolean) => void>();
 
 const encoder = new TextEncoder();
 
-/** `text` cut to at most `limit` UTF-8 bytes, on a character boundary. */
+/** Marks cut text, as the core, the UI host and the call worker do. */
+const MARK = '…';
+const MARK_BYTES = 3;
+
+/** One character's size in UTF-8 (a lone surrogate is sent as U+FFFD). */
+function utf8Size(character: string): number {
+  const point = character.codePointAt(0) ?? 0;
+  if (point < 0x80) return 1;
+  if (point < 0x800) return 2;
+  return point < 0x10000 ? 3 : 4;
+}
+
+/**
+ * `text` cut to at most `limit` UTF-8 bytes on a character boundary, ending
+ * with `…` when cut, so a cut record can be told from a whole one
+ * (ADR-0058). The marker counts against the limit, because the host and the
+ * core refuse more. It reads no further than the limit, so a huge message
+ * costs no more than a short one.
+ */
 export function cut(text: string, limit: number): string {
-  if (encoder.encode(text).length <= limit) return text;
-  let out = '';
   let bytes = 0;
+  let end = 0;
+  let kept = 0;
   for (const character of text) {
-    const size = encoder.encode(character).length;
-    if (bytes + size > limit) break;
-    out += character;
+    const size = utf8Size(character);
+    if (bytes + size > limit) {
+      return limit >= MARK_BYTES ? text.slice(0, kept) + MARK : '';
+    }
     bytes += size;
+    end += character.length;
+    if (bytes <= limit - MARK_BYTES) kept = end;
   }
-  return out;
+  return text;
 }
 
 /** Only short error codes are kept; anything else is just `error`. */
@@ -115,6 +140,7 @@ export function takeBatch(): PageRecord[] {
   const batch: PageRecord[] = [];
   // The brackets of the JSON array.
   let bytes = 2;
+  const carried = dropped;
   if (dropped > 0) {
     const count: PageRecord = {
       level: 'warn',
@@ -134,6 +160,7 @@ export function takeBatch(): PageRecord[] {
     taken += 1;
   }
   waiting = waiting.slice(taken);
+  lastBatchStandsFor = carried + taken;
   return batch;
 }
 
@@ -142,13 +169,14 @@ async function flush(): Promise<void> {
   // The flight that runs schedules the next batch when it ends.
   if (!on || flying) return;
   const records = takeBatch();
+  const standsFor = lastBatchStandsFor;
   if (records.length > 0) {
     flying = true;
     try {
       await invoke('diagnostic_records', { records });
     } catch {
       // Best effort, but counted: the next batch reports the loss.
-      if (on) dropped += records.length;
+      if (on) dropped += standsFor;
     } finally {
       flying = false;
     }

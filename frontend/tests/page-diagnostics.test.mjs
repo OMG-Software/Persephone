@@ -13,12 +13,18 @@ before(async () => {
   page = await import('../src/bridge/diagnostics.ts');
 });
 
-test('GIVEN text over the limit WHEN cut THEN it stays within the bytes and never splits a character', () => {
+test('GIVEN text over the limit WHEN cut THEN it ends with the marker, stays within the bytes and never splits a character', () => {
+  const bytes = (text) => new TextEncoder().encode(text).length;
   assert.equal(page.cut('short', 10), 'short');
-  assert.equal(page.cut('abcdef', 3), 'abc');
-  // "é" is two bytes: four bytes hold "aé" and not half of the next one.
-  assert.equal(page.cut('aéé', 4), 'aé');
-  assert.equal(page.cut('😀x', 3), '');
+  assert.equal(page.cut('exact', 5), 'exact');
+  // "…" is three bytes and counts against the limit.
+  assert.equal(page.cut('abcdef', 5), 'ab…');
+  // "é" is two bytes: five bytes hold "a…", not half of an "é".
+  assert.equal(page.cut('aééé', 5), 'a…');
+  assert.equal(page.cut('😀x', 3), '…');
+  assert.equal(page.cut('abc', 2), '');
+  const long = page.cut('é'.repeat(5000), page.MAX_MESSAGE_BYTES);
+  assert.ok(long.endsWith('…') && bytes(long) <= page.MAX_MESSAGE_BYTES, String(bytes(long)));
 });
 
 test('GIVEN rejection reasons WHEN coded THEN only short lowercase codes are kept', () => {
@@ -135,6 +141,35 @@ test('GIVEN the host refuses a batch WHEN the next batch goes THEN it starts wit
       sent.map((records) => records.map((record) => record.message)),
       [['2 records dropped: over the limit']]
     );
+    page.setPageDiagnostics(false);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('GIVEN the batch that carries a drop count is refused again and again WHEN one goes through THEN it names the true count', async () => {
+  const sent = [];
+  let refusals = 3;
+  mockIPC((_command, args) => {
+    if (refusals > 0) {
+      refusals -= 1;
+      throw 'core_unavailable';
+    }
+    sent.push(args.records.map((record) => record.message));
+    return null;
+  });
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  try {
+    page.setPageDiagnostics(true);
+    page.note('info', 'page::test', 'one');
+    page.note('info', 'page::test', 'two');
+    // Refused: the two records; then twice the count record alone.
+    for (let second = 0; second < 4; second += 1) {
+      mock.timers.tick(1000);
+      await settle();
+    }
+    assert.deepEqual(sent, [['2 records dropped: over the limit']]);
     page.setPageDiagnostics(false);
   } finally {
     mock.timers.reset();

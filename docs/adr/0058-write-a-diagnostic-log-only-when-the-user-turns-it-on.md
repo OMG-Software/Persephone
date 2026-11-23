@@ -200,6 +200,12 @@ so.
   queue drops records and counts them, before they are redacted or built.
   The next written line reports the count; when no line follows, the writer
   writes the count before it stops.
+* An "off" waits for the writer, so it runs off the serving loop, but only
+  when the log is on: an "off" for a log that is off is answered at once.
+  One drain runs at a time, and a second "off" meanwhile is refused before
+  a thread is started. Every "off" cancels an "on" that waits for the
+  user. So drain threads, also those whose reply waits for a UI that does
+  not read, are bounded by the user's "yes" answers.
 * The core itself admits at most 256 records each second from each other
   process (UI host, page, call worker), whatever that process promises. The
   rest are counted the same way, so a flood from one process cannot fill the
