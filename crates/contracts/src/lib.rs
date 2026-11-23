@@ -319,14 +319,14 @@ pub enum OtherEvent {
     VerificationDone,
     /// A call invitation or call notification.
     CallStarted,
-    /// `m.call.answer` or `m.call.select_answer`.
+    /// `m.call.answer`.
     CallAnswered,
     /// `m.call.reject`, or `m.rtc.decline` for a declined call notification.
     CallDeclined,
     /// `m.call.hangup`.
     CallEnded,
-    /// Call connection details: candidates, negotiation, stream metadata and
-    /// call encryption keys.
+    /// Call connection details: candidates, negotiation, the caller's choice
+    /// of answer, stream metadata and call encryption keys.
     CallSignalling,
     /// A call member state event with a membership.
     CallJoined,

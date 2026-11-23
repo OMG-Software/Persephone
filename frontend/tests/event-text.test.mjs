@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULT_SETTINGS } from '../src/preferences.ts';
-import { OTHER_SWITCHES, itemShown, otherParts, otherSwitch } from '../src/eventText.ts';
+import { OTHER_SWITCHES, deletedParts, itemShown, otherParts, otherSwitch } from '../src/eventText.ts';
 import { EVENT_SWITCHES } from '../src/stateText.ts';
 import { applyRelations, quoteOf } from '../src/timeline.ts';
 
@@ -35,6 +35,22 @@ test('GIVEN other events without fixed text WHEN described THEN the type is its 
   // A kind this build does not know is named by its type.
   assert.equal(line(otherParts(A, 'teleport', 'org.z')), `${A} sent an event of type [org.z]`);
   assert.equal(line(otherParts(A, 'toString', 'org.z')), `${A} sent an event of type [org.z]`);
+});
+
+test('GIVEN deleted other events WHEN described THEN each names what was deleted, not who deleted it', () => {
+  const cases = [
+    ['sticker', `${A}: Sticker deleted.`],
+    ['poll_started', `${A}: Poll deleted.`],
+    ['call_ended', `${A}: Call event deleted.`],
+    ['verification_step', `${A}: Verification step deleted.`],
+    ['message', `${A}: Message deleted.`],
+    ['event', `${A}: Event of type [<b>x</b>] deleted.`],
+    // A prototype name is no table entry.
+    ['toString', `${A}: Event of type [<b>x</b>] deleted.`]
+  ];
+  for (const [event, expected] of cases) {
+    assert.equal(line(deletedParts(A, event, '<b>x</b>')), expected, event);
+  }
 });
 
 test('GIVEN each other kind WHEN its switch is read THEN it is a listed switch, and an unknown kind is other events', () => {

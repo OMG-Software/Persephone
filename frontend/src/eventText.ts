@@ -62,6 +62,39 @@ export function otherParts(sender: string, event: OtherEvent, eventType: string)
   ];
 }
 
+/**
+ * What a deleted event of each kind was, before " deleted.". Only
+ * message-like kinds can be deleted items; a kind with no entry is named by
+ * its type. The line names no one as the deleter: a moderator may have
+ * deleted it.
+ */
+const DELETED_TEXT: Partial<Record<OtherEvent, string>> = {
+  verification_request: 'Verification request',
+  verification_ready: 'Verification step',
+  verification_start: 'Verification step',
+  verification_step: 'Verification step',
+  verification_cancelled: 'Verification step',
+  verification_done: 'Verification step',
+  call_started: 'Call event',
+  call_answered: 'Call event',
+  call_declined: 'Call event',
+  call_ended: 'Call event',
+  call_signalling: 'Call connection details',
+  poll_started: 'Poll',
+  poll_vote: 'Poll vote',
+  poll_ended: 'End of a poll',
+  sticker: 'Sticker',
+  location: 'Shared location',
+  message: 'Message'
+};
+
+/** The pieces of the line for a deleted other event from `sender`. */
+export function deletedParts(sender: string, event: OtherEvent, eventType: string): StatePart[] {
+  const what = Object.hasOwn(DELETED_TEXT, event) ? DELETED_TEXT[event] : undefined;
+  if (what !== undefined) return [{ person: sender }, { text: `: ${what} deleted.` }];
+  return [{ person: sender }, { text: ': Event of type ' }, { name: eventType }, { text: ' deleted.' }];
+}
+
 const OTHER_SWITCH: Record<OtherEvent, keyof TimelineEvents> = {
   verification_request: 'verification',
   verification_ready: 'verification',

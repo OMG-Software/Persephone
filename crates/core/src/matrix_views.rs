@@ -259,7 +259,7 @@ fn event_kind(kind: &str) -> OtherEvent {
         | "org.matrix.msc4075.call.notify"
         | "m.rtc.notification"
         | "org.matrix.msc4075.rtc.notification" => OtherEvent::CallStarted,
-        "m.call.answer" | "m.call.select_answer" => OtherEvent::CallAnswered,
+        "m.call.answer" => OtherEvent::CallAnswered,
         "m.call.reject" | "m.rtc.decline" | "org.matrix.msc4310.rtc.decline" => {
             OtherEvent::CallDeclined
         }
@@ -267,6 +267,7 @@ fn event_kind(kind: &str) -> OtherEvent {
         "m.call.candidates"
         | "m.call.negotiate"
         | "m.call.replaces"
+        | "m.call.select_answer"
         | "m.call.sdp_stream_metadata_changed"
         | "org.matrix.call.sdp_stream_metadata_changed"
         | "m.call.asserted_identity"
@@ -1603,6 +1604,7 @@ mod tests {
             ("m.call.reject", OtherEvent::CallDeclined),
             ("m.call.hangup", OtherEvent::CallEnded),
             ("m.call.candidates", OtherEvent::CallSignalling),
+            ("m.call.select_answer", OtherEvent::CallSignalling),
             (
                 "io.element.call.encryption_keys",
                 OtherEvent::CallSignalling,

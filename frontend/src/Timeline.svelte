@@ -18,7 +18,7 @@
   import type { RoomPictures } from './roomPictures';
   import { personText, shownName } from './people';
   import { stateParts } from './stateText';
-  import { itemShown, otherParts } from './eventText';
+  import { deletedParts, itemShown, otherParts } from './eventText';
   import { clockTime, dayDividers, fullTime, toDate } from './time';
   import { DEFAULT_SETTINGS } from './preferences';
   import { applyRelations, newestEvent, quoteOf, type ShownItem } from './timeline';
@@ -327,21 +327,12 @@
                   <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
                 {/if}
               </p>
-            {:else if item.kind === 'other' && item.deleted}
-              {@const date = toDate(item.origin_server_ts)}
-              <p class="notice other-event">
-                <span
-                  ><PersonName userId={item.sender} name={shownName(item.sender, names)} />: {noticeText.deleted}</span
-                >
-                {#if date}
-                  <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
-                {/if}
-              </p>
             {:else if item.kind === 'other'}
               {@const date = toDate(item.origin_server_ts)}
-              <p class="notice state-change other-event">
+              {@const parts = (item.deleted ? deletedParts : otherParts)(item.sender, item.event, item.event_type)}
+              <p class="notice other-event" class:state-change={!item.deleted}>
                 <span
-                  >{#each otherParts(item.sender, item.event, item.event_type) as part, at (at)}{#if 'person' in part}<PersonName
+                  >{#each parts as part, at (at)}{#if 'person' in part}<PersonName
                         userId={part.person}
                         name={shownName(part.person, names)}
                       />{:else if 'name' in part}<bdi>{part.name}</bdi

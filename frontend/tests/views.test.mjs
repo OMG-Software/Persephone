@@ -1461,7 +1461,7 @@ test('GIVEN other events with hostile types WHEN the timeline shows THEN each li
   // still applies to it.
   const deletedCall = { ...other('$deletedCall', 'call_ended', 'm.call.hangup'), deleted: true };
   const withDeleted = render(Timeline, { props: { ...props, items: [deletedCall] } }).body.replace(/<!--.*?-->/g, '');
-  assert.match(withDeleted, /<bdi>@user:matrix\.invalid<\/bdi>: Message deleted\./);
+  assert.match(withDeleted, /<bdi>@user:matrix\.invalid<\/bdi>: Call event deleted\./);
   assert.doesNotMatch(withDeleted, /ended a call/);
   const callsOff = Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'calls']));
   const noCalls = render(Timeline, { props: { ...props, items: [deletedCall], events: callsOff } }).body;
