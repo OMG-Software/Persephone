@@ -805,6 +805,11 @@ mod tests {
         let put = writer.take_put(later).unwrap();
         writer.put_ended(put, PutEnd::Refused, later);
         assert!(writer.refused());
+        // A save of another setting passes the same choice again: the
+        // refusal stays, and nothing is sent, as it would be refused again.
+        writer.configure(true, PresenceStatus::Unavailable);
+        assert!(writer.refused(), "the same choice");
+        assert_eq!(writer.take_put(later + RETRY_GAP_MAX), None);
 
         // A new choice ends it, and a refusal of the older one, ending after
         // the new choice was made, does not bring it back.

@@ -2193,10 +2193,13 @@ fn given_an_older_presence_when_the_contacts_room_is_opened_then_it_is_asked_aga
     // asked again when the room opens, too young to be asked by age alone.
     let earlier = WANTED_AGE * 2;
     assert!(earlier < LOOKUP_AGE);
-    // `Instant` counts from boot: just after one, it cannot go back that far.
-    let Some(at) = Instant::now().checked_sub(earlier) else {
-        eprintln!("skipped: the clock has run less than {earlier:?}");
-        return;
+    // `Instant` counts from boot: just after one, it cannot go back that far
+    // yet. Wait until it can, at most `earlier`, so the checks always run.
+    let at = loop {
+        if let Some(at) = Instant::now().checked_sub(earlier) {
+            break at;
+        }
+        std::thread::sleep(Duration::from_secs(1));
     };
     let contact = UserId::parse(CONTACT).unwrap();
     core.session()
