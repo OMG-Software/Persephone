@@ -55,8 +55,9 @@ static NAMED: LazyLock<Regex> = LazyLock::new(|| {
         // the first word of a value such as a passphrase with spaces.
         r#"(\\{0,2}["']?\s*[:=]\s*(?:Some\()?(?:(?:bearer|basic|digest|negotiate|ntlm|token|mac|hoba|mutual|aws4-hmac-sha256)\s+)?)"#,
         // A quoted value, escaped or not; then one whose closing quote a cut
-        // removed, taken to the end of the text; then a bare word.
-        r#"(\\{1,2}"(?:[^"\\]|\\[^"])*\\{1,2}"|"(?:[^"\\]|\\.)*"|'[^']*'|\\{1,2}"(?:[^"\\]|\\[^"])*\z|"(?:[^"\\]|\\.)*\z|'[^']*\z|[^\s"'&,;}\])]+)"#,
+        // removed, taken to the end of the text, also when the cut left a
+        // lone backslash at the end; then a bare word.
+        r#"(\\{1,2}"(?:[^"\\]|\\[^"])*\\{1,2}"|"(?:[^"\\]|\\.)*"|'[^']*'|\\{1,2}"(?:[^"\\]|\\[^"])*\\*\z|"(?:[^"\\]|\\.)*\\?\z|'[^']*\z|[^\s"'&,;}\])]+)"#,
     ))
     .expect("valid pattern")
 });
@@ -304,6 +305,22 @@ mod tests {
             let output = text(&input, 100);
             assert!(!output.contains("sss"), "{output}");
             assert!(output.contains(REDACTED), "{output}");
+        }
+    }
+
+    /// GIVEN a quoted secret that another process cut directly after a
+    /// backslash, so the text ends with a lone `\` THEN it is still
+    /// replaced, plain and escaped.
+    #[test]
+    fn given_secret_cut_after_a_backslash_then_replaced() {
+        for input in [
+            r#"{"password":"sss\"#,
+            r#"body: "{\"password\":\"sss\"#,
+            r#"body: "{\"password\":\"sss\\"#,
+        ] {
+            let output = clean(input);
+            assert!(!output.contains("sss"), "{input} -> {output}");
+            assert!(output.contains(REDACTED), "{input} -> {output}");
         }
     }
 
