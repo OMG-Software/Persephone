@@ -260,6 +260,11 @@
       {#if error}
         <p role="alert" class="error">{error}</p>
       {/if}
+      {#if shown.length === 0 && hasOlder && !loading}
+        <!-- The core leaves out what the settings hide, so a page of them
+             only is empty; say so rather than look like an empty room. -->
+        <p class="gap">Nothing to show in the newest history. Your settings can hide some kinds of events.</p>
+      {/if}
       <ol>
         {#each shown as item, index (key(item, index))}
           <li data-event-id={item.kind === 'gap' ? undefined : item.event_id}

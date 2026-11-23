@@ -172,6 +172,25 @@ test('timeline controls reflect loading, end of history and errors', () => {
   });
   assert.match(html, /<button type="button" disabled[^>]*>Start of history/);
   assert.match(html, /role="alert"/);
+  assert.doesNotMatch(html, /Nothing to show/, 'the start of history is not hidden history');
+});
+
+test('GIVEN a page whose lines the settings all hide WHEN older history exists THEN the timeline says so instead of looking empty', () => {
+  const note = /Nothing to show in the newest history\. Your settings can hide some kinds of events\./;
+  const props = (over) => ({
+    title: 'Room',
+    items: [{ kind: 'other', event_id: '$c', sender: '@m:example.invalid', origin_server_ts: 1, event: 'call_signalling', event_type: 'm.call.candidates', state: false, deleted: false }],
+    events: { ...DEFAULT_PREFERENCES.timelineEvents, callSignalling: false },
+    hasOlder: true,
+    loading: false,
+    error: null,
+    onolder: () => {},
+    ...over
+  });
+  assert.match(render(Timeline, { props: props({}) }).body, note);
+  assert.match(render(Timeline, { props: props({ items: [] }) }).body, note);
+  assert.doesNotMatch(render(Timeline, { props: props({ loading: true }) }).body, note);
+  assert.doesNotMatch(render(Timeline, { props: props({ events: DEFAULT_PREFERENCES.timelineEvents }) }).body, note);
 });
 
 test('notices render as fixed text with an isolated sender, never as content', () => {

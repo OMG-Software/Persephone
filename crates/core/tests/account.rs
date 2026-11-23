@@ -2423,13 +2423,13 @@ impl wiremock::Respond for SlowEvent {
     }
 }
 
-/// GIVEN a later chunk whose edits each need a slow read of the edited
-/// message WHEN call connection details are switched off THEN no read starts
-/// after `PAGE_TIME_BUDGET`: the page drops that chunk and ends before it,
-/// and the next page loads it whole, so no edit is lost.
-#[test]
-fn given_slow_edit_reads_in_a_later_chunk_then_the_page_ends_before_it_and_the_next_has_it() {
-    use persephone_core::matrix_views::PAGE_TIME_BUDGET;
+/// A core signed in to `ROOM` with call connection details switched off,
+/// whose `/messages` answers with `EditsLater` and whose edited messages
+/// each take `delay` to read: the server, profile, core and the read count.
+fn core_with_edits_later(
+    edits: usize,
+    delay: Duration,
+) -> (Homeserver, TempDir, Core, Arc<AtomicUsize>) {
     let server = Homeserver::start(
         (
             200,
@@ -2438,12 +2438,11 @@ fn given_slow_edit_reads_in_a_later_chunk_then_the_page_ends_before_it_and_the_n
         false,
         true,
     );
-    let delay = PAGE_TIME_BUDGET * 3 / 5;
     let reads = Arc::new(AtomicUsize::new(0));
     server.runtime.block_on(async {
         Mock::given(method("GET"))
             .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/messages$"))
-            .respond_with(EditsLater { edits: 3 })
+            .respond_with(EditsLater { edits })
             .with_priority(1)
             .mount(&server.server)
             .await;
@@ -2460,7 +2459,6 @@ fn given_slow_edit_reads_in_a_later_chunk_then_the_page_ends_before_it_and_the_n
     let dir = TempDir::new().unwrap();
     let core = make_core(dir.path(), Fixed::new(Ok(())));
     sign_in_to_room(&core, &server);
-    let _locked = LockOnDrop(&core);
     let saved = call(
         &core,
         Call::SetAccountSettings {
@@ -2474,21 +2472,40 @@ fn given_slow_edit_reads_in_a_later_chunk_then_the_page_ends_before_it_and_the_n
         },
     );
     assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
-    let page = |cursor: Option<String>| -> TimelinePage {
-        value(call(
-            &core,
-            Call::TimelinePage {
-                room_id: ROOM.into(),
-                cursor,
-            },
-        ))
-    };
-    let edits = |page: &TimelinePage| {
-        page.items
-            .iter()
-            .filter(|item| matches!(item, TimelineItem::Edit { .. }))
-            .count()
-    };
+    (server, dir, core, reads)
+}
+
+/// One timeline page of `ROOM`, older than `cursor`.
+fn room_page(core: &Core, cursor: Option<String>) -> TimelinePage {
+    value(call(
+        core,
+        Call::TimelinePage {
+            room_id: ROOM.into(),
+            cursor,
+        },
+    ))
+}
+
+/// How many edits a page holds.
+fn edit_count(page: &TimelinePage) -> usize {
+    page.items
+        .iter()
+        .filter(|item| matches!(item, TimelineItem::Edit { .. }))
+        .count()
+}
+
+/// GIVEN a later chunk whose edits each need a slow read of the edited
+/// message WHEN call connection details are switched off THEN no read starts
+/// after `PAGE_TIME_BUDGET`: the page drops that chunk and ends before it,
+/// and the next page loads it whole, so no edit is lost.
+#[test]
+fn given_slow_edit_reads_in_a_later_chunk_then_the_page_ends_before_it_and_the_next_has_it() {
+    use persephone_core::matrix_views::PAGE_TIME_BUDGET;
+    let delay = PAGE_TIME_BUDGET * 3 / 5;
+    let (_server, _dir, core, reads) = core_with_edits_later(3, delay);
+    let _locked = LockOnDrop(&core);
+    let page = |cursor| room_page(&core, cursor);
+    let edits = edit_count;
     let started = Instant::now();
     let first = page(None);
     let took = started.elapsed();
@@ -2505,6 +2522,29 @@ fn given_slow_edit_reads_in_a_later_chunk_then_the_page_ends_before_it_and_the_n
         "the senders read before are remembered"
     );
     assert_eq!(second.next_cursor, None);
+}
+
+/// GIVEN a later chunk with more edits of unseen messages than a page may
+/// read (`MAX_EDIT_LOOKUPS`) WHEN call connection details are switched off
+/// THEN the page ends before that chunk instead of leaving edits out, and
+/// the next page loads it first and shows every edit.
+#[test]
+fn given_more_edit_reads_than_are_left_in_a_later_chunk_then_no_edit_is_lost() {
+    use persephone_core::matrix_views::MAX_EDIT_LOOKUPS;
+    let edits = MAX_EDIT_LOOKUPS + 2;
+    let (_server, _dir, core, reads) = core_with_edits_later(edits, Duration::ZERO);
+    let _locked = LockOnDrop(&core);
+    let first = room_page(&core, None);
+    assert_eq!(page_ids(&first), ["$said0"]);
+    assert_eq!(edit_count(&first), 0, "the chunk waits for the next page");
+    assert_eq!(reads.load(Ordering::SeqCst), MAX_EDIT_LOOKUPS);
+    let second = room_page(&core, first.next_cursor.clone());
+    assert_eq!(edit_count(&second), edits, "no edit is left out");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        edits,
+        "the senders read before are remembered"
+    );
 }
 
 /// GIVEN Sliding Sync, which sends other people's member events only in

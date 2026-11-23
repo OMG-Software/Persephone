@@ -882,7 +882,8 @@ impl MatrixViews {
     /// which must be a text message that is not an edit itself. The edited
     /// message's sender comes from `chunk`, from those remembered, or, while
     /// `lookups` allows, from the homeserver; otherwise the edit is left out.
-    /// A read that would start after `lookups.until` marks the budget late.
+    /// In a later chunk (`lookups.until` set), a read the budget does not
+    /// allow defers the chunk instead (`lookups.deferred`).
     async fn checked_edit(
         &self,
         joined: &matrix_sdk::Room,
@@ -1145,7 +1146,8 @@ impl MatrixViews {
                 }
                 requests += 1;
                 // Edits of a later chunk read the homeserver only within the
-                // time budget too.
+                // time budget too, and never go unchecked: a later chunk that
+                // needs more reads than are left waits for the next page.
                 lookups.until = (fetch > 0).then(|| started + PAGE_TIME_BUDGET);
                 let Some(chunk) = self
                     .fetch_chunk(
@@ -1159,8 +1161,9 @@ impl MatrixViews {
                     )
                     .await?
                 else {
-                    // Its edits need more time than is left: the next page
-                    // fetches this chunk again, first, with a new budget.
+                    // Its edits need more reads or time than are left: the
+                    // next page fetches this chunk again, first, with a new
+                    // budget.
                     break 'fetches;
                 };
                 // A homeserver that answers a token with the same token did
@@ -1203,8 +1206,8 @@ impl MatrixViews {
     }
 
     /// Up to `limit` events older than `from` (or the newest), projected and
-    /// filtered by `events`, oldest first; `None` when an edit's check would
-    /// read the homeserver after `lookups.until`.
+    /// filtered by `events`, oldest first; `None` when a later chunk's edit
+    /// needs a read the budget does not allow (`EditLookups::deferred`).
     #[allow(clippy::too_many_arguments)]
     async fn fetch_chunk(
         &self,
@@ -1239,7 +1242,7 @@ impl MatrixViews {
                     let item = self
                         .checked_edit(joined, room, &messages.chunk, event, claim, lookups)
                         .await;
-                    if lookups.late {
+                    if lookups.deferred {
                         return Ok(None);
                     }
                     item
@@ -1268,22 +1271,26 @@ impl MatrixViews {
 
 /// The homeserver reads of edited messages that a page may still make: at
 /// most `MAX_EDIT_LOOKUPS`, and none that starts at or after `until`.
+///
+/// The first chunk leaves out an edit beyond the reads, as one page always
+/// did. A later chunk, which has `until`, is deferred instead: the next page
+/// reads it first, with a new budget, so a page of many chunks loses no edit
+/// that a page of one chunk would show.
 #[derive(Default)]
 struct EditLookups {
     used: usize,
     until: Option<Instant>,
-    /// A read was due after `until`.
-    late: bool,
+    /// A later chunk needed a read that the budget did not allow.
+    deferred: bool,
 }
 
 impl EditLookups {
     /// Whether a read may start now; it then counts.
     fn start(&mut self) -> bool {
-        if self.used >= MAX_EDIT_LOOKUPS {
-            return false;
-        }
-        if self.until.is_some_and(|until| Instant::now() >= until) {
-            self.late = true;
+        let spent = self.used >= MAX_EDIT_LOOKUPS
+            || self.until.is_some_and(|until| Instant::now() >= until);
+        if spent {
+            self.deferred = self.until.is_some();
             return false;
         }
         self.used += 1;
