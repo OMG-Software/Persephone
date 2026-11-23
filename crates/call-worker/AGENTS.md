@@ -28,6 +28,7 @@ The contained process that runs one call (ADR-0043). It joins one LiveKit room w
 
 - The pinned libwebrtc must be verified first: `python tools/dev.py webrtc`. Set `LK_CUSTOM_WEBRTC` to the directory it prints for every cargo command. The build must never download libwebrtc.
 - On Windows the prebuilt libwebrtc uses the static C runtime. Build and test this package with `RUSTFLAGS=-C target-feature=+crt-static`. `tools/dev.py` does this and builds the package apart from the rest of the workspace.
+- On macOS, `build.rs` links the worker and its tests with `-ObjC`. Keep it: libwebrtc's Objective-C categories are dropped without it, and the first peer connection factory aborts. The `-ObjC` that webrtc-sys sets does not reach this package.
 - `third_party/` holds vendored LiveKit crates with small marked patches (TLS 1.3 only and no proxy variables in `livekit-net`; key ring of 256 and a remote audio volume in `libwebrtc` and `webrtc-sys`). Read each `PERSEPHONE-PATCH.md`. They are patch sources, not workspace members.
 
 ## Checks

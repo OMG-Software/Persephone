@@ -57,6 +57,8 @@ pub fn capture_size_ok(width: u32, height: u32) -> bool {
 
 /// The byte order of the 32-bit pixels in a [`CapturedFrame`], as in memory.
 /// The fourth byte is alpha or padding; it is never used.
+/// `unsupported.rs` (macOS) makes no frame, so only tests make one there.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
     /// B, G, R, A (Windows BGRA; PipeWire BGRx and BGRA).
@@ -89,6 +91,7 @@ impl<'a> CapturedFrame<'a> {
 
     /// A frame over `data`, or `None` when `data` is shorter than a whole
     /// picture or the size is outside the capture limits.
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub fn checked(
         format: Format,
         width: u32,
@@ -107,7 +110,9 @@ impl<'a> CapturedFrame<'a> {
     }
 }
 
-/// Why a capture ended by itself.
+/// Why a capture ended by itself. `unsupported.rs` (macOS) starts no
+/// capture, so only tests make one there.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ended {
     /// The source went: the window or screen closed, the portal session
