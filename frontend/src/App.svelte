@@ -90,7 +90,14 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate, withNames } from './people';
-  import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, lockOffered, textScale } from './preferences';
+  import {
+    DEFAULT_SETTINGS,
+    SettingsKeeper,
+    isLockShortcut,
+    lockOffered,
+    textScale,
+    type SettingsPatch
+  } from './preferences';
   import { applyTheme } from './themes.ts';
   import { OwnNameKeeper } from './ownName';
   import { PASTE_UNSUPPORTED, attachErrorText, sendImageErrorText, type ImageDraft, type PastedImage } from './image';
@@ -2447,8 +2454,21 @@
     }
   }
 
-  /** Drop the old visible timeline immediately, then reload it with the changed ignore filter. */
-  async function ignoredChanged() {
+  /**
+   * Saves a change to the settings. The core leaves out what the timeline
+   * switches hide, so a change to them reloads the timeline: a switch turned
+   * on shows lines the loaded pages never had.
+   */
+  async function changeSettings(patch: SettingsPatch) {
+    await settingsKeeper.change(patch);
+    if (patch.timelineEvents) await reloadTimeline();
+  }
+
+  /**
+   * Drop the old visible timeline immediately, then reload it with the
+   * changed filter: the ignore list or the timeline switches.
+   */
+  async function reloadTimeline() {
     cancelContext?.(); cancelContext = null;
     const roomId = selected;
     if (!roomId) return;
@@ -2811,7 +2831,7 @@
             failure={settingsFailure}
             {mac}
             profilePassphrase={passphraseOn === true}
-            onchange={(patch) => settingsKeeper.change(patch)}
+            onchange={changeSettings}
           />
         {:else}
           <section class="settings-page" aria-labelledby="preferences-heading">
@@ -3422,7 +3442,7 @@
         <SavedDrafts {selected} onclose={() => (savedDraftsOpen = false)} />
       {/if}
       {#if ignoreOpen && signedIn}
-        <IgnoreUsers onchanged={ignoredChanged} onclose={() => (ignoreOpen = false)} />
+        <IgnoreUsers onchanged={reloadTimeline} onclose={() => (ignoreOpen = false)} />
       {/if}
       {#if sectionOpen && signedIn && selected}
         {#key selected}

@@ -22,7 +22,10 @@
 //! * Every other event is an `other` item (`other_item`): its kind, such as
 //!   a verification step, a call, a poll or a sticker, and its type projected
 //!   like a name. Nothing from its content is sent, so nothing disappears and
-//!   nothing new is trusted. The page decides which kinds to show.
+//!   nothing new is trusted.
+//! * Items the account's switches hide are left out before a page fills
+//!   (`timeline_filter`). While a page has room, older chunks are fetched,
+//!   at most `MAX_PAGE_FETCHES`, so hidden events do not crowd out messages.
 //! * An edit (`m.replace`) of a text message is an `edit` item only when its
 //!   sender sent the edited message, compared by full user ID: anyone can
 //!   send an edit naming someone else's message. The edited message's sender
@@ -68,7 +71,7 @@ use matrix_sdk::{
 };
 use persephone_contracts::{
     ContactStatus, MembershipChange, NoticeKind, OtherEvent, RoomEncryption, RoomList, RoomSummary,
-    SenderName, StateChange, TimelineItem, TimelinePage, UnixMillis,
+    SenderName, StateChange, TimelineEvents, TimelineItem, TimelinePage, UnixMillis,
 };
 use persephone_core_protocol::{ErrorCode, MAX_CURSOR_BYTES, MAX_ROOM_ID_BYTES};
 use std::{
@@ -92,6 +95,10 @@ pub const MAX_KNOWN_SENDERS: usize = 512;
 /// Most edited messages a page reads from the homeserver to check an edit's
 /// sender; an edit beyond them is left out of that page.
 pub const MAX_EDIT_LOOKUPS: usize = 8;
+/// Most chunks one timeline page fetches while switched-off events leave it
+/// with room: at most this many requests and `MAX_PAGE_ITEMS` times this
+/// many events a page, however many events the switches hide.
+pub const MAX_PAGE_FETCHES: usize = 5;
 
 #[derive(Default)]
 pub struct MatrixViews {
@@ -1089,85 +1096,161 @@ impl MatrixViews {
 
     /// One bounded page of history older than `cursor`, or the newest page.
     /// Refuse unreadable ignore state before fetching and filter ignored
-    /// message content while preserving state events and redactions.
+    /// message content while preserving state events and redactions. Items
+    /// the account's switches (`events`) hide are left out before the page
+    /// fills, so the core fetches older chunks, at most `MAX_PAGE_FETCHES`,
+    /// while the page has room left (`timeline_filter`).
     pub async fn timeline_page(
         &self,
         client: &Client,
         room: &str,
         cursor: Option<&str>,
+        events: &TimelineEvents,
     ) -> Result<TimelinePage, ErrorCode> {
         let joined = joined_room(client, room)?;
         let ignored = crate::abuse::ignored_set(client).await?;
-        let from = cursor.map(|cursor| self.token(room, cursor)).transpose()?;
-        let mut limit = MAX_PAGE_ITEMS;
-        loop {
-            let mut options = MessagesOptions::backward().from(from.as_deref());
-            options.limit = UInt::try_from(limit as u64).unwrap_or(UInt::MIN);
-            // The answer then carries the member events of the people the
-            // page shows, for their display names.
-            options.filter.lazy_load_options = LazyLoadOptions::Enabled {
-                include_redundant_members: true,
-            };
-            let messages = joined
-                .messages(options)
-                .await
-                .map_err(|_| ErrorCode::Unavailable)?;
-            // Backward pagination returns newest first; pages read oldest first.
-            let mut items = Vec::new();
-            let mut lookups = 0;
-            for event in messages.chunk.iter().rev() {
-                if ignored_content(event, &ignored) {
+        let mut token = cursor.map(|cursor| self.token(room, cursor)).transpose()?;
+        // Oldest first, as pages read; each chunk is older than the last.
+        let mut items: Vec<TimelineItem> = Vec::new();
+        let mut state = Vec::new();
+        let mut names = Vec::new();
+        let mut lookups = 0;
+        'fetches: for fetch in 0..MAX_PAGE_FETCHES {
+            let room_left = MAX_PAGE_ITEMS - items.len();
+            // After the first chunk, no token is the start of the room.
+            if room_left == 0 || (fetch > 0 && token.is_none()) {
+                break;
+            }
+            let mut limit = room_left;
+            loop {
+                let chunk = self
+                    .fetch_chunk(
+                        &joined,
+                        room,
+                        token.as_deref(),
+                        limit,
+                        &ignored,
+                        events,
+                        &mut lookups,
+                    )
+                    .await?;
+                // A homeserver that answers a token with the same token did
+                // not move: its chunk would repeat this page's events.
+                if fetch > 0 && chunk.end.is_some() && chunk.end == token {
+                    break 'fetches;
+                }
+                let with: Vec<TimelineItem> = chunk.items.iter().chain(&items).cloned().collect();
+                let with_state: Vec<_> = state.iter().chain(&chunk.state).cloned().collect();
+                let with_names = page_names(&joined, &with, &with_state).await;
+                if page_bytes(&with, &with_names) <= MAX_PAGE_BYTES {
+                    items = with;
+                    state = with_state;
+                    names = with_names;
+                    token = chunk.end;
+                    break;
+                }
+                // The SDK cannot resume inside a chunk: fetch fewer events.
+                if limit > 1 {
+                    limit /= 2;
                     continue;
                 }
-                self.remember_sender(room, event);
-                let item = match edit_claim(event) {
-                    Some(claim) => {
-                        self.checked_edit(
-                            &joined,
-                            room,
-                            &messages.chunk,
-                            event,
-                            claim,
-                            &mut lookups,
-                        )
-                        .await
-                    }
-                    None => project(event),
-                };
-                items.extend(item);
+                if fetch == 0 {
+                    // One event over the budget cannot happen with projected
+                    // bodies; drop it rather than exceed the frame.
+                    items.clear();
+                    names.clear();
+                    token = chunk.end;
+                }
+                // A later chunk that does not fit starts the next page.
+                break 'fetches;
             }
-            let mut names = page_names(&joined, &items, &messages.state).await;
-            let bytes: usize = items
-                .iter()
-                .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |v| v.len()))
-                .chain(
-                    names
-                        .iter()
-                        .map(|name| serde_json::to_vec(name).map_or(usize::MAX, |v| v.len())),
-                )
-                .fold(0usize, usize::saturating_add);
-            if bytes > MAX_PAGE_BYTES && limit > 1 {
-                limit /= 2;
+        }
+        Ok(TimelinePage {
+            room_id: room.to_owned(),
+            items,
+            next_cursor: token.map(|token| self.remember(room, token)),
+            names,
+        })
+    }
+
+    /// Up to `limit` events older than `from` (or the newest), projected and
+    /// filtered by `events`, oldest first.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_chunk(
+        &self,
+        joined: &matrix_sdk::Room,
+        room: &str,
+        from: Option<&str>,
+        limit: usize,
+        ignored: &std::collections::BTreeSet<OwnedUserId>,
+        events: &TimelineEvents,
+        lookups: &mut usize,
+    ) -> Result<Chunk, ErrorCode> {
+        let mut options = MessagesOptions::backward().from(from);
+        options.limit = UInt::try_from(limit as u64).unwrap_or(UInt::MIN);
+        // The answer then carries the member events of the people the
+        // page shows, for their display names.
+        options.filter.lazy_load_options = LazyLoadOptions::Enabled {
+            include_redundant_members: true,
+        };
+        let messages = joined
+            .messages(options)
+            .await
+            .map_err(|_| ErrorCode::Unavailable)?;
+        // Backward pagination returns newest first; pages read oldest first.
+        let mut items = Vec::new();
+        for event in messages.chunk.iter().rev() {
+            if ignored_content(event, ignored) {
                 continue;
             }
-            if bytes > MAX_PAGE_BYTES {
-                // One event over the budget cannot happen with projected
-                // bodies; drop it rather than exceed the frame.
-                items.clear();
-                names.clear();
-            }
-            let next_cursor = messages
-                .end
-                .filter(|_| !messages.chunk.is_empty())
-                .map(|token| self.remember(room, token));
-            return Ok(TimelinePage {
-                room_id: room.to_owned(),
-                items,
-                next_cursor,
-                names,
-            });
+            self.remember_sender(room, event);
+            let item = match edit_claim(event) {
+                Some(claim) => {
+                    self.checked_edit(joined, room, &messages.chunk, event, claim, lookups)
+                        .await
+                }
+                None => project(event),
+            };
+            items.extend(item.filter(|item| crate::timeline_filter::shown(item, events)));
         }
+        // Only the members the kept items name: a page of many chunks keeps
+        // its member events bounded by what it shows.
+        let named = named_users(&items);
+        let state = messages
+            .state
+            .into_iter()
+            .filter(|raw| {
+                raw.get_field::<String>("state_key")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|user| named.contains(user.as_str()))
+            })
+            .collect();
+        let end = messages.end.filter(|_| !messages.chunk.is_empty());
+        Ok(Chunk { items, state, end })
     }
+}
+
+/// One fetched chunk of history, projected and filtered, oldest first.
+struct Chunk {
+    items: Vec<TimelineItem>,
+    /// The member events of the people the items name.
+    state: Vec<Raw<AnyStateEvent>>,
+    /// The token for older history; `None` at the start of the room.
+    end: Option<String>,
+}
+
+/// The serialized size of a page's items and names.
+fn page_bytes(items: &[TimelineItem], names: &[SenderName]) -> usize {
+    items
+        .iter()
+        .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |v| v.len()))
+        .chain(
+            names
+                .iter()
+                .map(|name| serde_json::to_vec(name).map_or(usize::MAX, |v| v.len())),
+        )
+        .fold(0usize, usize::saturating_add)
 }
 
 #[cfg(test)]

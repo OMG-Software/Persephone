@@ -4,11 +4,11 @@
 #![cfg(feature = "dev-disposable-servers")]
 
 use persephone_contracts::{
-    AccountState, AccountStatus, ContactStatus, ContactTrust, DisplayName, HistoryVisibility,
-    IdentityState, JoinRule, LevelKey, Membership, NoticeKind, PendingMessage, PendingState,
-    PowerLevel, RoomChange, RoomEncryption, RoomIdentityChanges, RoomList, RoomMembers,
-    RoomSettings, SecurityError, SecurityOperation, SecurityStatus, SendFailure, SenderName,
-    SignInError, StoreState, TimelineItem, TimelinePage,
+    AccountSettings, AccountState, AccountStatus, ContactStatus, ContactTrust, DisplayName,
+    HistoryVisibility, IdentityState, JoinRule, LevelKey, Membership, NoticeKind, PendingMessage,
+    PendingState, PowerLevel, RoomChange, RoomEncryption, RoomIdentityChanges, RoomList,
+    RoomMembers, RoomSettings, SecurityError, SecurityOperation, SecurityStatus, SendFailure,
+    SenderName, SignInError, StoreState, TimelineEvents, TimelineItem, TimelinePage,
 };
 use persephone_core::{
     Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
@@ -349,6 +349,86 @@ impl wiremock::Respond for LazyHistory {
         ResponseTemplate::new(200)
             .set_body_json(json!({"start":"history","end":"older","chunk":chunk,"state":state}))
     }
+}
+
+/// `/messages` for `ROOM` during a call: each chunk is one message, then as
+/// many call candidates as the request's `limit` leaves room for. A chunk
+/// from `t<n>` ends at `t<n+1>`; with `chunks` set, history starts after
+/// that many chunks. It counts the requests.
+struct CallBurst {
+    chunks: Option<usize>,
+    requests: Arc<AtomicUsize>,
+}
+
+impl wiremock::Respond for CallBurst {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        let query = |name: &str| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        };
+        let at: usize = query("from")
+            .and_then(|from| from.strip_prefix('t')?.parse().ok())
+            .unwrap_or(0);
+        if self.chunks.is_some_and(|chunks| at >= chunks) {
+            return ResponseTemplate::new(200).set_body_json(json!({"start":"x","chunk":[]}));
+        }
+        let limit: usize = query("limit")
+            .and_then(|limit| limit.parse().ok())
+            .unwrap_or(10);
+        let time = 1_000_000 - at as u64 * 1_000;
+        let mut chunk = vec![
+            json!({"type":"m.room.message","sender":USER,"event_id":format!("$said{at}"),
+            "origin_server_ts":time,"content":{"msgtype":"m.text","body":format!("message {at}")}}),
+        ];
+        chunk.extend((1..limit).map(|n| {
+            json!({"type":"m.call.candidates","sender":USER,
+            "event_id":format!("$candidate{at}_{n}"),"origin_server_ts":time - n as u64,
+            "content":{"call_id":"c","party_id":"p","version":"1","candidates":[]}})
+        }));
+        ResponseTemplate::new(200).set_body_json(json!({
+            "start":format!("t{at}"),"end":format!("t{}", at + 1),
+            "chunk":in_room(ROOM, Value::Array(chunk)),"state":[]
+        }))
+    }
+}
+
+/// A core signed in to `ROOM`, whose `/messages` answers with `CallBurst`.
+fn core_with_call_burst(
+    server: &Homeserver,
+    dir: &Path,
+    chunks: Option<usize>,
+) -> (Core, Arc<AtomicUsize>) {
+    let requests = Arc::new(AtomicUsize::new(0));
+    server.runtime.block_on(
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/rooms/[^/]+/messages$"))
+            .respond_with(CallBurst {
+                chunks,
+                requests: Arc::clone(&requests),
+            })
+            .with_priority(1)
+            .mount(&server.server),
+    );
+    let core = make_core(dir, Fixed::new(Ok(())));
+    sign_in_to_room(&core, server);
+    (core, requests)
+}
+
+/// The event IDs of a page's items, oldest first.
+fn page_ids(page: &TimelinePage) -> Vec<String> {
+    page.items
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::Message { event_id, .. } | TimelineItem::Other { event_id, .. } => {
+                Some(event_id.clone())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// `GET /rooms/{roomId}/state/{eventType}/` as Matrix v1.19 answers it for
@@ -2153,6 +2233,106 @@ fn given_lazy_loaded_members_then_a_page_lists_the_display_names_it_shows() {
             },
         ]
     );
+}
+
+/// GIVEN a room whose history is mostly call connection details WHEN they
+/// are switched off THEN the core leaves them out and fetches older chunks
+/// until history starts, so the page holds the messages; with the switch
+/// on, the first chunk fills the page with them.
+#[test]
+fn given_call_details_switched_off_then_a_page_skips_them_and_reaches_older_messages() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        false,
+        true,
+    );
+    let dir = TempDir::new().unwrap();
+    let (core, requests) = core_with_call_burst(&server, dir.path(), Some(3));
+    let _locked = LockOnDrop(&core);
+    let page = |core: &Core| -> TimelinePage {
+        value(call(
+            core,
+            Call::TimelinePage {
+                room_id: ROOM.into(),
+                cursor: None,
+            },
+        ))
+    };
+    let shown = page(&core);
+    assert_eq!(shown.items.len(), 100, "the switch is on: one full chunk");
+    assert!(shown.next_cursor.is_some());
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                timeline_events: TimelineEvents {
+                    call_signalling: false,
+                    ..TimelineEvents::default()
+                },
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    requests.store(0, Ordering::SeqCst);
+    let hidden = page(&core);
+    assert_eq!(page_ids(&hidden), ["$said2", "$said1", "$said0"]);
+    assert_eq!(
+        hidden.next_cursor, None,
+        "history starts after three chunks"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 4);
+}
+
+/// GIVEN a history of call connection details with no end WHEN they are
+/// switched off THEN one page makes at most `MAX_PAGE_FETCHES` requests and
+/// keeps a cursor for the rest.
+#[test]
+fn given_endless_hidden_events_then_a_page_stops_after_its_fetch_limit() {
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        false,
+        true,
+    );
+    let dir = TempDir::new().unwrap();
+    let (core, requests) = core_with_call_burst(&server, dir.path(), None);
+    let _locked = LockOnDrop(&core);
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                timeline_events: TimelineEvents {
+                    call_signalling: false,
+                    ..TimelineEvents::default()
+                },
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    requests.store(0, Ordering::SeqCst);
+    let page: TimelinePage = value(call(
+        &core,
+        Call::TimelinePage {
+            room_id: ROOM.into(),
+            cursor: None,
+        },
+    ));
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        persephone_core::matrix_views::MAX_PAGE_FETCHES
+    );
+    assert_eq!(
+        page.items.len(),
+        persephone_core::matrix_views::MAX_PAGE_FETCHES
+    );
+    assert!(page.next_cursor.is_some(), "the rest stays reachable");
 }
 
 /// GIVEN Sliding Sync, which sends other people's member events only in

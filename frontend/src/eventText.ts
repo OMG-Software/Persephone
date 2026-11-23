@@ -158,7 +158,9 @@ export function otherSwitch(event: OtherEvent): keyof TimelineEvents | null {
 /**
  * Whether the timeline shows `item` with these settings. Messages, images,
  * files, gaps and encryption notices always show: hiding a message that
- * could not be decrypted would hide that it exists.
+ * could not be decrypted would hide that it exists. The core applies the
+ * same rules before it fills a page (`crates/core/src/timeline_filter.rs`);
+ * the page applies them again to items it marks deleted later.
  */
 export function itemShown(item: ShownItem, events: TimelineEvents): boolean {
   switch (item.kind) {

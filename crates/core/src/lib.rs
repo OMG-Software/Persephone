@@ -72,6 +72,7 @@ pub mod session;
 pub mod sessions;
 pub mod settings;
 pub mod store;
+pub mod timeline_filter;
 mod turns;
 pub mod ui_host;
 pub mod vault;
@@ -1052,10 +1053,17 @@ impl Core {
                     }
                     Source::Locked => Err(ErrorCode::Locked),
                     Source::SignedOut => Err(ErrorCode::NotFound),
-                    Source::Matrix(lease, client) => lease.stores().block_on(
+                    Source::Matrix(lease, client) => lease.stores().block_on(async {
+                        // Unreadable settings show every kind: the page
+                        // filters again with the settings it has.
+                        let events = settings::load(lease.stores())
+                            .await
+                            .map(|settings| settings.timeline_events)
+                            .unwrap_or_default();
                         self.matrix
-                            .timeline_page(&client, room_id, cursor.as_deref()),
-                    ),
+                            .timeline_page(&client, room_id, cursor.as_deref(), &events)
+                            .await
+                    }),
                 };
                 match page {
                     Ok(page) => ok(&page),
@@ -1518,10 +1526,23 @@ impl Core {
                     Call::JumpToDate {
                         room_id,
                         timestamp_ms,
-                    } => json(
-                        room_tools::jump_to_date(&client, &self.matrix, room_id, *timestamp_ms)
+                    } => {
+                        // Unreadable settings show every kind.
+                        let events = settings::load(stores)
+                            .await
+                            .map(|settings| settings.timeline_events)
+                            .unwrap_or_default();
+                        json(
+                            room_tools::jump_to_date(
+                                &client,
+                                &self.matrix,
+                                room_id,
+                                *timestamp_ms,
+                                &events,
+                            )
                             .await,
-                    ),
+                        )
+                    }
                     Call::EventContext { room_id, event_id } => json(
                         room_tools::event_context(&client, &self.matrix, room_id, event_id).await,
                     ),

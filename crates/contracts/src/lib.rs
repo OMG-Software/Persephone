@@ -1557,8 +1557,9 @@ impl<'de> Deserialize<'de> for Theme {
 }
 
 /// Which kinds of room changes and other events the timeline shows, one
-/// switch each. Only the page reads them: the core sends every event either
-/// way. Messages, images, files and encryption notices have no switch.
+/// switch each. The core leaves out what they hide before it fills a page,
+/// so hidden events do not crowd out messages; the page applies them again.
+/// Messages, images, files and encryption notices have no switch.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TimelineEvents {
