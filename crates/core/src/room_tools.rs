@@ -11,8 +11,8 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    AttachmentKind, AttachmentPage, FocusedTimeline, LocalSearchFilters, PinnedMessages,
-    TimelineItem, TimelinePage,
+    AttachmentKind, AttachmentPage, FocusedTimeline, LocalSearchFilters, NoticeKind,
+    PinnedMessages, TimelineItem, TimelinePage,
 };
 use persephone_core_protocol::{ErrorCode, MAX_EVENT_ID_BYTES, MAX_TIMELINE_EVENTS};
 use std::time::Duration;
@@ -241,7 +241,21 @@ async fn focused_context(
 }
 
 /// Skip hidden messages and relation-only events that have no timeline row.
+/// Prefer a line no setting hides (a message, image, file or encryption
+/// notice): a room change, other event or deleted line can be switched off
+/// on the page, so it is the target only when nothing else is near.
 fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option<&str> {
+    date_candidate(items, timestamp, backward, true)
+        .or_else(|| date_candidate(items, timestamp, backward, false))
+}
+
+/// The nearest item to `timestamp`; with `fixed`, only one no setting hides.
+fn date_candidate(
+    items: &[TimelineItem],
+    timestamp: u64,
+    backward: bool,
+    fixed: bool,
+) -> Option<&str> {
     let redacted: std::collections::BTreeSet<&str> = items
         .iter()
         .filter_map(|item| {
@@ -253,7 +267,7 @@ fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option
         })
         .collect();
     let candidates = items.iter().filter_map(|item| {
-        let (id, time) = match item {
+        let (id, time, always) = match item {
             TimelineItem::Message {
                 event_id,
                 origin_server_ts,
@@ -268,13 +282,18 @@ fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option
                 event_id,
                 origin_server_ts,
                 ..
-            }
-            | TimelineItem::Notice {
+            } => (event_id, origin_server_ts.as_ref()?.get(), true),
+            TimelineItem::Notice {
                 event_id,
                 origin_server_ts,
+                notice,
                 ..
-            }
-            | TimelineItem::State {
+            } => (
+                event_id,
+                origin_server_ts.as_ref()?.get(),
+                *notice != NoticeKind::Deleted,
+            ),
+            TimelineItem::State {
                 event_id,
                 origin_server_ts,
                 ..
@@ -283,10 +302,11 @@ fn date_target(items: &[TimelineItem], timestamp: u64, backward: bool) -> Option
                 event_id,
                 origin_server_ts,
                 ..
-            } => (event_id, origin_server_ts.as_ref()?.get()),
+            } => (event_id, origin_server_ts.as_ref()?.get(), false),
             _ => return None,
         };
         (!redacted.contains(id.as_str())
+            && (always || !fixed)
             && if backward {
                 time <= timestamp
             } else {
@@ -587,6 +607,35 @@ pub async fn attachments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN a call's other lines nearer the date than a message WHEN a date
+    /// target is chosen THEN it is the message, which no setting hides; with
+    /// only other lines near, the nearest of them is the target.
+    #[test]
+    fn given_hideable_lines_near_a_date_then_a_message_is_the_target() {
+        use persephone_contracts::{OtherEvent, UnixMillis};
+        let other = |id: &str, ts: u64| TimelineItem::Other {
+            event_id: id.into(),
+            sender: "@a:example.org".into(),
+            origin_server_ts: Some(UnixMillis::new(ts).unwrap()),
+            event: OtherEvent::CallSignalling,
+            event_type: "m.call.candidates".into(),
+            state: false,
+            deleted: false,
+        };
+        let message = TimelineItem::Message {
+            event_id: "$message".into(),
+            sender: "@a:example.org".into(),
+            body: "hi".into(),
+            origin_server_ts: Some(UnixMillis::new(30).unwrap()),
+            reply_to: None,
+        };
+        let items = [other("$early", 10), other("$near", 20), message];
+        assert_eq!(date_target(&items, 15, false), Some("$message"));
+        assert_eq!(date_target(&items, 35, true), Some("$message"));
+        assert_eq!(date_target(&items[..2], 15, false), Some("$near"));
+        assert_eq!(date_target(&items, 5, true), None);
+    }
 
     #[test]
     /// Check event ID rejection before any request can reach the homeserver.

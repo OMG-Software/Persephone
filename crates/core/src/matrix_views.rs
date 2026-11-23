@@ -277,7 +277,7 @@ fn event_kind(kind: &str) -> OtherEvent {
         "m.poll.response" | "org.matrix.msc3381.poll.response" => OtherEvent::PollVote,
         "m.poll.end" | "org.matrix.msc3381.poll.end" => OtherEvent::PollEnded,
         "m.sticker" => OtherEvent::Sticker,
-        "m.beacon" | "org.matrix.msc3672.beacon" => OtherEvent::Location,
+        "m.location" | "m.beacon" | "org.matrix.msc3672.beacon" => OtherEvent::Location,
         "m.room.message" => OtherEvent::Message,
         _ => OtherEvent::Event,
     }
@@ -1609,6 +1609,7 @@ mod tests {
             ("m.poll.response", OtherEvent::PollVote),
             ("m.poll.end", OtherEvent::PollEnded),
             ("m.sticker", OtherEvent::Sticker),
+            ("m.location", OtherEvent::Location),
             ("m.beacon", OtherEvent::Location),
             ("org.example.custom", OtherEvent::Event),
         ] {
