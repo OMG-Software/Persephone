@@ -116,6 +116,9 @@ pub struct Log {
     /// Held for the whole of [`Log::turn_on`] and [`Log::turn_off`], so an
     /// "on" waits until an "off" has drained the old writer: two writers on
     /// one file could split each other's lines. Never taken by `record`.
+    /// It also keeps `on` and the `log` crate's level (`follow_switch`)
+    /// together: only these two calls change them after `install`, so an
+    /// "on" and an "off" cannot interleave their changes.
     lifecycle: Mutex<()>,
     /// Goes up with each "off" request (see [`Log::epoch`]).
     epoch: AtomicU64,
