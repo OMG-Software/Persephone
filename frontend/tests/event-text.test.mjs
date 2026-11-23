@@ -16,6 +16,7 @@ test('GIVEN other events with fixed text WHEN described THEN the line names the 
     ['verification_done', `${A} says they finished verification`],
     ['call_started', `${A} started a call`],
     ['call_left', `${A} left the call`],
+    ['call_updated', `${A} updated their call membership`],
     ['location_stopped', `${A} stopped sharing their location`],
     ['poll_vote', `${A} voted in a poll`],
     ['sticker', `${A} sent a sticker`],
@@ -52,6 +53,29 @@ test('GIVEN deleted other events WHEN described THEN each names what was deleted
   ];
   for (const [event, expected] of cases) {
     assert.equal(line(deletedParts(A, event, '<b>x</b>')), expected, event);
+  }
+});
+
+test('GIVEN every other kind WHEN its switch is read THEN it is the switch its label names', () => {
+  const expected = {
+    verification_request: 'verification', verification_ready: 'verification', verification_start: 'verification',
+    verification_step: 'verification', verification_cancelled: 'verification', verification_done: 'verification',
+    call_started: 'calls', call_answered: 'calls', call_declined: 'calls', call_ended: 'calls',
+    call_joined: 'calls', call_left: 'calls', call_updated: 'callSignalling', call_signalling: 'callSignalling',
+    poll_started: 'polls', poll_vote: 'polls', poll_ended: 'polls', sticker: 'stickers',
+    location: 'locations', location_stopped: 'locations', space_child: 'spaces', space_parent: 'spaces',
+    widget: 'widgets', third_party_invite: 'invitations', message: null, event: 'otherEvents', state: 'otherEvents'
+  };
+  for (const [event, key] of Object.entries(expected)) {
+    assert.equal(otherSwitch(event), key, event);
+  }
+  // GIVEN each switch off THEN exactly its kinds go.
+  const other = (event) => ({ kind: 'other', event_id: '$o', sender: A, origin_server_ts: null, event, event_type: 't', state: false, deleted: false });
+  for (const key of new Set(Object.values(expected).filter(Boolean))) {
+    const events = { ...DEFAULT_SETTINGS.timelineEvents, [key]: false };
+    for (const [event, owner] of Object.entries(expected)) {
+      assert.equal(itemShown(other(event), events), owner !== key, `${event} with ${key} off`);
+    }
   }
 });
 

@@ -283,24 +283,34 @@ fn event_kind(kind: &str) -> OtherEvent {
     }
 }
 
+/// Whether call member content has a membership: a non-empty
+/// `memberships` list, or, in the older form, any content.
+fn in_call(content: Option<&serde_json::Value>) -> bool {
+    content
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|content| match content.get("memberships") {
+            Some(memberships) => memberships.as_array().is_some_and(|list| !list.is_empty()),
+            None => !content.is_empty(),
+        })
+}
+
 /// The kind of a state event that is not a shown room change, by its type.
-/// A call member event with a membership in its content is a join; an empty
-/// one, or one with no memberships, is a leave.
-fn state_kind(kind: &str, content: Option<&serde_json::Value>) -> OtherEvent {
+/// A call member event is a join when it adds a membership and a leave when
+/// it removes the last one. One that keeps the sender in the call, or out
+/// of it, as the previous content (`prev`) shows, is an update. Without the
+/// previous content, the current content decides.
+fn state_kind(
+    kind: &str,
+    content: Option<&serde_json::Value>,
+    prev: Option<&serde_json::Value>,
+) -> OtherEvent {
     match kind {
         "m.call.member" | "org.matrix.msc3401.call.member" => {
-            let joined = content
-                .and_then(serde_json::Value::as_object)
-                .is_some_and(|content| match content.get("memberships") {
-                    Some(memberships) => {
-                        memberships.as_array().is_some_and(|list| !list.is_empty())
-                    }
-                    None => !content.is_empty(),
-                });
-            if joined {
-                OtherEvent::CallJoined
-            } else {
-                OtherEvent::CallLeft
+            let now = in_call(content);
+            match (prev.map(|prev| in_call(Some(prev))), now) {
+                (Some(before), now) if before == now => OtherEvent::CallUpdated,
+                (_, true) => OtherEvent::CallJoined,
+                (_, false) => OtherEvent::CallLeft,
             }
         }
         "m.beacon_info" | "org.matrix.msc3672.beacon_info" => {
@@ -360,7 +370,12 @@ fn other_item(
     let deleted = !state && redacted(event);
     let content = raw.get_field::<serde_json::Value>("content").ok().flatten();
     let (event_kind, event_type) = if state {
-        let found = state_kind(&kind, content.as_ref());
+        let prev = raw
+            .get_field::<serde_json::Value>("unsigned")
+            .ok()
+            .flatten()
+            .and_then(|unsigned| unsigned.get("prev_content").cloned());
+        let found = state_kind(&kind, content.as_ref(), prev.as_ref());
         let neutral = matches!(
             found,
             OtherEvent::SpaceChild | OtherEvent::SpaceParent | OtherEvent::Widget
@@ -1763,6 +1778,11 @@ mod tests {
                 OtherEvent::LocationStopped,
             ),
             (
+                "m.beacon_info",
+                serde_json::json!({ "live": false }),
+                OtherEvent::LocationStopped,
+            ),
+            (
                 "m.call.member",
                 serde_json::json!({ "application": "m.call", "call_id": "" }),
                 OtherEvent::CallJoined,
@@ -1788,6 +1808,33 @@ mod tests {
                 state(kind, content),
                 Some((expected, kind.into())),
                 "{kind}"
+            );
+        }
+        // GIVEN the previous call member content THEN a join adds the first
+        // membership, a leave removes the last, and anything else is an
+        // update: a second device, or one of two leaving, is no join.
+        let one = serde_json::json!({ "memberships": [{ "call_id": "", "device_id": "A" }] });
+        let two = serde_json::json!({ "memberships": [
+            { "call_id": "", "device_id": "A" }, { "call_id": "", "device_id": "B" }
+        ] });
+        let none = serde_json::json!({ "memberships": [] });
+        for (content, prev, expected) in [
+            (&one, &none, OtherEvent::CallJoined),
+            (&none, &one, OtherEvent::CallLeft),
+            (&two, &one, OtherEvent::CallUpdated),
+            (&one, &two, OtherEvent::CallUpdated),
+            (&none, &none, OtherEvent::CallUpdated),
+        ] {
+            assert_eq!(
+                other_of(&state_event(
+                    "org.matrix.msc3401.call.member",
+                    A,
+                    "_@alice:example.org_A",
+                    content.clone(),
+                    Some(prev.clone()),
+                )),
+                Some((expected, "org.matrix.msc3401.call.member".into())),
+                "{content} after {prev}"
             );
         }
         // A member event that changes nothing is not a line: nothing

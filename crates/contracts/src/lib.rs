@@ -332,6 +332,9 @@ pub enum OtherEvent {
     CallJoined,
     /// A call member state event without a membership.
     CallLeft,
+    /// A call member state event that keeps its sender in the call, or out
+    /// of it: for example a second device joining.
+    CallUpdated,
     PollStarted,
     PollVote,
     PollEnded,
@@ -1589,7 +1592,8 @@ pub struct TimelineEvents {
     /// Calls started, answered, declined and ended, and members joining or
     /// leaving a call.
     pub calls: bool,
-    /// Call connection details ([`OtherEvent::CallSignalling`]).
+    /// Call connection details and call membership updates
+    /// ([`OtherEvent::CallSignalling`], [`OtherEvent::CallUpdated`]).
     pub call_signalling: bool,
     /// Polls started and ended, and votes.
     pub polls: bool,

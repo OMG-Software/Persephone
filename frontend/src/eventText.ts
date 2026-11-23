@@ -27,6 +27,7 @@ const OTHER_TEXT: Record<OtherEvent, string | null> = {
   call_signalling: ' sent call connection details',
   call_joined: ' joined the call',
   call_left: ' left the call',
+  call_updated: ' updated their call membership',
   poll_started: ' started a poll',
   poll_vote: ' voted in a poll',
   poll_ended: ' ended a poll',
@@ -102,7 +103,21 @@ export function deletedParts(sender: string, event: OtherEvent, eventType: strin
  * The switch for each kind. A message has none: a message of a type this
  * build has no text for is still a message, and messages always show.
  */
-const OTHER_SWITCH: Record<OtherEvent, keyof TimelineEvents | null> = {
+type OtherSwitch = Extract<
+  keyof TimelineEvents,
+  | 'verification'
+  | 'calls'
+  | 'callSignalling'
+  | 'polls'
+  | 'stickers'
+  | 'locations'
+  | 'spaces'
+  | 'widgets'
+  | 'invitations'
+  | 'otherEvents'
+>;
+
+const OTHER_SWITCH: Record<OtherEvent, OtherSwitch | null> = {
   verification_request: 'verification',
   verification_ready: 'verification',
   verification_start: 'verification',
@@ -116,6 +131,7 @@ const OTHER_SWITCH: Record<OtherEvent, keyof TimelineEvents | null> = {
   call_joined: 'calls',
   call_left: 'calls',
   call_signalling: 'callSignalling',
+  call_updated: 'callSignalling',
   poll_started: 'polls',
   poll_vote: 'polls',
   poll_ended: 'polls',
@@ -165,7 +181,7 @@ export function itemShown(item: ShownItem, events: TimelineEvents): boolean {
 export const OTHER_SWITCHES: readonly { key: keyof TimelineEvents; label: string }[] = [
   { key: 'verification', label: 'Verification requests and steps' },
   { key: 'calls', label: 'Calls, and people joining or leaving them' },
-  { key: 'callSignalling', label: 'Call connection details' },
+  { key: 'callSignalling', label: 'Call connection details and membership updates' },
   { key: 'polls', label: 'Polls and votes' },
   { key: 'stickers', label: 'Stickers' },
   { key: 'locations', label: 'Shared locations' },
