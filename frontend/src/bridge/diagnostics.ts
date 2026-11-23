@@ -29,6 +29,9 @@ let on = false;
 let waiting: PageRecord[] = [];
 let dropped = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
+// One batch at a time: while the core does not answer, later batches wait
+// in `waiting` (bounded) instead of piling up as calls.
+let flying = false;
 const listeners = new Set<(on: boolean) => void>();
 
 const encoder = new TextEncoder();
@@ -136,14 +139,18 @@ export function takeBatch(): PageRecord[] {
 
 async function flush(): Promise<void> {
   timer = null;
-  if (!on) return;
+  // The flight that runs schedules the next batch when it ends.
+  if (!on || flying) return;
   const records = takeBatch();
   if (records.length > 0) {
+    flying = true;
     try {
       await invoke('diagnostic_records', { records });
     } catch {
       // Best effort, but counted: the next batch reports the loss.
       if (on) dropped += records.length;
+    } finally {
+      flying = false;
     }
   }
   if (on && (waiting.length > 0 || dropped > 0) && timer === null) {

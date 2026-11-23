@@ -7,6 +7,7 @@
   // refuse there. The core writes the file; the page only shows where it is.
   let on = $state(false);
   let full = $state(false);
+  let failed = $state(false);
   let available = $state(false);
   let path = $state<string | null>(null);
   let loaded = $state(false);
@@ -21,15 +22,26 @@
     core_unavailable: 'The diagnostic log cannot be changed now, or its file could not be opened.'
   };
 
+  // Reads can overlap (mount, change events, the timer, a change): only the
+  // newest one may set the panel, so an older answer never shows a stale
+  // state or stops the timer.
+  let latestRead = 0;
+
   async function load() {
+    const read = ++latestRead;
     try {
       const status = await diagnosticsStatus();
+      if (read !== latestRead) return;
+      // A newer good read replaces an old read error.
+      failure = null;
       on = status.on;
       full = status.full;
+      failed = status.failed;
       available = status.available;
       path = status.path;
       loaded = true;
     } catch {
+      if (read !== latestRead) return;
       failure = 'The diagnostic log state could not be read.';
     }
   }
@@ -45,12 +57,13 @@
     return onDiagnosticsChange(() => load());
   });
 
-  // The file can reach its size limit while the log stays on, and the core
-  // sends no change for that: read the state again while it is on and not
-  // full, so the panel shows when writing stopped.
+  // The file can reach its size limit, or a write can fail, while the log
+  // stays on, and the core sends no change for that: read the state again
+  // while it is on and still writing, so the panel shows when writing
+  // stopped.
   const FULL_CHECK_MS = 10_000;
   $effect(() => {
-    if (!on || full) return;
+    if (!on || full || failed) return;
     const timer = setInterval(load, FULL_CHECK_MS);
     return () => clearInterval(timer);
   });
@@ -99,6 +112,12 @@
        run stays until the next start, also after the panel was closed. -->
   {#if path}
     <p class="note">File: <span class="mono diagnostics-path">{path}</span></p>
+    {#if failed}
+      <p role="status" class="note">
+        Persephone could not write to the file, for example because the disk is full, so the file may
+        end early. Nothing more is written. Turn the log off and on again to try again.
+      </p>
+    {/if}
     {#if full}
       <p role="status" class="note">
         The file reached its size limit (256 MiB). Nothing more is written until Persephone next
@@ -106,7 +125,7 @@
       </p>
     {/if}
     <p class="note">
-      {on ? 'On.' : 'Off. The file keeps what was written.'} When Persephone next starts, it overwrites
+      {on ? 'On.' : 'Off. The file keeps what was written.'} When Persephone next starts with this profile, it overwrites
       the file and deletes it. On SSDs and some file systems, overwriting cannot guarantee that the old
       data is gone from the disk.
     </p>

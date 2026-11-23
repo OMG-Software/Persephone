@@ -183,7 +183,7 @@ impl Diagnostics {
 }
 
 /// `text` with control characters as spaces, cut to `limit` bytes on a
-/// character boundary.
+/// character boundary, with `…` when cut.
 fn clean(text: &str, limit: usize) -> String {
     let mut out = String::with_capacity(text.len().min(limit));
     for character in text.chars() {
@@ -193,6 +193,7 @@ fn clean(text: &str, limit: usize) -> String {
             character
         };
         if out.len() + character.len_utf8() > limit {
+            mark_cut(&mut out, limit);
             break;
         }
         out.push(character);
@@ -200,8 +201,24 @@ fn clean(text: &str, limit: usize) -> String {
     out
 }
 
-/// `args` formatted into at most `limit` bytes, on a character boundary.
-/// The formatting stops at the limit, so a huge value is never built whole.
+/// Marks `out`, which was cut, with `…`, within `limit` bytes: a reader can
+/// tell a cut record from a whole one. The core marks its own cuts the same
+/// way; the marker counts against the limit here, because the core refuses
+/// a record over the protocol's limit.
+fn mark_cut(out: &mut String, limit: usize) {
+    const MARK: char = '…';
+    while !out.is_empty() && out.len() + MARK.len_utf8() > limit {
+        out.pop();
+    }
+    if out.len() + MARK.len_utf8() <= limit {
+        out.push(MARK);
+    }
+}
+
+/// `args` formatted into at most `limit` bytes, on a character boundary,
+/// with `…` when cut. The formatting stops at the limit, so a huge value is
+/// never built whole. A `Display` error of the value also ends with `…`:
+/// its text is not whole either.
 fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
     struct Bounded {
         out: String,
@@ -227,7 +244,9 @@ fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
         out: String::new(),
         limit,
     };
-    let _ = std::fmt::write(&mut bounded, args);
+    if std::fmt::write(&mut bounded, args).is_err() {
+        mark_cut(&mut bounded.out, limit);
+    }
     bounded.out
 }
 
@@ -364,11 +383,13 @@ mod tests {
     /// character boundary.
     #[test]
     fn given_long_text_then_cut() {
-        assert_eq!(clean("ééé", 3), "é");
-        assert_eq!(
-            clean(&"a".repeat(5000), MAX_DIAGNOSTIC_MESSAGE_BYTES).len(),
-            2048
-        );
+        assert_eq!(clean("ééé", 4), "…");
+        assert_eq!(clean("aéé", 5), "aéé");
+        assert_eq!(clean("aééé", 5), "a…");
+        assert_eq!(clean("ééé", 6), "ééé");
+        let long = clean(&"a".repeat(5000), MAX_DIAGNOSTIC_MESSAGE_BYTES);
+        assert_eq!(long.len(), MAX_DIAGNOSTIC_MESSAGE_BYTES);
+        assert!(long.ends_with('…'));
     }
 
     /// GIVEN a value whose text is far over the limit WHEN it is formatted
@@ -378,6 +399,7 @@ mod tests {
         let value = vec!["é"; 10_000];
         let text = format_bounded(format_args!("{value:?}"), 101);
         assert!(text.len() <= 101 && text.len() > 90, "{}", text.len());
+        assert!(text.ends_with('…'), "{text}");
         assert_eq!(format_bounded(format_args!("{}", 42), 101), "42");
     }
 

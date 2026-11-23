@@ -69,7 +69,8 @@ can apply one redaction rule, one size limit and one deletion rule.
   IDs, server names, device IDs, IP addresses and the times and types of
   events; that it never holds passwords, tokens or keys on purpose; that
   third-party text is filtered but the filter cannot be complete; and that
-  the file is deleted at the next start. "No" is the default answer. While
+  the file is deleted at the next start of this profile. "No" is the
+  default answer. While
   one question is open, a second request is refused with `limit_exceeded`.
 * Turning it off needs no question. The file stays until the next start, so
   the user can send it (owner's choice).
@@ -89,12 +90,20 @@ can apply one redaction rule, one size limit and one deletion rule.
   it overwrites the whole length with random bytes, flushes to disk, truncates
   and removes the file (owner's choice). Settings and `PRIVACY.md` say that
   this is best effort: an SSD or a copy-on-write file system can keep old
-  blocks that no application can reach.
+  blocks that no application can reach. Each profile has its own file, and
+  only the started profile's file is erased: a profile that is not started
+  again keeps its file until it is started. `PRIVACY.md`, the
+  warning and Settings say so.
 * The file is opened for append, without following links, and on Unix with
   mode `0600`. The directory is created with mode `0700` on Unix.
 * The file is at most 256 MiB. At the limit the core writes one
   `log_full` record and stops writing until the next start. The switch stays
   on; `diagnostics_status` reports `full`, and Settings says so.
+* A failed write, flush or sync (a full disk, a lost drive) stops the
+  writing too, because the file's end is then unknown. `diagnostics_status`
+  reports `failed`, Settings says that the file may end early, and no more
+  records are built. Turning the log off and on again opens the file again
+  and clears `failed`.
 
 ### Records
 
@@ -159,7 +168,10 @@ including field names and values from other processes:
   `access_token=`, `token=`, `password=` and `Bearer `, JSON string values of
   members with the names above, and recovery keys (groups of four base58
   characters that start with `Es`).
-* Strings are cut to 4 KiB. A record is cut to 16 KiB.
+* Strings are cut to 4 KiB. A record is cut to 16 KiB. Text that any
+  process cuts ends with `…`, so a cut record can be told from a whole
+  one; in the UI host and the call worker the `…` counts against the
+  protocol's limit.
 * The core never formats a secret type into a record. Secret holders keep
   `Debug` implementations that hide their content.
 

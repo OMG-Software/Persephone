@@ -98,6 +98,9 @@ struct Shared {
     queued: AtomicUsize,
     /// The file reached [`MAX_FILE_BYTES`] in this run.
     full: AtomicBool,
+    /// A write, flush or sync of the file failed (a full disk, a lost
+    /// drive): the writer wrote nothing more. Cleared when turned on again.
+    failed: AtomicBool,
 }
 
 struct Writer {
@@ -159,6 +162,13 @@ impl Log {
         self.shared.full.load(Ordering::Relaxed)
     }
 
+    /// Whether writing to the file failed since the log was last turned on,
+    /// so the file may end early. Nothing more is written until it is
+    /// turned on again.
+    pub fn has_failed(&self) -> bool {
+        self.shared.failed.load(Ordering::Relaxed)
+    }
+
     /// The file this run wrote to, if the log was ever on in this run. The
     /// file stays until the next start, also after the log is turned off.
     pub fn path(&self) -> Option<PathBuf> {
@@ -179,6 +189,14 @@ impl Log {
         self.epoch.load(Ordering::SeqCst)
     }
 
+    /// Cancels an "on" that still waits for the user, without waiting for
+    /// the writer: for an "off" that is refused because another one runs.
+    /// The refused "off" still gets an error, so the page does not take
+    /// the log to be off.
+    pub fn cancel_pending_on(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Like [`Log::turn_on`], but does nothing and returns `false` when the
     /// log was turned off (or asked to be off) after `epoch` was read: an
     /// "off" sent while the question was open wins over the "yes".
@@ -193,6 +211,8 @@ impl Log {
         }
         let file = open_for_append(path)?;
         let written = file.metadata()?.len();
+        // A new writer on a newly opened file: an old failure may be gone.
+        self.shared.failed.store(false, Ordering::Relaxed);
         let (queue, lines) = mpsc::sync_channel(QUEUE_LINES);
         let shared = self.shared.clone();
         let thread = std::thread::Builder::new()
@@ -282,7 +302,7 @@ impl Log {
     /// fields (events, `tracing`, `log`) asks first, so a dropped record
     /// costs no work. A full queue counts the record as dropped here.
     pub fn accepts(&self) -> bool {
-        if !self.is_on() || self.is_full() {
+        if !self.is_on() || self.is_full() || self.has_failed() {
             return false;
         }
         if self.shared.queued.load(Ordering::Relaxed) >= QUEUE_LINES {
@@ -444,12 +464,31 @@ fn now_ms() -> u64 {
         })
 }
 
+/// What the writer writes to: the log file, or a test's own.
+trait Durable: Write {
+    /// Brings the written bytes to the disk.
+    fn sync(&mut self) -> io::Result<()>;
+}
+
+impl Durable for File {
+    fn sync(&mut self) -> io::Result<()> {
+        self.sync_all()
+    }
+}
+
 /// The writer thread: writes queued lines until the queue closes, flushing
-/// whenever the queue is empty.
-fn write_lines(file: File, mut written: u64, lines: &Receiver<String>, shared: &Shared) {
+/// whenever the queue is empty. A failed write, flush or sync marks the log
+/// failed and stops the writing: after a failed write the file's end is
+/// unknown, and more lines would only hide that the file ends early.
+fn write_lines<F: Durable>(file: F, mut written: u64, lines: &Receiver<String>, shared: &Shared) {
     let mut out = BufWriter::new(file);
-    let put = |out: &mut BufWriter<File>, text: &str, written: &mut u64| -> bool {
-        if shared.full.load(Ordering::Relaxed) {
+    let fail = |result: io::Result<()>| {
+        if result.is_err() {
+            shared.failed.store(true, Ordering::Relaxed);
+        }
+    };
+    let put = |out: &mut BufWriter<F>, text: &str, written: &mut u64| -> bool {
+        if shared.full.load(Ordering::Relaxed) || shared.failed.load(Ordering::Relaxed) {
             return false;
         }
         // Room is kept for the closing `log_full` line.
@@ -465,17 +504,18 @@ fn write_lines(file: File, mut written: u64, lines: &Receiver<String>, shared: &
                 "log_full",
                 &[],
             );
-            let _ = writeln!(out, "{end}");
+            fail(writeln!(out, "{end}"));
             return false;
         }
-        if writeln!(out, "{text}").is_err() {
+        if let Err(error) = writeln!(out, "{text}") {
+            fail(Err(error));
             return false;
         }
         *written += text.len() as u64 + 1;
         true
     };
     // Writes the count of records dropped since the last line, if any.
-    let note_dropped = |out: &mut BufWriter<File>, written: &mut u64| {
+    let note_dropped = |out: &mut BufWriter<F>, written: &mut u64| {
         let dropped = shared.dropped.swap(0, Ordering::Relaxed);
         if dropped > 0 {
             let seq = shared.seq.fetch_add(1, Ordering::Relaxed);
@@ -498,13 +538,19 @@ fn write_lines(file: File, mut written: u64, lines: &Receiver<String>, shared: &
             put(&mut out, &text, &mut written);
             next = lines.try_recv().ok();
         }
-        let _ = out.flush();
+        if !shared.failed.load(Ordering::Relaxed) {
+            fail(out.flush());
+        }
     }
     // Records dropped after the last line, such as a closing line that did
     // not fit the queue: the file still ends with their count.
     note_dropped(&mut out, &mut written);
-    let _ = out.flush();
-    let _ = out.get_ref().sync_all();
+    if !shared.failed.load(Ordering::Relaxed) {
+        fail(out.flush());
+        fail(out.get_mut().sync());
+    }
+    // A failed buffer is dropped unwritten: its flush on drop would fail too.
+    let (_, _) = out.into_parts();
 }
 
 /// Opens the log for appending: creates its folder (owner-only on Unix) and
@@ -1055,6 +1101,74 @@ mod tests {
         assert_eq!(lines[2]["message"], "log_full");
     }
 
+    /// A file whose writes fail once `room` bytes were written, like a disk
+    /// that filled up.
+    struct FailingFile {
+        room: usize,
+        written: Vec<u8>,
+    }
+
+    impl Write for FailingFile {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.written.len() + bytes.len() > self.room {
+                return Err(io::Error::other("disk full"));
+            }
+            self.written.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Durable for FailingFile {
+        fn sync(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// GIVEN a file whose writes start to fail WHEN lines arrive THEN the
+    /// log is marked failed, nothing after the failure is written, and no
+    /// more records are accepted while it stays on.
+    #[test]
+    fn given_failing_writes_then_the_log_reports_failed_and_stops() {
+        let shared = Arc::new(Shared::default());
+        let (queue, lines_in) = mpsc::sync_channel(8);
+        // More than the room, so the first flush fails.
+        for n in 0..4 {
+            queue.send(format!("{{\"n\":{n}}}")).unwrap();
+        }
+        drop(queue);
+        let file = FailingFile {
+            room: 4,
+            written: Vec::new(),
+        };
+        write_lines(file, 0, &lines_in, &shared);
+        assert!(shared.failed.load(Ordering::Relaxed));
+
+        let log = Log {
+            shared: shared.clone(),
+            ..Log::default()
+        };
+        log.on.store(true, Ordering::Relaxed);
+        assert!(log.has_failed() && !log.accepts());
+    }
+
+    /// GIVEN a log that failed WHEN it is turned on again THEN the failure
+    /// is cleared and lines are written.
+    #[test]
+    fn given_failed_log_when_turned_on_again_then_it_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        log.shared.failed.store(true, Ordering::Relaxed);
+        log.turn_on(&path).unwrap();
+        assert!(!log.has_failed());
+        log.turn_off();
+        assert_eq!(lines(&path).len(), 2);
+    }
+
     /// GIVEN dropped records and no line after them WHEN the writer stops
     /// THEN the file still ends with their count.
     #[test]
@@ -1110,8 +1224,11 @@ mod tests {
         let path = path_in(dir.path());
         let log = Log::default();
         log.turn_on(&path).unwrap();
-        // Wait until the writer took the "on" line, so the count stays put.
-        while log.shared.queued.load(Ordering::Relaxed) != 0 {
+        // Wait until the writer flushed the "on" line and waits for the next
+        // one, so it does not take the count while this test reads it. A
+        // zero `queued` alone is too early: the writer lowers it before it
+        // takes the count.
+        while std::fs::metadata(&path).map_or(0, |meta| meta.len()) == 0 {
             std::thread::yield_now();
         }
         log.shared.queued.store(QUEUE_LINES, Ordering::Relaxed);

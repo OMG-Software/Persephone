@@ -222,9 +222,9 @@ pub const DIAGNOSTICS: (&str, &str) = (
      to it on purpose, and it removes them from the text of the libraries \
      it uses. That filter cannot be complete, so read the file before you \
      send it to anyone.\n\n\
-     When you turn it off, the file stays until Persephone starts again. At \
-     the next start, Persephone writes random bytes over the file and \
-     deletes it. On an SSD and some file systems, old copies of the data \
+     When you turn it off, the file stays until Persephone starts again \
+     with this profile. At that start, Persephone writes random bytes over \
+     the file and deletes it. On an SSD and some file systems, old copies of the data \
      can stay on the disk.\n\n\
      Turn on the diagnostic log?",
 );

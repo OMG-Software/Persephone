@@ -1181,6 +1181,10 @@ pub struct ProxySetting {
 pub struct DiagnosticsStatus {
     pub on: bool,
     pub full: bool,
+    /// Writing to the file failed (a full disk, a lost drive) since the log
+    /// was last turned on: the file may end early, and nothing more is
+    /// written until the log is turned off and on again.
+    pub failed: bool,
     pub available: bool,
     pub path: Option<String>,
 }

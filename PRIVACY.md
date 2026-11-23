@@ -265,8 +265,10 @@ tokens, call tokens or keys to the log on purpose, and it filters such values
 out of library text. A filter cannot be complete, so read the file before you
 send it to anyone.
 
-When you turn the log off, the file stays, so you can send it. The next time
-the app starts, it writes random bytes over the file and then deletes it. On
+When you turn the log off, the file stays, so you can send it. Each profile
+has its own file. The next time the app starts with that profile, it writes
+random bytes over the file and then deletes it. The file of a profile that
+you do not start again stays on the disk until you do. On
 an SSD, and on some file systems, old copies of the data can stay on the disk
 where no application can reach them. The app cannot remove those copies.
 

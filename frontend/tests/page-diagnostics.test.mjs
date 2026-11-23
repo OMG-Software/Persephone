@@ -141,6 +141,38 @@ test('GIVEN the host refuses a batch WHEN the next batch goes THEN it starts wit
   }
 });
 
+test('GIVEN a batch the core has not answered WHEN more seconds pass THEN no second batch goes until it ends', async () => {
+  const sent = [];
+  let answer;
+  mockIPC((_command, args) => {
+    sent.push(args.records.map((record) => record.message));
+    if (sent.length === 1) return new Promise((resolve) => (answer = resolve));
+    return null;
+  });
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  try {
+    page.setPageDiagnostics(true);
+    page.note('info', 'page::test', 'one');
+    mock.timers.tick(1000);
+    await settle();
+    page.note('info', 'page::test', 'two');
+    for (let second = 0; second < 5; second += 1) {
+      mock.timers.tick(1000);
+      await settle();
+    }
+    assert.deepEqual(sent, [['one']]);
+    answer(null);
+    await settle();
+    mock.timers.tick(1000);
+    await settle();
+    assert.deepEqual(sent, [['one'], ['two']]);
+    page.setPageDiagnostics(false);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test('GIVEN the page hooks WHEN an error and rejections happen THEN each is noted once, and a rejection only as a code', () => {
   const target = new EventTarget();
   page.installPageDiagnostics(target);

@@ -2291,17 +2291,21 @@ fn note_room_event(connection: u8, event: &RoomEvent) {
     if !diagnostics.is_on() {
         return;
     }
-    let Some((level, text)) = describe_room_event(event) else {
+    let Some((level, text)) = describe_room_event(connection, event) else {
         return;
     };
-    diagnostics.push(
-        level,
-        "persephone::call_worker::room",
-        &format!("connection {connection}: {text}"),
-    );
+    diagnostics.push(level, "persephone::call_worker::room", &text);
 }
 
-fn describe_room_event(event: &RoomEvent) -> Option<(u8, String)> {
+/// The level and text of the record for `event` on `connection`, or `None`
+/// for an event that does not matter for media. The connection comes
+/// first, so the own room's tracks and another SFU's stay apart.
+fn describe_room_event(connection: u8, event: &RoomEvent) -> Option<(u8, String)> {
+    describe_room_event_text(event)
+        .map(|(level, text)| (level, format!("connection {connection}: {text}")))
+}
+
+fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
     use crate::diagnostics::{DEBUG, INFO, WARN};
     let track = |publication: &RemoteTrackPublication| {
         format!(
@@ -2505,6 +2509,61 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// GIVEN room events that need no participant WHEN described THEN each
+    /// names its connection, its state or reason and its level, and a token
+    /// refresh never holds the token.
+    #[test]
+    fn given_room_events_when_described_then_records_name_connection_and_state() {
+        use crate::diagnostics::{INFO, WARN};
+        let cases = [
+            (RoomEvent::Reconnecting, WARN, "connection 0: reconnecting"),
+            (RoomEvent::Reconnected, INFO, "connection 0: reconnected"),
+            (
+                RoomEvent::ConnectionStateChanged(livekit::ConnectionState::Connected),
+                INFO,
+                "connection 0: connection state Connected",
+            ),
+            (
+                RoomEvent::Disconnected {
+                    reason: livekit::DisconnectReason::ServerShutdown,
+                },
+                WARN,
+                "connection 0: disconnected: ServerShutdown",
+            ),
+            (
+                RoomEvent::Connected {
+                    participants_with_tracks: Vec::new(),
+                },
+                INFO,
+                "connection 0: connected, 0 participants",
+            ),
+        ];
+        for (event, level, text) in cases {
+            assert_eq!(
+                describe_room_event(0, &event),
+                Some((level, text.to_owned()))
+            );
+        }
+        let other = describe_room_event(2, &RoomEvent::Reconnecting).unwrap().1;
+        assert_eq!(other, "connection 2: reconnecting");
+        let refreshed = RoomEvent::TokenRefreshed {
+            token: "eyJsecret.payload.sig".into(),
+        };
+        let (_, text) = describe_room_event(1, &refreshed).unwrap();
+        assert_eq!(text, "connection 1: token refreshed");
+    }
+
+    /// GIVEN a room event that does not matter for media WHEN described THEN
+    /// no record is made, so its metadata text never reaches the log.
+    #[test]
+    fn given_an_uninteresting_room_event_when_described_then_none() {
+        let event = RoomEvent::RoomMetadataChanged {
+            old_metadata: "old".into(),
+            metadata: "new".into(),
+        };
+        assert_eq!(describe_room_event(0, &event), None);
+    }
 
     fn solid_i420(width: u32, height: u32, y: u8, u: u8, v: u8) -> I420Buffer {
         let mut buffer = I420Buffer::new(width, height);

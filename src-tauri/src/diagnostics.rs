@@ -44,20 +44,48 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// `text` cut to at most `limit` bytes on a character boundary.
+/// `text` cut to at most `limit` bytes on a character boundary, with `…`
+/// when cut.
 fn cut(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_owned();
+    }
+    let mut out = prefix(text, limit).to_owned();
+    mark_cut(&mut out, limit);
+    out
+}
+
+/// The longest start of `text` within `limit` bytes, on a character
+/// boundary.
+fn prefix(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
     }
     let mut end = limit;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    text[..end].to_owned()
+    &text[..end]
 }
 
-/// `args` formatted into at most `limit` bytes, on a character boundary.
-/// The formatting stops at the limit, so a huge value is never built whole.
+/// Marks `out`, which was cut, with `…`, within `limit` bytes: a reader can
+/// tell a cut record from a whole one. The core marks its own cuts the same
+/// way; the marker counts against the limit here, because the core refuses
+/// a record over the protocol's limit.
+fn mark_cut(out: &mut String, limit: usize) {
+    const MARK: char = '…';
+    while !out.is_empty() && out.len() + MARK.len_utf8() > limit {
+        out.pop();
+    }
+    if out.len() + MARK.len_utf8() <= limit {
+        out.push(MARK);
+    }
+}
+
+/// `args` formatted into at most `limit` bytes, on a character boundary,
+/// with `…` when cut. The formatting stops at the limit, so a huge value is
+/// never built whole. A `Display` error of the value also ends with `…`:
+/// its text is not whole either.
 fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
     struct Bounded {
         out: String,
@@ -70,7 +98,7 @@ fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
                 self.out.push_str(text);
                 return Ok(());
             }
-            self.out.push_str(&cut(text, room));
+            self.out.push_str(prefix(text, room));
             // Stops the formatting: nothing more is wanted.
             Err(std::fmt::Error)
         }
@@ -79,7 +107,9 @@ fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
         out: String::new(),
         limit,
     };
-    let _ = std::fmt::write(&mut bounded, args);
+    if std::fmt::write(&mut bounded, args).is_err() {
+        mark_cut(&mut bounded.out, limit);
+    }
     bounded.out
 }
 
@@ -374,7 +404,11 @@ mod tests {
         let value = vec!["é"; 10_000];
         let text = format_bounded(format_args!("{value:?}"), 101);
         assert!(text.len() <= 101 && text.len() > 90, "{}", text.len());
+        assert!(text.ends_with('…'), "{text}");
         assert_eq!(format_bounded(format_args!("{}", 42), 101), "42");
+        let long = cut(&"é".repeat(600), MAX_DIAGNOSTIC_MESSAGE_BYTES);
+        assert!(long.len() <= MAX_DIAGNOSTIC_MESSAGE_BYTES && long.ends_with('…'));
+        assert_eq!(cut("whole", 5), "whole");
     }
 
     /// GIVEN a full queue WHEN more arrive THEN they are counted and the

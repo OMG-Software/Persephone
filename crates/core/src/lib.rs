@@ -510,6 +510,9 @@ pub struct Core {
     diagnostics_path: Option<std::path::PathBuf>,
     /// The question to turn the log on is shown: a second one is refused.
     diagnostics_asking: AtomicBool,
+    /// An "off" drains the writer: a second one is refused meanwhile, so
+    /// repeated requests cannot start a thread each.
+    diagnostics_stopping: AtomicBool,
 }
 
 /// Counts one running long call until it is dropped, with its thread or with
@@ -749,6 +752,7 @@ impl Core {
             modules_store: Mutex::new(()),
             diagnostics_path: None,
             diagnostics_asking: AtomicBool::new(false),
+            diagnostics_stopping: AtomicBool::new(false),
         }
     }
 
@@ -803,6 +807,7 @@ impl Core {
         persephone_contracts::DiagnosticsStatus {
             on: log.is_on(),
             full: log.is_full(),
+            failed: log.has_failed(),
             available: self.diagnostics_path.is_some(),
             path: log.path().map(|path| path.display().to_string()),
         }
@@ -823,7 +828,7 @@ impl Core {
         }
         // Clears the flag when the call ends in any way, also when it is
         // dropped unrun or the prompt panics.
-        let asking = DiagnosticsAsking(&self.diagnostics_asking);
+        let asking = ClearOnDrop(&self.diagnostics_asking);
         // An "off" sent while the question is open wins over the "yes".
         let epoch = diagnostics::global().epoch();
         Ok(Box::new(move || {
@@ -849,10 +854,22 @@ impl Core {
         }))
     }
 
-    fn diagnostics_off(&self) -> Outcome {
-        diagnostics::global().turn_off();
-        self.hub.diagnostics_changed();
-        Outcome::Ok(serde_json::Value::Bool(false))
+    /// Turns the log off, off the serving loop: it waits for the writer to
+    /// drain and flush. One at a time; a second "off" while one runs is
+    /// refused before a thread is started, but still cancels an "on" that
+    /// waits for the user.
+    fn diagnostics_off(&self) -> Result<LongCall<'_>, ErrorCode> {
+        if self.diagnostics_stopping.swap(true, Ordering::SeqCst) {
+            diagnostics::global().cancel_pending_on();
+            return Err(ErrorCode::LimitExceeded);
+        }
+        let stopping = ClearOnDrop(&self.diagnostics_stopping);
+        Ok(Box::new(move || {
+            diagnostics::global().turn_off();
+            drop(stopping);
+            self.hub.diagnostics_changed();
+            Outcome::Ok(serde_json::Value::Bool(false))
+        }))
     }
 
     /// The UI host's or the page's records, checked against the protocol's
@@ -997,11 +1014,10 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
-            // Off waits for the writer to drain and flush, so it runs off
-            // the serving loop too.
-            Call::SetDiagnostics { on: false } => {
-                Answer::Later(id, Box::new(|| self.diagnostics_off()))
-            }
+            Call::SetDiagnostics { on: false } => match self.diagnostics_off() {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::AcceptInvite { .. }
             | Call::DeclineInvite { .. }
             | Call::DeleteMessage { .. }
@@ -3777,11 +3793,11 @@ impl Core {
     }
 }
 
-/// Holds the core's "one diagnostics question at a time" flag; it is
-/// cleared when this is dropped.
-struct DiagnosticsAsking<'a>(&'a AtomicBool);
+/// Holds one of the core's "one at a time" diagnostics flags; it is cleared
+/// when this is dropped, also when the call is dropped unrun or panics.
+struct ClearOnDrop<'a>(&'a AtomicBool);
 
-impl Drop for DiagnosticsAsking<'_> {
+impl Drop for ClearOnDrop<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
@@ -5349,6 +5365,40 @@ mod tests {
         let core = Core::default();
         assert!(matches!(core.diagnostics_on(), Err(ErrorCode::Unavailable)));
         assert!(!core.diagnostics_status().available);
+    }
+
+    /// GIVEN an "off" that is not finished WHEN the UI sends more THEN each
+    /// is refused before a thread is started, and still cancels a pending
+    /// "on"; once the first ends, an "off" is taken again.
+    #[test]
+    fn given_an_off_running_when_more_arrive_then_refused() {
+        let core = Core::default();
+        let off = |id| {
+            core.answer(&Request {
+                id,
+                call: Call::SetDiagnostics { on: false },
+            })
+        };
+        let first = off(1);
+        assert!(matches!(first, Answer::Later(1, _)));
+        let epoch = diagnostics::global().epoch();
+        for id in 2..10 {
+            assert!(
+                matches!(
+                    off(id),
+                    Answer::Reply(Reply {
+                        outcome: Outcome::Error(ErrorCode::LimitExceeded),
+                        ..
+                    })
+                ),
+                "request {id}"
+            );
+        }
+        assert!(diagnostics::global().epoch() >= epoch + 8);
+        // Dropped unrun (as at a profile switch), it frees the slot. It is
+        // not run here: the log is shared by the tests of this process.
+        drop(first);
+        assert!(matches!(off(10), Answer::Later(10, _)));
     }
 
     /// GIVEN requests that succeeded, failed and are still running WHEN they

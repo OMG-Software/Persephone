@@ -493,7 +493,7 @@ impl CoreTransport for FakeCore {
             },
             Call::ProxySetting {} => Ok(serde_json::json!({"proxy": "127.0.0.1:9050"})),
             Call::DiagnosticsStatus {} => Ok(serde_json::json!({
-                "on": false, "full": false, "available": true, "path": null
+                "on": false, "full": false, "failed": false, "available": true, "path": null
             })),
             Call::SetDiagnostics { on } => Ok(serde_json::Value::Bool(on)),
             // A page's records always arrive as the page's.
