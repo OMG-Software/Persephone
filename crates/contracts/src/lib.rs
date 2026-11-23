@@ -352,7 +352,8 @@ pub enum OtherEvent {
     Message,
     /// Any other message-like event.
     Event,
-    /// Any other state event, or a deleted state event.
+    /// Any other state event, or a deleted state event whose line would say
+    /// more than that it changed.
     State,
 }
 

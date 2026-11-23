@@ -120,7 +120,7 @@ export function itemShown(item: ShownItem, events: TimelineEvents): boolean {
 /** The switches for other events, in the order the settings list them. */
 export const OTHER_SWITCHES: readonly { key: keyof TimelineEvents; label: string }[] = [
   { key: 'verification', label: 'Verification requests and steps' },
-  { key: 'calls', label: 'Calls started, answered and ended' },
+  { key: 'calls', label: 'Calls, and people joining or leaving them' },
   { key: 'callSignalling', label: 'Call connection details' },
   { key: 'polls', label: 'Polls and votes' },
   { key: 'stickers', label: 'Stickers' },

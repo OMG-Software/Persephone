@@ -318,8 +318,9 @@ fn state_kind(kind: &str, content: Option<&serde_json::Value>) -> OtherEvent {
 /// shows. A reaction or deletion that could not be read stays out: neither
 /// is a line of its own. A deleted message-like event keeps its kind, from
 /// its type, and is marked `deleted`, so the page applies both its kind's
-/// switch and the deleted messages switch. A deleted state event is generic
-/// `state`: its remaining content says nothing, so it is not read for a kind
+/// switch and the deleted messages switch. A deleted state event's remaining
+/// content says nothing, so it keeps its kind only where the line claims no
+/// more than a change (spaces and widgets); otherwise it is generic `state`
 /// (an emptied call member event is no proof that its sender left the call).
 fn other_item(
     event: &TimelineEvent,
@@ -335,10 +336,17 @@ fn other_item(
     }
     let deleted = !state && redacted(event);
     let content = raw.get_field::<serde_json::Value>("content").ok().flatten();
-    let (event_kind, event_type) = if state && redacted(event) {
-        (OtherEvent::State, kind.as_str())
-    } else if state {
-        (state_kind(&kind, content.as_ref()), kind.as_str())
+    let (event_kind, event_type) = if state {
+        let found = state_kind(&kind, content.as_ref());
+        let neutral = matches!(
+            found,
+            OtherEvent::SpaceChild | OtherEvent::SpaceParent | OtherEvent::Widget
+        );
+        if redacted(event) && !neutral {
+            (OtherEvent::State, kind.as_str())
+        } else {
+            (found, kind.as_str())
+        }
     } else {
         let other = event_kind(&kind);
         // A message names its `msgtype`, when it has one.
@@ -1767,8 +1775,18 @@ mod tests {
             );
         }
         // A deleted state event's emptied content says nothing: an emptied
-        // call member event is no proof that its sender left the call.
-        for kind in ["m.widget", "m.call.member", "m.room.name"] {
+        // call member event is no proof that its sender left the call. A
+        // space or widget line only says it changed, so it keeps its kind and
+        // its own switch.
+        for (kind, expected) in [
+            ("m.space.child", OtherEvent::SpaceChild),
+            ("m.space.parent", OtherEvent::SpaceParent),
+            ("m.widget", OtherEvent::Widget),
+            ("m.call.member", OtherEvent::State),
+            ("m.room.third_party_invite", OtherEvent::State),
+            ("m.beacon_info", OtherEvent::State),
+            ("m.room.name", OtherEvent::State),
+        ] {
             let item = project(&raw_event(serde_json::json!({
                 "type": kind, "event_id": "$s", "sender": "@alice:example.org",
                 "state_key": "k", "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
@@ -1782,10 +1800,7 @@ mod tests {
             else {
                 panic!("{kind}: an other item: {item:?}");
             };
-            assert_eq!(
-                (event, event_type.as_str(), state),
-                (OtherEvent::State, kind, true)
-            );
+            assert_eq!((event, event_type.as_str(), state), (expected, kind, true));
         }
         // GIVEN the same kind as a message and as a state event THEN only the
         // state one is marked as state.
