@@ -12,7 +12,8 @@ const line = (parts) =>
 test('GIVEN other events with fixed text WHEN described THEN the line names the sender and never the type', () => {
   const cases = [
     ['verification_request', `${A} sent a verification request`],
-    ['verification_done', `${A} finished verification`],
+    ['verification_ready', `${A} says they are ready to verify`],
+    ['verification_done', `${A} says they finished verification`],
     ['call_started', `${A} started a call`],
     ['call_left', `${A} left the call`],
     ['poll_vote', `${A} voted in a poll`],

@@ -13,11 +13,13 @@ import type { ShownItem } from './timeline.ts';
  */
 const OTHER_TEXT: Record<OtherEvent, string | null> = {
   verification_request: ' sent a verification request',
-  verification_ready: ' accepted the verification request',
-  verification_start: ' started verification',
-  verification_step: ' continued verification',
-  verification_cancelled: ' cancelled verification',
-  verification_done: ' finished verification',
+  // Any room member can send these events, so the line is the sender's
+  // claim and never says that a verification took place.
+  verification_ready: ' says they are ready to verify',
+  verification_start: ' says they started verification',
+  verification_step: ' sent a verification step',
+  verification_cancelled: ' says they cancelled verification',
+  verification_done: ' says they finished verification',
   call_started: ' started a call',
   call_answered: ' answered a call',
   call_declined: ' declined a call',
