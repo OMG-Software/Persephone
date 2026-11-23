@@ -439,6 +439,31 @@ export function volumeText(percent: number): string {
   return `${volumeValue(percent)}%`;
 }
 
+/** The label of the call's sound level meter, under the call volume (ADR-0055). */
+export const SOUND_LEVEL_LABEL = 'Call sound';
+/** The top of the meter: full scale, 0 dBFS. 0 is -60 dBFS or quieter. */
+export const SOUND_LEVEL_MAX = 100;
+/** From this level (-6 dBFS) the meter shows the sound as loud. */
+export const SOUND_LEVEL_LOUD = 90;
+
+/**
+ * The meter level the host sent, or `null` when it is not a whole number from
+ * 0 to {@link SOUND_LEVEL_MAX}. The core sends nothing else; this keeps a bad
+ * value off the page.
+ */
+export function parseSoundLevel(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= SOUND_LEVEL_MAX
+    ? value
+    : null;
+}
+
+/** The meter's spoken value: "Silent", else the level in decibels below full scale. */
+export function soundLevelText(level: number): string {
+  if (level <= 0) return 'Silent';
+  const decibels = Math.round(Math.min(level, SOUND_LEVEL_MAX) * 0.6 - 60);
+  return decibels === 0 ? '0 dB' : `−${-decibels} dB`;
+}
+
 /**
  * Sends only the newest value. While one send waits, later values replace
  * each other, and the last one goes when the send ends. So a slider that

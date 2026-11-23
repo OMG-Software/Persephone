@@ -180,6 +180,15 @@ Proposed option: "a contained call worker".
   cannot see (ADR-0049).
 * The same record keeps the call volume, which applies at once to a
   running call. Deafen and the volume are in [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md).
+* Amendment, 2026-11-23: echo cancellation is WebRTC's software echo
+  canceller (AEC3) only. The vendored `webrtc-sys` reports no built-in
+  echo canceller and refuses to turn one on. Without this, libwebrtc's
+  voice engine turned on the Windows Voice Capture DMO after LiveKit's
+  `PlatformAudio` had turned it off. The DMO gives no microphone audio
+  unless playout runs first, so a member who joined before anybody else
+  was heard sent no audio: a diagnostic log of 23 November showed
+  `StartRecording` failing with "Playout must be started before recording
+  when using the built-in AEC".
 
 ### Session lifecycle
 
@@ -203,7 +212,9 @@ Proposed option: "a contained call worker".
   `[patch.crates-io]`, builds a TLS 1.3-only rustls configuration with
   certificate checks. The vendored Rust `libwebrtc` crate raises the
   frame key ring from 255 to 256 slots, so that Element Call's key index
-  255 works. Each patch is small and is reapplied for each LiveKit update.
+  255 works. The vendored `webrtc-sys` hides the built-in echo canceller
+  (amendment of 2026-11-23 under "Audio devices"). Each patch is small
+  and is reapplied for each LiveKit update.
   Amendment, 2026-11-19: Persephone enforces the TLS 1.3 rule on the
   core's homeserver client, the core's `/sfu/get` request and the
   worker's LiveKit signalling. Persephone cannot enforce it on two

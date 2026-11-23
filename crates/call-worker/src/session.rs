@@ -26,6 +26,7 @@ use livekit::{
     webrtc::{
         native::yuv_helper,
         peer_connection_factory::{IceServer, IceTransportsType, RtcConfiguration},
+        stats::RtcStats,
         video_frame::{
             I420Buffer, NV12Buffer, VideoBuffer, VideoFormatType, VideoFrame, VideoRotation,
             native::VideoFrameBufferExt,
@@ -50,8 +51,8 @@ use zeroize::Zeroizing;
 use crate::camera::{self, CapturedFrame, Format};
 use crate::containment;
 use crate::mapping::{
-    ConnectFault, Playout, RoomChange, Slot, Slots, SoundPath, SpeakingTracker, apply,
-    bounded_device_list, choose_device, failure_for_connect, valid_identity,
+    ConnectFault, LevelGate, Playout, RoomChange, Slot, Slots, SoundPath, SpeakingTracker, apply,
+    bounded_device_list, choose_device, failure_for_connect, sound_level, valid_identity,
 };
 #[cfg(target_os = "linux")]
 use crate::mapping::{pulse_device_list, sound_path};
@@ -73,6 +74,8 @@ const FAILURE_TOLERANCE: i32 = -1;
 const SCREEN_MAX_BITRATE: u64 = 1_500_000;
 /// How often deferred Speaking changes are looked at.
 const SPEAKING_TICK: Duration = Duration::from_millis(100);
+/// The longest one sound level measurement may take (ADR-0055).
+const SOUND_MEASURE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Why the call ended.
 enum End {
@@ -210,6 +213,8 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
     // At most one connect is in flight for each other SFU, so this many
     // results can wait.
     let (connect_tx, connect_done) = mpsc::channel::<Connected>(usize::from(MAX_OTHER_CONNECTIONS));
+    // At most one sound level measurement runs, so one result can wait.
+    let (sound_tx, mut sound_done) = mpsc::channel::<Option<f64>>(1);
     let mut others_inbox = OtherInbox {
         events: OtherEvents::default(),
         connected: connect_done,
@@ -240,6 +245,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
         connect_tx,
         others: Others::default(),
         playout: Playout::new(volume),
+        sound: SoundProbe::new(sound_tx),
     };
     // Tracks subscribed during the connect get the volume now; later ones
     // when their subscription is handled.
@@ -264,6 +270,7 @@ pub async fn run(first: ToWorker, input: &mut Receiver<Input>, output: &Output) 
                 &mut screens,
                 &mut others_inbox,
                 &mut tracker,
+                &mut sound_done,
             )
             .await
         }
@@ -473,6 +480,100 @@ struct Call<'a> {
     /// The volume and deafen state of every remote audio track, on every
     /// connection (ADR-0055).
     playout: Playout,
+    /// The level meter's measurement of the received sound (ADR-0055).
+    sound: SoundProbe,
+}
+
+/// Measures the received sound for the level meter (ADR-0055). At most one
+/// measurement runs, on its own task, so the event loop never waits for it.
+struct SoundProbe {
+    /// A measurement reports the loudest linear level here, or `None` when
+    /// it did not finish.
+    done: mpsc::Sender<Option<f64>>,
+    task: Option<JoinHandle<()>>,
+    gate: LevelGate,
+}
+
+/// One measurement's report. Dropping it sends the level, or `None`, so the
+/// task reports once however it ends: done, timed out or unwound. Only one
+/// measurement runs and the slot is freed only by its report, so the channel
+/// of one place has room.
+struct SoundReport {
+    done: mpsc::Sender<Option<f64>>,
+    level: Option<f64>,
+}
+
+impl Drop for SoundReport {
+    fn drop(&mut self) {
+        let _ = self.done.try_send(self.level.take());
+    }
+}
+
+impl SoundProbe {
+    fn new(done: mpsc::Sender<Option<f64>>) -> Self {
+        Self {
+            done,
+            task: None,
+            gate: LevelGate::default(),
+        }
+    }
+
+    /// Whether a measurement runs: its report has not reached [`Self::end`].
+    fn is_busy(&self) -> bool {
+        self.task.is_some()
+    }
+
+    /// Starts `measure` on its own task, stopped after `limit`, unless a
+    /// measurement runs. Its report comes back through `done` exactly once:
+    /// the level, or `None` when it timed out or unwound.
+    fn start<F>(&mut self, measure: F, limit: Duration) -> bool
+    where
+        F: std::future::Future<Output = f64> + Send + 'static,
+    {
+        if self.is_busy() {
+            return false;
+        }
+        let done = self.done.clone();
+        self.task = Some(tokio::spawn(async move {
+            // Reports when dropped, also if the measurement unwinds, so the
+            // slot is always freed. A timeout reports `None`, not silence.
+            let mut report = SoundReport { done, level: None };
+            report.level = tokio::time::timeout(limit, measure).await.ok();
+        }));
+        true
+    }
+
+    /// A measurement's report arrived: the slot is free. One that did not
+    /// finish (`None`) changes nothing, so the meter keeps its level until
+    /// the next one.
+    fn end(&mut self, linear: Option<f64>) -> Option<FromWorker> {
+        self.task = None;
+        self.gate
+            .next(sound_level(linear?), std::time::Instant::now())
+    }
+}
+
+/// The loudest `audioLevel` (0.0 to 1.0) of the tracks' inbound streams.
+/// WebRTC measures it on the audio as it is played, after the call volume:
+/// `ChannelReceive::GetAudioFrameWithInfo` scales the frame by the output
+/// gain (`set_volume`) before `output_audio_level_.ComputeLevel`, and a
+/// disabled (deafened) track sets that gain to 0
+/// (`AudioRtpReceiver::Reconfigure`). So the meter follows the slider and is
+/// empty while deafened. A track whose statistics cannot be read counts as
+/// silent.
+async fn loudest_level(tracks: Vec<RemoteAudioTrack>) -> f64 {
+    let mut loudest = 0.0_f64;
+    for track in tracks {
+        let Ok(stats) = track.get_stats().await else {
+            continue;
+        };
+        for stat in stats {
+            if let RtcStats::InboundRtp(inbound) = stat {
+                loudest = loudest.max(inbound.inbound.audio_level);
+            }
+        }
+    }
+    loudest
 }
 
 /// The connections to other SFUs (ADR-0054). They subscribe only: nothing
@@ -997,6 +1098,9 @@ impl Call<'_> {
         open_done: &mut Receiver<Opened<OpenedCamera, CameraState>>,
         screens: &mut ScreenInbox,
     ) {
+        if let Some(task) = self.sound.task.take() {
+            task.abort();
+        }
         open_done.close();
         while let Ok(done) = open_done.try_recv() {
             if let Ok(opened) = done.result {
@@ -1517,15 +1621,39 @@ impl Call<'_> {
         }
     }
 
-    /// Gives every subscribed remote audio track the call's playout.
-    fn apply_playout(&self) {
+    /// Every subscribed remote audio track, on every connection.
+    fn remote_audio(&self) -> Vec<RemoteAudioTrack> {
         let rooms = std::iter::once(self.room).chain(self.others.open());
+        let mut tracks = Vec::new();
         for participant in rooms.flat_map(|room| room.remote_participants().into_values()) {
             for publication in participant.track_publications().values() {
                 if let Some(RemoteTrack::Audio(track)) = publication.track() {
-                    play_remote_audio(&track, self.playout);
+                    tracks.push(track);
                 }
             }
+        }
+        tracks
+    }
+
+    /// Starts a measurement of the received sound, unless one runs. With no
+    /// remote audio the level is silence at once.
+    fn measure_sound(&mut self) -> Option<FromWorker> {
+        if self.sound.is_busy() {
+            return None;
+        }
+        let tracks = self.remote_audio();
+        if tracks.is_empty() {
+            return self.sound.gate.next(0, std::time::Instant::now());
+        }
+        self.sound
+            .start(loudest_level(tracks), SOUND_MEASURE_TIMEOUT);
+        None
+    }
+
+    /// Gives every subscribed remote audio track the call's playout.
+    fn apply_playout(&self) {
+        for track in self.remote_audio() {
+            play_remote_audio(&track, self.playout);
         }
     }
 
@@ -1958,6 +2086,7 @@ async fn event_loop(
     screens: &mut ScreenInbox,
     others: &mut OtherInbox,
     tracker: &mut SpeakingTracker,
+    sound_done: &mut Receiver<Option<f64>>,
 ) -> End {
     let mut tick = interval(SPEAKING_TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -2039,7 +2168,12 @@ async fn event_loop(
                     return End::Failed(FailureCode::Internal);
                 }
             }
-            _ = tick.tick() => {}
+            Some(linear) = sound_done.recv() => {
+                outgoing.extend(call.sound.end(linear));
+            }
+            _ = tick.tick() => {
+                outgoing.extend(call.measure_sound());
+            }
         }
         outgoing.extend(tracker.poll(Instant::now().into_std()));
         let disconnected = outgoing.iter().any(|message| {
@@ -2252,7 +2386,7 @@ async fn read_pictures(mut stream: NativeVideoStream, tile: u8, pictures: Pictur
     }
 }
 
-fn start_audio() -> Result<PlatformAudio, FailureCode> {
+pub(crate) fn start_audio() -> Result<PlatformAudio, FailureCode> {
     let audio = PlatformAudio::new().map_err(|_| FailureCode::AudioDevice)?;
     audio
         .configure_audio_processing(AudioProcessingOptions {
@@ -2290,11 +2424,16 @@ async fn publish_microphone(
 /// flood of room events costs a count, not formatting.
 fn note_room_event(connection: u8, event: &RoomEvent) {
     let diagnostics = crate::diagnostics::global();
-    if !is_noted(event) || !diagnostics.admit() {
+    if !is_noted(event) || !diagnostics.admit(crate::diagnostics::Source::Note) {
         return;
     }
     if let Some((level, text)) = describe_room_event(connection, event) {
-        diagnostics.push_admitted(level, "persephone::call_worker::room", &text);
+        diagnostics.push_admitted(
+            crate::diagnostics::Source::Note,
+            level,
+            "persephone::call_worker::room",
+            &text,
+        );
     }
 }
 
@@ -2553,6 +2692,79 @@ async fn fail(output: &Output, code: FailureCode) -> u8 {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// GIVEN a sound measurement that finishes, one that times out and one
+    /// that unwinds THEN each reports exactly once: the level, then `None`
+    /// twice. So a slow or failed measurement never shows as silence and
+    /// never keeps the slot.
+    #[tokio::test]
+    async fn given_measurement_endings_then_each_reports_once() {
+        let (tx, mut rx) = mpsc::channel::<Option<f64>>(1);
+        drop(SoundReport {
+            done: tx.clone(),
+            level: Some(0.5),
+        });
+        assert_eq!(rx.recv().await, Some(Some(0.5)));
+
+        let done = tx.clone();
+        tokio::spawn(async move {
+            let mut report = SoundReport { done, level: None };
+            report.level =
+                tokio::time::timeout(Duration::from_millis(1), std::future::pending::<f64>())
+                    .await
+                    .ok();
+        })
+        .await
+        .expect("the timed-out measurement ends");
+        assert_eq!(rx.recv().await, Some(None));
+
+        let done = tx.clone();
+        let unwound = tokio::spawn(async move {
+            let _report = SoundReport { done, level: None };
+            panic!("statistics read failed");
+        });
+        assert!(unwound.await.is_err());
+        assert_eq!(rx.recv().await, Some(None));
+        assert!(rx.try_recv().is_err(), "one report each");
+    }
+
+    /// GIVEN a sound probe WHEN measurements start and end THEN at most one
+    /// runs; each report frees the slot; a level goes out only when it
+    /// changes; and a timed-out or unwound measurement frees the slot
+    /// without a message.
+    #[tokio::test]
+    async fn given_sound_measurements_then_one_runs_and_every_end_frees_it() {
+        let (tx, mut rx) = mpsc::channel::<Option<f64>>(1);
+        let mut probe = SoundProbe::new(tx);
+        let long = Duration::from_secs(5);
+
+        assert!(probe.start(async { 0.5 }, long));
+        assert!(!probe.start(async { 1.0 }, long), "one runs at a time");
+        let report = rx.recv().await.expect("a report");
+        assert_eq!(report, Some(0.5));
+        assert!(probe.is_busy(), "busy until the report is taken");
+        let first = probe.end(report);
+        assert!(matches!(first, Some(FromWorker::SoundLevel { level }) if level > 0));
+        assert!(!probe.is_busy());
+
+        assert!(probe.start(async { 0.5 }, long));
+        let same = rx.recv().await.expect("a report");
+        assert_eq!(probe.end(same), None, "an unchanged level is not sent");
+
+        assert!(probe.start(std::future::pending::<f64>(), Duration::from_millis(1)));
+        let timed_out = rx.recv().await.expect("a report");
+        assert_eq!(timed_out, None);
+        assert_eq!(probe.end(timed_out), None, "a timeout is not silence");
+        assert!(!probe.is_busy());
+
+        assert!(probe.start(async { panic!("statistics read failed") }, long));
+        let unwound = rx.recv().await.expect("a report");
+        assert_eq!(unwound, None);
+        assert_eq!(probe.end(unwound), None);
+        assert!(probe.start(async { 0.0 }, long), "the slot is free again");
+        let silent = rx.recv().await.expect("a report");
+        assert_eq!(probe.end(silent), Some(FromWorker::SoundLevel { level: 0 }));
+    }
 
     /// GIVEN room events that need no participant WHEN described THEN each
     /// names its connection, its state or reason and its level, and a token

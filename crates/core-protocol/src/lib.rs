@@ -1034,6 +1034,10 @@ pub const MAX_HOMESERVER_URL_BYTES: usize = 2048;
 /// Most rooms the UI may subscribe to at once.
 pub const MAX_SUBSCRIPTIONS: usize = 16;
 
+/// The top of the call's sound level meter (ADR-0055): 0 dBFS. 0 is
+/// -60 dBFS or quieter.
+pub const MAX_CALL_SOUND_LEVEL: u8 = 100;
+
 /// A notification from the core. Events carry no message content: the UI
 /// fetches content through bounded calls. A burst of changes to one room
 /// coalesces into one pending event, so the core's queue is bounded by the
@@ -1065,6 +1069,13 @@ pub enum Event {
     /// A new video picture is waiting: ask for `call_video_frame` on each
     /// active tile. Content-free and coalesced like `CallChanged`.
     CallVideo {},
+    /// The loudest sound the call plays now changed (ADR-0055): 0 to
+    /// [`MAX_CALL_SOUND_LEVEL`], on a decibel scale. A number only, no call
+    /// data. Coalesced: only the latest waits, and at most about ten leave
+    /// the core each second. A value over the top is refused by the UI host.
+    CallSoundLevel {
+        level: u8,
+    },
     /// An incoming call ring started, ended or changed (ADR-0052): ask for
     /// `call_rings`. Content-free and coalesced like `CallChanged`.
     RingsChanged {},
@@ -3903,6 +3914,26 @@ mod timeline_events_wire_tests {
             let wire = serde_json::to_value(&call).unwrap();
             assert_eq!(wire["command"], name.as_str());
         }
+    }
+
+    /// GIVEN a sound level event THEN its wire form carries only the level.
+    #[test]
+    fn given_sound_level_event_then_wire_form_is_small() {
+        let event = CoreMessage::Event(Event::CallSoundLevel {
+            level: MAX_CALL_SOUND_LEVEL,
+        });
+        let wire = serde_json::to_string(&event).unwrap();
+        assert_eq!(wire, r#"{"event":{"call_sound_level":{"level":100}}}"#);
+        assert!(
+            serde_json::from_str::<CoreMessage>(r#"{"event":{"call_sound_level":{"level":256}}}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<CoreMessage>(
+                r#"{"event":{"call_sound_level":{"level":1,"x":2}}}"#
+            )
+            .is_err()
+        );
     }
 
     /// GIVEN a diagnostics event THEN its wire form carries only `on`.

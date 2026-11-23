@@ -1,4 +1,5 @@
-//! Native lifecycle workload for the remote audio volume patch (ADR-0055).
+//! Native lifecycle workloads for the vendored patches: the remote audio
+//! volume (ADR-0055) and the hidden built-in echo canceller (ADR-0043).
 //!
 //! `third_party/webrtc-sys-0.3.54/AGENTS.md` asks every new C++-reachable
 //! feature for a repeated initialize, use, disconnect or drop, and shutdown
@@ -182,4 +183,39 @@ fn given_repeated_calls_when_the_volume_is_used_and_dropped_then_native_resource
             );
         }
     });
+}
+
+/// GIVEN the worker's audio setup, which asks for echo cancellation
+/// (ADR-0043 amendment of 2026-11-23)
+/// WHEN the platform audio device module is made and configured, and is
+/// then asked to prefer the operating system's processing
+/// THEN it never offers a built-in echo canceller, so libwebrtc keeps its
+/// software one and the microphone starts without waiting for playout.
+/// A machine with no audio device has no platform module to check.
+#[test]
+fn platform_audio_offers_no_builtin_aec() {
+    use livekit::prelude::{AudioProcessingOptions, PlatformAudio};
+    for _ in 0..3 {
+        let audio = match crate::session::start_audio() {
+            Ok(audio) => audio,
+            Err(_) => {
+                assert!(
+                    PlatformAudio::new().is_err(),
+                    "the worker's audio setup failed with a platform module present"
+                );
+                return;
+            }
+        };
+        assert!(!audio.is_hardware_aec_available());
+        audio
+            .configure_audio_processing(AudioProcessingOptions {
+                echo_cancellation: true,
+                noise_suppression: true,
+                auto_gain_control: true,
+                prefer_hardware_processing: true,
+            })
+            .expect("configuring audio processing");
+        assert!(!audio.is_hardware_aec_available());
+        drop(audio);
+    }
 }

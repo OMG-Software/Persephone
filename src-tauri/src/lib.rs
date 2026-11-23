@@ -53,14 +53,15 @@ use persephone_contracts::{
 };
 use persephone_core_protocol::{
     CALL_VIDEO_TILES, COUNTRY_CODE_BYTES, Call, DiagnosticRecord, ErrorCode, Event,
-    IMAGE_HANDLE_BYTES, MAX_CALL_DEVICE_ID_BYTES, MAX_CURSOR_BYTES, MAX_DEVICE_ID_BYTES,
-    MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES, MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES,
-    MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES, MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES,
-    MAX_MEMBER_FILTER_BYTES, MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES,
-    MAX_PASTED_IMAGE_BYTES, MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES,
-    MAX_REACTION_KEY_BYTES, MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES,
-    MAX_SERVER_NAME_BYTES, MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES,
-    RecordSource, call_video_within_limits, room_change_within_limits,
+    IMAGE_HANDLE_BYTES, MAX_CALL_DEVICE_ID_BYTES, MAX_CALL_SOUND_LEVEL, MAX_CURSOR_BYTES,
+    MAX_DEVICE_ID_BYTES, MAX_DIRECTORY_FILTER_BYTES, MAX_DIRECTORY_TOKEN_BYTES,
+    MAX_DISPLAY_NAME_BYTES, MAX_EMAIL_BYTES, MAX_EVENT_ID_BYTES, MAX_FLOW_ID_BYTES,
+    MAX_HOMESERVER_URL_BYTES, MAX_INVITEES, MAX_LINK_BYTES, MAX_MEMBER_FILTER_BYTES,
+    MAX_MESSAGE_BYTES, MAX_NEW_SESSION_IDS, MAX_NOTIFICATION_NAME_BYTES, MAX_PASTED_IMAGE_BYTES,
+    MAX_PHONE_NUMBER_BYTES, MAX_PROFILES, MAX_PROXY_BYTES, MAX_REACTION_KEY_BYTES,
+    MAX_ROOM_ID_BYTES, MAX_ROOM_NAME_BYTES, MAX_SEARCH_TERM_BYTES, MAX_SERVER_NAME_BYTES,
+    MAX_THREE_PID_ADDRESS_BYTES, MAX_USER_ID_BYTES, MAX_USERNAME_BYTES, RecordSource,
+    call_video_within_limits, room_change_within_limits,
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -376,6 +377,9 @@ struct Toasts {
 pub struct Subscriptions {
     channels: Mutex<HashMap<String, Channel<()>>>,
     session: Mutex<Option<Channel<&'static str>>>,
+    /// The page's channel for the call's sound level meter (ADR-0055): a
+    /// number from 0 to `MAX_CALL_SOUND_LEVEL`, nothing else.
+    sound_level: Mutex<Option<Channel<u8>>>,
     toasts: Mutex<Toasts>,
     capture: Arc<capture::CaptureState>,
 }
@@ -389,6 +393,12 @@ impl Subscriptions {
 
     fn session(&self) -> MutexGuard<'_, Option<Channel<&'static str>>> {
         self.session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn sound_level(&self) -> MutexGuard<'_, Option<Channel<u8>>> {
+        self.sound_level
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -455,6 +465,15 @@ impl Subscriptions {
             Event::CallVideo {} => {
                 if let Some(channel) = self.session().as_ref() {
                     let _ = channel.send("callVideo");
+                }
+            }
+            // A number only; one over the top is dropped.
+            Event::CallSoundLevel { level } => {
+                if level > MAX_CALL_SOUND_LEVEL {
+                    return;
+                }
+                if let Some(channel) = self.sound_level().as_ref() {
+                    let _ = channel.send(level);
                 }
             }
             Event::RingsChanged {} => {
@@ -536,10 +555,16 @@ async fn unsubscribe_room(
     relay::<()>(core.inner(), Call::Unsubscribe { room_id }).await
 }
 
-/// Registers the page's session channel, replacing any earlier one.
+/// Registers the page's session channel and its call sound level channel,
+/// replacing any earlier ones.
 #[tauri::command]
-fn watch_session(subscriptions: State<'_, Arc<Subscriptions>>, on_change: Channel<&'static str>) {
+fn watch_session(
+    subscriptions: State<'_, Arc<Subscriptions>>,
+    on_change: Channel<&'static str>,
+    on_sound_level: Channel<u8>,
+) {
     *subscriptions.session() = Some(on_change);
+    *subscriptions.sound_level() = Some(on_sound_level);
 }
 
 /// Locks the core's session. Replies with the resulting state; `locking`

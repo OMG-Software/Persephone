@@ -3479,8 +3479,41 @@ mark {
 }
 
 .call-volume output {
-  min-width: 4ch;
+  width: 5ch;
   text-align: right;
+}
+
+/* The call's sound level meter, right under the volume slider and as wide
+   as it: the bar grows to the right with the loudness of what is played. */
+.call-level {
+  align-self: flex-end;
+  position: relative;
+  width: 160px;
+  height: 6px;
+  margin: -4px calc(8px + 5ch) 0 0;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--line);
+  font-size: 12.5px;
+}
+
+.call-level-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 90ms linear;
+}
+
+.call-level.loud .call-level-fill {
+  background: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .call-level-fill {
+    transition: none;
+  }
 }
 
 .call-devices input[type='range'] {

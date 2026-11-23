@@ -14,6 +14,10 @@
     screenButton,
     SHARING_TEXT,
     showCallBar,
+    SOUND_LEVEL_LABEL,
+    SOUND_LEVEL_LOUD,
+    SOUND_LEVEL_MAX,
+    soundLevelText,
     UNDEAFEN_LABEL,
     UNREACHABLE_TEXT,
     VOLUME_LABEL,
@@ -37,6 +41,7 @@
     cameraBusy,
     screenBusy,
     volume,
+    soundLevel,
     onmute,
     ondeafen,
     onvolume,
@@ -58,6 +63,8 @@
     screenBusy: boolean;
     // The volume the slider shows: the one being set, else the call's.
     volume: number;
+    // The loudest call sound now, 0 to SOUND_LEVEL_MAX (ADR-0055).
+    soundLevel: number;
     onmute: () => void;
     ondeafen: () => void;
     // The slider moved; the page sends the newest value.
@@ -154,6 +161,19 @@
         />
         <output class="note">{volumeText(volume)}</output>
       </label>
+      <!-- What the call plays now, after the volume: it moves while someone talks. -->
+      <div
+        class="call-level"
+        class:loud={soundLevel >= SOUND_LEVEL_LOUD}
+        role="meter"
+        aria-label={SOUND_LEVEL_LABEL}
+        aria-valuemin="0"
+        aria-valuemax={SOUND_LEVEL_MAX}
+        aria-valuenow={soundLevel}
+        aria-valuetext={soundLevelText(soundLevel)}
+      >
+        <span class="call-level-fill" style:transform="scaleX({soundLevel / SOUND_LEVEL_MAX})"></span>
+      </div>
     {/if}
     {#if !ended && cameraText !== ''}
       <p class="call-camera-note note" role="status">{cameraText}</p>

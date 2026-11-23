@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use persephone_call_protocol::{
     FailureCode, FromWorker, MAX_DEVICES, MAX_IDENTITY_BYTES, MAX_OTHER_CONNECTIONS,
-    MAX_PARTICIPANTS, MAX_VOLUME_PERCENT, MediaDevice, ToWorker, pulse_id, pulse_name,
+    MAX_PARTICIPANTS, MAX_SOUND_LEVEL, MAX_VOLUME_PERCENT, MediaDevice, ToWorker, pulse_id,
+    pulse_name,
 };
 
 /// The most `Speaking` messages sent in any one second.
@@ -386,6 +387,58 @@ impl Playout {
     /// Whether remote audio tracks play at all.
     pub fn enabled(&self) -> bool {
         !self.deafened
+    }
+}
+
+/// The quietest sound the level meter shows, in dBFS (ADR-0055). Each of
+/// the [`MAX_SOUND_LEVEL`] steps above it is 0.6 dB.
+const SOUND_FLOOR_DB: f64 = -60.0;
+
+/// The meter level of a linear sound level, as WebRTC's `audioLevel` gives
+/// it (0.0 is silence, 1.0 is full scale): 0 at [`SOUND_FLOOR_DB`] or
+/// quieter, [`MAX_SOUND_LEVEL`] at full scale. A value that is not a number
+/// is silence.
+pub fn sound_level(linear: f64) -> u8 {
+    if linear.is_nan() || linear <= 0.0 {
+        return 0;
+    }
+    let decibels = 20.0 * linear.min(1.0).log10();
+    let steps = (decibels - SOUND_FLOOR_DB) / -SOUND_FLOOR_DB * f64::from(MAX_SOUND_LEVEL);
+    // Clamped to 0..=MAX_SOUND_LEVEL first, so the cast cannot truncate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let level = steps.round().clamp(0.0, f64::from(MAX_SOUND_LEVEL)) as u8;
+    level
+}
+
+/// How often an unchanged sound level above silence is sent again. A page
+/// that attaches during a call (a reload, or a call started before the
+/// page) starts at silence and gets no earlier level, so steady sound would
+/// otherwise show as silence there.
+pub const SOUND_LEVEL_REPEAT: Duration = Duration::from_secs(1);
+
+/// Lets a sound level through when it differs from the last one sent, and
+/// an unchanged level above silence again after [`SOUND_LEVEL_REPEAT`]. It
+/// starts at silence, so a call with no sound sends nothing.
+#[derive(Debug, Default)]
+pub struct LevelGate {
+    last: u8,
+    sent: Option<Instant>,
+}
+
+impl LevelGate {
+    /// The message for `level` at `now`, or `None` when the core already
+    /// has it and it is not yet due again.
+    pub fn next(&mut self, level: u8, now: Instant) -> Option<FromWorker> {
+        let due = level > 0
+            && self
+                .sent
+                .is_none_or(|at| now.saturating_duration_since(at) >= SOUND_LEVEL_REPEAT);
+        if level == self.last && !due {
+            return None;
+        }
+        self.last = level;
+        self.sent = Some(now);
+        Some(FromWorker::SoundLevel { level })
     }
 }
 
@@ -976,5 +1029,65 @@ mod tests {
         assert_eq!(playout.volume, 40);
         playout.deafened = false;
         assert!(playout.enabled());
+    }
+
+    /// GIVEN WebRTC audio levels from silence to full scale, beyond it and
+    /// not a number
+    /// WHEN they are put on the meter's decibel scale
+    /// THEN -60 dBFS and quieter is 0, full scale is the top, each 6 dB is
+    /// ten steps, and bad values are silence.
+    #[test]
+    fn given_linear_levels_when_mapped_then_the_scale_is_decibels() {
+        assert_eq!(sound_level(0.0), 0);
+        assert_eq!(sound_level(-0.5), 0);
+        assert_eq!(sound_level(f64::NAN), 0);
+        assert_eq!(sound_level(0.000_1), 0);
+        assert_eq!(sound_level(0.001), 0);
+        assert_eq!(sound_level(0.01), 33);
+        assert_eq!(sound_level(0.1), 67);
+        assert_eq!(sound_level(0.5), 90);
+        assert_eq!(sound_level(1.0), MAX_SOUND_LEVEL);
+        assert_eq!(sound_level(4.0), MAX_SOUND_LEVEL);
+        assert_eq!(sound_level(f64::INFINITY), MAX_SOUND_LEVEL);
+    }
+
+    /// GIVEN a run of levels with repeats within a second
+    /// WHEN each goes through the gate
+    /// THEN only changes are sent, and a call that stays silent sends none.
+    #[test]
+    fn given_levels_when_gated_then_only_changes_are_sent() {
+        let mut gate = LevelGate::default();
+        let start = Instant::now();
+        let sent: Vec<u8> = [0, 0, 40, 40, 41, 0, 0]
+            .into_iter()
+            .zip(0..)
+            .filter_map(
+                |(level, tick)| match gate.next(level, at(start, tick * 100)) {
+                    Some(FromWorker::SoundLevel { level }) => Some(level),
+                    Some(other) => panic!("not a level: {other:?}"),
+                    None => None,
+                },
+            )
+            .collect();
+        assert_eq!(sent, [40, 41, 0]);
+    }
+
+    /// GIVEN a steady level above silence WHEN it stays the same THEN it is
+    /// sent again once a second, so a page that attached later learns it;
+    /// GIVEN steady silence THEN it is never sent again.
+    #[test]
+    fn given_a_steady_level_when_gated_then_it_is_repeated_each_second() {
+        let mut gate = LevelGate::default();
+        let start = Instant::now();
+        let repeat = u64::try_from(SOUND_LEVEL_REPEAT.as_millis()).expect("short");
+        assert!(gate.next(60, start).is_some());
+        assert!(gate.next(60, at(start, repeat - 1)).is_none());
+        assert_eq!(
+            gate.next(60, at(start, repeat)),
+            Some(FromWorker::SoundLevel { level: 60 })
+        );
+        assert!(gate.next(60, at(start, repeat + 100)).is_none());
+        assert!(gate.next(0, at(start, repeat + 200)).is_some());
+        assert!(gate.next(0, at(start, 10 * repeat)).is_none());
     }
 }

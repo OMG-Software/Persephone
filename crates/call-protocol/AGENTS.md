@@ -12,6 +12,7 @@ This crate defines the bounded binary messages between the key-holding core and 
 - Other SFUs (ADR-0054): wire version 6 added `ToWorker::Subscribe { index 1..=3, url, jwt }` (the JWT in `Zeroizing`, the URL checked like the `Join` URL) and `FromWorker::Connection { connection 1..=3, up }`. `ParticipantJoined`, `ParticipantLeft`, `Speaking`, `ScreenSharer` and `VideoStarted` carry the connection number (0 is the own SFU, 1 to 3 are other SFUs, `MAX_OTHER_CONNECTIONS`); the reader refuses a larger number. The worker only reports the number. The core decides which connection may speak for which member.
 - Deafen and volume (ADR-0055): wire version 7 added `ToWorker::SetDeafened`, `ToWorker::SetVolume { percent }` and `FromWorker::Deafened`, and `Join` ends with the volume. `Reader::volume` refuses a volume over `MAX_VOLUME_PERCENT` (100).
 - Diagnostic log (ADR-0058): wire version 8 added `ToWorker::SetDiagnostics { on }` (allowed before `Join`) and `FromWorker::Diagnostic { level 1..=4, target, message }`. The target is 1 to 64 bytes and the message at most 2 KiB, both without control characters.
+- Sound level meter (ADR-0055 amendment of 2026-11-23): wire version 9 added `FromWorker::SoundLevel { level }`, 0 to `MAX_SOUND_LEVEL` (100). `Reader::sound_level` refuses a larger value.
 - Coordinate wire changes with `crates/core` and `crates/call-worker` (planned), and bump the version byte.
 
 ## Checks

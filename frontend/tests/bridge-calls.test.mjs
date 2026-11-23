@@ -375,12 +375,14 @@ test('GIVEN a paste that is not one PNG or JPEG of 1 byte to 20 MiB WHEN attache
 
 test('GIVEN session channel messages WHEN delivered THEN each reaches its own callback and only an unknown message counts as a session change', async () => {
   let channel;
+  let levelChannel;
   const asked = [];
   mockIPC((command, args) => {
     asked.push(command);
     if (command === 'diagnostics_status') return { on: false, full: false, failed: false, available: true, path: null };
     assert.equal(command, 'watch_session');
     channel = args.onChange;
+    levelChannel = args.onSoundLevel;
     return null;
   });
   const seen = [];
@@ -392,8 +394,13 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
     () => seen.push('calls'),
     () => seen.push('callVideo'),
     () => seen.push('rings'),
-    () => seen.push('account')
+    () => seen.push('account'),
+    (level) => seen.push(`level ${level}`)
   );
+  // The sound level has its own channel: a number from 0 to 100 reaches the
+  // page, anything else is dropped and is never a session change.
+  for (const value of [0, 42, 100, 101, -1, 4.5, '42', null]) levelChannel.onmessage(value);
+  assert.deepEqual(seen.splice(0), ['level 0', 'level 42', 'level 100']);
   for (const message of ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls', 'callvideo', 'rings', 'Rings', 'diagnostics', 'account', 'Account']) {
     channel.onmessage(message);
   }

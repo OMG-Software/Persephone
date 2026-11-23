@@ -130,6 +130,31 @@ their level after the warm-up. macOS runs the workload without the count.
   volume slider (0 to 100 in steps of 5). Both work during a call.
 * Settings, Calls has the same volume slider. It saves at once and changes
   a running call.
+* Amendment, 2026-11-23 (owner request): a sound level meter sits right
+  under the call bar's volume slider, as wide as it. A bar grows to the
+  right with the loudest sound the call plays now, so it moves while
+  someone talks. It shows the sound after the call volume, so it follows
+  the slider and is empty while deafened.
+  * The worker reads WebRTC's `audioLevel` of every subscribed remote audio
+    track (inbound RTP statistics, measured on the audio as it is played)
+    every 100 ms on its own task, at most one at a time and at most 500 ms
+    long, and takes the loudest. It maps it to 0 (-60 dBFS or quieter) to
+    100 (0 dBFS), 0.6 dB a step, and sends `SoundLevel { level }` (call
+    protocol version 9, tag 19) when the number changes, and an unchanged
+    level above 0 again once a second. The repeat lets a page that attaches
+    during a call (a reload, or a call started before the page) show the
+    sound within a second: the page starts at 0 and nobody keeps the level
+    for it. Silence is never repeated, so a quiet call sends nothing. The
+    core refuses a level over 100 when decoded.
+  * The level is not call state. The core passes it to the hub, which keeps
+    only the newest and sends `CallSoundLevel { level }` at most once every
+    100 ms. The host forwards the number on a second channel of
+    `watch_session` and drops one over 100; the page drops anything that is
+    not a whole number from 0 to 100, and any level outside an active call.
+    `call_status` is not asked again for it, so the meter adds no records to
+    the diagnostic log.
+  * It is an ARIA `meter` with the level in decibels as its spoken value.
+    From -6 dBFS it shows in the danger colour.
 
 ### Positive Consequences
 

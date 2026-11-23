@@ -44,6 +44,9 @@ import {
   ringsKey,
   shownRings,
   LatestOnly,
+  parseSoundLevel,
+  SOUND_LEVEL_MAX,
+  soundLevelText,
   volumeText,
   volumeValue
 } from '../src/calls.ts';
@@ -574,4 +577,19 @@ test('GIVEN a send that waits WHEN the sender is cleared and that send fails THE
   await settle();
   await settle();
   assert.deepEqual(outcomes, [false, true], 'a failure after the clear is reported');
+});
+
+test('GIVEN values from the host WHEN read as a sound level THEN only whole numbers from 0 to 100 pass', () => {
+  for (const good of [0, 1, 55, SOUND_LEVEL_MAX]) assert.equal(parseSoundLevel(good), good);
+  for (const bad of [-1, 101, 2.5, Number.NaN, Number.POSITIVE_INFINITY, '50', null, undefined, {}, [40]]) {
+    assert.equal(parseSoundLevel(bad), null, String(bad));
+  }
+});
+
+test('GIVEN meter levels WHEN spoken THEN silence is named and the rest are decibels below full scale', () => {
+  assert.equal(soundLevelText(0), 'Silent');
+  assert.equal(soundLevelText(1), '−59 dB');
+  assert.equal(soundLevelText(50), '−30 dB');
+  assert.equal(soundLevelText(90), '−6 dB');
+  assert.equal(soundLevelText(SOUND_LEVEL_MAX), '0 dB');
 });

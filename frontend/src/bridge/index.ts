@@ -95,6 +95,7 @@ import type {
   PublicRoomPage,
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
+import { parseSoundLevel } from '../calls.ts';
 import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
 import { parseVideoPicture, type VideoPicture } from '../video.ts';
 
@@ -333,7 +334,9 @@ export async function subscribeRoom(
  * changed (ask `callRings`; it clears nothing), and `onAccount` when the
  * account's status changed within its session, such as the homeserver
  * refusing its presence (ask `appStatus`; it clears nothing). Anything else
- * counts as a session change, which clears the page.
+ * counts as a session change, which clears the page. `onSoundLevel` gets the
+ * running call's sound level meter value on its own channel (ADR-0055): a
+ * whole number from 0 to 100; anything else is dropped.
  */
 export async function watchSession(
   onSession: () => void,
@@ -343,7 +346,8 @@ export async function watchSession(
   onCalls: () => void,
   onCallVideo: () => void,
   onRings: () => void,
-  onAccount: () => void
+  onAccount: () => void,
+  onSoundLevel: (level: number) => void = () => {}
 ): Promise<void> {
   const channel = new Channel<string>((message) =>
     message === 'rooms'
@@ -367,7 +371,11 @@ export async function watchSession(
   if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
     installPageDiagnostics(window);
   }
-  await invoke<null>('watch_session', { onChange: channel });
+  const soundLevel = new Channel<unknown>((value) => {
+    const level = parseSoundLevel(value);
+    if (level !== null) onSoundLevel(level);
+  });
+  await invoke<null>('watch_session', { onChange: channel, onSoundLevel: soundLevel });
   // The log may already be on (a reloaded page): follow it from now.
   await followDiagnostics();
 }

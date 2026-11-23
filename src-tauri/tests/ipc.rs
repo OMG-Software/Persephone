@@ -1,7 +1,7 @@
 //! IPC permission tests against the shell's real configuration and compiled
 //! capabilities, using Tauri's mock runtime (no window or web view).
 
-use persephone_core_protocol::{Call, ErrorCode, Event, MAX_ROOM_ID_BYTES};
+use persephone_core_protocol::{Call, ErrorCode, Event, MAX_CALL_SOUND_LEVEL, MAX_ROOM_ID_BYTES};
 use persephone_desktop::{
     BAND_PREFIX_BYTES, MAIN_WINDOW, Subscriptions, VIDEO_PREFIX_BYTES, configure, context,
     core_link::{Band, CoreError, CoreLink, CoreTransport, Video},
@@ -1313,7 +1313,7 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     assert!(
         invoke(
             "watch_session",
-            serde_json::json!({"onChange": "__CHANNEL__:3"})
+            serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4"})
         )
         .is_ok()
     );
@@ -1337,7 +1337,19 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     subscriptions.dispatch(Event::ModulesChanged {});
     subscriptions.dispatch(Event::AccountChanged {});
     subscriptions.dispatch(Event::DiagnosticsChanged { on: false });
+    subscriptions.dispatch(Event::CallSoundLevel { level: 42 });
+    subscriptions.dispatch(Event::CallSoundLevel {
+        level: MAX_CALL_SOUND_LEVEL + 1,
+    });
     let delivered = delivered.lock().unwrap().clone();
+    // The level goes on its own channel as a number; one over the top is
+    // dropped, and nothing about it reaches the session channel.
+    let levels: Vec<&String> = delivered
+        .iter()
+        .filter(|(channel, _)| *channel == 4)
+        .map(|(_, body)| body)
+        .collect();
+    assert_eq!(levels, [&"42".to_owned()], "{delivered:?}");
     assert!(
         delivered.contains(&(3, r#""diagnostics""#.into())),
         "{delivered:?}"
@@ -2635,7 +2647,7 @@ fn given_a_notification_event_then_only_the_toaster_sees_it() {
         request(
             "watch_session",
             app_origin(),
-            serde_json::json!({"onChange": "__CHANNEL__:3"}),
+            serde_json::json!({"onChange": "__CHANNEL__:3", "onSoundLevel": "__CHANNEL__:4"}),
         ),
     )
     .unwrap();
