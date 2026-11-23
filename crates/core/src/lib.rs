@@ -3803,9 +3803,10 @@ impl Drop for ClearOnDrop<'_> {
     }
 }
 
-/// Commands the page sends many times each second (video pictures, image
-/// bands): only their failures are noted, as the page does (ADR-0058).
-const QUIET_REQUESTS: &[&str] = &["call_video_frame", "image_band"];
+/// Commands sent many times each second (video pictures, image bands) or
+/// that only feed the log (record batches): only their failures are noted,
+/// as the page does (ADR-0058).
+const QUIET_REQUESTS: &[&str] = &["call_video_frame", "image_band", "diagnostic_records"];
 
 /// One command for the diagnostic log: its name, its request ID, how it
 /// ended (`ok`, an error code, or `running` for a long call that reports
@@ -5438,9 +5439,17 @@ mod tests {
             answer_kind(&reply(Outcome::Error(ErrorCode::LimitExceeded))),
             started,
         );
-        // Frame fetches are noted only when they fail.
+        // Frame fetches and record batches are noted only when they fail.
         note_request(&log, 4, "call_video_frame", "ok".into(), started);
         note_request(&log, 5, "image_band", "core_internal".into(), started);
+        note_request(&log, 6, "diagnostic_records", "ok".into(), started);
+        note_request(
+            &log,
+            7,
+            "diagnostic_records",
+            "limit_exceeded".into(),
+            started,
+        );
         note_request(
             &log,
             3,
@@ -5474,6 +5483,7 @@ mod tests {
                 ("room_list".into(), 1, "ok".into()),
                 ("sign_in".into(), 2, "limit_exceeded".into()),
                 ("image_band".into(), 5, "core_internal".into()),
+                ("diagnostic_records".into(), 7, "limit_exceeded".into()),
                 ("set_diagnostics".into(), 3, "running".into()),
             ]
         );
