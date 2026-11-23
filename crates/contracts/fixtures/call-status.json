@@ -2,15 +2,47 @@
   "phase": "active",
   "roomId": "!example:server.invalid",
   "muted": true,
+  "deafened": true,
+  "volume": 65,
   "participants": [
     {
       "userId": "@alice:server.invalid",
       "deviceId": "ALICEDEVICE",
       "speaking": true,
       "reachable": true,
-      "keyed": false
+      "keyed": false,
+      "sharing": true
     }
   ],
   "ended": null,
-  "joinError": null
+  "joinError": null,
+  "camera": "on",
+  "screen": "starting",
+  "video": [
+    {
+      "tile": 0,
+      "participant": null,
+      "own": true,
+      "stream": 0
+    },
+    {
+      "tile": 1,
+      "participant": {
+        "userId": "@alice:server.invalid",
+        "deviceId": "ALICEDEVICE"
+      },
+      "own": false,
+      "stream": 2
+    },
+    {
+      "tile": 5,
+      "participant": {
+        "userId": "@alice:server.invalid",
+        "deviceId": "ALICEDEVICE"
+      },
+      "own": false,
+      "stream": 3
+    }
+  ],
+  "ringDeclined": true
 }

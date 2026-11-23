@@ -3,10 +3,13 @@
   import IconAction from './IconAction.svelte';
   import { memberMark, type MemberRow } from './members';
   import { avatarColour, initials } from './people';
+  import { presenceLabel } from './presence.ts';
 
   // The people in the selected room, down the right of the room. Each name
   // has a Verify icon while this account has not verified them, and a
-  // verified icon once it has. Names and IDs are untrusted, isolated text.
+  // verified icon once it has. A dot on the picture shows the presence the
+  // member's homeserver last reported: green online, yellow away, grey
+  // offline, none when not known. Names and IDs are untrusted, isolated text.
   let {
     rows,
     truncated = false,
@@ -76,8 +79,14 @@
     <ul class="member-list">
       {#each rows as row (row.userId)}
         {@const mark = memberMark(row)}
+        {@const presence = presenceLabel(row.presence)}
         <li class="member">
-          <span class="avatar small {avatarColour(row.userId)}" aria-hidden="true">{initials(row.userId)}</span>
+          <span class="presence-avatar">
+            <span class="avatar small {avatarColour(row.userId)}" aria-hidden="true">{initials(row.userId)}</span>
+            {#if presence}
+              <span class="presence-mark {row.presence}" role="img" aria-label={presence} title={presence}></span>
+            {/if}
+          </span>
           <span class="member-text">
             <bdi class="member-name">{row.name ?? row.userId}</bdi>
             {#if row.name !== null || row.invited}

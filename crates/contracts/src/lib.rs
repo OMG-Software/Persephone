@@ -34,6 +34,30 @@ impl<'de> Deserialize<'de> for UnixMillis {
     }
 }
 
+/// A `u64` field that JavaScript holds exactly: at most [`UnixMillis::MAX`].
+/// A larger value fails to deserialize.
+fn safe_u64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    if value <= UnixMillis::MAX {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("number out of JavaScript's exact range"))
+    }
+}
+
+/// The highest call playout volume, in percent: the sound as received
+/// (ADR-0055).
+pub const CALL_VOLUME_MAX: u8 = 100;
+
+fn call_volume<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
+    let value = u8::deserialize(deserializer)?;
+    if value <= CALL_VOLUME_MAX {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("call volume over 100 percent"))
+    }
+}
+
 /// Deliberately small frontend projection; never expose SDK, authentication, or key types here.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -51,6 +75,14 @@ pub struct RoomSummary {
     /// when the picture changes. None when the room has no picture. The page
     /// loads the picture only through `load_room_picture` (ADR-0041).
     pub picture_id: Option<String>,
+    /// Another device is in this room's call now (ADR-0052). A flag only:
+    /// no names.
+    #[serde(default)]
+    pub has_call: bool,
+    /// The contact's presence, as their homeserver last reported it
+    /// (ADR-0057). None when there is no contact, or it is not known.
+    #[serde(default)]
+    pub contact_presence: Option<PresenceStatus>,
 }
 
 /// The length of a [`RoomSummary::picture_id`], in hex characters.
@@ -1447,6 +1479,37 @@ pub struct AccountSettings {
     pub timeline_events: TimelineEvents,
     /// The colours of the interface. Grey and orange by default.
     pub theme: Theme,
+    /// Tell the homeserver this account's presence. On by default. When
+    /// off, no request of this account changes its presence (ADR-0057).
+    pub share_presence: bool,
+    /// The presence this account shares while `share_presence` is on.
+    /// Online by default.
+    pub presence: PresenceStatus,
+}
+
+/// A Matrix presence state (`m.presence`). Read only from one of the three
+/// names, like [`Theme`].
+#[derive(Clone, Copy, Debug, Default, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceStatus {
+    #[default]
+    Online,
+    /// Away (idle).
+    Unavailable,
+    Offline,
+}
+
+impl<'de> Deserialize<'de> for PresenceStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        const NAMES: &[&str] = &["online", "unavailable", "offline"];
+        let name = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        match name.as_ref() {
+            "online" => Ok(Self::Online),
+            "unavailable" => Ok(Self::Unavailable),
+            "offline" => Ok(Self::Offline),
+            other => Err(serde::de::Error::unknown_variant(other, NAMES)),
+        }
+    }
 }
 
 /// The colour themes of the interface, all dark. Only the page reads the
@@ -1603,6 +1666,8 @@ impl Default for AccountSettings {
             capture_protection: true,
             timeline_events: TimelineEvents::default(),
             theme: Theme::Orange,
+            share_presence: true,
+            presence: PresenceStatus::Online,
         }
     }
 }
@@ -1641,6 +1706,10 @@ pub struct RoomReader {
     pub refused: u32,
     /// This account: its other devices read the room too.
     pub own: bool,
+    /// The member's presence, as their homeserver last reported it
+    /// (ADR-0057). None when it is not known yet.
+    #[serde(default)]
+    pub presence: Option<PresenceStatus>,
 }
 
 /// Reply of `room_readers`: who can read a room's new messages, at most 100
@@ -1846,7 +1915,8 @@ pub struct JoinedRoom {
 pub enum StoreState {
     /// No profile was given; nothing is stored.
     NotConfigured,
-    /// The store is open with its key, unsealed by the profile passphrase.
+    /// The store is open with its key (unsealed by the profile passphrase
+    /// when the profile has one, ADR-0050).
     Protected,
     /// Locked on request; the stores are closed.
     Locked,
@@ -2007,6 +2077,9 @@ pub enum SecurityOperation {
     WaitingForPassword,
     /// The core's own window is asking for the recovery key.
     WaitingForRecoveryKey,
+    /// The core's own window is asking for the profile passphrase, to turn
+    /// it on or off (ADR-0050).
+    WaitingForPassphrase,
     /// The core's own window is asking whether to accept a contact's new
     /// identity (ADR-0007).
     WaitingForConfirmation,
@@ -2054,6 +2127,12 @@ pub enum SecurityError {
     DeviceNotFound,
     /// A new recovery key was made and shown, but saving it to a file failed.
     RecoveryKeyNotSaved,
+    /// Too many wrong entries of the current profile passphrase, so the
+    /// passphrase was not turned off.
+    PassphraseRejected,
+    /// The profile's key file or the OS vault failed, so the passphrase
+    /// setting did not change.
+    ProfileUnavailable,
     /// Anything else.
     Failed,
 }
@@ -2172,6 +2251,9 @@ pub struct SecurityStatus {
     /// is incomplete. It may delete that backup and start a new one, after a
     /// confirmation in the core's own window (ADR-0040).
     pub can_start_new_backup: bool,
+    /// The local profile asks for a passphrase before it opens (ADR-0050).
+    /// Off by default.
+    pub profile_passphrase: bool,
 }
 
 impl SecurityStatus {
@@ -2184,6 +2266,7 @@ impl SecurityStatus {
             verification: None,
             can_set_up_recovery: false,
             can_start_new_backup: false,
+            profile_passphrase: false,
         }
     }
 }
@@ -2198,8 +2281,14 @@ pub enum CallUnavailable {
     NotJoined,
     /// A call never runs without end-to-end encryption.
     NotEncrypted,
+    /// This user's power level is below what the room requires to send the
+    /// call member state event, so the call could not join.
+    NotPermitted,
     /// The homeserver offers no call server.
     NoCallServer,
+    /// The homeserver offers a call server, but none that Persephone can
+    /// use (ADR-0056).
+    CallServerUnsupported,
     /// The homeserver could not be asked.
     ServerUnreachable,
 }
@@ -2237,11 +2326,15 @@ pub struct CallParticipant {
     pub user_id: String,
     pub device_id: String,
     pub speaking: bool,
-    /// It publishes to the call server this call uses. Others cannot be
-    /// heard in this version.
+    /// The call is connected to the call server it publishes to: the own
+    /// one, or another one the user agreed to connect to (ADR-0054).
+    /// Otherwise it cannot be heard or seen.
     pub reachable: bool,
     /// This device holds a key for it. Without one it cannot be heard.
     pub keyed: bool,
+    /// It shares its screen (ADR-0053). The sender's label is only a
+    /// display hint; shown as text.
+    pub sharing: bool,
 }
 
 /// Why a call ended.
@@ -2253,6 +2346,8 @@ pub enum CallEnd {
     AudioDevice,
     Containment,
     WorkerStopped,
+    /// The call process ended with an internal error (a panic or an abort).
+    WorkerCrashed,
     MembershipLost,
     KeysUnavailable,
     SessionEnded,
@@ -2269,6 +2364,9 @@ pub enum CallJoinError {
     NotJoined,
     NotEncrypted,
     NoCallServer,
+    /// The homeserver offers a call server, but none that Persephone can
+    /// use (ADR-0056).
+    CallServerUnsupported,
     /// The profile has a proxy and the user did not allow a direct call.
     Declined,
     UnsupportedPlatform,
@@ -2284,7 +2382,7 @@ pub enum CallJoinError {
     DeviceSettingUnreadable,
 }
 
-/// One microphone or speaker. The name is untrusted operating system text,
+/// One microphone, speaker or camera. The name is untrusted operating system text,
 /// shown as plain text only. The ID is the platform's device ID, kept and
 /// returned unchanged.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
@@ -2295,19 +2393,90 @@ pub struct CallDevice {
 }
 
 /// Reply of `call_devices`: the devices now connected and the saved choice
-/// (ADR-0043). `supported` is false where calls have no reviewed containment;
-/// the lists are then empty. A saved choice may name a device that is not
-/// connected now. `unreadable` is true when the saved record could not be
-/// read; both choices are then null.
+/// (ADR-0043, ADR-0048). `supported` is false where calls have no reviewed
+/// containment; the lists are then empty. A saved choice may name a device
+/// that is not connected now. `unreadable` is true when the saved record
+/// could not be read; all choices are then null and the volume is 100.
+/// `volume` is the saved playout volume, 0 to [`CALL_VOLUME_MAX`]
+/// (ADR-0055).
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallDevices {
     pub supported: bool,
     pub recording: Vec<CallDevice>,
     pub playout: Vec<CallDevice>,
+    pub cameras: Vec<CallDevice>,
     pub selected_recording: Option<String>,
     pub selected_playout: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub selected_camera: Option<String>,
+    #[serde(deserialize_with = "call_volume")]
+    pub volume: u8,
     pub unreadable: bool,
+}
+
+/// Most video tiles a call shows: the own camera, four remote cameras and
+/// the one remote screen share (ADR-0053).
+pub const CALL_VIDEO_TILES_MAX: usize = 6;
+
+/// The camera, as the page shows it (ADR-0048).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallCamera {
+    Off,
+    /// Asked to start; the worker has not answered yet.
+    Starting,
+    On,
+    /// The chosen camera is not connected.
+    NotFound,
+    /// No camera, the OS denied it, it is in use, or capture failed.
+    Unavailable,
+}
+
+/// The own screen share, as the page shows it (ADR-0053).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallScreen {
+    Off,
+    /// Asked to start; the core's chooser or warning, the portal or the
+    /// worker has not answered yet.
+    Starting,
+    On,
+    /// The chosen screen is gone or has another size.
+    NotFound,
+    /// Screen sharing cannot run here (this OS, no portal, or capture
+    /// failed).
+    Unavailable,
+    /// The OS or the portal refused the capture.
+    Refused,
+}
+
+/// A remote device, by the same IDs [`CallParticipant`] carries.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallParticipantRef {
+    pub user_id: String,
+    pub device_id: String,
+}
+
+/// One video tile. Tile 0 is the own camera (`own` is true and
+/// `participant` is null). Tiles 1 to 4 show a remote camera. Tile 5 shows
+/// the one decoded remote screen share (ADR-0053). The picture itself comes
+/// from `call_video_frame`.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallVideoTile {
+    /// 0 to 5.
+    pub tile: u8,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub participant: Option<CallParticipantRef>,
+    pub own: bool,
+    /// The tile's stream number. It changes when the tile starts showing a
+    /// new stream; `call_video_frame` gives pictures of this stream only.
+    /// At most 2^53 - 1, so the page holds it exactly.
+    #[serde(deserialize_with = "safe_u64")]
+    #[ts(type = "number")]
+    pub stream: u64,
 }
 
 /// Reply of every call command except `call_readiness`. Codes, bounded IDs
@@ -2317,13 +2486,63 @@ pub struct CallDevices {
 pub struct CallStatus {
     pub phase: CallPhase,
     pub room_id: Option<String>,
+    /// The microphone is muted. Always true while `deafened`.
     pub muted: bool,
+    /// All remote call audio is off and the microphone is muted (ADR-0055).
+    pub deafened: bool,
+    /// The playout volume of the call, 0 to [`CALL_VOLUME_MAX`] percent. 100
+    /// when there is no call.
+    #[serde(deserialize_with = "call_volume")]
+    pub volume: u8,
     /// At most [`CALL_PARTICIPANTS_MAX`], other devices only.
     pub participants: Vec<CallParticipant>,
     /// Set while `phase` is `ended`.
     pub ended: Option<CallEnd>,
     /// Set when this reply refuses a join.
     pub join_error: Option<CallJoinError>,
+    pub camera: CallCamera,
+    /// The own screen share (ADR-0053).
+    pub screen: CallScreen,
+    /// The active video tiles, at most [`CALL_VIDEO_TILES_MAX`].
+    pub video: Vec<CallVideoTile>,
+    /// The other member of a direct chat declined this call's ring
+    /// (ADR-0052). The call goes on until the user leaves.
+    #[serde(default)]
+    pub ring_declined: bool,
+}
+
+/// Most incoming rings at once (ADR-0052).
+pub const CALL_RINGS_MAX: usize = 4;
+
+/// What the caller meant: a soft hint for the camera.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallIntent {
+    Audio,
+    Video,
+}
+
+/// One incoming call ring (ADR-0052). `caller` is a validated user ID; the
+/// page shows it as inert text. `seconds_left` is whole seconds until the
+/// ring ends, at least 1 and at most 120.
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallRing {
+    /// A number the core gives each ring, so a new ring with the same room
+    /// and caller can be told apart. It names nothing in Matrix.
+    pub ring_id: u32,
+    pub room_id: String,
+    pub caller: String,
+    pub intent: CallIntent,
+    pub seconds_left: u32,
+}
+
+/// Reply of `call_rings` and `call_decline_ring`: the rings now running,
+/// newest first, at most [`CALL_RINGS_MAX`].
+#[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallRings {
+    pub rings: Vec<CallRing>,
 }
 
 impl CallStatus {
@@ -2332,9 +2551,15 @@ impl CallStatus {
             phase: CallPhase::Idle,
             room_id: None,
             muted: false,
+            deafened: false,
+            volume: CALL_VOLUME_MAX,
             participants: Vec::new(),
             ended: None,
             join_error: None,
+            camera: CallCamera::Off,
+            screen: CallScreen::Off,
+            video: Vec::new(),
+            ring_declined: false,
         }
     }
 }
@@ -2347,6 +2572,8 @@ pub fn sample_room_summary() -> RoomSummary {
         encryption: RoomEncryption::Encrypted,
         contact: Some("@alice:server.invalid".into()),
         picture_id: Some("0123456789abcdef".into()),
+        has_call: true,
+        contact_presence: Some(PresenceStatus::Unavailable),
     }
 }
 
@@ -2481,7 +2708,14 @@ pub fn generated_typescript() -> String {
         format!("export {}", CallParticipant::decl(&config)),
         format!("export {}", CallEnd::decl(&config)),
         format!("export {}", CallJoinError::decl(&config)),
+        format!("export {}", CallCamera::decl(&config)),
+        format!("export {}", CallScreen::decl(&config)),
+        format!("export {}", CallParticipantRef::decl(&config)),
+        format!("export {}", CallVideoTile::decl(&config)),
         format!("export {}", CallStatus::decl(&config)),
+        format!("export {}", CallIntent::decl(&config)),
+        format!("export {}", CallRing::decl(&config)),
+        format!("export {}", CallRings::decl(&config)),
         format!("export {}", CallDevice::decl(&config)),
         format!("export {}", CallDevices::decl(&config)),
         format!("export {}", ContactTrust::decl(&config)),
@@ -2540,6 +2774,7 @@ pub fn generated_typescript() -> String {
         format!("export {}", ThirdPartyModules::decl(&config)),
         format!("export {}", TimelineEvents::decl(&config)),
         format!("export {}", Theme::decl(&config)),
+        format!("export {}", PresenceStatus::decl(&config)),
         format!("export {}", AccountSettings::decl(&config)),
         format!("export {}", RoomActivity::decl(&config)),
         format!("export {}", RoomServer::decl(&config)),
@@ -2647,6 +2882,7 @@ mod personal_contract_tests {
         fixture::<ConnectionHealth>(include_str!("../fixtures/connection-health.json"));
         fixture::<CallReadiness>(include_str!("../fixtures/call-readiness.json"));
         fixture::<CallStatus>(include_str!("../fixtures/call-status.json"));
+        fixture::<CallRings>(include_str!("../fixtures/call-rings.json"));
         fixture::<LocalSearchFilters>(include_str!("../fixtures/local-search-filters.json"));
         let mut focused: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/focused-timeline.json")).unwrap();
@@ -2662,17 +2898,49 @@ mod personal_contract_tests {
     fn call_contracts_refuse_unknown_fields_and_codes() {
         assert_eq!(
             serde_json::to_string(&CallStatus::idle()).unwrap(),
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null}"#
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#
         );
         for wire in [
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null,"token":"x"}"#,
-            r#"{"phase":"paused","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":null}"#,
-            r#"{"phase":"ended","roomId":null,"muted":false,"participants":[],"ended":"crashed","joinError":null}"#,
-            r#"{"phase":"idle","roomId":null,"muted":false,"participants":[],"ended":null,"joinError":"busy"}"#,
-            r#"{"phase":"idle","roomId":null,"muted":"no","participants":[],"ended":null,"joinError":null}"#,
-            r#"{"phase":"active","roomId":null,"muted":false,"participants":[{"userId":"@a:s","deviceId":"D","speaking":false,"reachable":true,"keyed":true,"url":"x"}],"ended":null,"joinError":null}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"token":"x"}"#,
+            r#"{"phase":"paused","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"ended","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":"crashed","joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":"busy","camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":"no","deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            r#"{"phase":"active","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[{"userId":"@a:s","deviceId":"D","speaking":false,"reachable":true,"keyed":true,"sharing":false,"url":"x"}],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+            // The camera and video fields are required, and the camera is a closed set.
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off"}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"notFound","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"broken","video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":true,"video":[]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":256,"participant":null,"own":true}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":-1,"participant":null,"own":true}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":0,"participant":null,"own":true,"url":"x"}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":1,"participant":{"userId":"@a:s"},"own":false}]}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[{"tile":1,"participant":{"userId":"@a:s","deviceId":"D","x":1},"own":false}]}"#,
+            // The deafen flag and the volume are required, and the volume is 0 to 100.
+            r#"{"phase":"idle","roomId":null,"muted":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":"no","volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":101,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":-1,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":50.5,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[],"ringDeclined":false}"#,
         ] {
             assert!(serde_json::from_str::<CallStatus>(wire).is_err(), "{wire}");
+        }
+        let devices = |volume: &str| {
+            format!(
+                r#"{{"supported":true,"recording":[],"playout":[],"cameras":[],"selectedRecording":null,"selectedPlayout":null,"selectedCamera":null,"volume":{volume},"unreadable":false}}"#
+            )
+        };
+        assert!(serde_json::from_str::<CallDevices>(&devices("0")).is_ok());
+        assert!(serde_json::from_str::<CallDevices>(&devices("100")).is_ok());
+        for volume in ["101", "-1", "255", "50.5", "null", "\"50\""] {
+            assert!(
+                serde_json::from_str::<CallDevices>(&devices(volume)).is_err(),
+                "{volume}"
+            );
         }
         for wire in [
             r#"{"available":true,"reason":null,"activeMembers":256}"#,
@@ -2685,6 +2953,35 @@ mod personal_contract_tests {
                 "{wire}"
             );
         }
+    }
+
+    /// GIVEN the ring DTOs WHEN given an unknown field, intent or a wrong
+    /// type THEN they are refused; a status without the flag reads as not
+    /// declined, and a room summary without it as having no call.
+    #[test]
+    fn ring_contracts_refuse_unknown_fields_and_intents() {
+        for wire in [
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"video","secondsLeft":5,"name":"x"}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"hologram","secondsLeft":5}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":-1}]}"#,
+            r#"{"rings":[{"ringId":-1,"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":5}]}"#,
+            r#"{"rings":[{"roomId":"!r:s","caller":"@a:s","intent":"audio","secondsLeft":5}]}"#,
+            r#"{"rings":[{"ringId":1,"roomId":"!r:s","caller":"@a:s","intent":"audio"}]}"#,
+            r#"{"rings":[],"token":"x"}"#,
+        ] {
+            assert!(serde_json::from_str::<CallRings>(wire).is_err(), "{wire}");
+        }
+        let status: CallStatus = serde_json::from_str(
+            r#"{"phase":"idle","roomId":null,"muted":false,"deafened":false,"volume":100,"participants":[],"ended":null,"joinError":null,"camera":"off","screen":"off","video":[]}"#,
+        )
+        .unwrap();
+        assert!(!status.ring_declined);
+        let summary: RoomSummary = serde_json::from_str(
+            r#"{"roomId":"!r:s","displayName":null,"unreadCount":0,"encryption":"encrypted"}"#,
+        )
+        .unwrap();
+        assert!(!summary.has_call);
+        assert_eq!(summary.contact_presence, None);
     }
 
     /// Reject missing, duplicate, or invalid nullable fields and unsafe timestamps.

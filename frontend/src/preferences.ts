@@ -53,7 +53,10 @@ export const DEFAULT_SETTINGS: AccountSettings = {
     otherEvents: true,
     deletedMessages: true
   },
-  theme: DEFAULT_THEME
+  theme: DEFAULT_THEME,
+  // Presence is shared, as online, until the account changes it (ADR-0057).
+  sharePresence: true,
+  presence: 'online'
 };
 
 /** The idle-lock choices offered, in minutes; 0 never locks (ADR-0025). */
@@ -80,6 +83,15 @@ export function isLockShortcut(
     !event.altKey &&
     event.key.toLowerCase() === 'l'
   );
+}
+
+/**
+ * Whether Lock is offered: the profile is open (or closing) and has a
+ * passphrase to open it again (ADR-0050). Unlock is not part of this: a closed
+ * profile can always be opened again.
+ */
+export function lockOffered(store: string | undefined, profilePassphrase: boolean | null): boolean {
+  return profilePassphrase === true && (store === 'protected' || store === 'locking');
 }
 
 /**

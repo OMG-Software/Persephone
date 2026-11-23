@@ -97,6 +97,10 @@ Proposed option: "a contained call worker".
   `foci_preferred` ("multi-SFU"). This first version connects only to
   the SFU of this homeserver. Members who publish to another SFU are shown
   as not reachable. Connecting to more than one SFU is later work.
+  Amendment, 19 November 2026: [ADR-0054](0054-connect-to-call-members-on-other-sfus.md)
+  adds subscribe-only connections to other SFUs, after the user agrees for
+  each server. A member is shown as not reachable only while no such
+  connection is up.
 * Only memberships whose state key names the event's sender, whose
   service URL is `https://`, and that have not expired are used. At most
   32 members are kept.
@@ -105,6 +109,20 @@ Proposed option: "a contained call worker".
 * SFU discovery: `discover_rtc_transports()` (the unstable
   `rtc/transports` path, then the `.well-known` `rtc_foci` fallback).
   TURN credentials: `GET /_matrix/client/v3/voip/turnServer`.
+  Amendment, 2026-11-19: Synapse 1.161 and later deprecate
+  `{"type":"livekit","livekit_service_url":U}` in favour of
+  `{"type":"m.livekit","url":U}`. The core accepts both forms in discovery
+  and in other members' `foci_preferred`, and uses the first acceptable
+  entry in the sender's order. The same checks apply to both: `https://`
+  only (loopback `http://` only with the `dev-disposable-servers` feature),
+  no user information, and the length limit. The advertised string is kept
+  byte for byte. The core still writes the legacy form in its own
+  membership, because Element Call's compatibility mode reads that form.
+  Replaced in part by
+  [ADR-0056](0056-get-call-tokens-from-the-homeserver-when-it-issues-them.md):
+  a `url` transport names the SFU (`wss://`), and its token comes from the
+  homeserver. An `https://` `url` is no longer accepted. The core reads the
+  transports with its own requests, not with `discover_rtc_transports()`.
 * SFU token: an OpenID token from the homeserver, sent to the
   transport's `/sfu/get`. The response URL must be `wss://`.
 * Frame keys: a new 32-byte random key for each rotation, with indices
@@ -139,7 +157,9 @@ Proposed option: "a contained call worker".
   record, play or connect.
 * A device is the libwebrtc device ID (on Windows the endpoint ID) and the
   OS name. IDs that LiveKit makes from a list position (`index:N`) are not
-  listed, because a hot-plug can move them to another device. Names are
+  listed, because a hot-plug can move them to another device. On Linux,
+  where libwebrtc has only such IDs, the worker lists sound server names
+  instead (`pulse:` IDs, ADR-0049). Names are
   untrusted text: the worker removes control characters and cuts them to
   256 bytes, the core normalizes them like display names (control and
   bidirectional formatting characters become U+FFFD), and the page shows
@@ -154,7 +174,12 @@ Proposed option: "a contained call worker".
 * A chosen device that is not connected stops the join with
   `DeviceNotFound`. The worker never falls back to another device, because
   that device could be a microphone the user did not choose. A record that
-  cannot be read stops the join too.
+  cannot be read stops the join too. On Linux the worker checks the device
+  before audio starts; if it goes away after that check or during the
+  call, the sound server moves the stream to its default, which the worker
+  cannot see (ADR-0049).
+* The same record keeps the call volume, which applies at once to a
+  running call. Deafen and the volume are in [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md).
 
 ### Session lifecycle
 
@@ -179,6 +204,37 @@ Proposed option: "a contained call worker".
   certificate checks. The vendored Rust `libwebrtc` crate raises the
   frame key ring from 255 to 256 slots, so that Element Call's key index
   255 works. Each patch is small and is reapplied for each LiveKit update.
+  Amendment, 2026-11-19: Persephone enforces the TLS 1.3 rule on the
+  core's homeserver client, the core's `/sfu/get` request and the
+  worker's LiveKit signalling. Persephone cannot enforce it on two
+  connections that libwebrtc makes, and neither is shown to meet it:
+  * Media: DTLS-SRTP to the SFU. libwebrtc's own BoringSSL negotiates the
+    DTLS version, and Persephone has no setting for it. The version that
+    the pinned build uses is not measured; DTLS 1.2 is assumed. The SFU
+    ends DTLS, so DTLS never protected the media from the SFU. The frame
+    encryption does that. A weaker DTLS exposes only what the network
+    path can already see: addresses, timing and the sizes of encrypted
+    frames.
+  * TURN over TLS (`turns:` URIs from the homeserver). libwebrtc makes
+    this TLS connection with its own stack, so Persephone's TLS version
+    and certificate rules do not apply to it. Its negotiated TLS version
+    and its certificate checks are not measured. A `turns:` connection
+    with an encrypted, certificate-checked TLS 1.2 session still protects
+    the TURN exchange from the path; it breaks only the TLS 1.3 rule.
+    Plain `turn:` over UDP or TCP has no TLS at all, so the path sees the
+    TURN username and the relay allocation. With Synapse's shared-secret
+    TURN credentials the username contains the Matrix user ID. TURN sends
+    a message integrity value, not the password. The relayed packets
+    are DTLS-SRTP with frame encryption in every case.
+  * This is a recorded gap, not an approved exception. The owner decision
+    of 20 October 2026 (`docs/planning/project-plan.md`) requires TLS 1.3
+    on every network connection, and no owner decision approves these two
+    connections. The requirement stays in force and is unmet for them.
+    The gap stays open until a live run records
+    the negotiated DTLS and `turns:` TLS versions with a packet capture,
+    and a test records whether `turns:` refuses a bad certificate. Then a
+    decision either accepts it or restricts it, for example by passing
+    the worker only `turns:` URIs, or no TURN URIs.
 * libwebrtc: `tools/dev.py` downloads the pinned prebuilt archive into
   `.local/`, checks its SHA-256 against a committed value, and gives its
   path to the build in `LK_CUSTOM_WEBRTC`. A wrong hash stops the build.
@@ -205,11 +261,16 @@ Proposed option: "a contained call worker".
 * A large native dependency: Google's WebRTC through LiveKit's fork, as a
   prebuilt static library. Its security fixes reach Persephone only through
   LiveKit releases.
+* DTLS-SRTP and TURN over TLS are made by libwebrtc and are not shown to
+  meet the TLS 1.3 requirement, which stays unmet for them (the recorded
+  gap in the amendment of 2026-11-19 under "Owner choices"; no owner
+  decision approves it). Their versions are not measured.
 * The worker can reach any network address. A compromised worker could
   send the call's audio and keys anywhere.
 * Opus audio is decoded in native code, outside the WebAssembly guest of
   ADR-0003. ADR-0003 keeps governing images.
-* Two vendored patches to maintain.
+* Two vendored patches to maintain. [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md) adds a remote
+  audio volume to `libwebrtc` and `webrtc-sys`.
 * The SFU and TURN operators see who is in a call, when, from which IP
   address, and the size and timing of the packets. They do not see the
   audio.
@@ -252,3 +313,4 @@ Proposed option: "a contained call worker".
 * [ADR-0028](0028-route-every-connection-through-the-profiles-socks5-proxy.md)
 * [Windows sandbox evidence](../evidence/windows-sandbox.md)
 * [Live call run with Element Call](../evidence/live-calls.md)
+* [ADR-0055](0055-add-deafen-and-a-call-volume-to-calls.md)

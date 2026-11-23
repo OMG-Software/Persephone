@@ -17,9 +17,10 @@ use std::{
     ffi::c_int,
     fs::File,
     io,
-    os::fd::OwnedFd,
+    os::{fd::OwnedFd, unix::net::UnixStream},
     path::Path,
     process::{Command, Stdio},
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
@@ -28,12 +29,15 @@ use std::{
 /// libraries one at a time before `main`; afterwards the worker opens
 /// nothing (seccomp or the sandbox refuses it anyway).
 const WORKER_MAX_FILES: u64 = 8;
+/// Most descriptors a call worker may hold (ADR-0049). It opens sockets,
+/// sound server connections and camera buffers, unlike the media worker.
+const CALL_MAX_FILES: u64 = 256;
 /// Longest pause between two checks for the worker's exit.
 const MAX_POLL: Duration = Duration::from_millis(10);
 /// Highest descriptor the fallback loop marks close-on-exec.
 const MAX_FALLBACK_FD: u64 = 1 << 20;
 
-fn error(call: &'static str, error: io::Error) -> LaunchError {
+pub(crate) fn error(call: &'static str, error: io::Error) -> LaunchError {
     LaunchError::Api {
         call,
         code: error.raw_os_error().unwrap_or(0) as u32,
@@ -118,6 +122,42 @@ pub(crate) fn set_limits(limits: Limits) -> io::Result<()> {
     set_limit(libc::RLIMIT_CORE, 0)?;
     set_limit(libc::RLIMIT_NPROC, 0)?;
     set_limit(libc::RLIMIT_NOFILE, WORKER_MAX_FILES)
+}
+
+/// The rlimits of a call worker (ADR-0049): files of at most `file_size`
+/// bytes, no core dumps, at most 256 descriptors and, where the OS enforces
+/// it, `address_space` bytes of address space. There is no CPU limit (a call
+/// runs for hours) and no process limit (libwebrtc starts threads, and
+/// `RLIMIT_NPROC` counts them). Async-signal-safe: system calls only.
+pub(crate) fn set_call_limits(address_space: Option<u64>, file_size: u64) -> io::Result<()> {
+    if let Some(bytes) = address_space {
+        set_limit(libc::RLIMIT_AS, bytes)?;
+    }
+    set_limit(libc::RLIMIT_FSIZE, file_size)?;
+    set_limit(libc::RLIMIT_CORE, 0)?;
+    set_limit(libc::RLIMIT_NOFILE, CALL_MAX_FILES)
+}
+
+/// Makes `fd` descriptor 3 of the new program and leaves it open across
+/// exec. Run after every descriptor above 2 was marked close-on-exec.
+/// Async-signal-safe.
+#[cfg(target_os = "linux")]
+pub(crate) fn inherit_as_fd3(fd: c_int) -> io::Result<()> {
+    // SAFETY: dup2 and fcntl with plain integer arguments.
+    let rc = unsafe {
+        if fd == 3 {
+            // dup2 does nothing when both numbers are equal, so the flag
+            // stays: clear it by hand.
+            libc::fcntl(3, libc::F_SETFD, 0)
+        } else {
+            // dup2 clears close-on-exec on the new descriptor.
+            libc::dup2(fd, 3)
+        }
+    };
+    if rc < 0 {
+        return Err(last_error());
+    }
+    Ok(())
 }
 
 /// Starts a new session, so the worker leads its own process group and has
@@ -301,5 +341,83 @@ impl Drop for UnixWorker {
             self.kill();
             let _ = self.reap(true);
         }
+    }
+}
+
+/// A call worker that runs until it exits or is killed (ADR-0043). Unlike
+/// the media worker it is shared between threads: one waits for its exit
+/// while another kills it, so each call holds the lock only briefly.
+pub struct LongLivedWorker(Mutex<UnixWorker>);
+
+impl LongLivedWorker {
+    fn lock(&self) -> std::sync::MutexGuard<'_, UnixWorker> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Ends the worker and its process group now.
+    pub fn kill(&self) {
+        self.lock().kill();
+    }
+
+    /// Waits up to `timeout` for the process to exit. Returns whether it did.
+    pub fn wait_exit(&self, timeout: Duration) -> bool {
+        let start = Instant::now();
+        let mut pause = Duration::from_millis(1);
+        loop {
+            match self.lock().wait(Duration::ZERO) {
+                Wait::Exited => return true,
+                Wait::Failed => return false,
+                Wait::TimedOut => {}
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return false;
+            }
+            thread::sleep(pause.min(timeout - elapsed));
+            pause = (pause * 2).min(MAX_POLL);
+        }
+    }
+
+    /// How the process ended. `None` while it runs or when the OS cannot say.
+    pub fn exit_status(&self) -> Option<crate::WorkerExit> {
+        let worker = self.lock();
+        worker.reap(false).ok()?;
+        let (status, _) = worker.reaped.get()?;
+        if libc::WIFEXITED(status) {
+            Some(crate::WorkerExit::Code(libc::WEXITSTATUS(status) as u32))
+        } else if libc::WIFSIGNALED(status) {
+            Some(crate::WorkerExit::Signal(libc::WTERMSIG(status) as u32))
+        } else {
+            None
+        }
+    }
+
+    /// Whether the OS shows the worker as contained (Linux:
+    /// `/proc/<pid>/status`; macOS: `sandbox_check`). Call it after the
+    /// worker's `Ready` message and before any input goes to it.
+    pub fn confirm_contained(&self) -> bool {
+        self.lock().confirm_contained()
+    }
+}
+
+/// A started call worker: its handle, the broker's ends of its pipes and, on
+/// Linux, the broker's end of the camera channel (descriptor 3 of the
+/// worker). macOS has no camera channel.
+pub struct StartedCallWorker {
+    pub worker: LongLivedWorker,
+    /// Writes to the worker's standard input.
+    pub stdin: File,
+    /// Reads from the worker's standard output.
+    pub stdout: File,
+    /// The camera channel: send one descriptor and one byte with
+    /// `send_camera_fd` (Linux). `None` on macOS.
+    pub camera: Option<UnixStream>,
+}
+
+impl LongLivedWorker {
+    pub(crate) fn new(worker: UnixWorker) -> Self {
+        Self(Mutex::new(worker))
     }
 }

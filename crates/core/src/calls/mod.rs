@@ -18,14 +18,20 @@
 //!   and parsed strictly: a sender can set a key only for its own identity.
 //! * [`sfu`]: the LiveKit JWT service request (`/sfu/get`) with an OpenID
 //!   token. The answer must name a `wss://` URL and a well-formed JWT.
+//! * [`other_sfu`]: which SFU each member is on, the other SFUs a call connects
+//!   to (ADR-0054) and what the user has been asked about them.
 //! * [`readiness`]: whether the homeserver offers an SFU transport and TURN
 //!   servers, so the page can say a call is not possible before it starts.
-//! * [`devices`]: the saved microphone and speaker, and the device list a
-//!   contained worker reports.
+//! * [`devices`]: the saved microphone, speaker and camera, and the device
+//!   list a contained worker reports.
+//! * [`video`]: the newest picture on each video tile, kept apart from the
+//!   worker's blocking event queue (ADR-0048).
 //! * [`delayed`]: the delayed leave (MSC4140) that ends a membership when the
 //!   core stops restarting it.
 //! * [`incoming`]: the bounded to-device handler for other members' keys and
 //!   the one decision that accepts or drops each.
+//! * [`rings`]: incoming call rings, the rooms that have a call, and the
+//!   events this core sends to ring and to decline (ADR-0052).
 //! * [`status`]: the page's view of a call: readiness, state, and the codes for
 //!   an end or a refused join. Codes, flags and bounded IDs only.
 //! * [`controller`]: the one running call. It starts the worker first, writes
@@ -42,9 +48,14 @@ pub mod encryption_keys;
 pub mod incoming;
 pub mod keys;
 pub mod membership;
+pub mod other_sfu;
 pub mod readiness;
+pub mod ring_events;
+pub mod rings;
+pub mod screen;
 pub mod sfu;
 pub mod status;
+pub mod video;
 pub mod worker;
 
 /// Most call members kept: examined events become at most this many members,
@@ -84,4 +95,61 @@ pub(crate) fn is_service_url(url: &url::Url, secure: &str, plain: &str) -> bool 
             Some(Host::Ipv6(ip)) => ip == std::net::Ipv6Addr::LOCALHOST,
             _ => false,
         }
+}
+
+/// One LiveKit transport entry: a homeserver's advertised transport or a
+/// member's `foci_preferred` entry (ADR-0056). Discovery and the membership
+/// reader both read entries with [`livekit_entry`], so they cannot differ.
+pub(crate) struct LiveKitEntry {
+    /// The acceptable `https` `livekit_service_url`, as advertised and
+    /// parsed: the entry uses the OpenID flow.
+    pub service: Option<(String, url::Url)>,
+    /// The acceptable `wss` `url`, as advertised and parsed.
+    pub sfu: Option<(String, url::Url)>,
+}
+
+/// The advertised string and its parse, when `value` is a string of at
+/// most [`MAX_URL_BYTES`] that [`is_service_url`] accepts.
+fn acceptable_url(
+    value: &serde_json::Value,
+    secure: &str,
+    plain: &str,
+) -> Option<(String, url::Url)> {
+    let advertised = value.as_str().filter(|raw| raw.len() <= MAX_URL_BYTES)?;
+    let url = url::Url::parse(advertised)
+        .ok()
+        .filter(|url| is_service_url(url, secure, plain))?;
+    Some((advertised.to_owned(), url))
+}
+
+/// Reads one entry by the rules of Element Call 0.28.2. `None` to skip it:
+///
+/// * The type must be `livekit` or `m.livekit`.
+/// * An entry with `livekit_service_url` must be type `livekit` (the type
+///   `matrix-js-sdk` reads) with an acceptable `https` URL. Its `url`, if
+///   acceptable, is kept too.
+/// * An entry without it must have an acceptable `wss` `url`.
+pub(crate) fn livekit_entry(entry: &serde_json::Value) -> Option<LiveKitEntry> {
+    let kind = entry.get("type")?.as_str()?;
+    if kind != "livekit" && kind != "m.livekit" {
+        return None;
+    }
+    let sfu = entry
+        .get("url")
+        .and_then(|url| acceptable_url(url, "wss", "ws"));
+    match entry.get("livekit_service_url") {
+        Some(service) => {
+            if kind != "livekit" {
+                return None;
+            }
+            Some(LiveKitEntry {
+                service: Some(acceptable_url(service, "https", "http")?),
+                sfu,
+            })
+        }
+        None => Some(LiveKitEntry {
+            service: None,
+            sfu: Some(sfu?),
+        }),
+    }
 }

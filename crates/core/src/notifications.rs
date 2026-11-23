@@ -21,7 +21,7 @@ use matrix_sdk::{
     deserialized_responses::RawAnySyncOrStrippedTimelineEvent,
     notification_settings::{IsEncrypted, IsOneToOne, RoomNotificationMode},
     ruma::{
-        MilliSecondsSinceUnixEpoch, OwnedUserId,
+        MilliSecondsSinceUnixEpoch, OwnedUserId, UserId,
         push::{PredefinedOverrideRuleId, RuleKind},
     },
     sync::Notification,
@@ -139,6 +139,15 @@ pub async fn shown(
     let RawAnySyncOrStrippedTimelineEvent::Sync(event) = &notification.event else {
         return None;
     };
+    // A call ring raises its own notification (ADR-0052); a push rule for it
+    // must not raise a second one.
+    if event
+        .get_field::<String>("type")
+        .ok()?
+        .is_some_and(|kind| kind == crate::calls::rings::NOTIFICATION_TYPE)
+    {
+        return None;
+    }
     let sender: OwnedUserId = event.get_field("sender").ok()??;
     // State events still flow through sync, but ignored senders never toast.
     if crate::abuse::ignored_set(client)
@@ -155,6 +164,12 @@ pub async fn shown(
     if !recent(sent, MilliSecondsSinceUnixEpoch::now()) {
         return None;
     }
+    Some(names(client, room, &sender).await)
+}
+
+/// The projected, bounded room and sender names of a notification (also
+/// used for a call ring, ADR-0052).
+pub async fn names(client: &Client, room: &Room, sender: &UserId) -> (String, String) {
     let contact = contacts::contact_of(client, room);
     let room_name = match (room.name(), &contact) {
         (None, Some(contact)) => contacts::shown(contact),
@@ -163,14 +178,14 @@ pub async fn shown(
             .map(|name| project_name(&name.to_string()))
             .unwrap_or_else(|| "A room".to_owned()),
     };
-    let sender_name = match room.get_member_no_sync(&sender).await {
+    let sender_name = match room.get_member_no_sync(sender).await {
         Ok(Some(member)) => member
             .display_name()
             .map(project_name)
-            .unwrap_or_else(|| contacts::shown(&sender)),
-        _ => contacts::shown(&sender),
+            .unwrap_or_else(|| contacts::shown(sender)),
+        _ => contacts::shown(sender),
     };
-    Some((bounded(room_name), bounded(sender_name)))
+    (bounded(room_name), bounded(sender_name))
 }
 
 #[cfg(test)]

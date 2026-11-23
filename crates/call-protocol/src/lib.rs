@@ -8,11 +8,11 @@
 use std::io::{self, Read, Write};
 
 use persephone_media_protocol::{
-    FrameError, FrameHeader, FrameKind, ResourceBudgets, read_frame, write_frame,
+    BudgetPermit, FrameError, FrameHeader, FrameKind, ResourceBudgets, read_frame, write_frame,
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 7;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_URL_BYTES: usize = 2048;
 pub const MAX_JWT_BYTES: usize = 8192;
@@ -23,12 +23,82 @@ pub const MAX_TURN_CREDENTIAL_BYTES: usize = 512;
 pub const MIN_KEY_BYTES: usize = 16;
 pub const MAX_KEY_BYTES: usize = 64;
 pub const MAX_PARTICIPANTS: usize = 32;
-/// An audio device ID as libwebrtc reports it (on Windows, the endpoint ID).
+/// Most subscribe-only connections to other SFUs for one call (ADR-0054).
+/// Connection 0 is the own SFU; the others are 1 to this number.
+pub const MAX_OTHER_CONNECTIONS: u8 = 3;
+/// A device ID as the platform reports it: an audio endpoint ID from
+/// libwebrtc, or a camera's symbolic link.
 pub const MAX_DEVICE_ID_BYTES: usize = 512;
 /// A device name as the OS reports it, cut on a character boundary.
 pub const MAX_DEVICE_NAME_BYTES: usize = 256;
-/// Devices per list (microphones or speakers).
+/// Devices per list (microphones, speakers or cameras).
 pub const MAX_DEVICES: usize = 32;
+/// The longest side of a video picture, in pixels (ADR-0048).
+pub const MAX_VIDEO_SIDE: u32 = 640;
+/// The most pixels in one video picture.
+pub const MAX_VIDEO_PIXELS: u32 = 640 * 360;
+/// The most bytes in one video picture: RGBA, four bytes per pixel.
+pub const MAX_VIDEO_BYTES: usize = MAX_VIDEO_PIXELS as usize * 4;
+/// Video tiles in a call. Tile 0 is the own camera; tiles 1 to 4 are remote
+/// cameras; tile 5 is the one decoded remote screen share (ADR-0053).
+pub const VIDEO_TILES: u8 = 6;
+/// The tile of the remote screen share.
+pub const SCREEN_TILE: u8 = 5;
+/// The most pictures per second for one camera tile.
+pub const MAX_VIDEO_FPS: u32 = 15;
+/// The longest side of a screen picture, in pixels (ADR-0053).
+pub const MAX_SCREEN_SIDE: u32 = 1280;
+/// The most pixels in one screen picture: 1280 x 720.
+pub const MAX_SCREEN_PIXELS: u32 = 1280 * 720;
+/// The most bytes in one screen picture: RGBA, four bytes per pixel.
+pub const MAX_SCREEN_BYTES: usize = MAX_SCREEN_PIXELS as usize * 4;
+/// The most pictures per second for the screen tile.
+pub const MAX_SCREEN_FPS: u32 = 5;
+/// The most monitors the core can name to the worker.
+pub const MAX_SCREEN_MONITORS: u8 = 16;
+/// The largest side of a monitor the core names, in pixels.
+pub const MAX_MONITOR_SIDE: u32 = 16_384;
+
+/// The longest side of a picture on this tile.
+pub const fn max_side(tile: u8) -> u32 {
+    if tile == SCREEN_TILE {
+        MAX_SCREEN_SIDE
+    } else {
+        MAX_VIDEO_SIDE
+    }
+}
+
+/// The most pixels in one picture on this tile.
+pub const fn max_pixels(tile: u8) -> u32 {
+    if tile == SCREEN_TILE {
+        MAX_SCREEN_PIXELS
+    } else {
+        MAX_VIDEO_PIXELS
+    }
+}
+
+/// The most pictures per second on this tile.
+pub const fn max_fps(tile: u8) -> u32 {
+    if tile == SCREEN_TILE {
+        MAX_SCREEN_FPS
+    } else {
+        MAX_VIDEO_FPS
+    }
+}
+
+/// A picture of `width` x `height` pixels is inside the limits of `tile`.
+pub fn picture_fits(tile: u8, width: u32, height: u32) -> bool {
+    tile < VIDEO_TILES
+        && (1..=max_side(tile)).contains(&width)
+        && (1..=max_side(tile)).contains(&height)
+        && u64::from(width) * u64::from(height) <= u64::from(max_pixels(tile))
+}
+/// The largest rotation: quarter turns clockwise, 0 to 3.
+pub const MAX_VIDEO_ROTATION: u8 = 3;
+/// The highest playout volume, in percent: the sound as received (ADR-0055).
+pub const MAX_VOLUME_PERCENT: u8 = 100;
+/// The fixed length of a media-protocol frame header.
+const FRAME_HEADER_LEN: usize = 17;
 
 /// Why a message body was refused. There is no free text on purpose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,15 +151,15 @@ impl std::fmt::Debug for TurnServer {
     }
 }
 
-/// One microphone or speaker. The ID is the platform's stable device ID;
-/// the name is untrusted OS text for display only.
+/// One microphone, speaker or camera. The ID is the platform's stable
+/// device ID; the name is untrusted OS text for display only.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AudioDevice {
+pub struct MediaDevice {
     pub id: String,
     pub name: String,
 }
 
-impl AudioDevice {
+impl MediaDevice {
     /// A device that fits the wire limits, or `None` when the ID does not:
     /// empty, over [`MAX_DEVICE_ID_BYTES`], or holding a control character.
     /// The name loses its control characters and is cut on a character
@@ -112,6 +182,38 @@ impl AudioDevice {
     }
 }
 
+/// The start of a Linux sound server device ID (ADR-0049): `pulse:` and then
+/// the PulseAudio sink or source name. libwebrtc's own Linux IDs are list
+/// positions (`index:N`), which are never listed; these names are stable.
+pub const PULSE_PREFIX: &str = "pulse:";
+/// The longest sound server device name taken (PulseAudio's `PA_NAME_MAX`).
+pub const MAX_PULSE_NAME_BYTES: usize = 128;
+
+/// Whether `name` can be a sound server device name: 1 to
+/// [`MAX_PULSE_NAME_BYTES`] ASCII letters, digits, `.`, `-`, `_` or `:`. The
+/// name goes into the worker's environment, so nothing else is taken. A
+/// device with another name is not listed.
+pub fn valid_pulse_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_PULSE_NAME_BYTES
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
+/// The sound server name inside a device ID, or `None` when `id` is not a
+/// `pulse:` ID with a valid name.
+pub fn pulse_name(id: &str) -> Option<&str> {
+    id.strip_prefix(PULSE_PREFIX)
+        .filter(|name| valid_pulse_name(name))
+}
+
+/// The device ID of the sound server device `name`, or `None` for an invalid
+/// name.
+pub fn pulse_id(name: &str) -> Option<String> {
+    valid_pulse_name(name).then(|| format!("{PULSE_PREFIX}{name}"))
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum ToWorker {
     Join {
@@ -125,8 +227,15 @@ pub enum ToWorker {
         recording_device: Option<String>,
         /// The speaker to use; `None` is the system default.
         playout_device: Option<String>,
+        /// The camera to use; `None` is the first camera the system lists.
+        camera_device: Option<String>,
+        /// Start the camera as the call connects.
+        camera_on: bool,
+        /// The playout volume of every remote audio track, 0 to
+        /// [`MAX_VOLUME_PERCENT`].
+        volume: u8,
     },
-    /// Only as the first message: report the audio devices, then exit.
+    /// Only as the first message: report the devices, then exit.
     ListDevices,
     SetKey {
         identity: String,
@@ -142,6 +251,47 @@ pub enum ToWorker {
         muted: bool,
     },
     Leave,
+    /// Start or stop the screen share (ADR-0053). The worker answers with
+    /// [`FromWorker::Screen`]. A start carries what the core chose; the page
+    /// never names a source.
+    SetScreen {
+        target: Option<ScreenTarget>,
+        /// The core's number for the share: a new one for each start, the
+        /// stopped share's for a stop. Every `Screen` state carries the
+        /// number of the share it describes, so a late state of an older
+        /// share is never taken for the newer one.
+        share: u32,
+    },
+    /// Turn the camera on or off. The worker answers with
+    /// [`FromWorker::Camera`].
+    SetCamera {
+        on: bool,
+        /// A camera portal remote went over the camera channel for this
+        /// camera-on, directly before it (Linux portal path). The worker
+        /// takes it with this command and closes it if the command opens
+        /// nothing. Only a camera-on carries one.
+        remote: bool,
+    },
+    /// Connect to another SFU as subscriber only (ADR-0054). `index` is the
+    /// connection number, 1 to [`MAX_OTHER_CONNECTIONS`]; the own SFU is
+    /// connection 0. The worker publishes nothing on it and answers with
+    /// [`FromWorker::Connection`].
+    Subscribe {
+        index: u8,
+        url: String,
+        jwt: Zeroizing<String>,
+    },
+    /// Stop or restart the playout of every remote audio track, including
+    /// tracks subscribed later. It does not change the microphone. The
+    /// worker answers with [`FromWorker::Deafened`].
+    SetDeafened {
+        deafened: bool,
+    },
+    /// Set the playout volume of every remote audio track, including tracks
+    /// subscribed later: 0 to [`MAX_VOLUME_PERCENT`]. No answer.
+    SetVolume {
+        percent: u8,
+    },
 }
 
 impl std::fmt::Debug for ToWorker {
@@ -156,6 +306,9 @@ impl std::fmt::Debug for ToWorker {
                 own_key,
                 recording_device,
                 playout_device,
+                camera_device,
+                camera_on,
+                volume,
             } => f
                 .debug_struct("Join")
                 .field("sfu_url", sfu_url)
@@ -166,6 +319,9 @@ impl std::fmt::Debug for ToWorker {
                 .field("own_key", own_key)
                 .field("recording_device", recording_device)
                 .field("playout_device", playout_device)
+                .field("camera_device", camera_device)
+                .field("camera_on", camera_on)
+                .field("volume", volume)
                 .finish(),
             Self::ListDevices => f.write_str("ListDevices"),
             Self::SetKey { identity, key } => f
@@ -180,6 +336,30 @@ impl std::fmt::Debug for ToWorker {
                 .finish(),
             Self::SetMuted { muted } => f.debug_struct("SetMuted").field("muted", muted).finish(),
             Self::Leave => f.write_str("Leave"),
+            Self::SetCamera { on, remote } => f
+                .debug_struct("SetCamera")
+                .field("on", on)
+                .field("remote", remote)
+                .finish(),
+            Self::SetScreen { target, share } => f
+                .debug_struct("SetScreen")
+                .field("target", target)
+                .field("share", share)
+                .finish(),
+            Self::Subscribe { index, url, jwt } => f
+                .debug_struct("Subscribe")
+                .field("index", index)
+                .field("url", url)
+                .field("jwt_len", &jwt.len())
+                .finish(),
+            Self::SetDeafened { deafened } => f
+                .debug_struct("SetDeafened")
+                .field("deafened", deafened)
+                .finish(),
+            Self::SetVolume { percent } => f
+                .debug_struct("SetVolume")
+                .field("percent", percent)
+                .finish(),
         }
     }
 }
@@ -219,6 +399,77 @@ impl TryFrom<u8> for FailureCode {
     }
 }
 
+/// What the core grants for one screen share (ADR-0053).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScreenTarget {
+    /// Linux: the portal remote went over the camera channel with kind `s`,
+    /// directly before this command. `node` is the PipeWire node ID.
+    Portal { node: u32 },
+    /// Windows: the monitor's index in display order and its size in pixels
+    /// when the user chose it. The worker reads its own list when the share
+    /// starts; another size at that index is "not found".
+    Monitor { index: u8, width: u32, height: u32 },
+}
+
+/// The state of the screen share, as the worker reports it. A closed set
+/// with no text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ScreenState {
+    Off = 0,
+    Starting = 1,
+    On = 2,
+    /// The chosen screen is gone, or has another size.
+    NotFound = 3,
+    /// Screen capture cannot run here, or capture failed.
+    Unavailable = 4,
+    /// The OS or the portal refused the capture.
+    Refused = 5,
+}
+
+impl TryFrom<u8> for ScreenState {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, DecodeError> {
+        Ok(match value {
+            0 => Self::Off,
+            1 => Self::Starting,
+            2 => Self::On,
+            3 => Self::NotFound,
+            4 => Self::Unavailable,
+            5 => Self::Refused,
+            _ => return Err(DecodeError::InvalidValue),
+        })
+    }
+}
+
+/// The state of the camera, as the worker reports it. A closed set with no
+/// text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum CameraState {
+    Off = 0,
+    On = 1,
+    /// The chosen camera is not connected.
+    NotFound = 2,
+    /// No camera, the OS denied it, it is in use, or capture failed.
+    Unavailable = 3,
+}
+
+impl TryFrom<u8> for CameraState {
+    type Error = DecodeError;
+
+    fn try_from(value: u8) -> Result<Self, DecodeError> {
+        Ok(match value {
+            0 => Self::Off,
+            1 => Self::On,
+            2 => Self::NotFound,
+            3 => Self::Unavailable,
+            _ => return Err(DecodeError::InvalidValue),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FromWorker {
     /// Containment self-check result. Zero means all controls are present,
@@ -227,18 +478,27 @@ pub enum FromWorker {
         containment_bits: u32,
     },
     Connected,
+    /// A remote participant joined the room of this connection (0 is the
+    /// own SFU, 1 to 3 are other SFUs, ADR-0054).
     ParticipantJoined {
+        connection: u8,
         identity: String,
     },
     ParticipantLeft {
+        connection: u8,
         identity: String,
     },
     Speaking {
+        connection: u8,
         identity: String,
         speaking: bool,
     },
     Muted {
         muted: bool,
+    },
+    /// The answer to `SetDeafened`: remote audio is off (`true`) or on.
+    Deafened {
+        deafened: bool,
     },
     Failed {
         code: FailureCode,
@@ -246,8 +506,51 @@ pub enum FromWorker {
     Left,
     /// The reply to `ListDevices`.
     Devices {
-        recording: Vec<AudioDevice>,
-        playout: Vec<AudioDevice>,
+        recording: Vec<MediaDevice>,
+        playout: Vec<MediaDevice>,
+        cameras: Vec<MediaDevice>,
+    },
+    /// The camera state. Sent after every `SetCamera`, after a join with
+    /// the camera on, and when capture fails during a call.
+    Camera {
+        state: CameraState,
+    },
+    /// The screen share state. Sent after every `SetScreen`, when the share
+    /// ends by itself, and when capture fails during a call.
+    Screen {
+        state: ScreenState,
+        /// The `SetScreen` number of the share this state describes.
+        share: u32,
+    },
+    /// A remote participant started or stopped a screen share that is not
+    /// shown on tile 5. It is only a display hint (ADR-0053).
+    ScreenSharer {
+        connection: u8,
+        identity: String,
+        sharing: bool,
+    },
+    /// A remote participant's video arrived on this tile (1 to 5).
+    VideoStarted {
+        tile: u8,
+        connection: u8,
+        identity: String,
+    },
+    /// The video on this tile (0 to 5) ended.
+    VideoStopped {
+        tile: u8,
+    },
+    /// Announces one picture for this tile (0 to 5). Always followed at once
+    /// by exactly one `RgbaPixels` frame: use [`read_worker_item`] and
+    /// [`write_video_frame`]. `rotation` is quarter turns clockwise, 0 to 3.
+    VideoFrame {
+        tile: u8,
+        rotation: u8,
+    },
+    /// The connection to another SFU (1 to 3) is up, or it ended or never
+    /// came up (ADR-0054). It never ends the call.
+    Connection {
+        connection: u8,
+        up: bool,
     },
 }
 
@@ -259,6 +562,11 @@ const TO_REMOVE_PARTICIPANT: u8 = 4;
 const TO_SET_MUTED: u8 = 5;
 const TO_LEAVE: u8 = 6;
 const TO_LIST_DEVICES: u8 = 7;
+const TO_SET_CAMERA: u8 = 8;
+const TO_SET_SCREEN: u8 = 9;
+const TO_SUBSCRIBE: u8 = 10;
+const TO_SET_DEAFENED: u8 = 11;
+const TO_SET_VOLUME: u8 = 12;
 
 // Tags of worker to core messages.
 const FROM_READY: u8 = 1;
@@ -270,6 +578,14 @@ const FROM_MUTED: u8 = 6;
 const FROM_FAILED: u8 = 7;
 const FROM_LEFT: u8 = 8;
 const FROM_DEVICES: u8 = 9;
+const FROM_CAMERA: u8 = 10;
+const FROM_VIDEO_STARTED: u8 = 11;
+const FROM_VIDEO_STOPPED: u8 = 12;
+const FROM_VIDEO_FRAME: u8 = 13;
+const FROM_SCREEN: u8 = 14;
+const FROM_SCREEN_SHARER: u8 = 15;
+const FROM_CONNECTION: u8 = 16;
+const FROM_DEAFENED: u8 = 17;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -350,7 +666,45 @@ impl<'a> Reader<'a> {
         Ok((!id.is_empty()).then(|| id.to_owned()))
     }
 
-    fn devices(&mut self) -> Result<Vec<AudioDevice>, DecodeError> {
+    /// A connection number: 0 is the own SFU, 1 to 3 are other SFUs.
+    fn connection(&mut self) -> Result<u8, DecodeError> {
+        let connection = self.u8()?;
+        if connection <= MAX_OTHER_CONNECTIONS {
+            Ok(connection)
+        } else {
+            Err(DecodeError::InvalidValue)
+        }
+    }
+
+    /// A playout volume: 0 to [`MAX_VOLUME_PERCENT`].
+    fn volume(&mut self) -> Result<u8, DecodeError> {
+        let percent = self.u8()?;
+        if percent <= MAX_VOLUME_PERCENT {
+            Ok(percent)
+        } else {
+            Err(DecodeError::InvalidValue)
+        }
+    }
+
+    /// A connection to another SFU: 1 to 3.
+    fn other_connection(&mut self) -> Result<u8, DecodeError> {
+        match self.connection()? {
+            0 => Err(DecodeError::InvalidValue),
+            connection => Ok(connection),
+        }
+    }
+
+    /// A tile number from `first` up to the last tile.
+    fn tile(&mut self, first: u8) -> Result<u8, DecodeError> {
+        let tile = self.u8()?;
+        if (first..VIDEO_TILES).contains(&tile) {
+            Ok(tile)
+        } else {
+            Err(DecodeError::InvalidValue)
+        }
+    }
+
+    fn devices(&mut self) -> Result<Vec<MediaDevice>, DecodeError> {
         let count = usize::from(self.u8()?);
         if count > MAX_DEVICES {
             return Err(DecodeError::TooLarge);
@@ -363,7 +717,7 @@ impl<'a> Reader<'a> {
             let name = self
                 .str(MAX_DEVICE_NAME_BYTES, CharRule::NoControl, true)?
                 .to_owned();
-            devices.push(AudioDevice { id, name });
+            devices.push(MediaDevice { id, name });
         }
         Ok(devices)
     }
@@ -416,7 +770,7 @@ fn put_str(out: &mut Vec<u8>, text: &str) {
     out.extend_from_slice(bytes);
 }
 
-fn put_devices(out: &mut Vec<u8>, devices: &[AudioDevice]) {
+fn put_devices(out: &mut Vec<u8>, devices: &[MediaDevice]) {
     let devices = &devices[..devices.len().min(usize::from(u8::MAX))];
     out.push(devices.len() as u8);
     for device in devices {
@@ -465,6 +819,9 @@ impl ToWorker {
                 own_key,
                 recording_device,
                 playout_device,
+                camera_device,
+                camera_on,
+                volume,
             } => {
                 out.push(TO_JOIN);
                 put_str(&mut out, sfu_url);
@@ -480,6 +837,9 @@ impl ToWorker {
                 put_key(&mut out, own_key);
                 put_str(&mut out, recording_device.as_deref().unwrap_or(""));
                 put_str(&mut out, playout_device.as_deref().unwrap_or(""));
+                put_str(&mut out, camera_device.as_deref().unwrap_or(""));
+                out.push(u8::from(*camera_on));
+                out.push(*volume);
             }
             Self::ListDevices => out.push(TO_LIST_DEVICES),
             Self::SetKey { identity, key } => {
@@ -500,6 +860,46 @@ impl ToWorker {
                 out.push(u8::from(*muted));
             }
             Self::Leave => out.push(TO_LEAVE),
+            Self::SetCamera { on, remote } => {
+                out.push(TO_SET_CAMERA);
+                out.push(u8::from(*on));
+                out.push(u8::from(*remote));
+            }
+            Self::Subscribe { index, url, jwt } => {
+                out.push(TO_SUBSCRIBE);
+                out.push(*index);
+                put_str(&mut out, url);
+                put_str(&mut out, jwt);
+            }
+            Self::SetScreen { target, share } => {
+                out.push(TO_SET_SCREEN);
+                out.extend_from_slice(&share.to_be_bytes());
+                match target {
+                    None => out.push(0),
+                    Some(ScreenTarget::Portal { node }) => {
+                        out.push(1);
+                        out.extend_from_slice(&node.to_be_bytes());
+                    }
+                    Some(ScreenTarget::Monitor {
+                        index,
+                        width,
+                        height,
+                    }) => {
+                        out.push(2);
+                        out.push(*index);
+                        out.extend_from_slice(&width.to_be_bytes());
+                        out.extend_from_slice(&height.to_be_bytes());
+                    }
+                }
+            }
+            Self::SetDeafened { deafened } => {
+                out.push(TO_SET_DEAFENED);
+                out.push(u8::from(*deafened));
+            }
+            Self::SetVolume { percent } => {
+                out.push(TO_SET_VOLUME);
+                out.push(*percent);
+            }
         }
         out
     }
@@ -538,6 +938,9 @@ impl ToWorker {
                     own_key: reader.key()?,
                     recording_device: reader.device_choice()?,
                     playout_device: reader.device_choice()?,
+                    camera_device: reader.device_choice()?,
+                    camera_on: reader.bool()?,
+                    volume: reader.volume()?,
                 }
             }
             TO_LIST_DEVICES => Self::ListDevices,
@@ -553,6 +956,59 @@ impl ToWorker {
                 muted: reader.bool()?,
             },
             TO_LEAVE => Self::Leave,
+            TO_SET_CAMERA => {
+                let on = reader.bool()?;
+                let remote = reader.bool()?;
+                // Only a camera-on carries a portal remote.
+                if remote && !on {
+                    return Err(DecodeError::InvalidValue);
+                }
+                Self::SetCamera { on, remote }
+            }
+            TO_SUBSCRIBE => {
+                let index = reader.other_connection()?;
+                let url = reader.str(MAX_URL_BYTES, CharRule::AsciiGraphic, false)?;
+                validate_sfu_url(url)?;
+                let url = url.to_owned();
+                Self::Subscribe {
+                    index,
+                    url,
+                    jwt: reader.secret(MAX_JWT_BYTES, CharRule::AsciiGraphic)?,
+                }
+            }
+            TO_SET_SCREEN => {
+                let share = reader.u32()?;
+                let target = match reader.u8()? {
+                    0 => None,
+                    1 => Some(ScreenTarget::Portal {
+                        node: reader.u32()?,
+                    }),
+                    2 => {
+                        let index = reader.u8()?;
+                        let width = reader.u32()?;
+                        let height = reader.u32()?;
+                        if index >= MAX_SCREEN_MONITORS
+                            || !(1..=MAX_MONITOR_SIDE).contains(&width)
+                            || !(1..=MAX_MONITOR_SIDE).contains(&height)
+                        {
+                            return Err(DecodeError::InvalidValue);
+                        }
+                        Some(ScreenTarget::Monitor {
+                            index,
+                            width,
+                            height,
+                        })
+                    }
+                    _ => return Err(DecodeError::InvalidValue),
+                };
+                Self::SetScreen { target, share }
+            }
+            TO_SET_DEAFENED => Self::SetDeafened {
+                deafened: reader.bool()?,
+            },
+            TO_SET_VOLUME => Self::SetVolume {
+                percent: reader.volume()?,
+            },
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -561,6 +1017,42 @@ impl ToWorker {
 }
 
 impl FromWorker {
+    /// A [`FromWorker::Devices`] reply that fits one message. Each list may
+    /// hold [`MAX_DEVICES`] devices, but three full lists of the longest IDs
+    /// and names encode to more than [`MAX_MESSAGE_BYTES`], which the writer
+    /// refuses. Devices are therefore dropped from the end of the longest
+    /// list until the reply fits. Build every `Devices` reply with this.
+    pub fn devices(
+        mut recording: Vec<MediaDevice>,
+        mut playout: Vec<MediaDevice>,
+        mut cameras: Vec<MediaDevice>,
+    ) -> Self {
+        fn list_len(list: &[MediaDevice]) -> usize {
+            // The count, then each ID and name with its two-byte length.
+            1 + list
+                .iter()
+                .map(|device| 4 + device.id.len() + device.name.len())
+                .sum::<usize>()
+        }
+        loop {
+            // The version and the tag, then the three lists.
+            let size = 2 + list_len(&recording) + list_len(&playout) + list_len(&cameras);
+            if size <= MAX_MESSAGE_BYTES {
+                break;
+            }
+            let longest = [&mut recording, &mut playout, &mut cameras]
+                .into_iter()
+                .max_by_key(|list| list.len())
+                .expect("three lists");
+            longest.pop();
+        }
+        Self::Devices {
+            recording,
+            playout,
+            cameras,
+        }
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut out = vec![VERSION];
         match self {
@@ -569,16 +1061,29 @@ impl FromWorker {
                 out.extend_from_slice(&containment_bits.to_be_bytes());
             }
             Self::Connected => out.push(FROM_CONNECTED),
-            Self::ParticipantJoined { identity } => {
+            Self::ParticipantJoined {
+                connection,
+                identity,
+            } => {
                 out.push(FROM_PARTICIPANT_JOINED);
+                out.push(*connection);
                 put_str(&mut out, identity);
             }
-            Self::ParticipantLeft { identity } => {
+            Self::ParticipantLeft {
+                connection,
+                identity,
+            } => {
                 out.push(FROM_PARTICIPANT_LEFT);
+                out.push(*connection);
                 put_str(&mut out, identity);
             }
-            Self::Speaking { identity, speaking } => {
+            Self::Speaking {
+                connection,
+                identity,
+                speaking,
+            } => {
                 out.push(FROM_SPEAKING);
+                out.push(*connection);
                 put_str(&mut out, identity);
                 out.push(u8::from(*speaking));
             }
@@ -586,15 +1091,67 @@ impl FromWorker {
                 out.push(FROM_MUTED);
                 out.push(u8::from(*muted));
             }
+            Self::Deafened { deafened } => {
+                out.push(FROM_DEAFENED);
+                out.push(u8::from(*deafened));
+            }
             Self::Failed { code } => {
                 out.push(FROM_FAILED);
                 out.push(*code as u8);
             }
             Self::Left => out.push(FROM_LEFT),
-            Self::Devices { recording, playout } => {
+            Self::Devices {
+                recording,
+                playout,
+                cameras,
+            } => {
                 out.push(FROM_DEVICES);
                 put_devices(&mut out, recording);
                 put_devices(&mut out, playout);
+                put_devices(&mut out, cameras);
+            }
+            Self::Camera { state } => {
+                out.push(FROM_CAMERA);
+                out.push(*state as u8);
+            }
+            Self::Screen { state, share } => {
+                out.push(FROM_SCREEN);
+                out.push(*state as u8);
+                out.extend_from_slice(&share.to_be_bytes());
+            }
+            Self::ScreenSharer {
+                connection,
+                identity,
+                sharing,
+            } => {
+                out.push(FROM_SCREEN_SHARER);
+                out.push(*connection);
+                put_str(&mut out, identity);
+                out.push(u8::from(*sharing));
+            }
+            Self::VideoStarted {
+                tile,
+                connection,
+                identity,
+            } => {
+                out.push(FROM_VIDEO_STARTED);
+                out.push(*tile);
+                out.push(*connection);
+                put_str(&mut out, identity);
+            }
+            Self::Connection { connection, up } => {
+                out.push(FROM_CONNECTION);
+                out.push(*connection);
+                out.push(u8::from(*up));
+            }
+            Self::VideoStopped { tile } => {
+                out.push(FROM_VIDEO_STOPPED);
+                out.push(*tile);
+            }
+            Self::VideoFrame { tile, rotation } => {
+                out.push(FROM_VIDEO_FRAME);
+                out.push(*tile);
+                out.push(*rotation);
             }
         }
         out
@@ -608,17 +1165,23 @@ impl FromWorker {
             },
             FROM_CONNECTED => Self::Connected,
             FROM_PARTICIPANT_JOINED => Self::ParticipantJoined {
+                connection: reader.connection()?,
                 identity: reader.identity()?,
             },
             FROM_PARTICIPANT_LEFT => Self::ParticipantLeft {
+                connection: reader.connection()?,
                 identity: reader.identity()?,
             },
             FROM_SPEAKING => Self::Speaking {
+                connection: reader.connection()?,
                 identity: reader.identity()?,
                 speaking: reader.bool()?,
             },
             FROM_MUTED => Self::Muted {
                 muted: reader.bool()?,
+            },
+            FROM_DEAFENED => Self::Deafened {
+                deafened: reader.bool()?,
             },
             FROM_FAILED => Self::Failed {
                 code: FailureCode::try_from(reader.u8()?)?,
@@ -627,7 +1190,40 @@ impl FromWorker {
             FROM_DEVICES => Self::Devices {
                 recording: reader.devices()?,
                 playout: reader.devices()?,
+                cameras: reader.devices()?,
             },
+            FROM_CAMERA => Self::Camera {
+                state: CameraState::try_from(reader.u8()?)?,
+            },
+            FROM_SCREEN => Self::Screen {
+                state: ScreenState::try_from(reader.u8()?)?,
+                share: reader.u32()?,
+            },
+            FROM_SCREEN_SHARER => Self::ScreenSharer {
+                connection: reader.connection()?,
+                identity: reader.identity()?,
+                sharing: reader.bool()?,
+            },
+            FROM_VIDEO_STARTED => Self::VideoStarted {
+                tile: reader.tile(1)?,
+                connection: reader.connection()?,
+                identity: reader.identity()?,
+            },
+            FROM_CONNECTION => Self::Connection {
+                connection: reader.other_connection()?,
+                up: reader.bool()?,
+            },
+            FROM_VIDEO_STOPPED => Self::VideoStopped {
+                tile: reader.tile(0)?,
+            },
+            FROM_VIDEO_FRAME => {
+                let tile = reader.tile(0)?;
+                let rotation = reader.u8()?;
+                if rotation > MAX_VIDEO_ROTATION {
+                    return Err(DecodeError::InvalidValue);
+                }
+                Self::VideoFrame { tile, rotation }
+            }
             _ => return Err(DecodeError::UnknownTag),
         };
         reader.finish()?;
@@ -670,6 +1266,69 @@ pub enum ReadError {
     /// The frame was not a Control frame.
     NotControl,
     Decode(DecodeError),
+    /// After a `VideoFrame`, the next frame was not an `RgbaPixels` frame.
+    NotPixels,
+    /// After a `VideoFrame`, the pixel frame is over the video limits. Its
+    /// body was not read.
+    VideoLimit,
+}
+
+/// What the core reads from the worker: a message, or a video picture.
+#[derive(Debug, Eq, PartialEq)]
+pub enum WorkerItem {
+    Message(FromWorker),
+    /// A [`FromWorker::VideoFrame`] with its pixel frame: `width` by `height`
+    /// RGBA pixels, bytes in the order R, G, B, A.
+    Video {
+        tile: u8,
+        rotation: u8,
+        width: u32,
+        height: u32,
+        rgba: Pixels,
+    },
+}
+
+/// The RGBA bytes of one received picture and the budget reservation that
+/// covers them. The reservation ends only when the bytes are dropped, so a
+/// kept picture stays charged to the reader's [`ResourceBudgets`].
+pub struct Pixels {
+    bytes: Vec<u8>,
+    _permit: BudgetPermit,
+}
+
+impl Pixels {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl AsRef<[u8]> for Pixels {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl std::ops::Deref for Pixels {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// Pictures compare by their bytes; the reservation is not part of the value.
+impl PartialEq for Pixels {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+impl Eq for Pixels {}
+
+impl std::fmt::Debug for Pixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pixels({} bytes)", self.bytes.len())
+    }
 }
 
 /// Writes one message as a Control frame and flushes it.
@@ -703,6 +1362,83 @@ pub fn read_message<R: Read, M: Message>(
     M::from_body(frame.body()).map_err(ReadError::Decode)
 }
 
+/// The header of a pixel frame is inside the limits of its tile.
+fn video_header_fits(tile: u8, header: &FrameHeader) -> bool {
+    header.kind == FrameKind::RgbaPixels
+        && picture_fits(tile, header.width, header.height)
+        && header.length == u64::from(header.width) * u64::from(header.height) * 4
+}
+
+/// Reads one message from the worker (the core side). After a
+/// [`FromWorker::VideoFrame`], the next frame must be an `RgbaPixels` frame
+/// inside the video limits. That header is checked before the body is
+/// allocated or its budget reserved. A missing, wrong-kind or over-limit
+/// pixel frame is an error, and the caller must treat the worker as failed.
+pub fn read_worker_item<R: Read>(
+    reader: &mut R,
+    budgets: &ResourceBudgets,
+) -> Result<WorkerItem, ReadError> {
+    let message: FromWorker = read_message(reader, budgets)?;
+    let FromWorker::VideoFrame { tile, rotation } = message else {
+        return Ok(WorkerItem::Message(message));
+    };
+    let mut wire = [0; FRAME_HEADER_LEN];
+    reader
+        .read_exact(&mut wire)
+        .map_err(|error| ReadError::Frame(FrameError::Io(error.kind())))?;
+    let header = FrameHeader::decode(wire).map_err(ReadError::Frame)?;
+    if header.kind != FrameKind::RgbaPixels {
+        return Err(ReadError::NotPixels);
+    }
+    if !video_header_fits(tile, &header) {
+        return Err(ReadError::VideoLimit);
+    }
+    // The header was checked; give it back to the budgeted reader together
+    // with the body that follows it.
+    let frame = read_frame(&mut (&wire[..]).chain(reader), budgets).map_err(ReadError::Frame)?;
+    let (bytes, permit) = frame.into_parts();
+    Ok(WorkerItem::Video {
+        tile,
+        rotation,
+        width: header.width,
+        height: header.height,
+        rgba: Pixels {
+            bytes,
+            _permit: permit,
+        },
+    })
+}
+
+/// Writes a [`FromWorker::VideoFrame`] and its pixel frame as one unit (the
+/// worker side). Everything is checked before anything is written: the tile,
+/// the rotation, the size limits, and that `rgba` is exactly
+/// `width * height * 4` bytes. The caller holds its output lock across this
+/// call, so no other frame comes between the two.
+pub fn write_video_frame<W: Write>(
+    writer: &mut W,
+    tile: u8,
+    rotation: u8,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> io::Result<()> {
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
+    if tile >= VIDEO_TILES || rotation > MAX_VIDEO_ROTATION {
+        return Err(invalid("video tile or rotation out of range"));
+    }
+    let header = FrameHeader {
+        kind: FrameKind::RgbaPixels,
+        length: rgba.len() as u64,
+        width,
+        height,
+    };
+    if !video_header_fits(tile, &header) {
+        return Err(invalid("video picture outside the video limits"));
+    }
+    write_message(writer, &FromWorker::VideoFrame { tile, rotation })?;
+    write_frame(writer, header, rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,11 +1451,49 @@ mod tests {
         }
     }
 
-    fn device(id: &str, name: &str) -> AudioDevice {
-        AudioDevice {
+    fn device(id: &str, name: &str) -> MediaDevice {
+        MediaDevice {
             id: id.to_owned(),
             name: name.to_owned(),
         }
+    }
+
+    /// GIVEN sound server device names WHEN checked THEN real PulseAudio and
+    /// PipeWire names pass, and empty, long, spaced, `=`, NUL, slash and
+    /// non-ASCII names do not; an ID round-trips only with the prefix.
+    #[test]
+    fn given_pulse_names_then_only_safe_names_make_ids() {
+        for good in [
+            "alsa_output.pci-0000_00_1f.3.analog-stereo",
+            "alsa_input.usb-Logitech_USB_Headset-00.mono-fallback",
+            "bluez_output.00_1B_66_A1_B2_C3.1",
+            "auto_null",
+            "a:b",
+            &"x".repeat(MAX_PULSE_NAME_BYTES),
+        ] {
+            assert!(valid_pulse_name(good), "{good}");
+            let id = pulse_id(good).expect(good);
+            assert_eq!(pulse_name(&id), Some(good));
+        }
+        for bad in [
+            "",
+            "two words",
+            "a=b",
+            "a\0b",
+            "../x",
+            "café",
+            "a\nb",
+            &"x".repeat(MAX_PULSE_NAME_BYTES + 1),
+        ] {
+            assert!(!valid_pulse_name(bad), "{bad:?}");
+            assert_eq!(pulse_id(bad), None, "{bad:?}");
+        }
+        assert_eq!(pulse_name("auto_null"), None, "no prefix");
+        assert_eq!(pulse_name("pulse:"), None, "no name");
+        assert_eq!(pulse_name("index:0"), None);
+        assert_eq!(pulse_name("pulse:a b"), None);
+        // The longest ID fits the wire.
+        assert!(PULSE_PREFIX.len() + MAX_PULSE_NAME_BYTES <= MAX_DEVICE_ID_BYTES);
     }
 
     fn turn(uri: &str) -> TurnServer {
@@ -743,6 +1517,9 @@ mod tests {
             own_key: key(3, 16),
             recording_device: Some("{0.0.1.00000000}.{6a2c}".to_owned()),
             playout_device: None,
+            camera_device: Some("usb#vid_046d&pid_0825#cam".to_owned()),
+            camera_on: true,
+            volume: 65,
         }
     }
 
@@ -763,9 +1540,20 @@ mod tests {
             own_key,
             recording_device: None,
             playout_device: None,
+            camera_device: None,
+            camera_on: false,
+            volume: MAX_VOLUME_PERCENT,
         }
         .encode()
         .to_vec()
+    }
+
+    fn subscribe(index: u8, url: &str) -> ToWorker {
+        ToWorker::Subscribe {
+            index,
+            url: url.to_owned(),
+            jwt: Zeroizing::new("a.b.c".to_owned()),
+        }
     }
 
     fn all_to_worker() -> Vec<ToWorker> {
@@ -782,6 +1570,44 @@ mod tests {
             ToWorker::SetMuted { muted: true },
             ToWorker::Leave,
             ToWorker::ListDevices,
+            ToWorker::SetCamera {
+                on: true,
+                remote: false,
+            },
+            ToWorker::SetCamera {
+                on: true,
+                remote: true,
+            },
+            subscribe(1, "wss://sfu.other.example"),
+            subscribe(3, "wss://sfu.example.org:7881/livekit?x=1"),
+            ToWorker::SetCamera {
+                on: false,
+                remote: false,
+            },
+            ToWorker::SetScreen {
+                target: None,
+                share: 0,
+            },
+            ToWorker::SetScreen {
+                target: Some(ScreenTarget::Portal {
+                    node: 4_294_967_295,
+                }),
+                share: 4_294_967_295,
+            },
+            ToWorker::SetScreen {
+                target: Some(ScreenTarget::Monitor {
+                    index: 15,
+                    width: 16_384,
+                    height: 1,
+                }),
+                share: 7,
+            },
+            ToWorker::SetDeafened { deafened: true },
+            ToWorker::SetDeafened { deafened: false },
+            ToWorker::SetVolume { percent: 0 },
+            ToWorker::SetVolume {
+                percent: MAX_VOLUME_PERCENT,
+            },
         ]
     }
 
@@ -792,24 +1618,129 @@ mod tests {
             },
             FromWorker::Connected,
             FromWorker::ParticipantJoined {
+                connection: 0,
                 identity: "@bob:example.org:D".to_owned(),
             },
             FromWorker::ParticipantLeft {
+                connection: 0,
                 identity: "ünï".to_owned(),
             },
             FromWorker::Speaking {
+                connection: 0,
                 identity: "@bob:example.org:D".to_owned(),
                 speaking: true,
             },
             FromWorker::Muted { muted: false },
+            FromWorker::Deafened { deafened: true },
+            FromWorker::Deafened { deafened: false },
             FromWorker::Left,
             FromWorker::Devices {
                 recording: vec![device("{0.0.1.00000000}.{6a2c}", "Microphone (Headset)")],
                 playout: vec![device("p", ""), device("q", "Lautsprecher (Ü)")],
+                cameras: vec![device("usb#cam", "Integrated Camera")],
             },
             FromWorker::Devices {
                 recording: Vec::new(),
                 playout: Vec::new(),
+                cameras: Vec::new(),
+            },
+            FromWorker::Camera {
+                state: CameraState::Off,
+            },
+            FromWorker::Camera {
+                state: CameraState::On,
+            },
+            FromWorker::Camera {
+                state: CameraState::NotFound,
+            },
+            FromWorker::Camera {
+                state: CameraState::Unavailable,
+            },
+            FromWorker::Screen {
+                state: ScreenState::Off,
+                share: 3,
+            },
+            FromWorker::Screen {
+                state: ScreenState::Starting,
+                share: 3,
+            },
+            FromWorker::Screen {
+                state: ScreenState::On,
+                share: 3,
+            },
+            FromWorker::Screen {
+                state: ScreenState::NotFound,
+                share: 3,
+            },
+            FromWorker::Screen {
+                state: ScreenState::Unavailable,
+                share: 3,
+            },
+            FromWorker::Screen {
+                state: ScreenState::Refused,
+                share: 3,
+            },
+            FromWorker::ScreenSharer {
+                connection: 0,
+                identity: "@bob:example.org:D".to_owned(),
+                sharing: true,
+            },
+            FromWorker::ScreenSharer {
+                connection: 0,
+                identity: "ünï".to_owned(),
+                sharing: false,
+            },
+            FromWorker::VideoStarted {
+                tile: 1,
+                connection: 0,
+                identity: "@bob:example.org:D".to_owned(),
+            },
+            FromWorker::VideoStarted {
+                tile: 4,
+                connection: 0,
+                identity: "ünï".to_owned(),
+            },
+            FromWorker::VideoStarted {
+                tile: SCREEN_TILE,
+                connection: 0,
+                identity: "@bob:example.org:D".to_owned(),
+            },
+            FromWorker::ParticipantJoined {
+                connection: 3,
+                identity: "@carol:other.example:D".to_owned(),
+            },
+            FromWorker::Speaking {
+                connection: 2,
+                identity: "@carol:other.example:D".to_owned(),
+                speaking: true,
+            },
+            FromWorker::VideoStarted {
+                tile: 2,
+                connection: 1,
+                identity: "@carol:other.example:D".to_owned(),
+            },
+            FromWorker::Connection {
+                connection: 1,
+                up: true,
+            },
+            FromWorker::Connection {
+                connection: 3,
+                up: false,
+            },
+            FromWorker::VideoStopped { tile: 0 },
+            FromWorker::VideoStopped { tile: 4 },
+            FromWorker::VideoStopped { tile: SCREEN_TILE },
+            FromWorker::VideoFrame {
+                tile: 0,
+                rotation: 0,
+            },
+            FromWorker::VideoFrame {
+                tile: 4,
+                rotation: 3,
+            },
+            FromWorker::VideoFrame {
+                tile: SCREEN_TILE,
+                rotation: 0,
             },
         ];
         for code in 1..=9 {
@@ -945,6 +1876,7 @@ mod tests {
             assert_eq!(ToWorker::decode(&case), Err(DecodeError::TooLarge));
         }
         let long_identity = FromWorker::ParticipantJoined {
+            connection: 0,
             identity: identity.clone(),
         };
         assert_eq!(
@@ -1014,11 +1946,11 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            ToWorker::decode(&[VERSION, 8]),
+            ToWorker::decode(&[VERSION, 13]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 10]),
+            FromWorker::decode(&[VERSION, 18]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -1050,7 +1982,7 @@ mod tests {
     /// THEN it is rejected.
     #[test]
     fn given_invalid_utf8_identity_when_decoded_then_it_is_rejected() {
-        let body = [VERSION, FROM_PARTICIPANT_LEFT, 0, 2, 0xC3, 0x28];
+        let body = [VERSION, FROM_PARTICIPANT_LEFT, 0, 0, 2, 0xC3, 0x28];
         assert_eq!(FromWorker::decode(&body), Err(DecodeError::InvalidUtf8));
     }
 
@@ -1061,6 +1993,7 @@ mod tests {
     fn given_control_character_in_identity_when_decoded_then_it_is_rejected() {
         for bad in ["a\nb", "a\0b", "a\u{7f}b", "a\u{85}b"] {
             let message = FromWorker::ParticipantJoined {
+                connection: 0,
                 identity: bad.to_owned(),
             };
             assert_eq!(
@@ -1185,7 +2118,65 @@ mod tests {
             own_key,
             recording_device: None,
             playout_device: Some(playout.to_owned()),
+            camera_device: None,
+            camera_on: false,
+            volume: MAX_VOLUME_PERCENT,
         }
+    }
+
+    /// GIVEN three full device lists with the longest IDs and names
+    /// WHEN the reply is built
+    /// THEN it fits one message, keeps the most devices that fit, and
+    /// small lists are unchanged.
+    #[test]
+    fn given_three_full_device_lists_when_built_then_the_reply_fits() {
+        let full = |prefix: char| -> Vec<MediaDevice> {
+            (0..MAX_DEVICES)
+                .map(|n| {
+                    let id = format!("{prefix}{n:02}").repeat(MAX_DEVICE_ID_BYTES / 3);
+                    device(&id, &"n".repeat(MAX_DEVICE_NAME_BYTES))
+                })
+                .collect()
+        };
+        let unfitted = FromWorker::Devices {
+            recording: full('r'),
+            playout: full('p'),
+            cameras: full('c'),
+        };
+        assert!(unfitted.encode().len() > MAX_MESSAGE_BYTES);
+        let fitted = FromWorker::devices(full('r'), full('p'), full('c'));
+        let encoded = fitted.encode();
+        assert!(encoded.len() <= MAX_MESSAGE_BYTES);
+        assert!(write_message(&mut Vec::new(), &fitted).is_ok());
+        assert_eq!(FromWorker::decode(&encoded), Ok(fitted.clone()));
+        let FromWorker::Devices {
+            recording,
+            playout,
+            cameras,
+        } = fitted
+        else {
+            panic!("not a device list");
+        };
+        // Lists shrink evenly, and one more device would not fit.
+        let lens = [recording.len(), playout.len(), cameras.len()];
+        assert!(lens.iter().max().unwrap() - lens.iter().min().unwrap() <= 1);
+        assert!(
+            encoded.len() + 4 + MAX_DEVICE_ID_BYTES + MAX_DEVICE_NAME_BYTES > MAX_MESSAGE_BYTES
+        );
+        // Lists that fit are kept as they are.
+        let small = FromWorker::devices(
+            vec![device("r", "R")],
+            vec![device("p", "P")],
+            vec![device("c", "C")],
+        );
+        assert_eq!(
+            small,
+            FromWorker::Devices {
+                recording: vec![device("r", "R")],
+                playout: vec![device("p", "P")],
+                cameras: vec![device("c", "C")],
+            }
+        );
     }
 
     /// GIVEN device lists or device IDs over their limits, or with a
@@ -1196,9 +2187,10 @@ mod tests {
     fn given_device_fields_over_limit_when_decoded_then_they_are_rejected() {
         let long_id = "d".repeat(MAX_DEVICE_ID_BYTES + 1);
         let long_name = "n".repeat(MAX_DEVICE_NAME_BYTES + 1);
-        let list = |recording: Vec<AudioDevice>| FromWorker::Devices {
+        let list = |recording: Vec<MediaDevice>| FromWorker::Devices {
             recording,
             playout: Vec::new(),
+            cameras: Vec::new(),
         };
         let full_id = "d".repeat(MAX_DEVICE_ID_BYTES);
         let full_name = "n".repeat(MAX_DEVICE_NAME_BYTES);
@@ -1266,20 +2258,747 @@ mod tests {
     /// and a bad ID gives no device.
     #[test]
     fn given_os_device_text_when_bounded_then_it_fits_the_wire() {
-        let named = AudioDevice::bounded("id", "Mic\u{1b}[31m (USB)\n").unwrap();
+        let named = MediaDevice::bounded("id", "Mic\u{1b}[31m (USB)\n").unwrap();
         assert_eq!(named.name, "Mic[31m (USB)");
         let wide = "é".repeat(MAX_DEVICE_NAME_BYTES);
-        let cut = AudioDevice::bounded("id", &wide).unwrap();
+        let cut = MediaDevice::bounded("id", &wide).unwrap();
         assert!(cut.name.len() <= MAX_DEVICE_NAME_BYTES);
         assert_eq!(cut.name.chars().count(), MAX_DEVICE_NAME_BYTES / 2);
         let long_id = "i".repeat(MAX_DEVICE_ID_BYTES + 1);
         for bad in ["", "a\tb", long_id.as_str()] {
-            assert_eq!(AudioDevice::bounded(bad, "n"), None, "{bad:?}");
+            assert_eq!(MediaDevice::bounded(bad, "n"), None, "{bad:?}");
         }
         let fits = FromWorker::Devices {
             recording: vec![cut],
             playout: vec![named],
+            cameras: Vec::new(),
         };
         assert!(FromWorker::decode(&fits.encode()).is_ok());
+    }
+
+    /// A video picture of `width` x `height` with a pattern in every byte.
+    fn picture(width: u32, height: u32) -> Vec<u8> {
+        (0..width as usize * height as usize * 4)
+            .map(|i| (i % 251) as u8)
+            .collect()
+    }
+
+    fn video_wire(tile: u8, rotation: u8, width: u32, height: u32) -> Vec<u8> {
+        let mut wire = Vec::new();
+        write_video_frame(
+            &mut wire,
+            tile,
+            rotation,
+            width,
+            height,
+            &picture(width, height),
+        )
+        .unwrap();
+        wire
+    }
+
+    fn read_item(wire: Vec<u8>) -> (Result<WorkerItem, ReadError>, u64) {
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(wire);
+        let result = read_worker_item(&mut reader, &budgets);
+        // A returned picture stays charged while it lives; nothing else does.
+        let held = match &result {
+            Ok(WorkerItem::Video { rgba, .. }) => rgba.len() as u64,
+            _ => 0,
+        };
+        assert_eq!(budgets.aggregate_used(), held);
+        (result, reader.position())
+    }
+
+    fn pixel_header(width: u32, height: u32, length: u64) -> Vec<u8> {
+        FrameHeader {
+            kind: FrameKind::RgbaPixels,
+            length,
+            width,
+            height,
+        }
+        .encode()
+        .to_vec()
+    }
+
+    fn control_wire(message: &FromWorker) -> Vec<u8> {
+        let mut wire = Vec::new();
+        write_message(&mut wire, message).unwrap();
+        wire
+    }
+
+    /// GIVEN a picture at the largest size and one at the smallest
+    /// WHEN it is written and read back
+    /// THEN the tile, rotation, size and every pixel byte are unchanged.
+    #[test]
+    fn given_video_frame_when_written_then_read_back_unchanged() {
+        for (tile, rotation, width, height) in [
+            (0, 0, 640, 360),
+            (4, 3, 1, 1),
+            (2, 1, 360, 640),
+            (SCREEN_TILE, 0, 1280, 720),
+            (SCREEN_TILE, 0, 720, 1280),
+        ] {
+            let (item, _) = read_item(video_wire(tile, rotation, width, height));
+            let Ok(WorkerItem::Video {
+                tile: got_tile,
+                rotation: got_rotation,
+                width: got_width,
+                height: got_height,
+                rgba,
+            }) = item
+            else {
+                panic!("not a picture: {item:?}");
+            };
+            assert_eq!(
+                (got_tile, got_rotation, got_width, got_height),
+                (tile, rotation, width, height)
+            );
+            assert_eq!(rgba.as_slice(), picture(width, height).as_slice());
+        }
+        assert_eq!(MAX_VIDEO_BYTES, 921_600);
+    }
+
+    /// GIVEN a picture read from the worker
+    /// WHEN it is kept, then dropped
+    /// THEN its bytes stay charged to the budget while it is kept, and the
+    /// charge ends with the picture.
+    #[test]
+    fn given_kept_picture_then_its_reservation_lives_as_long_as_the_bytes() {
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(video_wire(1, 0, 4, 2));
+        let item = read_worker_item(&mut reader, &budgets).expect("a picture");
+        let Some(bytes) = (match &item {
+            WorkerItem::Video { rgba, .. } => Some(rgba.len() as u64),
+            WorkerItem::Message(_) => None,
+        }) else {
+            panic!("not a picture");
+        };
+        assert_eq!(bytes, 4 * 2 * 4);
+        assert_eq!(budgets.aggregate_used(), bytes);
+        drop(item);
+        assert_eq!(budgets.aggregate_used(), 0);
+    }
+
+    /// GIVEN a plain message
+    /// WHEN it is read as a worker item
+    /// THEN it comes back as a message and no pixel frame is expected.
+    #[test]
+    fn given_plain_message_when_read_as_item_then_it_is_a_message() {
+        let message = FromWorker::Camera {
+            state: CameraState::On,
+        };
+        let (item, _) = read_item(control_wire(&message));
+        assert_eq!(item, Ok(WorkerItem::Message(message)));
+    }
+
+    /// GIVEN a video announcement followed by each wrong frame
+    /// WHEN it is read
+    /// THEN it fails, and no body past the checked header is read.
+    #[test]
+    fn given_wrong_frame_after_video_frame_then_read_fails_before_the_body() {
+        let announce = FromWorker::VideoFrame {
+            tile: 1,
+            rotation: 0,
+        };
+        let mut control = control_wire(&announce);
+        let end = control.len() as u64;
+        // A control frame instead of pixels.
+        let mut wire = control.clone();
+        wire.extend(control_wire(&FromWorker::Left));
+        let (result, position) = read_item(wire);
+        assert_eq!(result, Err(ReadError::NotPixels));
+        assert_eq!(position, end + FRAME_HEADER_LEN as u64);
+        // Pixels over the side limit, the pixel limit, or with a bad length.
+        for (width, height, length) in [
+            (641, 1, 641 * 4),
+            (1, 641, 641 * 4),
+            (640, 361, 640 * 361 * 4),
+            (8192, 1, 8192 * 4),
+            (2, 2, 15),
+        ] {
+            let mut wire = control.clone();
+            wire.extend(pixel_header(width, height, length));
+            wire.extend(vec![0; 64]);
+            let (result, position) = read_item(wire);
+            assert!(
+                matches!(
+                    result,
+                    Err(ReadError::VideoLimit)
+                        | Err(ReadError::Frame(FrameError::PixelLengthMismatch))
+                ),
+                "{width}x{height}: {result:?}"
+            );
+            assert_eq!(position, end + FRAME_HEADER_LEN as u64);
+        }
+        // Zero dimensions are a frame error.
+        control.extend(pixel_header(0, 4, 16));
+        let (result, _) = read_item(control);
+        assert_eq!(result, Err(ReadError::Frame(FrameError::ZeroDimension)));
+    }
+
+    /// GIVEN a video announcement with a missing or cut-off pixel frame
+    /// WHEN it is read
+    /// THEN the read fails with an I/O error.
+    #[test]
+    fn given_truncated_pixel_frame_when_read_then_it_fails() {
+        let full = video_wire(0, 0, 4, 4);
+        let control_len = control_wire(&FromWorker::VideoFrame {
+            tile: 0,
+            rotation: 0,
+        })
+        .len();
+        for cut in [
+            control_len,
+            control_len + 5,
+            control_len + 17,
+            full.len() - 1,
+        ] {
+            let (result, _) = read_item(full[..cut].to_vec());
+            assert!(
+                matches!(result, Err(ReadError::Frame(FrameError::Io(_)))),
+                "cut at {cut}: {result:?}"
+            );
+        }
+    }
+
+    /// GIVEN bad values in a video announcement
+    /// WHEN it is decoded
+    /// THEN it is rejected.
+    #[test]
+    fn given_bad_tile_or_rotation_when_decoded_then_it_is_rejected() {
+        let invalid = DecodeError::InvalidValue;
+        let cases: [(&[u8], DecodeError); 13] = [
+            (&[VERSION, FROM_VIDEO_FRAME, 6, 0], invalid),
+            (&[VERSION, FROM_VIDEO_FRAME, 0, 4], invalid),
+            (&[VERSION, FROM_VIDEO_FRAME, 0], DecodeError::Truncated),
+            (&[VERSION, FROM_VIDEO_STOPPED, 6], invalid),
+            (&[VERSION, FROM_VIDEO_STARTED, 0, 0, 0, 1, 97], invalid),
+            (&[VERSION, FROM_VIDEO_STARTED, 6, 0, 0, 1, 97], invalid),
+            (&[VERSION, FROM_SCREEN, 6], invalid),
+            (&[VERSION, FROM_SCREEN], DecodeError::Truncated),
+            (&[VERSION, FROM_SCREEN_SHARER, 0, 0, 1, 97, 2], invalid),
+            (
+                &[VERSION, FROM_SCREEN_SHARER, 0, 0, 0, 1],
+                DecodeError::TooShort,
+            ),
+            (
+                &[VERSION, FROM_SCREEN_SHARER, 0, 0, 1, 97],
+                DecodeError::Truncated,
+            ),
+            (
+                &[VERSION, FROM_VIDEO_STARTED, 1, 0, 0, 0],
+                DecodeError::TooShort,
+            ),
+            (&[VERSION, FROM_CAMERA, 4], invalid),
+        ];
+        for (body, expected) in cases {
+            assert_eq!(FromWorker::decode(body), Err(expected), "{body:?}");
+        }
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA, 2, 0]),
+            Err(invalid)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA, 1, 2]),
+            Err(invalid)
+        );
+        // A portal remote comes only with a camera-on.
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA, 0, 1]),
+            Err(invalid)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_CAMERA, 1]),
+            Err(DecodeError::Truncated)
+        );
+        let long = FromWorker::VideoStarted {
+            tile: 1,
+            connection: 0,
+            identity: "i".repeat(MAX_IDENTITY_BYTES + 1),
+        };
+        assert_eq!(
+            FromWorker::decode(&long.encode()),
+            Err(DecodeError::TooLarge)
+        );
+        let control = FromWorker::VideoStarted {
+            tile: 1,
+            connection: 0,
+            identity: "a\nb".to_owned(),
+        };
+        assert_eq!(
+            FromWorker::decode(&control.encode()),
+            Err(DecodeError::InvalidCharacter)
+        );
+    }
+
+    /// GIVEN a picture outside the limits, or a bad tile or rotation
+    /// WHEN the worker tries to write it
+    /// THEN nothing is written.
+    #[test]
+    fn given_bad_video_frame_when_written_then_nothing_is_written() {
+        let ok = picture(2, 2);
+        let big = vec![0; 641 * 640 * 4];
+        let cases: [(u8, u8, u32, u32, &[u8]); 8] = [
+            (6, 0, 2, 2, &ok),
+            (0, 4, 2, 2, &ok),
+            (0, 0, 0, 2, &[]),
+            (0, 0, 2, 2, &ok[..15]),
+            (0, 0, 2, 2, &[0; 17]),
+            (0, 0, 641, 1, &big[..641 * 4]),
+            (0, 0, 1, 641, &big[..641 * 4]),
+            (0, 0, 640, 361, &big[..640 * 361 * 4]),
+        ];
+        for (tile, rotation, width, height, body) in cases {
+            let mut wire = Vec::new();
+            assert!(write_video_frame(&mut wire, tile, rotation, width, height, body).is_err());
+            assert!(wire.is_empty(), "{tile} {rotation} {width}x{height}");
+        }
+    }
+
+    /// GIVEN the screen tile and a camera tile
+    /// WHEN their limits are asked
+    /// THEN the screen tile allows 1280x720 at 5 per second, and cameras keep
+    /// 640x360 at 15 per second.
+    #[test]
+    fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 7));
+        assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
+        assert_eq!(MAX_SCREEN_PIXELS, 921_600);
+        for tile in 0..SCREEN_TILE {
+            assert_eq!(
+                (max_side(tile), max_pixels(tile), max_fps(tile)),
+                (640, 640 * 360, 15)
+            );
+        }
+        assert_eq!(
+            (
+                max_side(SCREEN_TILE),
+                max_pixels(SCREEN_TILE),
+                max_fps(SCREEN_TILE)
+            ),
+            (1280, 1280 * 720, 5)
+        );
+        assert!(picture_fits(SCREEN_TILE, 1280, 720));
+        assert!(!picture_fits(SCREEN_TILE, 1281, 720));
+        assert!(!picture_fits(SCREEN_TILE, 1280, 721));
+        assert!(!picture_fits(0, 1280, 720));
+        assert!(!picture_fits(VIDEO_TILES, 1, 1));
+        assert!(!picture_fits(SCREEN_TILE, 0, 1));
+    }
+
+    /// GIVEN a screen-size picture announced for a camera tile, and a
+    /// picture over the screen limit announced for the screen tile
+    /// WHEN each is read from the worker
+    /// THEN both stop at the header with `VideoLimit` and no body is read.
+    #[test]
+    fn given_picture_over_the_limit_of_its_tile_then_it_is_refused_before_the_body() {
+        for (tile, width, height) in [
+            (1, 1280, 720),
+            (0, 641, 1),
+            (SCREEN_TILE, 1281, 1),
+            (SCREEN_TILE, 1280, 721),
+            (SCREEN_TILE, 1, 1281),
+        ] {
+            let mut wire = control_wire(&FromWorker::VideoFrame { tile, rotation: 0 });
+            let end = wire.len() as u64;
+            wire.extend(pixel_header(
+                width,
+                height,
+                u64::from(width) * u64::from(height) * 4,
+            ));
+            wire.extend(vec![0; 64]);
+            let (result, position) = read_item(wire);
+            assert_eq!(
+                result,
+                Err(ReadError::VideoLimit),
+                "{tile} {width}x{height}"
+            );
+            assert_eq!(position, end + FRAME_HEADER_LEN as u64);
+        }
+    }
+
+    /// GIVEN a screen-size picture for a camera tile or one over the screen
+    /// limit for the screen tile
+    /// WHEN the worker tries to write it
+    /// THEN nothing is written; a 1280x720 screen picture is written.
+    #[test]
+    fn given_screen_size_picture_when_written_then_the_tile_limit_decides() {
+        for (tile, width, height) in [(0, 1280, 720), (4, 641, 360), (SCREEN_TILE, 1281, 720)] {
+            let body = vec![0; width as usize * height as usize * 4];
+            let mut wire = Vec::new();
+            assert!(write_video_frame(&mut wire, tile, 0, width, height, &body).is_err());
+            assert!(wire.is_empty(), "{tile} {width}x{height}");
+        }
+        let mut wire = Vec::new();
+        let body = vec![7; MAX_SCREEN_BYTES];
+        write_video_frame(&mut wire, SCREEN_TILE, 0, 1280, 720, &body).unwrap();
+        assert!(!wire.is_empty());
+    }
+
+    /// GIVEN bad values in a SetScreen
+    /// WHEN it is decoded
+    /// THEN a bad kind, monitor index or monitor size is rejected, and a cut
+    /// message is truncated.
+    #[test]
+    fn given_bad_set_screen_when_decoded_then_it_is_rejected() {
+        let invalid = DecodeError::InvalidValue;
+        let monitor = |index: u8, width: u32, height: u32| {
+            let mut body = vec![VERSION, TO_SET_SCREEN, 0, 0, 0, 9, 2, index];
+            body.extend(width.to_be_bytes());
+            body.extend(height.to_be_bytes());
+            body
+        };
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 0, 1, 3]),
+            Err(invalid)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 1]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 0, 1, 1, 0, 0]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_SCREEN, 0, 0, 0, 1, 0, 0]),
+            Err(DecodeError::TrailingBytes)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_SCREEN, 0, 0, 0]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(ToWorker::decode(&monitor(16, 1920, 1080)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(0, 0, 1080)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(0, 1920, 0)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(0, 16_385, 1)), Err(invalid));
+        assert_eq!(ToWorker::decode(&monitor(0, 1, 16_385)), Err(invalid));
+        assert_eq!(
+            ToWorker::decode(&monitor(0, 1920, 1080)),
+            Ok(ToWorker::SetScreen {
+                target: Some(ScreenTarget::Monitor {
+                    index: 0,
+                    width: 1920,
+                    height: 1080
+                }),
+                share: 9,
+            })
+        );
+    }
+
+    /// GIVEN a message made for wire version 4
+    /// WHEN it is decoded
+    /// THEN the version is refused.
+    #[test]
+    fn given_old_wire_version_when_decoded_then_it_is_refused() {
+        assert_eq!(
+            ToWorker::decode(&[4, TO_LEAVE]),
+            Err(DecodeError::UnknownVersion)
+        );
+        assert_eq!(
+            FromWorker::decode(&[4, FROM_LEFT]),
+            Err(DecodeError::UnknownVersion)
+        );
+    }
+
+    /// GIVEN a Join with a camera chosen, or none
+    /// WHEN it is encoded and decoded
+    /// THEN the camera ID and flag are kept, and no camera stays `None`.
+    #[test]
+    fn given_join_camera_fields_when_round_tripped_then_they_are_kept() {
+        let Ok(ToWorker::Join {
+            camera_device,
+            camera_on,
+            ..
+        }) = ToWorker::decode(&join().encode())
+        else {
+            panic!("join decodes");
+        };
+        assert_eq!(camera_device.as_deref(), Some("usb#vid_046d&pid_0825#cam"));
+        assert!(camera_on);
+        let none = join_with("wss://h", "t", vec![], "id", key(0, 16));
+        let Ok(ToWorker::Join {
+            camera_device,
+            camera_on,
+            ..
+        }) = ToWorker::decode(&none)
+        else {
+            panic!("join decodes");
+        };
+        assert_eq!((camera_device, camera_on), (None, false));
+        // A version 2 or 3 Join is refused.
+        for version in [2, 3] {
+            let mut old = join().encode().to_vec();
+            old[0] = version;
+            assert_eq!(ToWorker::decode(&old), Err(DecodeError::UnknownVersion));
+        }
+    }
+
+    /// GIVEN a camera ID or camera list over its limits
+    /// WHEN the messages are decoded
+    /// THEN each is rejected.
+    #[test]
+    fn given_camera_fields_over_limit_when_decoded_then_they_are_rejected() {
+        let long = "c".repeat(MAX_DEVICE_ID_BYTES + 1);
+        let with_camera = |camera: &str| {
+            let ToWorker::Join {
+                sfu_url,
+                jwt,
+                turn,
+                relay_only,
+                own_identity,
+                own_key,
+                ..
+            } = join()
+            else {
+                unreachable!()
+            };
+            ToWorker::Join {
+                sfu_url,
+                jwt,
+                turn,
+                relay_only,
+                own_identity,
+                own_key,
+                recording_device: None,
+                playout_device: None,
+                camera_device: Some(camera.to_owned()),
+                camera_on: true,
+                volume: 0,
+            }
+            .encode()
+        };
+        assert!(ToWorker::decode(&with_camera(&"c".repeat(MAX_DEVICE_ID_BYTES))).is_ok());
+        assert_eq!(
+            ToWorker::decode(&with_camera(&long)),
+            Err(DecodeError::TooLarge)
+        );
+        assert_eq!(
+            ToWorker::decode(&with_camera("a\nb")),
+            Err(DecodeError::InvalidCharacter)
+        );
+        let cameras = |cameras: Vec<MediaDevice>| FromWorker::Devices {
+            recording: Vec::new(),
+            playout: Vec::new(),
+            cameras,
+        };
+        let full: Vec<MediaDevice> = (0..MAX_DEVICES).map(|_| device("c", "n")).collect();
+        assert!(FromWorker::decode(&cameras(full).encode()).is_ok());
+        for (list, expected) in [
+            (
+                (0..=MAX_DEVICES).map(|_| device("c", "n")).collect(),
+                DecodeError::TooLarge,
+            ),
+            (vec![device(&long, "n")], DecodeError::TooLarge),
+            (vec![device("", "n")], DecodeError::TooShort),
+            (vec![device("c\u{0}", "n")], DecodeError::InvalidCharacter),
+        ] {
+            assert_eq!(FromWorker::decode(&cameras(list).encode()), Err(expected));
+        }
+    }
+
+    /// GIVEN a Subscribe with each connection index and a `wss://` URL
+    /// WHEN it is encoded and decoded
+    /// THEN it is the same message.
+    #[test]
+    fn given_subscribe_when_round_tripped_then_it_is_kept() {
+        for index in 1..=MAX_OTHER_CONNECTIONS {
+            let message = subscribe(index, "wss://sfu.other.example");
+            assert_eq!(ToWorker::decode(&message.encode()), Ok(message));
+        }
+    }
+
+    /// GIVEN a Subscribe with index 0 or above 3, or a URL that is not
+    /// `wss://`, or a JWT with a space, or no JWT
+    /// WHEN it is decoded
+    /// THEN it is rejected.
+    #[test]
+    fn given_bad_subscribe_when_decoded_then_it_is_rejected() {
+        for index in [0, 4, 255] {
+            let body = subscribe(index, "wss://sfu.other.example").encode();
+            assert_eq!(
+                ToWorker::decode(&body),
+                Err(DecodeError::InvalidValue),
+                "{index}"
+            );
+        }
+        for url in ["https://x", "ws://x.example", "wss://", "WSS://x.example"] {
+            let body = subscribe(1, url).encode();
+            assert_eq!(
+                ToWorker::decode(&body),
+                Err(DecodeError::InvalidValue),
+                "{url}"
+            );
+        }
+        let spaced = ToWorker::Subscribe {
+            index: 1,
+            url: "wss://x.example".to_owned(),
+            jwt: Zeroizing::new("a b".to_owned()),
+        };
+        assert_eq!(
+            ToWorker::decode(&spaced.encode()),
+            Err(DecodeError::InvalidCharacter)
+        );
+        let empty = ToWorker::Subscribe {
+            index: 1,
+            url: "wss://x.example".to_owned(),
+            jwt: Zeroizing::new(String::new()),
+        };
+        assert_eq!(
+            ToWorker::decode(&empty.encode()),
+            Err(DecodeError::TooShort)
+        );
+    }
+
+    /// GIVEN a Subscribe with a URL or JWT over its limit, a cut body, or
+    /// trailing bytes
+    /// WHEN it is decoded
+    /// THEN it is rejected before anything large is kept.
+    #[test]
+    fn given_oversized_cut_or_padded_subscribe_when_decoded_then_it_is_rejected() {
+        let long_url = format!("wss://{}", "a".repeat(MAX_URL_BYTES));
+        assert_eq!(
+            ToWorker::decode(&subscribe(1, &long_url).encode()),
+            Err(DecodeError::TooLarge)
+        );
+        let long_jwt = ToWorker::Subscribe {
+            index: 1,
+            url: "wss://x.example".to_owned(),
+            jwt: Zeroizing::new("a".repeat(MAX_JWT_BYTES + 1)),
+        };
+        assert_eq!(
+            ToWorker::decode(&long_jwt.encode()),
+            Err(DecodeError::TooLarge)
+        );
+        let full = subscribe(2, "wss://x.example").encode();
+        for cut in 2..full.len() {
+            assert!(ToWorker::decode(&full[..cut]).is_err(), "cut at {cut}");
+        }
+        let mut padded = full.to_vec();
+        padded.push(0);
+        assert_eq!(ToWorker::decode(&padded), Err(DecodeError::TrailingBytes));
+    }
+
+    /// GIVEN a Subscribe
+    /// WHEN it is formatted with Debug
+    /// THEN the JWT is not shown.
+    #[test]
+    fn given_subscribe_when_debug_formatted_then_the_jwt_is_hidden() {
+        let message = ToWorker::Subscribe {
+            index: 1,
+            url: "wss://x.example".to_owned(),
+            jwt: Zeroizing::new("secret.jwt.text".to_owned()),
+        };
+        let text = format!("{message:?}");
+        assert!(!text.contains("secret"), "{text}");
+        assert!(text.contains("jwt_len"));
+    }
+
+    /// GIVEN worker messages with a connection above 3, or a Connection
+    /// message for connection 0
+    /// WHEN they are decoded
+    /// THEN they are rejected.
+    #[test]
+    fn given_bad_connection_numbers_when_decoded_then_they_are_rejected() {
+        let invalid = DecodeError::InvalidValue;
+        for connection in [4, 255] {
+            for body in [
+                vec![VERSION, FROM_PARTICIPANT_JOINED, connection, 0, 1, 97],
+                vec![VERSION, FROM_PARTICIPANT_LEFT, connection, 0, 1, 97],
+                vec![VERSION, FROM_SPEAKING, connection, 0, 1, 97, 1],
+                vec![VERSION, FROM_SCREEN_SHARER, connection, 0, 1, 97, 1],
+                vec![VERSION, FROM_VIDEO_STARTED, 1, connection, 0, 1, 97],
+                vec![VERSION, FROM_CONNECTION, connection, 1],
+            ] {
+                assert_eq!(FromWorker::decode(&body), Err(invalid), "{body:?}");
+            }
+        }
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_CONNECTION, 0, 1]),
+            Err(invalid)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_CONNECTION, 1, 2]),
+            Err(invalid)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_CONNECTION, 1]),
+            Err(DecodeError::Truncated)
+        );
+    }
+
+    /// GIVEN a message of the previous wire version (6)
+    /// WHEN it is decoded in either direction
+    /// THEN the version is refused.
+    #[test]
+    fn given_wire_version_6_when_decoded_then_it_is_refused() {
+        assert_eq!(VERSION, 7);
+        assert_eq!(
+            ToWorker::decode(&[6, TO_LEAVE]),
+            Err(DecodeError::UnknownVersion)
+        );
+        assert_eq!(
+            FromWorker::decode(&[6, FROM_CONNECTED]),
+            Err(DecodeError::UnknownVersion)
+        );
+    }
+
+    /// GIVEN a volume over 100 percent, a bad deafen flag, or a truncated
+    /// volume or deafen message
+    /// WHEN each is decoded
+    /// THEN it is rejected; 0 and 100 percent are accepted.
+    #[test]
+    fn given_bad_volume_or_deafen_fields_when_decoded_then_they_are_rejected() {
+        let invalid = Err(DecodeError::InvalidValue);
+        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_VOLUME, 101]), invalid);
+        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_VOLUME, 255]), invalid);
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_VOLUME]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_VOLUME, 0]),
+            Ok(ToWorker::SetVolume { percent: 0 })
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_VOLUME, 100]),
+            Ok(ToWorker::SetVolume { percent: 100 })
+        );
+        assert_eq!(ToWorker::decode(&[VERSION, TO_SET_DEAFENED, 2]), invalid);
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_DEAFENED, 2]),
+            Err(DecodeError::InvalidValue)
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_DEAFENED]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            ToWorker::decode(&[VERSION, TO_SET_DEAFENED, 1, 0]),
+            Err(DecodeError::TrailingBytes)
+        );
+    }
+
+    /// GIVEN a Join whose last byte, the volume, is over 100 percent
+    /// WHEN it is decoded
+    /// THEN it is rejected; the encoded volume round-trips.
+    #[test]
+    fn given_join_volume_when_decoded_then_it_is_bounded() {
+        let mut body = join().encode().to_vec();
+        let Ok(ToWorker::Join { volume, .. }) = ToWorker::decode(&body) else {
+            panic!("join decodes");
+        };
+        assert_eq!(volume, 65);
+        *body.last_mut().expect("volume byte") = MAX_VOLUME_PERCENT + 1;
+        assert_eq!(ToWorker::decode(&body), Err(DecodeError::InvalidValue));
     }
 }

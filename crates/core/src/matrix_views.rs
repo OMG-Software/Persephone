@@ -856,7 +856,19 @@ impl MatrixViews {
             .ok_or(ErrorCode::NotFound)
     }
 
-    pub fn room_list(client: &Client) -> RoomList {
+    /// The other person in a joined direct-message room, or `None`.
+    pub fn contact(client: &Client, room: &str) -> Option<matrix_sdk::ruma::OwnedUserId> {
+        contacts::contact_of(client, &joined_room(client, room).ok()?)
+    }
+
+    /// `call_rooms` says which rooms have another device in their call
+    /// (ADR-0052); `presence` holds the contacts' presence (ADR-0057).
+    pub fn room_list(
+        client: &Client,
+        call_rooms: &crate::calls::rings::CallRooms,
+        presence: &crate::presence::Book,
+    ) -> RoomList {
+        let now = crate::calls::controller::now_ms();
         let mut rooms = client.joined_rooms();
         rooms.sort_by(|a, b| a.room_id().cmp(b.room_id()));
         let truncated = rooms.len() > MAX_ROOMS;
@@ -885,6 +897,8 @@ impl MatrixViews {
                         contact: contact.as_ref().map(|contact| contacts::shown(contact)),
                         // Names the picture only; the page cannot fetch it.
                         picture_id: room.avatar_url().as_deref().map(crate::media::picture_id),
+                        has_call: call_rooms.active(room.room_id(), now),
+                        contact_presence: contact.as_deref().and_then(|user| presence.get(user)),
                     }
                 })
                 .collect(),

@@ -10,6 +10,7 @@
     onsetuprecovery,
     onverify,
     onchangekey = () => {},
+    onpassphrase = () => {},
     onnewbackup = () => {}
   }: {
     security: SecurityStatus;
@@ -20,6 +21,9 @@
     onverify: () => void;
     // Replaces the recovery key; the core warns, shows and saves it.
     onchangekey?: () => void;
+    // Turns the profile passphrase on or off. The core asks for it in its own
+    // window; the page never sees it (ADR-0050).
+    onpassphrase?: (on: boolean) => void;
     // Deletes a key backup this device cannot use and starts a new one; the
     // core asks first, then shows and saves the new key.
     onnewbackup?: () => void;
@@ -76,6 +80,7 @@
   const operationText: Partial<Record<SecurityStatus['operation'], string>> = {
     waiting_for_password: 'Enter your password in the Windows window Persephone opened.',
     waiting_for_recovery_key: 'Enter your recovery key in the Windows window Persephone opened.',
+    waiting_for_passphrase: 'Enter the passphrase in the Windows window Persephone opened.',
     waiting_for_confirmation: 'Answer in the Windows window Persephone opened.',
     working: 'Working…'
   };
@@ -134,6 +139,37 @@
       {/if}
     {:else}
       <p>This device is verified.</p>
+    {/if}
+  </div>
+  <div class="panel" role="group" aria-labelledby="passphrase-heading">
+    <h3 id="passphrase-heading">Profile passphrase</h3>
+    {#if security.profilePassphrase}
+      <p>
+        The passphrase is on. Persephone asks for it each time it starts. Lock is available, and
+        it closes the profile until you enter the passphrase again.
+      </p>
+      <div class="actions">
+        <button
+          type="button"
+          disabled={waiting}
+          class="secondary"
+          onclick={() => onpassphrase(false)}>Turn off passphrase</button
+        >
+      </div>
+    {:else}
+      <p>
+        The passphrase is off. Persephone opens this profile without asking. Its stores are still
+        encrypted, and the key is bound to this computer account. But anyone, and any program,
+        that can use this computer account can open the profile.
+      </p>
+      <div class="actions">
+        <button
+          type="button"
+          disabled={waiting}
+          class="secondary"
+          onclick={() => onpassphrase(true)}>Turn on passphrase</button
+        >
+      </div>
     {/if}
   </div>
   {#if showRecovery}

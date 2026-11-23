@@ -14,6 +14,13 @@
 //! the core's frames with [`receive_from_core`], which checks the pixel
 //! frame's header against its reply before it allocates the body.
 //!
+//! `call_video_frame` has the same shape: a [`VideoReply`] control frame
+//! followed at once by exactly one `RgbaPixels` frame of at most
+//! [`MAX_CALL_VIDEO_BYTES`] ([`send_video_reply`], ADR-0048). When no newer
+//! picture exists, it gets an ordinary `Reply` whose outcome is `ok` with a
+//! null value, and no pixel frame follows. [`receive_from_core`] checks the
+//! pixel frame's header against its reply before it allocates the body.
+//!
 //! One call carries bytes the other way: `paste_image` is a control frame
 //! followed at once by exactly one `EncodedImage` frame of the length it
 //! declares, at most [`MAX_PASTED_IMAGE_BYTES`] ([`send_pasted_image`],
@@ -39,6 +46,8 @@ pub const MAX_THIRD_PARTY_MODULES: usize = 128;
 pub const MAX_MODULE_ID_BYTES: usize = 512;
 /// The longest module path in a report.
 pub const MAX_MODULE_PATH_BYTES: usize = 1024;
+/// Most events one `timeline_events` call reads again.
+pub const MAX_TIMELINE_EVENTS: usize = 20;
 
 /// Bound shared local filters before relay. Matrix identifier syntax is checked
 /// again in the core. A missing date range never authorizes extra cache reads.
@@ -114,6 +123,15 @@ pub fn personal_call_within_limits(call: &Call) -> bool {
         | Call::SetPinned {
             room_id, event_id, ..
         } => text(room_id, MAX_ROOM_ID_BYTES) && text(event_id, MAX_EVENT_ID_BYTES),
+        Call::TimelineEvents { room_id, event_ids } => {
+            text(room_id, MAX_ROOM_ID_BYTES)
+                && (1..=MAX_TIMELINE_EVENTS).contains(&event_ids.len())
+                && event_ids.iter().enumerate().all(|(index, id)| {
+                    !id.is_empty()
+                        && text(id, MAX_EVENT_ID_BYTES)
+                        && !event_ids[..index].contains(id)
+                })
+        }
         Call::PinnedMessages { room_id } => text(room_id, MAX_ROOM_ID_BYTES),
         Call::Attachments {
             room_id,
@@ -180,6 +198,17 @@ pub enum Call {
     EventContext {
         room_id: String,
         event_id: String,
+    },
+    /// Read these events of a room again, decrypted with the keys the core
+    /// holds now: 1 to [`MAX_TIMELINE_EVENTS`] different event IDs. Replies
+    /// with a `TimelinePage` of their items (no cursor), in the given order;
+    /// an event that cannot be read is left out. The UI asks for loaded
+    /// items that were undecryptable. The core reads them only when room
+    /// keys arrived for the room since the last such call while it was
+    /// subscribed; otherwise the page has no items and nothing is fetched.
+    TimelineEvents {
+        room_id: String,
+        event_ids: Vec<String>,
     },
     PinnedMessages {
         room_id: String,
@@ -257,8 +286,8 @@ pub enum Call {
     /// Lists the devices through a contained call worker, so it can take
     /// seconds. Available whenever the profile is unlocked.
     CallDevices {},
-    /// Save the chosen call microphone and speaker as platform device IDs,
-    /// each at most [`MAX_CALL_DEVICE_ID_BYTES`]; null is the system default.
+    /// Save the chosen call microphone, speaker and camera as platform device
+    /// IDs, each at most [`MAX_CALL_DEVICE_ID_BYTES`]; null is the system default.
     /// They apply to calls joined afterwards.
     SetCallDevices {
         /// Required, though it may be null.
@@ -267,6 +296,10 @@ pub enum Call {
         /// Required, though it may be null.
         #[serde(deserialize_with = "Option::deserialize")]
         playout: Option<String>,
+        /// The camera, as a platform device ID. Required, though it may be
+        /// null (the first camera the system lists).
+        #[serde(deserialize_with = "Option::deserialize")]
+        camera: Option<String>,
     },
     /// Find the homeserver of a server name such as `example.org`, through
     /// its `.well-known/matrix/client` file, and confirm it speaks Matrix
@@ -297,7 +330,14 @@ pub enum Call {
     /// Sign out: revoke the session on the homeserver if it can be reached,
     /// then delete this device's local profile (keys first). Replies with the
     /// resulting store state.
-    SignOut {},
+    ///
+    /// Without `discard_keys`, the core first makes sure this device's room
+    /// keys are in the key backup. When they are not, nothing changes and the
+    /// call fails with [`ErrorCode::KeysNotBackedUp`]. `discard_keys` is the
+    /// user's choice to sign out and lose them.
+    SignOut {
+        discard_keys: bool,
+    },
     /// The account's encryption state (codes only).
     SecurityStatus {},
     /// Set up cross-signing and recovery for an account without an identity.
@@ -613,6 +653,15 @@ pub enum Call {
     /// offers to save it to a file it writes itself. The key never crosses
     /// this channel. Replies at once with the status.
     ChangeRecoveryKey {},
+    /// Turn the local profile passphrase on or off (ADR-0050). The core asks
+    /// for the passphrase in its own window: a new one (twice) to turn it
+    /// on, the current one to turn it off. The passphrase never crosses this
+    /// channel. Replies at once with the status; progress and the result
+    /// arrive as [`Event::SecurityChanged`]. An unchanged setting, a locked
+    /// profile or a running security operation leaves the status as it is.
+    SetProfilePassphrase {
+        on: bool,
+    },
     /// Delete the homeserver's key backup, which this verified device cannot
     /// use, and start a new one with a new recovery key (ADR-0040). The core
     /// asks in its own window first, then shows the new key as for
@@ -641,12 +690,14 @@ pub enum Call {
     CallReadiness {
         room_id: String,
     },
-    /// Join the audio call in this joined, encrypted room. With a profile
+    /// Join the call in this joined, encrypted room, with the camera on when
+    /// `video` is true (ADR-0048). With a profile
     /// proxy the core first asks, in its own window, whether the call may
     /// connect directly. Replies `CallStatus`; a refusal is a `joinError` in
     /// it, not an error code. Progress arrives as [`Event::CallChanged`].
     CallJoin {
         room_id: String,
+        video: bool,
     },
     /// Leave the call, or cancel a join in progress. Replies `CallStatus`.
     CallLeave {},
@@ -655,8 +706,55 @@ pub enum Call {
     CallMute {
         muted: bool,
     },
+    /// Deafen or undeafen the call (ADR-0055): all remote audio goes off and
+    /// the microphone mutes, or remote audio comes back and the microphone
+    /// returns to the user's own mute choice. Unmuting with [`Call::CallMute`]
+    /// also undeafens. Replies `CallStatus`; the worker's answer arrives as
+    /// [`Event::CallChanged`].
+    CallDeafen {
+        deafened: bool,
+    },
+    /// Set the call playout volume, 0 to [`MAX_CALL_VOLUME_PERCENT`]
+    /// (ADR-0055). It is saved for later calls and applies at once to a
+    /// running call. Replies `CallStatus`.
+    CallVolume {
+        percent: u8,
+    },
+    /// Turn the camera on or off during a call. Replies `CallStatus`, with the
+    /// camera `starting` when turned on; the worker's answer arrives as
+    /// [`Event::CallChanged`]. Refused when no call is connected.
+    CallCamera {
+        on: bool,
+    },
+    /// Start or stop sharing the screen during a call (ADR-0053). The page
+    /// names no screen, window or handle: on a start the core shows its own
+    /// chooser or warning, and a cancel leaves the share off. Replies
+    /// `CallStatus`, with the screen `starting` when started; the worker's
+    /// answer arrives as [`Event::CallChanged`]. Refused when no call is
+    /// connected.
+    CallScreen {
+        on: bool,
+    },
+    /// The newest picture on a video tile (0 is the own camera, 1 to 4 are
+    /// remote cameras, 5 is the remote screen share), if its number is above
+    /// `after` and it belongs to the tile's
+    /// stream `stream` (from the call status). Answered at once with a
+    /// [`VideoReply`] and one pixel frame, or with an `ok` reply holding null
+    /// when there is no such picture.
+    CallVideoFrame {
+        tile: u8,
+        after: u64,
+        stream: u64,
+    },
     /// The call as the page shows it. Replies `CallStatus`.
     CallStatus {},
+    /// The incoming call rings now running (ADR-0052). Replies `CallRings`.
+    CallRings {},
+    /// Decline the ring in this room (ADR-0052): the core sends the decline
+    /// event once, without a retry, and ends the ring. Replies `CallRings`.
+    CallDeclineRing {
+        room_id: String,
+    },
     /// Open a direct-message conversation with this user: an existing room
     /// with just them, or a new encrypted room they are invited to. Refused
     /// when they have no cross-signing identity (ADR-0005).
@@ -861,6 +959,51 @@ pub const MAX_PROXY_BYTES: usize = 300;
 /// Longest call device ID either side accepts, in bytes.
 pub const MAX_CALL_DEVICE_ID_BYTES: usize = 512;
 
+/// Video tiles in a call: tile 0 is the own camera, tiles 1 to 4 are remote
+/// cameras, tile 5 is the remote screen share (ADR-0053).
+pub const CALL_VIDEO_TILES: u8 = 6;
+/// The highest call playout volume, in percent (ADR-0055).
+pub const MAX_CALL_VOLUME_PERCENT: u8 = 100;
+
+/// The tile of the remote screen share.
+pub const CALL_SCREEN_TILE: u8 = 5;
+
+/// The longest side of a call camera picture, in pixels.
+pub const MAX_CALL_VIDEO_SIDE: u32 = 640;
+
+/// The most pixels in one call camera picture.
+pub const MAX_CALL_VIDEO_PIXELS: u32 = 640 * 360;
+
+/// The longest side of a screen share picture, in pixels.
+pub const MAX_CALL_SCREEN_SIDE: u32 = 1280;
+
+/// The most pixels in one screen share picture: 1280 x 720.
+pub const MAX_CALL_SCREEN_PIXELS: u32 = 1280 * 720;
+
+/// The longest side of a picture on this tile.
+pub const fn max_call_video_side(tile: u8) -> u32 {
+    if tile == CALL_SCREEN_TILE {
+        MAX_CALL_SCREEN_SIDE
+    } else {
+        MAX_CALL_VIDEO_SIDE
+    }
+}
+
+/// The most pixels in a picture on this tile.
+pub const fn max_call_video_pixels(tile: u8) -> u32 {
+    if tile == CALL_SCREEN_TILE {
+        MAX_CALL_SCREEN_PIXELS
+    } else {
+        MAX_CALL_VIDEO_PIXELS
+    }
+}
+
+/// The most bytes in the one `RgbaPixels` frame after a [`VideoReply`].
+pub const MAX_CALL_VIDEO_BYTES: u64 = MAX_CALL_VIDEO_PIXELS as u64 * 4;
+
+/// The largest picture rotation: quarter turns clockwise, 0 to 3.
+pub const MAX_CALL_VIDEO_ROTATION: u8 = 3;
+
 /// Longest server name either side accepts in `discover_homeserver`, in
 /// bytes (a DNS name and a port).
 pub const MAX_SERVER_NAME_BYTES: usize = 261;
@@ -894,6 +1037,12 @@ pub enum Event {
     /// The call changed state, or its participants did: ask for
     /// `call_status`. Coalesced; it carries no call data.
     CallChanged {},
+    /// A new video picture is waiting: ask for `call_video_frame` on each
+    /// active tile. Content-free and coalesced like `CallChanged`.
+    CallVideo {},
+    /// An incoming call ring started, ended or changed (ADR-0052): ask for
+    /// `call_rings`. Content-free and coalesced like `CallChanged`.
+    RingsChanged {},
     /// The list of third-party modules changed: ask for `third_party_modules`.
     /// Content-free and coalesced like `SecurityChanged`.
     ModulesChanged {},
@@ -902,10 +1051,14 @@ pub enum Event {
     /// desktop notification with these names and never forwards it to the
     /// page. Names only, never message text; each is projected and at most
     /// [`MAX_NOTIFICATION_NAME_BYTES`]. Both are empty when the account's
-    /// settings leave names out. Coalesced: only the latest waits.
+    /// settings leave names out. Coalesced: only the latest waits. `call` is
+    /// true for an incoming call ring (ADR-0052): the text is then "Incoming
+    /// call", with the caller's name only when `sender` is not empty.
     Notification {
         room: String,
         sender: String,
+        #[serde(default)]
+        call: bool,
     },
 }
 
@@ -948,6 +1101,9 @@ pub enum ErrorCode {
     /// failed its integrity check, or the server refused the file (a 4xx
     /// status other than 404 or 429). Trying again gives the same answer.
     Rejected,
+    /// Sign-out did not start: this device's room keys are not all in a key
+    /// backup, so signing out would lose encrypted history.
+    KeysNotBackedUp,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -996,6 +1152,86 @@ impl PixelReply {
     }
 }
 
+/// Announces the video picture that follows it: tile `tile`, picture number
+/// `seq`, turned `rotation` quarter turns clockwise, `width` by `height` RGBA
+/// pixels, for request `id`. On the wire it is `{"video_reply":{...}}` in a
+/// control frame.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VideoReply {
+    pub id: u32,
+    pub tile: u8,
+    pub seq: u64,
+    pub rotation: u8,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl VideoReply {
+    /// The pixel frame header this reply announces, or `None` when the tile
+    /// or rotation is out of range, the picture number is not JavaScript-safe,
+    /// or the picture is empty, too wide or too tall, or over
+    /// [`MAX_CALL_VIDEO_PIXELS`].
+    pub fn frame_header(&self) -> Option<FrameHeader> {
+        if self.tile >= CALL_VIDEO_TILES
+            || self.rotation > MAX_CALL_VIDEO_ROTATION
+            || self.seq > MAX_SAFE_TIMESTAMP
+        {
+            return None;
+        }
+        // The limits are the tile's: checked before any buffer exists.
+        let side = max_call_video_side(self.tile);
+        if !(1..=side).contains(&self.width) || !(1..=side).contains(&self.height) {
+            return None;
+        }
+        let pixels = u64::from(self.width) * u64::from(self.height);
+        if pixels > u64::from(max_call_video_pixels(self.tile)) {
+            return None;
+        }
+        Some(FrameHeader {
+            kind: FrameKind::RgbaPixels,
+            length: pixels * RGBA_BYTES_PER_PIXEL,
+            width: self.width,
+            height: self.height,
+        })
+    }
+}
+
+/// A [`VideoReply`] and its pixel frame. The frame keeps its budget
+/// reservation until it is dropped.
+pub struct VideoPicture {
+    pub reply: VideoReply,
+    pub pixels: ReceivedFrame,
+}
+
+/// Cheap checks for the relay and authoritative receiver on the call video
+/// commands: [`Call::CallVideoFrame`] needs a tile below [`CALL_VIDEO_TILES`]
+/// and a JavaScript-safe `after` and `stream`; a camera ID in [`Call::SetCallDevices`]
+/// must be non-empty, at most [`MAX_CALL_DEVICE_ID_BYTES`] and free of
+/// control characters; [`Call::CallVolume`] is at most
+/// [`MAX_CALL_VOLUME_PERCENT`]. Any other call is not constrained here and
+/// gives `true`.
+pub fn call_video_within_limits(call: &Call) -> bool {
+    match call {
+        Call::CallVideoFrame {
+            tile,
+            after,
+            stream,
+        } => {
+            *tile < CALL_VIDEO_TILES
+                && *after <= MAX_SAFE_TIMESTAMP
+                && *stream <= MAX_SAFE_TIMESTAMP
+        }
+        Call::SetCallDevices { camera, .. } => camera.as_ref().is_none_or(|id| {
+            !id.is_empty()
+                && id.len() <= MAX_CALL_DEVICE_ID_BYTES
+                && !id.chars().any(char::is_control)
+        }),
+        Call::CallVolume { percent } => *percent <= MAX_CALL_VOLUME_PERCENT,
+        _ => true,
+    }
+}
+
 /// A [`PixelReply`] and its pixel frame. The frame keeps its budget
 /// reservation until it is dropped.
 pub struct PixelBand {
@@ -1003,20 +1239,23 @@ pub struct PixelBand {
     pub pixels: ReceivedFrame,
 }
 
-/// What the UI reads from the core: a message, or a band of pixels.
+/// What the UI reads from the core: a message, a band of pixels, or a video
+/// picture.
 pub enum FromCore {
     Message(CoreMessage),
     Pixels(PixelBand),
+    Video(VideoPicture),
 }
 
 /// Every control message from the core: [`CoreMessage`]'s two forms and the
-/// pixel reply, in the same externally tagged form.
+/// pixel and video replies, in the same externally tagged form.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum Wire<R, P> {
+enum Wire<R, P, V> {
     Reply(R),
     Event(Event),
     PixelReply(P),
+    VideoReply(V),
 }
 
 /// The fixed frame header length of `persephone-media-protocol`.
@@ -1088,7 +1327,37 @@ pub fn send_pixel_reply<W: Write>(
     }
     FrameHeader::decode(header.encode())
         .map_err(|_| invalid("pixel frame header fails receiver validation"))?;
-    let body = serde_json::to_vec(&Wire::<(), &PixelReply>::PixelReply(reply))
+    let body = serde_json::to_vec(&Wire::<(), &PixelReply, ()>::PixelReply(reply))
+        .map_err(io::Error::other)?;
+    let control = FrameHeader {
+        kind: FrameKind::Control,
+        length: body.len() as u64,
+        width: 0,
+        height: 0,
+    };
+    write_frame(writer, control, &body)?;
+    write_frame(writer, header, pixels)
+}
+
+/// Writes a [`VideoReply`] and then its pixel frame. Everything is checked
+/// before anything is written: the reply must be inside the video limits, and
+/// `pixels` must be exactly `width * height` RGBA pixels. The caller holds
+/// its output lock across this call, so no other frame comes between the two.
+pub fn send_video_reply<W: Write>(
+    writer: &mut W,
+    reply: &VideoReply,
+    pixels: &[u8],
+) -> io::Result<()> {
+    let invalid = |message: &str| io::Error::new(io::ErrorKind::InvalidInput, message.to_owned());
+    let header = reply
+        .frame_header()
+        .ok_or_else(|| invalid("video picture outside the video limits"))?;
+    if u64::try_from(pixels.len()).ok() != Some(header.length) {
+        return Err(invalid("video picture length does not match its reply"));
+    }
+    FrameHeader::decode(header.encode())
+        .map_err(|_| invalid("pixel frame header fails receiver validation"))?;
+    let body = serde_json::to_vec(&Wire::<(), (), &VideoReply>::VideoReply(reply))
         .map_err(io::Error::other)?;
     let control = FrameHeader {
         kind: FrameKind::Control,
@@ -1190,11 +1459,12 @@ pub fn receive_request<R: Read>(
     }
 }
 
-/// Reads one message or pixel band from the core (the UI side). After a
-/// [`PixelReply`], the next frame must be an `RgbaPixels` frame whose width,
-/// height and length match it. That header is checked before the body is
-/// allocated, and the body is read with the budgeted reader. A reply over the
-/// band limit is refused without reading the frame that follows.
+/// Reads one message, pixel band or video picture from the core (the UI
+/// side). After a [`PixelReply`] or [`VideoReply`], the next frame must be an
+/// `RgbaPixels` frame whose width, height and length match it. That header is
+/// checked before the body is allocated, and the body is read with the
+/// budgeted reader. A reply over its limit is refused without reading the
+/// frame that follows.
 pub fn receive_from_core<R: Read>(
     reader: &mut R,
     budgets: &ResourceBudgets,
@@ -1203,14 +1473,16 @@ pub fn receive_from_core<R: Read>(
     if frame.header().kind != FrameKind::Control {
         return Err(ReceiveError::UnexpectedKind);
     }
-    let reply = match serde_json::from_slice::<Wire<Reply, PixelReply>>(frame.body()) {
-        Ok(Wire::Reply(reply)) => return Ok(FromCore::Message(CoreMessage::Reply(reply))),
-        Ok(Wire::Event(event)) => return Ok(FromCore::Message(CoreMessage::Event(event))),
-        Ok(Wire::PixelReply(reply)) => reply,
-        Err(_) => return Err(ReceiveError::Malformed),
-    };
+    let (expected, reply) =
+        match serde_json::from_slice::<Wire<Reply, PixelReply, VideoReply>>(frame.body()) {
+            Ok(Wire::Reply(reply)) => return Ok(FromCore::Message(CoreMessage::Reply(reply))),
+            Ok(Wire::Event(event)) => return Ok(FromCore::Message(CoreMessage::Event(event))),
+            Ok(Wire::PixelReply(reply)) => (reply.frame_header(), Announced::Band(reply)),
+            Ok(Wire::VideoReply(reply)) => (reply.frame_header(), Announced::Video(reply)),
+            Err(_) => return Err(ReceiveError::Malformed),
+        };
     drop(frame);
-    let expected = reply.frame_header().ok_or(ReceiveError::Malformed)?;
+    let expected = expected.ok_or(ReceiveError::Malformed)?;
     let mut wire = [0; FRAME_HEADER_LEN];
     reader
         .read_exact(&mut wire)
@@ -1225,7 +1497,16 @@ pub fn receive_from_core<R: Read>(
     // The header was checked; give it back to the budgeted reader together
     // with the body that follows it.
     let pixels = read_frame(&mut (&wire[..]).chain(reader), budgets).map_err(frame_error)?;
-    Ok(FromCore::Pixels(PixelBand { reply, pixels }))
+    Ok(match reply {
+        Announced::Band(reply) => FromCore::Pixels(PixelBand { reply, pixels }),
+        Announced::Video(reply) => FromCore::Video(VideoPicture { reply, pixels }),
+    })
+}
+
+/// The reply that announced a pixel frame.
+enum Announced {
+    Band(PixelReply),
+    Video(VideoReply),
 }
 
 #[cfg(test)]
@@ -1290,6 +1571,7 @@ mod tests {
         let list = CoreMessage::Event(Event::RoomListChanged {});
         let security = CoreMessage::Event(Event::SecurityChanged {});
         let calls = CoreMessage::Event(Event::CallChanged {});
+        let video = CoreMessage::Event(Event::CallVideo {});
         let modules = CoreMessage::Event(Event::ModulesChanged {});
         send(&mut wire, &reply).unwrap();
         send(&mut wire, &event).unwrap();
@@ -1305,10 +1587,15 @@ mod tests {
             "wire form of the security event"
         );
         send(&mut wire, &calls).unwrap();
+        send(&mut wire, &video).unwrap();
         send(&mut wire, &modules).unwrap();
         assert!(
             String::from_utf8_lossy(&wire).contains(r#"{"event":{"call_changed":{}}}"#),
             "wire form of the call event"
+        );
+        assert!(
+            String::from_utf8_lossy(&wire).contains(r#"{"event":{"call_video":{}}}"#),
+            "wire form of the call video event"
         );
         assert!(
             String::from_utf8_lossy(&wire).ends_with(r#"{"event":{"modules_changed":{}}}"#),
@@ -1316,7 +1603,7 @@ mod tests {
         );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session, list, security, calls, modules] {
+        for expected in [reply, event, session, list, security, calls, video, modules] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -1334,6 +1621,8 @@ mod tests {
             br#"{"event":{"call_changed":{"room_id":"!r:s"}}}"#,
             br#"{"event":{"call_changed":{"participants":[]}}}"#,
             br#"{"event":"call_changed"}"#,
+            br#"{"event":{"call_video":{"tile":1}}}"#,
+            br#"{"event":"call_video"}"#,
         ] {
             let mut reader = Cursor::new(frame(FrameKind::Control, body));
             assert!(
@@ -1624,8 +1913,17 @@ mod tests {
                 Call::SetCallDevices {
                     recording: Some("{0.0.1}.{a}".into()),
                     playout: None,
+                    camera: Some("usb#cam".into()),
                 },
-                r#"{"id":1,"call":{"command":"set_call_devices","recording":"{0.0.1}.{a}","playout":null}}"#,
+                r#"{"id":1,"call":{"command":"set_call_devices","recording":"{0.0.1}.{a}","playout":null,"camera":"usb#cam"}}"#,
+            ),
+            (
+                Call::SetCallDevices {
+                    recording: None,
+                    playout: None,
+                    camera: None,
+                },
+                r#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"camera":null}}"#,
             ),
             (
                 Call::DiscoverHomeserver {
@@ -1681,9 +1979,11 @@ mod tests {
                             ..persephone_contracts::TimelineEvents::default()
                         },
                         theme: persephone_contracts::Theme::Red,
+                        share_presence: false,
+                        presence: persephone_contracts::PresenceStatus::Unavailable,
                     },
                 },
-                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false,"loadRoomPictures":true,"captureProtection":false,"timelineEvents":{"joins":true,"leaves":false,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"verification":true,"calls":true,"callSignalling":true,"polls":true,"stickers":true,"locations":true,"spaces":true,"widgets":true,"otherEvents":true,"deletedMessages":true},"theme":"red"}}}"#,
+                r#"{"id":1,"call":{"command":"set_account_settings","settings":{"enterSends":false,"chatTextPercent":120,"interfaceTextPercent":90,"desktopNotifications":true,"sendTyping":false,"sendReadReceipts":true,"idleLockMinutes":15,"notificationNames":false,"loadRoomPictures":true,"captureProtection":false,"timelineEvents":{"joins":true,"leaves":false,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"verification":true,"calls":true,"callSignalling":true,"polls":true,"stickers":true,"locations":true,"spaces":true,"widgets":true,"otherEvents":true,"deletedMessages":true},"theme":"red","sharePresence":false,"presence":"unavailable"}}}"#,
             ),
             (
                 Call::ProfileList {},
@@ -1706,8 +2006,25 @@ mod tests {
             (
                 Call::CallJoin {
                     room_id: "!r:s".into(),
+                    video: true,
                 },
-                r#"{"id":1,"call":{"command":"call_join","room_id":"!r:s"}}"#,
+                r#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","video":true}}"#,
+            ),
+            (
+                Call::CallCamera { on: false },
+                r#"{"id":1,"call":{"command":"call_camera","on":false}}"#,
+            ),
+            (
+                Call::CallScreen { on: true },
+                r#"{"id":1,"call":{"command":"call_screen","on":true}}"#,
+            ),
+            (
+                Call::CallVideoFrame {
+                    tile: 4,
+                    after: 9,
+                    stream: 2,
+                },
+                r#"{"id":1,"call":{"command":"call_video_frame","tile":4,"after":9,"stream":2}}"#,
             ),
             (
                 Call::CallLeave {},
@@ -1718,8 +2035,26 @@ mod tests {
                 r#"{"id":1,"call":{"command":"call_mute","muted":true}}"#,
             ),
             (
+                Call::CallDeafen { deafened: true },
+                r#"{"id":1,"call":{"command":"call_deafen","deafened":true}}"#,
+            ),
+            (
+                Call::CallVolume { percent: 35 },
+                r#"{"id":1,"call":{"command":"call_volume","percent":35}}"#,
+            ),
+            (
                 Call::CallStatus {},
                 r#"{"id":1,"call":{"command":"call_status"}}"#,
+            ),
+            (
+                Call::CallRings {},
+                r#"{"id":1,"call":{"command":"call_rings"}}"#,
+            ),
+            (
+                Call::CallDeclineRing {
+                    room_id: "!r:s".into(),
+                },
+                r#"{"id":1,"call":{"command":"call_decline_ring","room_id":"!r:s"}}"#,
             ),
         ] {
             let request = Request { id: 1, call };
@@ -1792,6 +2127,16 @@ mod tests {
                 r#"{"id":1,"call":{"command":"three_pids"}}"#,
             ),
             (
+                Call::SignOut {
+                    discard_keys: false,
+                },
+                r#"{"id":1,"call":{"command":"sign_out","discard_keys":false}}"#,
+            ),
+            (
+                Call::SignOut { discard_keys: true },
+                r#"{"id":1,"call":{"command":"sign_out","discard_keys":true}}"#,
+            ),
+            (
                 Call::RequestEmailToken {
                     email: "a@example.org".into(),
                 },
@@ -1824,6 +2169,10 @@ mod tests {
             (
                 Call::ChangeRecoveryKey {},
                 r#"{"id":1,"call":{"command":"change_recovery_key"}}"#,
+            ),
+            (
+                Call::SetProfilePassphrase { on: true },
+                r#"{"id":1,"call":{"command":"set_profile_passphrase","on":true}}"#,
             ),
             (
                 Call::StartNewBackup {},
@@ -1866,6 +2215,10 @@ mod tests {
             br#"{"id":1,"call":{"command":"verify_device","device_id":null}}"#,
             br#"{"id":1,"call":{"command":"change_recovery_key","key":"x"}}"#,
             br#"{"id":1,"call":{"command":"change_recovery_key","path":"C:\\x"}}"#,
+            br#"{"id":1,"call":{"command":"set_profile_passphrase"}}"#,
+            br#"{"id":1,"call":{"command":"set_profile_passphrase","on":null}}"#,
+            br#"{"id":1,"call":{"command":"set_profile_passphrase","on":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"set_profile_passphrase","on":true,"passphrase":"x"}}"#,
             br#"{"id":1,"call":{"command":"start_new_backup","key":"x"}}"#,
             br#"{"id":1,"call":{"command":"start_new_backup","delete":true}}"#,
             br#"{"id":1,"call":{"command":"set_notification_level"}}"#,
@@ -1885,12 +2238,31 @@ mod tests {
         let event = CoreMessage::Event(Event::Notification {
             room: "Plans".into(),
             sender: "Bob".into(),
+            call: false,
         });
         let mut sent = Vec::new();
         send(&mut sent, &event).unwrap();
         assert_eq!(
             String::from_utf8(sent[17..].to_vec()).unwrap(),
-            r#"{"event":{"notification":{"room":"Plans","sender":"Bob"}}}"#
+            r#"{"event":{"notification":{"room":"Plans","sender":"Bob","call":false}}}"#
+        );
+        // A ring's notification and its coalesced page event (ADR-0052).
+        let event = CoreMessage::Event(Event::Notification {
+            room: String::new(),
+            sender: String::new(),
+            call: true,
+        });
+        let mut sent = Vec::new();
+        send(&mut sent, &event).unwrap();
+        assert_eq!(
+            String::from_utf8(sent[17..].to_vec()).unwrap(),
+            r#"{"event":{"notification":{"room":"","sender":"","call":true}}}"#
+        );
+        let mut sent = Vec::new();
+        send(&mut sent, &CoreMessage::Event(Event::RingsChanged {})).unwrap();
+        assert_eq!(
+            String::from_utf8(sent[17..].to_vec()).unwrap(),
+            r#"{"event":{"rings_changed":{}}}"#
         );
     }
 
@@ -2109,17 +2481,46 @@ mod tests {
             br#"{"id":1,"call":{"command":"register","homeserver":"https://h","username":"al","token":"x"}}"#,
             br#"{"id":1,"call":{"command":"register","username":"al"}}"#,
             br#"{"id":1,"call":{"command":"sign_out","keep_data":true}}"#,
+            br#"{"id":1,"call":{"command":"sign_out"}}"#,
+            br#"{"id":1,"call":{"command":"sign_out","discard_keys":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"sign_out","discard_keys":true,"keep_data":true}}"#,
             br#"{"id":1,"call":{"command":"security_status","user":"@a:s"}}"#,
             br#"{"id":1,"call":{"command":"call_readiness"}}"#,
             br#"{"id":1,"call":{"command":"call_readiness","room_id":"!r:s","video":true}}"#,
             br#"{"id":1,"call":{"command":"call_join"}}"#,
-            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","proxy_ok":true}}"#,
-            br#"{"id":1,"call":{"command":"call_join","room_id":null}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","video":"yes"}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":"!r:s","video":false,"proxy_ok":true}}"#,
+            br#"{"id":1,"call":{"command":"call_join","room_id":null,"video":false}}"#,
+            br#"{"id":1,"call":{"command":"call_camera"}}"#,
+            br#"{"id":1,"call":{"command":"call_camera","on":1}}"#,
+            br#"{"id":1,"call":{"command":"call_camera","on":true,"device":"x"}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame"}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","after":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":256,"after":0,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":-1,"after":0,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":-1,"stream":0}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0,"stream":-1}}"#,
+            br#"{"id":1,"call":{"command":"call_video_frame","tile":1,"after":0,"stream":0,"x":1}}"#,
             br#"{"id":1,"call":{"command":"call_leave","room_id":"!r:s"}}"#,
             br#"{"id":1,"call":{"command":"call_mute"}}"#,
             br#"{"id":1,"call":{"command":"call_mute","muted":"yes"}}"#,
             br#"{"id":1,"call":{"command":"call_mute","muted":true,"user":"@a:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_deafen"}}"#,
+            br#"{"id":1,"call":{"command":"call_deafen","deafened":1}}"#,
+            br#"{"id":1,"call":{"command":"call_deafen","deafened":true,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"call_volume"}}"#,
+            br#"{"id":1,"call":{"command":"call_volume","percent":256}}"#,
+            br#"{"id":1,"call":{"command":"call_volume","percent":-1}}"#,
+            br#"{"id":1,"call":{"command":"call_volume","percent":50.5}}"#,
+            br#"{"id":1,"call":{"command":"call_volume","percent":"50"}}"#,
             br#"{"id":1,"call":{"command":"call_status","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_rings","room_id":"!r:s"}}"#,
+            br#"{"id":1,"call":{"command":"call_decline_ring"}}"#,
+            br#"{"id":1,"call":{"command":"call_decline_ring","room_id":"!r:s","event_id":"$e"}}"#,
+            br#"{"id":1,"call":{"command":"call_decline_ring","room_id":7}}"#,
             br#"{"id":1,"call":{"command":"set_up_encryption","password":"x"}}"#,
             br#"{"id":1,"call":{"command":"recover_with_key","recovery_key":"x"}}"#,
             br#"{"id":1,"call":{"command":"export_room_keys"}}"#,
@@ -2147,8 +2548,11 @@ mod tests {
             br#"{"id":1,"call":{"command":"set_call_devices"}}"#,
             br#"{"id":1,"call":{"command":"set_call_devices","recording":null}}"#,
             br#"{"id":1,"call":{"command":"set_call_devices","playout":null}}"#,
-            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"x":1}}"#,
-            br#"{"id":1,"call":{"command":"set_call_devices","recording":1,"playout":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"camera":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"camera":null,"x":1}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":1,"playout":null,"camera":null}}"#,
+            br#"{"id":1,"call":{"command":"set_call_devices","recording":null,"playout":null,"camera":1}}"#,
             br#"{"id":1,"call":{"command":"call_devices","recording":null}}"#,
             br#"{"id":1,"call":{"command":"discover_homeserver","server_name":"e.org","url":"x"}}"#,
             br#"{"id":1,"call":{"command":"acknowledge_sessions"}}"#,
@@ -2593,6 +2997,334 @@ mod tests {
         assert!(send(&mut wire, &huge).is_err());
         assert!(wire.is_empty());
     }
+
+    fn video_reply(tile: u8, width: u32, height: u32) -> VideoReply {
+        VideoReply {
+            id: 5,
+            tile,
+            seq: 42,
+            rotation: 1,
+            width,
+            height,
+        }
+    }
+
+    /// GIVEN a video reply between an event and a reply WHEN the UI reads THEN
+    /// it gets the event, the picture with its pixels and the reply, in order;
+    /// the documented wire form is used, and a reader that knows only
+    /// messages refuses it.
+    #[test]
+    fn given_a_video_reply_then_the_picture_arrives_whole_between_messages() {
+        let mut wire = Vec::new();
+        send(&mut wire, &CoreMessage::Event(Event::CallVideo {})).unwrap();
+        let reply = video_reply(3, 4, 2);
+        let pixels: Vec<u8> = (0..32).collect();
+        let start = wire.len();
+        send_video_reply(&mut wire, &reply, &pixels).unwrap();
+        let documented =
+            r#"{"video_reply":{"id":5,"tile":3,"seq":42,"rotation":1,"width":4,"height":2}}"#;
+        let body = start + 17;
+        assert_eq!(
+            String::from_utf8_lossy(&wire[body..body + documented.len()]),
+            documented
+        );
+        assert_eq!(
+            wire[body + documented.len()],
+            FrameKind::RgbaPixels as u8,
+            "the pixel frame follows at once"
+        );
+        send(
+            &mut wire,
+            &CoreMessage::Reply(Reply {
+                id: 6,
+                outcome: Outcome::Ok(serde_json::Value::Null),
+            }),
+        )
+        .unwrap();
+        let budgets = ResourceBudgets::default();
+        let mut reader = Cursor::new(wire.clone());
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Ok(FromCore::Message(CoreMessage::Event(Event::CallVideo {})))
+        ));
+        match receive_from_core(&mut reader, &budgets) {
+            Ok(FromCore::Video(picture)) => {
+                assert_eq!(picture.reply, reply);
+                assert_eq!(picture.pixels.body(), &pixels[..]);
+                assert_eq!(picture.pixels.header().width, 4);
+                assert_eq!(picture.pixels.header().height, 2);
+            }
+            _ => panic!("expected a video picture"),
+        }
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Ok(FromCore::Message(CoreMessage::Reply(Reply { id: 6, .. })))
+        ));
+        assert!(matches!(
+            receive_from_core(&mut reader, &budgets),
+            Err(ReceiveError::Closed)
+        ));
+        let mut reader = Cursor::new(wire[start..].to_vec());
+        assert!(matches!(
+            receive::<_, CoreMessage>(&mut reader, &budgets),
+            Err(ReceiveError::Malformed)
+        ));
+    }
+
+    /// GIVEN no newer picture WHEN the core answers THEN it is an ordinary
+    /// `ok` reply with null and no pixel frame follows.
+    #[test]
+    fn given_no_newer_picture_then_the_reply_is_ok_null_without_pixels() {
+        let mut wire = Vec::new();
+        send(
+            &mut wire,
+            &CoreMessage::Reply(Reply {
+                id: 8,
+                outcome: Outcome::Ok(serde_json::Value::Null),
+            }),
+        )
+        .unwrap();
+        let documented = r#"{"reply":{"id":8,"outcome":{"ok":null}}}"#;
+        assert_eq!(String::from_utf8_lossy(&wire[17..]), documented);
+        assert!(matches!(
+            receive_from_core(&mut Cursor::new(wire), &ResourceBudgets::default()),
+            Ok(FromCore::Message(CoreMessage::Reply(Reply { id: 8, .. })))
+        ));
+    }
+
+    /// GIVEN pixel frames that do not match their video reply WHEN read THEN
+    /// each is refused, and the pixel body is never read.
+    #[test]
+    fn given_a_mismatched_or_missing_video_frame_then_receive_refuses() {
+        let budgets = ResourceBudgets::default();
+        let reply =
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":2,"height":2}}"#;
+        let body = [7u8; 16];
+        for (follower, expected) in [
+            (pixels_frame(4, 1, &body), "malformed"),
+            (pixels_frame(1, 4, &body), "malformed"),
+            (frame(FrameKind::Control, b"{}"), "kind"),
+            (frame(FrameKind::EncodedImage, &body), "kind"),
+            (Vec::new(), "closed"),
+            (pixels_frame(2, 2, &body)[..9].to_vec(), "closed"),
+        ] {
+            let mut wire = pixel_reply_frame(reply);
+            let header_end = wire.len() + 17;
+            wire.extend_from_slice(&follower);
+            let mut reader = Cursor::new(wire);
+            let result = receive_from_core(&mut reader, &budgets);
+            let matched = match (expected, &result) {
+                ("malformed", Err(ReceiveError::Malformed))
+                | ("kind", Err(ReceiveError::UnexpectedKind)) => {
+                    reader.position() == header_end as u64
+                }
+                ("closed", Err(ReceiveError::Closed)) => true,
+                _ => false,
+            };
+            assert!(matched, "{expected}");
+        }
+        let mut wire = pixel_reply_frame(reply);
+        wire.extend_from_slice(&pixels_frame(2, 2, &body)[..25]);
+        assert!(matches!(
+            receive_from_core(&mut Cursor::new(wire), &budgets),
+            Err(ReceiveError::Closed)
+        ));
+    }
+
+    /// GIVEN a video reply outside the video limits, or with extra or missing
+    /// fields WHEN read THEN it is refused before the next frame is touched;
+    /// WHEN the core tries to send one THEN nothing is written.
+    #[test]
+    fn given_an_out_of_limit_video_reply_then_nothing_crosses() {
+        let budgets = ResourceBudgets::default();
+        for reply in [
+            r#"{"video_reply":{"id":1,"tile":6,"seq":1,"rotation":0,"width":1,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":5,"seq":1,"rotation":0,"width":1281,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":5,"seq":1,"rotation":0,"width":1280,"height":721}}"#,
+            r#"{"video_reply":{"id":1,"tile":4,"seq":1,"rotation":0,"width":1280,"height":720}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":4,"width":1,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":0,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1,"height":0}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":641,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1,"height":641}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":640,"height":361}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":9007199254740992,"rotation":0,"width":1,"height":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1,"height":1,"x":0}}"#,
+            r#"{"video_reply":{"id":1,"tile":0,"seq":1,"rotation":0,"width":1}}"#,
+            r#"{"video_reply":{"id":1,"tile":256,"seq":1,"rotation":0,"width":1,"height":1}}"#,
+        ] {
+            let mut wire = pixel_reply_frame(reply);
+            let end = wire.len() as u64;
+            wire.extend_from_slice(&pixels_frame(1, 1, &[0; 4]));
+            let mut reader = Cursor::new(wire);
+            assert!(
+                matches!(
+                    receive_from_core(&mut reader, &budgets),
+                    Err(ReceiveError::Malformed)
+                ),
+                "{reply}"
+            );
+            assert_eq!(reader.position(), end, "{reply}");
+        }
+        // The largest picture that fits: 640 x 360, and its turned form.
+        for (width, height) in [(640, 360), (360, 640), (1, 1)] {
+            let largest = video_reply(4, width, height);
+            let mut wire = Vec::new();
+            let pixels = vec![1; width as usize * height as usize * 4];
+            send_video_reply(&mut wire, &largest, &pixels).unwrap();
+            assert!(matches!(
+                receive_from_core(&mut Cursor::new(wire), &budgets),
+                Ok(FromCore::Video(_))
+            ));
+        }
+        // The screen tile takes up to 1280 x 720, and its turned form.
+        for (width, height) in [(1280, 720), (720, 1280)] {
+            let screen = video_reply(5, width, height);
+            let mut wire = Vec::new();
+            let pixels = vec![1; width as usize * height as usize * 4];
+            send_video_reply(&mut wire, &screen, &pixels).unwrap();
+            assert!(matches!(
+                receive_from_core(&mut Cursor::new(wire), &budgets),
+                Ok(FromCore::Video(_))
+            ));
+        }
+        for (reply, length) in [
+            (video_reply(6, 2, 2), 16),
+            (video_reply(5, 1281, 1), 1281 * 4),
+            (video_reply(5, 1280, 721), 1280 * 721 * 4),
+            (video_reply(4, 1280, 720), 1280 * 720 * 4),
+            (
+                VideoReply {
+                    rotation: 4,
+                    ..video_reply(0, 2, 2)
+                },
+                16,
+            ),
+            (video_reply(0, 640, 361), 640 * 361 * 4),
+            (video_reply(0, 641, 1), 641 * 4),
+            (video_reply(0, 0, 2), 0),
+            (video_reply(0, 2, 2), 15),
+            (video_reply(0, 2, 2), 20),
+            (
+                VideoReply {
+                    seq: MAX_SAFE_TIMESTAMP + 1,
+                    ..video_reply(0, 2, 2)
+                },
+                16,
+            ),
+        ] {
+            let mut wire = Vec::new();
+            assert!(send_video_reply(&mut wire, &reply, &vec![0; length]).is_err());
+            assert!(wire.is_empty(), "{reply:?}");
+        }
+    }
+
+    /// GIVEN video and camera calls WHEN their limits are checked THEN tiles
+    /// 0 to 5 and safe cursors pass, and every other value is refused.
+    #[test]
+    fn given_video_calls_when_limits_are_checked_then_bounds_hold() {
+        let frame = |tile, after, stream| Call::CallVideoFrame {
+            tile,
+            after,
+            stream,
+        };
+        assert!(call_video_within_limits(&frame(0, 0, 0)));
+        assert!(call_video_within_limits(&frame(
+            5,
+            MAX_SAFE_TIMESTAMP,
+            MAX_SAFE_TIMESTAMP
+        )));
+        assert!(!call_video_within_limits(&frame(6, 0, 0)));
+        assert!(!call_video_within_limits(&frame(255, 0, 0)));
+        assert!(!call_video_within_limits(&frame(
+            0,
+            MAX_SAFE_TIMESTAMP + 1,
+            0
+        )));
+        assert!(!call_video_within_limits(&frame(
+            0,
+            0,
+            MAX_SAFE_TIMESTAMP + 1
+        )));
+        let devices = |camera: Option<String>| Call::SetCallDevices {
+            recording: None,
+            playout: None,
+            camera,
+        };
+        assert!(call_video_within_limits(&devices(None)));
+        assert!(call_video_within_limits(&devices(Some("c".into()))));
+        assert!(call_video_within_limits(&devices(Some(
+            "c".repeat(MAX_CALL_DEVICE_ID_BYTES)
+        ))));
+        assert!(!call_video_within_limits(&devices(Some(String::new()))));
+        assert!(!call_video_within_limits(&devices(Some(
+            "c".repeat(MAX_CALL_DEVICE_ID_BYTES + 1)
+        ))));
+        assert!(!call_video_within_limits(&devices(Some("a\nb".into()))));
+        assert!(call_video_within_limits(&Call::CallCamera { on: true }));
+        assert!(call_video_within_limits(&Call::CallScreen { on: true }));
+        // The volume is 0 to 100; the wire type already refuses 256 and up.
+        assert!(call_video_within_limits(&Call::CallVolume { percent: 0 }));
+        assert!(call_video_within_limits(&Call::CallVolume {
+            percent: MAX_CALL_VOLUME_PERCENT
+        }));
+        assert!(!call_video_within_limits(&Call::CallVolume {
+            percent: MAX_CALL_VOLUME_PERCENT + 1
+        }));
+        assert!(!call_video_within_limits(&Call::CallVolume {
+            percent: 255
+        }));
+    }
+
+    /// GIVEN video replies of many sizes on camera tiles and the screen tile
+    /// WHEN their frame headers are made THEN the tile decides the limit: a
+    /// screen picture up to 1280x720 passes only on tile 5, a camera picture
+    /// stays at 640x360, and every size over a limit is refused.
+    #[test]
+    fn given_video_replies_when_headers_are_made_then_the_tile_limit_decides() {
+        let reply = |tile, width, height| VideoReply {
+            id: 1,
+            tile,
+            seq: 1,
+            rotation: 0,
+            width,
+            height,
+        };
+        let header = reply(CALL_SCREEN_TILE, 1280, 720)
+            .frame_header()
+            .expect("a full screen picture");
+        assert_eq!(header.length, 3_686_400);
+        assert!(reply(CALL_SCREEN_TILE, 720, 1280).frame_header().is_some());
+        assert!(reply(CALL_SCREEN_TILE, 1281, 720).frame_header().is_none());
+        assert!(reply(CALL_SCREEN_TILE, 1280, 721).frame_header().is_none());
+        assert!(reply(CALL_SCREEN_TILE, 0, 720).frame_header().is_none());
+        for tile in 0..CALL_SCREEN_TILE {
+            assert!(reply(tile, 640, 360).frame_header().is_some(), "{tile}");
+            assert!(reply(tile, 1280, 720).frame_header().is_none(), "{tile}");
+            assert!(reply(tile, 641, 360).frame_header().is_none(), "{tile}");
+            assert!(reply(tile, 640, 361).frame_header().is_none(), "{tile}");
+        }
+        assert!(reply(CALL_VIDEO_TILES, 1, 1).frame_header().is_none());
+    }
+
+    /// GIVEN the screen command WHEN it is decoded THEN it carries only the
+    /// flag: any source, device, handle, id or missing flag is refused.
+    #[test]
+    fn given_the_screen_command_then_the_page_can_name_no_source() {
+        let decoded = |json: &[u8]| serde_json::from_slice::<Request>(json);
+        assert!(decoded(br#"{"id":1,"call":{"command":"call_screen","on":true}}"#).is_ok());
+        assert!(decoded(br#"{"id":1,"call":{"command":"call_screen","on":false}}"#).is_ok());
+        for json in [
+            &br#"{"id":1,"call":{"command":"call_screen"}}"#[..],
+            br#"{"id":1,"call":{"command":"call_screen","on":1}}"#,
+            br#"{"id":1,"call":{"command":"call_screen","on":true,"source":"1"}}"#,
+            br#"{"id":1,"call":{"command":"call_screen","on":true,"monitor":0}}"#,
+            br#"{"id":1,"call":{"command":"call_screen","on":true,"node":7}}"#,
+            br#"{"id":1,"call":{"command":"call_screen","on":true,"window":"x"}}"#,
+        ] {
+            assert!(decoded(json).is_err(), "{}", String::from_utf8_lossy(json));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2910,6 +3642,92 @@ mod paste_tests {
                 receive::<_, Request>(&mut reader, &budgets),
                 Err(ReceiveError::Malformed)
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod timeline_events_wire_tests {
+    use super::*;
+
+    fn valid() -> serde_json::Value {
+        serde_json::json!({"command":"timeline_events","room_id":"!r:s","event_ids":["$a","$b"]})
+    }
+
+    /// GIVEN the exact wire form WHEN it is decoded THEN it is accepted
+    /// within the limits and encodes back to the same form.
+    #[test]
+    fn given_the_exact_wire_form_then_timeline_events_is_accepted() {
+        let call: Call = serde_json::from_value(valid()).unwrap();
+        assert_eq!(
+            call,
+            Call::TimelineEvents {
+                room_id: "!r:s".into(),
+                event_ids: vec!["$a".into(), "$b".into()],
+            }
+        );
+        assert!(personal_call_within_limits(&call));
+        assert_eq!(serde_json::to_value(call).unwrap(), valid());
+    }
+
+    /// GIVEN a missing field, a field of the wrong type, or an extra field
+    /// WHEN the call is decoded THEN it is refused.
+    #[test]
+    fn given_a_missing_wrong_or_extra_field_then_timeline_events_is_refused() {
+        for key in ["room_id", "event_ids"] {
+            let mut missing = valid();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(
+                serde_json::from_value::<Call>(missing).is_err(),
+                "missing {key}"
+            );
+        }
+        for (key, wrong) in [
+            ("room_id", serde_json::json!(["!r:s"])),
+            ("room_id", serde_json::Value::Null),
+            ("event_ids", serde_json::json!("$a")),
+            ("event_ids", serde_json::Value::Null),
+            ("event_ids", serde_json::json!([1])),
+            ("event_ids", serde_json::json!([null])),
+        ] {
+            let mut value = valid();
+            value[key] = wrong;
+            assert!(
+                serde_json::from_value::<Call>(value).is_err(),
+                "wrong {key}"
+            );
+        }
+        let mut extra = valid();
+        extra["cursor"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<Call>(extra).is_err());
+    }
+
+    /// GIVEN no event IDs, more than `MAX_TIMELINE_EVENTS`, a repeated, empty,
+    /// oversized or control-character ID, or an oversized room ID WHEN the
+    /// limits are checked THEN the call is refused; exactly the maximum of
+    /// different IDs is accepted.
+    #[test]
+    fn given_ids_outside_the_limits_then_timeline_events_is_refused() {
+        let call = |room_id: &str, event_ids: Vec<String>| Call::TimelineEvents {
+            room_id: room_id.into(),
+            event_ids,
+        };
+        let ids = |count: usize| (0..count).map(|n| format!("$e{n}")).collect::<Vec<_>>();
+        assert!(personal_call_within_limits(&call(
+            "!r:s",
+            ids(MAX_TIMELINE_EVENTS)
+        )));
+        for refused in [
+            call("!r:s", Vec::new()),
+            call("!r:s", ids(MAX_TIMELINE_EVENTS + 1)),
+            call("!r:s", vec!["$a".into(), "$b".into(), "$a".into()]),
+            call("!r:s", vec![String::new()]),
+            call("!r:s", vec!["é".repeat(MAX_EVENT_ID_BYTES / 2 + 1)]),
+            call("!r:s", vec!["$a\n".into()]),
+            call(&"é".repeat(MAX_ROOM_ID_BYTES / 2 + 1), ids(1)),
+            call("!r:\u{7}s", ids(1)),
+        ] {
+            assert!(!personal_call_within_limits(&refused), "{refused:?}");
         }
     }
 }

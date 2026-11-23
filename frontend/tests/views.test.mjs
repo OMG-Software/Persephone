@@ -101,6 +101,39 @@ test('room names render as isolated, escaped text with capped unread counts', ()
   assert.match(html, /<nav aria-label="Rooms">/);
 });
 
+test('GIVEN direct-message rooms WHEN a contact presence is known THEN a labelled dot shows it, and no other room gets one', () => {
+  const room = (id, contact, contactPresence) => ({
+    roomId: id,
+    displayName: id,
+    unreadCount: 0,
+    encryption: 'encrypted',
+    contact,
+    contactPresence
+  });
+  const { body: html } = render(RoomList, {
+    props: {
+      rooms: [
+        room('!a:s', '@a:s', 'online'),
+        room('!b:s', '@b:s', 'unavailable'),
+        room('!c:s', '@c:s', 'offline'),
+        room('!d:s', '@d:s', null),
+        // Not a direct-message room: a presence is ignored.
+        room('!e:s', null, 'online'),
+        // A value this page does not know shows nothing.
+        room('!f:s', '@f:s', '<b>busy</b>')
+      ],
+      truncated: false,
+      selected: null,
+      onselect: () => {}
+    }
+  });
+  assert.match(html, /class="presence-mark online" role="img" aria-label="Online"/);
+  assert.match(html, /class="presence-mark unavailable" role="img" aria-label="Away"/);
+  assert.match(html, /class="presence-mark offline" role="img" aria-label="Offline"/);
+  assert.equal((html.match(/presence-mark/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /busy/);
+});
+
 test('timeline bodies keep their text, are direction-isolated and never parsed as HTML', () => {
   const { body: html } = render(Timeline, {
     props: {
@@ -383,7 +416,8 @@ test('GIVEN a verified device that cannot use the key backup WHEN the panel rend
     error: null,
     verification: null,
     canSetUpRecovery: false,
-    canStartNewBackup
+    canStartNewBackup,
+    profilePassphrase: false
   });
   const calls = [];
   const panel = (security) =>
@@ -401,10 +435,10 @@ test('GIVEN a verified device that cannot use the key backup WHEN the panel rend
   const buttons = (html) => [...html.matchAll(/<button[^>]*>([^<]+)</g)].map((m) => m[1]);
 
   const incomplete = panel(status('incomplete', true));
-  assert.deepEqual(buttons(incomplete), ['Use recovery key', 'Start a new backup…']);
+  assert.deepEqual(buttons(incomplete), ['Turn on passphrase', 'Use recovery key', 'Start a new backup…']);
   assert.match(incomplete, /Messages kept only in the old backup can\s+then not be read\./);
   const serverOnly = panel(status('disabled', true));
-  assert.deepEqual(buttons(serverOnly), ['Start a new backup…']);
+  assert.deepEqual(buttons(serverOnly), ['Turn on passphrase', 'Start a new backup…']);
   assert.match(serverOnly, /The homeserver has a key backup this device cannot use\./);
   assert.doesNotMatch(serverOnly, /Set up recovery/);
   // Not offered when the core does not say so, whatever the recovery state.
@@ -425,6 +459,7 @@ test('the encryption panel offers the step that fits and never asks for a secret
     verification: null,
     canSetUpRecovery: false,
     canStartNewBackup: false,
+    profilePassphrase: false,
     ...extra
   });
   const panel = (security, busy = false) =>
@@ -451,7 +486,7 @@ test('the encryption panel offers the step that fits and never asks for a secret
   assert.match(verified, /This device is verified\./);
   assert.match(verified, /Recovery is set up\./);
   // The only step left is replacing the recovery key, which the core shows.
-  assert.deepEqual([...verified.matchAll(/<button[^>]*>([^<]+)</g)].map((m) => m[1]), ['Change recovery key…']);
+  assert.deepEqual([...verified.matchAll(/<button[^>]*>([^<]+)</g)].map((m) => m[1]), ['Turn on passphrase', 'Change recovery key…']);
   assert.match(verified, /does not keep your recovery key/);
   assert.match(verified, /The old key stops working\./);
   assert.doesNotMatch(panel(status('unverified', { recovery: 'enabled' })), /Change recovery key/);
@@ -743,7 +778,8 @@ test('verification shows each phase as fixed text, the emoji as text and the dev
           error: null,
           verification: flow(phase),
           canSetUpRecovery: false,
-          canStartNewBackup: false
+          canStartNewBackup: false,
+          profilePassphrase: false
         },
         busy: false,
         onsetup: () => {},
@@ -1075,7 +1111,7 @@ test('GIVEN a room header with a favourite action WHEN it shows THEN a star togg
 
 test('GIVEN the room settings WHEN they open THEN the room name is isolated text, the tabs show and nothing is changeable before they load', () => {
   const html = render(RoomSettings, {
-    props: { roomId: '!r:example.invalid', roomName: hostileName, changes: 0, onleft: () => {}, onclose: () => {} }
+    props: { roomId: '!r:example.invalid', roomName: hostileName, changes: 0, onclose: () => {} }
   }).body;
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /<dialog class="room-settings" aria-labelledby="room-settings-heading"/);
@@ -1169,19 +1205,54 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
     loadRoomPictures: false,
     captureProtection: true,
     timelineEvents: Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'leaves'])),
-    theme: 'orange'
+    theme: 'orange',
+    sharePresence: true,
+    presence: 'online'
   };
   const html = render(Preferences, {
-    props: { settings, failure: null, mac: false, onchange: () => {} }
+    props: { settings, failure: null, mac: false, profilePassphrase: true, onchange: () => {} }
   }).body;
   const nameless = render(Preferences, {
     props: {
       settings: { ...settings, desktopNotifications: true, notificationNames: false },
       failure: null,
       mac: false,
+      profilePassphrase: true,
       onchange: () => {}
     }
   }).body;
+  // Presence is shared as online by default, and its status can be chosen
+  // while sharing is on (ADR-0057).
+  assert.match(html, /<span>Share your presence<\/span>/);
+  assert.match(html, /<label for="presence">Your presence<\/label>/);
+  assert.match(html, /<option value="unavailable">Away<\/option>/);
+  assert.match(html, /at most once a second/);
+  const unshared = render(Preferences, {
+    props: {
+      settings: { ...settings, sharePresence: false },
+      failure: null,
+      mac: false,
+      profilePassphrase: true,
+      onchange: () => {}
+    }
+  }).body;
+  assert.match(unshared, /<select id="presence" class="field" disabled/);
+  assert.doesNotMatch(html, /<select id="presence" class="field" disabled/);
+  // The menu shows the saved status, not the default.
+  const away = render(Preferences, {
+    props: {
+      settings: { ...settings, presence: 'unavailable' },
+      failure: null,
+      mac: false,
+      profilePassphrase: true,
+      onchange: () => {}
+    }
+  }).body;
+  const menu = (page) => page.slice(page.indexOf('<select id="presence"'), page.indexOf('</select>', page.indexOf('<select id="presence"')));
+  assert.match(menu(away), /<option value="unavailable" selected/);
+  assert.doesNotMatch(menu(away), /<option value="online" selected/);
+  assert.match(menu(html), /<option value="online" selected/);
+
   assert.match(nameless, /says only that a message arrived: no names, no message/);
   assert.match(html, /Show who wrote and in which room/);
   assert.match(html, /<label for="chat-text-size">Message text</);
@@ -1241,6 +1312,7 @@ test('GIVEN the preferences WHEN they show THEN a theme drop-down offers the thr
         settings: { ...DEFAULT_PREFERENCES, theme },
         failure: null,
         mac: false,
+        profilePassphrase: true,
         onchange: () => {}
       }
     }).body;
@@ -1277,6 +1349,7 @@ test('GIVEN the preferences WHEN they show THEN each kind of room change has its
       },
       failure: null,
       mac: false,
+      profilePassphrase: true,
       onchange: () => {}
     }
   }).body;
@@ -1563,4 +1636,124 @@ test('GIVEN a module report WHEN the section renders THEN hostile names stay ine
   assert.match(linux, /Forced in by LD_PRELOAD/);
   assert.match(linux, /LD_PRELOAD\. This list shows code in Persephone/);
   assert.doesNotMatch(linux, /Microsoft/);
+});
+
+test('GIVEN the profile passphrase is off or on WHEN the panel renders THEN it explains the state and offers the opposite switch', () => {
+  const status = (extra = {}) => ({
+    identity: 'verified',
+    recovery: 'enabled',
+    operation: 'idle',
+    error: null,
+    verification: null,
+    canSetUpRecovery: false,
+    canStartNewBackup: false,
+    profilePassphrase: false,
+    ...extra
+  });
+  const calls = [];
+  const panel = (security, busy = false) =>
+    render(Security, {
+      props: {
+        security,
+        busy,
+        onsetup: () => {},
+        onrecover: () => {},
+        onsetuprecovery: () => {},
+        onverify: () => {},
+        onpassphrase: (on) => calls.push(on)
+      }
+    }).body;
+  const section = (html) => html.slice(html.indexOf('id="passphrase-heading"'), html.indexOf('id="recovery-heading"'));
+
+  const off = section(panel(status()));
+  assert.match(off, /The passphrase is off/);
+  assert.match(off, /still\s+encrypted/);
+  assert.match(off, /can use this computer account can open the profile/);
+  assert.match(off, />Turn on passphrase</);
+  assert.doesNotMatch(off, /Turn off passphrase/);
+  const on = section(panel(status({ profilePassphrase: true })));
+  assert.match(on, /asks for it each time it starts/);
+  assert.match(on, /Lock is available/);
+  assert.match(on, />Turn off passphrase</);
+  assert.doesNotMatch(on, /Turn on passphrase/);
+  assert.doesNotMatch(on + off, /<input/, 'the page never takes the passphrase');
+  assert.deepEqual(calls, []);
+});
+
+test('GIVEN the core waits for the passphrase or another operation runs WHEN the panel renders THEN the switch is disabled and the wait is shown', () => {
+  const status = (extra = {}) => ({
+    identity: 'verified',
+    recovery: 'enabled',
+    operation: 'idle',
+    error: null,
+    verification: null,
+    canSetUpRecovery: false,
+    canStartNewBackup: false,
+    profilePassphrase: true,
+    ...extra
+  });
+  const panel = (security, busy = false) =>
+    render(Security, {
+      props: {
+        security,
+        busy,
+        onsetup: () => {},
+        onrecover: () => {},
+        onsetuprecovery: () => {},
+        onverify: () => {}
+      }
+    }).body;
+  const button = (html) => /<button[^>]*>Turn off passphrase</.exec(html)?.[0] ?? '';
+
+  const waiting = panel(status({ operation: 'waiting_for_passphrase' }));
+  assert.match(waiting, /Enter the passphrase in the Windows window/);
+  assert.match(button(waiting), /disabled/);
+  assert.match(button(panel(status({ operation: 'working' }))), /disabled/);
+  assert.match(button(panel(status(), true)), /disabled/);
+  assert.doesNotMatch(button(panel(status())), /disabled/);
+});
+
+test('GIVEN a passphrase change failed WHEN the panel renders THEN it shows fixed error text and no code', () => {
+  const html = (error) =>
+    render(Security, {
+      props: {
+        security: {
+          identity: 'verified',
+          recovery: 'enabled',
+          operation: 'idle',
+          error,
+          verification: null,
+          canSetUpRecovery: false,
+          canStartNewBackup: false,
+          profilePassphrase: true
+        },
+        busy: false,
+        onsetup: () => {},
+        onrecover: () => {},
+        onsetuprecovery: () => {},
+        onverify: () => {}
+      }
+    }).body;
+  const rejected = html('passphrase_rejected');
+  assert.match(rejected, /role="alert"[^>]*>Too many wrong entries\. The passphrase is still on/);
+  assert.doesNotMatch(rejected, /passphrase_rejected/);
+  assert.match(html('profile_unavailable'), /profile key could not be used\. Nothing changed/);
+});
+
+test('GIVEN the profile passphrase is off WHEN the preferences render THEN the idle-lock setting is hidden', () => {
+  const page = (profilePassphrase) =>
+    render(Preferences, {
+      props: {
+        settings: { ...DEFAULT_PREFERENCES, idleLockMinutes: 15 },
+        failure: null,
+        mac: false,
+        profilePassphrase,
+        onchange: () => {}
+      }
+    }).body;
+  assert.match(page(true), /id="idle-lock"/);
+  assert.match(page(true), /Ctrl\+Shift\+L/);
+  const off = page(false);
+  assert.doesNotMatch(off, /id="idle-lock"/);
+  assert.doesNotMatch(off, /Ctrl\+Shift\+L/);
 });

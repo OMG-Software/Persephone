@@ -28,5 +28,9 @@ export const securityErrorText: Record<SecurityError, string> = {
   device_not_found: 'The homeserver no longer lists that session. Refresh the list.',
   recovery_key_not_saved:
     'The new recovery key was shown, but saving it to the file failed. Write it down now: it cannot be shown again.',
+  passphrase_rejected:
+    'Too many wrong entries. The passphrase is still on. Try again when you remember it.',
+  profile_unavailable:
+    'Persephone could not change the passphrase because the profile key could not be used. Nothing changed.',
   failed: 'That did not work.'
 };

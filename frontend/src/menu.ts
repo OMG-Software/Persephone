@@ -79,3 +79,39 @@ export function mainMenuItems(
     : [];
   return [...account, { label: 'Settings', onselect: act.settings, separated: account.length > 0 }, ...lock];
 }
+
+/** What the selected room's menu commands do. */
+export type RoomMenuActions = {
+  invite: () => void;
+  jump: () => void;
+  pins: () => void;
+  attachments: () => void;
+  members: () => void;
+  group: () => void;
+  settings: () => void;
+  leave: () => void;
+};
+
+/**
+ * The selected room's menu: what used to be buttons at the top of the room.
+ * A direct conversation has no "Invite people". The member list needs a wide
+ * window. "Leave room" comes last, on its own, and is disabled while a leave
+ * is being sent.
+ */
+export function roomMenuItems(
+  state: { direct: boolean; membersRoom: boolean; membersShown: boolean; leaving: boolean },
+  act: RoomMenuActions
+): MenuCommand[] {
+  return [
+    ...(state.direct ? [] : [{ label: 'Invite people', onselect: act.invite }]),
+    { label: 'Jump to date', onselect: act.jump },
+    { label: 'Pinned messages', onselect: act.pins },
+    { label: 'Attachments', onselect: act.attachments },
+    state.membersRoom
+      ? { label: state.membersShown ? 'Hide members' : 'Show members', onselect: act.members, separated: true }
+      : { label: 'Members need a wider window', onselect: () => {}, disabled: true, separated: true },
+    { label: 'Room group', onselect: act.group },
+    { label: 'Room settings', onselect: act.settings, separated: true },
+    { label: 'Leave room', onselect: act.leave, disabled: state.leaving, separated: true }
+  ];
+}

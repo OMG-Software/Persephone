@@ -15,6 +15,7 @@
     type SettingsPatch
   } from './preferences';
   import { DEFAULT_THEME, THEMES, themeOf } from './themes.ts';
+  import { PRESENCE_CHOICES, presenceOf } from './presence.ts';
 
   // This account's preferences. The settings are kept in its encrypted
   // profile through the caller; the notification level is the account's
@@ -23,11 +24,15 @@
     settings,
     failure,
     mac,
+    profilePassphrase,
     onchange
   }: {
     settings: AccountSettings;
     failure: string | null;
     mac: boolean;
+    // The idle lock and the lock shortcut exist only while the profile has a
+    // passphrase (ADR-0050). The saved idle time stays as it is.
+    profilePassphrase: boolean;
     // Only the settings a control changes, down to one timeline switch; the
     // caller lays them over the stored ones.
     onchange: (patch: SettingsPatch) => void;
@@ -276,6 +281,33 @@
       <input
         type="checkbox"
         role="switch"
+        checked={settings.sharePresence}
+        onchange={(event) => onchange({ sharePresence: event.currentTarget.checked })}
+      />
+      <span>Share your presence</span>
+    </label>
+    <label for="presence">Your presence</label>
+    <select
+      id="presence"
+      class="field"
+      value={presenceOf(settings.presence)}
+      disabled={!settings.sharePresence}
+      onchange={(event) => onchange({ presence: presenceOf(event.currentTarget.value) })}
+    >
+      {#each PRESENCE_CHOICES as choice (choice.value)}
+        <option value={choice.value}>{choice.label}</option>
+      {/each}
+    </select>
+    <p class="note">
+      On by default: people who share a room with you can see whether you are online. Persephone
+      changes your presence at most once a second. When sharing is off, Persephone stops setting
+      your presence. Your homeserver may show you offline after a while, and your other signed-in
+      apps decide what people see. You still see other people's presence.
+    </p>
+    <label class="switch-row">
+      <input
+        type="checkbox"
+        role="switch"
         checked={settings.loadRoomPictures}
         onchange={(event) => onchange({ loadRoomPictures: event.currentTarget.checked })}
       />
@@ -286,26 +318,28 @@
       picture tells your homeserver, and the server that holds the picture, that you looked at it.
       Persephone decodes pictures in its contained image decoder.
     </p>
-    <label for="idle-lock">Lock Persephone when this computer is not used</label>
-    <!-- Only Windows reads the computer's idle time yet (ADR-0025); elsewhere
-         the setting could not take effect, so it is not offered. -->
-    <select
-      id="idle-lock"
-      class="field"
-      disabled={idleUnavailable}
-      value={idleUnavailable ? 0 : settings.idleLockMinutes}
-      onchange={(event) => onchange({ idleLockMinutes: Number(event.currentTarget.value) })}
-    >
-      {#each IDLE_LOCK_CHOICES as minutes (minutes)}
-        <option value={minutes}>{idleLockText(minutes)}</option>
-      {/each}
-    </select>
-    <p class="note">
-      {idleUnavailable
-        ? 'Not available on this system yet: Persephone cannot read how long it has been idle.'
-        : 'Counts time without keyboard or mouse input on this computer, in any program. Locking closes the profile; your passphrase opens it again.'}
-      Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
-    </p>
+    {#if profilePassphrase}
+      <label for="idle-lock">Lock Persephone when this computer is not used</label>
+      <!-- Only Windows reads the computer's idle time yet (ADR-0025); elsewhere
+           the setting could not take effect, so it is not offered. -->
+      <select
+        id="idle-lock"
+        class="field"
+        disabled={idleUnavailable}
+        value={idleUnavailable ? 0 : settings.idleLockMinutes}
+        onchange={(event) => onchange({ idleLockMinutes: Number(event.currentTarget.value) })}
+      >
+        {#each IDLE_LOCK_CHOICES as minutes (minutes)}
+          <option value={minutes}>{idleLockText(minutes)}</option>
+        {/each}
+      </select>
+      <p class="note">
+        {idleUnavailable
+          ? 'Not available on this system yet: Persephone cannot read how long it has been idle.'
+          : 'Counts time without keyboard or mouse input on this computer, in any program. Locking closes the profile; your passphrase opens it again.'}
+        Lock at once with {mac ? '⌘⇧L' : 'Ctrl+Shift+L'}.
+      </p>
+    {/if}
   </div>
   {#if failure}
     <p role="alert" class="error">{failure}</p>

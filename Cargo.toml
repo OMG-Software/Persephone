@@ -25,7 +25,15 @@ exclude = ["third_party/*"]
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-only"
-rust-version = "1.96"
+# The oldest toolchain whose std the contained media path works with. Older
+# toolchains build without error but break image decoding:
+# - before 1.97, the wasm32 allocator (dlmalloc 0.2.11) takes heap only from
+#   `memory.grow`, which the guest's fixed linear memory always refuses, so
+#   every guest allocation fails and the guest traps;
+# - before 1.99, std calls `sigaltstack` and `munmap` after `main` returns
+#   (runtime cleanup of the main thread's signal stack), and the Linux
+#   worker's seccomp allowlist kills it for `sigaltstack`.
+rust-version = "1.99"
 publish = false
 
 # Keep SDK development builds useful without duplicating full debug/incremental

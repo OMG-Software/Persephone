@@ -35,11 +35,26 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
-pub use linux::SeccompContainment;
+pub use linux::{
+    CallCamera, CallSound, KIND_CAMERA, KIND_SCREEN, SeccompContainment, send_camera_fd,
+    send_screen_fd, start_call_worker,
+};
 #[cfg(target_os = "macos")]
-pub use macos::SeatbeltContainment;
+pub use macos::{SeatbeltContainment, start_call_worker};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::{LongLivedWorker, StartedCallWorker};
 #[cfg(windows)]
 pub use windows::{AppContainerProfile, LongLivedWorker, StartedCallWorker, start_call_worker};
+
+/// How a call worker ended, as the OS reports it. The core maps it to a
+/// closed reason; no worker text is involved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerExit {
+    /// The process exit code (Windows: the full 32-bit code).
+    Code(u32),
+    /// The signal that ended the process (Linux and macOS).
+    Signal(u32),
+}
 
 /// The OS containment context a worker runs in: on Windows the AppContainer
 /// profile whose SID the worker runs under; on Linux and macOS a marker,

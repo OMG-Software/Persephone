@@ -28,7 +28,9 @@
      encrypted and not encrypted stand out equally. */
   --secure: #1a8f55;
   --on-solid: #ffffff;
+  /* Presence dots: green online, yellow away; offline is --ink3 grey. */
   --presence: #3dbe7a;
+  --presence-away: #e5b454;
   --ok: #4fc89b;
   --attention: #e5b454;
   --match: #f2d98c;
@@ -274,27 +276,35 @@ button:disabled {
   color: var(--danger-text);
 }
 
-.primary:hover:not(:disabled) {
+.primary:hover:not(:disabled, [aria-disabled='true']) {
   background: var(--accent-hover);
 }
 
-.secondary:hover:not(:disabled),
-.danger:hover:not(:disabled) {
+.secondary:hover:not(:disabled, [aria-disabled='true']),
+.danger:hover:not(:disabled, [aria-disabled='true']) {
   background: var(--hover);
 }
 
-.secondary:hover:not(:disabled) {
+.secondary:hover:not(:disabled, [aria-disabled='true']) {
   border-color: var(--ink3);
 }
 
 /* Disabled controls share one flat look in every theme: no accent, no
-   border, dimmed text. */
+   border, dimmed text. A control that is `aria-disabled` stays focusable,
+   so a screen reader can read why, but it looks the same. */
 .primary:disabled,
 .secondary:disabled,
-.danger:disabled {
+.danger:disabled,
+.primary[aria-disabled='true'],
+.secondary[aria-disabled='true'],
+.danger[aria-disabled='true'] {
   border-color: transparent;
   background: var(--disabled-bg);
   color: var(--disabled-ink);
+}
+
+button[aria-disabled='true'] {
+  cursor: default;
 }
 
 .wide {
@@ -715,9 +725,41 @@ kbd {
   flex: none;
   align-items: center;
   gap: 10px;
-  height: 60px;
-  padding: 0 14px;
+  min-height: 60px;
+  padding: 8px 14px;
   border-top: 1px solid var(--line);
+}
+
+/* The account's presence menu, under its name. The list opens upwards. */
+.text-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 1px 0 1px -4px;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.text-menu-trigger:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.text-menu-trigger .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.presence-failure {
+  color: var(--danger-text);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .account-text {
@@ -3065,7 +3107,8 @@ mark {
   border-top: 1px solid var(--line);
 }
 
-.menu-list [role='menuitem'] {
+.menu-list [role='menuitem'],
+.menu-list [role='menuitemradio'] {
   display: block;
   width: 100%;
   padding: 7px 10px;
@@ -3079,8 +3122,19 @@ mark {
 }
 
 .menu-list [role='menuitem']:hover:not(:disabled),
-.menu-list [role='menuitem']:focus {
+.menu-list [role='menuitem']:focus,
+.menu-list [role='menuitemradio']:hover:not(:disabled),
+.menu-list [role='menuitemradio']:focus {
   background: var(--hover);
+}
+
+.menu-list [role='menuitemradio'][aria-checked='true'] {
+  font-weight: 600;
+}
+
+.menu-list.side-above {
+  top: auto;
+  bottom: calc(100% + 4px);
 }
 
 .menu-list [role='menuitem']:disabled {
@@ -3244,6 +3298,7 @@ mark {
 .chat-header .header-action {
   display: flex;
   flex: none;
+  gap: 8px;
   margin-left: auto;
 }
 
@@ -3269,6 +3324,96 @@ mark {
   background: var(--panel);
 }
 
+.ring-prompt {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-soft);
+}
+
+.ring-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ring-text {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  align-items: baseline;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ring-title {
+  font-weight: 600;
+}
+
+.presence-mark {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.presence-mark.online {
+  background: var(--presence);
+}
+
+/* Each state differs by shape too: online is a full green dot, away a
+   yellow crescent, offline a grey ring, and not shared a dashed ring. */
+.presence-mark.unavailable {
+  background: radial-gradient(circle at 25% 25%, transparent 0 32%, var(--presence-away) 34%);
+}
+
+.presence-mark.offline {
+  border: 2px solid var(--ink3);
+  box-sizing: border-box;
+}
+
+.presence-mark.hidden {
+  border: 1.5px dashed var(--ink3);
+  box-sizing: border-box;
+}
+
+/* A presence dot on the corner of a picture. */
+.presence-avatar {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.presence-avatar .presence-mark {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+}
+
+.presence-avatar .presence-mark.offline {
+  background: var(--panel);
+}
+
+.menu-mark {
+  display: inline-block;
+  margin-inline-end: 8px;
+  vertical-align: -1px;
+  box-shadow: none;
+}
+
+.call-mark {
+  display: inline-flex;
+  flex: none;
+  color: var(--presence);
+}
+
 .call-head {
   display: flex;
   align-items: center;
@@ -3285,6 +3430,8 @@ mark {
 
 .call-controls {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   margin-left: auto;
 }
@@ -3297,6 +3444,40 @@ mark {
 
 .call-mute[aria-pressed='true'] {
   border-color: var(--danger);
+}
+
+.call-deafen {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-deafen[aria-pressed='true'] {
+  border-color: var(--danger);
+}
+
+/* The call volume: a slider with its value, under the call controls. */
+.call-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.call-volume input {
+  width: 160px;
+  accent-color: var(--accent);
+}
+
+.call-volume output {
+  min-width: 4ch;
+  text-align: right;
+}
+
+.call-devices input[type='range'] {
+  width: 100%;
+  max-width: 320px;
+  accent-color: var(--accent);
 }
 
 .call-people {
@@ -3314,6 +3495,79 @@ mark {
   gap: 6px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.call-camera {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-camera[aria-pressed='true'] {
+  border-color: var(--presence);
+}
+
+.call-camera-note {
+  margin: 0;
+}
+
+.call-screen {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-screen[aria-pressed='true'] {
+  border-color: var(--presence);
+}
+
+.call-screen-note {
+  margin: 0;
+}
+
+/* The shared screen is wider than a camera tile, so text on it can be read. */
+.video-tile.screen {
+  grid-column: span 2;
+}
+
+/* The call's video tiles: a grid of up to five, each as wide as its picture
+   allows. The canvas is centred in its frame and turned by CSS. */
+.call-video {
+  display: grid;
+  flex: none;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 280px));
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.video-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+}
+
+.video-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--line);
+}
+
+.video-canvas {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  height: auto;
+}
+
+.video-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
 }
 
 .speaking-mark {

@@ -1,17 +1,23 @@
 # Sends the source to SonarQube Cloud for static analysis on pushes to main
-# and on pull requests from this repository. It first runs the frontend checks
-# (python tools/dev.py frontend), whose Node tests write the LCOV line coverage
-# of the frontend's TypeScript, then the Rust tests instrumented (python
-# tools/dev.py coverage --linux-live), which write the LCOV line coverage of
-# the Rust crates. On this disposable runner the coverage run also includes
-# the core's ignored Linux live tests: the UI scope tests against the runner's
-# systemd user manager, and the Secret Service test against a throwaway GNOME
-# Keyring on a private bus. The analysis settings are in sonar-project.properties at the
-# repository root.
-# Pull requests from forks get no SONAR_TOKEN, so the job is skipped for them.
-# The project must use CI-based analysis: Automatic Analysis is turned off in
-# SonarQube Cloud. Actions are pinned to full commit SHAs; the tag each was
-# taken from is noted alongside.
+# and on pull requests from this repository. It has two jobs (ADR-0051):
+# - coverage, which has no secret, runs the frontend checks (python
+#   tools/dev.py frontend), whose Node tests write the LCOV line coverage of
+#   the frontend's TypeScript, then the Rust tests instrumented (python
+#   tools/dev.py coverage --linux-live), which write the LCOV line coverage of
+#   the Rust crates. On this disposable runner the coverage run also includes
+#   the core's ignored Linux live tests: the UI scope tests against the
+#   runner's systemd user manager, and the Secret Service test against a
+#   throwaway GNOME Keyring on a private bus. It uploads the two reports as an
+#   artifact.
+# - sonarqube holds SONAR_TOKEN. It checks out the source, downloads the
+#   reports and runs the scan action, and nothing else: no dependency code,
+#   build script or cache restore runs in a job that holds the token, because
+#   any step can read the job's secrets from the runner's memory.
+# The analysis settings are in sonar-project.properties at the repository
+# root. Pull requests from forks get no SONAR_TOKEN, so both jobs are skipped
+# for them. The project must use CI-based analysis: Automatic Analysis is
+# turned off in SonarQube Cloud. Actions are pinned to full commit SHAs; the
+# tag each was taken from is noted alongside.
 name: SonarQube
 
 on:
@@ -19,12 +25,15 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# As in check.yml: a newer push to a pull request cancels its older run, and
+# no other run is cancelled.
 concurrency:
-  group: sonar-${{ github.ref }}
+  group: sonar-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -35,17 +44,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  sonarqube:
-    name: SonarQube
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+  coverage:
+    name: Coverage
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     # The instrumented Rust build and tests take most of it.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history, so issues can be attributed to the commits that added them.
-          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -60,6 +67,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config clang
+          # The Linux call worker links PipeWire; bindgen needs libclang (ADR-0049).
+          sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev
           sudo apt-get install -y --no-install-recommends dbus-daemon gnome-keyring
 
       - name: Install Rust
@@ -68,10 +77,12 @@ jobs:
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
 
       # Only downloaded packages are cached, as in check.yml, and the
-      # cargo-llvm-cov build.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # cargo-llvm-cov build. Only main saves them.
+      - name: Restore downloaded dependencies
+        id: deps
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
+          path: &deps-paths |
             .local/cache/cargo/registry/index
             .local/cache/cargo/registry/cache
             .local/cache/cargo/git/db
@@ -79,8 +90,9 @@ jobs:
           key: deps-sonar-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'frontend/package-lock.json') }}
           restore-keys: deps-sonar-${{ runner.os }}-
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore cargo-llvm-cov
         id: llvm-cov
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .local/tools/cargo-llvm-cov
           key: cargo-llvm-cov-${{ env.CARGO_LLVM_COV_VERSION }}-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}
@@ -88,6 +100,15 @@ jobs:
       - name: Install cargo-llvm-cov
         if: steps.llvm-cov.outputs.cache-hit != 'true'
         run: cargo install --locked --root .local/tools/cargo-llvm-cov cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION"
+
+      # Saved straight after it is built, before any project dependency code
+      # runs in this job.
+      - name: Save cargo-llvm-cov
+        if: github.ref == 'refs/heads/main' && steps.llvm-cov.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local/tools/cargo-llvm-cov
+          key: ${{ steps.llvm-cov.outputs.cache-primary-key }}
 
       - name: Install frontend dependencies
         run: python tools/dev.py bootstrap
@@ -117,13 +138,46 @@ jobs:
           export PATH="$PWD/.local/tools/cargo-llvm-cov/bin:$PATH"
           python tools/dev.py coverage --linux-live
 
-      - name: Cache SonarQube packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          path: ~/.sonar/cache
-          key: ${{ runner.os }}-sonar
-          restore-keys: ${{ runner.os }}-sonar
+          name: coverage
+          path: |
+            .local/coverage/frontend/lcov.info
+            .local/coverage/rust/lcov.info
+          if-no-files-found: error
+          retention-days: 1
 
+      - name: Save downloaded dependencies
+        if: github.ref == 'refs/heads/main' && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *deps-paths
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+  sonarqube:
+    name: SonarQube
+    needs: coverage
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, so issues can be attributed to the commits that added them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The reports are data: the scanner reads their line counts and maps
+      # each SF: path, which tools/dev.py made repository-relative, to a file
+      # of this checkout.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage
+          path: .local/coverage
+
+      # No ~/.sonar/cache restore: the scanner would run the plugin JARs in
+      # it while this job holds SONAR_TOKEN, and any job on main could have
+      # written that cache.
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:

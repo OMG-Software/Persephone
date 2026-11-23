@@ -8,14 +8,18 @@ import type {
   AccountSettings,
   AccountStatus,
   AppStatus,
+  CallCamera,
   CallDevices,
   CallEnd,
   CallJoinError,
   CallParticipant,
   CallPhase,
   CallReadiness,
+  CallRing,
+  CallRings,
   CallStatus,
   CallUnavailable,
+  CallVideoTile,
   ContactStatus,
   ConversationStart,
   DeviceList,
@@ -89,19 +93,26 @@ import type {
   JoinedRoom
 } from '../../../crates/contracts/generated/contracts';
 import { MAX_PASTED_IMAGE_BYTES, parseBand, type Band } from '../image.ts';
+import { parseVideoPicture, type VideoPicture } from '../video.ts';
+
+export type { VideoPicture };
 
 export type {
   AccountChange,
   AccountSettings,
   AccountStatus,
   AppStatus,
+  CallCamera,
   CallEnd,
   CallJoinError,
   CallParticipant,
   CallPhase,
   CallReadiness,
+  CallRing,
+  CallRings,
   CallStatus,
   CallUnavailable,
+  CallVideoTile,
   ContactStatus,
   ConversationStart,
   DeviceList,
@@ -224,6 +235,16 @@ export function eventContext(roomId: string, eventId: string): Promise<FocusedTi
   return invoke<FocusedTimeline>('event_context', { roomId, eventId });
 }
 
+/**
+ * Read loaded undecryptable events of an open room again (1 to
+ * `MAX_REFETCHED_EVENTS` different IDs). The core reads them only when room
+ * keys arrived for the room since the last such call; otherwise the page has
+ * no items.
+ */
+export function readEventsAgain(roomId: string, eventIds: string[]): Promise<TimelinePage> {
+  return invoke<TimelinePage>('timeline_events', { roomId, eventIds });
+}
+
 /** Read shared room pins and the core's current management permission. */
 export function pinnedMessages(roomId: string): Promise<PinnedMessages> {
   return invoke<PinnedMessages>('pinned_messages', { roomId });
@@ -286,15 +307,19 @@ export async function subscribeRoom(
  * `onSecurity` when the account's encryption state changed (it clears
  * nothing), `onModules` when the report of loaded code changed (it clears
  * nothing either), and `onCalls` when the call changed state or participants
- * (ask `callStatus`; it clears nothing). Anything else counts as a session
- * change, which clears the page.
+ * (ask `callStatus`; it clears nothing), and `onCallVideo` when a new video
+ * picture is waiting (ask `callVideoFrame` for each active tile; it clears
+ * nothing), and `onRings` when an incoming call ring started, ended or
+ * changed (ask `callRings`; it clears nothing). Anything else counts as a session change, which clears the page.
  */
 export async function watchSession(
   onSession: () => void,
   onRooms: () => void,
   onSecurity: () => void,
   onModules: () => void,
-  onCalls: () => void
+  onCalls: () => void,
+  onCallVideo: () => void,
+  onRings: () => void
 ): Promise<void> {
   const channel = new Channel<string>((message) =>
     message === 'rooms'
@@ -305,7 +330,11 @@ export async function watchSession(
           ? onModules()
           : message === 'calls'
             ? onCalls()
-          : onSession()
+            : message === 'callVideo'
+              ? onCallVideo()
+              : message === 'rings'
+                ? onRings()
+                : onSession()
   );
   await invoke<null>('watch_session', { onChange: channel });
 }
@@ -366,9 +395,12 @@ export function register(homeserver: string, username: string): Promise<AccountS
  * Signs out: the core revokes the session if the homeserver can be reached
  * and deletes this device's local profile, keys first. The outcome arrives as
  * a session change; Persephone must then be restarted to sign in again.
+ * Without `discardKeys` the core refuses with `keys_not_backed_up` while this
+ * device's room keys are not all in a key backup; `true` is the user's choice
+ * to lose them.
  */
-export function signOut(): Promise<StoreState> {
-  return invoke<StoreState>('sign_out');
+export function signOut(discardKeys: boolean): Promise<StoreState> {
+  return invoke<StoreState>('sign_out', { discardKeys });
 }
 
 /** The account's encryption state. Codes only. */
@@ -386,15 +418,66 @@ export function callReadiness(roomId: string): Promise<CallReadiness> {
 }
 
 /**
- * Joins the audio call in this room. With a profile proxy the core first
+ * Joins the call in this room, with the camera on when `video` is true. With a profile proxy the core first
  * asks, in its own window, whether the call may connect around the proxy: the
  * call joins only after that window confirms it, and never otherwise. The
  * reply carries codes only, never a key, token or URL. A refused join is a
  * status with `joinError` set, not a rejection. Progress arrives as call
  * changes (`watchSession`'s `onCalls`).
  */
-export function callJoin(roomId: string): Promise<CallStatus> {
-  return invoke<CallStatus>('call_join', { roomId });
+export function callJoin(roomId: string, video: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_join', { roomId, video });
+}
+
+/**
+ * Turns the camera on or off during a call. The reply is the call as it is
+ * now, with the camera `starting` when turned on; the worker's answer arrives
+ * as a call change. Codes only.
+ */
+export function callCamera(on: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_camera', { on });
+}
+
+/**
+ * Starts or stops sharing the screen during a call (ADR-0053). The page names
+ * no screen and no window: the core shows its own warning or chooser and the
+ * desktop's picker, and a cancel leaves the share off. The reply is the call as
+ * it is now, with the screen `starting` when started; the answer arrives as a
+ * call change. Codes only.
+ */
+export function callScreen(on: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_screen', { on });
+}
+
+/**
+ * The newest picture on video tile `tile` (0 to 5; 0 is the own camera, 5 is
+ * the remote screen share) if
+ * its number is above `after` and it belongs to the tile's stream `stream`
+ * (from the call status), else null. The host answers with raw bytes: an
+ * empty body for no newer picture, otherwise the picture number as a
+ * little-endian u64, then rotation, width and height as little-endian u32,
+ * then the RGBA pixels. Rejects with `bad_video` when the answer is anything
+ * else.
+ */
+export async function callVideoFrame(tile: number, after: number, stream: number): Promise<VideoPicture | null> {
+  return parseVideoPicture(await invoke<unknown>('call_video_frame', { tile, after, stream }), tile);
+}
+
+/**
+ * The incoming call rings now running (ADR-0052), newest first, at most four.
+ * Caller IDs are untrusted text. Answering is `callJoin`; nothing here starts
+ * a call. A change arrives as `watchSession`'s `onRings`.
+ */
+export function callRings(): Promise<CallRings> {
+  return invoke<CallRings>('call_rings');
+}
+
+/**
+ * Declines the ring in this room (ADR-0052). The core sends the decline once
+ * and ends the ring either way. The reply is the rings now running.
+ */
+export function callDeclineRing(roomId: string): Promise<CallRings> {
+  return invoke<CallRings>('call_decline_ring', { roomId });
 }
 
 /** Leaves the call, or cancels a join in progress. Codes only. */
@@ -411,6 +494,23 @@ export function callMute(muted: boolean): Promise<CallStatus> {
 }
 
 /**
+ * Deafens or undeafens the call (ADR-0055): all call sound and the
+ * microphone go off, or come back with the microphone as it was before.
+ * Unmuting also undeafens. The worker's answer arrives as a call change.
+ */
+export function callDeafen(deafened: boolean): Promise<CallStatus> {
+  return invoke<CallStatus>('call_deafen', { deafened });
+}
+
+/**
+ * Sets the call volume, a whole number from 0 to 100 percent (ADR-0055). It
+ * applies at once to a running call and is saved for later calls.
+ */
+export function callVolume(percent: number): Promise<CallStatus> {
+  return invoke<CallStatus>('call_volume', { percent });
+}
+
+/**
  * The call microphones and speakers now connected, and the saved choice
  * (ADR-0043). The core lists them through a contained worker, so it can take
  * a few seconds. Names are untrusted text: render them as plain text only.
@@ -420,12 +520,16 @@ export function callDevices(): Promise<CallDevices> {
 }
 
 /**
- * Saves the call microphone and speaker as device IDs from `callDevices`;
+ * Saves the call microphone, speaker and camera as device IDs from `callDevices`;
  * `null` is the system default. A device need not be connected now. It
  * applies to calls joined afterwards.
  */
-export function setCallDevices(recording: string | null, playout: string | null): Promise<void> {
-  return invoke<void>('set_call_devices', { recording, playout });
+export function setCallDevices(
+  recording: string | null,
+  playout: string | null,
+  camera: string | null
+): Promise<void> {
+  return invoke<void>('set_call_devices', { recording, playout, camera });
 }
 
 /** The call as the core shows it: codes, flags and bounded IDs only. */
@@ -831,7 +935,9 @@ export function setAccountSettings(settings: AccountSettings): Promise<void> {
       loadRoomPictures: settings.loadRoomPictures,
       captureProtection: settings.captureProtection,
       timelineEvents: timelineEvents(settings.timelineEvents),
-      theme: settings.theme
+      theme: settings.theme,
+      sharePresence: settings.sharePresence,
+      presence: settings.presence
     }
   });
 }
@@ -998,6 +1104,15 @@ export function verifyDevice(deviceId: string): Promise<SecurityStatus> {
  */
 export function changeRecoveryKey(): Promise<SecurityStatus> {
   return invoke<SecurityStatus>('change_recovery_key');
+}
+
+/**
+ * Turns the local profile passphrase on or off. Only the choice crosses: the
+ * core asks for the passphrase in its own window, and the result arrives as a
+ * security change (ADR-0050).
+ */
+export function setProfilePassphrase(on: boolean): Promise<SecurityStatus> {
+  return invoke<SecurityStatus>('set_profile_passphrase', { on });
 }
 
 /**

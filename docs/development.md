@@ -76,7 +76,7 @@ and the [SDK lifecycle contract](architecture/sdk-lifecycle.md).
 
 ## Toolchain and commands
 
-Install Python, Rust/Cargo, and Node.js with npm available on `PATH`, plus the WebAssembly target for the decoder guest (`rustup target add wasm32-unknown-unknown`). On Windows, use the MSVC Rust target and its native build tools. On Linux, the call worker needs clang 21 or later (`clang++`, or `CXX`), because the pinned libwebrtc is built against a libc++ that needs it. With an older clang or none, `check`, `rust`, `build` and `coverage` skip the call worker and print why. The worker does not ship on Linux and calls are refused there (ADR-0043). With `PERSEPHONE_CALL_WORKER=required`, as CI sets it, they fail instead of skipping. Install the locked frontend dependencies once, then run checks from the repository root:
+Install Python, Rust/Cargo 1.99 or later, and Node.js with npm available on `PATH`, plus the WebAssembly target for the decoder guest (`rustup target add wasm32-unknown-unknown`). Cargo refuses older toolchains through the workspace `rust-version`, because their std breaks the contained image decoder: the guest cannot allocate in its fixed memory before 1.97, and the Linux worker calls `sigaltstack` at exit, which its seccomp allowlist kills, before 1.99. See the comment on `rust-version` in the root `Cargo.toml`. On Windows, use the MSVC Rust target and its native build tools. On Linux, the call worker needs clang 21 or later (`clang++`, or `CXX`), because the pinned libwebrtc is built against a libc++ that needs it. With an older clang or none, `check`, `rust`, `build` and `coverage` skip the call worker and print why. The worker does not ship on Linux and calls are refused there (ADR-0043). With `PERSEPHONE_CALL_WORKER=required`, as CI sets it, they fail instead of skipping. Install the locked frontend dependencies once, then run checks from the repository root:
 
 ```powershell
 python tools/dev.py bootstrap
@@ -125,13 +125,21 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 
 ### Continuous integration
 
-[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` (`python3` in the distribution containers) for every pull request, every push to `main` and on demand. Every job pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target) and Node.js 24.15.0, uses the committed lockfiles, and caches only downloaded Cargo and npm sources. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit.
+[`.github/workflows/check.yml`](../.github/workflows/check.yml) runs `python tools/dev.py bootstrap` and `python tools/dev.py check` (`python3` in the distribution containers). Every job pins Rust 1.99.1 (with `rustfmt`, `clippy` and the `wasm32-unknown-unknown` target) and Node.js 24.15.0 and uses the committed lockfiles. Like the local check, it does not run live homeservers, the native sandbox probe or the dependency audit.
+
+The jobs are tiered by event ([ADR-0051](adr/0051-tier-ci-by-event-and-run-the-full-matrix-in-the-merge-queue.md)):
+
+- **Pull request:** `windows` and `ubuntu-latest` run. The other six jobs are skipped, and a skipped job reports success. A newer push to the pull request cancels the older run.
+- **Merge queue (`merge_group`), push to `main`, manual run:** all eight jobs run, and no run is cancelled. A branch without a pull request is run by hand with `workflow_dispatch`.
+- **Required checks:** each job name in the table below is a required check of the "Protect main" ruleset. Branch protection matches names exactly, so no job that reports one is a matrix. The shared steps are YAML anchors. Keep the ruleset, the job names and `REQUIRED_CHECKS` in `tests/tools/test_workflows.py` the same.
+- **Caches:** every job restores the downloaded Cargo and npm sources and libwebrtc; only `main` saves them. `windows` and `ubuntu-latest` also restore compiled dependencies (rust-cache, saved from `main` only) and write the hit and the target size to the job summary.
+- **Workflow tests:** `tests/tools/test_workflows.py` checks these rules for every workflow. It needs PyYAML and is skipped without it, except in `ubuntu-latest`, which installs PyYAML from [`tools/ci-requirements.txt`](../tools/ci-requirements.txt) (pinned by hash) and sets `PERSEPHONE_WORKFLOW_TESTS=required`.
 
 | Job | Runner or image | Prerequisites | Python |
 | --- | --- | --- | --- |
-| `windows` | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
+| `windows` (pull requests too) | `windows-latest` | Preinstalled MSVC | 3.14 (setup-python) |
 | `macos-latest` | `macos-latest` (arm64) | Preinstalled Xcode tools | 3.14 (setup-python) |
-| `ubuntu-latest` | `ubuntu-latest` (26.04 on 17 November 2026) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config clang` | 3.14 (setup-python) |
+| `ubuntu-latest` (pull requests too) | `ubuntu-latest` (26.04 on 17 November 2026) | `apt-get`: `libwebkit2gtk-4.1-dev build-essential pkg-config clang` | 3.14 (setup-python) |
 | `ubuntu-24.04-arm` | `ubuntu-24.04-arm` (arm64) | As `ubuntu-latest`; rustup from `sh.rustup.rs` if the image lacks it. Clang 21 from apt.llvm.org, because the image has clang 18 | 3.14 (setup-python) |
 | `debian-13` | `debian:trixie` container | `apt-get`: build tools, `clang`, `libwebkit2gtk-4.1-dev`. Clang 21 from apt.llvm.org, because Debian has clang 19 | Distribution `python3` |
 | `arch` | `archlinux:base-devel` container | `pacman -Syu`: `clang`, `webkit2gtk-4.1` | Distribution `python` |
@@ -147,7 +155,7 @@ This is a local toolchain workaround. Do not add a machine-specific LLVM path to
 - **Off Windows, CI covers build and tests only.** Linux and macOS have worker containment (seccomp on Linux, Seatbelt on macOS; ADR-0010, ADR-0011), and its probe and contained-worker tests run in their jobs. macOS also has its Keychain vault, prompts, image picker and UI host (CI-tested only, never run with a display). Its file panels, link opening and idle time (13 November 2026) have not yet been through macOS CI. Linux also has its Secret Service vault, GTK prompts and file choosers, and UI host with a systemd scope (ADR-0010); its live Secret Service and scope tests are ignored by `check` and run only in the SonarQube coverage job (`coverage --linux-live`, Ubuntu) and by hand in WSL ([dependency evidence](evidence/dependencies.md#linux-platform-layer-gtk-and-zbus-in-the-core-13-november-2026)), and its windows have never been shown. No job launches the application on any OS.
 - **Tests that compile on one OS only.** The AppContainer probe, DPAPI and the native Windows prompts run only on Windows; seccomp probes only on Linux; Keychain, AppKit and Seatbelt tests only on macOS. Test counts therefore differ between jobs.
 
-Other workflows: [`sonar.yml`](../.github/workflows/sonar.yml) sends the source to SonarQube Cloud for static analysis on pushes to `main` and same-repository pull requests; it builds and runs nothing. [`pages.yml`](../.github/workflows/pages.yml) deploys `site/`.
+Other workflows: [`sonar.yml`](../.github/workflows/sonar.yml) sends the source to SonarQube Cloud for static analysis on pushes to `main` and same-repository pull requests. Its `coverage` job, which has no secret, runs the frontend and instrumented Rust tests and uploads the LCOV reports; its `sonarqube` job holds `SONAR_TOKEN` and only downloads the reports and runs the scan. [`pages.yml`](../.github/workflows/pages.yml) deploys `site/`.
 
 Run 39785251911 at `04c0538` (22 October 2026) passed every job it had. The `ubuntu-24.04-arm` job was added later and has no recorded result here:
 
@@ -166,6 +174,27 @@ manual run builds unsigned artifacts only. Each push to `main` builds the
 unsigned files, and the `latest` pre-release is replaced only if that commit
 is still the tip of `main` when the build ends. [Release guide](release.md)
 lists the secrets, how to cut a release and how users verify the files.
+
+The Linux release jobs build on Ubuntu 22.04, which sets the bundles' glibc
+floor. Its PipeWire 0.3.48 headers are too old for `libspa` 0.10.1, which
+needs 0.3.65 or later (`spa_meta_region_is_valid` and `spa_meta_first` as
+inline functions, and the `flags` field and unsigned `modifier` of
+`spa_video_info_raw`). Where the headers are older,
+[`.github/scripts/install-pipewire-headers.sh`](../.github/scripts/install-pipewire-headers.sh)
+downloads `libspa-0.2-dev` and `libpipewire-0.3-dev` 1.0.5-1 from the Ubuntu
+24.04 (noble) release pocket, unpacks only their files, and points
+`PKG_CONFIG_PATH` at them; elsewhere it does nothing. The amd64 packages serve
+both architectures, because headers do not depend on it. The call worker still
+links the system's `libpipewire-0.3.so` 0.3.48, so the link fails if the
+worker calls a function that the older library lacks, and the `.deb` and
+`.rpm` packages still depend on the system's `libpipewire-0.3-0`. Each
+package's SHA-256 in the script is the one in noble's `main/binary-amd64`
+`Packages.xz`, which noble's `InRelease` lists and the Ubuntu Archive
+Automatic Signing Key (2018), fingerprint
+`F6EC B376 2474 EDA9 D21B 7022 8719 20D1 991B C93C`, signs. Both were checked
+with `gpgv` and `sha256sum` on 19 November 2026. The release pocket does not
+change during noble's life; when noble leaves the archive, move the pins to
+another signed release.
 
 The app's version line shows the build's revision: the first 12 hex digits of
 the checked-out commit, or `unknown` ([`crates/core/build.rs`](../crates/core/build.rs)).
@@ -213,7 +242,7 @@ cargo build --locked -p persephone-core --features dev-disposable-servers --bin 
 
 Run `.local/build/rust/debug/persephone.exe --profile <new directory under .local>` and enter the server's `base_url` from the harness profile in the page. Windows then asks for the username and password (`username` and `password` in the profile). To skip the prompt for automated runs, set `PERSEPHONE_DEV_PROFILE` to the harness `profile.json`; the core then prints `DEVELOPMENT BUILD` and answers the prompt from that file for the matching host. Never ship or distribute a build with this feature. See the [sign-in evidence](evidence/matrix-sign-in.md).
 
-Unless started with `--demo`, the core asks for the profile passphrase in its own Windows window before the page opens. A new profile asks for a new passphrase twice (at least 10 characters), and a profile from before passphrases is upgraded: it also asks for a new passphrase twice (ADR-0006). "Lock" closes the profile; "Unlock" asks for the passphrase again, but after a sign-in only a restart unlocks. "Reset profile…" is shown while the profile is closed; the core confirms in its own window, deletes the profile and asks for a new passphrase. With `PERSEPHONE_DEV_PROFILE`, `PERSEPHONE_DEV_PASSPHRASE_FILE` (a path inside `.local`) answers the passphrase prompts from that file; without it the native window is used. See the [unlock secret evidence](evidence/unlock-secret.md).
+The profile passphrase is optional and off by default (ADR-0050). A new profile opens with no prompt, and the OS vault alone wraps the store key. Settings, Security turns the passphrase on or off; the core asks in its own native window (twice, at least 10 characters, when turning it on). A profile that has a passphrase asks for it in the core's native window before the page opens (ADR-0006). Lock and the idle lock show only while the passphrase is on. "Lock" closes the profile; "Unlock" asks for the passphrase again, but after a sign-in only a restart unlocks. "Reset profile…" is shown while the profile is closed; the core confirms in its own window, deletes the profile and starts a new one without a passphrase. With `PERSEPHONE_DEV_PROFILE`, `PERSEPHONE_DEV_PASSPHRASE_FILE` (a path inside `.local`) answers the passphrase prompts from that file (they appear only while the passphrase is on); without it the native window is used. See the [unlock secret evidence](evidence/unlock-secret.md).
 
 "Sign out" in Settings, This session, attempts to revoke the session on the homeserver and deletes the profile's key; the next start deletes the store files. Restart Persephone to sign in again. See the [sign-out evidence](evidence/sign-out.md).
 

@@ -5,17 +5,34 @@
   import Accounts from './Accounts.svelte';
   import Composer from './Composer.svelte';
   import CallBar from './CallBar.svelte';
+  import CallVideo from './CallVideo.svelte';
+  import RingPrompt from './RingPrompt.svelte';
   import {
+    CAMERA_COMMAND_TEXT,
+    SCREEN_COMMAND_TEXT,
     CallRefresher,
     IDLE_CALL,
     JOIN_ERROR_TEXT,
     STARTING_TEXT,
     callButton,
-    inCall
+    callReasonNote,
+    cameraAvailable,
+    keptReasonRoom,
+    hasVideo,
+    inCall,
+    liveRings,
+    nextRingEnd,
+    shownRings,
+    videoCallButton,
+    CallOperations,
+    LatestOnly,
+    VOLUME_SAVE_TEXT,
+    type ShownRing
   } from './calls';
   import RoomTools from './RoomTools.svelte';
   import ConnectionHealth from './ConnectionHealth.svelte';
-  import { callJoin, callLeave, callMute, callReadiness, callStatus, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { callCamera, callDeafen, callDeclineRing, callDevices, callScreen, callJoin, callLeave, callMute, callReadiness, callRings, callStatus, callVolume, changeRoom, roomMembers, jumpToDate, eventContext, setPinned, setRoomPreference, startConversation } from './bridge';
+  import { LEAVE_NOT_DONE, LEAVE_QUESTION, LEAVING_TEXT, leaveAfterDraftFlush } from './roomLeave';
   import type { FocusedTimeline, ImagePick } from '../../crates/contracts/generated/contracts';
   import LocalSearch from './LocalSearch.svelte';
   import IgnoreUsers from './IgnoreUsers.svelte';
@@ -32,7 +49,7 @@
   import Icon from './Icon.svelte';
   import IconAction from './IconAction.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
-  import { mainMenuItems } from './menu.ts';
+  import { mainMenuItems, roomMenuItems } from './menu.ts';
   import MemberPanel from './MemberPanel.svelte';
   import {
     MEMBERS,
@@ -73,7 +90,7 @@
   import Verification from './Verification.svelte';
   import { LOCK_HELP, RESET_HELP } from './help';
   import { isolate, withNames } from './people';
-  import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, textScale } from './preferences';
+  import { DEFAULT_SETTINGS, SettingsKeeper, isLockShortcut, lockOffered, textScale } from './preferences';
   import { applyTheme } from './themes.ts';
   import { OwnNameKeeper } from './ownName';
   import { PASTE_UNSUPPORTED, attachErrorText, sendImageErrorText, type ImageDraft, type PastedImage } from './image';
@@ -85,6 +102,8 @@
     mergeNewest,
     newestEvent,
     quoteOf,
+    replaceUndecryptable,
+    undecryptableToRefetch,
     type Quote
   } from './timeline';
   import { TypingNotifier } from './typing';
@@ -123,6 +142,7 @@
     verifyThisDevice,
     verifyDevice,
     changeRecoveryKey,
+    setProfilePassphrase,
     startNewBackup,
     acceptVerification,
     confirmVerification,
@@ -150,6 +170,7 @@
     signInWithOidc,
     register,
     subscribeRoom,
+    readEventsAgain,
     timelinePage,
     resetProfile,
     unlockSession,
@@ -174,6 +195,10 @@
 
   let status = $state<AppStatus | null>(null);
   let security = $state<SecurityStatus | null>(null);
+  // Whether the profile has a passphrase, null until the core says. It is a
+  // property of the profile, so it survives a session change; Lock and the idle
+  // lock show only while it is true (ADR-0050).
+  let passphraseOn = $state<boolean | null>(null);
   let securityBusy = $state(false);
   // Why the last security action failed. Kept apart from `error`, so a later
   // success clears it without hiding a room's error.
@@ -208,6 +233,11 @@
   // One of this account's messages waiting for "Delete" to be confirmed,
   // and whether the deletion is being sent.
   let confirmingDelete = $state<{ roomId: string; eventId: string } | null>(null);
+  // The room waiting for "Leave room" to be confirmed from the room menu,
+  // and whether the leave is being sent.
+  let confirmingLeave = $state<string | null>(null);
+  let leavingRoom = $state(false);
+  let leaveQuestion = $state<HTMLElement | null>(null);
   // Where the "New messages" line goes in the selected room, fixed when it
   // opens, and the event this room was last marked read at.
   let unreadFrom = $state<string | null>(null);
@@ -340,6 +370,10 @@
   let switching = $state(false);
   // Sign-out deletes this device's keys, so it asks once more first.
   let confirmingSignOut = $state(false);
+  // The core refused the sign-out: this device's room keys are not all in a
+  // key backup. The question then states the loss and offers recovery.
+  let signOutLosesKeys = $state(false);
+  let keysWarning = $state<HTMLElement | null>(null);
   // What the window shows besides the room: settings, and the jump palette.
   let view = $state<'chat' | 'settings'>('chat');
   let settingsTab = $state<SettingsTab>('security');
@@ -406,6 +440,8 @@
   let opening = false;
   let refreshing = false;
   let changedAgain = false;
+  // Whether a read of older undecryptable events is running (at most one).
+  let rereading = false;
 
   // Fixed text per store state; the core sends codes only.
   const storeText: Record<StoreState, string> = {
@@ -413,7 +449,7 @@
     protected: 'Local store protected',
     locked: 'Local store locked',
     locking: 'Locking: work in progress is finishing',
-    unlocking: 'Unlocking: enter the passphrase in the Persephone window',
+    unlocking: 'Unlocking: if the profile has a passphrase, enter it in the Persephone window',
     lock_failed: 'Local store did not close cleanly; restart Persephone',
     restart_required: 'Locked: restart Persephone to unlock',
     key_missing: 'Local store locked: its key is missing',
@@ -437,7 +473,7 @@
     'store_unavailable'
   ];
 
-  // Closed profiles the core may reset after a forgotten passphrase. The core
+  // Closed profiles the core may reset after a forgotten passphrase or a lost key. The core
   // checks again and asks for confirmation in its own window.
   const resettable: StoreState[] = [
     'locked',
@@ -537,7 +573,7 @@
     // Lock at once, from anywhere, while the profile is open.
     if (isLockShortcut(event, mac)) {
       event.preventDefault();
-      if (status?.store === 'protected') void toggleLock();
+      if (lockOffered(status?.store, passphraseOn) && status?.store === 'protected') void toggleLock();
       return;
     }
     if (!(mac ? event.metaKey : event.ctrlKey) || event.altKey || event.key.toLowerCase() !== 'k') {
@@ -561,6 +597,7 @@
 
   function closeSettings() {
     confirmingSignOut = false;
+    signOutLosesKeys = false;
     view = 'chat';
   }
 
@@ -600,6 +637,7 @@
     }
     if (generation !== sessionGeneration) return;
     status = reply;
+    if (reply.account.state !== 'signed_in' || reply.store !== 'protected') void refreshPassphrase();
     if (reply.store !== 'protected' && reply.store !== 'not_configured') return;
     if (reply.account.state === 'signed_in') {
       refreshSecurity();
@@ -734,15 +772,75 @@
   let callDismissed = $state(false);
   let callPending = $state(false);
   let callBusy = $state(false);
+  let cameraBusy = $state(false);
+  let screenBusy = $state(false);
+  // The volume the slider is moving to, until the core has the last value.
+  let volumeDraft = $state<number | null>(null);
+  // Goes up each time the core says a new video picture is waiting.
+  let callVideoTicks = $state(0);
   let callJoinText = $state<string | null>(null);
+  let cameraText = $state<string | null>(null);
+  let screenText = $state<string | null>(null);
+  // The newest screen share command; as `cameraRequest`.
+  let screenRequest = 0;
+  // The newest camera command. Its failure alone shows `cameraText`; a
+  // Mute or Leave in between does not hide it. Goes up when the call ends
+  // and on a session change, so an old command shows nothing.
+  let cameraRequest = 0;
   let readiness = $state<CallReadiness | null>(null);
   let callNames = $state<ReadonlyMap<string, string>>(new Map());
   let readinessRequest = 0;
   let callNamesFor: string | null = null;
-  const callRefresher = new CallRefresher(callStatus, (next) => {
-    callState = next;
-    if (next.phase !== 'ended') callDismissed = false;
+  const callOperations = new CallOperations();
+  // A camera failure is about the call that is running; it goes when that
+  // call ends.
+  $effect(() => {
+    if (callState.phase === 'ended' || callState.phase === 'idle') {
+      cameraRequest += 1;
+      cameraText = null;
+      screenRequest += 1;
+      screenText = null;
+    }
   });
+  // A status read during which a call command finished is dropped: that
+  // command's reply is newer, and the command asks for a fresh read.
+  const callRefresher = new CallRefresher(
+    callStatus,
+    (next) => {
+      callState = next;
+      if (next.phase !== 'ended') callDismissed = false;
+    },
+    () => callOperations.completed
+  );
+
+  // Shown when the last volume from the call bar was not saved. The running
+  // call may already use it, but the next call would not (ADR-0055).
+  let volumeSaveText = $state<string | null>(null);
+
+  // Sends the newest call volume only, one at a time (ADR-0055). A failure
+  // goes to `LatestOnly`, which reports only the last value's outcome.
+  const volumeSender = new LatestOnly<number>(
+    async (percent) => {
+      const generation = sessionGeneration;
+      const operation = callOperations.begin();
+      try {
+        const reply = await callVolume(percent);
+        if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
+      } finally {
+        if (generation === sessionGeneration) callOperations.complete(operation);
+      }
+    },
+    (failed) => {
+      volumeDraft = null;
+      volumeSaveText = failed ? VOLUME_SAVE_TEXT : null;
+      callRefresher.request();
+    }
+  );
+
+  function changeVolume(percent: number) {
+    volumeDraft = percent;
+    volumeSender.set(percent);
+  }
 
   const callRoomName = $derived(
     callState.roomId === null
@@ -752,6 +850,21 @@
   const callView = $derived(
     selected === null ? null : callButton(selected, readiness, callState, callPending)
   );
+  const videoView = $derived(
+    selected === null ? null : videoCallButton(selected, readiness, callState, callPending)
+  );
+  // The room where a click on a call button asked why no call can start.
+  // The answer is visible text; the button's own description reaches only
+  // screen readers.
+  let callReasonFor = $state<string | null>(null);
+  const callReasonText = $derived(
+    selected === null ? null : callReasonNote(selected, callReasonFor, callView)
+  );
+  // The click is forgotten once its note goes: a room change, a ready room
+  // or a hidden button. A later block then needs a new click.
+  $effect(() => {
+    callReasonFor = keptReasonRoom(selected, callReasonFor, callView);
+  });
 
   // Ask again whether the shown room can take a call when the room or the
   // call changes. Speaking changes alone do not.
@@ -808,39 +921,237 @@
     });
   }
 
-  async function startCall() {
-    if (!selected || callPending || callView?.disabled) return;
-    const roomId = selected;
+  async function startCall(video: boolean) {
+    if (!selected || callPending) return;
+    if (callView?.disabled) {
+      // A button that cannot start a call says why, rather than nothing.
+      // An earlier join error would hide that answer, so this click ends it.
+      callJoinText = null;
+      callReasonFor = selected;
+      return;
+    }
+    callReasonFor = null;
+    await runJoin(selected, video);
+  }
+
+  // Joins the call in `roomId`: from the header's buttons, or by answering a
+  // ring. The core runs every join check either way.
+  async function runJoin(roomId: string, video: boolean) {
     const generation = sessionGeneration;
     callPending = true;
     callJoinText = null;
+    const operation = callOperations.begin();
     try {
-      const reply = await callJoin(roomId);
-      if (generation !== sessionGeneration) return;
+      const reply = await callJoin(roomId, video);
+      if (generation !== sessionGeneration || !callOperations.isCurrent(operation)) return;
       callJoinText = reply.joinError === null ? null : JOIN_ERROR_TEXT[reply.joinError];
       callState = reply;
       if (reply.phase !== 'ended') callDismissed = false;
     } catch {
       if (generation === sessionGeneration) callJoinText = JOIN_ERROR_TEXT.declined;
     } finally {
+      // A command of an old session must not drop the new session's read.
       if (generation === sessionGeneration) {
+        callOperations.complete(operation);
         callPending = false;
         callRefresher.request();
       }
     }
   }
 
+  // Incoming call rings (ADR-0052). The core lists them; this page stamps
+  // each with its end and drops it when the time passes. Nothing here joins
+  // a call except an answer button.
+  let rings = $state<ShownRing[]>([]);
+  let ringCamera = $state(false);
+  let ringBusy = $state<ReadonlySet<string>>(new Set());
+  // Goes up when a newer list arrives, so an older read cannot replace it.
+  let ringRequest = 0;
+  // Goes up when a decline starts; only the newest decline's reply is shown.
+  let declineRequest = 0;
+  let ringsRunning = false;
+  let ringsAgain = false;
+  let ringDevicesAsked = false;
+
+  async function refreshRings() {
+    if (ringsRunning) {
+      ringsAgain = true;
+      return;
+    }
+    ringsRunning = true;
+    try {
+      do {
+        ringsAgain = false;
+        const generation = sessionGeneration;
+        const request = ringRequest;
+        try {
+          const reply = await callRings();
+          if (generation === sessionGeneration && request === ringRequest) {
+            rings = shownRings(reply, Date.now());
+          }
+        } catch {
+          // Keep what is shown; the next change asks again.
+        }
+      } while (ringsAgain);
+    } finally {
+      ringsRunning = false;
+    }
+  }
+
+  function markRingBusy(roomId: string, on: boolean) {
+    const next = new Set(ringBusy);
+    if (on) next.add(roomId);
+    else next.delete(roomId);
+    ringBusy = next;
+  }
+
+  async function answerRing(roomId: string, video: boolean) {
+    if (callPending || ringBusy.has(roomId)) return;
+    const generation = sessionGeneration;
+    markRingBusy(roomId, true);
+    try {
+      await runJoin(roomId, video);
+    } finally {
+      if (generation === sessionGeneration) {
+        markRingBusy(roomId, false);
+        refreshRings();
+      }
+    }
+  }
+
+  async function declineRing(roomId: string) {
+    if (ringBusy.has(roomId)) return;
+    const generation = sessionGeneration;
+    const request = ++declineRequest;
+    markRingBusy(roomId, true);
+    try {
+      const reply = await callDeclineRing(roomId);
+      if (generation === sessionGeneration && request === declineRequest) {
+        ringRequest += 1;
+        rings = shownRings(reply, Date.now());
+      }
+    } catch {
+      // The next read shows what the core still holds.
+    } finally {
+      if (generation === sessionGeneration) {
+        markRingBusy(roomId, false);
+        refreshRings();
+      }
+    }
+  }
+
+  // A ring leaves the page when its time is up, even before the core says so.
+  $effect(() => {
+    const wait = nextRingEnd(rings, Date.now());
+    if (wait === null) return;
+    const timer = setTimeout(() => (rings = liveRings(rings, Date.now())), wait + 1);
+    return () => clearTimeout(timer);
+  });
+
+  // Answering with video is offered only when a camera is connected. The
+  // device list is read once each time rings appear, and not during a call.
+  $effect(() => {
+    if (rings.length === 0) {
+      ringDevicesAsked = false;
+      ringCamera = false;
+      return;
+    }
+    if (ringDevicesAsked || inCall(callState)) return;
+    ringDevicesAsked = true;
+    const generation = sessionGeneration;
+    callDevices().then(
+      (devices) => {
+        if (generation === sessionGeneration) ringCamera = cameraAvailable(devices);
+      },
+      () => {}
+    );
+  });
+
+  const ringRoomNames = $derived(
+    new Map((rooms?.rooms ?? []).map((room) => [room.roomId, room.displayName ?? room.roomId]))
+  );
+
   async function toggleMute() {
     const generation = sessionGeneration;
     callBusy = true;
+    const operation = callOperations.begin();
     try {
       const reply = await callMute(!callState.muted);
-      if (generation === sessionGeneration) callState = reply;
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
     } catch {
       // The next call change shows the real state.
     } finally {
       if (generation === sessionGeneration) {
+        callOperations.complete(operation);
         callBusy = false;
+        callRefresher.request();
+      }
+    }
+  }
+
+  // Starts or stops the screen share. The page sends no source: on a start the
+  // core shows its own warning or chooser, and a cancel leaves the share off.
+  async function toggleScreen() {
+    const generation = sessionGeneration;
+    screenBusy = true;
+    screenText = null;
+    screenRequest += 1;
+    const request = screenRequest;
+    const operation = callOperations.begin();
+    try {
+      const reply = await callScreen(callState.screen !== 'on' && callState.screen !== 'starting');
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
+    } catch {
+      if (generation === sessionGeneration && request === screenRequest) {
+        screenText = SCREEN_COMMAND_TEXT;
+      }
+    } finally {
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        screenBusy = false;
+        callRefresher.request();
+      }
+    }
+  }
+
+  async function toggleDeafen() {
+    const generation = sessionGeneration;
+    callBusy = true;
+    const operation = callOperations.begin();
+    try {
+      const reply = await callDeafen(!callState.deafened);
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
+    } catch {
+      // The next call change shows the real state.
+    } finally {
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        callBusy = false;
+        callRefresher.request();
+      }
+    }
+  }
+
+  async function toggleCamera() {
+    const generation = sessionGeneration;
+    cameraBusy = true;
+    cameraText = null;
+    cameraRequest += 1;
+    const request = cameraRequest;
+    const operation = callOperations.begin();
+    try {
+      const reply = await callCamera(callState.camera !== 'on' && callState.camera !== 'starting');
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
+    } catch {
+      // The command failed before the core answered. The refresh shows the
+      // real camera state; this says why it did not change.
+      if (generation === sessionGeneration && request === cameraRequest) {
+        cameraText = CAMERA_COMMAND_TEXT;
+      }
+    } finally {
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        cameraBusy = false;
         callRefresher.request();
       }
     }
@@ -848,13 +1159,17 @@
 
   async function leaveCall() {
     const generation = sessionGeneration;
+    const operation = callOperations.begin();
     try {
       const reply = await callLeave();
-      if (generation === sessionGeneration) callState = reply;
+      if (generation === sessionGeneration && callOperations.isCurrent(operation)) callState = reply;
     } catch {
       // The next call change shows the real state.
     } finally {
-      if (generation === sessionGeneration) callRefresher.request();
+      if (generation === sessionGeneration) {
+        callOperations.complete(operation);
+        callRefresher.request();
+      }
     }
     focusCallControl();
   }
@@ -866,16 +1181,32 @@
 
   /** Clear session-bound UI state and invalidate pending room-context work. */
   function reset() {
+    callOperations.reset();
     callRefresher.reset();
     readiness = null;
     readinessRequest += 1;
     callPending = false;
     callBusy = false;
+    cameraBusy = false;
+    screenBusy = false;
+    volumeSender.clear();
+    volumeDraft = null;
+    volumeSaveText = null;
     callJoinText = null;
+    cameraText = null;
+    cameraRequest += 1;
+    screenText = null;
+    screenRequest += 1;
     callDismissed = false;
     callNames = new Map();
     callNamesFor = null;
     callRefresher.request();
+    rings = [];
+    ringRequest += 1;
+    ringBusy = new Set();
+    ringCamera = false;
+    ringDevicesAsked = false;
+    refreshRings();
     cancelContext?.(); cancelContext = null;
     sessionGeneration += 1;
     roomOpenRequest += 1;
@@ -899,6 +1230,7 @@
     textSending = false;
     // A question about the old session no longer applies.
     confirmingSignOut = false;
+    signOutLosesKeys = false;
     view = 'chat';
     paletteOpen = false;
     newConversationOpen = false;
@@ -928,6 +1260,7 @@
     replyingTo = null;
     editingMessage = null;
     confirmingDelete = null;
+    confirmingLeave = null;
     // The core dropped every image handle with the session.
     imageDraft = null;
     attaching = false;
@@ -1061,6 +1394,16 @@
     }
   }
 
+  // Learn whether the profile has a passphrase while no account is signed in
+  // or the profile is closed. The core reports it in every store state.
+  async function refreshPassphrase() {
+    try {
+      passphraseOn = (await securityStatus()).profilePassphrase;
+    } catch {
+      // Lock stays hidden until a later status says so.
+    }
+  }
+
   // The account's encryption state changed: fetch it again. Nothing else
   // changes.
   async function refreshSecurity() {
@@ -1074,6 +1417,7 @@
         security = reply;
         securityShown = request;
       }
+      if (generation === sessionGeneration) passphraseOn = reply.profilePassphrase;
     } catch {
       // The next security or session event tries again.
     }
@@ -1184,6 +1528,7 @@
         security = reply;
         securityShown = request;
       }
+      if (generation === sessionGeneration) passphraseOn = reply.profilePassphrase;
     } catch (reason) {
       if (generation === sessionGeneration) {
         // A refused request leaves the previous status: its error is not
@@ -1265,25 +1610,51 @@
     }
   }
 
-  /** Start sign-out without waiting for draft persistence; the core attempts server logout before locking. */
-  async function confirmSignOut() {
+  /** Start sign-out without waiting for draft persistence; the core attempts server logout before locking.
+   * `discardKeys` is the user's choice to lose room keys that are not in a key backup. */
+  async function confirmSignOut(discardKeys: boolean) {
     if (switching) return;
     confirmingSignOut = false;
+    signOutLosesKeys = false;
     switching = true;
     const generation = sessionGeneration;
     try {
-      const store = await draftKeeper.protect(signOut);
+      const store = await draftKeeper.protect(() => signOut(discardKeys));
       if (generation === sessionGeneration && status) status = { ...status, store };
     } catch (reason) {
       if (generation === sessionGeneration) {
-        error =
-          String(reason) === 'limit_exceeded'
-            ? 'Persephone is busy, so signing out did not start. Try again.'
-            : describe(reason);
+        // The session goes on: save the draft whose autosave `protect` stopped.
+        void draftKeeper.flush();
+        if (String(reason) === 'keys_not_backed_up') {
+          // Nothing changed. Ask again, with the loss stated.
+          signOutLosesKeys = true;
+          confirmingSignOut = true;
+          void focusKeysWarning();
+        } else {
+          error =
+            String(reason) === 'limit_exceeded'
+              ? 'Persephone is busy, so signing out did not start. Try again.'
+              : describe(reason);
+        }
       }
     } finally {
       switching = false;
     }
+  }
+
+  // The warning replaces the question that had focus, so it takes focus
+  // once it shows.
+  async function focusKeysWarning() {
+    await tick();
+    keysWarning?.focus();
+  }
+
+  // Closes the warning and gives focus back to the Sign out button.
+  async function keepSignedIn() {
+    confirmingSignOut = false;
+    signOutLosesKeys = false;
+    await tick();
+    document.getElementById('sign-out-button')?.focus();
   }
 
   /** Lock or unlock the active store and ignore status from a session that changed meanwhile. */
@@ -1324,12 +1695,13 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request());
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings);
     } catch {
       unavailable = true;
       return;
     }
     callRefresher.request();
+    refreshRings();
     load();
     refreshModules();
     if (platform === 'linux') {
@@ -1402,6 +1774,7 @@
     confirmingPlain = null;
     replyingTo = null;
     confirmingDelete = null;
+    confirmingLeave = null;
     unreadFrom = null;
     markedRead = null;
     activity = null;
@@ -1497,6 +1870,8 @@
         if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
         items = mergeNewest(items, page.items);
         senderNames = withNames(senderNames, page, true);
+        // Not awaited: newer pages do not wait for older events.
+        void refetchUndecryptable(roomId, generation, contentEpoch, page.items);
         if (signedIn) {
           loadActivity(roomId, generation);
           await loadPending(roomId, generation);
@@ -1508,6 +1883,42 @@
       refreshing = false;
       // A change in a room opened while this fetch ran.
       if (changedAgain && selected && !opening) refresh(selected, sessionGeneration);
+    }
+  }
+
+  /**
+   * After a change, read loaded undecryptable items above the newest page
+   * again: the newest page shows only its own events decrypted with keys that
+   * arrived. The core reads them from the homeserver only when room keys
+   * arrived for the room; otherwise it answers at once with no items. Items
+   * are replaced in place, so the scroll position is not set. A stale or
+   * failed result changes nothing; after a failed read the core keeps its
+   * mark, so the next change asks again.
+   *
+   * It runs beside `refresh`, which does not wait for it. At most one read
+   * runs at a time; a change during it does not ask again, and the core keeps
+   * any new mark for the next change.
+   */
+  async function refetchUndecryptable(
+    roomId: string,
+    generation: number,
+    contentEpoch: number,
+    newest: TimelineItem[]
+  ) {
+    if (!signedIn || rereading) return;
+    const eventIds = undecryptableToRefetch(items, newest);
+    if (eventIds.length === 0) return;
+    rereading = true;
+    try {
+      const page = await readEventsAgain(roomId, eventIds);
+      if (!current(roomId, generation) || contentEpoch !== timelineEpoch) return;
+      if (page.roomId !== roomId || page.items.length === 0) return;
+      items = replaceUndecryptable(items, page.items);
+      senderNames = withNames(senderNames, page, false);
+    } catch {
+      // Best effort: the notices stay as they are until the next change.
+    } finally {
+      rereading = false;
     }
   }
 
@@ -1561,6 +1972,52 @@
       return false;
     } finally {
       if (generation === sessionGeneration) textSending = false;
+    }
+  }
+
+  // Asks before leaving. The menu gives focus back to its button, so the
+  // question takes it after it shows.
+  async function askLeave(roomId: string) {
+    confirmingLeave = roomId;
+    await tick();
+    leaveQuestion?.focus();
+  }
+
+  // Closes the question and gives focus back to the room menu.
+  async function stayInRoom() {
+    confirmingLeave = null;
+    await tick();
+    document.getElementById('room-menu-button')?.focus();
+  }
+
+  // Leaves the room waiting for confirmation. The unsaved draft is saved
+  // first, as before an account switch, and the composer stays disabled
+  // until the leave ends, so no later text is lost. The room view clears
+  // only after the homeserver accepted the leave, and only when the same
+  // room is still selected when this code runs again.
+  async function confirmLeave() {
+    const roomId = confirmingLeave;
+    if (!roomId || leavingRoom) return;
+    const generation = sessionGeneration;
+    const valid = () => current(roomId, generation);
+    leavingRoom = true;
+    try {
+      const left = await leaveAfterDraftFlush(
+        prepareAccountSwitch,
+        () => changeRoom(roomId, { kind: 'leave' }),
+        valid
+      );
+      if (!valid()) return;
+      confirmingLeave = null;
+      if (left) leftRoom();
+      else error = LEAVE_NOT_DONE;
+    } catch (reason) {
+      if (valid()) {
+        confirmingLeave = null;
+        error = describe(reason);
+      }
+    } finally {
+      leavingRoom = false;
     }
   }
 
@@ -2165,7 +2622,7 @@
     mainMenuItems(
       {
         signedIn,
-        canLock: status?.store === 'protected' || status?.store === 'locking',
+        canLock: lockOffered(status?.store, passphraseOn),
         switching,
         confirmingSignOut
       },
@@ -2184,17 +2641,19 @@
 
   /** The selected room's menu: what used to be buttons at the top of the room. */
   function roomMenu(roomId: string, direct: boolean): MenuItem[] {
-    return [
-      ...(direct ? [] : [{ label: 'Invite people', onselect: () => (invitingTo = roomId) }]),
-      { label: 'Jump to date', onselect: () => (roomTool = 'jump') },
-      { label: 'Pinned messages', onselect: () => (roomTool = 'pins') },
-      { label: 'Attachments', onselect: () => (roomTool = 'attachments') },
-      membersRoom
-        ? { label: membersShown ? 'Hide members' : 'Show members', onselect: () => (membersShown = !membersShown), separated: true }
-        : { label: 'Members need a wider window', onselect: () => {}, disabled: true, separated: true },
-      { label: 'Room group', onselect: () => (sectionOpen = true) },
-      { label: 'Room settings', onselect: () => (roomSettingsOf = roomId), separated: true }
-    ];
+    return roomMenuItems(
+      { direct, membersRoom, membersShown, leaving: leavingRoom },
+      {
+        invite: () => (invitingTo = roomId),
+        jump: () => (roomTool = 'jump'),
+        pins: () => (roomTool = 'pins'),
+        attachments: () => (roomTool = 'attachments'),
+        members: () => (membersShown = !membersShown),
+        group: () => (sectionOpen = true),
+        settings: () => (roomSettingsOf = roomId),
+        leave: () => void askLeave(roomId)
+      }
+    );
   }
 
   /** Pin through the core; reopen the panel only for the original room request. */
@@ -2228,6 +2687,7 @@
 
 {#snippet lockButton()}
   <!-- Not while the sign-out question is open: it would apply to a locked session. -->
+  <!-- Callers show it only while the profile has a passphrase (ADR-0050). -->
   <TipButton
     id="lock-help"
     help={LOCK_HELP}
@@ -2283,7 +2743,9 @@
         {#if error}
           <p role="alert" class="error">{error}</p>
         {/if}
-        {@render lockButton()}
+        {#if lockOffered(status.store, passphraseOn)}
+          {@render lockButton()}
+        {/if}
         <Accounts compact />
       </div>
     </div>
@@ -2348,6 +2810,7 @@
             {settings}
             failure={settingsFailure}
             {mac}
+            profilePassphrase={passphraseOn === true}
             onchange={(patch) => settingsKeeper.change(patch)}
           />
         {:else}
@@ -2376,6 +2839,7 @@
               onsetuprecovery={() => startSecurity(setUpRecovery)}
               onverify={() => startSecurity(verifyThisDevice)}
               onchangekey={() => startSecurity(changeRecoveryKey)}
+              onpassphrase={(on) => startSecurity(() => setProfilePassphrase(on))}
               onnewbackup={() => startSecurity(startNewBackup)}
             />
           {:else}
@@ -2421,7 +2885,7 @@
               {/if}
             </p>
           </div>
-          {#if status.store === 'protected' || status.store === 'locking'}
+          {#if lockOffered(status.store, passphraseOn)}
             <div class="panel">
               <h3>Lock</h3>
               <p>{LOCK_HELP}</p>
@@ -2431,13 +2895,53 @@
           {#if signedIn}
             <div class="panel">
               <h3>Sign out</h3>
-              {#if confirmingSignOut}
+              {#if confirmingSignOut && signOutLosesKeys}
+                <div class="confirm" role="alertdialog" aria-labelledby="sign-out-question">
+                  <p id="sign-out-question" tabindex="-1" bind:this={keysWarning}>
+                    This device's message keys are not all in a key backup. If you sign out now,
+                    you lose the encrypted history this device can read, unless another of your
+                    signed-in devices has the keys. Set up recovery first to keep them.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    onclick={() => {
+                      confirmingSignOut = false;
+                      signOutLosesKeys = false;
+                      openSettings('security');
+                    }}
+                  >
+                    Set up recovery
+                  </button>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    class="danger"
+                    onclick={() => confirmSignOut(true)}
+                  >
+                    Sign out and lose history
+                  </button>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    class="secondary"
+                    onclick={keepSignedIn}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              {:else if confirmingSignOut}
                 <div class="confirm" role="alertdialog" aria-labelledby="sign-out-question">
                   <p id="sign-out-question">
                     Sign out and delete this device's keys and local data? Encrypted history this
                     device could read may not be readable again.
                   </p>
-                  <button type="button" disabled={switching} class="danger" onclick={confirmSignOut}>
+                  <button
+                    type="button"
+                    disabled={switching}
+                    class="danger"
+                    onclick={() => confirmSignOut(false)}
+                  >
                     Sign out
                   </button>
                   <button
@@ -2453,6 +2957,7 @@
                 <p>Signs this device out of the homeserver and deletes its keys and local data.</p>
                 <div class="actions">
                   <button
+                    id="sign-out-button"
                     type="button"
                     disabled={switching}
                     class="danger"
@@ -2478,6 +2983,9 @@
         {preferences}
         userId={signedIn ? status.account.userId : null}
         {ownName}
+        presence={signedIn ? settings : null}
+        onpresence={signedIn ? (patch) => settingsKeeper.change(patch) : undefined}
+        presenceFailure={settingsFailure}
         {shortcut}
         onselect={open}
         onsearch={() => (paletteOpen = rooms !== null)}
@@ -2555,16 +3063,64 @@
             <button type="button" class="secondary" disabled={modulesBusy} onclick={reviewModules}>{unreviewed(modules).length > 1 ? 'Mark all as reviewed' : 'Mark as reviewed'}</button>
           </div>
         {/if}
+        <RingPrompt
+          {rings}
+          roomNames={ringRoomNames}
+          camera={ringCamera}
+          busy={ringBusy}
+          onanswer={answerRing}
+          ondecline={declineRing}
+        />
+        {#if !selected}
+          <!-- An answer with no room open shows its progress and failure
+               here; with a room open, the room header shows them. -->
+          {#if callPending}
+            <p class="call-notice note" role="status">{STARTING_TEXT}</p>
+          {:else if callJoinText}
+            <p class="call-notice error" role="alert">
+              <span>{callJoinText}</span>
+              <button type="button" class="secondary" onclick={() => (callJoinText = null)}>Dismiss</button>
+            </p>
+          {/if}
+        {/if}
         <CallBar
           status={callState}
           dismissed={callDismissed}
           roomName={callRoomName}
           names={callNames}
           busy={callBusy}
+          {cameraBusy}
+          {screenBusy}
+          volume={volumeDraft ?? callState.volume}
           onmute={toggleMute}
+          ondeafen={toggleDeafen}
+          onvolume={changeVolume}
+          oncamera={toggleCamera}
+          onscreen={toggleScreen}
           onleave={leaveCall}
           ondismiss={dismissCall}
         />
+        {#if cameraText}
+          <p class="call-notice camera-notice error" role="alert">
+            <span>{cameraText}</span>
+            <button type="button" class="secondary" onclick={() => (cameraText = null)}>Dismiss</button>
+          </p>
+        {/if}
+        {#if volumeSaveText}
+          <p class="call-notice volume-notice error" role="alert">
+            <span>{volumeSaveText}</span>
+            <button type="button" class="secondary" onclick={() => (volumeSaveText = null)}>Dismiss</button>
+          </p>
+        {/if}
+        {#if screenText}
+          <p class="call-notice screen-notice error" role="alert">
+            <span>{screenText}</span>
+            <button type="button" class="secondary" onclick={() => (screenText = null)}>Dismiss</button>
+          </p>
+        {/if}
+        {#if hasVideo(callState)}
+          <CallVideo tiles={callState.video} names={callNames} ticks={callVideoTicks} />
+        {/if}
         {#if selectedRoom}
           <div class="room-view" style:--members-width="{shownMembers}px">
           <div class="room-main">
@@ -2588,11 +3144,11 @@
             onfavourite={signedIn ? () => toggleFavourite(selectedRoom.roomId) : undefined}
             favouriteBusy={favouriteBusy || groupsBusy}
             menu={signedIn ? roomMenuButton : undefined}
-            onreply={sendBlocked === null && draftReady && !textSending
+            onreply={sendBlocked === null && draftReady && !textSending && !leavingRoom
               ? replyToMessage
               : undefined}
             ownUserId={signedIn ? status.account.userId : null}
-            onedit={sendBlocked === null ? startEdit : undefined}
+            onedit={sendBlocked === null && !leavingRoom ? startEdit : undefined}
             onreport={signedIn ? (eventId, sender) => (reportTarget = { roomId: selectedRoom.roomId, eventId, sender }) : undefined}
             onpin={signedIn && !pinBusy ? pinMessage : undefined}
             {focusEvent}
@@ -2621,11 +3177,24 @@
                   disabled={callView.disabled && callView.reason === null}
                   aria-disabled={callView.disabled && callView.reason !== null ? 'true' : undefined}
                   aria-describedby={callView.reason !== null ? 'call-reason' : undefined}
-                  onclick={startCall}
+                  onclick={() => startCall(false)}
                 >
                   <Icon name="phone" />
                   {callView.label}
                 </button>
+                {#if videoView && !videoView.hidden}
+                  <button
+                    type="button"
+                    class="secondary call-start call-start-video"
+                    disabled={videoView.disabled && videoView.reason === null}
+                    aria-disabled={videoView.disabled && videoView.reason !== null ? 'true' : undefined}
+                    aria-describedby={videoView.reason !== null ? 'call-reason' : undefined}
+                    onclick={() => startCall(true)}
+                  >
+                    <Icon name="video" />
+                    {videoView.label}
+                  </button>
+                {/if}
                 {#if callView.reason !== null}
                   <span id="call-reason" class="visually-hidden">{callView.reason}</span>
                 {/if}
@@ -2638,6 +3207,11 @@
                 <p class="call-notice error" role="alert">
                   <span>{callJoinText}</span>
                   <button type="button" class="secondary" onclick={() => (callJoinText = null)}>Dismiss</button>
+                </p>
+              {:else if callReasonText}
+                <p class="call-notice note" role="status">
+                  <span>{callReasonText}</span>
+                  <button type="button" class="secondary" onclick={() => (callReasonFor = null)}>Dismiss</button>
                 </p>
               {/if}
             {/snippet}
@@ -2669,6 +3243,22 @@
             />
           {/if}
           {#if signedIn}
+            {#if confirmingLeave === selectedRoom.roomId}
+              <div class="confirm" role="alertdialog" aria-labelledby="leave-question">
+                <p id="leave-question" tabindex="-1" bind:this={leaveQuestion}>{LEAVE_QUESTION}</p>
+                <button type="button" class="danger" disabled={leavingRoom} onclick={confirmLeave}>
+                  Leave room
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  disabled={leavingRoom}
+                  onclick={stayInRoom}
+                >
+                  Stay
+                </button>
+              </div>
+            {/if}
             {#if confirmingDelete}
               <div class="confirm" role="alertdialog" aria-labelledby="delete-question">
                 <p id="delete-question">
@@ -2706,7 +3296,7 @@
             {/if}
             <Composer
               pending={visiblePending}
-              blocked={draftReady ? sendBlocked : 'Loading the saved draft…'}
+              blocked={leavingRoom ? LEAVING_TEXT : draftReady ? sendBlocked : 'Loading the saved draft…'}
               roomId={selectedRoom.roomId}
               encryption={selectedRoom.encryption}
               roomName={selectedRoom.displayName ?? selectedRoom.roomId}
@@ -2869,8 +3459,6 @@
           roomId={roomSettingsOf}
           roomName={selectedRoom.displayName ?? selectedRoom.roomId}
           changes={roomChanges}
-          beforeleave={prepareAccountSwitch}
-          onleft={leftRoom}
           onclose={() => (roomSettingsOf = null)}
         />
       {/if}

@@ -9,8 +9,9 @@ with `cargo metadata --locked --offline` that the lockfile is still valid.
 `check-tag vX.Y.Z[-pre]` exits 1 and lists each manifest whose version differs
 from the tag. The release workflow runs it before it builds anything.
 
-`append-notice [--title TEXT]` writes .local/release/notices/THIRD-PARTY-NOTICES-windows.txt:
-the shared notices plus the licence texts of the verified libwebrtc in the cache.
+`append-notice --platform windows|linux|macos [--key KEY]... [--title TEXT]` writes
+.local/release/notices/THIRD-PARTY-NOTICES-<platform>.txt: the shared notices plus the licence
+texts of the verified libwebrtc archives in the cache (macOS needs both mac-arm64 and mac-x64).
 
 `bundle-config --platform windows|linux|macos --notices FILE --output FILE` writes the release-only Tauri
 configuration (sidecars and bundled licence files) that the workflow merges
@@ -308,11 +309,11 @@ def cargo_lock_is_valid(root):
 
 
 SIDECARS = ("binaries/persephone", "binaries/persephone-media-worker")
-# Calls run on Windows only, so only the Windows bundle carries the call worker.
+# Every bundle carries the call worker (ADR-0049 adds Linux and macOS).
 PLATFORM_SIDECARS = {
     "windows": SIDECARS + ("binaries/persephone-call-worker",),
-    "linux": SIDECARS,
-    "macos": SIDECARS,
+    "linux": SIDECARS + ("binaries/persephone-call-worker",),
+    "macos": SIDECARS + ("binaries/persephone-call-worker",),
 }
 
 
@@ -345,8 +346,19 @@ def bundle_config(root, notices, platform):
 
 NOTICE_SOURCE_LIMIT = 1024 * 1024
 NOTICES = Path(".local/release/notices/THIRD-PARTY-NOTICES.txt")
-WINDOWS_NOTICES = NOTICES.with_name("THIRD-PARTY-NOTICES-windows.txt")
 NOTICE_SEPARATOR = "=" * 78
+# Every bundle that ships the call worker links libwebrtc statically. The
+# macOS universal worker holds both archives; each Linux build holds one.
+NOTICE_PLATFORMS = {
+    "windows": {"prefix": "win-", "keys": ("win-x64",), "binary": "persephone-call-worker.exe"},
+    "linux": {"prefix": "linux-", "keys": None, "binary": "persephone-call-worker"},
+    "macos": {"prefix": "mac-", "keys": ("mac-arm64", "mac-x64"), "binary": "persephone-call-worker"},
+}
+
+
+def notices_path(platform):
+    """The per-platform notices file that `append-notice` writes."""
+    return NOTICES.with_name(f"THIRD-PARTY-NOTICES-{platform}.txt")
 
 
 def webrtc_title(root):
@@ -360,31 +372,17 @@ def webrtc_title(root):
     return f"Prebuilt libwebrtc ({tag})"
 
 
-def webrtc_licence(root):
-    """LICENSE.md of the pinned libwebrtc archive, from the copy that
+def webrtc_licence(root, key):
+    """LICENSE.md of the pinned libwebrtc archive `key`, from the copy that
     tools/webrtc.py verified into the cache. Nothing is downloaded here."""
     try:
-        library = webrtc.ensure(root, offline=True, announce=lambda _message: None)
+        library = webrtc.ensure(root, key=key, offline=True, announce=lambda _message: None)
     except webrtc.WebrtcError as error:
-        raise ReleaseError(f"no verified libwebrtc in the cache: {error}") from error
+        raise ReleaseError(f"no verified libwebrtc {key} in the cache: {error}") from error
     return Path(library) / "LICENSE.md"
 
 
-def append_notice(title, root=ROOT):
-    """Write the Windows notices: the shared notices plus the licence texts of
-    the prebuilt libwebrtc that the call worker links.
-
-    Both paths are fixed: the shared notices in `.local/release/notices` and
-    the licence file of the verified libwebrtc archive, whose SHA-256
-    tools/webrtc.py checks, so no copy is committed and no argument names a
-    file. It refuses a missing, empty or oversized licence file, and shared
-    notices that already hold the section. The Windows file is written again
-    on each run.
-    """
-    notices = root / NOTICES
-    source = webrtc_licence(root)
-    if not notices.is_file():
-        raise ReleaseError(f"third-party notices not found at {notices}")
+def _licence_text(source):
     if not source.is_file():
         raise ReleaseError(f"licence file not found at {source}")
     size = source.stat().st_size
@@ -398,20 +396,70 @@ def append_notice(title, root=ROOT):
         raise ReleaseError(f"licence file {source} is not UTF-8: {error}") from error
     if not text.strip():
         raise ReleaseError(f"licence file {source} is empty")
+    return text if text.endswith("\n") else text + "\n"
+
+
+def notice_keys(platform, keys=None):
+    """The libwebrtc archive keys whose licence texts the platform's bundle needs."""
+    if platform not in NOTICE_PLATFORMS:
+        raise ReleaseError(f"unknown platform {platform!r}; expected one of {', '.join(NOTICE_PLATFORMS)}")
+    spec = NOTICE_PLATFORMS[platform]
+    if not keys:
+        if spec["keys"] is None:
+            raise ReleaseError(f"{platform} needs --key (for example linux-x64 or linux-arm64)")
+        keys = spec["keys"]
+    keys = list(dict.fromkeys(keys))
+    for key in keys:
+        if not key.startswith(spec["prefix"]):
+            raise ReleaseError(f"libwebrtc key {key!r} does not belong to {platform}")
+    if platform == "macos" and set(keys) != set(spec["keys"]):
+        raise ReleaseError("the universal macOS worker links both mac-arm64 and mac-x64")
+    return keys
+
+
+def append_notice(title, root=ROOT, platform="windows", keys=None):
+    """Write the platform notices: the shared notices plus the licence texts
+    of the prebuilt libwebrtc archives that the call worker links.
+
+    The paths are fixed: the shared notices in `.local/release/notices` and
+    the licence file of each verified libwebrtc archive, whose SHA-256
+    tools/webrtc.py checks, so no copy is committed and no argument names a
+    file. It refuses a missing, empty or oversized licence file, and shared
+    notices that already hold the section. When several archives (macOS) have
+    identical licence texts, the text appears once and names every archive;
+    otherwise each archive gets its own section. The platform file is written
+    again on each run.
+    """
+    keys = notice_keys(platform, keys)
+    binary = NOTICE_PLATFORMS[platform]["binary"]
+    notices = root / NOTICES
+    texts = {key: _licence_text(webrtc_licence(root, key)) for key in keys}
+    if not notices.is_file():
+        raise ReleaseError(f"third-party notices not found at {notices}")
     existing = _read(notices).replace("\r\n", "\n")
     if f"\n{title}\n" in f"\n{existing}":
         raise ReleaseError(f"notices already contain {title!r}")
     if existing and not existing.endswith("\n"):
         existing += "\n"
-    if not text.endswith("\n"):
-        text += "\n"
-    section = (
-        f"\n{NOTICE_SEPARATOR}\n{title}\n{NOTICE_SEPARATOR}\n\n"
-        "Linked statically into persephone-call-worker.exe. "
-        "Licence texts as shipped in the pinned archive:\n\n"
-        f"{text}"
-    )
-    _write(root / WINDOWS_NOTICES, existing + section)
+    groups = {}
+    for key, text in texts.items():
+        groups.setdefault(text, []).append(key)
+    sections = []
+    for text, group in groups.items():
+        heading = title if len(groups) == 1 else f"{title} [{', '.join(group)}]"
+        if len(keys) == 1:
+            archives = ""
+        elif len(group) > 1:
+            archives = f" (archives {', '.join(group)}; identical licence texts)"
+        else:
+            archives = f" (archive {group[0]})"
+        sections.append(
+            f"\n{NOTICE_SEPARATOR}\n{heading}\n{NOTICE_SEPARATOR}\n\n"
+            f"Linked statically into {binary}{archives}. "
+            "Licence texts as shipped in the pinned archive:\n\n"
+            f"{text}"
+        )
+    _write(root / notices_path(platform), existing + "".join(sections))
 
 
 def main(argv=None, root=ROOT):
@@ -424,13 +472,21 @@ def main(argv=None, root=ROOT):
     bundle.add_argument("--notices", required=True, help="third-party notices file to bundle")
     bundle.add_argument("--output", required=True, help="JSON file for `cargo tauri --config`")
     append = commands.add_parser(
-        "append-notice", help=f"write {WINDOWS_NOTICES.as_posix()}: the notices plus the libwebrtc licence texts"
+        "append-notice", help="write THIRD-PARTY-NOTICES-<platform>.txt: the notices plus the libwebrtc licence texts"
+    )
+    append.add_argument("--platform", required=True, choices=sorted(NOTICE_PLATFORMS), help="bundle platform")
+    append.add_argument(
+        "--key",
+        action="append",
+        dest="keys",
+        help="libwebrtc archive key, such as linux-x64; repeat for several. "
+        "Default: win-x64 on windows, mac-arm64 and mac-x64 on macos; linux needs one",
     )
     append.add_argument("--title", help="section title; default from the tag in tools/webrtc.json")
     args = parser.parse_args(argv)
     try:
         if args.command == "append-notice":
-            append_notice(args.title or webrtc_title(root), root)
+            append_notice(args.title or webrtc_title(root), root, args.platform, args.keys)
             return 0
         if args.command == "bundle-config":
             config = bundle_config(root, args.notices, args.platform)

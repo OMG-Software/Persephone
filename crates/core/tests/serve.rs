@@ -586,9 +586,10 @@ fn answer<T: serde::de::DeserializeOwned>(core: &Core, call: Call) -> Result<T, 
     }
 }
 
-/// GIVEN a core with no call WHEN the page asks for the call status, leaves
-/// or mutes THEN each is answered with an idle status and no error, and
-/// nothing crosses but codes.
+/// GIVEN a core with no call WHEN the page asks for the call status, leaves,
+/// mutes, deafens or sets the volume THEN each is answered with an idle
+/// status and no error, and nothing crosses but codes; a volume over 100
+/// percent is refused.
 #[test]
 fn given_no_call_then_status_leave_and_mute_answer_idle() {
     use persephone_contracts::CallStatus;
@@ -598,6 +599,10 @@ fn given_no_call_then_status_leave_and_mute_answer_idle() {
         Call::CallLeave {},
         Call::CallMute { muted: true },
         Call::CallMute { muted: false },
+        Call::CallDeafen { deafened: true },
+        Call::CallDeafen { deafened: false },
+        Call::CallVolume { percent: 0 },
+        Call::CallVolume { percent: 100 },
     ] {
         assert_eq!(
             answer::<CallStatus>(&core, call.clone()),
@@ -605,6 +610,62 @@ fn given_no_call_then_status_leave_and_mute_answer_idle() {
             "{call:?}"
         );
     }
+    for percent in [101, 255] {
+        assert_eq!(
+            answer::<CallStatus>(&core, Call::CallVolume { percent }),
+            Err(ErrorCode::InvalidArgument)
+        );
+    }
+}
+
+/// GIVEN an open profile WHEN the page sets the call volume THEN it is saved
+/// in the call device record and kept when the devices are saved again, and
+/// the volume keeps the saved devices; no call is not an error.
+#[test]
+fn given_a_profile_when_the_call_volume_is_set_then_it_is_saved_with_the_devices() {
+    use persephone_contracts::CallStatus;
+    use persephone_core::calls::devices::{Selection, load};
+    let dir = tempfile::TempDir::new().unwrap();
+    let core = Core::default().with_session(common::open_session(dir.path()));
+    let saved = |core: &Core| -> Selection {
+        let lease = core.session().admit().unwrap();
+        lease.stores().block_on(load(lease.stores())).unwrap()
+    };
+    assert_eq!(saved(&core).volume(), 100, "no record is full volume");
+    assert_eq!(
+        answer::<CallStatus>(&core, Call::CallVolume { percent: 40 }),
+        Ok(CallStatus::idle())
+    );
+    assert_eq!(saved(&core).volume, Some(40));
+    assert_eq!(
+        answer::<serde_json::Value>(
+            &core,
+            Call::SetCallDevices {
+                recording: Some("mic".into()),
+                playout: None,
+                camera: None,
+            },
+        ),
+        Ok(serde_json::Value::Null)
+    );
+    let record = saved(&core);
+    assert_eq!(
+        record.volume,
+        Some(40),
+        "saving the devices keeps the volume"
+    );
+    assert_eq!(record.recording.as_deref(), Some("mic"));
+    assert_eq!(
+        answer::<CallStatus>(&core, Call::CallVolume { percent: 0 }),
+        Ok(CallStatus::idle())
+    );
+    let record = saved(&core);
+    assert_eq!(record.volume, Some(0));
+    assert_eq!(
+        record.recording.as_deref(),
+        Some("mic"),
+        "the volume keeps the devices"
+    );
 }
 
 /// GIVEN a malformed room ID WHEN the page asks for readiness or a join THEN
@@ -621,6 +682,11 @@ fn given_call_commands_then_room_ids_are_checked_and_synthetic_data_has_no_call(
             },
             Call::CallJoin {
                 room_id: room_id.into(),
+                video: false,
+            },
+            Call::CallJoin {
+                room_id: room_id.into(),
+                video: true,
             },
         ] {
             assert_eq!(
@@ -636,6 +702,7 @@ fn given_call_commands_then_room_ids_are_checked_and_synthetic_data_has_no_call(
         },
         Call::CallJoin {
             room_id: "!r:example.invalid".into(),
+            video: true,
         },
     ] {
         assert_eq!(
@@ -680,6 +747,7 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         &core,
         Call::CallJoin {
             room_id: room.into(),
+            video: true,
         },
     ) {
         // Where call containment is not implemented, the refusal comes first.
@@ -698,12 +766,16 @@ fn given_a_profile_then_call_commands_follow_the_session() {
         Call::CallStatus {},
         Call::CallLeave {},
         Call::CallMute { muted: true },
+        Call::CallDeafen { deafened: true },
+        Call::CallVolume { percent: 50 },
         Call::CallReadiness {
             room_id: room.into(),
         },
         Call::CallJoin {
             room_id: room.into(),
+            video: false,
         },
+        Call::CallCamera { on: true },
     ] {
         assert_eq!(
             answer::<serde_json::Value>(&core, call.clone()),
@@ -711,4 +783,157 @@ fn given_a_profile_then_call_commands_follow_the_session() {
             "{call:?}"
         );
     }
+}
+
+/// GIVEN no call WHEN the page turns the camera on or off THEN the core
+/// refuses it as `unavailable`: there is no connected call to change.
+#[test]
+fn given_no_call_then_the_camera_command_is_refused() {
+    let core = Core::default();
+    for on in [true, false] {
+        assert_eq!(
+            answer::<serde_json::Value>(&core, Call::CallCamera { on }),
+            Err(ErrorCode::Unavailable),
+            "{on}"
+        );
+    }
+}
+
+/// GIVEN video frame requests with and without a call WHEN served THEN every
+/// tile below six answers `ok(null)` (no picture), a tile, `after` or
+/// `stream` out of bounds is an invalid argument, and the loop stays in step
+/// for the next request.
+#[test]
+fn given_video_frame_requests_then_no_picture_is_null_and_bad_bounds_are_refused() {
+    let mut wire = Vec::new();
+    let frame = |tile, after, stream| Call::CallVideoFrame {
+        tile,
+        after,
+        stream,
+    };
+    let calls = [
+        (1, frame(0, 0, 0)),
+        (2, frame(5, 7, 3)),
+        (3, frame(6, 0, 0)),
+        (4, frame(255, 0, 0)),
+        (5, frame(1, 9_007_199_254_740_992, 0)),
+        (6, frame(1, 9_007_199_254_740_991, 9_007_199_254_740_991)),
+        (8, frame(1, 0, 9_007_199_254_740_992)),
+    ];
+    for (id, request) in calls {
+        send(&mut wire, &call(id, request)).unwrap();
+    }
+    send(&mut wire, &call(7, Call::AppStatus {})).unwrap();
+    let mut output = Vec::new();
+    assert_eq!(serve(wire, &mut output), ServeEnd::UiClosed);
+    let outcomes: Vec<(u32, Outcome)> = replies(output)
+        .into_iter()
+        .map(|reply| (reply.id, reply.outcome))
+        .collect();
+    assert_eq!(outcomes[0], (1, Outcome::Ok(serde_json::Value::Null)));
+    assert_eq!(outcomes[1], (2, Outcome::Ok(serde_json::Value::Null)));
+    assert_eq!(outcomes[2], (3, Outcome::Error(ErrorCode::InvalidArgument)));
+    assert_eq!(outcomes[3], (4, Outcome::Error(ErrorCode::InvalidArgument)));
+    assert_eq!(outcomes[4], (5, Outcome::Error(ErrorCode::InvalidArgument)));
+    assert_eq!(outcomes[5], (6, Outcome::Ok(serde_json::Value::Null)));
+    assert_eq!(outcomes[6], (8, Outcome::Error(ErrorCode::InvalidArgument)));
+    assert!(matches!(outcomes[7], (7, Outcome::Ok(_))));
+}
+
+/// GIVEN a camera ID that is empty, too long or has a control character WHEN
+/// the page saves the call devices THEN the core refuses it before any
+/// storage; a valid or absent camera passes the argument check.
+#[test]
+fn given_a_bad_camera_id_then_saving_the_call_devices_is_refused() {
+    let core = Core::default();
+    let save = |camera: Option<String>| {
+        answer::<serde_json::Value>(
+            &core,
+            Call::SetCallDevices {
+                recording: None,
+                playout: None,
+                camera,
+            },
+        )
+    };
+    for bad in [
+        String::new(),
+        "c".repeat(513),
+        "a
+b"
+        .to_owned(),
+    ] {
+        assert_eq!(save(Some(bad.clone())), Err(ErrorCode::InvalidArgument));
+    }
+    // Argument checks pass; without a profile the save is `unavailable`.
+    for fine in [None, Some("cam".to_owned()), Some("c".repeat(512))] {
+        assert_eq!(save(fine), Err(ErrorCode::Unavailable));
+    }
+}
+
+/// GIVEN an open profile without a passphrase WHEN the UI sends
+/// `set_profile_passphrase` THEN the reply is a status at once, the core's own
+/// prompts (not the UI) supply the passphrase, and the change arrives as a
+/// security event and a status that reports the passphrase on.
+#[test]
+fn given_a_set_profile_passphrase_call_then_the_core_asks_and_announces_the_result() {
+    use persephone_contracts::{SecurityOperation, SecurityStatus};
+    use std::io::{PipeReader, PipeWriter};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let prompts = common::Script::new([]);
+    let core = Core::default()
+        .with_credentials(prompts.clone())
+        .with_session(common::open_session(dir.path()));
+    let (from_ui, mut to_core): (PipeReader, PipeWriter) = std::io::pipe().unwrap();
+    let (mut from_core, to_ui) = std::io::pipe().unwrap();
+    let budgets = ResourceBudgets::default();
+    let mut ask = move |id: u32, call: Call| -> (SecurityStatus, Vec<Event>) {
+        send(&mut to_core, &self::call(id, call)).unwrap();
+        let mut events = Vec::new();
+        loop {
+            match receive::<_, CoreMessage>(&mut from_core, &budgets).unwrap() {
+                CoreMessage::Event(event) => events.push(event),
+                CoreMessage::Reply(reply) => {
+                    assert_eq!(reply.id, id);
+                    let Outcome::Ok(value) = reply.outcome else {
+                        panic!("{:?}", reply.outcome);
+                    };
+                    return (serde_json::from_value(value).unwrap(), events);
+                }
+            }
+        }
+    };
+    std::thread::scope(|scope| {
+        let server = scope.spawn(|| persephone_core::serve(&core, from_ui, to_ui));
+        let (status, mut events) = ask(1, Call::SecurityStatus {});
+        assert!(!status.profile_passphrase);
+        let (status, more) = ask(2, Call::SetProfilePassphrase { on: true });
+        events.extend(more);
+        assert!(status.operation != SecurityOperation::Working);
+        let mut id = 3;
+        loop {
+            let (status, more) = ask(id, Call::SecurityStatus {});
+            events.extend(more);
+            if status.operation == SecurityOperation::Idle {
+                assert!(status.profile_passphrase);
+                assert_eq!(status.error, None);
+                break;
+            }
+            assert!(id < 2000, "the switch never finished");
+            id += 1;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(events.contains(&Event::SecurityChanged {}), "{events:?}");
+        drop(ask);
+        assert_eq!(server.join().unwrap(), ServeEnd::UiClosed);
+    });
+    assert_eq!(
+        prompts.seen(),
+        ["NewPassphrase(TurnOn)", "NewPassphrase(Confirm)"]
+    );
+    let (state, _) = core
+        .session()
+        .lock(std::time::Duration::from_secs(30), || {});
+    assert_eq!(state, persephone_contracts::StoreState::Locked);
 }

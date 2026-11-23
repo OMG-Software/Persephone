@@ -38,6 +38,7 @@
 - [ADR-0035](adr/0035-keep-favourites-and-room-sections-local-to-the-profile.md) (proposed): local encrypted favourites and named sections, without Matrix room tags.
 - [ADR-0037](adr/0037-browse-public-room-directories-and-join-only-listed-rooms.md) (proposed): browse a public room directory through the homeserver, and join only rooms a listed page offered as open to anyone.
 - [ADR-0043](adr/0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md) (proposed): audio calls through MatrixRTC and a LiveKit SFU, with WebRTC in a contained call worker that gets only the SFU token, TURN credentials and frame keys; direct connection with a proxy only after confirmation.
+- [ADR-0050](adr/0050-make-the-profile-passphrase-optional-and-off-by-default.md): the profile passphrase is optional and off by default; the OS vault alone wraps the store key until the user turns the passphrase on, and Lock shows only while it is on.
 
 ## Evidence
 
@@ -66,6 +67,7 @@ Run records and supporting artifacts are grouped under [evidence](evidence). The
 - [Injected DLL hardening](evidence/injected-dll-hardening.md): on Windows, the core and UI refuse global-hook and other extension-point DLLs and images not signed through Microsoft, and later also images from network shares or labelled low integrity; the demo app runs with the first two policies; WebView2 processes are not covered.
 - [Third-party module report](evidence/third-party-module-report.md): on Windows, the core lists other code loaded into the core, UI and WebView2 processes, checks signatures offline, and shows it in Settings > Security with a notice until reviewed; automated checks pass, the panel was not seen live.
 - [Capture protection](evidence/capture-protection.md): on Windows, the UI excludes its main window from screen capture by default, with a Settings > Security switch per account; checks and a live display-affinity read are recorded.
+- [Screen capture in the call worker (Windows)](evidence/screen-share-windows.md): Windows.Graphics.Capture fails with access denied inside the call worker's AppContainer with every tried capability set, so Windows reports screen sharing as unavailable (ADR-0053).
 - [Sign-out](evidence/sign-out.md): remote revocation, key deleted first, crash-safe wipe of the local profile; live runs on Merovingian and Synapse.
 - [Encryption setup](evidence/encryption-setup.md): identity-based key sharing, cross-signing and recovery set up from the page with secrets only in the core's windows, recovery-key verification; live runs on Merovingian and Synapse.
 - [Encrypted sending](evidence/encrypted-sending.md): outbox with per-room order and same-transaction retries, consent before unencrypted sends; live two-account runs on Merovingian and Synapse with an unsigned-device control.

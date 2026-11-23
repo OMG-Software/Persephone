@@ -63,8 +63,10 @@ lists recorded results and open gates.
 
 On Windows, the app can do these things today:
 
-- Keep an encrypted local profile that opens only with your passphrase
-  ([ADR-0006](docs/adr/0006-require-an-unlock-secret-for-the-local-profile.md)).
+- Keep an encrypted local profile. The profile opens with no prompt by default, bound to
+  your computer account. You can turn on a passphrase in Settings, Security
+  ([ADR-0006](docs/adr/0006-require-an-unlock-secret-for-the-local-profile.md),
+  [ADR-0050](docs/adr/0050-make-the-profile-passphrase-optional-and-off-by-default.md)).
 - Sign in with a password through the core's own native prompt, and sign out.
   Sign-out revokes the session and deletes the local profile. Source also
   includes `.well-known` discovery and browser-based OIDC sign-in. No live

@@ -25,6 +25,8 @@
 * [0045 - Exclude the main window from screen capture by default](0045-exclude-the-main-window-from-screen-capture-by-default.md)
 * [0046 - Do not block same-user attach to the Linux core](0046-do-not-block-same-user-attach-to-the-linux-core.md)
 * [0047 - Report loaded code on Linux and macOS](0047-report-loaded-code-on-linux-and-macos.md)
+* [0050 - Make the profile passphrase optional and off by default](0050-make-the-profile-passphrase-optional-and-off-by-default.md)
+* [0056 - Get call tokens from the homeserver when it issues them](0056-get-call-tokens-from-the-homeserver-when-it-issues-them.md)
 
 ## Proposed Records
 
@@ -54,6 +56,14 @@
 * [0037 - Browse public room directories and join only listed rooms](0037-browse-public-room-directories-and-join-only-listed-rooms.md)
 * [0041 - Load room pictures in the core, on request or when turned on](0041-load-room-pictures-in-the-core-on-request-or-when-turned-on.md)
 * [0043 - Make audio calls through MatrixRTC in a contained call worker](0043-make-audio-calls-through-matrixrtc-in-a-contained-call-worker.md)
+* [0048 - Add camera video to calls in the call worker](0048-add-camera-video-to-calls-in-the-call-worker.md)
+* [0049 - Contain the call worker on Linux and macOS](0049-contain-the-call-worker-on-linux-and-macos.md)
+* [0051 - Tier CI by event and run the full matrix in the merge queue](0051-tier-ci-by-event-and-run-the-full-matrix-in-the-merge-queue.md)
+* [0052 - Ring for incoming calls and show active calls](0052-ring-for-incoming-calls-and-show-active-calls.md)
+* [0053 - Share the screen in calls on Linux and Windows](0053-share-the-screen-in-calls-on-linux-and-windows.md)
+* [0054 - Connect to call members on other SFUs](0054-connect-to-call-members-on-other-sfus.md)
+* [0055 - Add deafen and a call volume to calls](0055-add-deafen-and-a-call-volume-to-calls.md)
+* [0057 - Share presence at most once a second and show contacts' presence](0057-share-presence-at-most-once-a-second-and-show-contacts-presence.md)
 
 ## Superseded Records
 

@@ -1,6 +1,6 @@
 [package]
 name = "persephone-core"
-version = "0.0.1"
+version = "0.2.0"
 description = "Key-holding core process: application entry point; starts and serves the keyless UI (ADR-0004)"
 edition.workspace = true
 license.workspace = true
@@ -42,6 +42,10 @@ matrix-sdk-sqlite = { version = "=0.19.1", features = ["bundled", "crypto-store"
 # socks: the profile's SOCKS5 proxy (ADR-0028), through hyper-util's proxy
 # connector, which reqwest already builds; no other crate.
 reqwest = { version = "=0.13.5", default-features = false, features = ["socks"] }
+# The MSC4195 LiveKit participant identity, a SHA-256 hash (ADR-0056). The
+# version that matrix-sdk, matrix-sdk-crypto and vodozemac already use; no
+# default features.
+sha2 = { version = "=0.11.1", default-features = false }
 # net and io-util: the OAuth sign-in's loopback redirect (ADR-0030).
 tokio = { version = "=1.53.3", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "=2.5.8"

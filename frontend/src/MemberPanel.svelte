@@ -66,15 +66,21 @@
   // panel says the load failed and offers Try again.
   const BUSY_TRIES = 5;
   const DELAY_MS = 1000;
+  // While open, the panel lists the members again this often. The core
+  // looks up members' presence only while their listing is recent
+  // (ADR-0057), so a closed panel stops those lookups.
+  const LISTING_MS = 60_000;
   let request = 0;
   let active = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let loaded = false;
   let pending = false;
   let busyTries = 0;
+  const listing = setInterval(schedule, LISTING_MS);
   onDestroy(() => {
     active = false;
     clearTimeout(timer);
+    clearInterval(listing);
   });
 
   const isBusy = (reason: unknown) => String(reason) === 'limit_exceeded';

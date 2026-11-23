@@ -18,7 +18,8 @@ pub const MAX_PIXELS: u64 = 16_000_000;
 pub const RGBA_BYTES_PER_PIXEL: u64 = 4;
 
 const FRAME_HEADER_LEN: usize = 17;
-const CONTROL_FRAME_LIMIT: u64 = 128 * 1024;
+/// The largest control (JSON) frame body.
+pub const CONTROL_FRAME_LIMIT: u64 = 128 * 1024;
 const ENCODED_FRAME_LIMIT: u64 = 20 * MIB;
 const PIXEL_FRAME_LIMIT: u64 = 64 * MIB;
 

@@ -12,9 +12,18 @@
 use crate::{
     LaunchError, WorkerPolicy,
     launch::{Launcher, Spawned},
-    unix::{self, Limits, UnixWorker},
+    unix::{self, Limits, LongLivedWorker, StartedCallWorker, UnixWorker},
 };
-use std::{ffi::c_uint, fs, io, os::unix::process::CommandExt, path::Path};
+use std::{
+    env,
+    ffi::{OsString, c_uint},
+    fs, io,
+    os::{
+        fd::{AsFd, AsRawFd, BorrowedFd},
+        unix::{net::UnixStream, process::CommandExt},
+    },
+    path::Path,
+};
 
 /// The Linux containment: nothing to create, since the worker applies its
 /// own seccomp filter. It exists so that every OS has the same API.
@@ -108,6 +117,228 @@ fn cloexec_above_stderr() -> io::Result<()> {
         return Ok(());
     }
     unix::cloexec_each_above_stderr()
+}
+
+/// The address-space limit of the call worker (ADR-0049): a bound, not the
+/// 512 MiB of the Windows Job, because libwebrtc reserves much more address
+/// space than it uses.
+const CALL_ADDRESS_SPACE: u64 = 4 * 1024 * 1024 * 1024;
+
+/// The largest file the call worker may grow (`RLIMIT_FSIZE`). It is not 0:
+/// the sound server's client library sizes its shared-memory pool, a memfd
+/// of 64 MiB, with `ftruncate`, and Linux counts memfd and `/dev/shm` files
+/// against this limit. Above the limit the kernel sends `SIGXFSZ`, which
+/// killed the worker before it reached the sound server, so no call and no
+/// device list worked. The worker's Landlock table has no writable path
+/// (`/dev/shm` is read only), so the files it grows are memfds, which go
+/// away with it.
+const CALL_FILE_SIZE: u64 = 256 * 1024 * 1024;
+
+/// Which camera path the call worker may use (ADR-0049). The core decides it
+/// before it starts the worker; the worker gets it as one argument.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallCamera {
+    /// The PipeWire remote the core sends over the camera channel.
+    Portal,
+    /// The worker opens `/dev/video*` itself.
+    V4l2,
+    /// No camera.
+    None,
+}
+
+impl CallCamera {
+    /// The worker's one command-line argument.
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Portal => "--camera=portal",
+            Self::V4l2 => "--camera=v4l2",
+            Self::None => "--camera=none",
+        }
+    }
+}
+
+/// The sound server devices a call opens by name (ADR-0049): a source
+/// (microphone) and a sink (speaker). `None` keeps the server's default.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CallSound {
+    pub source: Option<String>,
+    pub sink: Option<String>,
+}
+
+/// The longest sound server name (`PA_NAME_MAX`).
+const MAX_SOUND_NAME_BYTES: usize = 128;
+
+/// The sound server's name rule (ASCII letters, digits, `.`, `-`, `_`) and
+/// `:`, at most [`MAX_SOUND_NAME_BYTES`]. The same rule as
+/// `persephone_call_protocol::valid_pulse_name`, checked again here because
+/// the value goes into the worker's environment.
+fn valid_sound_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_SOUND_NAME_BYTES
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
+/// The environment of the call worker: the sound server's socket directory
+/// and the home directory (its cookie), each only when it is an absolute
+/// path, `LANG=C`, and the chosen sound server devices as `PULSE_SOURCE`
+/// and `PULSE_SINK`. A device name that breaks the name rule refuses the
+/// launch (`None`). There is no `DBUS_SESSION_BUS_ADDRESS`.
+fn call_environment(
+    mut get: impl FnMut(&str) -> Option<OsString>,
+    sound: &CallSound,
+) -> Option<Vec<(&'static str, OsString)>> {
+    let mut vars = Vec::new();
+    for name in ["XDG_RUNTIME_DIR", "HOME"] {
+        if let Some(value) = get(name).filter(|value| Path::new(value).is_absolute()) {
+            vars.push((name, value));
+        }
+    }
+    vars.push(("LANG", OsString::from("C")));
+    for (name, value) in [("PULSE_SOURCE", &sound.source), ("PULSE_SINK", &sound.sink)] {
+        if let Some(value) = value {
+            if !valid_sound_name(value) {
+                return None;
+            }
+            vars.push((name, OsString::from(value)));
+        }
+    }
+    Some(vars)
+}
+
+/// Starts the call worker with the Linux launch rules of ADR-0049: the
+/// media worker's launch (new session, parent-death `SIGKILL`,
+/// `no_new_privs`, descriptors above 2 closed at exec) with the call limits,
+/// the environment of [`call_environment`], the `--camera` argument and the
+/// camera channel as descriptor 3. The worker contains itself and reports
+/// `Ready`; the caller then calls `confirm_contained` on the returned worker
+/// before it sends any input. A sound device name that breaks the name rule
+/// starts nothing (`EINVAL`).
+pub fn start_call_worker(
+    _profile: &SeccompContainment,
+    exe: &Path,
+    camera: CallCamera,
+    sound: &CallSound,
+) -> Result<StartedCallWorker, LaunchError> {
+    let vars = call_environment(|name| env::var_os(name), sound).ok_or(LaunchError::Api {
+        call: "sound device name",
+        code: libc::EINVAL as u32,
+    })?;
+    spawn_call(exe, &[camera.argument()], &vars)
+}
+
+fn spawn_call(
+    program: &Path,
+    args: &[&str],
+    vars: &[(&'static str, OsString)],
+) -> Result<StartedCallWorker, LaunchError> {
+    let mut command = unix::command(program)?;
+    command.args(args);
+    for (name, value) in vars {
+        command.env(name, value);
+    }
+    let (broker_end, child_end) = UnixStream::pair().map_err(|e| unix::error("socketpair", e))?;
+    let child_fd = child_end.as_raw_fd();
+    // SAFETY: getpid takes no arguments.
+    let broker = unsafe { libc::getpid() };
+    // SAFETY: the closure runs between fork and exec and makes only system
+    // calls; it allocates nothing.
+    unsafe {
+        command.pre_exec(move || call_child_setup(broker, child_fd));
+    }
+    let spawned = unix::spawn(command, confirm)?;
+    // The worker has its own copy; this one must not stay open here.
+    drop(child_end);
+    Ok(StartedCallWorker {
+        worker: LongLivedWorker::new(spawned.worker),
+        stdin: spawned.stdin,
+        stdout: spawned.stdout,
+        camera: Some(broker_end),
+    })
+}
+
+/// Runs in the child between fork and exec. Async-signal-safe.
+fn call_child_setup(broker: libc::pid_t, child_fd: libc::c_int) -> io::Result<()> {
+    unix::new_session()?;
+    cloexec_above_stderr()?;
+    prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong)?;
+    // SAFETY: getppid takes no arguments.
+    if unsafe { libc::getppid() } != broker {
+        return Err(io::Error::from_raw_os_error(libc::ESRCH));
+    }
+    prctl(libc::PR_SET_NO_NEW_PRIVS, 1)?;
+    // After the close-on-exec marking, so that only descriptor 3 survives.
+    unix::inherit_as_fd3(child_fd)?;
+    unix::set_call_limits(Some(CALL_ADDRESS_SPACE), CALL_FILE_SIZE)
+}
+
+/// The data byte of a camera descriptor on the camera channel (ADR-0053).
+pub const KIND_CAMERA: u8 = b'c';
+/// The data byte of a screen share descriptor on the camera channel.
+pub const KIND_SCREEN: u8 = b's';
+
+/// Sends the camera portal's remote `fd` to the worker over the camera
+/// channel: one descriptor (`SCM_RIGHTS`) and one data byte, `c`. It never
+/// blocks: a full channel is `WouldBlock`.
+pub fn send_camera_fd(channel: &UnixStream, fd: BorrowedFd<'_>) -> io::Result<()> {
+    send_fd(channel, fd, KIND_CAMERA)
+}
+
+/// Sends the screen cast portal's remote `fd` to the worker over the camera
+/// channel with the data byte `s` (ADR-0053). The worker keeps at most four
+/// of each kind; any other byte closes its channel.
+pub fn send_screen_fd(channel: &UnixStream, fd: BorrowedFd<'_>) -> io::Result<()> {
+    send_fd(channel, fd, KIND_SCREEN)
+}
+
+fn send_fd(channel: &UnixStream, fd: BorrowedFd<'_>, kind: u8) -> io::Result<()> {
+    use std::mem::{size_of, zeroed};
+    let byte = [kind; 1];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_ptr() as *mut _,
+        iov_len: byte.len(),
+    };
+    // An array of u64 aligns the buffer for `cmsghdr`; 32 bytes hold one
+    // descriptor on every Linux ABI.
+    let mut control = [0_u64; 4];
+    let raw = fd.as_raw_fd();
+    // SAFETY: msghdr is plain data; zero is a valid empty value.
+    let mut message: libc::msghdr = unsafe { zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    // SAFETY: CMSG_SPACE and CMSG_LEN are pure size computations.
+    message.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as _;
+    // SAFETY: the control buffer holds one `cmsghdr` and one descriptor.
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as _;
+        std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>(), raw);
+    }
+    loop {
+        // SAFETY: `message` points at buffers that outlive the call.
+        let sent = unsafe {
+            libc::sendmsg(
+                channel.as_fd().as_raw_fd(),
+                &message,
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if sent == 1 {
+            return Ok(());
+        }
+        let error = if sent < 0 {
+            io::Error::last_os_error()
+        } else {
+            io::Error::from(io::ErrorKind::WriteZero)
+        };
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 /// The `/proc/<pid>/status` fields that show the worker's containment.
@@ -256,6 +487,254 @@ mod tests {
         assert_eq!(run.stats.exit_code, 128 + libc::SIGKILL as u32);
         assert!(run.stats.elapsed < Duration::from_secs(5));
         assert_eq!(budgets.aggregate_used(), 0);
+    }
+
+    #[test]
+    fn given_camera_modes_then_each_has_its_one_argument() {
+        assert_eq!(CallCamera::Portal.argument(), "--camera=portal");
+        assert_eq!(CallCamera::V4l2.argument(), "--camera=v4l2");
+        assert_eq!(CallCamera::None.argument(), "--camera=none");
+    }
+
+    /// GIVEN a broker environment WHEN the call worker's is built THEN only
+    /// absolute `XDG_RUNTIME_DIR` and `HOME` and `LANG=C` pass.
+    #[test]
+    fn given_broker_environment_then_the_call_worker_gets_an_allowlist() {
+        let vars = call_environment(
+            |name| match name {
+                "XDG_RUNTIME_DIR" => Some("/run/user/1000".into()),
+                "HOME" => Some("/home/a".into()),
+                // The broker's own sound settings never pass through.
+                _ => Some("leak".into()),
+            },
+            &CallSound::default(),
+        );
+        assert_eq!(
+            vars,
+            Some(vec![
+                ("XDG_RUNTIME_DIR", OsString::from("/run/user/1000")),
+                ("HOME", OsString::from("/home/a")),
+                ("LANG", OsString::from("C")),
+            ])
+        );
+        // Relative or missing values are dropped.
+        let vars = call_environment(
+            |name| (name == "HOME").then(|| "relative".into()),
+            &CallSound::default(),
+        );
+        assert_eq!(vars, Some(vec![("LANG", OsString::from("C"))]));
+    }
+
+    /// GIVEN chosen sound server devices WHEN the environment is built THEN
+    /// each name is set as `PULSE_SOURCE` or `PULSE_SINK`.
+    #[test]
+    fn given_sound_devices_then_the_worker_gets_their_names() {
+        let sound = CallSound {
+            source: Some("alsa_input.usb-Mic_01-00.analog-stereo".into()),
+            sink: Some("vsink".into()),
+        };
+        assert_eq!(
+            call_environment(|_| None, &sound),
+            Some(vec![
+                ("LANG", OsString::from("C")),
+                (
+                    "PULSE_SOURCE",
+                    OsString::from("alsa_input.usb-Mic_01-00.analog-stereo")
+                ),
+                ("PULSE_SINK", OsString::from("vsink")),
+            ])
+        );
+        let sink_only = CallSound {
+            source: None,
+            sink: Some("vsink".into()),
+        };
+        assert_eq!(
+            call_environment(|_| None, &sink_only),
+            Some(vec![
+                ("LANG", OsString::from("C")),
+                ("PULSE_SINK", OsString::from("vsink")),
+            ])
+        );
+    }
+
+    /// GIVEN a sound device name that breaks the name rule WHEN the
+    /// environment is built or the worker starts THEN the launch is refused,
+    /// not cleaned up.
+    #[test]
+    fn given_an_unsafe_sound_name_then_the_launch_is_refused() {
+        let long = "a".repeat(MAX_SOUND_NAME_BYTES + 1);
+        for bad in [
+            "",
+            "a b",
+            "x\nPULSE_SERVER=tcp:evil",
+            "../pulse",
+            "tcp:host/x",
+            "name\u{0}",
+            long.as_str(),
+        ] {
+            let sink = CallSound {
+                source: None,
+                sink: Some(bad.to_owned()),
+            };
+            assert_eq!(call_environment(|_| None, &sink), None, "{bad:?}");
+            let source = CallSound {
+                source: Some(bad.to_owned()),
+                sink: None,
+            };
+            assert_eq!(call_environment(|_| None, &source), None, "{bad:?}");
+        }
+        assert!(valid_sound_name(&"a".repeat(MAX_SOUND_NAME_BYTES)));
+        let refused = start_call_worker(
+            &SeccompContainment::create_or_open("").unwrap(),
+            Path::new("/bin/true"),
+            CallCamera::None,
+            &CallSound {
+                source: Some("a b".into()),
+                sink: None,
+            },
+        );
+        assert!(matches!(
+            refused,
+            Err(LaunchError::Api {
+                code,
+                ..
+            }) if code == libc::EINVAL as u32
+        ));
+    }
+
+    fn run_sh(script: &str, vars: &[(&'static str, OsString)]) -> (String, StartedCallWorker) {
+        use std::io::Read;
+        let mut started = spawn_call(Path::new("/bin/sh"), &["-c", script], vars).unwrap();
+        let mut out = String::new();
+        started.stdout.read_to_string(&mut out).unwrap();
+        (out, started)
+    }
+
+    /// GIVEN a launched call worker WHEN it lists itself THEN descriptor 3 is
+    /// a socket, no other descriptor above 2 is open, only the allowlisted
+    /// environment is set, and the limits are the call limits.
+    #[test]
+    fn given_a_launched_call_worker_then_it_has_only_the_channel_and_the_call_limits() {
+        let script = "readlink /proc/self/fd/3; ls /proc/self/fd | tr '\n' ' '; echo;                       env | sort | tr '\n' ' '; echo;                       grep -E 'Max (address space|file size|core file size|open files|processes)'                       /proc/self/limits";
+        let vars = [
+            ("HOME", OsString::from("/home/x")),
+            ("LANG", OsString::from("C")),
+        ];
+        let (out, started) = run_sh(script, &vars);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("socket:"), "{out}");
+        // 0 1 2 3, plus the descriptor `ls` opens for /proc/self/fd.
+        let fds: Vec<&str> = lines[1].split_whitespace().collect();
+        assert!(fds.starts_with(&["0", "1", "2", "3"]), "{out}");
+        assert!(fds.len() <= 5, "{out}");
+        assert!(
+            lines[2].contains("HOME=/home/x") && lines[2].contains("LANG=C"),
+            "{out}"
+        );
+        assert!(!lines[2].contains("PATH="), "{out}");
+        // "Max <name> <soft> <hard> <unit>": the soft limit is the first
+        // number or word after the name.
+        let soft = |name: &str| -> String {
+            let line = lines[3..]
+                .iter()
+                .find(|line| line.contains(name))
+                .expect(name);
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let at = words
+                .iter()
+                .position(|word| word.chars().all(|c| c.is_ascii_digit()) || *word == "unlimited");
+            words[at.expect(name)].to_owned()
+        };
+        assert_eq!(soft("address space"), "4294967296", "{out}");
+        // "Max file size" is in bytes.
+        assert_eq!(soft("file size"), CALL_FILE_SIZE.to_string(), "{out}");
+        assert_eq!(soft("core file size"), "0", "{out}");
+        assert_eq!(soft("open files"), "256", "{out}");
+        // The process limit is the broker's, not 0: the call worker starts
+        // threads.
+        assert_ne!(soft("processes"), "0", "{out}");
+        drop(started);
+    }
+
+    /// GIVEN a launched call worker WHEN it grows a file to the size of the
+    /// sound server client's shared-memory pool (64 MiB, as libpulse does
+    /// with `ftruncate`) THEN it lives; WHEN it grows one past the call
+    /// limit THEN the kernel refuses it. With a limit of 0 the first step
+    /// killed the worker with SIGXFSZ (Linux Mint 22.3, pipewire-pulse).
+    #[test]
+    fn given_a_call_worker_then_the_sound_pool_fits_and_larger_files_do_not() {
+        let pool = 64 * 1024 * 1024;
+        let over = CALL_FILE_SIZE + 1;
+        // Sparse files: nothing is written. Each step reports its status;
+        // a signal ends `truncate` with 128 plus the signal number.
+        let script = format!(
+            "f=$(mktemp) || exit 9; \
+             truncate -s {pool} \"$f\"; echo pool=$?; \
+             truncate -s {over} \"$f\"; echo over=$?; \
+             rm -f \"$f\""
+        );
+        let (out, started) = run_sh(&script, &[]);
+        assert!(out.contains("pool=0"), "{out}");
+        assert!(!out.contains("over=0"), "{out}");
+        drop(started);
+    }
+
+    /// GIVEN a launched worker that is not sandboxed WHEN it is checked THEN
+    /// it is not contained, and killing it ends it.
+    #[test]
+    fn given_a_call_worker_without_seccomp_then_it_is_not_contained_and_can_be_killed() {
+        let mut started =
+            spawn_call(Path::new("/bin/sh"), &["-c", "exec /bin/sleep 30"], &[]).unwrap();
+        assert!(!started.worker.confirm_contained());
+        started.worker.kill();
+        assert!(started.worker.wait_exit(Duration::from_secs(5)));
+        drop(started.camera.take());
+    }
+
+    /// GIVEN the broker's end of the channel WHEN a descriptor is sent THEN
+    /// the worker's end receives one byte and one descriptor.
+    #[test]
+    fn given_a_descriptor_when_sent_then_the_other_end_gets_one_byte_and_one_descriptor() {
+        let (broker, worker) = UnixStream::pair().unwrap();
+        let file = fs::File::open("/dev/null").unwrap();
+        send_camera_fd(&broker, file.as_fd()).unwrap();
+        send_screen_fd(&broker, file.as_fd()).unwrap();
+        // One byte arrives.
+        let mut byte = [0_u8; 1];
+        // SAFETY: recvmsg with a one-byte buffer and a control buffer.
+        let mut control = [0_u64; 4];
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = 32;
+        let got = unsafe { libc::recvmsg(worker.as_raw_fd(), &mut message, 0) };
+        assert_eq!(got, 1);
+        assert_eq!(byte, [b'c'], "a camera descriptor carries the byte c");
+        // SAFETY: the buffer was filled by recvmsg.
+        let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+        assert!(!header.is_null());
+        assert_eq!(unsafe { (*header).cmsg_type }, libc::SCM_RIGHTS);
+        // The screen descriptor came second, with the byte s.
+        let mut second = [0_u8; 1];
+        let mut control = [0_u64; 4];
+        let mut iov = libc::iovec {
+            iov_base: second.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = 32;
+        let got = unsafe { libc::recvmsg(worker.as_raw_fd(), &mut message, 0) };
+        assert_eq!(got, 1);
+        assert_eq!(second, [b's'], "a screen descriptor carries the byte s");
+        drop(worker);
     }
 
     #[test]

@@ -2,7 +2,6 @@
   import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import LevelPicker from './LevelPicker.svelte';
-  import { leaveAfterDraftFlush } from './roomLeave';
   import { avatarColour, initials, localpart, looksLikeUserId } from './people';
   import {
     HISTORY,
@@ -45,8 +44,6 @@
     roomId,
     roomName,
     changes,
-    onleft,
-    beforeleave = async () => true,
     onclose
   }: {
     roomId: string;
@@ -55,8 +52,6 @@
     // Counts change notifications for the room; each one reads the settings
     // again, since the device's copy of the room's state follows the sync.
     changes: number;
-    onleft: () => void;
-    beforeleave?: () => Promise<boolean>;
     onclose: () => void;
   } = $props();
 
@@ -86,7 +81,6 @@
   let settings = $state<RoomSettings | null>(null);
   let loadFailure = $state<string | null>(null);
   let busy = $state(false);
-  let active = true;
   let failure = $state<string | null>(null);
   let done = $state<string | null>(null);
   // A change that needs a yes first.
@@ -234,7 +228,6 @@
     dialog?.showModal();
     loadSettings();
     return () => {
-      active = false;
       dialog?.close();
       previous?.focus();
     };
@@ -265,7 +258,7 @@
     if (next === 'security') loadSecurity();
   }
 
-  /** Apply one room change; leaving first passes the unsaved-draft gate. */
+  /** Apply one room change. Leaving is in the room menu, not here. */
   async function apply(change: RoomChange, success = 'Saved.') {
     if (busy) return;
     busy = true;
@@ -273,15 +266,6 @@
     done = null;
     confirming = null;
     try {
-      if (change.kind === 'leave') {
-        const left = await leaveAfterDraftFlush(beforeleave, () => changeRoom(roomId, change), () => active);
-        if (!left) {
-          if (active) failure = 'The room was not left. Close room settings, then retry or discard the unsaved draft.';
-          return;
-        }
-        onleft();
-        return;
-      }
       await changeRoom(roomId, change);
       if (settings) settings = applyLocally(settings, change);
       if (members) members = applyToMembers(members, change);
@@ -626,28 +610,6 @@
             >
           </form>
           <p class="note">New addresses must be on your own homeserver.</p>
-        </section>
-        <section class="panel" aria-labelledby="leave-heading">
-          <h4 id="leave-heading">Leave room</h4>
-          <p>
-            You will stop receiving messages from this room. To come back, someone must invite you,
-            unless anyone can join.
-          </p>
-          <div class="actions">
-            <button
-              type="button"
-              class="danger"
-              disabled={busy}
-              onclick={() =>
-                ask(
-                  { kind: 'leave' },
-                  settings?.joinRule === 'public'
-                    ? 'Leave this room?'
-                    : 'Leave this room? You will need a new invitation to come back.',
-                  'Leave room'
-                )}>Leave room</button
-            >
-          </div>
         </section>
       {:else if tab === 'people'}
         <div class="people-tools">

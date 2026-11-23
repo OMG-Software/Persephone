@@ -1,6 +1,6 @@
 [package]
 name = "persephone-call-worker"
-version = "0.0.1"
+version = "0.2.0"
 description = "Contained call worker process: joins one LiveKit room with frame encryption and platform audio (ADR-0043)"
 edition.workspace = true
 license.workspace = true
@@ -13,14 +13,84 @@ persephone-media-protocol = { path = "../media-protocol" }
 livekit = { version = "=0.11.0", default-features = false, features = ["native", "rustls-tls-native-roots"] }
 livekit-signaling = { version = "=0.2.0", default-features = false }
 tokio = { version = "=1.53.3", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = { version = "=0.1.19", default-features = false }
 zeroize = "=1.9.1"
 
 [target.'cfg(windows)'.dependencies]
+# Camera capture through Media Foundation (ADR-0048) and screen capture
+# through Windows.Graphics.Capture (ADR-0053): only these features.
+windows = { version = "=0.62.2", default-features = false, features = [
+  "Foundation",
+  "Graphics_Capture",
+  "Graphics_DirectX_Direct3D11",
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_Media_MediaFoundation",
+  "Win32_System_Com",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
+] }
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Containment (ADR-0049): the camera channel's recvmsg, the Landlock system
+# calls and the seccomp filters. PipeWire: the camera portal path.
+libc = "=0.2.191"
+seccompiler = "=0.5.0"
+pipewire = { version = "=0.10.1", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Camera capture through AVFoundation (ADR-0049): only these features.
+objc2 = "=0.6.5"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "NSArray",
+  "NSDictionary",
+  "NSError",
+  "NSObject",
+  "NSString",
+  "NSValue",
+] }
+block2 = "=0.6.2"
+dispatch2 = "=0.3.1"
+objc2-av-foundation = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "dispatch2",
+  "objc2-core-media",
+  "objc2-core-video",
+  "AVCaptureDevice",
+  "AVCaptureInput",
+  "AVCaptureOutput",
+  "AVCaptureOutputBase",
+  "AVCaptureSession",
+  "AVCaptureSessionPreset",
+  "AVCaptureVideoDataOutput",
+  "AVMediaFormat",
+] }
+objc2-core-media = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "CMFormatDescription",
+  "CMSampleBuffer",
+  "CMTime",
+  "objc2-core-video",
+] }
+objc2-core-video = { version = "=0.3.2", default-features = false, features = [
+  "std",
+  "CVBase",
+  "CVBuffer",
+  "CVImageBuffer",
+  "CVPixelBuffer",
+  "CVReturn",
 ] }
 
 [features]

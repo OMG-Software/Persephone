@@ -75,8 +75,9 @@ fn speaks_matrix(body: &[u8]) -> bool {
 }
 
 /// GETs `url`: the status and, for a success, the body, at most
-/// [`MAX_WELL_KNOWN_BYTES`].
-async fn fetch(client: &reqwest::Client, url: Url) -> Result<(u16, Vec<u8>), ErrorCode> {
+/// [`MAX_WELL_KNOWN_BYTES`]. The call transport discovery also reads the
+/// `.well-known` document with it (ADR-0056).
+pub(crate) async fn fetch(client: &reqwest::Client, url: Url) -> Result<(u16, Vec<u8>), ErrorCode> {
     let mut response = client
         .get(url)
         .timeout(DISCOVERY_TIMEOUT)

@@ -698,12 +698,15 @@ fn stored_counts<'a>(memberships: impl Iterator<Item = &'a MembershipState>) -> 
 /// Who can read a joined room's new messages: up to [`MAX_LISTED_MEMBERS`]
 /// joined or invited members by user ID, each with this account's trust in
 /// them and their devices split by whether they receive room keys
-/// (ADR-0005), from the local crypto store.
+/// (ADR-0005), from the local crypto store. The listed members become the
+/// ones whose presence the sync loop keeps (`presence`), and each carries
+/// the presence known now (ADR-0057).
 pub async fn readers(
     client: &Client,
     room_id: &str,
     refreshed: &Mutex<Refreshed>,
     generation: u64,
+    presence: &crate::presence::Members,
 ) -> Result<RoomReaders, ErrorCode> {
     let room = joined(client, room_id)?;
     let own = own_user(client)?;
@@ -725,6 +728,11 @@ pub async fn readers(
         .map(ToOwned::to_owned)
         .collect();
     drop(all);
+    presence.show(
+        room.room_id(),
+        members.iter().map(|user| &**user),
+        std::time::Instant::now(),
+    );
     let encryption = client.encryption();
     let mut readers = Vec::with_capacity(members.len());
     for user in members {
@@ -746,6 +754,7 @@ pub async fn readers(
             receiving,
             refused,
             own: user == own,
+            presence: presence.book().get(&user),
         });
     }
     Ok(RoomReaders { readers, truncated })

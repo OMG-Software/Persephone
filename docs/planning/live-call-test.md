@@ -345,18 +345,51 @@ Observed, in order:
     new connection, so no `/sfu/get` was sent. No call worker process
     started. The call state still showed the previous ended call.
 
-Findings to fix or decide later:
+Findings to fix or decide later. Status as of 19 November 2026:
 
 - When the membership event is refused, the cleanup sends the delayed leave
   instead of cancelling it.
+  *Fixed 19 November 2026 in `crates/core/src/calls/controller.rs`.* The
+  flag `membership_sent` was set before the send and never cleared. It is
+  now cleared when the homeserver answers with a client error (4xx), so the
+  cleanup cancels the delayed leave. A timeout, a lost connection or a 5xx
+  may hide a write, so those still send the leave. Test:
+  `given_membership_failures_then_only_a_client_error_is_a_refusal`.
 - Readiness does not warn when power levels block call membership.
+  *Fixed 19 November 2026 in `crates/core/src/calls/status.rs`.* A new code
+  `not_permitted` follows `not_encrypted`. Tests: `given_power_levels_then_member_state_permission_follows_the_room`,
+  `given_no_power_levels_event_then_only_the_creator_may_send`.
 - A worker that panics shows "The call process stopped." The panic message
   is lost because the worker has no stderr by design.
+  *Fixed 19 November 2026 without a message.* The core reads the exit status
+  of an ended worker (`crates/media-broker`, `crates/core/src/calls/worker.rs`
+  `exit_is_crash`, `controller.rs` `stop_reason`). A panic (exit 101), the
+  worker's own unreportable exit, a Windows crash status or a crash signal
+  ends the call with the new code `worker_crashed`. The Unix part of the
+  status read was not compiled or run on the development machine.
 - The worker gathered a server-reflexive candidate, so it contacted a STUN
   server that the SFU named. The proxy warning names only the SFU and the
   TURN server. Check which STUN server LiveKit sends by default.
+  *Fixed 19 November 2026 (text only) in `crates/core/src/platform/call_host.rs`.*
+  The warning now says that STUN or TURN servers named by the call server
+  also see the IP address. ICE behaviour is unchanged. The worker passes the
+  homeserver's TURN servers, and the core keeps only `turn:` and `turns:`
+  URIs. `livekit` 0.11 uses the SFU's `ice_servers` from the join response
+  only when the worker's list is empty, so the STUN server comes from the
+  SFU when the homeserver has no TURN. A UDP TURN server also answers STUN
+  binding requests, so with a homeserver TURN server it can be the source.
+  The default STUN list of the LiveKit server was not checked in this run.
 - `internetClient` excludes private ranges. A self-hosted SFU on a LAN or
   VPN address cannot be reached by the contained worker.
+  *Still open: a containment decision.* Not changed.
+- While the core's proxy warning is open, the call button is disabled with
+  no text (evidence finding).
+  *Fixed 19 November 2026 in `frontend/src/calls.ts`.* The pending text now
+  says that a proxy warning window may be open. The page cannot see the
+  core's window, so the text is not specific to the warning.
+- Newer SFU transport form (`m.livekit` with `url`, Synapse 1.161 and later).
+  *Done 19 November 2026 in `crates/core/src/calls/readiness.rs` and
+  `membership.rs`; see the ADR-0043 amendment.*
 
 ## Synapse configuration additions
 
@@ -435,6 +468,291 @@ Pass criteria are in brackets. Each step records its observed result.
 14. **Proxy prompt.** Set a SOCKS5 proxy in the profile and join.
     [the core's own dialog appears; "No" stops the join]
 
+### Video steps (ADR-0048, added 17 November 2026, not yet run)
+
+15. **Cameras listed.** Settings lists the cameras through a contained
+    worker; no camera light comes on. [list shown; worker exits with 0]
+16. **Video call from Persephone.** [member event has `m.call.intent`
+    `video`; the camera light comes on; the own tile shows the camera]
+17. **Video both ways.** Element Call turns its camera on. [each side sees
+    the other; LiveKit reports encrypted video tracks; Persephone's tile is
+    at most 640x360]
+18. **Camera off and on** in the call bar. [the camera light goes out and
+    the peer's tile for Persephone goes away; on again, the peer sees video]
+19. **Rejoin with video.** Element Call leaves and rejoins. [Element Call
+    sees Persephone's video after the key rotation, so the camera track uses
+    the current own key index]
+20. **Camera from an audio call.** Join with the call button, then turn the
+    camera on. [intent stays `audio`; the peer sees video]
+21. **Chosen camera missing.** Choose a camera, unplug it, turn the camera
+    on. [the call bar says the camera is not connected; no other camera
+    light comes on; audio goes on]
+22. **Containment.** Record whether any mitigation must be relaxed for
+    Media Foundation in the AppContainer, and the worker's peak memory with
+    four remote videos against its 512 MiB Job limit.
+
+## Ringing checks (ADR-0052, implemented, not yet run live)
+
+The core code, the contracts and the page exist and have unit and IPC tests.
+No run against a live homeserver or Element client has happened. Each step
+needs a live Element Call or Element Web client beside Persephone, on
+Synapse and on Merovingian.
+
+23. **Incoming ring.** Start a call from Element in a direct chat with the
+    Persephone user. Record whether Persephone shows "Incoming call" and the
+    caller, and one desktop notification with the text "Incoming call". Record
+    whether the notification names the caller only when notification names are
+    on. [one prompt, one notification, no sound from Persephone, no join, no
+    device on]
+24. **Group room.** Start a call from Element in a group room. Record that
+    Persephone does not ring (type `notification`) and that the room shows the
+    call mark in the room list.
+25. **Answer.** Answer with and without video. Record that every join check
+    runs (readiness, proxy question, cross-signed keys) and that the prompt
+    goes away on the join.
+26. **Decline.** Decline from Persephone. Record that Element shows the
+    decline and that the prompt goes away. Decline from Element in a ring that
+    Persephone sent and record "Declined" in Persephone's call bar while the
+    call goes on.
+27. **Send.** Start a call from Persephone in a direct chat and in a group
+    room. Record the events on the homeserver: type, `notification_type`,
+    `m.mentions`, `m.relates_to`, `lifetime` 90000, `m.call.intent`, and that
+    it is encrypted in an encrypted room.
+28. **Sticky only.** Record whether any Element version sends only the sticky
+    (MSC4354) notification; Persephone does not read it.
+29. **Bounds.** Record that a second ring from the same user within 30 s, a
+    ring with an old `sender_ts` and a ring from a room the user left do not
+    show a prompt.
+
+## Deafen and volume checks (ADR-0055, added 19 November 2026, not yet run)
+
+Run these during step 6, with a test tone from Element Call.
+
+30. **Volume.** Move the call bar's volume slider from 100 to 20 and back.
+    [the tone gets quieter at once and comes back; at 0 it is silent; the
+    peer's audio is not changed]
+31. **Volume is saved.** Leave, then open Settings, Calls. [the slider shows
+    the last value]; join again [the call starts at that volume]
+32. **Deafen.** Unmuted, press Deafen. [the tone stops; the peer hears
+    silence; the call bar shows Undeafen and Unmute]
+33. **Undeafen.** [the tone comes back; the peer hears Persephone again]
+34. **Undeafen keeps a mute.** Mute, deafen, undeafen. [the tone comes back;
+    the peer still hears silence]
+35. **Unmute while deafened.** Deafen, then press Unmute. [the tone comes
+    back and the peer hears Persephone: unmute also undeafens]
+36. **A peer joins while deafened.** Deafen, then let Element Call leave and
+    rejoin. [no sound from the rejoined peer until undeafen; record any
+    short sound at the rejoin]
+37. **Deafen and rejoin.** Deafen, leave, join again. [the new call is not
+    deafened and uses the saved volume]
+38. **Another SFU.** With a member on another SFU (ADR-0054), deafen and
+    move the volume. [that member's audio follows the same as the own SFU's
+    members]
+
+## Linux and macOS containment checks (ADR-0049, not yet run)
+
+ADR-0049 keeps calls on Linux and macOS unverified until a live run like the
+Windows run passes on each system, with these checks. The expected results
+below come from the record and the current code. None of them has been
+observed yet. Record each result, with the OS, kernel or macOS version and
+commit, in the evidence report before any claim.
+
+The containment step of the Windows run (Media Foundation and the Job) does
+not apply to these systems.
+
+### Linux
+
+Run on a host with Landlock ABI 3 or newer (Linux 6.2 or newer) and on one
+without it.
+
+Descriptor check. The worker is not dumpable, so only root can read its
+descriptors. Run each command with `sudo` on the test host. A permission
+error, an empty list or a worker that is gone makes the check inconclusive,
+not a pass; repeat it.
+
+- `sudo ls -l /proc/<pid>/fd` lists every descriptor. Record the list.
+- `sudo ss -xp | grep 'pid=<pid>,'` lists the worker's Unix sockets. For
+  each one, take the peer inode (the number after `*` in the peer column)
+  and find its owner: `sudo ss -xp | grep ' <peer inode> '`.
+- Pass: no `/dev/video*` path in the descriptor list (portal path), and no
+  worker socket whose peer is bound at the session bus address
+  (`$DBUS_SESSION_BUS_ADDRESS` of the desktop user, usually
+  `/run/user/<uid>/bus`) or the accessibility bus
+  (`/run/user/<uid>/at-spi/bus*`), or belongs to `dbus-daemon` or
+  `dbus-broker`.
+  Record each peer and its process. A socket whose peer cannot be found
+  is recorded and makes the check inconclusive.
+
+1. Before the call, on the supported host only: `cat
+   /sys/kernel/security/lsm` names `landlock`. On the host without
+   Landlock, record the list as it is; step 4 applies there.
+2. Join a call with the camera off. While it is connected, find the call
+   worker's process ID (`pgrep -f persephone-call-worker`) and the process
+   that started it (`ps -o ppid= -p <pid>`).
+   - Record the baseline: `Seccomp_filters:` in `/proc/<ppid>/status`. The
+     worker inherits these filters.
+   - Expected pass: `/proc/<pid>/status` shows `NoNewPrivs: 1`,
+     `Seccomp: 2` and `Seccomp_filters:` of exactly the baseline plus 4.
+     Stage 1 installs two programs (kill and `ENOSYS`) and stage 2 installs
+     two more (Landlock calls killed, new `AF_UNIX` sockets refused with
+     `EACCES`). The baseline plus 2 means that stage 2 is missing, and the
+     step fails. Stage 2 runs before the SFU connection, so a connected call
+     must show it.
+   - Expected pass: the worker is not dumpable, so `stat -c %U
+     /proc/<pid>/environ` shows `root`.
+   - Expected pass: the descriptor check (above) passes.
+3. Turn the camera on. On the portal path the desktop asks for camera
+   access.
+   - Expected pass: a grant shows the own tile. A refusal leaves the camera
+     `Unavailable` and makes no V4L2 attempt.
+   - Expected pass: while the own tile shows, the descriptor check passes
+     again. On the portal path the PipeWire remote's peer is the PipeWire
+     daemon, which is expected. The portal path gets frames over that
+     remote only, so a video node opened after the grant fails the step.
+     `Seccomp_filters:` is still the baseline plus 4.
+   - Expected pass: closing the call while the access dialog is open closes
+     the dialog and ends the call at once.
+4. Expected refusal: on a kernel without Landlock ABI 3, or with Landlock
+   turned off, the join is refused with the containment text ("The call did
+   not start: its process could not be contained."). No worker stays
+   running.
+5. Settings, Preferences, call devices. On the portal path the desktop asks
+   for camera access. Expected pass: after a grant the camera menu lists
+   the cameras (`pipewire:` IDs); after a refusal it lists none and the
+   page shows no error. The microphone and speaker menus list the sound
+   server's sources (no monitors) and sinks with `pulse:` IDs, and "System
+   default".
+6. Choose a microphone and a speaker that are not the system default, then
+   join a call. Expected pass: `pactl list source-outputs` and `pactl list
+   sink-inputs` show the worker's streams on the chosen devices, and
+   `/proc/<pid>/environ` of the worker holds `PULSE_SOURCE` and
+   `PULSE_SINK` with those names. Unplug or unload the chosen microphone,
+   then join again. Expected refusal: the join stops with the device text
+   and never uses the default microphone.
+
+### Linux device listing (measured 19 November 2026)
+
+The owner reported that Preferences showed no call devices on Linux after
+the camera portal's access dialog. This was a partial run: the device
+listing only, without the app, a call or the portal. It is not the live
+containment run above.
+
+- Host: Linux Mint 22.3 VM, kernel 6.14.0-37 (LSMs `landlock`, `yama`,
+  `apparmor` and others), headless PipeWire 1.0.5 with `pipewire-pulse`
+  (`libpulse0` 16.1), no sound card and no camera.
+- Code: `origin/main` 3a40b30, then the fixes on this branch. Debug
+  builds of `persephone-call-worker` with `CXX=clang++-21` and the pinned
+  libwebrtc, with and without `dev-uncontained`.
+- Method: a Python driver started the worker as
+  `crates/media-broker/src/linux.rs` does (new session, `no_new_privs`,
+  the call rlimits, descriptor 3 as the camera channel, only
+  `XDG_RUNTIME_DIR`, `HOME` and `LANG=C`), sent `ListDevices` and decoded
+  the answer. A connected socket to the user's own `pipewire-0` stood in for
+  the portal's `OpenPipeWireRemote` (sent as the core does, byte `c`). A
+  GStreamer `videotestsrc` node with media class `Video/Source` stood in
+  for a camera. The driver and logs stayed on the VM; gdb gave the
+  backtrace.
+
+Before the fixes (3a40b30), each of these stops the listing on its own:
+
+| Cause | Observed | What the page gets |
+| --- | --- | --- |
+| `RLIMIT_FSIZE` 0 from the broker | libpulse sizes its 64 MiB memfd pool with `ftruncate`; the worker dies with `SIGXFSZ` before `Devices`. `prlimit --fsize=0 pactl info` dies the same way. | "The call devices could not be listed." |
+| No Landlock rule for `$XDG_RUNTIME_DIR/pulse` | With the file limit lifted, libpulse reports "Failed to create secure directory (/run/user/1001/pulse): Permission denied"; the worker sends `Failed(AudioDevice)`. | The same error |
+| libwebrtc's weak `pw_*` stubs | With both lifted and a PipeWire remote, the worker dies with `SIGSEGV`: `pipewire::init` calls libwebrtc's `pw_init` stub, whose pointer is null. Also seen uncontained. Screen sharing (ADR-0053) uses the same connection code, so it was affected too (not run). | The same error |
+
+After the fixes (file limit 256 MiB, read rule on `$XDG_RUNTIME_DIR/pulse`,
+`webrtc::InitializePipeWire()` before `pw::init`), the contained worker
+(containment bits 0) answered `Devices` and exited 0. It listed
+`pipewire:persephone-testcam` ("TestCamera") over the PipeWire remote, and
+no camera without one. The build without `dev-uncontained` still refused
+to run without `no_new_privs` (`Failed(Containment)`, exit 3).
+
+The microphone and speaker lists stayed empty: with the `index:` filter
+turned off in a probe build, libwebrtc reported `index:0` "default:
+auto_null.monitor" for recording and `index:0` "default: Dummy Output" and
+`index:1` "Dummy Output" for playout. Its PulseAudio module gives no GUIDs,
+and ADR-0043 never lists or selects `index:` IDs. The owner then chose
+sound server names set at launch (ADR-0049); see the next record.
+
+Not covered: the real camera portal and its dialog, a real camera or
+sound card, the full app (core, broker and page), a call, a desktop
+session, other distributions, and a kernel without Landlock.
+
+### Linux microphones and speakers by name (measured 19 November 2026)
+
+The owner chose sound server names set at launch (ADR-0049). This was a
+partial run on the same VM and driver as the record above: the device list
+and the start of a join, without the app, an SFU or a call.
+
+- Code: this branch on top of 3a40b30, debug build of
+  `persephone-call-worker` without `dev-uncontained`. Containment bits 0
+  in every run.
+- Devices: `pactl load-module module-null-sink sink_name=vsink` and
+  `module-remap-source master=vsink.monitor source_name=vmic` (a source
+  that is not a monitor). `pipewire-pulse` restarts by socket activation
+  and then drops such modules, so they were loaded just before each run.
+- Join runs: the driver sent `Join` with the chosen IDs to
+  `wss://127.0.0.1:9/x`, which refuses connections. `Network` (4) means
+  that the device check, audio start and stage 2 passed and only the SFU
+  connection failed.
+
+| Run | Result |
+| --- | --- |
+| `ListDevices` | Recording `pulse:vmic` "VirtualMic"; playout `pulse:vsink` "VirtualSpeaker". `vsink.monitor` is left out, so the `monitor_of_sink` field is read at the right place. Without the virtual devices: no recording device and `pulse:auto_null` "Dummy Output". |
+| `pulse:vmic`, `pulse:vsink`, environment `PULSE_SOURCE=vmic`, `PULSE_SINK=vsink` | `Failed(Network)` |
+| No choice, no names in the environment | `Failed(Network)` |
+| `pulse:vmic`, no `PULSE_SOURCE` | `Failed(Protocol)` |
+| `pulse:vmic`, `PULSE_SOURCE=vsink.monitor` | `Failed(Protocol)` |
+| No choice, `PULSE_SINK=vsink` | `Failed(Protocol)` |
+| `pulse:gone`, `PULSE_SOURCE=gone` | `Failed(DeviceNotFound)` |
+| `pulse:vsink.monitor` as microphone, matching `PULSE_SOURCE` | `Failed(DeviceNotFound)` (monitors are not microphones) |
+| `index:0` as microphone | `Failed(DeviceNotFound)` |
+
+The client library sends a stream without a device name to the names in
+the environment: with a second sink and source and `vsink` and `vmic` as
+the defaults, `PULSE_SINK=vsink2 pacat` played to `vsink2`,
+`PULSE_SOURCE=vmic2 parec` recorded from `vmic2`, and a plain `pacat`
+played to `vsink`. libwebrtc opens such a stream at position 0 (read from
+`audio_device_pulse_linux.cc`, m137); its own stream on the chosen device
+was not observed, because no call connected.
+
+Read-only `/dev/shm` (after review, same day): the worker's Landlock rule
+for `/dev/shm` became read only, so no file it grows outlives it. With
+that build, the contained worker listed the same devices, a
+`pulse:vmic`/`pulse:vsink2` join reached `Failed(Network)`, and the
+PipeWire remote listed `pipewire:persephone-testcam`. Because the worker
+cannot stream without an SFU, `pacat` and `parec` ran under a Landlock
+wrapper with the worker's path rules and `/dev/shm` read only: playback to
+`vsink2` ran until stopped, and `parec` recorded 196608 bytes from `vmic`
+in 3 s. `/dev/shm` stayed empty; PipeWire and the client library used
+memfds.
+
+Not covered: a connected call with audio on the chosen devices, the core
+and broker launch path (covered by unit tests only), the page, a real
+sound card, a device unplugged during a call, PulseAudio without PipeWire
+(its pool may use `/dev/shm` files; the client then falls back to copying
+over the socket, not measured), and the Landlock wrapper is not the
+worker's seccomp filter.
+
+### macOS
+
+1. Before the call: `codesign -d --entitlements - <call worker>` lists only
+   `com.apple.security.device.audio-input` and
+   `com.apple.security.device.camera`, and `codesign -dv <call worker>`
+   shows the hardened runtime. The main app and the other helpers have no
+   entitlements.
+2. Join a call with the camera off.
+   - Expected pass: Activity Monitor's Sandbox column shows the call worker
+     as sandboxed.
+   - Record the Mach and I/O Kit services that the worker uses (the
+     record requires this list before it is accepted).
+3. Turn the camera on. Expected pass: macOS asks for camera access for
+   Persephone, and a grant shows the own tile.
+4. Expected refusal: a worker that reports any missing control (for example
+   a build without the call profile) makes the join fail with the
+   containment text. No input reaches it.
+
 ## Evidence
 
 - A dated report `docs/evidence/live-calls.md` in the format of
@@ -448,6 +766,8 @@ Pass criteria are in brackets. Each step records its observed result.
 ## Not covered by this run
 
 - TLS 1.3 to a real SFU (the `livekit-net` patch), TURN relay, IPv6.
-- Linux and macOS (the call host refuses there by design).
+- Linux and macOS: each needs its own run with the containment checks
+  above.
 - Merovingian (separate run after its probe).
 - More than two participants.
+- Deafen and the volume with more than one remote member.

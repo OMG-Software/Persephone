@@ -14,7 +14,7 @@ use persephone_core::{
     Core, IDLE_CHECK, LOCK_TIMEOUT, ServeEnd,
     credentials::{CredentialSource, Credentials, PromptError, SecretPrompt},
     serve,
-    session::AdmissionError,
+    session::{AdmissionError, SignOutRefused},
 };
 use persephone_core_protocol::{Call, ErrorCode, Outcome, Request};
 use serde_json::{Value, json};
@@ -205,6 +205,36 @@ impl wiremock::Respond for SlidingJoin {
     }
 }
 
+/// Native Sliding Sync with only `DM`, a direct-message room with `CONTACT`,
+/// listed as direct in the account data. Sliding Sync carries no presence.
+struct SlidingDirect;
+
+impl wiremock::Respond for SlidingDirect {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+        let wanted = body["lists"]["rooms"]["required_state"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let state: Vec<Value> = dm_state()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| wanted.iter().any(|entry| requested(entry, event)))
+            .cloned()
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "pos":"sliding-pos","lists":{"rooms":{"count":1}},
+            "rooms":{DM:{"initial":true,"joined_count":2,"invited_count":0,"required_state":state,"timeline":[],"num_live":0,"notification_count":0,"highlight_count":0}},
+            "extensions":{
+                "account_data":{"global":[{"type":"m.direct","content":{CONTACT:[DM]}}]},
+                "e2ee":{"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}},
+                "to_device":{"events":[],"next_batch":"to-device-pos"}
+            }
+        }))
+    }
+}
+
 /// The Sliding Sync answer for `ROOM` with `timeline` and the homeserver's
 /// joined and invited `counts`: only the state the request's list asks for,
 /// less the `withheld` event types.
@@ -386,7 +416,9 @@ struct LiveRoom {
     round: AtomicUsize,
     /// Also report `PLAIN`, a room that is not encrypted.
     plain: bool,
-    /// Also report `DM`, a direct-message room with `CONTACT`.
+    /// Also report `DM`, a direct-message room with `CONTACT`, who is away.
+    /// Only the first round reports their presence, before the core tracks
+    /// them, so the core has to read it from the SDK's store.
     dm: bool,
 }
 
@@ -432,7 +464,11 @@ impl wiremock::Respond for LiveRoom {
             rooms[PLAIN] = json!({"state":{"events":plain_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
         }
         let mut account_data = json!([]);
+        let mut presence = json!([]);
         if self.dm {
+            if n == 0 {
+                presence = json!([{"type":"m.presence","sender":CONTACT,"content":{"presence":"unavailable"}}]);
+            }
             rooms[DM] = json!({"summary":{"m.joined_member_count":2,"m.invited_member_count":0},"state":{"events":dm_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             rooms[GROUP] = json!({"summary":{"m.joined_member_count":3,"m.invited_member_count":0},"state":{"events":group_state()},"timeline":{"events":[],"limited":false},"ephemeral":{"events":[]},"account_data":{"events":[]}});
             account_data = json!([{"type":"m.direct","content":{CONTACT:[DM, GROUP]}}]);
@@ -440,9 +476,20 @@ impl wiremock::Respond for LiveRoom {
         ResponseTemplate::new(200).set_body_json(json!({
             "next_batch": format!("classic-{n}"),
             "account_data":{"events":account_data},
+            "presence":{"events":presence},
             "rooms":{"join":rooms},
             "to_device":{"events":[]},"device_lists":{"changed":[],"left":[]},"device_one_time_keys_count":{"signed_curve25519":50}
         }))
+    }
+}
+
+/// An empty `200` answer that records when each request arrived.
+struct Stamped(Arc<std::sync::Mutex<Vec<Instant>>>);
+
+impl Respond for Stamped {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.0.lock().unwrap().push(Instant::now());
+        ResponseTemplate::new(200).set_body_json(json!({}))
     }
 }
 
@@ -1492,6 +1539,468 @@ fn given_native_sliding_sync_then_it_is_used_and_rooms_arrive() {
     assert_eq!(state, StoreState::RestartRequired);
 }
 
+impl Homeserver {
+    /// Answers presence changes with 200 from now on.
+    fn accept_presence(&self) {
+        self.runtime.block_on(
+            Mock::given(method("PUT"))
+                .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .mount(&self.server),
+        );
+    }
+
+    /// The `set_presence` value of each classic sync request, in order;
+    /// `online` where the request leaves it out, as the spec defaults it.
+    fn sync_presence(&self) -> Vec<String> {
+        self.presence_sent_to("/_matrix/client/v3/sync")
+    }
+
+    /// As [`Self::sync_presence`], for the requests to `endpoint`.
+    fn presence_sent_to(&self, endpoint: &str) -> Vec<String> {
+        self.requests_matching(endpoint)
+            .into_iter()
+            .map(|(url, _)| {
+                url.split(['?', '&'])
+                    .find_map(|pair| pair.strip_prefix("set_presence="))
+                    .unwrap_or("online")
+                    .to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The bodies of the presence changes sent, in order: `PUT` requests only,
+/// not the lookups (`GET`) of contacts' presence.
+fn presence_puts(server: &Homeserver) -> Vec<Value> {
+    server
+        .runtime
+        .block_on(server.server.received_requests())
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "PUT"
+                && request
+                    .url
+                    .path()
+                    .starts_with("/_matrix/client/v3/presence/")
+        })
+        .map(|request| serde_json::from_slice(&request.body).unwrap_or(Value::Null))
+        .collect()
+}
+
+/// GIVEN a homeserver whose sync answers at once, as when another client of
+/// the account keeps changing its presence WHEN Persephone syncs THEN only
+/// its first request changes the presence, and every later one sends
+/// `offline`, which leaves it as it is (ADR-0057).
+#[test]
+fn given_sync_rounds_that_return_at_once_then_presence_is_not_set_again_and_again() {
+    let server = Homeserver::signed_in();
+    server.accept_presence();
+    let dir = TempDir::new().unwrap();
+    let _core = signed_in_core(&server, dir.path());
+    wait_for("three sync rounds", || server.sync_presence().len() >= 3);
+    std::thread::sleep(Duration::from_secs(2));
+    let sent = server.sync_presence();
+    assert_eq!(sent[0], "online", "{sent:?}");
+    assert!(sent[1..].iter().all(|value| value == "offline"), "{sent:?}");
+    assert!(presence_puts(&server).is_empty());
+}
+
+/// GIVEN native Sliding Sync, whose rounds here return at once WHEN it syncs
+/// and the presence changes THEN its requests carry the writer's value as
+/// classic ones do: only the first changes the presence, setting the value
+/// makes no request, and the change is one `PUT` (ADR-0057).
+#[test]
+fn given_sliding_sync_then_its_requests_carry_the_writers_presence() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    server.accept_presence();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("three sliding rounds", || {
+        server.presence_sent_to(SLIDING).len() >= 3
+    });
+    let sent = server.presence_sent_to(SLIDING);
+    assert_eq!(sent[0], "online", "{sent:?}");
+    assert!(sent[1..].iter().all(|value| value == "offline"), "{sent:?}");
+    assert!(
+        presence_puts(&server).is_empty(),
+        "no request sets the value"
+    );
+    assert!(server.sync_presence().is_empty(), "no classic fallback");
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                presence: PresenceStatus::Unavailable,
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    wait_for("the change", || !presence_puts(&server).is_empty());
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        presence_puts(&server),
+        vec![json!({"presence": "unavailable"})]
+    );
+}
+
+/// GIVEN changes of the shared presence every 300 ms for 3 seconds WHEN they
+/// are sent THEN the `PUT`s that arrive are at least a second apart, the
+/// newest choice arrives last, and once sharing is off nothing changes it
+/// any more (ADR-0057). Sync rounds come every 500 ms, so without the limit
+/// the `PUT`s would come that often.
+#[test]
+fn given_quick_presence_changes_then_at_most_one_is_sent_each_second() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    let server = Homeserver::signed_in();
+    let arrived = Arc::new(std::sync::Mutex::new(Vec::new()));
+    server.runtime.block_on(
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(Stamped(arrived.clone()))
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the first sync", || !server.sync_presence().is_empty());
+    // The first sync carried the presence; the next carry would come
+    // `SYNC_CARRY_GAP` (15 s) later while sharing is on.
+    let first_carry = Instant::now();
+    let set = |share_presence, presence| {
+        let saved = call(
+            &core,
+            Call::SetAccountSettings {
+                settings: AccountSettings {
+                    share_presence,
+                    presence,
+                    ..AccountSettings::default()
+                },
+            },
+        );
+        assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    };
+    for step in 0..10 {
+        let presence = if step % 2 == 0 {
+            PresenceStatus::Unavailable
+        } else {
+            PresenceStatus::Online
+        };
+        set(true, presence);
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    set(true, PresenceStatus::Offline);
+    wait_for("the newest change", || {
+        presence_puts(&server).last() == Some(&json!({"presence": "offline"}))
+    });
+    let arrived = arrived.lock().unwrap().clone();
+    assert!(arrived.len() >= 2, "{} changes sent", arrived.len());
+    for pair in arrived.windows(2) {
+        // The limit holds where the core sends; arrival adds a little jitter.
+        let gap = pair[1].duration_since(pair[0]);
+        assert!(
+            gap >= Duration::from_millis(900),
+            "two changes {gap:?} apart"
+        );
+    }
+    // Sharing off: wait for two more sync requests, so the round that may
+    // have begun before the change has ended, then past the time of the
+    // next carry. Nothing may change the presence meanwhile.
+    set(false, PresenceStatus::Online);
+    let changed = server.sync_presence().len();
+    wait_for("a round after the change", || {
+        server.sync_presence().len() >= changed + 2
+    });
+    let before = (presence_puts(&server).len(), server.sync_presence().len());
+    let carry_due = first_carry + Duration::from_secs(16);
+    wait_for("the time of the next carry", || {
+        Instant::now() >= carry_due && server.sync_presence().len() > before.1
+    });
+    assert_eq!(presence_puts(&server).len(), before.0, "no change sent");
+    let later = server.sync_presence();
+    assert!(
+        later[before.1..].iter().all(|value| value == "offline"),
+        "{later:?}"
+    );
+}
+
+/// GIVEN a homeserver that refuses presence changes, as one with presence
+/// turned off answers 403 WHEN the presence changes THEN it is sent once and
+/// not again on later rounds, by `PUT` or by sync (ADR-0057).
+#[test]
+fn given_a_refused_presence_change_then_it_is_not_sent_again() {
+    use persephone_contracts::{AccountSettings, PresenceStatus};
+    let server = Homeserver::signed_in();
+    server.runtime.block_on(
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(
+                    json!({"errcode": "M_FORBIDDEN", "error": "Presence is disabled"}),
+                ),
+            )
+            .mount(&server.server),
+    );
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    wait_for("the first sync", || !server.sync_presence().is_empty());
+    let saved = call(
+        &core,
+        Call::SetAccountSettings {
+            settings: AccountSettings {
+                presence: PresenceStatus::Unavailable,
+                ..AccountSettings::default()
+            },
+        },
+    );
+    assert!(matches!(saved, Outcome::Ok(_)), "{saved:?}");
+    wait_for("the refused change", || !presence_puts(&server).is_empty());
+    let rounds = server.sync_presence().len();
+    wait_for("six more rounds", || {
+        server.sync_presence().len() >= rounds + 6
+    });
+    assert_eq!(presence_puts(&server).len(), 1);
+    assert!(
+        server.sync_presence()[rounds..]
+            .iter()
+            .all(|sent| sent == "offline"),
+        "{:?}",
+        server.sync_presence()
+    );
+}
+
+/// GIVEN a direct-message contact whose classic sync reports them away WHEN
+/// the page lists rooms THEN the contact's room carries their presence, and
+/// a room without a contact carries none (ADR-0057).
+#[test]
+fn given_a_contacts_presence_then_their_room_in_the_list_carries_it() {
+    use persephone_contracts::PresenceStatus;
+    let server = Homeserver::signed_in();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut list = RoomList {
+        rooms: Vec::new(),
+        truncated: false,
+    };
+    wait_for("the contact's presence in the room list", || {
+        list = value(call(&core, Call::RoomList {}));
+        list.rooms
+            .iter()
+            .any(|room| room.room_id == DM && room.contact_presence.is_some())
+    });
+    assert!(list.rooms.iter().any(|room| room.room_id == GROUP));
+    for room in &list.rooms {
+        let expected = (room.room_id == DM).then_some(PresenceStatus::Unavailable);
+        assert_eq!(room.contact_presence, expected, "{}", room.room_id);
+    }
+}
+
+/// GIVEN classic sync, which reported the contact away before anyone listed
+/// the room's members WHEN the page lists them THEN the next listing carries
+/// that presence from the SDK's store, with no lookup (ADR-0057).
+#[test]
+fn given_classic_sync_then_the_listed_members_presence_is_read_from_the_store() {
+    use persephone_contracts::{PresenceStatus, RoomReaders};
+    let server = Homeserver::signed_in();
+    server.direct_endpoints();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let contact = || match call(&core, Call::RoomReaders { room_id: DM.into() }) {
+        Outcome::Ok(value) => serde_json::from_value::<RoomReaders>(value)
+            .unwrap()
+            .readers
+            .into_iter()
+            .find(|reader| reader.user_id == CONTACT)
+            .and_then(|reader| reader.presence),
+        _ => None,
+    };
+    wait_for("the contact's presence in the member listing", || {
+        contact().is_some()
+    });
+    assert_eq!(contact(), Some(PresenceStatus::Unavailable));
+    let lookups = server
+        .runtime
+        .block_on(server.server.received_requests())
+        .unwrap_or_default();
+    assert!(
+        !lookups
+            .iter()
+            .any(|request| request.method.as_str() == "GET"
+                && request
+                    .url
+                    .path()
+                    .starts_with("/_matrix/client/v3/presence/")),
+        "classic sync asks no presence"
+    );
+}
+
+/// Answers a presence lookup: `CONTACT` is away, anyone else online.
+struct PresenceByUser(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Respond for PresenceByUser {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let user = request.url.path().replace("%40", "@").replace("%3A", ":");
+        self.0.lock().unwrap().push(user.clone());
+        let presence = if user.contains(CONTACT) {
+            "unavailable"
+        } else {
+            "online"
+        };
+        ResponseTemplate::new(200).set_body_json(json!({"presence": presence}))
+    }
+}
+
+/// GIVEN Sliding Sync, which carries no presence, WHEN the page lists a
+/// room's members THEN the core asks for each listed member's presence once
+/// in the next rounds, and the next listing carries it (ADR-0057).
+#[test]
+fn given_sliding_sync_then_the_listed_members_presence_is_looked_up_once() {
+    use persephone_contracts::{PresenceStatus, RoomReaders};
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    server.runtime.block_on(async {
+        Mock::given(method("POST"))
+            .and(path(SLIDING))
+            .respond_with(SlidingDirect)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(PresenceByUser(asked.clone()))
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/rooms/[^/]*dm[^/]*/members$",
+            ))
+            .respond_with(Members(
+                dm_state().as_array().unwrap()[1..3].to_vec().into(),
+            ))
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let readers = || match call(&core, Call::RoomReaders { room_id: DM.into() }) {
+        Outcome::Ok(value) => Some(serde_json::from_value::<RoomReaders>(value).unwrap()),
+        _ => None,
+    };
+    let mut listed = None;
+    wait_for("the members' presence in the listing", || {
+        listed = readers();
+        listed.as_ref().is_some_and(|listed| {
+            listed.readers.len() == 2
+                && listed
+                    .readers
+                    .iter()
+                    .all(|reader| reader.presence.is_some())
+        })
+    });
+    for reader in listed.unwrap().readers {
+        let expected = if reader.own {
+            PresenceStatus::Online
+        } else {
+            PresenceStatus::Unavailable
+        };
+        assert_eq!(reader.presence, Some(expected), "{}", reader.user_id);
+    }
+    let rounds = server.presence_sent_to(SLIDING).len();
+    wait_for("three more sliding rounds", || {
+        server.presence_sent_to(SLIDING).len() >= rounds + 3
+    });
+    let asked = asked.lock().unwrap().clone();
+    let members = asked.iter().filter(|user| user.contains(USER)).count();
+    assert_eq!(members, 1, "this account is asked once: {asked:?}");
+    // The contact is asked once as a contact and once as a member.
+    assert!(
+        asked.iter().filter(|user| user.contains(CONTACT)).count() <= 2,
+        "{asked:?}"
+    );
+}
+
+/// GIVEN Sliding Sync, which carries no presence, and a direct-message
+/// contact WHEN the core syncs THEN it asks the homeserver for the contact's
+/// presence once, and their room in the list carries it; opening the room
+/// right after does not ask again, as the presence is recent (ADR-0057).
+#[test]
+fn given_sliding_sync_then_a_contacts_presence_is_looked_up_once_and_listed() {
+    use persephone_contracts::PresenceStatus;
+    const SLIDING: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+    let server = Homeserver::start(
+        (
+            200,
+            json!({"user_id":USER,"access_token":TOKEN,"device_id":"PERSEPHONE1"}),
+        ),
+        true,
+        true,
+    );
+    let lookups = Arc::new(AtomicUsize::new(0));
+    server.runtime.block_on(async {
+        Mock::given(method("POST"))
+            .and(path(SLIDING))
+            .respond_with(SlidingDirect)
+            .with_priority(1)
+            .mount(&server.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/_matrix/client/v3/presence/[^/]+/status$"))
+            .respond_with(Counted(
+                ResponseTemplate::new(200).set_body_json(json!({"presence":"unavailable"})),
+                lookups.clone(),
+            ))
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let mut list = RoomList {
+        rooms: Vec::new(),
+        truncated: false,
+    };
+    wait_for("the contact's presence in the room list", || {
+        list = value(call(&core, Call::RoomList {}));
+        list.rooms
+            .iter()
+            .any(|room| room.room_id == DM && room.contact_presence.is_some())
+    });
+    let dm = list.rooms.iter().find(|room| room.room_id == DM).unwrap();
+    assert_eq!(dm.contact.as_deref(), Some(CONTACT));
+    assert_eq!(dm.contact_presence, Some(PresenceStatus::Unavailable));
+    assert!(server.sync_presence().is_empty(), "no classic fallback");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+    let _ = call(&core, Call::ContactStatus { room_id: DM.into() });
+    let rounds = server.presence_sent_to(SLIDING).len();
+    wait_for("three more sliding rounds", || {
+        server.presence_sent_to(SLIDING).len() >= rounds + 3
+    });
+    assert_eq!(
+        lookups.load(Ordering::SeqCst),
+        1,
+        "a recent presence is not asked again"
+    );
+}
+
 /// GIVEN a core that a test left signed in and syncing, never locked WHEN that
 /// test's homeserver is dropped THEN its address refuses connections and the
 /// core's next round fails: what the core sends reaches no later test's
@@ -2100,7 +2609,7 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
     let dir = TempDir::new().unwrap();
     {
         let core = signed_in_core(&server, dir.path());
-        let state: StoreState = value(call(&core, Call::SignOut {}));
+        let state: StoreState = value(call(&core, Call::SignOut { discard_keys: true }));
         assert_eq!(state, StoreState::RestartRequired);
         assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
         let status = core.session().account_status();
@@ -2108,7 +2617,7 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
             (status.state, status.error),
             (AccountState::SignedOut, None)
         );
-        assert!(!dir.path().join("store-key.v2").exists(), "key deleted");
+        assert!(!dir.path().join("store-key.v1").exists(), "key deleted");
         assert!(
             dir.path().join("signed-out").exists() && dir.path().join("store").exists(),
             "store files are left for the next start"
@@ -2149,6 +2658,108 @@ fn given_sign_out_then_the_session_is_revoked_and_the_profile_is_wiped() {
     );
 }
 
+/// GIVEN a signed-in device with no key backup WHEN signing out without
+/// choosing to lose its room keys THEN the call is refused with
+/// `keys_not_backed_up` and nothing changes: no logout request, no sign-out
+/// marker, the key is kept and the account stays signed in and usable. The
+/// same sign-out with the choice made then completes.
+#[test]
+fn given_keys_not_in_a_backup_then_sign_out_is_refused_until_the_user_accepts_the_loss() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    assert_eq!(
+        call(
+            &core,
+            Call::SignOut {
+                discard_keys: false
+            }
+        ),
+        Outcome::Error(ErrorCode::KeysNotBackedUp)
+    );
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    assert!(
+        !dir.path().join("signed-out").exists(),
+        "no sign-out recorded"
+    );
+    assert!(dir.path().join("store-key.v1").exists(), "key kept");
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedIn
+    );
+    assert!(matches!(call(&core, Call::RoomList {}), Outcome::Ok(_)));
+
+    let state: StoreState = value(call(&core, Call::SignOut { discard_keys: true }));
+    assert_eq!(state, StoreState::RestartRequired);
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
+    assert!(!dir.path().join("store-key.v1").exists());
+}
+
+/// GIVEN other work still running (a held lease) WHEN signing out without
+/// discarding keys THEN new work is held back while the sign-out waits for
+/// the running work, so no sync round or send can add a key after the backup
+/// check, while a running call's operations still pass; once that work ends,
+/// the check runs, refuses, and new work is admitted again with the account
+/// still signed in.
+#[test]
+fn given_running_work_then_the_backup_check_waits_for_it_and_holds_new_work_back() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let running = core.session().admit().unwrap();
+    std::thread::scope(|scope| {
+        let signing_out = scope.spawn(|| {
+            core.session()
+                .sign_out(Duration::from_secs(10), false, || {})
+        });
+        // A lease taken before the hold starts is let go at once.
+        wait_for("the hold on new work", || {
+            matches!(core.session().admit(), Err(AdmissionError::Saturated))
+        });
+        assert!(!signing_out.is_finished(), "waits for the running work");
+        // A running call's operation still passes: a refused sign-out must
+        // not end the call.
+        let (lease, client) = (core.session().admission())().expect("a call is admitted");
+        {
+            let _runtime = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        drop(running);
+        assert_eq!(
+            signing_out.join().unwrap(),
+            Err(SignOutRefused::KeysNotBackedUp)
+        );
+    });
+    assert!(core.session().admit().is_ok(), "new work admitted again");
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    assert!(dir.path().join("store-key.v1").exists(), "key kept");
+    assert_eq!(
+        core.session().account_status().state,
+        AccountState::SignedIn
+    );
+}
+
+/// GIVEN work that does not end before the timeout WHEN signing out without
+/// discarding keys THEN the sign-out reports that it did not start
+/// (`Saturated`), changes nothing, and admits new work again.
+#[test]
+fn given_running_work_that_does_not_end_then_sign_out_does_not_start() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = signed_in_core(&server, dir.path());
+    let running = core.session().admit().unwrap();
+    assert_eq!(
+        core.session()
+            .sign_out(Duration::from_millis(300), false, || {}),
+        Err(SignOutRefused::Saturated)
+    );
+    assert!(core.session().admit().is_ok(), "new work admitted again");
+    drop(running);
+    assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
+    assert!(dir.path().join("store-key.v1").exists(), "key kept");
+}
+
 /// When the server cannot revoke, sign-out still completes locally and says
 /// the server session may remain.
 #[test]
@@ -2157,14 +2768,14 @@ fn given_the_server_cannot_revoke_then_sign_out_still_wipes_and_warns() {
     let dir = TempDir::new().unwrap();
     let core = signed_in_core(&server, dir.path());
     server.fail_logout();
-    let state: StoreState = value(call(&core, Call::SignOut {}));
+    let state: StoreState = value(call(&core, Call::SignOut { discard_keys: true }));
     assert_eq!(state, StoreState::RestartRequired);
     assert_eq!(
         core.session().account_status().error,
         Some(SignInError::SessionNotRevoked)
     );
     assert!(
-        !dir.path().join("store-key.v2").exists(),
+        !dir.path().join("store-key.v1").exists(),
         "key deleted anyway"
     );
 }
@@ -2231,7 +2842,7 @@ fn given_the_homeserver_ends_the_session_then_the_profile_is_deleted_and_the_nex
         );
         assert_eq!(core.session().state(), StoreState::RestartRequired);
         assert!(!core.session().has_ended(), "finished once");
-        assert!(!dir.path().join("store-key.v2").exists(), "key deleted");
+        assert!(!dir.path().join("store-key.v1").exists(), "key deleted");
         assert!(dir.path().join("signed-out").exists());
         assert_eq!(
             server.requests_to("/_matrix/client/v3/logout"),
@@ -2286,7 +2897,7 @@ fn given_a_soft_logout_then_the_profile_is_kept() {
     });
     assert!(!core.session().has_ended());
     assert!(!core.finish_ended_session());
-    assert!(dir.path().join("store-key.v2").exists());
+    assert!(dir.path().join("store-key.v1").exists());
     assert_eq!(core.session().state(), StoreState::Protected);
     assert_eq!(
         core.session().account_status().state,
@@ -2312,7 +2923,7 @@ fn given_a_refusal_that_a_second_request_does_not_confirm_then_the_profile_is_ke
     });
     assert!(!core.session().has_ended());
     assert!(!core.finish_ended_session());
-    assert!(dir.path().join("store-key.v2").exists());
+    assert!(dir.path().join("store-key.v1").exists());
     assert_eq!(core.session().state(), StoreState::Protected);
     assert_eq!(
         core.session().account_status().error,
@@ -2355,7 +2966,7 @@ fn given_a_good_round_between_two_that_end_the_session_then_the_profile_is_kept(
     }
     assert!(!core.session().has_ended());
     assert!(!core.finish_ended_session());
-    assert!(dir.path().join("store-key.v2").exists());
+    assert!(dir.path().join("store-key.v1").exists());
 }
 
 /// GIVEN a password session that holds a refresh token WHEN the homeserver
@@ -2384,9 +2995,14 @@ fn given_a_refused_refresh_token_then_the_session_ends() {
 fn given_no_account_then_sign_out_changes_nothing() {
     let dir = TempDir::new().unwrap();
     let core = make_core(dir.path(), Fixed::new(Ok(())));
-    let state: StoreState = value(call(&core, Call::SignOut {}));
+    let state: StoreState = value(call(
+        &core,
+        Call::SignOut {
+            discard_keys: false,
+        },
+    ));
     assert_eq!(state, StoreState::Protected);
-    assert!(dir.path().join("store-key.v2").exists());
+    assert!(dir.path().join("store-key.v1").exists());
 }
 
 /// GIVEN every lease in use WHEN signing out THEN the sign-out waits for one;
@@ -2403,11 +3019,11 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
         leases.push(lease);
     }
     assert_eq!(
-        core.session().sign_out(Duration::ZERO, || {}),
-        Err(AdmissionError::Saturated)
+        core.session().sign_out(Duration::ZERO, true, || {}),
+        Err(SignOutRefused::Saturated)
     );
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 0);
-    assert!(dir.path().join("store-key.v2").exists(), "nothing deleted");
+    assert!(dir.path().join("store-key.v1").exists(), "nothing deleted");
     assert_eq!(
         core.session().account_status().state,
         AccountState::SignedIn
@@ -2419,12 +3035,13 @@ fn given_a_saturated_session_then_sign_out_waits_or_reports_that_it_did_not_star
             leases.clear();
         });
         assert_eq!(
-            core.session().sign_out(Duration::from_secs(10), || {}),
+            core.session()
+                .sign_out(Duration::from_secs(10), true, || {}),
             Ok(StoreState::RestartRequired)
         );
     });
     assert_eq!(server.requests_to("/_matrix/client/v3/logout"), 1);
-    assert!(!dir.path().join("store-key.v2").exists());
+    assert!(!dir.path().join("store-key.v1").exists());
 }
 
 /// GIVEN a signed-in profile whose sign-out stopped after recording its
@@ -2481,7 +3098,7 @@ fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_e
     let announced = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         let signing_out = scope.spawn(|| {
-            core.session().sign_out(Duration::from_secs(10), || {
+            core.session().sign_out(Duration::from_secs(10), true, || {
                 announced.fetch_add(1, Ordering::SeqCst);
             })
         });
@@ -2493,7 +3110,7 @@ fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_e
             "intent recorded before the answer"
         );
         assert!(
-            dir.path().join("store-key.v2").exists(),
+            dir.path().join("store-key.v1").exists(),
             "key deleted only after the answer"
         );
         assert_eq!(announced.load(Ordering::SeqCst), 1, "page cleared first");
@@ -2506,7 +3123,7 @@ fn given_a_slow_logout_then_the_sign_out_intent_is_recorded_before_the_request_e
         assert_eq!(signing_out.join().unwrap(), Ok(StoreState::RestartRequired));
     });
     assert_eq!(announced.load(Ordering::SeqCst), 1, "announced once");
-    assert!(!dir.path().join("store-key.v2").exists());
+    assert!(!dir.path().join("store-key.v1").exists());
 }
 
 /// GIVEN a signed-in core whose UI connection ended (a failed window) WHEN
@@ -4381,4 +4998,314 @@ fn given_a_listed_directory_then_only_its_open_rooms_can_be_joined() {
         json!({"errcode": "M_UNKNOWN", "error": "Bad gateway"}),
     );
     assert_eq!(list(None), Outcome::Error(ErrorCode::Unavailable));
+}
+
+/// GIVEN a signed-in account with its room open and three events the
+/// homeserver serves by ID (a text message, an event encrypted with a key
+/// nobody has, and one whose answer is another event) WHEN the page asks to
+/// read loaded events again before any room key arrived THEN it gets no items
+/// and no event is fetched. WHEN keys may have arrived (a change of the
+/// ignore list marks every open room so, as arriving room keys do) THEN the
+/// events are read once, in the order asked, decrypted where possible: the
+/// message is a message and the encrypted event stays undecryptable. The
+/// mark is used up, so the next call fetches nothing. WHEN the homeserver
+/// answers with another event THEN the call is rejected and the mark is put
+/// back, so a later call reads again. WHEN an event read fails with a server
+/// error THEN that event is left out and the mark is kept; WHEN it fails
+/// with not found THEN the event is left out and the mark is used up. WHEN
+/// the room is not open THEN it is never marked.
+#[test]
+fn given_keys_arrived_then_timeline_events_reads_the_asked_events_once() {
+    let server = Homeserver::signed_in();
+    let encrypted = json!({"type":"m.room.encrypted","room_id":ROOM,"sender":USER,"event_id":"$locked","origin_server_ts":5,"content":{"algorithm":"m.megolm.v1.aes-sha2","ciphertext":"AwgAEgAAAA","sender_key":"c2VuZGVyLWtleQ","device_id":"OTHER","session_id":"no-such-session"}});
+    let mut readable = text("$readable", "now readable");
+    readable["room_id"] = json!(ROOM);
+    let mut other = text("$other", "not the one asked for");
+    other["room_id"] = json!(ROOM);
+    server.runtime.block_on(async {
+        for (name, event) in [
+            ("locked", encrypted),
+            ("readable", readable),
+            ("swapped", other),
+        ] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(event))
+                .mount(&server.server)
+                .await;
+        }
+        for (name, status, errcode) in [("busy", 503, "M_UNKNOWN"), ("gone", 404, "M_NOT_FOUND")] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(json!({"errcode": errcode, "error": name})),
+                )
+                .mount(&server.server)
+                .await;
+        }
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/user/[^/]+/account_data/m\.ignored_user_list$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server.server)
+            .await;
+    });
+    let fetched = |name: &str| {
+        let plain = format!("/event/${name}");
+        let encoded = format!("/event/%24{name}");
+        server
+            .runtime
+            .block_on(server.server.received_requests())
+            .unwrap_or_default()
+            .iter()
+            .filter(|request| {
+                let path = request.url.path();
+                path.ends_with(&plain) || path.ends_with(&encoded)
+            })
+            .count()
+    };
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("the room", || {
+        matches!(
+            call(
+                &core,
+                Call::Subscribe {
+                    room_id: ROOM.into()
+                }
+            ),
+            Outcome::Ok(_)
+        )
+    });
+    let read = |ids: &[&str]| {
+        call(
+            &core,
+            Call::TimelineEvents {
+                room_id: ROOM.into(),
+                event_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            },
+        )
+    };
+    let mark = || {
+        assert_eq!(
+            call(
+                &core,
+                Call::SetIgnoredUser {
+                    user_id: "@mallory:synthetic.test".into(),
+                    ignored: true,
+                }
+            ),
+            Outcome::Ok(Value::Null)
+        );
+    };
+
+    let page: TimelinePage = value(read(&["$locked", "$readable"]));
+    assert_eq!(page.room_id, ROOM);
+    assert!(page.items.is_empty(), "no keys arrived: {page:?}");
+    assert_eq!(page.next_cursor, None);
+    assert_eq!(
+        fetched("locked") + fetched("readable"),
+        0,
+        "nothing fetched"
+    );
+
+    mark();
+    let page: TimelinePage = value(read(&["$locked", "$readable"]));
+    assert_eq!(page.next_cursor, None);
+    match page.items.as_slice() {
+        [
+            TimelineItem::Notice {
+                event_id: locked,
+                notice: NoticeKind::Undecryptable,
+                ..
+            },
+            TimelineItem::Message {
+                event_id: message,
+                body,
+                ..
+            },
+        ] => {
+            assert_eq!(locked, "$locked");
+            assert_eq!(message, "$readable");
+            assert_eq!(body, "now readable");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!((fetched("locked"), fetched("readable")), (1, 1));
+
+    let page: TimelinePage = value(read(&["$locked", "$readable"]));
+    assert!(page.items.is_empty(), "the mark was used up");
+    assert_eq!((fetched("locked"), fetched("readable")), (1, 1));
+
+    mark();
+    assert_eq!(read(&["$swapped"]), Outcome::Error(ErrorCode::Rejected));
+    let page: TimelinePage = value(read(&["$readable"]));
+    assert_eq!(page.items.len(), 1, "the failed read put the mark back");
+    assert_eq!(fetched("readable"), 2);
+
+    mark();
+    let page: TimelinePage = value(read(&["$busy", "$readable"]));
+    assert_eq!(page.items.len(), 1, "the busy event is left out: {page:?}");
+    let page: TimelinePage = value(read(&["$busy", "$readable"]));
+    assert_eq!(page.items.len(), 1, "a server error kept the mark");
+    assert_eq!((fetched("busy"), fetched("readable")), (2, 4));
+
+    mark();
+    let page: TimelinePage = value(read(&["$gone", "$readable"]));
+    assert_eq!(
+        page.items.len(),
+        1,
+        "the missing event is left out: {page:?}"
+    );
+    let page: TimelinePage = value(read(&["$gone", "$readable"]));
+    assert!(page.items.is_empty(), "not found used up the mark");
+    assert_eq!((fetched("gone"), fetched("readable")), (1, 5));
+
+    assert_eq!(
+        call(
+            &core,
+            Call::Unsubscribe {
+                room_id: ROOM.into()
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+    mark();
+    let page: TimelinePage = value(read(&["$readable"]));
+    assert!(page.items.is_empty(), "a room not open is never marked");
+    assert_eq!(fetched("readable"), 5);
+}
+
+/// GIVEN an open room marked after keys arrived WHEN a reread event is an
+/// edit whose original message the homeserver answers only after the
+/// projection's time limit THEN the read is `unavailable` and the mark is
+/// kept, so the next call reads again.
+#[test]
+fn given_a_slow_edit_original_then_the_reread_is_unavailable_and_the_mark_is_kept() {
+    let server = Homeserver::signed_in();
+    let mut edit = edit_of("$edit", USER, "$slow", "changed");
+    edit["room_id"] = json!(ROOM);
+    let mut readable = text("$readable", "now readable");
+    readable["room_id"] = json!(ROOM);
+    let mut slow = text("$slow", "original");
+    slow["room_id"] = json!(ROOM);
+    server.runtime.block_on(async {
+        for (name, event, delay) in [
+            ("edit", edit, Duration::ZERO),
+            ("readable", readable, Duration::ZERO),
+            // Past the 10 s projection limit, within the 30 s request timeout.
+            ("slow", slow, Duration::from_secs(15)),
+        ] {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r"^/_matrix/client/v3/rooms/[^/]+/event/(%24|\$){name}$"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(event)
+                        .set_delay(delay),
+                )
+                .mount(&server.server)
+                .await;
+        }
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/_matrix/client/v3/user/[^/]+/account_data/m\.ignored_user_list$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server.server)
+            .await;
+    });
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    wait_for("the room", || {
+        matches!(
+            call(
+                &core,
+                Call::Subscribe {
+                    room_id: ROOM.into()
+                }
+            ),
+            Outcome::Ok(_)
+        )
+    });
+    let read = |ids: &[&str]| {
+        call(
+            &core,
+            Call::TimelineEvents {
+                room_id: ROOM.into(),
+                event_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            },
+        )
+    };
+    assert_eq!(
+        call(
+            &core,
+            Call::SetIgnoredUser {
+                user_id: "@mallory:synthetic.test".into(),
+                ignored: true,
+            }
+        ),
+        Outcome::Ok(Value::Null)
+    );
+
+    let started = Instant::now();
+    assert_eq!(read(&["$edit"]), Outcome::Error(ErrorCode::Unavailable));
+    assert!(
+        started.elapsed() < Duration::from_secs(14),
+        "the limit ended the read, not the answer: {:?}",
+        started.elapsed()
+    );
+    let page: TimelinePage = value(read(&["$readable"]));
+    assert_eq!(page.items.len(), 1, "the mark was kept: {page:?}");
+}
+
+/// GIVEN a signed-in account WHEN the page asks to read events again with
+/// no IDs, too many, a repeated or malformed ID, or a malformed room ID THEN
+/// the core refuses it before any request.
+#[test]
+fn given_bad_arguments_then_timeline_events_is_refused() {
+    let server = Homeserver::signed_in();
+    let dir = TempDir::new().unwrap();
+    let core = make_core(dir.path(), Fixed::new(Ok(())));
+    sign_in(&core, &server.uri());
+    wait_for("sign-in", || {
+        core.session().account_status().state == AccountState::SignedIn
+    });
+    let many: Vec<String> = (0..=persephone_core_protocol::MAX_TIMELINE_EVENTS)
+        .map(|n| format!("$e{n}"))
+        .collect();
+    for (room_id, event_ids) in [
+        (ROOM, Vec::new()),
+        (ROOM, many),
+        (ROOM, vec!["$a".to_owned(), "$a".to_owned()]),
+        (ROOM, vec!["not-an-event-id".to_owned()]),
+        ("room", vec!["$a".to_owned()]),
+    ] {
+        assert_eq!(
+            call(
+                &core,
+                Call::TimelineEvents {
+                    room_id: room_id.into(),
+                    event_ids: event_ids.clone(),
+                }
+            ),
+            Outcome::Error(ErrorCode::InvalidArgument),
+            "{room_id} {event_ids:?}"
+        );
+    }
 }

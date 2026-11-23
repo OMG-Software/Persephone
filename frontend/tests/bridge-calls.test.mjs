@@ -121,6 +121,7 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.searchMessages('hello', '!r:s', { sender: '@a:s', fromMs: 1, beforeMs: 2 }), 'search_messages', { term: 'hello', roomId: '!r:s', filters: { sender: '@a:s', fromMs: 1, beforeMs: 2 } }],
     [() => bridge.jumpToDate('!r:s', 123), 'jump_to_date', { roomId: '!r:s', timestampMs: 123 }],
     [() => bridge.eventContext('!r:s', '$e'), 'event_context', { roomId: '!r:s', eventId: '$e' }],
+    [() => bridge.readEventsAgain('!r:s', ['$a', '$b']), 'timeline_events', { roomId: '!r:s', eventIds: ['$a', '$b'] }],
     [() => bridge.pinnedMessages('!r:s'), 'pinned_messages', { roomId: '!r:s' }],
     [() => bridge.setPinned('!r:s', '$e', true), 'set_pinned', { roomId: '!r:s', eventId: '$e', pinned: true }],
     [() => bridge.setPinned('!r:s', '$e', false), 'set_pinned', { roomId: '!r:s', eventId: '$e', pinned: false }],
@@ -144,7 +145,9 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           loadRoomPictures: true,
           captureProtection: false,
           timelineEvents: { ...ALL_SHOWN, leaves: false },
-          theme: 'red'
+          theme: 'red',
+          sharePresence: false,
+          presence: 'unavailable'
         }),
       'set_account_settings',
       {
@@ -160,12 +163,16 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
           loadRoomPictures: true,
           captureProtection: false,
           timelineEvents: { ...ALL_SHOWN, leaves: false },
-          theme: 'red'
+          theme: 'red',
+          sharePresence: false,
+          presence: 'unavailable'
         }
       }
     ],
     [() => bridge.loadRoomPicture('!r:s'), 'load_room_picture', { roomId: '!r:s' }],
     [() => bridge.changePassword(true), 'change_password', { signOutOthers: true }],
+    [() => bridge.signOut(false), 'sign_out', { discardKeys: false }],
+    [() => bridge.signOut(true), 'sign_out', { discardKeys: true }],
     [() => bridge.newSessions(), 'new_sessions', {}],
     [() => bridge.thirdPartyModules(), 'third_party_modules', {}],
     [() => bridge.displaySession(), 'display_session', {}],
@@ -175,7 +182,8 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.setProxySetting('127.0.0.1:9050'), 'set_proxy_setting', { proxy: '127.0.0.1:9050' }],
     [() => bridge.setProxySetting(null), 'set_proxy_setting', { proxy: null }],
     [() => bridge.callDevices(), 'call_devices', {}],
-    [() => bridge.setCallDevices('mic', null), 'set_call_devices', { recording: 'mic', playout: null }],
+    [() => bridge.setCallDevices('mic', null, 'cam'), 'set_call_devices', { recording: 'mic', playout: null, camera: 'cam' }],
+    [() => bridge.setCallDevices(null, 'spk', null), 'set_call_devices', { recording: null, playout: 'spk', camera: null }],
     [() => bridge.discoverHomeserver('example.org'), 'discover_homeserver', { serverName: 'example.org' }],
     [() => bridge.publicRooms(null, null, null), 'public_rooms', { server: null, filter: null, since: null }],
     [() => bridge.publicRooms('example.org', 'rust', 'p30'), 'public_rooms', { server: 'example.org', filter: 'rust', since: 'p30' }],
@@ -198,12 +206,24 @@ test('GIVEN the room, account, settings and profile calls WHEN made THEN each ma
     [() => bridge.verifyDevice('OTHER'), 'verify_device', { deviceId: 'OTHER' }],
     [() => bridge.verifyMember('!r:s', '@b:s'), 'verify_member', { roomId: '!r:s', userId: '@b:s' }],
     [() => bridge.callReadiness('!r:s'), 'call_readiness', { roomId: '!r:s' }],
-    [() => bridge.callJoin('!r:s'), 'call_join', { roomId: '!r:s' }],
+    [() => bridge.callJoin('!r:s', false), 'call_join', { roomId: '!r:s', video: false }],
+    [() => bridge.callJoin('!r:s', true), 'call_join', { roomId: '!r:s', video: true }],
+    [() => bridge.callCamera(true), 'call_camera', { on: true }],
+    [() => bridge.callCamera(false), 'call_camera', { on: false }],
+    [() => bridge.callScreen(true), 'call_screen', { on: true }],
+    [() => bridge.callScreen(false), 'call_screen', { on: false }],
     [() => bridge.callLeave(), 'call_leave', {}],
     [() => bridge.callMute(true), 'call_mute', { muted: true }],
     [() => bridge.callMute(false), 'call_mute', { muted: false }],
+    [() => bridge.callDeafen(true), 'call_deafen', { deafened: true }],
+    [() => bridge.callDeafen(false), 'call_deafen', { deafened: false }],
+    [() => bridge.callVolume(35), 'call_volume', { percent: 35 }],
     [() => bridge.callStatus(), 'call_status', {}],
+    [() => bridge.callRings(), 'call_rings', {}],
+    [() => bridge.callDeclineRing('!r:s'), 'call_decline_ring', { roomId: '!r:s' }],
     [() => bridge.changeRecoveryKey(), 'change_recovery_key', {}],
+    [() => bridge.setProfilePassphrase(true), 'set_profile_passphrase', { on: true }],
+    [() => bridge.setProfilePassphrase(false), 'set_profile_passphrase', { on: false }],
     [() => bridge.startNewBackup(), 'start_new_backup', {}],
     [() => bridge.notificationLevel(), 'notification_level', {}],
     [() => bridge.setNotificationLevel('mentions'), 'set_notification_level', { level: 'mentions' }],
@@ -243,6 +263,8 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       captureProtection: true,
       timelineEvents: { ...ALL_SHOWN, futureKind: false },
       theme: 'blue',
+      sharePresence: true,
+      presence: 'offline',
       accent: 'green'
     })
   );
@@ -259,7 +281,9 @@ test('GIVEN account settings WHEN saved THEN only the known settings cross, neve
       loadRoomPictures: false,
       captureProtection: true,
       timelineEvents: ALL_SHOWN,
-      theme: 'blue'
+      theme: 'blue',
+      sharePresence: true,
+      presence: 'offline'
     }
   });
 });
@@ -270,6 +294,7 @@ test('GIVEN the account-change calls WHEN made THEN no password, code, key or pa
     'change_password',
     'add_three_pid',
     'change_recovery_key',
+    'set_profile_passphrase',
     'start_new_backup',
     'request_phone_token',
     'verify_device'
@@ -358,10 +383,54 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
     () => seen.push('rooms'),
     () => seen.push('security'),
     () => seen.push('modules'),
-    () => seen.push('calls')
+    () => seen.push('calls'),
+    () => seen.push('callVideo'),
+    () => seen.push('rings')
   );
-  for (const message of ['calls', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls']) {
+  for (const message of ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'something-new', 'calls', 'callvideo', 'rings', 'Rings']) {
     channel.onmessage(message);
   }
-  assert.deepEqual(seen, ['calls', 'modules', 'rooms', 'security', 'session', 'session', 'calls']);
+  assert.deepEqual(seen, ['calls', 'callVideo', 'modules', 'rooms', 'security', 'session', 'session', 'calls', 'session', 'rings', 'session']);
+});
+
+test('GIVEN the video frame call WHEN the host answers THEN an empty body is no picture, a whole picture is parsed and anything else is refused', async () => {
+  const body = new Uint8Array(20 + 8);
+  const prefix = new DataView(body.buffer);
+  prefix.setBigUint64(0, 12n, true);
+  prefix.setUint32(8, 1, true);
+  prefix.setUint32(12, 2, true);
+  prefix.setUint32(16, 1, true);
+
+  const calls = [];
+  const answer = (reply) => {
+    mockIPC((command, args) => {
+      calls.push({ command, args });
+      return reply;
+    });
+  };
+  answer(new ArrayBuffer(0));
+  assert.equal(await bridge.callVideoFrame(3, 11, 2), null);
+  answer(body.buffer);
+  const picture = await bridge.callVideoFrame(0, 0, 0);
+  assert.deepEqual([picture.seq, picture.rotation, picture.width, picture.height], [12, 1, 2, 1]);
+  assert.deepEqual(calls.map((call) => call.command), ['call_video_frame', 'call_video_frame']);
+  assert.deepEqual(calls[0].args, { tile: 3, after: 11, stream: 2 });
+  assert.ok(registered.has('call_video_frame') && registered.has('call_camera'));
+  assert.deepEqual(hostArguments.get('call_video_frame'), ['after', 'stream', 'tile']);
+  assert.deepEqual(hostArguments.get('call_camera'), ['on']);
+  // The page names no screen: the screen command takes the flag and nothing else.
+  assert.ok(registered.has('call_screen'));
+  assert.deepEqual(hostArguments.get('call_screen'), ['on']);
+  assert.deepEqual(hostArguments.get('call_join'), ['roomId', 'video']);
+  assert.ok(registered.has('call_rings') && registered.has('call_decline_ring'));
+  assert.deepEqual(hostArguments.get('call_rings'), []);
+  assert.deepEqual(hostArguments.get('call_decline_ring'), ['roomId']);
+  assert.deepEqual(hostArguments.get('set_call_devices'), ['camera', 'playout', 'recording']);
+
+  for (const bad of [null, { seq: 1 }, 'x', body.slice(0, 27), new Uint8Array(21)]) {
+    answer(bad);
+    await assert.rejects(bridge.callVideoFrame(0, 0, 0), (reason) => reason === 'bad_video');
+  }
+  mockIPC(() => Promise.reject('limit_exceeded'));
+  await assert.rejects(bridge.callVideoFrame(0, 0, 0), (reason) => reason === 'limit_exceeded');
 });

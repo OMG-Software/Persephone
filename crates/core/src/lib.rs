@@ -34,6 +34,8 @@ pub mod account;
 pub mod account_changes;
 pub mod account_details;
 pub mod activity;
+pub mod backup_restore;
+mod bounded;
 pub mod calls;
 pub mod contacts;
 pub mod conversations;
@@ -55,6 +57,7 @@ pub mod passphrase;
 pub mod personal;
 pub mod pick;
 pub mod platform;
+pub mod presence;
 pub mod profiles;
 pub mod prompt_text;
 pub mod proxy;
@@ -87,26 +90,30 @@ use persephone_contracts::{
 use persephone_core_protocol::{
     Call, CoreMessage, ErrorCode, Event, MAX_EVENT_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
     MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, MAX_USER_ID_BYTES, Outcome,
-    PixelReply, ReceiveError, Reply, Request, ToCore, receive_request, send, send_pixel_reply,
+    PixelReply, ReceiveError, Reply, Request, ToCore, VideoReply, call_video_within_limits,
+    receive_request, send, send_pixel_reply, send_video_reply,
 };
 use persephone_media_protocol::{ReceivedFrame, ResourceBudgets};
 use pick::ImagePicker;
 use serde::Serialize;
-use session::{Session, SessionListener};
+use session::{Session, SessionListener, SignOutRefused};
 use std::{
     collections::BTreeSet,
     io::{Read, Write},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const MILESTONE: &str = "P1";
 
 /// The commit this core was built from (`build.rs`).
 pub const REVISION: &str = env!("PERSEPHONE_REVISION");
+
+/// The shortest time between two `call_video` events: about 30 a second.
+const VIDEO_EVENT_GAP: Duration = Duration::from_millis(33);
 
 /// Longest a `lock_session` call waits for admitted work before replying
 /// `locking`; the UI may call again to resume the wait. Covers one sync round.
@@ -136,6 +143,10 @@ struct Notifications {
     subscribed: BTreeSet<String>,
     /// Subscribed rooms changed since their last notification.
     pending: BTreeSet<String>,
+    /// Subscribed rooms that got room keys since their last
+    /// `timeline_events` call: only they read undecryptable events again.
+    /// A subset of `subscribed`.
+    keyed: BTreeSet<String>,
     /// The session changed state since the last notification.
     session_changed: bool,
     /// The room list changed since the last notification.
@@ -144,11 +155,20 @@ struct Notifications {
     security_changed: bool,
     /// The call changed since the last notification.
     calls_changed: bool,
+    /// A call video picture arrived since the last notification. At most one
+    /// `call_video` event per [`VIDEO_EVENT_GAP`] leaves the core.
+    video_changed: bool,
+    /// When the last `call_video` event was taken.
+    video_taken: Option<Instant>,
     /// The report of third-party modules changed since the last notification.
     modules_changed: bool,
     /// The latest desktop notification waiting to be sent (ADR-0022): room
     /// and sender names. A newer one replaces it.
     toast: Option<(String, String)>,
+    /// The waiting desktop notification is for an incoming call (ADR-0052).
+    toast_call: bool,
+    /// The incoming call rings changed since the last notification.
+    rings_changed: bool,
     /// The UI sent a valid request on this connection, so its page runs.
     ready: bool,
     closed: bool,
@@ -164,7 +184,19 @@ struct Hub {
     /// Weak: the core owns the controller, and the controller's admission
     /// reaches the session that holds this hub.
     calls: OnceLock<Weak<calls::controller::CallController>>,
+    /// The UI connection has closed. Long calls that wait for the user (the
+    /// camera portal of a device listing) end when it is set.
+    closing: AtomicBool,
+    /// Incoming call rings, in memory only (ADR-0052).
+    rings: calls::rings::Rings,
+    /// The rooms that have another device in their call (ADR-0052).
+    call_rooms: calls::rings::CallRooms,
 }
+
+/// The largest JSON reply of a device listing, below the UI pipe's control
+/// frame limit with room for the reply envelope (`id` and `outcome`).
+const MAX_DEVICE_REPLY_BYTES: usize =
+    persephone_media_protocol::CONTROL_FRAME_LIMIT as usize - 1024;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A poisoned lock means a panic mid-update; the core stops either way.
@@ -189,10 +221,21 @@ impl Hub {
         let mut notifications = lock(&self.notifications);
         notifications.subscribed.clear();
         notifications.pending.clear();
+        notifications.keyed.clear();
         notifications.room_list_changed = false;
         notifications.toast = None;
+        notifications.toast_call = false;
+        notifications.rings_changed = false;
         notifications.session_changed = true;
         self.changed.notify_all();
+    }
+
+    /// Drops every ring and call flag: on a lock, an unlock, a profile reset
+    /// and when the signed-in account ends or changes. A sync error does not
+    /// come here, so a short outage keeps them.
+    fn clear_calls(&self) {
+        self.rings.clear();
+        self.call_rooms.clear();
     }
 
     /// Queues one call event; changes before the UI reads coalesce.
@@ -200,6 +243,48 @@ impl Hub {
         let mut notifications = lock(&self.notifications);
         if !notifications.calls_changed {
             notifications.calls_changed = true;
+            self.changed.notify_all();
+        }
+    }
+
+    /// The call controller's room is the one that takes no rings (ADR-0052):
+    /// a join in progress counts. A ring in that room ends.
+    fn open_call_changed(&self) {
+        use calls::controller::CallState;
+        let state = self
+            .calls
+            .get()
+            .and_then(Weak::upgrade)
+            .map(|calls| calls.state());
+        let room = match &state {
+            Some(CallState::Joining { room_id } | CallState::Active { room_id, .. }) => {
+                Some(room_id.as_ref())
+            }
+            _ => None,
+        };
+        if self.rings.set_open_room(room) {
+            self.mark_rings_changed();
+        }
+    }
+
+    /// Queues one content-free `rings_changed` event; changes before the UI
+    /// reads coalesce.
+    fn mark_rings_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.rings_changed {
+            notifications.rings_changed = true;
+            self.changed.notify_all();
+        }
+    }
+
+    /// Queues one content-free `call_video` event. Pictures before the UI
+    /// reads coalesce; the writer sends it no sooner than [`VIDEO_EVENT_GAP`]
+    /// after the last one. Called from the worker read thread, so it only
+    /// sets a flag.
+    fn video_changed(&self) {
+        let mut notifications = lock(&self.notifications);
+        if !notifications.video_changed {
+            notifications.video_changed = true;
             self.changed.notify_all();
         }
     }
@@ -238,6 +323,10 @@ impl SessionListener for Hub {
         self.announce_session_change();
     }
 
+    fn account_ended(&self) {
+        self.clear_calls();
+    }
+
     fn direct_rooms_changed(&self) {
         self.mark_list_changed(&[], true);
     }
@@ -254,6 +343,7 @@ impl SessionListener for Hub {
         let mut any = false;
         for room in &notifications.subscribed {
             if rooms.includes(room) {
+                notifications.keyed.insert(room.clone());
                 any |= notifications.pending.insert(room.clone());
             }
         }
@@ -273,7 +363,38 @@ impl SessionListener for Hub {
     fn notify(&self, room: &str, sender: &str) {
         let mut notifications = lock(&self.notifications);
         notifications.toast = Some((room.to_owned(), sender.to_owned()));
+        notifications.toast_call = false;
         self.changed.notify_all();
+    }
+
+    fn notify_call(&self, room: &str, sender: &str) {
+        let mut notifications = lock(&self.notifications);
+        notifications.toast = Some((room.to_owned(), sender.to_owned()));
+        notifications.toast_call = true;
+        self.changed.notify_all();
+    }
+
+    fn rings(&self) -> Option<&calls::rings::Rings> {
+        Some(&self.rings)
+    }
+
+    fn call_rooms(&self) -> Option<&calls::rings::CallRooms> {
+        Some(&self.call_rooms)
+    }
+
+    fn rings_changed(&self) {
+        self.mark_rings_changed();
+    }
+
+    fn room_call_changed(&self, room: &str) {
+        self.mark_changed(&[room.to_owned()], true);
+    }
+
+    fn check_rooms(&self, joined: &dyn Fn(&matrix_sdk::ruma::RoomId) -> bool) {
+        self.call_rooms.retain(joined);
+        if self.rings.retain(|ring| joined(&ring.room_id)) {
+            self.mark_rings_changed();
+        }
     }
 
     /// Wakes the watch in [`serve`], which finishes the ended session. A
@@ -338,6 +459,7 @@ pub struct Core {
     call_readiness: conversations::Busy,
     call_join: conversations::Busy,
     call_leave: conversations::Busy,
+    call_decline: conversations::Busy,
     call_device_list: conversations::Busy,
     /// One device-list request at a time.
     devices: conversations::Busy,
@@ -427,6 +549,9 @@ enum Answer<'a> {
     Reply(Reply),
     /// A pixel reply and the band it announces.
     Pixels(PixelReply, media::Band),
+    /// A video reply, the picture it announces, and the open session's
+    /// generation from before the picture was chosen.
+    Video(VideoReply, calls::video::Picture, Option<u64>),
     /// Admitted; the reply follows when the call finishes.
     Later(u32, LongCall<'a>),
 }
@@ -434,6 +559,16 @@ enum Answer<'a> {
 impl Default for Core {
     fn default() -> Self {
         Self::new(views::Fixtures::default())
+    }
+}
+
+/// The reply to `timeline_events` when there is nothing to read.
+fn no_events(room_id: &str) -> persephone_contracts::TimelinePage {
+    persephone_contracts::TimelinePage {
+        room_id: room_id.to_owned(),
+        items: Vec::new(),
+        next_cursor: None,
+        names: Vec::new(),
     }
 }
 
@@ -495,6 +630,18 @@ fn refused<T: Serialize>(result: Result<T, ErrorCode>) -> Outcome {
     }
 }
 
+/// `Ok` when the JSON of `devices` fits [`MAX_DEVICE_REPLY_BYTES`]. Names
+/// and IDs that JSON escapes can make three lists of valid devices larger
+/// than the UI pipe takes; the writer would then refuse the frame and the
+/// page would get no reply.
+fn within_device_reply(devices: &persephone_contracts::CallDevices) -> Result<(), ErrorCode> {
+    match serde_json::to_vec(devices) {
+        Ok(bytes) if bytes.len() <= MAX_DEVICE_REPLY_BYTES => Ok(()),
+        Ok(_) => Err(ErrorCode::LimitExceeded),
+        Err(_) => Err(ErrorCode::Internal),
+    }
+}
+
 /// A room ID the SDK accepts, so nothing queued or consented to can fail to
 /// parse later.
 fn valid_room_id(room_id: &str) -> bool {
@@ -534,6 +681,13 @@ impl Core {
         calls.set_listener(Arc::new(move || {
             if let Some(hub) = tell.upgrade() {
                 hub.calls_changed();
+                hub.open_call_changed();
+            }
+        }));
+        let tell = Arc::downgrade(&hub);
+        calls.set_video_listener(Arc::new(move || {
+            if let Some(hub) = tell.upgrade() {
+                hub.video_changed();
             }
         }));
         Self {
@@ -562,6 +716,7 @@ impl Core {
             call_readiness: conversations::Busy::default(),
             call_join: conversations::Busy::default(),
             call_leave: conversations::Busy::default(),
+            call_decline: conversations::Busy::default(),
             call_device_list: conversations::Busy::default(),
             devices: conversations::Busy::default(),
             room_settings: conversations::Busy::default(),
@@ -677,6 +832,17 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
+            Call::TimelineEvents { room_id, event_ids } => {
+                match self.timeline_events(room_id, event_ids) {
+                    Ok(Some(call)) => Answer::Later(id, call),
+                    // Nothing to read: answered at once, with no worker.
+                    Ok(None) => Answer::Reply(Reply {
+                        id,
+                        outcome: ok(&no_events(room_id)),
+                    }),
+                    Err(code) => error(code),
+                }
+            }
             Call::LoadImage { room_id, event_id } => match self.load_image(room_id, event_id) {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
@@ -703,12 +869,13 @@ impl Core {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
             },
-            Call::CallReadiness { .. } | Call::CallJoin { .. } | Call::CallLeave {} => {
-                match self.call_work(&request.call) {
-                    Ok(call) => Answer::Later(id, call),
-                    Err(code) => error(code),
-                }
-            }
+            Call::CallReadiness { .. }
+            | Call::CallJoin { .. }
+            | Call::CallLeave {}
+            | Call::CallDeclineRing { .. } => match self.call_work(&request.call) {
+                Ok(call) => Answer::Later(id, call),
+                Err(code) => error(code),
+            },
             Call::CallDevices {} => match self.call_devices() {
                 Ok(call) => Answer::Later(id, call),
                 Err(code) => error(code),
@@ -760,6 +927,37 @@ impl Core {
                         band,
                     ),
                     Err(code) => error(code),
+                }
+            }
+            Call::CallVideoFrame {
+                tile,
+                after,
+                stream,
+            } => {
+                if !call_video_within_limits(&request.call) {
+                    return error(ErrorCode::InvalidArgument);
+                }
+                // No newer picture, no call, and a locked profile all give the
+                // same answer: nothing to show. The generation is read first,
+                // so a lock after it is seen again when the reply is written.
+                let generation = self.media_generation();
+                match self.calls.video_picture(*tile, *after, *stream) {
+                    Some(picture) => Answer::Video(
+                        VideoReply {
+                            id,
+                            tile: *tile,
+                            seq: picture.seq,
+                            rotation: picture.rotation,
+                            width: picture.width,
+                            height: picture.height,
+                        },
+                        picture,
+                        generation,
+                    ),
+                    None => Answer::Reply(Reply {
+                        id,
+                        outcome: Outcome::Ok(serde_json::Value::Null),
+                    }),
                 }
             }
             call => Answer::Reply(Reply {
@@ -814,6 +1012,13 @@ impl Core {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
+            Call::TimelineEvents { room_id, event_ids } => {
+                match self.timeline_events(room_id, event_ids) {
+                    Ok(Some(call)) => call(),
+                    Ok(None) => ok(&no_events(room_id)),
+                    Err(code) => Outcome::Error(code),
+                }
+            }
             Call::AppStatus {} => ok(&AppStatus {
                 version: env!("CARGO_PKG_VERSION").into(),
                 revision: REVISION.into(),
@@ -834,7 +1039,11 @@ impl Core {
                 Source::Fixtures => ok(&lock(&self.fixtures).room_list()),
                 Source::Locked => Outcome::Error(ErrorCode::Locked),
                 Source::SignedOut => ok(&empty_rooms()),
-                Source::Matrix(_lease, client) => ok(&MatrixViews::room_list(&client)),
+                Source::Matrix(_lease, client) => ok(&MatrixViews::room_list(
+                    &client,
+                    &self.hub.call_rooms,
+                    self.session.contacts_presence(),
+                )),
             },
             Call::TimelinePage { room_id, cursor } => {
                 let page = match self.source() {
@@ -858,6 +1067,7 @@ impl Core {
                 let mut notifications = lock(&self.hub.notifications);
                 notifications.subscribed.remove(room_id);
                 notifications.pending.remove(room_id);
+                notifications.keyed.remove(room_id);
                 Outcome::Ok(serde_json::Value::Null)
             }
             Call::LockSession {} => {
@@ -868,6 +1078,7 @@ impl Core {
                 let before = self.session.state();
                 let state = self.session.unlock();
                 if state != before {
+                    self.hub.clear_calls();
                     self.hub.announce_session_change();
                 }
                 ok(&state)
@@ -876,6 +1087,7 @@ impl Core {
                 let before = self.session.state();
                 let state = self.session.reset_profile();
                 if state != before {
+                    self.hub.clear_calls();
                     self.hub.announce_session_change();
                 }
                 ok(&state)
@@ -962,6 +1174,9 @@ impl Core {
             Call::ChangeRecoveryKey {} => {
                 ok(&self.session.change_recovery_key(self.credentials.clone()))
             }
+            Call::SetProfilePassphrase { on } => ok(&self
+                .session
+                .set_profile_passphrase(*on, self.credentials.clone())),
             Call::StartNewBackup {} => ok(&self.session.start_new_backup(self.credentials.clone())),
             Call::VerifyDevice { device_id } => {
                 if verification::valid_device_id(device_id) {
@@ -1003,11 +1218,18 @@ impl Core {
                     .verify(verification::Action::StartMember(room_id.clone(), member))),
                 _ => Outcome::Error(ErrorCode::InvalidArgument),
             },
-            Call::SignOut {} => {
-                match self.session.sign_out(LOCK_TIMEOUT, || self.announce_lock()) {
+            Call::SignOut { discard_keys } => {
+                match self
+                    .session
+                    .sign_out(LOCK_TIMEOUT, *discard_keys, || self.announce_lock())
+                {
                     Ok(state) => ok(&state),
                     // Too much work in progress: nothing was signed out.
-                    Err(_) => Outcome::Error(ErrorCode::LimitExceeded),
+                    Err(SignOutRefused::Saturated) => Outcome::Error(ErrorCode::LimitExceeded),
+                    // The page asks the user before it tries again.
+                    Err(SignOutRefused::KeysNotBackedUp) => {
+                        Outcome::Error(ErrorCode::KeysNotBackedUp)
+                    }
                 }
             }
             Call::LoadImage { room_id, event_id } => match self.load_image(room_id, event_id) {
@@ -1034,20 +1256,43 @@ impl Core {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
-            Call::CallReadiness { .. } | Call::CallJoin { .. } | Call::CallLeave {} => {
-                match self.call_work(call) {
-                    Ok(call) => call(),
-                    Err(code) => Outcome::Error(code),
-                }
-            }
+            Call::CallReadiness { .. }
+            | Call::CallJoin { .. }
+            | Call::CallLeave {}
+            | Call::CallDeclineRing { .. } => match self.call_work(call) {
+                Ok(call) => call(),
+                Err(code) => Outcome::Error(code),
+            },
             Call::CallDevices {} => match self.call_devices() {
                 Ok(call) => call(),
                 Err(code) => Outcome::Error(code),
             },
-            Call::SetCallDevices { recording, playout } => {
-                self.set_call_devices(recording.as_deref(), playout.as_deref())
+            Call::SetCallDevices {
+                recording,
+                playout,
+                camera,
+            } => {
+                if !call_video_within_limits(call) {
+                    return Outcome::Error(ErrorCode::InvalidArgument);
+                }
+                self.set_call_devices(recording.as_deref(), playout.as_deref(), camera.as_deref())
             }
             Call::CallMute { muted } => self.call_mute(*muted),
+            Call::CallDeafen { deafened } => self.call_deafen(*deafened),
+            Call::CallVolume { percent } => {
+                if !call_video_within_limits(call) {
+                    return Outcome::Error(ErrorCode::InvalidArgument);
+                }
+                self.call_volume(*percent)
+            }
+            Call::CallCamera { on } => self.call_camera(*on),
+            Call::CallScreen { on } => self.call_screen(*on),
+            // Its picture reaches only `serve`.
+            Call::CallVideoFrame { .. } => Outcome::Error(ErrorCode::Unavailable),
+            Call::CallRings {} => match self.calls_open() {
+                Ok(()) => ok(&self.ring_list()),
+                Err(code) => Outcome::Error(code),
+            },
             Call::CallStatus {} => match self.calls_open() {
                 Ok(()) => ok(&calls::status::status(&self.calls.state())),
                 Err(code) => Outcome::Error(code),
@@ -1130,6 +1375,78 @@ impl Core {
             // Profile reads can overlap without mutating their records.
             _ => None,
         })
+    }
+
+    /// Reads loaded undecryptable events of a subscribed room again
+    /// (`room_tools::timeline_events`), only when room keys arrived for it
+    /// since the last such call. Otherwise `None`: the caller answers at once
+    /// with no items, with no worker and no request, so a page that asks
+    /// after every change costs nothing. The mark is taken once the read is
+    /// admitted. It is put back when the read fails, or when an event was
+    /// left out that a later read may get, so a later change asks again. A
+    /// lease is held from admission to the reply, which is fenced against
+    /// lock and sign-out.
+    fn timeline_events<'a>(
+        &'a self,
+        room_id: &str,
+        event_ids: &[String],
+    ) -> Result<Option<LongCall<'a>>, ErrorCode> {
+        let call = Call::TimelineEvents {
+            room_id: room_id.to_owned(),
+            event_ids: event_ids.to_vec(),
+        };
+        if !persephone_core_protocol::personal_call_within_limits(&call)
+            || !valid_room_id(room_id)
+            || !event_ids.iter().all(|id| valid_event_id(id))
+        {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        if !self.session.is_configured() {
+            return Err(ErrorCode::NotFound);
+        }
+        let room = room_id.to_owned();
+        if !lock(&self.hub.notifications).keyed.contains(&room) {
+            return Ok(None);
+        }
+        let slot = self.room_reads.begin()?;
+        let (lease, client) = match self.session.with_client() {
+            Ok(Some(granted)) => granted,
+            Ok(None) => return Err(ErrorCode::NotFound),
+            Err(session::AdmissionError::Locked) => return Err(ErrorCode::Locked),
+            Err(session::AdmissionError::Saturated) => return Err(ErrorCode::LimitExceeded),
+        };
+        if !lock(&self.hub.notifications).keyed.remove(&room) {
+            // Another call took the mark meanwhile and reads them.
+            return Ok(None);
+        }
+        let ids = event_ids.to_vec();
+        Ok(Some(Box::new(move || {
+            let _slot = slot;
+            let stores = lease.stores();
+            let result = stores.block_on(room_tools::timeline_events(
+                &client,
+                &self.matrix,
+                &room,
+                &ids,
+            ));
+            {
+                let _context = stores.runtime().enter();
+                drop(client);
+            }
+            // A failure, or an event left out that a later read may get.
+            if !matches!(result, Ok((_, false))) {
+                let mut notifications = lock(&self.hub.notifications);
+                if notifications.subscribed.contains(&room) {
+                    notifications.keyed.insert(room.clone());
+                }
+            }
+            lease
+                .commit(|| match result {
+                    Ok((page, _)) => bounded(&page),
+                    Err(code) => Outcome::Error(code),
+                })
+                .unwrap_or(Outcome::Error(ErrorCode::Locked))
+        })))
     }
 
     /// Local profile operations and explicit abuse operations. Retain a lease
@@ -1639,8 +1956,14 @@ impl Core {
                 })),
                 Work::RoomReaders(room_id) => self
                     .with_matrix(generation, async |client| {
-                        room_settings::readers(&client, room_id, &self.member_refreshes, generation)
-                            .await
+                        room_settings::readers(
+                            &client,
+                            room_id,
+                            &self.member_refreshes,
+                            generation,
+                            self.session.members_presence(),
+                        )
+                        .await
                     })
                     .and_then(|readers| match bounded(&readers) {
                         Outcome::Ok(value) => Ok(value),
@@ -2007,6 +2330,7 @@ impl Core {
         self.calls.stop_for_session_end();
         self.media.purge();
         lock(&self.modules).clear_reviewed();
+        self.hub.clear_calls();
         self.hub.announce_session_change();
     }
 
@@ -2047,8 +2371,90 @@ impl Core {
         if let Err(code) = self.calls_open() {
             return Outcome::Error(code);
         }
-        let _ = self.calls.set_muted(muted);
+        self.queued_call_command(self.calls.set_muted(muted))
+    }
+
+    /// Deafens or undeafens (ADR-0055). Like mute, no call is not an error:
+    /// the reply is the call state, and the page sees there is none.
+    fn call_deafen(&self, deafened: bool) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        self.queued_call_command(self.calls.set_deafened(deafened))
+    }
+
+    /// The reply to a mute or deafen. No call is the call state, as the page
+    /// expects. A running call whose command queue is full did not take the
+    /// command, so the page gets `limit_exceeded` and not a status that looks
+    /// as if the command will happen.
+    fn queued_call_command(&self, queued: Result<(), calls::controller::CallError>) -> Outcome {
+        match queued {
+            Err(calls::controller::CallError::Busy) => Outcome::Error(ErrorCode::LimitExceeded),
+            _ => ok(&calls::status::status(&self.calls.state())),
+        }
+    }
+
+    /// Sets the call playout volume (ADR-0055): at once for a running call,
+    /// and saved in the profile's call device record for later calls. The
+    /// other choices in the record are kept. A record that cannot be read
+    /// is not replaced, because that would drop the user's device choice
+    /// without a word; the reply is then `unavailable`. Synthetic data and a
+    /// signed-out profile have no record and no call.
+    fn call_volume(&self, percent: u8) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        // A running call changes now, even if the save below fails.
+        let _ = self.calls.set_volume(percent);
+        if self.session.is_configured() {
+            let lease = match self.session.admit() {
+                Ok(lease) => lease,
+                Err(session::AdmissionError::Locked) => return Outcome::Error(ErrorCode::Locked),
+                Err(session::AdmissionError::Saturated) => {
+                    return Outcome::Error(ErrorCode::LimitExceeded);
+                }
+            };
+            let stores = lease.stores();
+            let saved = stores.block_on(async {
+                let Ok(mut selection) = calls::devices::load(stores).await else {
+                    return Err(ErrorCode::Unavailable);
+                };
+                selection.volume = Some(percent);
+                if calls::devices::save(stores, &selection).await {
+                    Ok(())
+                } else {
+                    Err(ErrorCode::Internal)
+                }
+            });
+            if let Err(code) = saved {
+                return Outcome::Error(code);
+            }
+        }
         ok(&calls::status::status(&self.calls.state()))
+    }
+
+    /// Turns the camera on or off. Unlike mute, no call is an error: there is
+    /// nothing to turn on.
+    fn call_camera(&self, on: bool) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        match self.calls.set_camera(on) {
+            Ok(()) => ok(&calls::status::status(&self.calls.state())),
+            Err(_) => Outcome::Error(ErrorCode::Unavailable),
+        }
+    }
+
+    /// Starts or stops the screen share (ADR-0053). The page names no
+    /// source: the platform's own window or portal asks the user.
+    fn call_screen(&self, on: bool) -> Outcome {
+        if let Err(code) = self.calls_open() {
+            return Outcome::Error(code);
+        }
+        match self.calls.set_screen(on) {
+            Ok(()) => ok(&calls::status::status(&self.calls.state())),
+            Err(_) => Outcome::Error(ErrorCode::Unavailable),
+        }
     }
 
     /// Admits a call command that waits on the homeserver or the worker
@@ -2057,8 +2463,9 @@ impl Core {
     fn call_work<'a>(&'a self, call: &Call) -> Result<LongCall<'a>, ErrorCode> {
         enum Work {
             Readiness(matrix_sdk::ruma::OwnedRoomId),
-            Join(matrix_sdk::ruma::OwnedRoomId),
+            Join(matrix_sdk::ruma::OwnedRoomId, bool),
             Leave,
+            Decline(matrix_sdk::ruma::OwnedRoomId),
         }
         let room = |room_id: &str| {
             if valid_room_id(room_id) {
@@ -2070,29 +2477,33 @@ impl Core {
         };
         let work = match call {
             Call::CallReadiness { room_id } => Work::Readiness(room(room_id)?),
-            Call::CallJoin { room_id } => Work::Join(room(room_id)?),
+            Call::CallJoin { room_id, video } => Work::Join(room(room_id)?, *video),
             Call::CallLeave {} => Work::Leave,
+            Call::CallDeclineRing { room_id } => Work::Decline(room(room_id)?),
             _ => return Err(ErrorCode::InvalidArgument),
         };
         // Synthetic data has no homeserver and no call to leave.
         if !self.session.is_configured() {
             return match work {
                 Work::Leave => Ok(Box::new(|| ok(&persephone_contracts::CallStatus::idle()))),
+                Work::Decline(_) => Ok(Box::new(|| ok(&self.ring_list()))),
                 _ => Err(ErrorCode::NotFound),
             };
         }
         self.calls_open()?;
         let slot = match work {
             Work::Readiness(_) => self.call_readiness.begin()?,
-            Work::Join(_) => self.call_join.begin()?,
+            Work::Join(..) => self.call_join.begin()?,
             Work::Leave => self.call_leave.begin()?,
+            Work::Decline(_) => self.call_decline.begin()?,
         };
         Ok(Box::new(move || {
             let _slot = slot;
             match work {
                 Work::Readiness(room_id) => refused(self.finish_call_readiness(&room_id)),
-                Work::Join(room_id) => refused(self.finish_call_join(&room_id)),
+                Work::Join(room_id, video) => refused(self.finish_call_join(&room_id, video)),
                 Work::Leave => refused(self.finish_call_leave()),
+                Work::Decline(room_id) => refused(self.finish_call_decline(&room_id)),
             }
         }))
     }
@@ -2110,23 +2521,39 @@ impl Core {
     /// The saved choice, then the devices a worker reports. An unreadable
     /// record is shown, with both choices null, and does not hide the list.
     /// A listing that fails is `unavailable`.
+    ///
+    /// The saved choice belongs to the session that was open when it was
+    /// read. The listing can wait up to a minute for the camera portal, and
+    /// holds no session lease meanwhile, so a lock or another session after
+    /// the read gives `locked` and the old choice is not sent. A reply too
+    /// large for the UI pipe is `limit_exceeded`.
     fn finish_call_devices(&self) -> Result<persephone_contracts::CallDevices, ErrorCode> {
+        let generation = self.media_generation();
         let (selection, unreadable) = self.saved_call_devices()?;
-        let listing =
-            calls::devices::list(self.calls.host().as_ref()).map_err(|_| ErrorCode::Unavailable)?;
+        let listing = calls::devices::list(self.calls.host().as_ref(), &self.hub.closing)
+            .map_err(|_| ErrorCode::Unavailable)?;
+        if generation.is_none() || self.media_generation() != generation {
+            return Err(ErrorCode::Locked);
+        }
         let device =
-            |device: persephone_call_protocol::AudioDevice| persephone_contracts::CallDevice {
+            |device: persephone_call_protocol::MediaDevice| persephone_contracts::CallDevice {
                 id: device.id,
                 name: device.name,
             };
-        Ok(persephone_contracts::CallDevices {
+        let volume = selection.volume();
+        let devices = persephone_contracts::CallDevices {
             supported: listing.supported,
             recording: listing.recording.into_iter().map(device).collect(),
             playout: listing.playout.into_iter().map(device).collect(),
+            cameras: listing.cameras.into_iter().map(device).collect(),
             selected_recording: selection.recording,
             selected_playout: selection.playout,
+            selected_camera: selection.camera,
+            volume,
             unreadable,
-        })
+        };
+        within_device_reply(&devices)?;
+        Ok(devices)
     }
 
     /// The saved call devices and whether the record was unreadable (then
@@ -2152,11 +2579,19 @@ impl Core {
     }
 
     /// Saves the call devices; they apply to calls joined afterwards. A
-    /// device need not be connected now.
-    fn set_call_devices(&self, recording: Option<&str>, playout: Option<&str>) -> Outcome {
-        let selection = calls::devices::Selection {
+    /// device need not be connected now. The saved volume is kept; when the
+    /// old record cannot be read, the new one has the default volume.
+    fn set_call_devices(
+        &self,
+        recording: Option<&str>,
+        playout: Option<&str>,
+        camera: Option<&str>,
+    ) -> Outcome {
+        let mut selection = calls::devices::Selection {
             recording: recording.map(str::to_owned),
             playout: playout.map(str::to_owned),
+            camera: camera.map(str::to_owned),
+            volume: None,
         };
         if !selection.is_valid() {
             return Outcome::Error(ErrorCode::InvalidArgument);
@@ -2171,10 +2606,14 @@ impl Core {
                 return Outcome::Error(ErrorCode::LimitExceeded);
             }
         };
-        if lease
-            .stores()
-            .block_on(calls::devices::save(lease.stores(), &selection))
-        {
+        let stores = lease.stores();
+        if stores.block_on(async {
+            selection.volume = calls::devices::load(stores)
+                .await
+                .ok()
+                .and_then(|saved| saved.volume);
+            calls::devices::save(stores, &selection).await
+        }) {
             Outcome::Ok(serde_json::Value::Null)
         } else {
             Outcome::Error(ErrorCode::Internal)
@@ -2216,6 +2655,7 @@ impl Core {
     fn finish_call_join(
         &self,
         room_id: &matrix_sdk::ruma::RoomId,
+        video: bool,
     ) -> Result<persephone_contracts::CallStatus, ErrorCode> {
         use calls::controller::{CallError, JoinScope};
         let refuse = |error: CallError| Ok(calls::status::join_reply(error, &self.calls.state()));
@@ -2258,6 +2698,7 @@ impl Core {
             generation,
             runtime: lease.stores().runtime().handle().clone(),
             devices,
+            video,
         };
         let joined = lease
             .stores()
@@ -2268,9 +2709,68 @@ impl Core {
         }
         drop(lease);
         match joined {
-            Ok(()) => Ok(calls::status::status(&self.calls.state())),
+            Ok(()) => {
+                // A join ends the room's ring (ADR-0052).
+                if self.hub.rings.end_room(room_id) {
+                    self.hub.mark_rings_changed();
+                }
+                Ok(calls::status::status(&self.calls.state()))
+            }
             Err(error) => refuse(error),
         }
+    }
+
+    /// The incoming rings now running, newest first, as the page shows them.
+    fn ring_list(&self) -> persephone_contracts::CallRings {
+        use persephone_contracts::{CALL_RINGS_MAX, CallIntent, CallRing, CallRings};
+        let now = calls::controller::now_ms();
+        CallRings {
+            rings: self
+                .hub
+                .rings
+                .live(now)
+                .into_iter()
+                .take(CALL_RINGS_MAX)
+                .map(|ring| CallRing {
+                    ring_id: ring.id,
+                    room_id: ring.room_id.to_string(),
+                    caller: ring.sender.to_string(),
+                    intent: match ring.intent {
+                        calls::rings::Intent::Audio => CallIntent::Audio,
+                        calls::rings::Intent::Video => CallIntent::Video,
+                    },
+                    seconds_left: u32::try_from(ring.ends_ms.saturating_sub(now).div_ceil(1000))
+                        .unwrap_or(u32::MAX),
+                })
+                .collect(),
+        }
+    }
+
+    /// Declines the ring in `room_id` (ADR-0052): one decline event, sent as
+    /// a normal room event, never retried. The ring ends whether or not the
+    /// send worked. No ring is not an error: the reply is the list.
+    fn finish_call_decline(
+        &self,
+        room_id: &matrix_sdk::ruma::RoomId,
+    ) -> Result<persephone_contracts::CallRings, ErrorCode> {
+        let Some((event_id, _caller)) = self.hub.rings.target(room_id, calls::controller::now_ms())
+        else {
+            return Ok(self.ring_list());
+        };
+        let (lease, client) = self.call_lease()?;
+        let _ = lease.stores().block_on(calls::ring_events::send_decline(
+            &client, room_id, &event_id,
+        ));
+        {
+            let _context = lease.stores().runtime().enter();
+            drop(client);
+        }
+        drop(lease);
+        // Only the declined ring ends: a newer ring in the room stays.
+        if self.hub.rings.retain(|ring| ring.event_id != event_id) {
+            self.hub.mark_rings_changed();
+        }
+        Ok(self.ring_list())
     }
 
     /// Leaves the call, or cancels a join in progress. No call is not an
@@ -2811,9 +3311,18 @@ impl Core {
             Source::Locked => Err(ErrorCode::Locked),
             // Synthetic rooms have no contacts.
             Source::Fixtures | Source::SignedOut => Err(ErrorCode::NotFound),
-            Source::Matrix(lease, client) => lease
-                .stores()
-                .block_on(MatrixViews::contact_status(&client, room_id)),
+            Source::Matrix(lease, client) => {
+                // Opening a contact's room asks for their presence again
+                // soon, unless it is recent (ADR-0057).
+                if let Some(contact) = MatrixViews::contact(&client, room_id) {
+                    self.session
+                        .contacts_presence()
+                        .want(&contact, std::time::Instant::now());
+                }
+                lease
+                    .stores()
+                    .block_on(MatrixViews::contact_status(&client, room_id))
+            }
         };
         match status {
             Ok(status) => ok(&status),
@@ -3002,24 +3511,60 @@ impl Core {
     /// once the connection is closed.
     fn take_events(&self) -> Option<Vec<Event>> {
         let mut notifications = lock(&self.hub.notifications);
-        while notifications.pending.is_empty()
-            && !notifications.session_changed
-            && !notifications.room_list_changed
-            && !notifications.security_changed
-            && !notifications.calls_changed
-            && !notifications.modules_changed
-            && notifications.toast.is_none()
-            && !notifications.closed
-        {
-            notifications = self
-                .hub
-                .changed
-                .wait(notifications)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            // A video event waits until the gap since the last one has passed;
+            // any other event does not wait for it.
+            let video_wait = notifications
+                .video_changed
+                .then_some(notifications.video_taken)
+                .flatten()
+                .map(|taken| (taken + VIDEO_EVENT_GAP).saturating_duration_since(Instant::now()))
+                .filter(|wait| !wait.is_zero());
+            let video_due = notifications.video_changed && video_wait.is_none();
+            let idle = notifications.pending.is_empty()
+                && !notifications.session_changed
+                && !notifications.room_list_changed
+                && !notifications.security_changed
+                && !notifications.calls_changed
+                && !notifications.rings_changed
+                && !notifications.modules_changed
+                && notifications.toast.is_none()
+                && !video_due
+                && !notifications.closed;
+            if !idle {
+                break;
+            }
+            notifications = match video_wait {
+                Some(wait) => {
+                    self.hub
+                        .changed
+                        .wait_timeout(notifications, wait)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .0
+                }
+                None => self
+                    .hub
+                    .changed
+                    .wait(notifications)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            };
         }
         if notifications.closed {
             return None;
         }
+        // Taken only when due: a picture that came during the gap stays
+        // pending for the next call.
+        let video = if notifications.video_changed
+            && notifications
+                .video_taken
+                .is_none_or(|taken| taken.elapsed() >= VIDEO_EVENT_GAP)
+        {
+            notifications.video_changed = false;
+            notifications.video_taken = Some(Instant::now());
+            Some(Event::CallVideo {})
+        } else {
+            None
+        };
         let session =
             std::mem::take(&mut notifications.session_changed).then_some(Event::SessionChanged {});
         let list = std::mem::take(&mut notifications.room_list_changed)
@@ -3028,12 +3573,19 @@ impl Core {
             .then_some(Event::SecurityChanged {});
         let call =
             std::mem::take(&mut notifications.calls_changed).then_some(Event::CallChanged {});
+        let rings =
+            std::mem::take(&mut notifications.rings_changed).then_some(Event::RingsChanged {});
         let modules =
             std::mem::take(&mut notifications.modules_changed).then_some(Event::ModulesChanged {});
+        let for_call = std::mem::take(&mut notifications.toast_call);
         let toast = notifications
             .toast
             .take()
-            .map(|(room, sender)| Event::Notification { room, sender });
+            .map(|(room, sender)| Event::Notification {
+                room,
+                sender,
+                call: for_call,
+            });
         let rooms = std::mem::take(&mut notifications.pending);
         Some(
             session
@@ -3041,6 +3593,8 @@ impl Core {
                 .chain(list)
                 .chain(security)
                 .chain(call)
+                .chain(rings)
+                .chain(video)
                 .chain(modules)
                 .chain(toast)
                 .chain(
@@ -3076,10 +3630,12 @@ impl Core {
     pub fn reopen(&self) {
         self.media.purge();
         *lock(&self.hub.notifications) = Notifications::default();
+        self.hub.closing.store(false, Ordering::SeqCst);
         self.hub.changed.notify_all();
     }
 
     fn close(&self) {
+        self.hub.closing.store(true, Ordering::SeqCst);
         lock(&self.hub.notifications).closed = true;
         self.hub.changed.notify_all();
     }
@@ -3137,6 +3693,27 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                         }
                         Answer::Pixels(reply, band) => {
                             send_pixel_reply(&mut *lock(&output), &reply, band.bytes())
+                        }
+                        // The picture's bytes are shared with the store, which
+                        // is not locked here: only the pipe is.
+                        // A lock between the choice and this write must keep
+                        // the picture from the page, so the generation is
+                        // checked again while the pipe is held. The session
+                        // state lock is a leaf: nothing holding it waits on
+                        // the pipe.
+                        Answer::Video(reply, picture, generation) => {
+                            let mut output = lock(&output);
+                            if generation.is_some() && core.media_generation() == generation {
+                                send_video_reply(&mut *output, &reply, picture.bytes())
+                            } else {
+                                send(
+                                    &mut *output,
+                                    &CoreMessage::Reply(Reply {
+                                        id: reply.id,
+                                        outcome: Outcome::Ok(serde_json::Value::Null),
+                                    }),
+                                )
+                            }
                         }
                         Answer::Later(id, call) => {
                             let output = &output;
@@ -3201,6 +3778,48 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN device lists WHEN the reply is checked THEN an ordinary one
+    /// fits, and three full lists of names and IDs that JSON escapes to
+    /// twice their size are `limit_exceeded` instead of a frame the UI pipe
+    /// refuses.
+    #[test]
+    fn given_a_device_reply_then_only_one_that_fits_the_pipe_is_sent() {
+        use persephone_call_protocol::{MAX_DEVICE_ID_BYTES, MAX_DEVICE_NAME_BYTES, MAX_DEVICES};
+        let list = |id: &str, name: &str, count: usize| {
+            vec![
+                persephone_contracts::CallDevice {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                };
+                count
+            ]
+        };
+        let devices = |recording, playout, cameras| persephone_contracts::CallDevices {
+            supported: true,
+            recording,
+            playout,
+            cameras,
+            selected_recording: None,
+            selected_playout: None,
+            selected_camera: None,
+            volume: 100,
+            unreadable: false,
+        };
+        let ordinary = devices(
+            list("a", "Mic", 2),
+            list("b", "Speaker", 2),
+            list("c", "Cam", 1),
+        );
+        assert_eq!(within_device_reply(&ordinary), Ok(()));
+        let id = "\"".repeat(MAX_DEVICE_ID_BYTES);
+        let name = "\"".repeat(MAX_DEVICE_NAME_BYTES);
+        let full = || list(&id, &name, MAX_DEVICES);
+        assert_eq!(
+            within_device_reply(&devices(full(), full(), full())),
+            Err(ErrorCode::LimitExceeded)
+        );
+    }
 
     #[test]
     /// Reserve room and cache-search slots independently, and refuse excess work.
@@ -3326,6 +3945,224 @@ mod tests {
         }
         assert_eq!(core.take_events(), Some(vec![Event::CallChanged {}]));
         assert!(!lock(&core.hub.notifications).calls_changed);
+    }
+
+    fn test_ring(room: &str, sender: &str, ends_ms: u64) -> calls::rings::Ring {
+        calls::rings::Ring {
+            id: 0,
+            room_id: matrix_sdk::ruma::OwnedRoomId::try_from(room).unwrap(),
+            event_id: matrix_sdk::ruma::OwnedEventId::try_from("$n:example.org").unwrap(),
+            sender: matrix_sdk::ruma::OwnedUserId::try_from(sender).unwrap(),
+            intent: calls::rings::Intent::Video,
+            ends_ms,
+        }
+    }
+
+    /// GIVEN many ring changes before the UI reads WHEN the events are taken
+    /// THEN one content-free event carries them, and none stays pending.
+    #[test]
+    fn given_many_ring_changes_then_one_rings_event_is_taken() {
+        let core = Core::default();
+        for _ in 0..5 {
+            SessionListener::rings_changed(&*core.hub);
+        }
+        assert_eq!(core.take_events(), Some(vec![Event::RingsChanged {}]));
+        assert!(!lock(&core.hub.notifications).rings_changed);
+    }
+
+    /// GIVEN a ring notification and a message notification WHEN taken THEN
+    /// the first is marked as a call and the other is not; the latest wins.
+    #[test]
+    fn given_a_call_notification_then_the_event_is_marked_as_a_call() {
+        let core = Core::default();
+        SessionListener::notify_call(&*core.hub, "", "");
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::Notification {
+                room: String::new(),
+                sender: String::new(),
+                call: true,
+            }])
+        );
+        SessionListener::notify_call(&*core.hub, "Plans", "Bob");
+        SessionListener::notify(&*core.hub, "Plans", "Bob");
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::Notification {
+                room: "Plans".into(),
+                sender: "Bob".into(),
+                call: false,
+            }])
+        );
+    }
+
+    /// GIVEN rings WHEN the UI asks for them THEN each has its room, caller,
+    /// intent and whole seconds left, newest first, and expired ones are
+    /// absent.
+    #[test]
+    fn given_rings_then_the_list_shows_whole_seconds_and_drops_expired_rings() {
+        let core = Core::default();
+        let now = calls::controller::now_ms();
+        let rings = &core.hub.rings;
+        rings
+            .admit(test_ring("!old:s", "@a:s", now + 1_500), now)
+            .unwrap();
+        rings
+            .admit(test_ring("!new:s", "@b:s", now + 60_000), now)
+            .unwrap();
+        let Outcome::Ok(value) = core
+            .handle(&Request {
+                id: 1,
+                call: Call::CallRings {},
+            })
+            .outcome
+        else {
+            panic!("rings");
+        };
+        let listed: persephone_contracts::CallRings = serde_json::from_value(value).unwrap();
+        assert_eq!(listed.rings.len(), 2);
+        assert_eq!(listed.rings[0].room_id, "!new:s");
+        assert_eq!(listed.rings[0].caller, "@b:s");
+        assert_eq!(
+            listed.rings[0].intent,
+            persephone_contracts::CallIntent::Video
+        );
+        assert!((59..=60).contains(&listed.rings[0].seconds_left));
+        assert!((1..=2).contains(&listed.rings[1].seconds_left));
+        rings.end_room(matrix_sdk::ruma::room_id!("!new:s"));
+        let Outcome::Ok(value) = core
+            .handle(&Request {
+                id: 1,
+                call: Call::CallRings {},
+            })
+            .outcome
+        else {
+            panic!("rings");
+        };
+        let listed: persephone_contracts::CallRings = serde_json::from_value(value).unwrap();
+        assert_eq!(listed.rings.len(), 1);
+    }
+
+    /// GIVEN a decline for no ring or for a bad room ID THEN the list comes
+    /// back for no ring, and a bad ID is refused before any work.
+    #[test]
+    fn given_a_decline_without_a_ring_or_with_a_bad_room_then_nothing_is_sent() {
+        let core = Core::default();
+        let reply = core.handle(&Request {
+            id: 1,
+            call: Call::CallDeclineRing {
+                room_id: "!none:s".into(),
+            },
+        });
+        let Outcome::Ok(value) = reply.outcome else {
+            panic!("list");
+        };
+        assert_eq!(value, serde_json::json!({"rings": []}));
+        for bad in ["room", "", "#alias:s", "$event:s"] {
+            assert_eq!(
+                core.handle(&Request {
+                    id: 1,
+                    call: Call::CallDeclineRing {
+                        room_id: bad.into()
+                    },
+                })
+                .outcome,
+                Outcome::Error(ErrorCode::InvalidArgument),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// GIVEN rings and flags WHEN a sync round shows the rooms are left, or
+    /// the account ends THEN they end, and the UI is told once; a status
+    /// change of the same account keeps them.
+    #[test]
+    fn given_left_rooms_or_a_session_change_then_rings_and_flags_end() {
+        let core = Core::default();
+        let now = calls::controller::now_ms();
+        let hub = &core.hub;
+        let room = matrix_sdk::ruma::room_id!("!r:s");
+        hub.rings
+            .admit(test_ring("!r:s", "@a:s", now + 60_000), now)
+            .unwrap();
+        hub.rings
+            .admit(test_ring("!kept:s", "@b:s", now + 60_000), now)
+            .unwrap();
+        hub.call_rooms.set(room, Some(now + 60_000));
+        SessionListener::check_rooms(&**hub, &|id| id != room);
+        assert_eq!(hub.rings.live(now).len(), 1);
+        assert!(!hub.call_rooms.active(room, now));
+        assert_eq!(core.take_events(), Some(vec![Event::RingsChanged {}]));
+        // Nothing left that changed: no event.
+        SessionListener::check_rooms(&**hub, &|id| id != room);
+        assert!(!lock(&hub.notifications).rings_changed);
+        hub.call_rooms.set(room, Some(now + 60_000));
+        // A status change of the same account, such as a sync error, keeps
+        // them.
+        SessionListener::session_changed(&**hub);
+        assert_eq!(hub.rings.live(now).len(), 1);
+        assert!(hub.call_rooms.active(room, now));
+        // The end of the account drops them.
+        SessionListener::account_ended(&**hub);
+        assert!(hub.rings.live(now).is_empty());
+        assert!(!hub.call_rooms.active(room, now));
+    }
+
+    /// GIVEN many pictures before the UI reads WHEN the events are taken THEN
+    /// one video event carries them, and none stays pending.
+    #[test]
+    fn given_many_video_pictures_then_one_video_event_is_taken() {
+        let core = Core::default();
+        for _ in 0..50 {
+            core.hub.video_changed();
+        }
+        assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
+        assert!(!lock(&core.hub.notifications).video_changed);
+    }
+
+    /// GIVEN a video event just taken WHEN pictures arrive again THEN the next
+    /// video event waits out the gap (about 30 a second), and another event
+    /// does not wait for it. The time of the last video event is set by the
+    /// test, so a slow thread cannot change the result.
+    #[test]
+    fn given_video_events_then_they_are_spaced_and_do_not_hold_other_events() {
+        let core = Core::default();
+        core.hub.video_changed();
+        assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
+
+        // The last video event is a day ahead, so the gap cannot pass during
+        // this step however slowly the thread runs.
+        lock(&core.hub.notifications).video_taken =
+            Some(Instant::now() + Duration::from_secs(24 * 60 * 60));
+        core.hub.video_changed();
+        core.hub.calls_changed();
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::CallChanged {}]),
+            "the call event is not held for the video gap"
+        );
+        assert!(lock(&core.hub.notifications).video_changed, "still pending");
+
+        // The last video event is now: the next one waits out the gap.
+        let taken = Instant::now();
+        lock(&core.hub.notifications).video_taken = Some(taken);
+        assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
+        assert!(
+            taken.elapsed() >= VIDEO_EVENT_GAP,
+            "the second video event came after the gap"
+        );
+    }
+
+    /// GIVEN a waiting video event WHEN the connection closes THEN the writer
+    /// stops instead of waiting for the gap.
+    #[test]
+    fn given_a_closed_connection_then_a_pending_video_event_does_not_keep_it_open() {
+        let core = Core::default();
+        core.hub.video_changed();
+        assert_eq!(core.take_events(), Some(vec![Event::CallVideo {}]));
+        core.hub.video_changed();
+        core.close();
+        assert_eq!(core.take_events(), None);
     }
 
     /// GIVEN each setting, profile state and idle time WHEN checked THEN the
@@ -4131,6 +4968,31 @@ mod tests {
             ["!a:s", "!c:s"]
         );
         assert!(!notifications.room_list_changed);
+    }
+
+    /// GIVEN one open room WHEN room keys arrive for it and for a room not
+    /// open THEN only the open room is marked for `timeline_events`; WHEN
+    /// other changes arrive THEN nothing is marked; WHEN the session changes
+    /// THEN every mark is dropped with the subscriptions.
+    #[test]
+    fn given_room_keys_then_only_open_rooms_are_marked_for_reading_again() {
+        let hub = Hub::default();
+        lock(&hub.notifications).subscribed.insert("!a:s".into());
+        hub.rooms_changed(&["!a:s".into()]);
+        hub.outbox_changed("!a:s");
+        assert!(lock(&hub.notifications).keyed.is_empty(), "no keys yet");
+        hub.room_keys_arrived(&KeyRooms::Listed(["!a:s".into(), "!b:s".into()].into()));
+        assert_eq!(
+            lock(&hub.notifications).keyed.iter().collect::<Vec<_>>(),
+            ["!a:s"]
+        );
+        hub.session_changed();
+        assert!(lock(&hub.notifications).keyed.is_empty());
+        hub.room_keys_arrived(&KeyRooms::All);
+        assert!(
+            lock(&hub.notifications).keyed.is_empty(),
+            "nothing is open after the change"
+        );
     }
 
     /// GIVEN no room changed WHEN the account's direct-message rooms change

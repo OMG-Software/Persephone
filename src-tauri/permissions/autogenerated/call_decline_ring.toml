@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-decline-ring"
+description = "Enables the call_decline_ring command without any pre-configured scope."
+commands.allow = ["call_decline_ring"]
+
+[[permission]]
+identifier = "deny-call-decline-ring"
+description = "Denies the call_decline_ring command without any pre-configured scope."
+commands.deny = ["call_decline_ring"]

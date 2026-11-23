@@ -17,6 +17,7 @@
 #include "livekit/audio_track.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -77,6 +78,21 @@ void AudioTrack::remove_sink(
   webrtc::MutexLock lock(&mutex_);
   track()->RemoveSink(sink.get());
   sinks_.erase(std::remove(sinks_.begin(), sinks_.end(), sink), sinks_.end());
+}
+
+// PERSEPHONE PATCH (ADR-0055): sets the playout gain of a remote audio track.
+// A remote track's source passes the gain to its receiver, which keeps it
+// while the track is disabled. The receiver expects the call on the
+// signaling thread. WebRTC accepts 0 to 10; the value is clamped to 0 to 1,
+// and NaN, which std::clamp passes through, is silence.
+void AudioTrack::set_volume(double volume) const {
+  const double clamped = std::isnan(volume) ? 0.0 : std::clamp(volume, 0.0, 1.0);
+  rtc_runtime_->signaling_thread()->BlockingCall([this, clamped] {
+    webrtc::AudioSourceInterface* source = track()->GetSource();
+    if (source != nullptr) {
+      source->SetVolume(clamped);
+    }
+  });
 }
 
 NativeAudioSink::NativeAudioSink(rust::Box<AudioSinkWrapper> observer,

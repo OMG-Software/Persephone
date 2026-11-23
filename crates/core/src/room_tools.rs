@@ -14,9 +14,9 @@ use persephone_contracts::{
     AttachmentKind, AttachmentPage, FocusedTimeline, LocalSearchFilters, PinnedMessages,
     TimelineItem, TimelinePage,
 };
-use persephone_core_protocol::{ErrorCode, MAX_EVENT_ID_BYTES};
+use persephone_core_protocol::{ErrorCode, MAX_EVENT_ID_BYTES, MAX_TIMELINE_EVENTS};
 use std::time::Duration;
-use tokio::time::{Instant, timeout_at};
+use tokio::time::{Instant, timeout, timeout_at};
 
 const MAX_PINS: usize = 100;
 /// Removal can preserve a larger existing state without permitting new pins.
@@ -24,6 +24,11 @@ const MAX_PIN_STATE_IDS: usize = 512;
 const MAX_SCAN: usize = 100;
 const MAX_ATTACHMENTS: usize = 50;
 const PIN_READ_BUDGET: Duration = Duration::from_secs(10);
+/// Longest all events of one `timeline_events` call may take to read.
+const EVENT_READ_BUDGET: Duration = Duration::from_secs(20);
+/// Longest the projection of those events may take: it can read the original
+/// messages of edits (`MatrixViews::checked_edit`).
+const EVENT_PROJECT_BUDGET: Duration = Duration::from_secs(10);
 
 /// Reject oversized or invalid Matrix event IDs before room network operations.
 fn event_id(raw: &str) -> Result<&EventId, ErrorCode> {
@@ -90,6 +95,85 @@ pub async fn event_context(
     raw: &str,
 ) -> Result<FocusedTimeline, ErrorCode> {
     focused_context(client, views, room, raw, None).await
+}
+
+/// Read up to [`MAX_TIMELINE_EVENTS`] events of a joined room again from the
+/// homeserver, decrypted with the keys held now, so items that were
+/// undecryptable can be replaced. Each event is one request, all within
+/// [`EVENT_READ_BUDGET`]; an event that cannot be read is left out, and the
+/// rest are not read once the budget is spent. The items keep the request's
+/// order and the page rules (ignored senders, checked edits, the byte budget).
+/// The projection has [`EVENT_PROJECT_BUDGET`]; past it the call is
+/// `unavailable`.
+///
+/// The flag is `true` when an event was left out but a later read may
+/// succeed: the budget ended first, or the read failed in a way that can pass
+/// ([`may_read_later`]).
+pub async fn timeline_events(
+    client: &Client,
+    views: &MatrixViews,
+    room: &str,
+    raw: &[String],
+) -> Result<(TimelinePage, bool), ErrorCode> {
+    if raw.is_empty() || raw.len() > MAX_TIMELINE_EVENTS {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    let ids = raw
+        .iter()
+        .map(|id| event_id(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let joined = joined_room(client, room)?;
+    let deadline = Instant::now() + EVENT_READ_BUDGET;
+    let mut chunk = Vec::with_capacity(ids.len());
+    let mut retry = false;
+    for id in ids {
+        match timeout_at(deadline, joined.event(id, None)).await {
+            // The homeserver must answer with the event asked for.
+            Ok(Ok(event)) if event.event_id() == Some(id) => chunk.push(event),
+            Ok(Ok(_)) => return Err(ErrorCode::Rejected),
+            Ok(Err(error)) => retry |= may_read_later(&error),
+            Err(_) => {
+                retry = true;
+                break;
+            }
+        }
+    }
+    let projected = timeout(
+        EVENT_PROJECT_BUDGET,
+        views.project_chunk(client, &joined, &chunk),
+    )
+    .await
+    .map_err(|_| ErrorCode::Unavailable)??;
+    let mut items: Vec<_> = projected
+        .into_iter()
+        .filter(|item| item_id(item).is_some_and(|id| raw.iter().any(|asked| asked == id)))
+        .collect();
+    loop {
+        let names = crate::matrix_views::page_names(&joined, &items, &[]).await;
+        let page = TimelinePage {
+            room_id: room.to_owned(),
+            items,
+            next_cursor: None,
+            names,
+        };
+        // An empty page (no items, so no names) always fits.
+        if fits(&page) || page.items.is_empty() {
+            return Ok((page, retry));
+        }
+        // Keep the first items, which the page asked for first.
+        items = page.items;
+        items.pop();
+    }
+}
+
+/// Whether a failed event read may succeed later: there was no answer, or the
+/// homeserver had a server error or asked to wait (429). Any other client
+/// error, such as not found or forbidden, is final, so that event does not
+/// cause a read after each change.
+fn may_read_later(error: &matrix_sdk::Error) -> bool {
+    error
+        .as_client_api_error()
+        .is_none_or(|api| api.status_code.is_server_error() || api.status_code.as_u16() == 429)
 }
 
 /// Select a visible date target from the same bounded, validated context.

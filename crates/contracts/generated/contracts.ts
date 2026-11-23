@@ -29,9 +29,9 @@ export type IdentityState = "unknown" | "none" | "unverified" | "verified";
 
 export type RecoveryState = "unknown" | "disabled" | "incomplete" | "enabled";
 
-export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_confirmation" | "working";
+export type SecurityOperation = "idle" | "waiting_for_password" | "waiting_for_recovery_key" | "waiting_for_passphrase" | "waiting_for_confirmation" | "working";
 
-export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "backup_key_unavailable" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "cannot_sign_devices" | "device_not_found" | "recovery_key_not_saved" | "failed";
+export type SecurityError = "cancelled" | "unsupported" | "invalid_password" | "identity_exists" | "wrong_recovery_key" | "backup_exists_on_server" | "backup_key_unavailable" | "recovery_key_not_shown" | "unreachable" | "contact_has_no_identity" | "cannot_sign_contacts" | "not_direct_room" | "cannot_sign_devices" | "device_not_found" | "recovery_key_not_saved" | "passphrase_rejected" | "profile_unavailable" | "failed";
 
 export type VerificationPhase = "incoming" | "waiting" | "compare" | "confirmed" | "done" | "cancelled";
 
@@ -64,9 +64,14 @@ canSetUpRecovery: boolean,
  * is incomplete. It may delete that backup and start a new one, after a
  * confirmation in the core's own window (ADR-0040).
  */
-canStartNewBackup: boolean, };
+canStartNewBackup: boolean, 
+/**
+ * The local profile asks for a passphrase before it opens (ADR-0050).
+ * Off by default.
+ */
+profilePassphrase: boolean, };
 
-export type CallUnavailable = "unsupported_platform" | "not_joined" | "not_encrypted" | "no_call_server" | "server_unreachable";
+export type CallUnavailable = "unsupported_platform" | "not_joined" | "not_encrypted" | "not_permitted" | "no_call_server" | "call_server_unsupported" | "server_unreachable";
 
 export type CallReadiness = { available: boolean, 
 /**
@@ -83,20 +88,57 @@ export type CallPhase = "idle" | "joining" | "active" | "ended";
 
 export type CallParticipant = { userId: string, deviceId: string, speaking: boolean, 
 /**
- * It publishes to the call server this call uses. Others cannot be
- * heard in this version.
+ * The call is connected to the call server it publishes to: the own
+ * one, or another one the user agreed to connect to (ADR-0054).
+ * Otherwise it cannot be heard or seen.
  */
 reachable: boolean, 
 /**
  * This device holds a key for it. Without one it cannot be heard.
  */
-keyed: boolean, };
+keyed: boolean, 
+/**
+ * It shares its screen (ADR-0053). The sender's label is only a
+ * display hint; shown as text.
+ */
+sharing: boolean, };
 
-export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found";
+export type CallEnd = "left" | "connection_failed" | "audio_device" | "containment" | "worker_stopped" | "worker_crashed" | "membership_lost" | "keys_unavailable" | "session_ended" | "internal" | "device_not_found";
 
-export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
+export type CallJoinError = "already_in_call" | "not_joined" | "not_encrypted" | "no_call_server" | "call_server_unsupported" | "declined" | "unsupported_platform" | "containment" | "no_worker" | "no_delayed_events" | "membership" | "call_server" | "keys" | "proxy_unreadable" | "device_setting_unreadable";
 
-export type CallStatus = { phase: CallPhase, roomId: string | null, muted: boolean, 
+export type CallCamera = "off" | "starting" | "on" | "not_found" | "unavailable";
+
+export type CallScreen = "off" | "starting" | "on" | "not_found" | "unavailable" | "refused";
+
+export type CallParticipantRef = { userId: string, deviceId: string, };
+
+export type CallVideoTile = { 
+/**
+ * 0 to 5.
+ */
+tile: number, participant: CallParticipantRef | null, own: boolean, 
+/**
+ * The tile's stream number. It changes when the tile starts showing a
+ * new stream; `call_video_frame` gives pictures of this stream only.
+ * At most 2^53 - 1, so the page holds it exactly.
+ */
+stream: number, };
+
+export type CallStatus = { phase: CallPhase, roomId: string | null, 
+/**
+ * The microphone is muted. Always true while `deafened`.
+ */
+muted: boolean, 
+/**
+ * All remote call audio is off and the microphone is muted (ADR-0055).
+ */
+deafened: boolean, 
+/**
+ * The playout volume of the call, 0 to [`CALL_VOLUME_MAX`] percent. 100
+ * when there is no call.
+ */
+volume: number, 
 /**
  * At most [`CALL_PARTICIPANTS_MAX`], other devices only.
  */
@@ -108,11 +150,35 @@ ended: CallEnd | null,
 /**
  * Set when this reply refuses a join.
  */
-joinError: CallJoinError | null, };
+joinError: CallJoinError | null, camera: CallCamera, 
+/**
+ * The own screen share (ADR-0053).
+ */
+screen: CallScreen, 
+/**
+ * The active video tiles, at most [`CALL_VIDEO_TILES_MAX`].
+ */
+video: Array<CallVideoTile>, 
+/**
+ * The other member of a direct chat declined this call's ring
+ * (ADR-0052). The call goes on until the user leaves.
+ */
+ringDeclined: boolean, };
+
+export type CallIntent = "audio" | "video";
+
+export type CallRing = { 
+/**
+ * A number the core gives each ring, so a new ring with the same room
+ * and caller can be told apart. It names nothing in Matrix.
+ */
+ringId: number, roomId: string, caller: string, intent: CallIntent, secondsLeft: number, };
+
+export type CallRings = { rings: Array<CallRing>, };
 
 export type CallDevice = { id: string, name: string, };
 
-export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, unreadable: boolean, };
+export type CallDevices = { supported: boolean, recording: Array<CallDevice>, playout: Array<CallDevice>, cameras: Array<CallDevice>, selectedRecording: string | null, selectedPlayout: string | null, selectedCamera: string | null, volume: number, unreadable: boolean, };
 
 export type ContactTrust = "unknown" | "no_identity" | "unverified" | "verified" | "changed" | "verified_changed";
 
@@ -157,7 +223,17 @@ contact: string | null,
  * when the picture changes. None when the room has no picture. The page
  * loads the picture only through `load_room_picture` (ADR-0041).
  */
-pictureId: string | null, };
+pictureId: string | null, 
+/**
+ * Another device is in this room's call now (ADR-0052). A flag only:
+ * no names.
+ */
+hasCall: boolean, 
+/**
+ * The contact's presence, as their homeserver last reported it
+ * (ADR-0057). None when there is no contact, or it is not known.
+ */
+contactPresence: PresenceStatus | null, };
 
 export type PendingState = "queued" | "sending" | "sent" | "failed" | "unknown";
 
@@ -438,6 +514,8 @@ deletedMessages: boolean, };
 
 export type Theme = "orange" | "red" | "blue";
 
+export type PresenceStatus = "online" | "unavailable" | "offline";
+
 export type AccountSettings = { 
 /**
  * Enter sends a message; otherwise it starts a new line. On by default.
@@ -504,7 +582,17 @@ timelineEvents: TimelineEvents,
 /**
  * The colours of the interface. Grey and orange by default.
  */
-theme: Theme, };
+theme: Theme, 
+/**
+ * Tell the homeserver this account's presence. On by default. When
+ * off, no request of this account changes its presence (ADR-0057).
+ */
+sharePresence: boolean, 
+/**
+ * The presence this account shares while `share_presence` is on.
+ * Online by default.
+ */
+presence: PresenceStatus, };
 
 export type RoomActivity = { typing: Array<string>, readBy: Array<string>, truncated: boolean, };
 
@@ -516,7 +604,12 @@ export type RoomReader = { userId: string, trust: ContactTrust, receiving: numbe
 /**
  * This account: its other devices read the room too.
  */
-own: boolean, };
+own: boolean, 
+/**
+ * The member's presence, as their homeserver last reported it
+ * (ADR-0057). None when it is not known yet.
+ */
+presence: PresenceStatus | null, };
 
 export type RoomReaders = { readers: Array<RoomReader>, truncated: boolean, };
 
@@ -712,7 +805,9 @@ export const roomSummaryFixture = {
   "unreadCount": 4294967295,
   "encryption": "encrypted",
   "contact": "@alice:server.invalid",
-  "pictureId": "0123456789abcdef"
+  "pictureId": "0123456789abcdef",
+  "hasCall": true,
+  "contactPresence": "unavailable"
 } as const satisfies RoomSummary;
 
 export const timelinePageFixture = {

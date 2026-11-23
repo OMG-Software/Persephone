@@ -3,8 +3,8 @@
 
 use persephone_core_protocol::{Call, ErrorCode, Event, MAX_ROOM_ID_BYTES};
 use persephone_desktop::{
-    BAND_PREFIX_BYTES, MAIN_WINDOW, Subscriptions, configure, context,
-    core_link::{Band, CoreError, CoreLink, CoreTransport},
+    BAND_PREFIX_BYTES, MAIN_WINDOW, Subscriptions, VIDEO_PREFIX_BYTES, configure, context,
+    core_link::{Band, CoreError, CoreLink, CoreTransport, Video},
     create_main_window,
 };
 use std::sync::{
@@ -26,6 +26,8 @@ struct FakeCore {
     verified_member: Mutex<Option<(String, String)>>,
     // The room and bytes of the last pasted image that reached the core.
     pasted: Mutex<Option<(String, Vec<u8>)>>,
+    // The room and event IDs of the last `timeline_events` that reached the core.
+    timeline_events: Mutex<Option<(String, Vec<String>)>>,
     // What the stored account settings say about capture protection.
     capture_protection: AtomicBool,
 }
@@ -37,6 +39,7 @@ impl FakeCore {
             calls: AtomicUsize::new(0),
             verified_member: Mutex::new(None),
             pasted: Mutex::new(None),
+            timeline_events: Mutex::new(None),
             capture_protection: AtomicBool::new(true),
         })
     }
@@ -48,6 +51,9 @@ impl CoreTransport for FakeCore {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Call::VerifyMember { room_id, user_id } = &call {
             *self.verified_member.lock().unwrap() = Some((room_id.clone(), user_id.clone()));
+        }
+        if let Call::TimelineEvents { room_id, event_ids } = &call {
+            *self.timeline_events.lock().unwrap() = Some((room_id.clone(), event_ids.clone()));
         }
         if !self.available {
             return Err(CoreError::Unavailable);
@@ -66,6 +72,13 @@ impl CoreTransport for FakeCore {
             Call::JumpToDate { room_id, .. } | Call::EventContext { room_id, .. } => Ok(
                 serde_json::json!({"page":{"roomId":room_id,"items":[],"nextCursor":null,"names":[]},"eventId":"$match"}),
             ),
+            // A reply item with a field outside the contract must not reach the page.
+            Call::TimelineEvents { room_id, .. } if room_id == "!leaky:s" => Ok(
+                serde_json::json!({"roomId":room_id,"items":[],"nextCursor":null,"names":[],"accessToken":"x"}),
+            ),
+            Call::TimelineEvents { room_id, .. } => {
+                Ok(serde_json::json!({"roomId":room_id,"items":[],"nextCursor":null,"names":[]}))
+            }
             Call::PinnedMessages { room_id } => Ok(
                 serde_json::json!({"roomId":room_id,"eventIds":["$match"],"items":[],"canManage":true,"truncated":false}),
             ),
@@ -103,11 +116,26 @@ impl CoreTransport for FakeCore {
             // A state outside the contract must not reach the page.
             Call::UnlockSession {} => Ok(serde_json::json!("plaintext")),
             Call::ResetProfile {} => Ok(serde_json::json!("unlocking")),
-            Call::SignOut {} => Ok(serde_json::json!("restart_required")),
+            // This fake device's keys are never in a backup.
+            Call::SignOut {
+                discard_keys: false,
+            } => Err(CoreError::Core(ErrorCode::KeysNotBackedUp)),
+            Call::SignOut { discard_keys: true } => Ok(serde_json::json!("restart_required")),
             Call::SecurityStatus {} => Ok(
-                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false}),
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false}),
             ),
             Call::CallStatus {} | Call::CallLeave {} => Ok(call_idle()),
+            Call::CallRings {} => Ok(serde_json::json!({"rings": [
+                {"ringId": 9, "roomId": "!r:example.invalid", "caller": "@bob:example.invalid", "intent": "video", "secondsLeft": 42}
+            ]})),
+            Call::CallDeclineRing { room_id } => match room_id.as_str() {
+                "!r:example.invalid" => Ok(serde_json::json!({"rings": []})),
+                // A ring with a field outside the contract must not reach the page.
+                "!leaky:example.invalid" => Ok(serde_json::json!({"rings": [
+                    {"ringId": 9, "roomId": "!r:example.invalid", "caller": "@bob:example.invalid", "intent": "audio", "secondsLeft": 1, "body": "hi"}
+                ]})),
+                _ => Err(CoreError::Core(ErrorCode::NotFound)),
+            },
             Call::CallReadiness { room_id } => match room_id.as_str() {
                 "!r:example.invalid" => {
                     Ok(serde_json::json!({"available": true, "reason": null, "activeMembers": 1}))
@@ -118,30 +146,45 @@ impl CoreTransport for FakeCore {
                 ),
                 _ => Err(CoreError::Core(ErrorCode::NotFound)),
             },
-            Call::CallJoin { room_id } => match room_id.as_str() {
+            Call::CallJoin { room_id, video } => match room_id.as_str() {
                 "!r:example.invalid" => Ok(
-                    serde_json::json!({"phase": "joining", "roomId": room_id, "muted": false, "participants": [], "ended": null, "joinError": null}),
+                    serde_json::json!({"phase": "joining", "roomId": room_id, "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": if video { "starting" } else { "off" }, "screen": "off", "video": []}),
                 ),
                 // A refused join is a status with a code, not an error.
                 "!plain:example.invalid" => Ok(
-                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": "not_encrypted"}),
+                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": "not_encrypted", "camera": "off", "screen": "off", "video": []}),
                 ),
                 // A reply with a field the contract does not have.
                 _ => Ok(
-                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null, "sfuUrl": "wss://x"}),
+                    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": [], "sfuUrl": "wss://x"}),
                 ),
             },
+            Call::CallCamera { on } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": if on { "starting" } else { "off" }, "screen": "off", "video": []}),
+            ),
+            Call::CallScreen { on } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": if on { "starting" } else { "off" }, "video": []}),
+            ),
+            // Answered with a picture, through `video_frame`; the UI never
+            // sends it as an ordinary call.
+            Call::CallVideoFrame { .. } => Err(CoreError::BadReply),
             Call::CallMute { muted } => Ok(
-                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": muted, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true}], "ended": null, "joinError": null}),
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": muted, "deafened": false, "volume": 100, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true, "sharing": false}], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
+            ),
+            Call::CallDeafen { deafened } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": deafened, "deafened": deafened, "volume": 100, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true, "sharing": false}], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
+            ),
+            Call::CallVolume { percent } => Ok(
+                serde_json::json!({"phase": "active", "roomId": "!r:example.invalid", "muted": false, "deafened": false, "volume": percent, "participants": [{"userId": "@bob:example.invalid", "deviceId": "DEV", "speaking": false, "reachable": true, "keyed": true, "sharing": false}], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": []}),
             ),
             Call::VerifyThisDevice {} => Ok(serde_json::json!({
-                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false,
+                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": "f1", "phase": "waiting", "emoji": [], "otherDevice": null}
             })),
             Call::AcceptVerification { flow_id }
             | Call::ConfirmVerification { flow_id }
             | Call::CancelVerification { flow_id } => Ok(serde_json::json!({
-                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false,
+                "identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": flow_id, "phase": "compare",
                     "emoji": [{"symbol": "🐶", "description": "Dog"}], "otherDevice": "<b>Laptop</b>"}
             })),
@@ -232,17 +275,17 @@ impl CoreTransport for FakeCore {
             }
             Call::AcceptIdentity { .. } => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "enabled", "operation": "waiting_for_confirmation",
-                "error": null, "canSetUpRecovery": false, "canStartNewBackup": false, "verification": null
+                "error": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false, "verification": null
             })),
             Call::VerifyContact { .. } | Call::VerifyMember { .. } => Ok(serde_json::json!({
-                "identity": "verified", "recovery": "enabled", "operation": "working", "error": null, "canSetUpRecovery": false, "canStartNewBackup": false,
+                "identity": "verified", "recovery": "enabled", "operation": "working", "error": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": null
             })),
             Call::SetUpRecovery {} => Ok(
-                serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false}),
+                serde_json::json!({"identity": "verified", "recovery": "disabled", "operation": "working", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false}),
             ),
             Call::SetUpEncryption {} => Ok(
-                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false}),
+                serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "waiting_for_password", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false}),
             ),
             // A reply carrying a secret is refused by the contract.
             Call::SendMessage { room_id, body, .. } | Call::EditMessage { room_id, body, .. } => {
@@ -265,7 +308,7 @@ impl CoreTransport for FakeCore {
             },
             Call::AllowUnencrypted { .. } => Ok(serde_json::Value::Null),
             Call::RecoverWithKey {} => Ok(
-                serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "recoveryKey": "x"}),
+                serde_json::json!({"identity": "unverified", "recovery": "enabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false, "recoveryKey": "x"}),
             ),
             Call::Register { username, .. } => match username.as_str() {
                 "taken" => Ok(
@@ -436,7 +479,7 @@ impl CoreTransport for FakeCore {
                 "idleLockMinutes": 0, "notificationNames": true, "loadRoomPictures": false,
                 "captureProtection": self.capture_protection.load(Ordering::SeqCst),
                 "timelineEvents": all_timeline_events(),
-                "theme": "red"
+                "theme": "red", "sharePresence": true, "presence": "online"
             })),
             Call::SetAccountSettings { settings } => match settings.enter_sends {
                 true => Ok(serde_json::Value::Null),
@@ -457,16 +500,23 @@ impl CoreTransport for FakeCore {
                 "supported": true,
                 "recording": [{"id": "mic-1", "name": "Headset"}],
                 "playout": [],
+                "cameras": [{"id": "cam-1", "name": "Webcam"}],
                 "selectedRecording": null,
                 "selectedPlayout": null,
-                "unreadable": false
+                "selectedCamera": null,
+                "unreadable": false,
+                "volume": 100
             })),
-            Call::SetCallDevices { recording, playout } => {
-                match (recording.as_deref(), playout.as_deref()) {
-                    (None | Some("mic-1"), None | Some("spk-1")) => Ok(serde_json::Value::Null),
-                    _ => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+            Call::SetCallDevices {
+                recording,
+                playout,
+                camera,
+            } => match (recording.as_deref(), playout.as_deref(), camera.as_deref()) {
+                (None | Some("mic-1"), None | Some("spk-1"), None | Some("cam-1")) => {
+                    Ok(serde_json::Value::Null)
                 }
-            }
+                _ => Err(CoreError::Core(ErrorCode::InvalidArgument)),
+            },
             Call::NewSessions {} => Ok(serde_json::json!({
                 "sessions": [{"deviceId": "NEWDEV", "displayName": null}], "truncated": false
             })),
@@ -510,19 +560,24 @@ impl CoreTransport for FakeCore {
             Call::RemoveThreePid { .. } => Ok(serde_json::json!("done")),
             Call::VerifyDevice { device_id } => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "enabled", "operation": "working",
-                "error": null, "canSetUpRecovery": false, "canStartNewBackup": false,
+                "error": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false,
                 "verification": {"flowId": device_id, "phase": "waiting", "emoji": [],
                     "otherDevice": null, "contact": null}
             })),
             Call::ChangeRecoveryKey {} => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "enabled",
                 "operation": "waiting_for_confirmation", "error": null,
-                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false
+                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false
+            })),
+            Call::SetProfilePassphrase { on } => Ok(serde_json::json!({
+                "identity": "verified", "recovery": "enabled",
+                "operation": "waiting_for_passphrase", "error": null,
+                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": !on
             })),
             Call::StartNewBackup {} => Ok(serde_json::json!({
                 "identity": "verified", "recovery": "incomplete",
                 "operation": "waiting_for_confirmation", "error": null,
-                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": true
+                "verification": null, "canSetUpRecovery": false, "canStartNewBackup": true, "profilePassphrase": false
             })),
             Call::NotificationLevel {} => Ok(serde_json::json!({"level": "custom"})),
             Call::SetNotificationLevel { .. } => Ok(serde_json::Value::Null),
@@ -620,6 +675,38 @@ impl CoreTransport for FakeCore {
         })
     }
 
+    /// Tile 0 has picture 5 (2 by 1 pixels, one quarter turn), tile 1 has
+    /// picture 7, tile 2 has none, tile 3 is busy and tile 4 gives pixels of
+    /// the wrong tile. Every picture belongs to stream 1; another stream has
+    /// none.
+    fn video_frame(&self, tile: u8, after: u64, stream: u64) -> Result<Option<Video>, CoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.available {
+            return Err(CoreError::Unavailable);
+        }
+        if stream != 1 && tile < 3 {
+            return Ok(None);
+        }
+        let seq = match tile {
+            0 => 5,
+            1 => 7,
+            2 => return Ok(None),
+            3 => return Err(CoreError::Core(ErrorCode::LimitExceeded)),
+            _ => return Err(CoreError::BadReply),
+        };
+        if seq <= after {
+            return Ok(None);
+        }
+        Ok(Some(Video {
+            tile,
+            seq,
+            rotation: 1,
+            width: 2,
+            height: 1,
+            pixels: (0..8).collect(),
+        }))
+    }
+
     fn paste_image(&self, room_id: String, bytes: Vec<u8>) -> Result<serde_json::Value, CoreError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if !self.available {
@@ -647,7 +734,7 @@ fn all_timeline_events() -> serde_json::Value {
 }
 
 fn call_idle() -> serde_json::Value {
-    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "participants": [], "ended": null, "joinError": null})
+    serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": [], "ringDeclined": false})
 }
 
 const HANDLE: &str = "0123456789abcdef0123456789abcdef";
@@ -854,6 +941,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-search-messages",
             "allow-jump-to-date",
             "allow-event-context",
+            "allow-timeline-events",
             "allow-pinned-messages",
             "allow-set-pinned",
             "allow-attachments",
@@ -882,7 +970,14 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-call-join",
             "allow-call-leave",
             "allow-call-mute",
+            "allow-call-deafen",
+            "allow-call-volume",
+            "allow-call-camera",
+            "allow-call-screen",
+            "allow-call-video-frame",
             "allow-call-status",
+            "allow-call-rings",
+            "allow-call-decline-ring",
             "allow-set-up-encryption",
             "allow-recover-with-key",
             "allow-send-message",
@@ -950,6 +1045,7 @@ fn given_shell_config_then_security_settings_are_restrictive() {
             "allow-remove-three-pid",
             "allow-verify-device",
             "allow-change-recovery-key",
+            "allow-set-profile-passphrase",
             "allow-start-new-backup",
             "allow-notification-level",
             "allow-set-notification-level",
@@ -998,6 +1094,59 @@ fn given_view_commands_then_replies_are_relayed_and_checked_against_contracts() 
         error(serde_json::json!({"roomId": "!bad-reply:example.invalid", "cursor": null})),
         "core_unavailable"
     );
+}
+
+/// GIVEN valid arguments WHEN the page asks to read events again THEN the
+/// room and event IDs reach the core unchanged and the contract-checked page
+/// comes back. GIVEN no IDs, too many, a repeated, empty, oversized or
+/// control-character ID, an oversized room ID, a missing or extra argument,
+/// or a remote origin THEN nothing reaches the core. GIVEN a reply with a
+/// field outside the contract THEN the page gets only a generic error.
+#[test]
+fn given_timeline_events_then_only_validated_arguments_are_relayed() {
+    let fake = FakeCore::new(true);
+    let app = app_with(fake.clone());
+    let window = create_main_window(&app).unwrap();
+    let ids = |count: usize| (0..count).map(|n| format!("$e{n}")).collect::<Vec<_>>();
+    let max = persephone_core_protocol::MAX_TIMELINE_EVENTS;
+
+    let body = serde_json::json!({"roomId": "!r:s", "eventIds": ids(max)});
+    let page = invoke_on(&window, "timeline_events", app_origin(), body.clone()).unwrap();
+    assert_eq!(
+        page,
+        serde_json::json!({"roomId": "!r:s", "items": [], "nextCursor": null, "names": []})
+    );
+    assert_eq!(
+        fake.timeline_events.lock().unwrap().clone(),
+        Some(("!r:s".to_owned(), ids(max)))
+    );
+    let calls = fake.calls.load(Ordering::SeqCst);
+    assert_eq!(calls, 1);
+
+    for bad in [
+        serde_json::json!({"roomId": "!r:s", "eventIds": []}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": ids(max + 1)}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": ["$a", "$a"]}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": [""]}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": ["x".repeat(256)]}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": ["$a\n"]}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": "$a"}),
+        serde_json::json!({"roomId": "!r:s", "eventIds": [1]}),
+        serde_json::json!({"roomId": "x".repeat(256), "eventIds": ["$a"]}),
+        serde_json::json!({"roomId": "!r:s"}),
+        serde_json::json!({"eventIds": ["$a"]}),
+    ] {
+        assert!(
+            invoke_on(&window, "timeline_events", app_origin(), bad.clone()).is_err(),
+            "{bad}"
+        );
+    }
+    assert!(invoke_on(&window, "timeline_events", "https://evil.invalid", body).is_err());
+    assert_eq!(fake.calls.load(Ordering::SeqCst), calls, "nothing relayed");
+
+    let leaky = serde_json::json!({"roomId": "!leaky:s", "eventIds": ["$a"]});
+    let error = invoke_on(&window, "timeline_events", app_origin(), leaky).unwrap_err();
+    assert_eq!(error, serde_json::json!("core_unavailable"));
 }
 
 #[test]
@@ -1166,6 +1315,7 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     subscriptions.dispatch(Event::RoomListChanged {});
     subscriptions.dispatch(Event::SecurityChanged {});
     subscriptions.dispatch(Event::CallChanged {});
+    subscriptions.dispatch(Event::CallVideo {});
     subscriptions.dispatch(Event::ModulesChanged {});
     let delivered = delivered.lock().unwrap().clone();
     assert!(
@@ -1174,6 +1324,10 @@ fn given_a_session_change_then_room_channels_drop_and_the_session_channel_is_tol
     );
     assert!(
         delivered.contains(&(3, r#""calls""#.into())),
+        "{delivered:?}"
+    );
+    assert!(
+        delivered.contains(&(3, r#""callVideo""#.into())),
         "{delivered:?}"
     );
     assert!(
@@ -1238,12 +1392,25 @@ fn given_sign_in_then_only_the_homeserver_crosses_and_replies_are_checked() {
         calls,
         "oversized URL never reached the core"
     );
-    let signed_out = get_ipc_response(
-        &window,
-        request("sign_out", app_origin(), serde_json::json!({})),
-    )
-    .map(|reply| reply.deserialize::<serde_json::Value>().unwrap());
-    assert_eq!(signed_out, Ok(serde_json::json!("restart_required")));
+    let sign_out = |args: serde_json::Value| {
+        get_ipc_response(&window, request("sign_out", app_origin(), args))
+            .map(|reply| reply.deserialize::<serde_json::Value>().unwrap())
+    };
+    let calls = core.calls.load(Ordering::SeqCst);
+    assert!(sign_out(serde_json::json!({})).is_err());
+    assert_eq!(
+        core.calls.load(Ordering::SeqCst),
+        calls,
+        "a sign-out without the key choice never reached the core"
+    );
+    assert_eq!(
+        sign_out(serde_json::json!({"discardKeys": false})).unwrap_err(),
+        "keys_not_backed_up"
+    );
+    assert_eq!(
+        sign_out(serde_json::json!({"discardKeys": true})),
+        Ok(serde_json::json!("restart_required"))
+    );
 }
 
 /// Registration relays only the homeserver URL and the username; the reason
@@ -1299,7 +1466,7 @@ fn given_encryption_commands_then_only_codes_cross_and_secrets_are_refused() {
     assert_eq!(
         invoke("security_status"),
         Ok(
-            serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false})
+            serde_json::json!({"identity": "none", "recovery": "disabled", "operation": "idle", "error": null, "verification": null, "canSetUpRecovery": false, "canStartNewBackup": false, "profilePassphrase": false})
         )
     );
     assert_eq!(
@@ -1333,15 +1500,48 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
         invoke("call_readiness", room("!nope:example.invalid")).unwrap_err(),
         "not_found"
     );
+    let join = |id: &str, video: bool| {
+        invoke(
+            "call_join",
+            serde_json::json!({"roomId": id, "video": video}),
+        )
+    };
+    assert_eq!(join("!r:example.invalid", false).unwrap()["camera"], "off");
     assert_eq!(
-        invoke("call_join", room("!r:example.invalid")).unwrap()["phase"],
-        "joining"
+        join("!r:example.invalid", true).unwrap()["camera"],
+        "starting"
     );
     assert_eq!(
-        invoke("call_join", room("!plain:example.invalid")).unwrap()["joinError"],
+        join("!plain:example.invalid", false).unwrap()["joinError"],
         "not_encrypted"
     );
-    assert!(invoke("call_join", room("!leaky:example.invalid")).is_err());
+    assert!(join("!leaky:example.invalid", false).is_err());
+    // A join without the video flag, or with a flag of another type, is
+    // refused by the argument types.
+    assert!(invoke("call_join", room("!r:example.invalid")).is_err());
+    assert!(
+        invoke(
+            "call_join",
+            serde_json::json!({"roomId": "!r:example.invalid", "video": "yes"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        invoke("call_camera", serde_json::json!({"on": true})).unwrap()["camera"],
+        "starting"
+    );
+    assert_eq!(
+        invoke("call_camera", serde_json::json!({"on": false})).unwrap()["camera"],
+        "off"
+    );
+    assert_eq!(
+        invoke("call_screen", serde_json::json!({"on": true})).unwrap()["screen"],
+        "starting"
+    );
+    assert_eq!(
+        invoke("call_screen", serde_json::json!({"on": false})).unwrap()["screen"],
+        "off"
+    );
     assert_eq!(
         invoke("call_leave", serde_json::json!({})).unwrap()["phase"],
         "idle"
@@ -1353,19 +1553,75 @@ fn given_call_commands_then_bounded_arguments_cross_and_replies_are_checked() {
     let muted = invoke("call_mute", serde_json::json!({"muted": true})).unwrap();
     assert_eq!(muted["muted"], true);
     assert_eq!(muted["participants"][0]["userId"], "@bob:example.invalid");
+    let deafened = invoke("call_deafen", serde_json::json!({"deafened": true})).unwrap();
+    assert_eq!(
+        (&deafened["deafened"], &deafened["muted"]),
+        (&serde_json::json!(true), &serde_json::json!(true))
+    );
+    let quiet = invoke("call_volume", serde_json::json!({"percent": 35})).unwrap();
+    assert_eq!(quiet["volume"], 35);
+
+    // The handler takes the flag only, so an extra argument is dropped before
+    // the relay: what reaches the core is `CallScreen { on }` and nothing else.
+    for extra in ["source", "monitor", "window", "node", "handle", "device"] {
+        assert_eq!(
+            invoke("call_screen", serde_json::json!({"on": true, extra: "x"})).unwrap()["screen"],
+            "starting",
+            "{extra}"
+        );
+    }
+
+    // The rings are listed without arguments, and a decline names one room.
+    let rings = invoke("call_rings", serde_json::json!({})).unwrap();
+    assert_eq!(rings["rings"][0]["caller"], "@bob:example.invalid");
+    assert_eq!(rings["rings"][0]["secondsLeft"], 42);
+    assert_eq!(
+        invoke("call_decline_ring", room("!r:example.invalid")).unwrap(),
+        serde_json::json!({"rings": []})
+    );
+    assert_eq!(
+        invoke("call_decline_ring", room("!nope:example.invalid")).unwrap_err(),
+        "not_found"
+    );
+    assert!(invoke("call_decline_ring", room("!leaky:example.invalid")).is_err());
+    assert!(invoke("call_decline_ring", serde_json::json!({})).is_err());
+    assert!(invoke("call_decline_ring", serde_json::json!({"roomId": 5})).is_err());
 
     let before = core.calls.load(Ordering::SeqCst);
     let long = "!".to_owned() + &"r".repeat(MAX_ROOM_ID_BYTES);
-    for cmd in ["call_readiness", "call_join"] {
-        assert_eq!(
-            invoke(cmd, room(&long)).unwrap_err(),
-            "invalid_argument",
-            "{cmd}"
-        );
-    }
+    assert_eq!(
+        invoke("call_readiness", room(&long)).unwrap_err(),
+        "invalid_argument"
+    );
+    assert_eq!(
+        join(&long, true).unwrap_err(),
+        "invalid_argument",
+        "call_join"
+    );
     // Arguments of the wrong type or extra arguments do not reach the core.
     assert!(invoke("call_mute", serde_json::json!({"muted": "yes"})).is_err());
     assert!(invoke("call_mute", serde_json::json!({})).is_err());
+    assert!(invoke("call_camera", serde_json::json!({"on": 1})).is_err());
+    assert!(invoke("call_camera", serde_json::json!({})).is_err());
+    // The page names no screen: the command is the flag, and a wrong or
+    // missing flag is refused before it reaches the core.
+    assert!(invoke("call_screen", serde_json::json!({"on": 1})).is_err());
+    assert!(invoke("call_screen", serde_json::json!({})).is_err());
+    assert_eq!(
+        invoke("call_decline_ring", room(&long)).unwrap_err(),
+        "invalid_argument"
+    );
+    assert!(invoke("call_deafen", serde_json::json!({"deafened": "yes"})).is_err());
+    assert!(invoke("call_deafen", serde_json::json!({})).is_err());
+    assert!(invoke("call_volume", serde_json::json!({"percent": "50"})).is_err());
+    assert!(invoke("call_volume", serde_json::json!({"percent": 256})).is_err());
+    assert!(invoke("call_volume", serde_json::json!({"percent": -1})).is_err());
+    assert!(invoke("call_volume", serde_json::json!({})).is_err());
+    // In range for the type but over 100 percent: the host refuses it.
+    assert_eq!(
+        invoke("call_volume", serde_json::json!({"percent": 101})).unwrap_err(),
+        "invalid_argument"
+    );
     assert_eq!(core.calls.load(Ordering::SeqCst), before);
 }
 
@@ -1931,7 +2187,7 @@ fn given_room_account_and_profile_commands_then_bounded_arguments_cross() {
             "interfaceTextPercent": 100, "desktopNotifications": false,
             "sendTyping": false, "sendReadReceipts": false, "idleLockMinutes": 0,
             "notificationNames": true, "loadRoomPictures": false, "captureProtection": true, "timelineEvents": all_timeline_events(),
-            "theme": theme}})
+            "theme": theme, "sharePresence": true, "presence": "online"}})
     };
     let settings = |enter_sends: bool| settings_with(enter_sends, "orange");
     assert_eq!(
@@ -2092,9 +2348,19 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         invoke("call_devices", serde_json::json!({})).unwrap()["recording"][0]["id"],
         "mic-1"
     );
+    assert_eq!(
+        invoke("call_devices", serde_json::json!({})).unwrap()["cameras"][0]["id"],
+        "cam-1"
+    );
+    assert_eq!(
+        invoke("call_devices", serde_json::json!({})).unwrap()["volume"],
+        100,
+        "the saved call volume crosses with the devices"
+    );
     for args in [
         serde_json::json!({"recording": "mic-1", "playout": null}),
-        serde_json::json!({"recording": null, "playout": "spk-1"}),
+        serde_json::json!({"recording": null, "playout": "spk-1", "camera": "cam-1"}),
+        serde_json::json!({"camera": "cam-1"}),
         serde_json::json!({}),
     ] {
         assert_eq!(
@@ -2107,6 +2373,9 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         serde_json::json!({"recording": "m".repeat(513), "playout": null}),
         serde_json::json!({"recording": null, "playout": "s".repeat(513)}),
         serde_json::json!({"recording": "", "playout": null}),
+        serde_json::json!({"camera": "c".repeat(513)}),
+        serde_json::json!({"camera": ""}),
+        serde_json::json!({"camera": "cam\n1"}),
     ] {
         assert_eq!(
             invoke("set_call_devices", args).unwrap_err(),
@@ -2114,6 +2383,7 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         );
     }
     assert!(invoke("set_call_devices", serde_json::json!({"recording": 7})).is_err());
+    assert!(invoke("set_call_devices", serde_json::json!({"camera": 7})).is_err());
     assert_eq!(core.calls.load(Ordering::SeqCst), calls);
     assert_eq!(
         invoke(
@@ -2184,6 +2454,31 @@ fn given_account_change_commands_then_only_non_secret_arguments_cross() {
         invoke("change_recovery_key", serde_json::json!({})).unwrap()["operation"],
         "waiting_for_confirmation"
     );
+    let turned_on = invoke("set_profile_passphrase", serde_json::json!({"on": true})).unwrap();
+    assert_eq!(turned_on["operation"], "waiting_for_passphrase");
+    assert_eq!(turned_on["profilePassphrase"], false, "not changed yet");
+    // Only the choice crosses: a passphrase argument or a missing or
+    // mistyped choice never reaches the core.
+    let calls = core.calls.load(Ordering::SeqCst);
+    for args in [
+        serde_json::json!({}),
+        serde_json::json!({"on": "yes"}),
+        serde_json::json!({"on": null}),
+    ] {
+        assert!(
+            invoke("set_profile_passphrase", args).is_err(),
+            "bad arguments refused"
+        );
+    }
+    assert!(
+        invoke(
+            "set_profile_passphrase",
+            serde_json::json!({"on": true, "passphrase": "hunter2 hunter2"})
+        )
+        .is_ok(),
+        "unknown arguments are ignored by Tauri and never forwarded"
+    );
+    assert_eq!(core.calls.load(Ordering::SeqCst), calls + 1);
     assert_eq!(
         invoke("start_new_backup", serde_json::json!({})).unwrap()["operation"],
         "waiting_for_confirmation"
@@ -2295,26 +2590,38 @@ fn given_a_notification_event_then_only_the_toaster_sees_it() {
         subscriptions.dispatch(Event::Notification {
             room: room.into(),
             sender: "Bob".into(),
+            call: false,
         });
     }
-    let toasts: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let toasts: Arc<Mutex<Vec<(String, String, bool)>>> = Arc::default();
     let shown = toasts.clone();
-    subscriptions.set_toaster(Box::new(move |room, sender| {
-        shown.lock().unwrap().push((room.into(), sender.into()));
+    subscriptions.set_toaster(Box::new(move |room, sender, call| {
+        shown
+            .lock()
+            .unwrap()
+            .push((room.into(), sender.into(), call));
     }));
     subscriptions.dispatch(Event::Notification {
         room: "Later".into(),
         sender: "Ann".into(),
+        call: false,
     });
     subscriptions.dispatch(Event::Notification {
         room: "x".repeat(513),
         sender: "Bob".into(),
+        call: false,
+    });
+    subscriptions.dispatch(Event::Notification {
+        room: String::new(),
+        sender: "Cy".into(),
+        call: true,
     });
     assert_eq!(
         *toasts.lock().unwrap(),
         vec![
-            ("Plans".to_owned(), "Bob".to_owned()),
-            ("Later".to_owned(), "Ann".to_owned())
+            ("Plans".to_owned(), "Bob".to_owned(), false),
+            ("Later".to_owned(), "Ann".to_owned(), false),
+            (String::new(), "Cy".to_owned(), true)
         ]
     );
     assert!(
@@ -2732,6 +3039,128 @@ fn given_an_image_band_then_the_page_gets_raw_bytes_with_width_and_rows() {
     }
 }
 
+/// GIVEN a call video picture WHEN the page asks for it THEN it is a raw
+/// binary response: the picture number as a little-endian `u64`, then the
+/// rotation, width and height as little-endian `u32`, then exactly
+/// `width * height * 4` RGBA bytes. No newer picture is an empty body, and a
+/// core error is a fixed code.
+#[test]
+fn given_a_call_video_frame_then_the_page_gets_raw_bytes_or_an_empty_body() {
+    let app = app();
+    let window = create_main_window(&app).unwrap();
+    let frame = |tile: u64, after: u64, stream: u64| {
+        get_ipc_response(
+            &window,
+            request(
+                "call_video_frame",
+                app_origin(),
+                serde_json::json!({"tile": tile, "after": after, "stream": stream}),
+            ),
+        )
+    };
+    assert_eq!(VIDEO_PREFIX_BYTES, 20);
+    let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = frame(1, 6, 1) else {
+        panic!("the picture is not a raw response");
+    };
+    assert_eq!(u64::from_le_bytes(body[0..8].try_into().unwrap()), 7);
+    assert_eq!(u32::from_le_bytes(body[8..12].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(body[12..16].try_into().unwrap()), 2);
+    assert_eq!(u32::from_le_bytes(body[16..20].try_into().unwrap()), 1);
+    assert_eq!(&body[VIDEO_PREFIX_BYTES..], &(0..8).collect::<Vec<u8>>());
+    // No newer picture, or none of the asked stream: an empty raw body,
+    // never JSON.
+    for (tile, after, stream) in [(1, 7, 1), (1, 9, 1), (2, 0, 1), (1, 0, 2)] {
+        let Ok(tauri::ipc::InvokeResponseBody::Raw(body)) = frame(tile, after, stream) else {
+            panic!("tile {tile} after {after} stream {stream} is not a raw response");
+        };
+        assert!(body.is_empty(), "tile {tile} after {after} stream {stream}");
+    }
+    assert_eq!(frame(3, 0, 1).unwrap_err(), "limit_exceeded");
+    // A reply that breaks the contract is a generic error.
+    assert_eq!(frame(4, 0, 1).unwrap_err(), "core_unavailable");
+}
+
+/// GIVEN a tile outside 0 to 4 or an `after` or `stream` the page cannot
+/// hold exactly WHEN `call_video_frame` is called THEN it is refused without calling the
+/// core, from the app origin and from a remote one.
+#[test]
+fn given_bad_call_video_arguments_then_the_ui_refuses_without_calling_the_core() {
+    let core = FakeCore::new(true);
+    let app = app_with(core.clone());
+    let window = create_main_window(&app).unwrap();
+    for args in [
+        serde_json::json!({"tile": 6, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 255, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 9_007_199_254_740_992_u64, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": u64::MAX, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": 9_007_199_254_740_992_u64}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": u64::MAX}),
+    ] {
+        assert_eq!(
+            invoke_on(&window, "call_video_frame", app_origin(), args.clone()).unwrap_err(),
+            "invalid_argument",
+            "{args}"
+        );
+    }
+    for args in [
+        serde_json::json!({"tile": 256, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": -1, "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": -1, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0, "stream": -1}),
+        serde_json::json!({"tile": "0", "after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "stream": 0}),
+        serde_json::json!({"after": 0, "stream": 0}),
+        serde_json::json!({"tile": 0, "after": 0}),
+    ] {
+        assert!(
+            get_ipc_response(
+                &window,
+                request("call_video_frame", app_origin(), args.clone())
+            )
+            .is_err(),
+            "{args}"
+        );
+    }
+    assert_eq!(core.calls.load(Ordering::SeqCst), 0);
+    let ok = serde_json::json!({"tile": 0, "after": 0, "stream": 0});
+    for (cmd, args) in [
+        ("call_video_frame", ok.clone()),
+        ("call_camera", serde_json::json!({"on": true})),
+        ("call_screen", serde_json::json!({"on": true})),
+    ] {
+        assert!(
+            get_ipc_response(&window, request(cmd, app_origin(), args.clone())).is_ok(),
+            "{cmd} is allowed from the app"
+        );
+        let calls = core.calls.load(Ordering::SeqCst);
+        for origin in ["https://example.org", "http://localhost:1420"] {
+            assert!(
+                get_ipc_response(&window, request(cmd, origin, args.clone())).is_err(),
+                "{cmd} from {origin}"
+            );
+        }
+        assert_eq!(core.calls.load(Ordering::SeqCst), calls, "{cmd}");
+    }
+}
+
+/// GIVEN an unreachable core WHEN a video picture is asked for THEN the page
+/// gets the generic error.
+#[test]
+fn given_unreachable_core_then_a_call_video_frame_is_a_generic_error() {
+    let app = app_with(FakeCore::new(false));
+    let window = create_main_window(&app).unwrap();
+    assert_eq!(
+        invoke_on(
+            &window,
+            "call_video_frame",
+            app_origin(),
+            serde_json::json!({"tile": 0, "after": 0, "stream": 0})
+        )
+        .unwrap_err(),
+        "core_unavailable"
+    );
+}
+
 /// GIVEN malformed handles or oversized room or event IDs WHEN any image
 /// command is called THEN the UI refuses it without calling the core.
 #[test]
@@ -2934,6 +3363,24 @@ fn given_notifications_with_and_without_names_then_only_named_ones_show_names() 
     assert_eq!(
         persephone_desktop::toast_text("", ""),
         ("Persephone".to_owned(), "New message".to_owned())
+    );
+}
+
+/// GIVEN an incoming call notification WHEN its text is made THEN it says
+/// "Incoming call" and names the caller only when the core sent a name; it
+/// never carries the room or message text (ADR-0052).
+#[test]
+fn given_call_notifications_then_the_text_is_incoming_call_and_names_only_when_sent() {
+    assert_eq!(
+        persephone_desktop::call_toast_text("@bob:example.invalid"),
+        (
+            "Incoming call".to_owned(),
+            "@bob:example.invalid".to_owned()
+        )
+    );
+    assert_eq!(
+        persephone_desktop::call_toast_text(""),
+        ("Incoming call".to_owned(), "Persephone".to_owned())
     );
 }
 
@@ -3237,7 +3684,7 @@ fn given_account_settings_then_capture_protection_follows_only_successful_calls(
             "notificationNames": true, "loadRoomPictures": false,
             "captureProtection": capture_protection,
             "timelineEvents": all_timeline_events(),
-            "theme": "orange"}})
+            "theme": "orange", "sharePresence": true, "presence": "online"}})
     };
     assert!(invoke("set_account_settings", saved(true, false)).is_ok());
     assert!(!capture.wanted());

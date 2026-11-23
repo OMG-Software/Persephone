@@ -13,6 +13,7 @@
 //! `core-main` thread, and the main thread runs [`run_main_loop`]. Prompts
 //! reach the main thread through [`main_thread`].
 
+pub mod call;
 pub mod credentials;
 pub mod main_loop;
 pub mod modules;
@@ -133,7 +134,8 @@ pub(crate) fn start_detached(command: &mut std::process::Command) -> std::io::Re
     command.spawn().map(drop)
 }
 
-/// No call containment is reviewed for this OS (ADR-0043): calls are refused.
+/// The contained call worker host (ADR-0049): the broker's call launcher,
+/// the worker's Seatbelt profile, and the `sandbox_check` before any input.
 pub(crate) fn call_host() -> std::sync::Arc<dyn crate::calls::worker::CallHost> {
-    std::sync::Arc::new(crate::calls::worker::Unsupported)
+    std::sync::Arc::new(call::ContainedCallHost::next_to_core())
 }

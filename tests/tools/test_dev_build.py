@@ -1,5 +1,6 @@
 """The cargo and npm commands that `python tools/dev.py build` runs."""
 
+import contextlib
 import io
 import os
 from pathlib import Path
@@ -207,6 +208,44 @@ class CallWorkerSkipTest(unittest.TestCase):
         with mock.patch.object(dev, "clang_major", side_effect=AssertionError("not probed")):
             for platform in ("win32", "darwin"):
                 self.assertIsNone(dev.call_worker_skip({}, self.library, platform=platform))
+
+
+class SandboxStatusTest(unittest.TestCase):
+    """The exit status of `python tools/dev.py sandbox`."""
+
+    def sandbox(self, native, screen):
+        """Runs the command with a probe that returns `native`, or `screen`
+        for --screen-probe. Returns the raised status and the probes run."""
+        probes = []
+
+        def fake(command, **_):
+            command = list(map(str, command))
+            if command[0] == "cargo":
+                return subprocess.CompletedProcess(command, 0)
+            probes.append(command[1:])
+            return subprocess.CompletedProcess(command, screen if command[1:] == ["--screen-probe"] else native)
+
+        with (
+            mock.patch.object(dev.sys, "argv", ["dev.py", "sandbox"]),
+            mock.patch.object(dev.os, "name", "nt"),
+            mock.patch.object(dev.subprocess, "run", side_effect=fake),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            try:
+                dev.main()
+            except subprocess.CalledProcessError as error:
+                return error.returncode, probes
+        return 0, probes
+
+    def test_given_both_probes_fail_then_the_native_status_is_kept(self):
+        self.assertEqual(self.sandbox(7, 1), (7, [[], ["--screen-probe"]]))
+
+    def test_given_only_one_probe_fails_then_its_status_is_kept(self):
+        self.assertEqual(self.sandbox(7, 0)[0], 7)
+        self.assertEqual(self.sandbox(0, 1)[0], 1)
+
+    def test_given_both_probes_pass_then_the_command_passes(self):
+        self.assertEqual(self.sandbox(0, 0), (0, [[], ["--screen-probe"]]))
 
 
 if __name__ == "__main__":

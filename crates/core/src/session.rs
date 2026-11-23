@@ -23,9 +23,17 @@
 //!
 //! Encryption setup (`security.rs`) runs on its own thread, one lease per
 //! step, like sync. So do changing the recovery key (ADR-0021) and
-//! verifying another of the account's devices. Its prompts run on
-//! short-lived threads without a lease, so a prompt left open never holds up
-//! a lock; an answer given after a lock (or a lock and unlock) is dropped.
+//! verifying another of the account's devices. After recovery with the
+//! recovery key, the same thread downloads the key backup's room keys, one
+//! room per lease, in ticks with no other work (`backup_restore.rs`). Its
+//! prompts run on short-lived threads without a lease, so a prompt left open
+//! never holds up a lock; an answer given after a lock (or a lock and
+//! unlock) is dropped.
+//!
+//! Turning the profile passphrase on or off (ADR-0050) asks on a short-lived
+//! thread without a lease, like the other prompts. Only the file switch that
+//! follows takes `transition`, and it writes nothing unless the same session
+//! is still open, so a lock during the prompt drops the answer.
 //!
 //! Unlocking and resetting the profile ask for the passphrase (ADR-0006) in
 //! the core's own window. They run on a worker thread in the `unlocking`
@@ -34,6 +42,7 @@
 
 use crate::account;
 use crate::activity;
+use crate::backup_restore::{self, Restore};
 use crate::contacts;
 use crate::credentials::{CredentialSource, NewPassword, PromptError, SecretPrompt};
 use crate::homeserver::Homeserver;
@@ -42,6 +51,7 @@ use crate::media::ImageUpload;
 use crate::notifications;
 use crate::outbox::{Content, Outbox};
 use crate::passphrase::Unlock;
+use crate::presence;
 use crate::recovery_file;
 use crate::registration::{self, Registered};
 use crate::security;
@@ -58,6 +68,7 @@ use matrix_sdk::{
             GlobalAccountDataEvent,
             direct::DirectEventContent,
             key::verification::request::ToDeviceKeyVerificationRequestEvent,
+            presence::PresenceEvent,
             room::{
                 member::SyncRoomMemberEvent,
                 message::{MessageType, OriginalSyncRoomMessageEvent},
@@ -110,8 +121,19 @@ const SECURITY_STACK_BYTES: usize = 8 * 1024 * 1024;
 pub enum AdmissionError {
     /// The session is not open (locked, locking or never unlocked).
     Locked,
-    /// [`MAX_LEASES`] leases are outstanding.
+    /// [`MAX_LEASES`] leases are outstanding, or a sign-out holds new work
+    /// back while it checks the key backup.
     Saturated,
+}
+
+/// Why [`Session::sign_out`] did not start. Nothing changed in either case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignOutRefused {
+    /// Every lease stayed in use until the timeout.
+    Saturated,
+    /// This device's room keys are not all in a key backup, and the caller
+    /// did not choose to lose them.
+    KeysNotBackedUp,
 }
 
 /// Proof that leased work drained before the stores closed. It says nothing
@@ -152,6 +174,28 @@ pub trait SessionListener: Send + Sync {
     /// room's and sender's projected names, never its text. Called only while
     /// desktop notifications are on.
     fn notify(&self, _room: &str, _sender: &str) {}
+    /// The rings and call flags the call handlers keep (ADR-0052).
+    fn rings(&self) -> Option<&crate::calls::rings::Rings> {
+        None
+    }
+    fn call_rooms(&self) -> Option<&crate::calls::rings::CallRooms> {
+        None
+    }
+    /// A ring was accepted, ended or replaced.
+    fn rings_changed(&self) {}
+    /// A room's call flag changed.
+    fn room_call_changed(&self, _room: &str) {}
+    /// An incoming call ring arrived and desktop notifications are on. Both
+    /// names are empty when the account's settings leave names out. It makes
+    /// the "Incoming call" desktop notification (ADR-0052).
+    fn notify_call(&self, _room: &str, _sender: &str) {}
+    /// The signed-in account ended or changed: a sign-out, a failed sign-in
+    /// or another user. Not called when a sync error or its recovery keeps
+    /// the same account. The call handlers' rings and flags end.
+    fn account_ended(&self) {}
+    /// Called after each sync round with the rooms this account has joined,
+    /// so rings and flags of a left room end.
+    fn check_rooms(&self, _joined: &dyn Fn(&matrix_sdk::ruma::RoomId) -> bool) {}
     /// The homeserver ended the session; [`Session::finish_ended`] deletes
     /// the profile. Called on the sync thread, which then stops.
     fn session_ended(&self) {}
@@ -171,6 +215,10 @@ struct Inner {
     stores: Option<Arc<Stores>>,
     generation: u64,
     active: usize,
+    /// A sign-out is checking the key backup: new work other than a running
+    /// call's ([`Shared::admit_while`]) is refused as saturated until it
+    /// gives up or the lock closes admission.
+    held: bool,
 }
 
 struct ActiveAccount {
@@ -317,8 +365,40 @@ struct Shared {
     idle_lock_minutes: AtomicU16,
     /// Who is typing in each room, from the sync.
     typing: Arc<activity::Typing>,
+    /// When this account's presence may change next (ADR-0057).
+    presence: Mutex<presence::Writer>,
+    /// The presence of the direct-message contacts.
+    contacts_presence: Arc<presence::Book>,
+    /// The presence of the members the member panel last listed.
+    members_presence: Arc<presence::Members>,
     security: Mutex<SecurityShared>,
     outbox: Mutex<Outbox>,
+}
+
+impl crate::calls::ring_events::Env for Shared {
+    fn listener(&self) -> Option<Arc<dyn SessionListener>> {
+        Shared::listener(self)
+    }
+
+    fn toast(&self) -> Option<bool> {
+        self.toasts
+            .load(Ordering::SeqCst)
+            .then(|| self.toast_names.load(Ordering::SeqCst))
+    }
+
+    fn open_generation(&self) -> Option<u64> {
+        Shared::open_generation(self)
+    }
+
+    fn while_open(&self, generation: u64, action: &mut dyn FnMut()) {
+        // `close_admission` advances the generation under this lock and
+        // clears the UI's notifications after it, so whatever `action`
+        // queues here is either cleared by that lock or never queued.
+        let inner = lock(self);
+        if inner.generation == generation && inner.state == StoreState::Protected {
+            action();
+        }
+    }
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -333,6 +413,16 @@ fn lock(shared: &Shared) -> MutexGuard<'_, Inner> {
 
 impl Shared {
     fn admit(self: &Arc<Self>) -> Result<Lease, AdmissionError> {
+        self.admit_while(false)
+    }
+
+    /// `through_hold` admits work while a sign-out holds new work back. Only
+    /// a running call's operations pass: refusing them would end the call
+    /// although the sign-out may still be refused. They add no room key a
+    /// history needs: membership state, delayed events and Olm to-device
+    /// call keys are not Megolm, and the one encrypted event, the ring when a
+    /// call starts, only keeps this device from reading its own ring.
+    fn admit_while(self: &Arc<Self>, through_hold: bool) -> Result<Lease, AdmissionError> {
         let mut inner = lock(self);
         let Some(stores) = inner
             .stores
@@ -341,7 +431,7 @@ impl Shared {
         else {
             return Err(AdmissionError::Locked);
         };
-        if inner.active >= MAX_LEASES {
+        if inner.active >= MAX_LEASES || (inner.held && !through_hold) {
             return Err(AdmissionError::Saturated);
         }
         inner.active += 1;
@@ -353,7 +443,14 @@ impl Shared {
     }
 
     fn with_client(self: &Arc<Self>) -> Result<Option<(Lease, Client)>, AdmissionError> {
-        let lease = self.admit()?;
+        self.with_client_while(false)
+    }
+
+    fn with_client_while(
+        self: &Arc<Self>,
+        through_hold: bool,
+    ) -> Result<Option<(Lease, Client)>, AdmissionError> {
+        let lease = self.admit_while(through_hold)?;
         let client = guard(&self.account)
             .as_ref()
             .map(|account| account.client.clone());
@@ -398,8 +495,16 @@ impl Shared {
     }
 
     fn set_status(&self, status: AccountStatus) {
-        *guard(&self.status) = status;
+        let same_account = {
+            let mut current = guard(&self.status);
+            let same = same_signed_in_account(&current, &status);
+            *current = status;
+            same
+        };
         if let Some(listener) = self.listener() {
+            if !same_account {
+                listener.account_ended();
+            }
             listener.session_changed();
         }
     }
@@ -423,8 +528,9 @@ pub struct Session {
     protector: Arc<dyn KeyProtector>,
     unlock: Unlock,
     shared: Arc<Shared>,
-    /// Serializes lock and unlock; admission does not take it.
-    transition: Mutex<()>,
+    /// Serializes lock, unlock and the passphrase switch; admission does not
+    /// take it. Shared with the switch's worker thread.
+    transition: Arc<Mutex<()>>,
 }
 
 /// Takes a lease and the client for one complete operation, or `None` once
@@ -482,6 +588,15 @@ fn failed(error: SignInError) -> AccountStatus {
         user_id: None,
         error: Some(error),
     }
+}
+
+/// Whether both statuses are signed in to the same account, as before and
+/// after a sync error or its recovery.
+fn same_signed_in_account(before: &AccountStatus, after: &AccountStatus) -> bool {
+    before.state == AccountState::SignedIn
+        && after.state == AccountState::SignedIn
+        && before.user_id.is_some()
+        && before.user_id == after.user_id
 }
 
 fn signed_in(user_id: &str, error: Option<SignInError>) -> AccountStatus {
@@ -632,6 +747,7 @@ fn install(shared: &Arc<Shared>, lease: Lease, client: Client, user_id: String) 
     shared
         .idle_lock_minutes
         .store(loaded.idle_lock_minutes, Ordering::SeqCst);
+    *guard(&shared.presence) = presence::Writer::new(loaded.share_presence, loaded.presence);
     let installed = lease.commit(|| {
         *guard(&shared.health) = SyncHealth::default();
         *guard(&shared.account) = Some(ActiveAccount {
@@ -740,6 +856,37 @@ fn run_sync(
             std::future::ready(())
         })
     };
+    // Contacts' and listed members' presence from classic sync (ADR-0057);
+    // Sliding Sync has none. Contacts whose shown presence changed, at most
+    // one entry each, and whether a listed member's did.
+    let presence_changed: Arc<Mutex<Vec<OwnedUserId>>> = Arc::default();
+    let members_changed: Arc<AtomicBool> = Arc::default();
+    let presence_handler = {
+        let _context = runtime.enter();
+        let book = shared.contacts_presence.clone();
+        let members = shared.members_presence.clone();
+        let changed = presence_changed.clone();
+        let members_noted = members_changed.clone();
+        client.add_event_handler(move |event: PresenceEvent| {
+            let status = presence::status(&event.content.presence);
+            if members.book().note(&event.sender, status, Instant::now()) {
+                members_noted.store(true, Ordering::Relaxed);
+            }
+            if book.note(&event.sender, status, Instant::now()) {
+                let mut changed = guard(&changed);
+                if !changed.contains(&event.sender) && changed.len() < presence::MAX_CONTACTS {
+                    changed.push(event.sender);
+                }
+            }
+            std::future::ready(())
+        })
+    };
+    // Incoming call rings and call flags (ADR-0052).
+    let ring_handlers = {
+        let _context = runtime.enter();
+        let env: Arc<dyn crate::calls::ring_events::Env> = shared.clone();
+        crate::calls::ring_events::register(&client, Arc::downgrade(&env))
+    };
     // Sliding Sync asks only for this account's own member event, and the
     // SDK reads room state from `required_state` alone, never from the
     // timeline. So once the member list is loaded, another person's join,
@@ -827,13 +974,27 @@ fn run_sync(
                     .map(Box::pin);
             }
             attempted_at = observed_time();
-            let rooms =
-                account::sync_round(&client, engine.as_ref().expect("selected above")).await;
+            let carried = presence_before_round(shared, &client).await;
+            let engine = engine.as_ref().expect("selected above");
+            let rooms = account::sync_round(&client, engine, carried).await;
             // Saved even when the round failed: the SDK may have refreshed the
             // token, spending the old refresh token, before the error.
             saved_token =
                 account::save_if_refreshed(&client, lease.stores(), saved_token.take()).await;
-            let rooms = rooms?;
+            let mut rooms = rooms?;
+            let looks_up = matches!(engine, account::Engine::Sliding(_));
+            let changed = std::mem::take(&mut *guard(&presence_changed));
+            let noted = members_changed.swap(false, Ordering::Relaxed);
+            // Both at once, so their lookups add one timeout to the round.
+            let (contact_rooms, members_room) = tokio::join!(
+                contacts_presence(shared, &client, looks_up, changed),
+                members_presence(shared, &client, looks_up, noted),
+            );
+            for room in contact_rooms.into_iter().chain(members_room) {
+                if !rooms.contains(&room) {
+                    rooms.push(room);
+                }
+            }
             let keyed = match keys.as_mut() {
                 Some(stream) => Some(account::take_key_rooms(stream.as_mut()).await),
                 None => None,
@@ -901,6 +1062,11 @@ fn run_sync(
                     if identities_changed {
                         listener.security_changed();
                     }
+                    listener.check_rooms(&|room| {
+                        client
+                            .get_room(room)
+                            .is_some_and(|room| room.state() == matrix_sdk::RoomState::Joined)
+                    });
                     if let Some(keyed) = keyed.filter(|keyed| !keyed.is_empty()) {
                         listener.room_keys_arrived(&keyed);
                     }
@@ -926,12 +1092,163 @@ fn run_sync(
     let _context = runtime.enter();
     client.remove_event_handler(direct_handler);
     client.remove_event_handler(typing_handler);
+    client.remove_event_handler(presence_handler);
+    for handler in ring_handlers {
+        client.remove_event_handler(handler);
+    }
     client.remove_event_handler(members_handler);
     drop(changes);
     drop(identities);
     drop(keys);
     drop(engine);
     drop(client);
+}
+
+/// Sends a waiting presence change, then gives the `set_presence` value of
+/// the next sync request (ADR-0057). A failed or timed-out `PUT` is sent
+/// again after a growing wait; it changes nothing twice, so a repeat is
+/// harmless. A refused one is not sent again until the setting changes.
+async fn presence_before_round(
+    shared: &Shared,
+    client: &Client,
+) -> matrix_sdk::ruma::presence::PresenceState {
+    let put = guard(&shared.presence).take_put(Instant::now());
+    if let Some(state) = put {
+        let sent = tokio::time::timeout(
+            presence::PUT_TIMEOUT,
+            client.set_presence(state.clone(), None, true),
+        )
+        .await;
+        let end = match sent {
+            Ok(Ok(())) => presence::PutEnd::Sent,
+            Ok(Err(error)) => match error.as_client_api_error() {
+                Some(answer) => presence::answered(
+                    answer.status_code.as_u16(),
+                    presence::rate_limit_wait(error.client_api_error_kind(), SystemTime::now()),
+                ),
+                // No answer that can be read: it may have been applied.
+                None => presence::PutEnd::Unknown,
+            },
+            // Timed out: the request may still reach the homeserver.
+            Err(_) => presence::PutEnd::Unknown,
+        };
+        guard(&shared.presence).put_ended(state, end, Instant::now());
+    }
+    guard(&shared.presence).for_sync(Instant::now())
+}
+
+/// Tracks the direct-message contacts' presence after a round. For the due
+/// ones, Sliding Sync (`looks_up`) asks the homeserver, and classic sync
+/// reads the SDK's store. Returns the rooms whose contact's presence
+/// changed, including the contacts in `changed` from classic sync's events.
+/// A failed lookup keeps the presence as it was.
+async fn contacts_presence(
+    shared: &Shared,
+    client: &Client,
+    looks_up: bool,
+    mut changed: Vec<OwnedUserId>,
+) -> Vec<String> {
+    let mut rooms = client.joined_rooms();
+    rooms.sort_by(|a, b| a.room_id().cmp(b.room_id()));
+    let contacts: Vec<(OwnedRoomId, OwnedUserId)> = rooms
+        .iter()
+        .filter_map(|room| {
+            contacts::contact_of(client, room).map(|user| (room.room_id().to_owned(), user))
+        })
+        .take(presence::MAX_CONTACTS)
+        .collect();
+    let book = &shared.contacts_presence;
+    book.track(contacts.iter().map(|(_, user)| &**user));
+    let due = book.due(Instant::now());
+    // Both at once, so a round waits for one timeout at most: the round
+    // must not delay the next carried presence past the homeserver's
+    // timeout (`presence::SYNC_CARRY_GAP`).
+    let (first, second) = tokio::join!(
+        presence_of(client, due.first(), looks_up),
+        presence_of(client, due.get(1), looks_up),
+    );
+    for (user, status) in due.into_iter().zip([first, second]) {
+        if let Some(status) = status
+            && book.note(&user, status, Instant::now())
+        {
+            changed.push(user);
+        }
+    }
+    contacts
+        .into_iter()
+        .filter(|(_, user)| changed.contains(user))
+        .map(|(room, _)| room.to_string())
+        .collect()
+}
+
+// `contacts_presence` asks for exactly two contacts at once.
+const _: () = assert!(presence::LOOKUPS_PER_ROUND == 2);
+
+/// Looks up the due presence of the members the member panel last listed,
+/// all at once, like [`contacts_presence`], while that listing is recent
+/// (`presence::MEMBER_LISTING_AGE`). Returns the room listed now when a
+/// shown presence changed, here or (`noted`) from classic sync's events, so
+/// the page lists its members again. The page may have listed another room
+/// during the lookups: the book is shared, so that room's listing shows a
+/// member of both rooms with the new presence. A failed lookup keeps the
+/// presence as it was.
+async fn members_presence(
+    shared: &Shared,
+    client: &Client,
+    looks_up: bool,
+    noted: bool,
+) -> Option<String> {
+    let members = &shared.members_presence;
+    members.listed(Instant::now())?;
+    let book = members.book();
+    let due = book.due(Instant::now());
+    let (first, second, third, fourth) = tokio::join!(
+        presence_of(client, due.first(), looks_up),
+        presence_of(client, due.get(1), looks_up),
+        presence_of(client, due.get(2), looks_up),
+        presence_of(client, due.get(3), looks_up),
+    );
+    let mut changed = noted;
+    for (user, status) in due.iter().zip([first, second, third, fourth]) {
+        if let Some(status) = status {
+            changed |= book.note(user, status, Instant::now());
+        }
+    }
+    if !changed {
+        return None;
+    }
+    members.listed(Instant::now()).map(|room| room.to_string())
+}
+
+// `members_presence` asks for exactly four members at once.
+const _: () = assert!(presence::MEMBER_LOOKUPS_PER_ROUND == 4);
+
+/// A contact's presence, or `None` when it could not be read (or there is
+/// no `user`). Sliding Sync (`looks_up`) asks the homeserver, within
+/// [`presence::LOOKUP_TIMEOUT`]. Classic sync reads the SDK's store, which
+/// keeps the newest event, also of a round before the contact was tracked;
+/// no request is made.
+async fn presence_of(
+    client: &Client,
+    user: Option<&OwnedUserId>,
+    looks_up: bool,
+) -> Option<Option<persephone_contracts::PresenceStatus>> {
+    use matrix_sdk::ruma::api::client::presence::get_presence;
+    let user = user?;
+    if looks_up {
+        let asked = tokio::time::timeout(
+            presence::LOOKUP_TIMEOUT,
+            client.send(get_presence::v3::Request::new(user.clone())),
+        )
+        .await;
+        return match asked {
+            Ok(Ok(response)) => Some(presence::status(&response.presence)),
+            _ => None,
+        };
+    }
+    let raw = client.state_store().get_presence_event(user).await.ok()??;
+    let event = raw.deserialize().ok()?;
+    Some(presence::status(&event.content.presence))
 }
 
 /// An incoming verification request as sync saw it: the sender, the flow ID,
@@ -962,6 +1279,9 @@ fn run_security(
     // read here rather than during sync so a member-list request never holds
     // up sync. The account's direct marks do not count.
     let mut flow: Option<Flow> = None;
+    // The rooms whose backup keys are still to be downloaded after a
+    // recovery (`backup_restore.rs`). Only this session's loop holds it.
+    let mut restore = Restore::default();
     let incoming: Arc<Mutex<Option<Noted>>> = Arc::default();
     let recorder = incoming.clone();
     let own = user_id.clone();
@@ -999,6 +1319,26 @@ fn run_security(
         let active = flow.as_ref().is_some_and(|flow| !flow.is_over());
         let waiting = guard(&incoming).is_some();
         if command.is_none() && !active && !waiting && Instant::now() < next_refresh {
+            // Nothing else to do in this tick: restore one room's keys, if a
+            // restore is under way. Commands, verification and the status
+            // refresh come first.
+            let now = Instant::now();
+            if restore.wants_step(now)
+                && !restore_step(
+                    shared,
+                    generation,
+                    &mut restore,
+                    now,
+                    |_| backup_restore::joined_rooms(&client),
+                    |lease, room| {
+                        lease
+                            .stores()
+                            .block_on(backup_restore::restore_room(&client, room))
+                    },
+                )
+            {
+                break;
+            }
             continue;
         }
         let lease = match shared.admit() {
@@ -1057,7 +1397,19 @@ fn run_security(
                         }
                     }
                     Some(SecurityCommand::Recover(key)) => {
-                        (security::recover(&client, &key).await.err(), None)
+                        match security::recover(&client, &key).await {
+                            Ok(()) => {
+                                // A new recovery replaces a restore under way.
+                                // Its first step reads the joined rooms.
+                                restore = if client.encryption().backups().are_enabled().await {
+                                    Restore::start(Instant::now())
+                                } else {
+                                    Restore::default()
+                                };
+                                (None, None)
+                            }
+                            Err(error) => (Some(error), None),
+                        }
                     }
                     Some(SecurityCommand::SetUpRecovery { source }) => {
                         match security::enable_recovery(&client).await {
@@ -1199,6 +1551,50 @@ fn run_security(
     client.remove_event_handler(room_handler);
     drop(flow);
     drop(client);
+}
+
+/// One step of `restore` at `now`, under a lease of its own
+/// (`backup_restore.rs`): when a scan is due, adds the rooms `scan` finds;
+/// then downloads the backup's keys for the next room with `download`.
+/// Returns `false` when the security loop must stop: the session locked or
+/// is no longer the one of `generation`; the restore is then ended. When no
+/// lease is free, the step does nothing and the room waits for the next tick;
+/// that is not a failure.
+fn restore_step(
+    shared: &Arc<Shared>,
+    generation: u64,
+    restore: &mut Restore,
+    now: Instant,
+    scan: impl FnOnce(&Lease) -> Vec<OwnedRoomId>,
+    download: impl FnOnce(&Lease, &matrix_sdk::ruma::RoomId) -> bool,
+) -> bool {
+    if !restore.wants_step(now) {
+        return true;
+    }
+    let lease = match shared.admit() {
+        Ok(lease) if lease.generation() == generation => lease,
+        Ok(_) | Err(AdmissionError::Locked) => {
+            restore.stop();
+            return false;
+        }
+        Err(AdmissionError::Saturated) => return true,
+    };
+    if restore.scan_due(now) {
+        restore.add_scanned(scan(&lease), now);
+    }
+    let restored = restore.take_next().map(|room| download(&lease, &room));
+    // A lock that began during the step ends the restore: the next lease
+    // would be refused anyway, and the keys already imported stay.
+    let current = lease.commit(|| ()).is_ok();
+    drop(lease);
+    if !current {
+        restore.stop();
+        return false;
+    }
+    if let Some(restored) = restored {
+        restore.record(restored);
+    }
+    true
 }
 
 /// The sending loop: one message at a time in queue order, one lease per
@@ -1369,6 +1765,56 @@ fn security_prompt_error(error: PromptError) -> SecurityError {
     }
 }
 
+/// The error a failed passphrase switch reports. A prompt that gave no entry
+/// leaves the profile `locked` in the store's vocabulary.
+fn passphrase_error(state: StoreState) -> SecurityError {
+    match state {
+        StoreState::Locked => SecurityError::Cancelled,
+        StoreState::Unsupported => SecurityError::Unsupported,
+        StoreState::SecretRejected => SecurityError::PassphraseRejected,
+        _ => SecurityError::ProfileUnavailable,
+    }
+}
+
+/// The worker's work for [`Session::set_profile_passphrase`]: asks, then
+/// writes the key file under `transition` if the session of `generation` is
+/// still open. Returns the error to report, `None` for success. For a session
+/// that moved on nothing is written and the change is dropped.
+fn switch_passphrase(
+    shared: &Arc<Shared>,
+    transition: &Mutex<()>,
+    dir: &Path,
+    protector: &dyn KeyProtector,
+    unlock: &Unlock,
+    generation: u64,
+    on: bool,
+) -> Option<SecurityError> {
+    let change = match store::ask_passphrase_change(dir, protector, unlock, on) {
+        Ok(change) => change,
+        Err(state) => return Some(passphrase_error(state)),
+    };
+    let _transition = transition
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // No lock, unlock or reset can run while this guard is held. A lock
+    // during the prompt has already moved the generation on: the answer is
+    // dropped (and zeroed) without a write.
+    let stores = {
+        let inner = lock(shared);
+        (inner.generation == generation && inner.state == StoreState::Protected)
+            .then(|| inner.stores.clone())
+            .flatten()
+    };
+    let Some(stores) = stores else {
+        return Some(SecurityError::Cancelled);
+    };
+    let written = store::apply_passphrase_change(dir, protector, unlock, change);
+    // A failure after the new key file is in place still changed the
+    // setting (see `store.rs`), so the files, not the result, decide.
+    stores.set_passphrase(store::passphrase_on(dir));
+    written.err().map(passphrase_error)
+}
+
 impl Session {
     /// A session with no profile: nothing is stored and nothing can unlock.
     pub fn not_configured() -> Self {
@@ -1429,6 +1875,7 @@ impl Session {
                     stores,
                     generation: 0,
                     active: 0,
+                    held: false,
                 }),
                 drained: Condvar::new(),
                 status: Mutex::new(AccountStatus::signed_out()),
@@ -1445,8 +1892,11 @@ impl Session {
                 send_receipts: AtomicBool::new(false),
                 idle_lock_minutes: AtomicU16::new(0),
                 typing: Arc::default(),
+                presence: Mutex::default(),
+                contacts_presence: Arc::default(),
+                members_presence: Arc::default(),
             }),
-            transition: Mutex::new(()),
+            transition: Arc::new(Mutex::new(())),
         }
     }
 
@@ -1508,7 +1958,9 @@ impl Session {
     /// holds the session's shared state, never a client.
     pub fn admission(&self) -> Admission {
         let shared = self.shared.clone();
-        Arc::new(move || shared.with_client().ok().flatten())
+        // A call outlives a sign-out's check of the key backup: it stops
+        // only when the lock closes admission.
+        Arc::new(move || shared.with_client_while(true).ok().flatten())
     }
 
     /// Restores a saved account without a prompt and starts syncing. Does
@@ -1828,6 +2280,40 @@ impl Session {
         Ok(self.account_status())
     }
 
+    /// Holds new work back, for a sign-out that holds one lease, and waits
+    /// until `deadline` for every other lease to end. Returns false when they
+    /// did not end in time or another sign-out already holds; new work is
+    /// then admitted as before. On true the hold stays until
+    /// [`Session::release_new_work`] or the lock closes admission.
+    fn hold_new_work(&self, deadline: Instant) -> bool {
+        let mut inner = lock(&self.shared);
+        if inner.held {
+            return false;
+        }
+        inner.held = true;
+        while inner.active > 1 {
+            let now = Instant::now();
+            if now >= deadline || inner.state != StoreState::Protected {
+                drop(inner);
+                self.release_new_work();
+                return false;
+            }
+            inner = self
+                .shared
+                .drained
+                .wait_timeout(inner, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        true
+    }
+
+    /// Admits new work again after [`Session::hold_new_work`].
+    fn release_new_work(&self) {
+        lock(&self.shared).held = false;
+        self.shared.drained.notify_all();
+    }
+
     /// The start of a lock: a protected session stops admitting work, moves
     /// to the next generation and runs `announce`, once, so the page clears
     /// before anything waits. Leases already held keep running; the lock
@@ -1838,6 +2324,8 @@ impl Session {
         if inner.state != StoreState::Protected {
             return;
         }
+        // A sign-out's hold ends here: nothing is admitted from now on.
+        inner.held = false;
         inner.state = match inner.generation.checked_add(1) {
             Some(next) => {
                 inner.generation = next;
@@ -1889,6 +2377,8 @@ impl Session {
         *guard(&self.shared.security) = SecurityShared::default();
         guard(&self.shared.outbox).clear();
         self.shared.typing.clear();
+        self.shared.contacts_presence.clear();
+        self.shared.members_presence.clear();
         // No lease remains, so the sync loop is between rounds and will see
         // the lock at its next admission; join it, then drop the client inside
         // the stores' runtime before closing them.
@@ -1946,6 +2436,17 @@ impl Session {
     /// deleted under it. A failed revocation still signs out locally and is
     /// reported as `session_not_revoked`.
     ///
+    /// Signing out deletes this device's room keys. Unless `discard_keys` is
+    /// set, the sign-out first makes sure they are all in the key backup
+    /// (waiting up to [`security::BACKUP_UPLOAD_WAIT`] for keys not yet
+    /// uploaded); when they are not, nothing changes and `KeysNotBackedUp` is
+    /// returned. The check runs under the lease, before anything is recorded,
+    /// and only once no other work runs: new work is held back (as
+    /// `Saturated`) and the work already running gets until `timeout` to
+    /// finish, so no sync round or send adds a key after the check. Work that
+    /// does not finish in time, or another sign-out already checking, gives
+    /// `Saturated`. A refusal admits new work again.
+    ///
     /// Returns the resulting state; without a signed-in account nothing
     /// changes. A saturated session is waited for up to `timeout` (leases
     /// last one request or one sync round); after that the sign-out has not
@@ -1953,8 +2454,9 @@ impl Session {
     pub fn sign_out(
         &self,
         timeout: Duration,
+        discard_keys: bool,
         announce: impl FnOnce(),
-    ) -> Result<StoreState, AdmissionError> {
+    ) -> Result<StoreState, SignOutRefused> {
         let Some(dir) = self.profile.clone() else {
             return Ok(self.state());
         };
@@ -1963,6 +2465,24 @@ impl Session {
         let (began, revoked) = loop {
             match self.with_client() {
                 Ok(Some((lease, client))) => {
+                    // Before anything changes: refusing here leaves the
+                    // account signed in, with its keys. A sync round or a
+                    // send can still add room keys, so new work is held back
+                    // and running work finishes first; the hold lasts until
+                    // the lock below closes admission.
+                    if !discard_keys {
+                        if !self.hold_new_work(deadline) {
+                            return Err(SignOutRefused::Saturated);
+                        }
+                        if !lease.stores().block_on(security::keys_backed_up(
+                            &client,
+                            lease.stores(),
+                            security::BACKUP_UPLOAD_WAIT,
+                        )) {
+                            self.release_new_work();
+                            return Err(SignOutRefused::KeysNotBackedUp);
+                        }
+                    }
                     // Before the request: an interrupted sign-out must never
                     // restore this account on the next start.
                     let began = store::begin_sign_out(&dir).is_ok();
@@ -1986,7 +2506,7 @@ impl Session {
                 Err(AdmissionError::Saturated) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(error) => return Err(error),
+                Err(AdmissionError::Saturated) => return Err(SignOutRefused::Saturated),
             }
         };
         let marked = store::mark_signed_out(&dir, revoked).is_ok() && began;
@@ -2194,13 +2714,31 @@ impl Session {
     /// The account's idle lock in minutes, 0 when off (ADR-0025). It stays
     /// as last loaded while the profile is locked or signed out, which is
     /// harmless: only an open profile can be locked.
+    ///
+    /// The lock needs the profile passphrase to reopen, so the idle lock is
+    /// off (0) while the profile has none, whatever was saved (ADR-0050).
     pub fn idle_lock_minutes(&self) -> u16 {
-        self.shared.idle_lock_minutes.load(Ordering::SeqCst)
+        let minutes = self.shared.idle_lock_minutes.load(Ordering::SeqCst);
+        let passphrase = lock(&self.shared)
+            .stores
+            .as_ref()
+            .is_some_and(|stores| stores.passphrase());
+        if passphrase { minutes } else { 0 }
     }
 
     /// Who is typing in each room, from the sync.
     pub fn typing(&self) -> &activity::Typing {
         &self.shared.typing
+    }
+
+    /// The presence of the direct-message contacts (ADR-0057).
+    pub fn contacts_presence(&self) -> &presence::Book {
+        &self.shared.contacts_presence
+    }
+
+    /// The presence of the members the member panel last listed.
+    pub fn members_presence(&self) -> &presence::Members {
+        &self.shared.members_presence
     }
 
     /// Replaces this account's settings. `Ok(false)` when the store could
@@ -2232,6 +2770,7 @@ impl Session {
                     shared
                         .idle_lock_minutes
                         .store(value.idle_lock_minutes, Ordering::SeqCst);
+                    guard(&shared.presence).configure(value.share_presence, value.presence);
                 })
                 .is_ok();
         Ok(committed)
@@ -2246,8 +2785,19 @@ impl Session {
     }
 
     /// The account's encryption state; `unknown` without a signed-in account.
+    /// `profile_passphrase` is the profile's own: the open stores say so;
+    /// for a closed profile it is whether `store-key.v2` exists, read from
+    /// disk because the session keeps no copy that could go stale across a
+    /// reset. No profile (demo, unavailable) has none.
     pub fn security_status(&self) -> SecurityStatus {
-        guard(&self.shared.security).status.clone()
+        let mut status = guard(&self.shared.security).status.clone();
+        let open = lock(&self.shared)
+            .stores
+            .as_ref()
+            .map(|stores| stores.passphrase());
+        status.profile_passphrase =
+            open.unwrap_or_else(|| self.profile.as_deref().is_some_and(store::passphrase_on));
+        status
     }
 
     /// Starts setting up encryption for an account without an identity: the
@@ -2576,6 +3126,87 @@ impl Session {
         self.security_status()
     }
 
+    /// Starts turning the profile passphrase on or off (ADR-0050). Does
+    /// nothing, and replies with the status as it is, unless the profile is
+    /// open, `on` differs from the current setting and no other security
+    /// operation runs. The core asks in its own window on a thread without a
+    /// lease, so the serving loop and a lock are never held up by the prompt.
+    /// Its answer is written under `transition` and only if the same session
+    /// is still open: after a lock nothing is written. Replies at once; the
+    /// result arrives as a security change.
+    pub fn set_profile_passphrase(
+        &self,
+        on: bool,
+        source: Arc<dyn CredentialSource>,
+    ) -> SecurityStatus {
+        let Some(dir) = self.profile.clone() else {
+            return self.security_status();
+        };
+        let started = {
+            let inner = lock(&self.shared);
+            match &inner.stores {
+                Some(stores)
+                    if inner.state == StoreState::Protected && stores.passphrase() != on =>
+                {
+                    Some(inner.generation)
+                }
+                _ => None,
+            }
+        };
+        let Some(started) = started else {
+            return self.security_status();
+        };
+        let accepted = self.shared.with_security(started, |security| {
+            let free =
+                security.status.operation == SecurityOperation::Idle && security.command.is_none();
+            if free {
+                security.status.operation = SecurityOperation::WaitingForPassphrase;
+                security.status.error = None;
+            }
+            free
+        });
+        if accepted != Some(true) {
+            return self.security_status();
+        }
+        let shared = self.shared.clone();
+        let transition = self.transition.clone();
+        let protector = self.protector.clone();
+        let unlock = Unlock {
+            source,
+            kdf: self.unlock.kdf,
+            backoff: self.unlock.backoff,
+        };
+        let spawned = std::thread::Builder::new()
+            .name("core-profile-passphrase".into())
+            .spawn(move || {
+                // A panic in a prompt or the vault must not leave the
+                // operation waiting for good.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    switch_passphrase(
+                        &shared,
+                        &transition,
+                        &dir,
+                        &*protector,
+                        &unlock,
+                        started,
+                        on,
+                    )
+                }))
+                .unwrap_or(Some(SecurityError::Failed));
+                shared.with_security(started, |security| {
+                    security.status.operation = SecurityOperation::Idle;
+                    security.status.error = outcome;
+                });
+            });
+        if spawned.is_err() {
+            self.shared.with_security(started, |security| {
+                security.status.operation = SecurityOperation::Idle;
+                security.status.error = Some(SecurityError::Failed);
+            });
+        }
+        self.security_status()
+    }
+
     /// Starts reopening a locked session: replies `unlocking` at once, then
     /// asks for the passphrase on a worker thread, opens the stores, restores
     /// a saved account and announces the result. A session that failed to
@@ -2758,6 +3389,32 @@ fn not_revoked() -> AccountStatus {
 mod tests {
     use super::*;
 
+    /// GIVEN status changes WHEN compared THEN only a change that keeps the
+    /// same signed-in account, such as a sync error or its recovery, keeps
+    /// the account; a sign-out, a failure or another user ends it.
+    #[test]
+    fn given_status_changes_then_only_the_same_signed_in_account_continues() {
+        let alice = signed_in("@alice:s", None);
+        let alice_error = signed_in("@alice:s", Some(SignInError::Failed));
+        assert!(same_signed_in_account(&alice, &alice_error));
+        assert!(same_signed_in_account(&alice_error, &alice));
+        for after in [
+            AccountStatus::signed_out(),
+            failed(SignInError::Failed),
+            not_revoked(),
+            signed_in("@bob:s", None),
+        ] {
+            assert!(!same_signed_in_account(&alice, &after), "{after:?}");
+        }
+        assert!(!same_signed_in_account(
+            &AccountStatus::signed_out(),
+            &alice
+        ));
+        // A user ID that cannot be shown is not proof of the same account.
+        let hidden = signed_in(&"x".repeat(256), None);
+        assert!(!same_signed_in_account(&hidden, &hidden));
+    }
+
     fn unverified() -> SecurityShared {
         let mut security = SecurityShared::default();
         security.status.identity = IdentityState::Unverified;
@@ -2928,6 +3585,31 @@ mod tests {
         assert_eq!(health.consecutive_failures, 0);
         assert_eq!(health.retry_delay_ms, 0);
         assert_eq!(health.last_error, None);
+    }
+
+    /// GIVEN an open session WHEN a ring notification is queued through
+    /// `while_open` before, during and after a lock THEN it runs only before:
+    /// the lock's `announce`, which clears the UI's notifications, already
+    /// sees the new generation, and nothing runs after it.
+    #[test]
+    fn given_a_lock_then_while_open_runs_only_in_the_open_generation() {
+        use crate::calls::ring_events::Env;
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        assert_eq!(settled(&session), StoreState::Protected);
+        let shared = session.shared.clone();
+        let generation = Env::open_generation(&*shared).unwrap();
+        let mut runs = 0;
+        shared.while_open(generation, &mut || runs += 1);
+        assert_eq!(runs, 1);
+        let mut during = 0;
+        session.lock(Duration::ZERO, || {
+            shared.while_open(generation, &mut || during += 1);
+        });
+        assert_eq!(during, 0);
+        shared.while_open(generation, &mut || runs += 1);
+        assert_eq!(runs, 1);
+        assert_eq!(Env::open_generation(&*shared), None);
     }
 
     #[test]
@@ -3235,6 +3917,243 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         session.state()
+    }
+
+    /// GIVEN a saved idle lock of five minutes WHEN the profile has no
+    /// passphrase THEN the effective idle lock is off, because a lock could
+    /// not be reopened with a passphrase; WHEN the passphrase is on THEN it
+    /// applies, and WHEN it is turned off again THEN it is off again.
+    #[test]
+    fn given_a_saved_idle_lock_then_it_applies_only_with_a_passphrase() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        session.shared.idle_lock_minutes.store(5, Ordering::SeqCst);
+        assert_eq!(session.idle_lock_minutes(), 0, "no passphrase");
+
+        let wait = |session: &Session| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while session.security_status().operation != SecurityOperation::Idle
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        session.set_profile_passphrase(true, Arc::new(Answer));
+        wait(&session);
+        assert!(session.security_status().profile_passphrase);
+        assert_eq!(session.idle_lock_minutes(), 5, "passphrase on");
+
+        session.set_profile_passphrase(false, Arc::new(Answer));
+        wait(&session);
+        assert!(!session.security_status().profile_passphrase);
+        assert_eq!(session.idle_lock_minutes(), 0, "passphrase off again");
+        assert_eq!(
+            session.shared.idle_lock_minutes.load(Ordering::SeqCst),
+            5,
+            "the saved setting is kept"
+        );
+    }
+
+    fn no_scan(_: &Lease) -> Vec<OwnedRoomId> {
+        panic!("this restore does not scan")
+    }
+
+    fn rooms(names: &[&str]) -> Restore {
+        Restore::new(
+            names
+                .iter()
+                .map(|name| OwnedRoomId::try_from(*name).unwrap()),
+        )
+    }
+
+    /// GIVEN an open session and a restore of three rooms WHEN the steps run
+    /// THEN each room is downloaded in order under a lease of its own, which
+    /// is the only one held and ends before the next step.
+    #[test]
+    fn given_a_restore_then_each_room_has_its_own_lease() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let generation = session.shared.open_generation().expect("open");
+        let mut restore = rooms(&["!a:s", "!b:s", "!c:s"]);
+        let mut seen = Vec::new();
+        while !restore.is_empty() {
+            let going_on = restore_step(
+                &session.shared,
+                generation,
+                &mut restore,
+                Instant::now(),
+                no_scan,
+                |lease, room| {
+                    assert_eq!(lease.generation(), generation);
+                    assert_eq!(lock(&session.shared).active, 1, "one lease, this room's");
+                    seen.push(room.to_string());
+                    true
+                },
+            );
+            assert!(going_on);
+            assert_eq!(lock(&session.shared).active, 0, "the lease ended");
+        }
+        assert_eq!(seen, ["!a:s", "!b:s", "!c:s"]);
+    }
+
+    /// GIVEN a restore started at recovery WHEN its first step runs THEN it
+    /// reads the joined rooms under the step's own lease and downloads the
+    /// first one; WHEN the next step runs before the scan interval THEN it
+    /// does not scan again and downloads the next room.
+    #[test]
+    fn given_a_started_restore_then_the_step_scans_under_its_lease() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let generation = session.shared.open_generation().expect("open");
+        let now = Instant::now();
+        let mut restore = Restore::start(now);
+        let mut seen = Vec::new();
+        assert!(restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            now,
+            |lease| {
+                assert_eq!(lease.generation(), generation);
+                assert_eq!(lock(&session.shared).active, 1, "the step's lease");
+                ["!a:s", "!b:s"]
+                    .iter()
+                    .map(|name| OwnedRoomId::try_from(*name).unwrap())
+                    .collect()
+            },
+            |_, room| {
+                seen.push(room.to_string());
+                true
+            },
+        ));
+        assert!(restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            now,
+            no_scan,
+            |_, room| {
+                seen.push(room.to_string());
+                true
+            },
+        ));
+        assert_eq!(seen, ["!a:s", "!b:s"]);
+        assert!(!restore.wants_step(now), "nothing left until the next scan");
+        assert_eq!(lock(&session.shared).active, 0);
+    }
+
+    /// GIVEN a restore WHEN the session is locked, or locked and opened
+    /// again (a new generation), before a step THEN the step downloads
+    /// nothing, the restore ends and the loop is told to stop.
+    #[test]
+    fn given_a_lock_or_a_new_session_then_the_restore_stops_before_downloading() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let old = session.shared.open_generation().expect("open");
+        assert_eq!(
+            session.lock(Duration::from_secs(5), || {}).0,
+            StoreState::Locked
+        );
+        let mut restore = rooms(&["!a:s", "!b:s"]);
+        let going_on = restore_step(
+            &session.shared,
+            old,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, _| panic!("no download after a lock"),
+        );
+        assert!(!going_on);
+        assert!(restore.is_empty());
+
+        assert_eq!(session.unlock(), StoreState::Unlocking);
+        assert_eq!(settled(&session), StoreState::Protected);
+        let mut restore = rooms(&["!a:s", "!b:s"]);
+        let going_on = restore_step(
+            &session.shared,
+            old,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, _| panic!("no download for the old session"),
+        );
+        assert!(!going_on, "the new session is not the restore's");
+        assert!(restore.is_empty());
+        // The unlock publishes `protected` before its own look for a saved
+        // account (`restore`), which holds a lease for a moment; wait for it
+        // so only a lease of the step would remain.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lock(&session.shared).active != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(lock(&session.shared).active, 0);
+    }
+
+    /// GIVEN a restore WHEN a lock begins while a room downloads THEN that
+    /// room's lease ends, the remaining rooms are dropped and the loop is
+    /// told to stop.
+    #[test]
+    fn given_a_lock_during_a_download_then_the_rest_of_the_restore_is_dropped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let generation = session.shared.open_generation().expect("open");
+        let mut restore = rooms(&["!a:s", "!b:s", "!c:s"]);
+        let going_on = restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, _| {
+                session.close_admission(|| {});
+                true
+            },
+        );
+        assert!(!going_on);
+        assert!(restore.is_empty());
+        assert_eq!(lock(&session.shared).active, 0);
+        assert_eq!(
+            session.lock(Duration::from_secs(5), || {}).0,
+            StoreState::Locked
+        );
+    }
+
+    /// GIVEN every lease in use WHEN a restore step runs THEN it downloads
+    /// nothing, keeps the room for the next tick and lets the loop go on.
+    #[test]
+    fn given_no_free_lease_then_the_room_waits_for_the_next_tick() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = Session::open(dir.path().into(), Arc::new(Plain), unlock());
+        let generation = session.shared.open_generation().expect("open");
+        let held: Vec<_> = (0..MAX_LEASES)
+            .map(|_| session.shared.admit().expect("a lease"))
+            .collect();
+        let mut restore = rooms(&["!a:s", "!b:s"]);
+        let going_on = restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, _| panic!("no lease, no download"),
+        );
+        assert!(going_on);
+        assert_eq!(restore.len(), 2);
+        drop(held);
+        let mut first = None;
+        assert!(restore_step(
+            &session.shared,
+            generation,
+            &mut restore,
+            Instant::now(),
+            no_scan,
+            |_, room| {
+                first = Some(room.to_string());
+                true
+            }
+        ));
+        assert_eq!(first.as_deref(), Some("!a:s"));
+        assert_eq!(restore.len(), 1);
     }
 
     /// GIVEN a write meant for the session before a lock WHEN it arrives

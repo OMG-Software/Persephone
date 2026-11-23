@@ -1,6 +1,6 @@
 {
   "productName": "Persephone",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "identifier": "io.github.omg-software.persephone",
   "build": {
     "frontendDist": "../.local/build/frontend"
@@ -54,13 +54,19 @@
         "installMode": "currentUser"
       },
       "wix": {
-        "version": "0.0.1",
+        "version": "0.2.0",
         "upgradeCode": "6c3031c6-7503-5143-9dc0-8b5ef49ea8d1"
       }
     },
     "linux": {
       "appimage": {
         "bundleMediaFramework": false
+      },
+      "deb": {
+        "depends": ["libpipewire-0.3-0t64 | libpipewire-0.3-0"]
+      },
+      "rpm": {
+        "depends": ["libpipewire-0.3.so.0()(64bit)"]
       }
     },
     "macOS": {

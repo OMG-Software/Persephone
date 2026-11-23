@@ -191,6 +191,26 @@ health snapshot.
 
 The app does not show link previews and does not load content from the web.
 
+### Calls
+
+* **Who sees a call.** A call uses your homeserver's call service (a LiveKit
+  media server) and its relay (TURN) servers. They see who is in the call,
+  when, your IP address, and the size and timing of the audio and video
+  packets. They do not see the audio or the video: each sender encrypts its
+  media with keys that only the call members get.
+* **Proxy.** Calls cannot use the profile's SOCKS5 proxy. When a proxy is set,
+  the app asks before each call whether to connect directly.
+* **Microphone.** The app records from the microphone only during a call.
+  Mute stops sending audio.
+* **Camera.** The app uses the camera only after you choose "Video call" or
+  turn the camera on during a call. Turning the camera off stops it, and the
+  camera light goes out. The app uses only the camera that you chose in
+  Settings, or the first camera when you chose none. It never changes to
+  another camera.
+* **Devices.** The app saves your choice of microphone, speaker and camera in
+  the encrypted profile. Listing devices does not record, play or open a
+  camera.
+
 ## What the app stores on your device
 
 The app keeps your account in a local profile. The profile holds the Matrix
@@ -209,10 +229,14 @@ request normal room history to locate that message. Saved drafts can remain
 after leaving a room. Use Saved drafts to view or discard those local records.
 
 * A random 32-byte key encrypts the values in these databases.
-* Your profile passphrase protects that key. You choose the passphrase when
-  you create the profile. The app has no way to recover a forgotten
-  passphrase.
-* The operating system's keystore adds a second layer. On Windows this is
+* By default, the operating system's keystore alone protects that key. The
+  profile then opens with no prompt. Anyone, and any program, that can use
+  your computer account can open it.
+* You can turn on a profile passphrase in Settings, Security. It protects
+  the key with a second layer, and the app asks for it each time it starts.
+  You can turn it off again. The app has no way to recover a forgotten
+  passphrase. Lock and the idle lock exist only while the passphrase is on.
+* The operating system's keystore protects the key in both cases. On Windows this is
   DPAPI. The Linux Secret Service adapter is not implemented. The macOS
   Keychain adapter is implemented but has no recorded native app run.
   If no keystore is available, the profile
@@ -230,7 +254,7 @@ deletes the profile's key, so the remaining files cannot be read. The next
 time the app starts, it deletes the profile's files.
 
 If you forget your passphrase, "Reset profile" deletes the profile without
-the passphrase. The app cannot end the old session on the homeserver in this
+the passphrase. The new profile has no passphrase. The app cannot end the old session on the homeserver in this
 case. Remove the old device from another Matrix client.
 
 ### Limits

@@ -1,6 +1,26 @@
 <script lang="ts">
   import type { CallStatus } from '../../crates/contracts/generated/contracts';
-  import { callAnnouncement, END_TEXT, NO_KEY_TEXT, PHASE_TEXT, showCallBar, UNREACHABLE_TEXT } from './calls';
+  import {
+    callAnnouncement,
+    CAMERA_TEXT,
+    cameraButton,
+    DEAFEN_LABEL,
+    DEAFEN_TEXT,
+    END_TEXT,
+    NO_KEY_TEXT,
+    PHASE_TEXT,
+    RING_DECLINED_TEXT,
+    SCREEN_TEXT,
+    screenButton,
+    SHARING_TEXT,
+    showCallBar,
+    UNDEAFEN_LABEL,
+    UNREACHABLE_TEXT,
+    VOLUME_LABEL,
+    VOLUME_MAX,
+    volumeText,
+    volumeValue
+  } from './calls';
   import Icon from './Icon.svelte';
   import PersonName from './PersonName.svelte';
 
@@ -14,7 +34,14 @@
     roomName,
     names,
     busy,
+    cameraBusy,
+    screenBusy,
+    volume,
     onmute,
+    ondeafen,
+    onvolume,
+    oncamera,
+    onscreen,
     onleave,
     ondismiss
   }: {
@@ -23,15 +50,31 @@
     roomName: string;
     // Display names from the call room's members, by user ID.
     names: ReadonlyMap<string, string>;
-    // A mute or leave request is waiting for the core.
+    // A mute, deafen or leave request is waiting for the core.
     busy: boolean;
+    // A camera request is waiting for the core.
+    cameraBusy: boolean;
+    // A screen share request is waiting for the core.
+    screenBusy: boolean;
+    // The volume the slider shows: the one being set, else the call's.
+    volume: number;
     onmute: () => void;
+    ondeafen: () => void;
+    // The slider moved; the page sends the newest value.
+    onvolume: (percent: number) => void;
+    oncamera: () => void;
+    // Starts or stops the share. The page names no screen: the core asks.
+    onscreen: () => void;
     onleave: () => void;
     ondismiss: () => void;
   } = $props();
 
   const shown = $derived(showCallBar(status, dismissed));
   const ended = $derived(status.phase === 'ended');
+  const camera = $derived(cameraButton(status.camera));
+  const cameraText = $derived(CAMERA_TEXT[status.camera]);
+  const screen = $derived(screenButton(status.screen));
+  const screenText = $derived(SCREEN_TEXT[status.screen]);
 </script>
 
 <div class="visually-hidden" aria-live="polite" aria-atomic="true">
@@ -57,10 +100,67 @@
             <Icon name={status.muted ? 'mic-off' : 'mic'} />
             {status.muted ? 'Unmute' : 'Mute'}
           </button>
+          <button
+            type="button"
+            class="secondary call-deafen"
+            aria-pressed={status.deafened}
+            aria-describedby="call-deafen-text"
+            disabled={busy}
+            onclick={ondeafen}
+          >
+            <Icon name={status.deafened ? 'headphones-off' : 'headphones'} />
+            {status.deafened ? UNDEAFEN_LABEL : DEAFEN_LABEL}
+          </button>
+          <button
+            type="button"
+            class="secondary call-camera"
+            aria-pressed={camera.pressed}
+            disabled={cameraBusy || status.phase !== 'active'}
+            onclick={oncamera}
+          >
+            <Icon name={camera.pressed ? 'video-off' : 'video'} />
+            {camera.label}
+          </button>
+          <button
+            type="button"
+            class="secondary call-screen"
+            aria-pressed={screen.pressed}
+            disabled={screenBusy || status.phase !== 'active'}
+            onclick={onscreen}
+          >
+            <Icon name="screen" />
+            {screen.label}
+          </button>
           <button type="button" class="secondary call-leave" onclick={onleave}>Leave</button>
         {/if}
       </span>
     </div>
+    {#if !ended && status.ringDeclined}
+      <p class="call-declined note" role="status">{RING_DECLINED_TEXT}</p>
+    {/if}
+    {#if !ended}
+      <span id="call-deafen-text" class="visually-hidden">{DEAFEN_TEXT}</span>
+      <label class="call-volume">
+        <Icon name="volume" />
+        <span>{VOLUME_LABEL}</span>
+        <input
+          type="range"
+          min="0"
+          max={VOLUME_MAX}
+          step="5"
+          value={volume}
+          aria-valuetext={volumeText(volume)}
+          oninput={(event) => onvolume(volumeValue(Number(event.currentTarget.value)))}
+        />
+        <output class="note">{volumeText(volume)}</output>
+      </label>
+    {/if}
+    {#if !ended && cameraText !== ''}
+      <p class="call-camera-note note" role="status">{cameraText}</p>
+    {/if}
+    {#if !ended && screenText !== ''}
+      <p class="call-screen-note note" role="status">{screenText}</p>
+    {/if}
     {#if ended}
       <p class="call-end">{status.ended === null ? END_TEXT.internal : END_TEXT[status.ended]}</p>
     {:else if status.participants.length > 0}
@@ -73,6 +173,7 @@
               <span class="speaking-mark idle" aria-hidden="true"></span>
             {/if}
             <PersonName userId={person.userId} name={names.get(person.userId) ?? null} />
+            {#if person.sharing}<span class="note call-note call-sharing">{SHARING_TEXT}</span>{/if}
             {#if !person.keyed}<span class="note call-note">{NO_KEY_TEXT}</span>{/if}
             {#if !person.reachable}<span class="note call-note">{UNREACHABLE_TEXT}</span>{/if}
           </li>

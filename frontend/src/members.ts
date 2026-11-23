@@ -1,10 +1,12 @@
 import type {
   ContactStatus,
   ContactTrust,
+  PresenceStatus,
   RoomMember,
   RoomReader
 } from '../../crates/contracts/generated/contracts';
 import { localpart } from './people.ts';
+import { knownPresence } from './presence.ts';
 
 /** One person in the room's member panel. All text is untrusted. */
 export type MemberRow = {
@@ -14,6 +16,8 @@ export type MemberRow = {
   own: boolean;
   // Invited but not joined yet. Invited members can read new messages too.
   invited: boolean;
+  // As the member's homeserver last reported it; null when not known.
+  presence: PresenceStatus | null;
 };
 
 /** What the panel shows next to a member's name. */
@@ -39,7 +43,8 @@ export function memberRows(
     name: byId.get(reader.userId)?.displayName ?? null,
     invited: byId.get(reader.userId)?.membership === 'invite',
     trust: contact !== null && contact.userId === reader.userId ? contact.trust : reader.trust,
-    own: reader.own
+    own: reader.own,
+    presence: knownPresence(reader.presence)
   }));
   // Sorted by what the list shows first: the display name, or else the
   // user ID without its "@", so names and bare IDs sort together.

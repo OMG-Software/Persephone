@@ -1,0 +1,6 @@
+# PyYAML for tests/tools/test_workflows.py, installed only by the
+# ubuntu-latest job of .github/workflows/check.yml (Python 3.14, x86-64).
+# The hash is that of the CPython 3.14 manylinux x86-64 wheel on PyPI; pip
+# installs it with --require-hashes --only-binary :all:.
+pyyaml==6.0.3 \
+    --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5

@@ -222,6 +222,15 @@ impl RemoteKeys {
     pub fn member_count(&self) -> usize {
         self.members.len()
     }
+
+    /// The indices of the stored keys of `identity`, oldest inserted first.
+    /// Only the indices: a caller reads a key with [`RemoteKeys::get`] when
+    /// it gives that key on, so no other copy of a key is made.
+    pub fn indices_of(&self, identity: &str) -> Vec<u8> {
+        self.members
+            .get(identity)
+            .map_or_else(Vec::new, |member| member.order.iter().copied().collect())
+    }
 }
 
 #[cfg(test)]
@@ -388,5 +397,16 @@ mod tests {
         assert!(remote.get("a", 0).is_none());
         assert!(remote.get("b", 0).is_some());
         assert!(remote.get("c", 0).is_none());
+    }
+
+    /// GIVEN stored keys WHEN a member's key indices are listed THEN they
+    /// come oldest first, and an unknown member has none.
+    #[test]
+    fn given_stored_keys_then_indices_of_lists_them_oldest_first() {
+        let mut remote = RemoteKeys::new();
+        remote.insert("a", 3, &[3; 16], &yes).unwrap();
+        remote.insert("a", 1, &[1; 16], &yes).unwrap();
+        assert_eq!(remote.indices_of("a"), [3, 1]);
+        assert!(remote.indices_of("b").is_empty());
     }
 }

@@ -1,9 +1,10 @@
 use persephone_contracts::{
     AccountChange, AccountSettings, AccountState, AccountStatus, AppStatus, CHAT_TEXT_PERCENT_MAX,
     ConversationStart, DeviceList, DisplayName, INTERFACE_TEXT_PERCENT_MAX, InviteList, JoinedRoom,
-    NotificationLevel, NotificationSettings, ProfileList, PublicRoomPage, RoomCreation, RoomInvite,
-    RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, Theme, ThreePidList, TimelineEvents,
-    UserSearch, generated_typescript, sample_room_summary, sample_timeline_page,
+    NotificationLevel, NotificationSettings, PresenceStatus, ProfileList, PublicRoomPage,
+    RoomCreation, RoomInvite, RoomList, SignInError, StoreState, TEXT_PERCENT_MIN, Theme,
+    ThreePidList, TimelineEvents, UserSearch, generated_typescript, sample_room_summary,
+    sample_timeline_page,
 };
 
 #[test]
@@ -546,7 +547,7 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
             ..defaults
         })
         .unwrap(),
-        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"captureProtection":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"verification":true,"calls":true,"callSignalling":true,"polls":true,"stickers":true,"locations":true,"spaces":true,"widgets":true,"otherEvents":true,"deletedMessages":true},"theme":"orange"}"#
+        r#"{"enterSends":false,"chatTextPercent":100,"interfaceTextPercent":100,"desktopNotifications":false,"sendTyping":false,"sendReadReceipts":false,"idleLockMinutes":0,"notificationNames":true,"loadRoomPictures":false,"captureProtection":true,"timelineEvents":{"joins":true,"leaves":true,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":true,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true,"verification":true,"calls":true,"callSignalling":true,"polls":true,"stickers":true,"locations":true,"spaces":true,"widgets":true,"otherEvents":true,"deletedMessages":true},"theme":"orange","sharePresence":true,"presence":"online"}"#
     );
     // Every kind of room change shows by default.
     assert_eq!(defaults.timeline_events, TimelineEvents::default());
@@ -583,6 +584,35 @@ fn room_account_and_profile_replies_keep_their_documented_shape() {
         );
     }
     assert!(serde_json::from_str::<AccountSettings>(&without_theme).is_err());
+    // GIVEN settings from the page WHEN presence is shared as online by
+    // default THEN a missing presence field, or a status that is not one
+    // of the three names, is refused (ADR-0057).
+    assert!(defaults.share_presence);
+    assert_eq!(defaults.presence, PresenceStatus::Online);
+    for (status, name) in [
+        (PresenceStatus::Online, r#""online""#),
+        (PresenceStatus::Unavailable, r#""unavailable""#),
+        (PresenceStatus::Offline, r#""offline""#),
+    ] {
+        assert_eq!(serde_json::to_string(&status).unwrap(), name);
+        assert_eq!(
+            serde_json::from_str::<PresenceStatus>(name).unwrap(),
+            status
+        );
+    }
+    for sent in [
+        complete.replace(r#","sharePresence":true"#, ""),
+        complete.replace(r#","presence":"online""#, ""),
+        complete.replace(r#""sharePresence":true"#, r#""sharePresence":"yes""#),
+        complete.replace(r#""presence":"online""#, r#""presence":"busy""#),
+        complete.replace(r#""presence":"online""#, r#""presence":{"online":null}"#),
+    ] {
+        assert_ne!(sent, complete);
+        assert!(
+            serde_json::from_str::<AccountSettings>(&sent).is_err(),
+            "{sent}"
+        );
+    }
     for invalid in [
         r#"{}"#,
         r#"{"enterSends":false}"#,
@@ -770,8 +800,14 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             name: "Headset".into(),
         }],
         playout: Vec::new(),
+        cameras: vec![persephone_contracts::CallDevice {
+            id: "usb#cam".into(),
+            name: "Camera".into(),
+        }],
         selected_recording: Some("{0.0.1}.{a}".into()),
         selected_playout: None,
+        selected_camera: Some("usb#cam".into()),
+        volume: 40,
         unreadable: false,
     };
     let json = serde_json::to_value(&devices).unwrap();
@@ -781,8 +817,11 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
             "supported": true,
             "recording": [{"id": "{0.0.1}.{a}", "name": "Headset"}],
             "playout": [],
+            "cameras": [{"id": "usb#cam", "name": "Camera"}],
             "selectedRecording": "{0.0.1}.{a}",
             "selectedPlayout": null,
+            "selectedCamera": "usb#cam",
+            "volume": 40,
             "unreadable": false
         })
     );
@@ -790,9 +829,62 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         serde_json::from_value::<persephone_contracts::CallDevices>(json.clone()).unwrap(),
         devices
     );
-    let mut extra = json;
+    let mut extra = json.clone();
     extra["path"] = "C:/x".into();
     assert!(serde_json::from_value::<persephone_contracts::CallDevices>(extra).is_err());
+    let mut without = json.clone();
+    without.as_object_mut().unwrap().remove("cameras");
+    assert!(serde_json::from_value::<persephone_contracts::CallDevices>(without).is_err());
+    let mut no_camera = json.clone();
+    no_camera.as_object_mut().unwrap().remove("selectedCamera");
+    assert!(
+        serde_json::from_value::<persephone_contracts::CallDevices>(no_camera).is_err(),
+        "a missing selectedCamera is rejected"
+    );
+    let mut null_camera = json.clone();
+    null_camera["selectedCamera"] = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_value::<persephone_contracts::CallDevices>(null_camera)
+            .unwrap()
+            .selected_camera,
+        None
+    );
+    let tile = serde_json::json!({"tile": 0, "participant": null, "own": true, "stream": 3});
+    assert_eq!(
+        serde_json::from_value::<persephone_contracts::CallVideoTile>(tile.clone())
+            .unwrap()
+            .participant,
+        None
+    );
+    let mut no_participant = tile.clone();
+    no_participant
+        .as_object_mut()
+        .unwrap()
+        .remove("participant");
+    assert!(
+        serde_json::from_value::<persephone_contracts::CallVideoTile>(no_participant).is_err(),
+        "a missing participant is rejected"
+    );
+    for (stream, valid) in [
+        (0_u64, true),
+        (9_007_199_254_740_991, true),
+        (9_007_199_254_740_992, false),
+        (u64::MAX, false),
+    ] {
+        let mut numbered = tile.clone();
+        numbered["stream"] = serde_json::json!(stream);
+        assert_eq!(
+            serde_json::from_value::<persephone_contracts::CallVideoTile>(numbered).is_ok(),
+            valid,
+            "stream {stream}"
+        );
+    }
+    let mut no_stream = tile.clone();
+    no_stream.as_object_mut().unwrap().remove("stream");
+    assert!(
+        serde_json::from_value::<persephone_contracts::CallVideoTile>(no_stream).is_err(),
+        "a missing stream number is rejected"
+    );
     assert_eq!(
         serde_json::to_value(persephone_contracts::CallEnd::DeviceNotFound).unwrap(),
         "device_not_found"
@@ -801,4 +893,35 @@ fn call_devices_use_camel_case_and_reject_unknown_fields() {
         serde_json::to_value(persephone_contracts::CallJoinError::DeviceSettingUnreadable).unwrap(),
         "device_setting_unreadable"
     );
+}
+
+/// GIVEN the profile passphrase setting WHEN a security status crosses the
+/// wire THEN it carries `profilePassphrase`, off by default, the new codes
+/// keep their snake_case names, and unknown fields stay refused.
+#[test]
+fn security_status_carries_the_profile_passphrase_setting() {
+    use persephone_contracts::{SecurityError, SecurityOperation, SecurityStatus};
+    let mut status = SecurityStatus::unknown();
+    assert!(!status.profile_passphrase, "off by default");
+    status.profile_passphrase = true;
+    status.operation = SecurityOperation::WaitingForPassphrase;
+    status.error = Some(SecurityError::PassphraseRejected);
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["profilePassphrase"], true);
+    assert_eq!(json["operation"], "waiting_for_passphrase");
+    assert_eq!(json["error"], "passphrase_rejected");
+    assert_eq!(
+        serde_json::to_value(SecurityError::ProfileUnavailable).unwrap(),
+        "profile_unavailable"
+    );
+    assert_eq!(
+        serde_json::from_value::<SecurityStatus>(json.clone()).unwrap(),
+        status
+    );
+    let mut missing = json.clone();
+    missing.as_object_mut().unwrap().remove("profilePassphrase");
+    assert!(serde_json::from_value::<SecurityStatus>(missing).is_err());
+    let mut extra = json;
+    extra["passphrase"] = "x".into();
+    assert!(serde_json::from_value::<SecurityStatus>(extra).is_err());
 }

@@ -49,6 +49,63 @@ export function mergeNewest(
   return [gap, ...kept];
 }
 
+/**
+ * Most events one `readEventsAgain` call reads again; the core and the host
+ * refuse more (`MAX_TIMELINE_EVENTS` in `crates/core-protocol`).
+ */
+export const MAX_REFETCHED_EVENTS = 20;
+
+/** Whether `item` is a notice that its event could not be decrypted. */
+function undecryptable(item: TimelineItem): boolean {
+  return item.kind === 'notice' && item.notice === 'undecryptable';
+}
+
+/**
+ * The event IDs of loaded items to read again after room keys arrive: the
+ * undecryptable notices that are not in `newest` (the newest page, which was
+ * just fetched again), the most recent first, each once, at most `max`.
+ */
+export function undecryptableToRefetch(
+  items: TimelineItem[],
+  newest: TimelineItem[],
+  max: number = MAX_REFETCHED_EVENTS
+): string[] {
+  const fetched = new Set<string>();
+  for (const item of newest) {
+    if (item.kind !== 'gap') fetched.add(item.event_id);
+  }
+  const wanted: string[] = [];
+  for (let index = items.length - 1; index >= 0 && wanted.length < max; index--) {
+    const item = items[index];
+    if (item.kind === 'gap' || !undecryptable(item)) continue;
+    if (fetched.has(item.event_id) || wanted.includes(item.event_id)) continue;
+    wanted.push(item.event_id);
+  }
+  return wanted;
+}
+
+/**
+ * Replaces each loaded undecryptable notice by the item of the same event in
+ * `fresh`, in place. Other loaded items, and fresh items for events that are
+ * not loaded or not undecryptable here, are left as they are: nothing is
+ * added, removed or moved. Returns `items` itself when nothing changed.
+ */
+export function replaceUndecryptable(items: TimelineItem[], fresh: TimelineItem[]): TimelineItem[] {
+  const byEvent = new Map<string, TimelineItem>();
+  for (const item of fresh) {
+    if (item.kind !== 'gap' && !byEvent.has(item.event_id)) byEvent.set(item.event_id, item);
+  }
+  let changed = false;
+  const replaced = items.map((item) => {
+    if (item.kind === 'gap' || !undecryptable(item)) return item;
+    const update = byEvent.get(item.event_id);
+    if (!update) return item;
+    changed = true;
+    return update;
+  });
+  return changed ? replaced : items;
+}
+
 /** Most characters of a quoted message shown above a reply. */
 export const MAX_QUOTE_CHARS = 140;
 

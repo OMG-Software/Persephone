@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at_utc": "2026-10-19T16:36:04+00:00",
+  "generated_at_utc": "2026-11-17T23:51:24+00:00",
   "source": {
     "service": "OSV",
     "endpoint": "https://api.osv.dev/v1/querybatch",
@@ -11,14 +11,14 @@
     "lockfiles": [
       "Cargo.lock"
     ],
-    "registry_package_versions": 418,
+    "registry_package_versions": 757,
     "batch_size": 100
   },
   "status": "complete",
-  "query_batches": 5,
-  "advisory_detail_queries": 2,
+  "query_batches": 8,
+  "advisory_detail_queries": 12,
   "query_failures": [],
-  "advisory_count": 2,
+  "advisory_count": 12,
   "packages": [
     {
       "name": "accessory",
@@ -63,6 +63,22 @@
     {
       "name": "android_system_properties",
       "version": "0.1.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "annotate-snippets",
+      "version": "0.11.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "anstyle",
+      "version": "1.0.14",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -125,10 +141,10 @@
                 "affected_functions": null
               },
               "database_specific": {
-                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0319.json",
                 "categories": [],
                 "cvss": null,
-                "informational": "unmaintained"
+                "informational": "unmaintained",
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0319.json"
               }
             }
           ]
@@ -138,6 +154,14 @@
     {
       "name": "archery",
       "version": "1.2.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "argon2",
+      "version": "0.6.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -176,8 +200,72 @@
       "advisories": []
     },
     {
+      "name": "async-broadcast",
+      "version": "0.7.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-channel",
+      "version": "2.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "async-compression",
       "version": "0.4.51",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-executor",
+      "version": "1.14.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-io",
+      "version": "2.6.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-lock",
+      "version": "3.4.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-process",
+      "version": "2.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-recursion",
+      "version": "1.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "async-signal",
+      "version": "0.2.14",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -200,8 +288,32 @@
       "advisories": []
     },
     {
+      "name": "async-task",
+      "version": "4.7.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "async-trait",
       "version": "0.1.92",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "atk",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "atk-sys",
+      "version": "0.18.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -257,6 +369,14 @@
     },
     {
       "name": "base64",
+      "version": "0.21.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "base64",
       "version": "0.22.1",
       "lockfiles": [
         "Cargo.lock"
@@ -280,8 +400,48 @@
       "advisories": []
     },
     {
+      "name": "bindgen",
+      "version": "0.72.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bit-set",
+      "version": "0.8.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bit-vec",
+      "version": "0.8.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bitflags",
+      "version": "1.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "bitflags",
       "version": "2.13.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "blake2",
+      "version": "0.11.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -314,6 +474,30 @@
     {
       "name": "block-padding",
       "version": "0.4.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "block2",
+      "version": "0.6.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "blocking",
+      "version": "1.7.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "bmrng",
+      "version": "0.5.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -368,6 +552,54 @@
       "advisories": []
     },
     {
+      "name": "cairo-rs",
+      "version": "0.18.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cairo-sys-rs",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "camino",
+      "version": "1.2.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cargo-platform",
+      "version": "0.1.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cargo_metadata",
+      "version": "0.19.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cargo_toml",
+      "version": "1.0.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "cbc",
       "version": "0.2.1",
       "lockfiles": [
@@ -378,6 +610,46 @@
     {
       "name": "cc",
       "version": "1.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cesu8",
+      "version": "1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cexpr",
+      "version": "0.6.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cfb",
+      "version": "0.14.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cfg-expr",
+      "version": "0.15.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cfg-expr",
+      "version": "0.20.11",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -421,11 +693,94 @@
       "lockfiles": [
         "Cargo.lock"
       ],
-      "advisories": []
+      "advisories": [
+        {
+          "id": "RUSTSEC-2026-0543",
+          "aliases": [],
+          "summary": "chrono is unmaintained",
+          "details": "The chrono crate is unmaintained; all versions are affected.\n\nRecommended alternatives:\n\n- [jiff](https://crates.io/crates/jiff)\n- [time](https://crates.io/crates/time)",
+          "published": "2026-09-14T12:00:00Z",
+          "modified": "2026-11-17T10:15:02.344223779Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/chrono",
+            "https://rustsec.org/advisories/RUSTSEC-2026-0543.html",
+            "https://github.com/chronotope/chrono/issues/1768"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "chrono",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/chrono"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.0.0-0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affects": {
+                  "os": [],
+                  "functions": [],
+                  "arch": []
+                },
+                "affected_functions": null
+              },
+              "database_specific": {
+                "informational": "unmaintained",
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0543.json",
+                "categories": [],
+                "cvss": null
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "name": "cipher",
       "version": "0.5.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "clang-sys",
+      "version": "1.9.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "clap",
+      "version": "4.6.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "clap_builder",
+      "version": "4.6.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "clap_lex",
+      "version": "1.1.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -442,6 +797,14 @@
     {
       "name": "cmov",
       "version": "0.5.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "codespan-reporting",
+      "version": "0.13.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -472,6 +835,14 @@
       "advisories": []
     },
     {
+      "name": "concurrent-queue",
+      "version": "2.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "const-oid",
       "version": "0.10.2",
       "lockfiles": [
@@ -496,6 +867,30 @@
       "advisories": []
     },
     {
+      "name": "constant_time_eq",
+      "version": "0.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cookie",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cookie-factory",
+      "version": "0.3.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "core-foundation",
       "version": "0.10.1",
       "lockfiles": [
@@ -506,6 +901,22 @@
     {
       "name": "core-foundation-sys",
       "version": "0.8.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "core-graphics",
+      "version": "0.25.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "core-graphics-types",
+      "version": "0.2.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -544,6 +955,22 @@
       "advisories": []
     },
     {
+      "name": "crossbeam-channel",
+      "version": "0.5.17",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "crossbeam-utils",
+      "version": "0.8.23",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "crypto-common",
       "version": "0.1.7",
       "lockfiles": [
@@ -560,6 +987,30 @@
       "advisories": []
     },
     {
+      "name": "cssparser",
+      "version": "0.37.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cssparser-macros",
+      "version": "0.7.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ctor",
+      "version": "1.0.13",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "ctr",
       "version": "0.10.1",
       "lockfiles": [
@@ -569,7 +1020,7 @@
     },
     {
       "name": "ctutils",
-      "version": "0.4.3",
+      "version": "0.4.4",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -586,6 +1037,102 @@
     {
       "name": "curve25519-dalek-derive",
       "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cxx",
+      "version": "1.0.205",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cxx-build",
+      "version": "1.0.205",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cxxbridge-cmd",
+      "version": "1.0.205",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cxxbridge-flags",
+      "version": "1.0.205",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "cxxbridge-macro",
+      "version": "1.0.205",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "darling",
+      "version": "0.14.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "darling",
+      "version": "0.24.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "darling_core",
+      "version": "0.14.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "darling_core",
+      "version": "0.24.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "darling_macro",
+      "version": "0.14.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "darling_macro",
+      "version": "0.24.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "data-encoding",
+      "version": "2.11.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -642,6 +1189,30 @@
     {
       "name": "decancer",
       "version": "3.3.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "defmt",
+      "version": "1.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "defmt-macros",
+      "version": "1.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "defmt-parser",
+      "version": "1.1.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -712,18 +1283,18 @@
                 }
               ],
               "ecosystem_specific": {
-                "affected_functions": null,
                 "affects": {
+                  "os": [],
                   "arch": [],
-                  "functions": [],
-                  "os": []
-                }
+                  "functions": []
+                },
+                "affected_functions": null
               },
               "database_specific": {
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2024-0388.json",
                 "categories": [],
                 "cvss": null,
-                "informational": "unmaintained",
-                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2024-0388.json"
+                "informational": "unmaintained"
               }
             }
           ]
@@ -763,6 +1334,14 @@
       "advisories": []
     },
     {
+      "name": "device-info",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "digest",
       "version": "0.10.7",
       "lockfiles": [
@@ -779,6 +1358,30 @@
       "advisories": []
     },
     {
+      "name": "dirs",
+      "version": "7.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dirs-sys",
+      "version": "0.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dispatch2",
+      "version": "0.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "displaydoc",
       "version": "0.2.7",
       "lockfiles": [
@@ -787,8 +1390,64 @@
       "advisories": []
     },
     {
+      "name": "dlopen2",
+      "version": "0.8.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dlopen2_derive",
+      "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dom_query",
+      "version": "0.28.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dpi",
+      "version": "0.1.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dtoa",
+      "version": "1.0.11",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dtoa-short",
+      "version": "0.3.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "dunce",
       "version": "1.0.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "dyn-clone",
+      "version": "1.0.20",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -819,8 +1478,56 @@
       "advisories": []
     },
     {
+      "name": "embed-resource",
+      "version": "3.0.12",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "embed_plist",
+      "version": "1.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "endi",
+      "version": "1.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "enumflags2",
+      "version": "0.7.12",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "enumflags2_derive",
+      "version": "0.7.12",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "equivalent",
       "version": "1.0.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "erased-serde",
+      "version": "0.4.10",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -837,6 +1544,14 @@
     {
       "name": "event-listener",
       "version": "5.4.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "event-listener-strategy",
+      "version": "0.5.4",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -891,6 +1606,14 @@
       "advisories": []
     },
     {
+      "name": "fdeflate",
+      "version": "0.3.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "fiat-crypto",
       "version": "0.3.0",
       "lockfiles": [
@@ -899,8 +1622,24 @@
       "advisories": []
     },
     {
+      "name": "field-offset",
+      "version": "0.3.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "find-msvc-tools",
       "version": "0.1.15",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fixedbitset",
+      "version": "0.5.9",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -924,7 +1663,39 @@
     },
     {
       "name": "foldhash",
+      "version": "0.1.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "foldhash",
       "version": "0.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "foreign-types",
+      "version": "0.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "foreign-types-macros",
+      "version": "0.2.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "foreign-types-shared",
+      "version": "0.3.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -933,6 +1704,30 @@
     {
       "name": "form_urlencoded",
       "version": "1.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "from_variants",
+      "version": "1.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "from_variants_impl",
+      "version": "1.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "fs2",
+      "version": "0.4.3",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -987,6 +1782,14 @@
       "advisories": []
     },
     {
+      "name": "futures-lite",
+      "version": "2.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "futures-macro",
       "version": "0.3.34",
       "lockfiles": [
@@ -1019,6 +1822,46 @@
       "advisories": []
     },
     {
+      "name": "gdk",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gdk-pixbuf",
+      "version": "0.18.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gdk-pixbuf-sys",
+      "version": "0.18.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gdk-sys",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gdkwayland-sys",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "generic-array",
       "version": "0.14.7",
       "lockfiles": [
@@ -1036,7 +1879,173 @@
     },
     {
       "name": "getrandom",
+      "version": "0.3.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "getrandom",
       "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gio",
+      "version": "0.18.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gio-sys",
+      "version": "0.18.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "glib",
+      "version": "0.18.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "GHSA-wrw7-89jp-8q8g",
+          "aliases": [
+            "RUSTSEC-2024-0429"
+          ],
+          "summary": "Unsoundness in `Iterator` and `DoubleEndedIterator` impls for `glib::VariantStrIter`",
+          "details": "The `VariantStrIter::impl_get` function (called internally by implementations of the `Iterator` and `DoubleEndedIterator` traits for this type) was unsound, resulting in undefined behaviour.\n\nAn immutable reference `&p` to a `*mut libc::c_char` pointer initialized to `NULL` was passed as an argument to a C function that that mutates the pointer behind `&p` in-place (i.e. as an out-argument), which was unsound. After changes in recent versions of the Rust compiler, these unsound writes through `&p` now seem to be completely disregarded when building the `glib` crate with optimizations.\n\nThis subsequently caused all calls of `VariantStrIter::impl_get` to violate the safety requirements of the `std::ffi::CStr::from_ptr` function - which requires its argument to be a valid pointer to a C-style string - resulting in crashes due to `NULL` pointer dereferences.\n\nThis was fixed by passing the out-argument pointer explitly as `&mut p` instead of `&p`.\n\nThis issue has been present since this code was initially added in `glib` v0.15.0. The mismatch in mutability was likely missed (and not raised as an error by the compiler) because the C function wrapped by `VariantStrIter::impl_get` is variadic (`glib_sys::g_variant_get_child`), and the pointer in question is one of the variadic arguments.\n\n",
+          "published": "2024-12-23T20:19:24Z",
+          "modified": "2025-10-28T06:29:26.473225Z",
+          "withdrawn": null,
+          "references": [
+            "https://github.com/gtk-rs/gtk-rs-core/pull/1343",
+            "https://github.com/gtk-rs/gtk-rs-core",
+            "https://rustsec.org/advisories/RUSTSEC-2024-0429.html"
+          ],
+          "database_specific": {
+            "github_reviewed": true,
+            "github_reviewed_at": "2024-12-23T20:19:24Z",
+            "nvd_published_at": null,
+            "cwe_ids": [],
+            "severity": "MODERATE"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "glib",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/glib"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.15.0"
+                    },
+                    {
+                      "fixed": "0.20.0"
+                    }
+                  ]
+                }
+              ],
+              "database_specific": {
+                "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2024/12/GHSA-wrw7-89jp-8q8g/GHSA-wrw7-89jp-8q8g.json"
+              }
+            }
+          ]
+        },
+        {
+          "id": "RUSTSEC-2024-0429",
+          "aliases": [
+            "GHSA-wrw7-89jp-8q8g"
+          ],
+          "summary": "Unsoundness in `Iterator` and `DoubleEndedIterator` impls for `glib::VariantStrIter`",
+          "details": "The `VariantStrIter::impl_get` function (called internally by implementations of the `Iterator` and `DoubleEndedIterator` traits for this type) was unsound, resulting in undefined behaviour.\n\nAn immutable reference `&p` to a `*mut libc::c_char` pointer initialized to `NULL` was passed as an argument to a C function that that mutates the pointer behind `&p` in-place (i.e. as an out-argument), which was unsound. After changes in recent versions of the Rust compiler, these unsound writes through `&p` now seem to be completely disregarded when building the `glib` crate with optimizations.\n\nThis subsequently caused all calls of `VariantStrIter::impl_get` to violate the safety requirements of the `std::ffi::CStr::from_ptr` function - which requires its argument to be a valid pointer to a C-style string - resulting in crashes due to `NULL` pointer dereferences.\n\nThis was fixed by passing the out-argument pointer explitly as `&mut p` instead of `&p`.\n\nThis issue has been present since this code was initially added in `glib` v0.15.0. The mismatch in mutability was likely missed (and not raised as an error by the compiler) because the C function wrapped by `VariantStrIter::impl_get` is variadic (`glib_sys::g_variant_get_child`), and the pointer in question is one of the variadic arguments.",
+          "published": "2024-03-30T12:00:00Z",
+          "modified": "2025-10-28T06:29:26.473225Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/glib",
+            "https://rustsec.org/advisories/RUSTSEC-2024-0429.html",
+            "https://github.com/gtk-rs/gtk-rs-core/pull/1343"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "glib",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/glib"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.15.0"
+                    },
+                    {
+                      "fixed": "0.20.0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affected_functions": null,
+                "affects": {
+                  "arch": [],
+                  "functions": [
+                    "glib::VariantStrIter::last",
+                    "glib::VariantStrIter::next",
+                    "glib::VariantStrIter::next_back",
+                    "glib::VariantStrIter::nth",
+                    "glib::VariantStrIter::nth_back"
+                  ],
+                  "os": []
+                }
+              },
+              "database_specific": {
+                "informational": "unsound",
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2024-0429.json",
+                "categories": [],
+                "cvss": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "glib-macros",
+      "version": "0.18.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "glib-sys",
+      "version": "0.18.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "glob",
+      "version": "0.3.4",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1067,6 +2076,14 @@
       "advisories": []
     },
     {
+      "name": "gobject-sys",
+      "version": "0.18.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "growable-bloom-filter",
       "version": "2.1.1",
       "lockfiles": [
@@ -1075,8 +2092,48 @@
       "advisories": []
     },
     {
+      "name": "gtk",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gtk-sys",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "gtk3-macros",
+      "version": "0.18.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "h2",
       "version": "0.4.20",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.12.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "hashbrown",
+      "version": "0.15.5",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1101,6 +2158,22 @@
     {
       "name": "hashlink",
       "version": "0.12.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "heck",
+      "version": "0.4.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "heck",
+      "version": "0.5.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1251,6 +2324,14 @@
       "advisories": []
     },
     {
+      "name": "ico",
+      "version": "0.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "icu_collections",
       "version": "2.3.0",
       "lockfiles": [
@@ -1307,6 +2388,14 @@
       "advisories": []
     },
     {
+      "name": "ident_case",
+      "version": "1.0.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "idna",
       "version": "1.1.0",
       "lockfiles": [
@@ -1348,7 +2437,23 @@
     },
     {
       "name": "indexmap",
+      "version": "1.9.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "indexmap",
       "version": "2.14.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "infer",
+      "version": "0.22.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1365,6 +2470,14 @@
     {
       "name": "ipnet",
       "version": "2.12.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "itertools",
+      "version": "0.13.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1395,6 +2508,70 @@
       "advisories": []
     },
     {
+      "name": "javascriptcore-rs",
+      "version": "1.1.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "javascriptcore-rs-sys",
+      "version": "1.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jiff",
+      "version": "0.2.38",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jiff-core",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jiff-static",
+      "version": "0.2.38",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jiff-tzdb",
+      "version": "0.1.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jiff-tzdb-platform",
+      "version": "0.1.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jni",
+      "version": "0.21.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "jni",
       "version": "0.22.4",
       "lockfiles": [
@@ -1405,6 +2582,14 @@
     {
       "name": "jni-macros",
       "version": "0.22.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jni-sys",
+      "version": "0.3.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1459,6 +2644,30 @@
       "advisories": []
     },
     {
+      "name": "json-patch",
+      "version": "4.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "jsonptr",
+      "version": "0.7.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "keyboard-types",
+      "version": "0.8.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "konst",
       "version": "0.4.3",
       "lockfiles": [
@@ -1483,6 +2692,30 @@
       "advisories": []
     },
     {
+      "name": "leb128fmt",
+      "version": "0.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libappindicator",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libappindicator-sys",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "libc",
       "version": "0.2.191",
       "lockfiles": [
@@ -1491,8 +2724,129 @@
       "advisories": []
     },
     {
+      "name": "libloading",
+      "version": "0.7.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libloading",
+      "version": "0.8.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libm",
+      "version": "0.2.16",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libredox",
+      "version": "0.1.25",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libspa",
+      "version": "0.10.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "libspa-sys",
+      "version": "0.10.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "libsqlite3-sys",
       "version": "0.38.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "RUSTSEC-2026-0459",
+          "aliases": [
+            "BIT-sqlite-2026-119375",
+            "CVE-2026-119375",
+            "GHSA-72w2-rjgg-q729",
+            "RUSTSEC-2026-0502"
+          ],
+          "summary": "`libsqlite3-sys` via C SQLite CVE-2026-119375",
+          "details": "SQLite versions before 3.54.0 can return uninitialized page-cache memory when a process opens a database file together with a sibling write-ahead-log (`-wal`) file whose page size differs from the database's. A crafted pair of files can make ordinary queries return stale bytes from the process's memory. The attack vector is local and needs the victim to open the files.\n\nAs `libsqlite3-sys` bundles SQLite when it is built from its bundled source (the `bundled` feature, which `rusqlite`'s `bundled` feature enables), it is susceptible to the vulnerability. The releases `0.6.0` to `0.38.2` bundle SQLite `3.13.0` to `3.53.2` and are affected; the earlier releases contain no SQLite source. `libsqlite3-sys` was updated to bundle the patched version of SQLite in `0.39.0` (SQLite `3.54.0`) and `0.39.1` (SQLite `3.54.1`), released with [`rusqlite` 0.41](https://github.com/rusqlite/rusqlite/releases/tag/v0.41.0). `libsqlite3-sys` `0.39` declares Rust 1.88 and `rusqlite` `0.41` declares Rust 1.89.\n\nOnly a process that opens a database file, with its `-wal`, that a less trusted party could have written is exposed. A build that links a system SQLite instead of the bundled source is not affected by the copy in this crate; its exposure is that of the system library's version. The `bundled-sqlcipher` feature builds SQLCipher instead of SQLite; in `0.39.0` and `0.39.1` it depends on `sqlcipher-src =419.0.6`, which bundles SQLite `3.53.4` and is affected.",
+          "published": "2026-10-30T12:00:00Z",
+          "modified": "2026-11-17T13:41:05.770775012Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/libsqlite3-sys",
+            "https://rustsec.org/advisories/RUSTSEC-2026-0459.html",
+            "https://nvd.nist.gov/vuln/detail/CVE-2026-119375",
+            "https://sqlite.org/bugs/info/2026-08-17T15:54:41Z",
+            "https://github.com/sqlite/sqlite/commit/e5bf119821f25be1d7f10ef0a2edbe175289166e",
+            "https://sqlite.org/releaselog/3_54_0.html",
+            "https://github.com/rusqlite/rusqlite/releases/tag/v0.41.0"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "libsqlite3-sys",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/libsqlite3-sys"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.6.0"
+                    },
+                    {
+                      "fixed": "0.39.0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affects": {
+                  "arch": [],
+                  "os": [],
+                  "functions": []
+                },
+                "affected_functions": null
+              },
+              "database_specific": {
+                "categories": [
+                  "memory-exposure"
+                ],
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0459.json",
+                "cvss": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+                "informational": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "link-cplusplus",
+      "version": "1.0.12",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1509,6 +2863,70 @@
     {
       "name": "litemap",
       "version": "0.8.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "livekit",
+      "version": "0.11.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "livekit-common",
+      "version": "0.1.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "livekit-data-stream",
+      "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "livekit-datatrack",
+      "version": "0.2.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "livekit-protocol",
+      "version": "0.8.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "livekit-region",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "livekit-rpc",
+      "version": "0.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "livekit-signaling",
+      "version": "0.2.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1533,6 +2951,14 @@
     {
       "name": "lru-slab",
       "version": "0.1.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "mac-notification-sys",
+      "version": "0.6.15",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1715,6 +3141,14 @@
       "advisories": []
     },
     {
+      "name": "memoffset",
+      "version": "0.9.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "mime",
       "version": "0.3.17",
       "lockfiles": [
@@ -1725,6 +3159,22 @@
     {
       "name": "mime2ext",
       "version": "0.1.54",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "minimal-lexical",
+      "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "miniz_oxide",
+      "version": "0.8.9",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1747,8 +3197,88 @@
       "advisories": []
     },
     {
+      "name": "muda",
+      "version": "0.20.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "multimap",
+      "version": "0.10.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ndk",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ndk-context",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ndk-sys",
+      "version": "0.6.0+11769913",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "new_debug_unreachable",
       "version": "1.0.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "nix",
+      "version": "0.31.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "nix",
+      "version": "0.32.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "nom",
+      "version": "7.1.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "nom",
+      "version": "8.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "notify-rust",
+      "version": "4.18.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1787,6 +3317,22 @@
       "advisories": []
     },
     {
+      "name": "num_enum",
+      "version": "0.7.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "num_enum_derive",
+      "version": "0.7.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "oauth2",
       "version": "5.0.0",
       "lockfiles": [
@@ -1803,6 +3349,182 @@
       "advisories": []
     },
     {
+      "name": "objc2",
+      "version": "0.6.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-app-kit",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-av-foundation",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-cloud-kit",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-audio",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-audio-types",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-data",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-foundation",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-graphics",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-image",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-location",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-media",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-text",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-core-video",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-encode",
+      "version": "4.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-exception-helper",
+      "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-foundation",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-io-surface",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-quartz-core",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-ui-kit",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-user-notifications",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "objc2-web-kit",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "once_cell",
       "version": "1.21.4",
       "lockfiles": [
@@ -1813,6 +3535,46 @@
     {
       "name": "openssl-probe",
       "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "option-ext",
+      "version": "0.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ordered-stream",
+      "version": "0.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "os_info",
+      "version": "3.15.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pango",
+      "version": "0.18.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pango-sys",
+      "version": "0.18.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1843,6 +3605,38 @@
       "advisories": []
     },
     {
+      "name": "password-hash",
+      "version": "0.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pbjson",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pbjson-build",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pbjson-types",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "pbkdf2",
       "version": "0.13.0",
       "lockfiles": [
@@ -1853,6 +3647,22 @@
     {
       "name": "percent-encoding",
       "version": "2.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "petgraph",
+      "version": "0.8.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "phc",
+      "version": "0.6.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1883,6 +3693,14 @@
       "advisories": []
     },
     {
+      "name": "phf_macros",
+      "version": "0.13.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "phf_shared",
       "version": "0.13.1",
       "lockfiles": [
@@ -1893,6 +3711,30 @@
     {
       "name": "pin-project-lite",
       "version": "0.2.17",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "piper",
+      "version": "0.2.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pipewire",
+      "version": "0.10.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "pipewire-sys",
+      "version": "0.10.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1915,8 +3757,56 @@
       "advisories": []
     },
     {
+      "name": "plist",
+      "version": "1.10.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "png",
+      "version": "0.17.16",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "png",
+      "version": "0.18.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "polling",
+      "version": "3.11.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "poly1305",
       "version": "0.9.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "portable-atomic",
+      "version": "1.15.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "portable-atomic-util",
+      "version": "0.2.8",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1955,8 +3845,99 @@
       "advisories": []
     },
     {
+      "name": "prettyplease",
+      "version": "0.2.37",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "proc-macro-crate",
+      "version": "1.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "proc-macro-crate",
+      "version": "2.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "proc-macro-crate",
       "version": "3.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "proc-macro-error",
+      "version": "1.0.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "RUSTSEC-2024-0370",
+          "aliases": [],
+          "summary": "proc-macro-error is unmaintained",
+          "details": "proc-macro-error's maintainer seems to be unreachable, with no commits for 2 years, no releases pushed for 4 years, and no activity on the GitLab repo or response to email.\n\nproc-macro-error also depends on `syn 1.x`, which may be bringing duplicate dependencies into dependant build trees.\n\n## Possible Alternative(s)\n\n- [manyhow](https://crates.io/crates/manyhow)\n- [proc-macro2-diagnostics](https://github.com/SergioBenitez/proc-macro2-diagnostics)",
+          "published": "2024-09-01T12:00:00Z",
+          "modified": "2026-06-07T20:00:03.923932350Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/proc-macro-error",
+            "https://rustsec.org/advisories/RUSTSEC-2024-0370.html",
+            "https://gitlab.com/CreepySkeleton/proc-macro-error/-/issues/20"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "proc-macro-error",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/proc-macro-error"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.0.0-0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affects": {
+                  "os": [],
+                  "functions": [],
+                  "arch": []
+                },
+                "affected_functions": null
+              },
+              "database_specific": {
+                "cvss": null,
+                "informational": "unmaintained",
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2024-0370.json",
+                "categories": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "proc-macro-error-attr",
+      "version": "1.0.4",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -1979,8 +3960,32 @@
       "advisories": []
     },
     {
+      "name": "prost-build",
+      "version": "0.14.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "prost-derive",
       "version": "0.14.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "prost-types",
+      "version": "0.14.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "quick-xml",
+      "version": "0.42.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2020,6 +4025,14 @@
     },
     {
       "name": "r-efi",
+      "version": "5.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "r-efi",
       "version": "6.0.0",
       "lockfiles": [
         "Cargo.lock"
@@ -2043,8 +4056,24 @@
       "advisories": []
     },
     {
+      "name": "rand",
+      "version": "0.9.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "rand_chacha",
       "version": "0.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rand_chacha",
+      "version": "0.9.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2091,6 +4120,14 @@
       "advisories": []
     },
     {
+      "name": "raw-window-handle",
+      "version": "0.6.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "readlock",
       "version": "0.1.11",
       "lockfiles": [
@@ -2115,6 +4152,30 @@
       "advisories": []
     },
     {
+      "name": "redox_users",
+      "version": "0.5.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ref-cast",
+      "version": "1.0.27",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ref-cast-impl",
+      "version": "1.0.27",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "regex",
       "version": "1.13.1",
       "lockfiles": [
@@ -2133,6 +4194,14 @@
     {
       "name": "regex-syntax",
       "version": "0.8.11",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "reqwest",
+      "version": "0.12.28",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2173,6 +4242,14 @@
     {
       "name": "rsqlite-vfs",
       "version": "0.1.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "rtrb",
+      "version": "0.3.6",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2280,7 +4357,70 @@
       "lockfiles": [
         "Cargo.lock"
       ],
-      "advisories": []
+      "advisories": [
+        {
+          "id": "RUSTSEC-2026-0486",
+          "aliases": [
+            "GHSA-jh2m-fhpj-3vr7"
+          ],
+          "summary": "xattr functions mark unwritten bytes as initialized when given a zero-length buffer",
+          "details": "The extended-attribute functions in `rustix::fs` (`getxattr`, `lgetxattr`, `fgetxattr`, `listxattr`, `llistxattr` and `flistxattr`) write into a `Buffer` and then mark as many bytes initialized as the system call reported. When the buffer has zero length, the operating system treats the call as a size query: it writes nothing and returns the size of the attribute value or of the name list. rustix still marked that many bytes as initialized.\n\nPassing a `Vec` whose length equals its capacity through `spare_capacity` gives such a zero-length buffer, and rustix then set the vector's length past its capacity over memory that was never written. This is undefined behavior reachable from safe code. With an empty `&mut [MaybeUninit<u8>]` the call panics instead.\n\nFrom 1.1.6 these functions return an empty result for a zero-length buffer, and new `getxattr_query`, `lgetxattr_query`, `fgetxattr_query`, `listxattr_query`, `llistxattr_query` and `flistxattr_query` functions return the size. The 0.38 series did not have the `Buffer` API and is not affected.",
+          "published": "2026-10-27T12:00:00Z",
+          "modified": "2026-11-11T08:45:02.466292839Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/rustix",
+            "https://rustsec.org/advisories/RUSTSEC-2026-0486.html",
+            "https://github.com/bytecodealliance/rustix/commit/8e6aaa6713d2bb64b1fdd8c472e3a32a10a76d70"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "rustix",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/rustix"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "1.0.0"
+                    },
+                    {
+                      "fixed": "1.1.6"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affected_functions": null,
+                "affects": {
+                  "arch": [],
+                  "os": [],
+                  "functions": [
+                    "rustix::fs::fgetxattr",
+                    "rustix::fs::flistxattr",
+                    "rustix::fs::getxattr",
+                    "rustix::fs::lgetxattr",
+                    "rustix::fs::listxattr",
+                    "rustix::fs::llistxattr"
+                  ]
+                }
+              },
+              "database_specific": {
+                "cvss": null,
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0486.json",
+                "informational": "unsound",
+                "categories": []
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "name": "rustls",
@@ -2324,7 +4464,7 @@
     },
     {
       "name": "rustls-webpki",
-      "version": "0.103.15",
+      "version": "0.103.16",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2332,6 +4472,14 @@
     },
     {
       "name": "rustversion",
+      "version": "1.0.23",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "ryu",
       "version": "1.0.23",
       "lockfiles": [
         "Cargo.lock"
@@ -2363,8 +4511,48 @@
       "advisories": []
     },
     {
+      "name": "schemars",
+      "version": "0.8.22",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "schemars",
+      "version": "0.9.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "schemars",
+      "version": "1.2.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "schemars_derive",
+      "version": "0.8.22",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "scopeguard",
       "version": "1.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "scratch",
+      "version": "1.0.9",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2387,6 +4575,14 @@
       "advisories": []
     },
     {
+      "name": "seccompiler",
+      "version": "0.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "security-framework",
       "version": "3.7.0",
       "lockfiles": [
@@ -2403,6 +4599,14 @@
       "advisories": []
     },
     {
+      "name": "selectors",
+      "version": "0.38.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "semver",
       "version": "1.0.28",
       "lockfiles": [
@@ -2413,6 +4617,14 @@
     {
       "name": "serde",
       "version": "1.0.229",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde-untagged",
+      "version": "0.1.9",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2451,6 +4663,14 @@
       "advisories": []
     },
     {
+      "name": "serde_derive_internals",
+      "version": "0.29.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "serde_html_form",
       "version": "0.4.1",
       "lockfiles": [
@@ -2475,6 +4695,22 @@
       "advisories": []
     },
     {
+      "name": "serde_repr",
+      "version": "0.1.21",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_spanned",
+      "version": "0.6.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "serde_spanned",
       "version": "1.1.2",
       "lockfiles": [
@@ -2483,8 +4719,64 @@
       "advisories": []
     },
     {
+      "name": "serde_urlencoded",
+      "version": "0.7.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_with",
+      "version": "3.24.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serde_with_macros",
+      "version": "3.24.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "serdect",
       "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serialize-to-javascript",
+      "version": "0.1.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "serialize-to-javascript-impl",
+      "version": "0.1.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "servo_arc",
+      "version": "0.4.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "sha1",
+      "version": "0.10.7",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2516,7 +4808,23 @@
     },
     {
       "name": "shlex",
+      "version": "1.3.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "shlex",
       "version": "2.0.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "signal-hook-registry",
+      "version": "1.4.8",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2587,6 +4895,38 @@
       "advisories": []
     },
     {
+      "name": "softbuffer",
+      "version": "0.4.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "soup3",
+      "version": "0.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "soup3-sys",
+      "version": "0.5.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "spin",
+      "version": "0.9.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "spki",
       "version": "0.8.1",
       "lockfiles": [
@@ -2611,6 +4951,22 @@
       "advisories": []
     },
     {
+      "name": "static_vcruntime",
+      "version": "3.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "string-interner",
+      "version": "0.19.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "string_cache",
       "version": "0.9.0",
       "lockfiles": [
@@ -2627,8 +4983,32 @@
       "advisories": []
     },
     {
+      "name": "strsim",
+      "version": "0.10.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "strsim",
+      "version": "0.11.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "subtle",
       "version": "2.6.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "swift-rs",
+      "version": "1.0.9",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2669,6 +5049,142 @@
     {
       "name": "synstructure",
       "version": "0.14.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "system-deps",
+      "version": "6.2.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "system-deps",
+      "version": "7.0.8",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tao",
+      "version": "0.37.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tao-macros",
+      "version": "0.1.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "target-lexicon",
+      "version": "0.12.16",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "target-lexicon",
+      "version": "0.13.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri",
+      "version": "2.12.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-build",
+      "version": "2.7.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-codegen",
+      "version": "2.7.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-macros",
+      "version": "2.7.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-plugin",
+      "version": "2.7.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-plugin-notification",
+      "version": "2.7.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-runtime",
+      "version": "2.12.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-runtime-wry",
+      "version": "2.12.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-utils",
+      "version": "2.10.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-winres",
+      "version": "0.3.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "tauri-winrt-notification",
+      "version": "0.8.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2811,8 +5327,24 @@
       "advisories": []
     },
     {
+      "name": "tokio-tungstenite",
+      "version": "0.29.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "tokio-util",
       "version": "0.7.20",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml",
+      "version": "0.8.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2828,7 +5360,31 @@
     },
     {
       "name": "toml_datetime",
+      "version": "0.6.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml_datetime",
       "version": "1.1.2+spec-1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml_edit",
+      "version": "0.19.15",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml_edit",
+      "version": "0.20.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2845,6 +5401,14 @@
     {
       "name": "toml_parser",
       "version": "1.1.5+spec-1.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "toml_writer",
+      "version": "1.1.3+spec-1.1.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2915,6 +5479,14 @@
       "advisories": []
     },
     {
+      "name": "tray-icon",
+      "version": "0.25.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "try-lock",
       "version": "0.2.5",
       "lockfiles": [
@@ -2939,6 +5511,30 @@
       "advisories": []
     },
     {
+      "name": "tungstenite",
+      "version": "0.29.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "typed-path",
+      "version": "0.13.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "typeid",
+      "version": "1.0.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "typenum",
       "version": "1.20.1",
       "lockfiles": [
@@ -2949,6 +5545,14 @@
     {
       "name": "typewit",
       "version": "1.15.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "uds_windows",
+      "version": "1.2.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -2973,6 +5577,22 @@
     {
       "name": "unicode-normalization",
       "version": "0.1.26",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "unicode-segmentation",
+      "version": "1.13.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "unicode-width",
+      "version": "0.2.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3011,6 +5631,14 @@
       "advisories": []
     },
     {
+      "name": "urlpattern",
+      "version": "0.6.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "utf8_iter",
       "version": "1.0.4",
       "lockfiles": [
@@ -3035,6 +5663,14 @@
       "advisories": []
     },
     {
+      "name": "version-compare",
+      "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "version_check",
       "version": "0.9.5",
       "lockfiles": [
@@ -3044,7 +5680,23 @@
     },
     {
       "name": "vodozemac",
-      "version": "0.11.1",
+      "version": "0.11.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "vswhom",
+      "version": "0.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "vswhom-sys",
+      "version": "0.1.3",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3069,6 +5721,14 @@
     {
       "name": "wasi",
       "version": "0.11.1+wasi-snapshot-preview1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasip2",
+      "version": "1.0.4+wasi-0.2.12",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3115,6 +5775,14 @@
       "advisories": []
     },
     {
+      "name": "wasm-encoder",
+      "version": "0.261.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "wasm-streams",
       "version": "0.5.0",
       "lockfiles": [
@@ -3125,6 +5793,70 @@
     {
       "name": "wasm_evt_listener",
       "version": "0.1.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasmi",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasmi_collections",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasmi_core",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasmi_ir",
+      "version": "2.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasmparser",
+      "version": "0.228.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wasmparser",
+      "version": "0.261.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wast",
+      "version": "261.0.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wat",
+      "version": "1.261.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3155,8 +5887,126 @@
       "advisories": []
     },
     {
+      "name": "webkit2gtk",
+      "version": "2.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "webkit2gtk-sys",
+      "version": "2.0.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "webpki-root-certs",
       "version": "1.0.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "RUSTSEC-2026-0383",
+          "aliases": [
+            "BIT-golang-2026-111943",
+            "CVE-2026-111943",
+            "GO-2026-6809",
+            "RUSTSEC-2026-0381",
+            "RUSTSEC-2026-0382"
+          ],
+          "summary": "Bundled root certificates allow trust in distrusted emSign intermediates",
+          "details": "Affected versions include `emSign ECC Root CA - G3`, which can allow certificate\npaths through distrusted emSign intermediates.\n\nAffected versions may accept certificate paths containing distrusted emSign\nintermediate public keys. The private keys corresponding to these intermediates\nare now well known.\n\nVersion 1.0.10+ removes this root.\n\nVersion 0.26.11 is a compatibility wrapper that re-exports\n`parent::TLS_SERVER_ROOT_CERTS` from its `webpki-root-certs` 1.x dependency; it\ncontains no separate root certificate list. Its resolved 1.x dependency must be\nupdated to 1.0.10 or later.",
+          "published": "2026-10-19T12:00:00Z",
+          "modified": "2026-10-29T10:55:54.096394276Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/webpki-root-certs",
+            "https://rustsec.org/advisories/RUSTSEC-2026-0383.html",
+            "https://github.com/rustls/webpki-roots/pull/133",
+            "https://emudhra.we-have-a-problem.com/",
+            "https://bugzilla.mozilla.org/show_bug.cgi?id=2083449"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "webpki-root-certs",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/webpki-root-certs"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.0.0-0"
+                    },
+                    {
+                      "fixed": "0.26.11"
+                    },
+                    {
+                      "introduced": "0.26.12-0"
+                    },
+                    {
+                      "fixed": "1.0.10"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affects": {
+                  "arch": [],
+                  "os": [],
+                  "functions": []
+                },
+                "affected_functions": null
+              },
+              "database_specific": {
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0383.json",
+                "informational": null,
+                "categories": [
+                  "crypto-failure"
+                ],
+                "cvss": null
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "webrtc-sys-build",
+      "version": "0.3.21",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "webview2-com",
+      "version": "0.39.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "webview2-com-macros",
+      "version": "0.8.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "webview2-com-sys",
+      "version": "0.39.1",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3179,6 +6029,22 @@
       "advisories": []
     },
     {
+      "name": "winapi",
+      "version": "0.3.9",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "winapi-i686-pc-windows-gnu",
+      "version": "0.4.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "winapi-util",
       "version": "0.1.11",
       "lockfiles": [
@@ -3187,8 +6053,48 @@
       "advisories": []
     },
     {
+      "name": "winapi-x86_64-pc-windows-gnu",
+      "version": "0.4.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "window-vibrancy",
+      "version": "0.8.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows",
+      "version": "0.62.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-collections",
+      "version": "0.3.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "windows-core",
       "version": "0.62.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-future",
+      "version": "0.3.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3219,6 +6125,14 @@
       "advisories": []
     },
     {
+      "name": "windows-numerics",
+      "version": "0.3.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "windows-result",
       "version": "0.4.1",
       "lockfiles": [
@@ -3236,7 +6150,23 @@
     },
     {
       "name": "windows-sys",
+      "version": "0.45.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-sys",
       "version": "0.52.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-sys",
+      "version": "0.59.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3252,7 +6182,39 @@
     },
     {
       "name": "windows-targets",
+      "version": "0.42.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-targets",
       "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-threading",
+      "version": "0.2.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows-version",
+      "version": "0.1.7",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_aarch64_gnullvm",
+      "version": "0.42.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3268,7 +6230,23 @@
     },
     {
       "name": "windows_aarch64_msvc",
+      "version": "0.42.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_aarch64_msvc",
       "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_i686_gnu",
+      "version": "0.42.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3292,7 +6270,23 @@
     },
     {
       "name": "windows_i686_msvc",
+      "version": "0.42.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_i686_msvc",
       "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_x86_64_gnu",
+      "version": "0.42.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3308,7 +6302,23 @@
     },
     {
       "name": "windows_x86_64_gnullvm",
+      "version": "0.42.2",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_x86_64_gnullvm",
       "version": "0.52.6",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "windows_x86_64_msvc",
+      "version": "0.42.2",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3324,7 +6334,23 @@
     },
     {
       "name": "winnow",
+      "version": "0.5.40",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "winnow",
       "version": "1.0.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "winreg",
+      "version": "0.56.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3339,8 +6365,24 @@
       "advisories": []
     },
     {
+      "name": "wit-bindgen",
+      "version": "0.57.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "writeable",
       "version": "0.6.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "wry",
+      "version": "0.57.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3373,6 +6415,89 @@
     {
       "name": "yoke-derive",
       "version": "0.8.4",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zbus",
+      "version": "5.19.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zbus_macros",
+      "version": "5.19.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zbus_names",
+      "version": "4.3.5",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "RUSTSEC-2026-0371",
+          "aliases": [],
+          "summary": "`zbus_names` is unmaintained",
+          "details": "The `zbus_names` crate is no longer maintained as a standalone crate.\n\nIt has been merged into [`zbus`](https://crates.io/crates/zbus) starting with version `6.0.0`, as its `names` module.\n\nUsers should migrate to [`zbus`](https://crates.io/crates/zbus), with its default features disabled if they only need the D-Bus name types.",
+          "published": "2026-10-16T12:00:00Z",
+          "modified": "2026-10-17T15:30:02.407875527Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/zbus_names",
+            "https://rustsec.org/advisories/RUSTSEC-2026-0371.html",
+            "https://github.com/z-galaxy/zbus/issues/2043"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "zbus_names",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/zbus_names"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.0.0-0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affected_functions": null,
+                "affects": {
+                  "functions": [],
+                  "arch": [],
+                  "os": []
+                }
+              },
+              "database_specific": {
+                "cvss": null,
+                "informational": "unmaintained",
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0371.json",
+                "categories": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "zcheapstr",
+      "version": "1.1.0",
       "lockfiles": [
         "Cargo.lock"
       ],
@@ -3451,6 +6576,14 @@
       "advisories": []
     },
     {
+      "name": "zip",
+      "version": "9.6.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
       "name": "zlib-rs",
       "version": "0.6.8",
       "lockfiles": [
@@ -3465,13 +6598,155 @@
         "Cargo.lock"
       ],
       "advisories": []
+    },
+    {
+      "name": "zune-core",
+      "version": "0.5.3",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zune-jpeg",
+      "version": "0.5.15",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
+    },
+    {
+      "name": "zvariant",
+      "version": "5.15.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "RUSTSEC-2026-0370",
+          "aliases": [],
+          "summary": "`zvariant` is unmaintained",
+          "details": "The `zvariant` crate is no longer maintained as a standalone crate.\n\nIt has been merged into [`zbus`](https://crates.io/crates/zbus) starting with version `6.0.0`, as its `wire` module.\n\nUsers should migrate to [`zbus`](https://crates.io/crates/zbus), with its default features disabled if they only need the D-Bus wire format. Users of the GVariant format should migrate to [`zgvariant`](https://crates.io/crates/zgvariant).",
+          "published": "2026-10-16T12:00:00Z",
+          "modified": "2026-10-17T15:30:02.390032532Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/zvariant",
+            "https://rustsec.org/advisories/RUSTSEC-2026-0370.html",
+            "https://github.com/z-galaxy/zbus/issues/2043"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "zvariant",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/zvariant"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.0.0-0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affects": {
+                  "arch": [],
+                  "os": [],
+                  "functions": []
+                },
+                "affected_functions": null
+              },
+              "database_specific": {
+                "categories": [],
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0370.json",
+                "cvss": null,
+                "informational": "unmaintained"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "zvariant_derive",
+      "version": "5.15.1",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": [
+        {
+          "id": "RUSTSEC-2026-0372",
+          "aliases": [],
+          "summary": "`zvariant_derive` is unmaintained",
+          "details": "The `zvariant_derive` crate is no longer maintained as a standalone crate.\n\nIts derive macros are provided by [`zbus`](https://crates.io/crates/zbus) starting with version `6.0.0`.\n\nUsers should migrate to [`zbus`](https://crates.io/crates/zbus), with its default features disabled if they only need the D-Bus wire format.",
+          "published": "2026-10-16T12:00:00Z",
+          "modified": "2026-10-17T15:30:02.394812511Z",
+          "withdrawn": null,
+          "references": [
+            "https://crates.io/crates/zvariant_derive",
+            "https://rustsec.org/advisories/RUSTSEC-2026-0372.html",
+            "https://github.com/z-galaxy/zbus/issues/2043"
+          ],
+          "database_specific": {
+            "license": "CC0-1.0"
+          },
+          "affected": [
+            {
+              "package": {
+                "name": "zvariant_derive",
+                "ecosystem": "crates.io",
+                "purl": "pkg:cargo/zvariant_derive"
+              },
+              "ranges": [
+                {
+                  "type": "SEMVER",
+                  "events": [
+                    {
+                      "introduced": "0.0.0-0"
+                    }
+                  ]
+                }
+              ],
+              "ecosystem_specific": {
+                "affects": {
+                  "functions": [],
+                  "arch": [],
+                  "os": []
+                },
+                "affected_functions": null
+              },
+              "database_specific": {
+                "informational": "unmaintained",
+                "categories": [],
+                "cvss": null,
+                "source": "https://github.com/rustsec/advisory-db/blob/osv/crates/RUSTSEC-2026-0372.json"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "zvariant_utils",
+      "version": "4.2.0",
+      "lockfiles": [
+        "Cargo.lock"
+      ],
+      "advisories": []
     }
   ],
   "cargo_audit": {
     "executed": false,
     "availability_checked": true,
-    "installed": false
+    "installed": true
   },
-  "queried_package_versions": 418,
+  "queried_package_versions": 757,
   "advisories_found": true
 }

@@ -1,13 +1,21 @@
-//! The LiveKit JWT service request (ADR-0043).
+//! The LiveKit token requests (ADR-0043, ADR-0056).
 //!
-//! A call needs a short-lived LiveKit access token for one SFU room. The
-//! service at the transport's URL gives one in exchange for an OpenID token
-//! from this account's homeserver (`POST {service}/sfu/get`). The answer is
-//! untrusted: it is size-capped while read, and its URL and token are checked
-//! before the call worker sees them.
+//! A call needs a short-lived LiveKit access token for one SFU room. There
+//! are two ways to get one:
+//!
+//! * The OpenID flow: the JWT service at the transport's URL gives one in
+//!   exchange for an OpenID token from this account's homeserver
+//!   (`POST {service}/sfu/get`).
+//! * The homeserver flow (MSC4195): the homeserver itself gives one for the
+//!   SFU it advertised (`POST /_matrix/client/v1/rtc/livekit/get_token`).
+//!
+//! Every answer is untrusted: it is size-capped, and its token (and for
+//! `/sfu/get` its URL) is checked before the call worker sees it.
 
 use super::{MAX_URL_BYTES, is_service_url};
+use crate::bounded::{self, RequestError};
 use matrix_sdk::ruma::{DeviceId, RoomId, api::client::account::request_openid_token};
+use serde_json::Map;
 use serde_json::{Value, json};
 use std::time::Duration;
 use url::Url;
@@ -92,8 +100,11 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
     if body.len() > MAX_RESPONSE_BYTES {
         return Err(Refusal::TooLarge);
     }
-    let value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
-    let object = value.as_object().ok_or(Refusal::NotJson)?;
+    let mut value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
+    let object = value.as_object_mut().ok_or(Refusal::NotJson)?;
+    // The JWT leaves the parsed answer first, so a refused URL leaves no
+    // ordinary copy of it either.
+    let jwt = checked_jwt(object)?;
 
     let raw_url = object
         .get("url")
@@ -107,10 +118,19 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
         return Err(Refusal::BadUrl);
     }
 
-    let jwt = object
-        .get("jwt")
-        .and_then(Value::as_str)
-        .ok_or(Refusal::BadJwt)?;
+    Ok(SfuGrant { url, jwt })
+}
+
+/// The `jwt` member of an answer: three non-empty parts of visible ASCII, at
+/// most [`MAX_JWT_BYTES`].
+///
+/// The string is moved out of the parsed answer into zeroized memory before
+/// it is checked, so no ordinary copy of it is left, also when it is refused.
+fn checked_jwt(object: &mut Map<String, Value>) -> Result<Zeroizing<String>, Refusal> {
+    let jwt = match object.remove("jwt") {
+        Some(Value::String(jwt)) => Zeroizing::new(jwt),
+        _ => return Err(Refusal::BadJwt),
+    };
     let parts: Vec<&str> = jwt.split('.').collect();
     if jwt.len() > MAX_JWT_BYTES
         || !jwt.bytes().all(|b| b.is_ascii_graphic())
@@ -119,16 +139,28 @@ pub fn parse_grant(body: &[u8]) -> Result<SfuGrant, Refusal> {
     {
         return Err(Refusal::BadJwt);
     }
+    Ok(jwt)
+}
+
+/// Checks a homeserver `get_token` answer (ADR-0056). Only `jwt` is read;
+/// the SFU is the advertised `sfu`, never a URL from the answer.
+pub fn parse_token(body: &[u8], sfu: &Url) -> Result<SfuGrant, Refusal> {
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(Refusal::TooLarge);
+    }
+    let mut value: Value = serde_json::from_slice(body).map_err(|_| Refusal::NotJson)?;
+    let object = value.as_object_mut().ok_or(Refusal::NotJson)?;
     Ok(SfuGrant {
-        url,
-        jwt: Zeroizing::new(jwt.to_owned()),
+        url: sfu.clone(),
+        jwt: checked_jwt(object)?,
     })
 }
 
 /// Why the request failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SfuError {
-    /// The service URL is not `https` (or a development loopback).
+    /// The service URL is not `https`, or the SFU URL is not `wss` (or a
+    /// development loopback).
     InsecureServiceUrl,
     /// The request could not be made or finished.
     Network,
@@ -196,6 +228,81 @@ async fn post(
         buffer.extend_from_slice(&chunk);
     }
     parse_grant(&buffer).map_err(SfuError::Refused)
+}
+
+/// The stable MSC4195 token path.
+const TOKEN_STABLE: &str = "/_matrix/client/v1/rtc/livekit/get_token";
+
+/// The unstable MSC4195 token path, the only one Element Call 0.28.2 uses.
+const TOKEN_UNSTABLE: &str = "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token";
+
+/// What a homeserver token is for (ADR-0056).
+pub struct TokenFor<'a> {
+    /// The advertised SFU URL, parsed.
+    pub sfu: &'a Url,
+    /// The advertised SFU URL string, with no change: the homeserver
+    /// compares it byte for byte.
+    pub advertised: &'a str,
+    /// The server name of the own user ID.
+    pub server_name: &'a str,
+    pub room_id: &'a RoomId,
+    /// This device's `membershipID`.
+    pub member_id: &'a str,
+}
+
+/// The MSC4195 `slot_id` of the call: the `m.call` application with the
+/// empty `call_id` that Persephone writes.
+pub const SLOT_ID: &str = "m.call#ROOM";
+
+/// The JSON body of a `get_token` request.
+pub fn token_body(to: &TokenFor<'_>) -> Value {
+    json!({
+        "url": to.advertised,
+        "server_name": to.server_name,
+        "room_id": to.room_id.as_str(),
+        "slot_id": SLOT_ID,
+        "member_id": to.member_id,
+    })
+}
+
+/// Asks the own homeserver for a token for its SFU (ADR-0056). The request
+/// goes through the SDK's HTTP client with the session's access token, so
+/// TLS 1.3, the proxy and the no-redirect policy apply, and the answer is
+/// capped at [`MAX_RESPONSE_BYTES`] while it is read. The stable path is
+/// asked first; the unstable path only on 404 `M_UNRECOGNIZED`.
+pub async fn get_homeserver_grant(
+    client: &matrix_sdk::Client,
+    to: TokenFor<'_>,
+) -> Result<SfuGrant, SfuError> {
+    if !is_service_url(to.sfu, "wss", "ws") {
+        return Err(SfuError::InsecureServiceUrl);
+    }
+    let body = token_body(&to);
+    let ask = |path| {
+        bounded::send(
+            client,
+            reqwest::Method::POST,
+            path,
+            Some(&body),
+            MAX_RESPONSE_BYTES,
+            REQUEST_TIMEOUT,
+        )
+    };
+    let mut answer = ask(TOKEN_STABLE).await;
+    if answer
+        .as_ref()
+        .is_ok_and(bounded::Answer::is_not_implemented)
+    {
+        answer = ask(TOKEN_UNSTABLE).await;
+    }
+    let answer = answer.map_err(|error| match error {
+        RequestError::TooLarge(_) => SfuError::Refused(Refusal::TooLarge),
+        RequestError::Network | RequestError::NoSession => SfuError::Network,
+    })?;
+    if !answer.is_success() {
+        return Err(SfuError::Status(answer.status));
+    }
+    parse_token(&answer.body, to.sfu).map_err(SfuError::Refused)
 }
 
 #[cfg(test)]
@@ -384,6 +491,58 @@ mod tests {
         assert!(post(&client(), &url, &json!({})).await.is_ok());
     }
 
+    /// GIVEN another SFU's service that answers with a redirect to a place
+    /// that would give a grant WHEN the profile's client asks THEN the status
+    /// is the answer and the redirect target is never requested.
+    #[tokio::test]
+    async fn given_a_redirect_then_it_is_not_followed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sfu/get"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "/elsewhere/sfu/get"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/elsewhere/sfu/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(grant_body()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let url = Url::parse(&server.uri()).unwrap();
+        let http = crate::homeserver::http_client(None).unwrap();
+        assert_eq!(
+            post(&http, &url, &json!({})).await.unwrap_err(),
+            SfuError::Status(302)
+        );
+    }
+
+    /// GIVEN another SFU's service whose answer names a URL that is not `wss://`
+    /// or has user information WHEN it is read THEN the grant is refused.
+    #[tokio::test]
+    async fn given_an_answer_with_a_bad_url_then_the_grant_is_refused() {
+        for bad in [
+            "https://sfu.example.org",
+            "wss://u:p@sfu.example.org",
+            "wss://",
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "url": bad, "jwt": JWT })),
+                )
+                .mount(&server)
+                .await;
+            let url = Url::parse(&server.uri()).unwrap();
+            assert_eq!(
+                post(&client(), &url, &json!({})).await.unwrap_err(),
+                SfuError::Refused(Refusal::BadUrl),
+                "{bad}"
+            );
+        }
+    }
+
     /// GIVEN a server error WHEN asked THEN only the status is reported.
     #[tokio::test]
     async fn given_server_error_then_status_only() {
@@ -431,6 +590,202 @@ mod tests {
         assert_eq!(
             post(&client(), &url, &json!({})).await.unwrap_err(),
             SfuError::Refused(Refusal::BadUrl)
+        );
+    }
+
+    const STABLE_TOKEN: &str = "/_matrix/client/v1/rtc/livekit/get_token";
+    const UNSTABLE_TOKEN: &str =
+        "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/get_token";
+    const SFU: &str = "wss://sfu.example.org:7443";
+
+    fn token_for<'a>(sfu: &'a Url, room: &'a RoomId) -> TokenFor<'a> {
+        TokenFor {
+            sfu,
+            advertised: SFU,
+            server_name: "synthetic.test",
+            room_id: room,
+            member_id: "@alice:synthetic.test:PERSEPHONE",
+        }
+    }
+
+    fn expected_body() -> Value {
+        json!({
+            "url": SFU,
+            "server_name": "synthetic.test",
+            "room_id": "!r:synthetic.test",
+            "slot_id": "m.call#ROOM",
+            "member_id": "@alice:synthetic.test:PERSEPHONE",
+        })
+    }
+
+    /// GIVEN a homeserver answer WHEN checked THEN only `jwt` is read, the
+    /// SFU is the advertised one, and a bad or oversized answer is refused.
+    #[test]
+    fn given_token_answers_then_jwt_checked_and_sfu_kept() {
+        let sfu = Url::parse(SFU).unwrap();
+        let grant = parse_token(
+            json!({ "jwt": JWT, "url": "wss://evil.example.org" })
+                .to_string()
+                .as_bytes(),
+            &sfu,
+        )
+        .unwrap();
+        assert_eq!(grant.url, sfu);
+        assert_eq!(grant.jwt.as_str(), JWT);
+        for (body, refusal) in [
+            (json!({ "jwt": "a.b" }).to_string(), Refusal::BadJwt),
+            (json!({}).to_string(), Refusal::BadJwt),
+            ("[]".to_owned(), Refusal::NotJson),
+            ("x".repeat(MAX_RESPONSE_BYTES + 1), Refusal::TooLarge),
+        ] {
+            assert_eq!(parse_token(body.as_bytes(), &sfu).unwrap_err(), refusal);
+        }
+    }
+
+    /// GIVEN a homeserver with the stable token path WHEN a token is asked
+    /// THEN the body has the advertised URL, own server, room, slot and
+    /// member ID, no OpenID token, and the unstable path is not asked.
+    #[tokio::test]
+    async fn given_stable_token_path_then_used_with_the_body() {
+        let server = MockServer::start().await;
+        let client = crate::calls::readiness::tests::signed_in(&server).await;
+        Mock::given(method("POST"))
+            .and(path(STABLE_TOKEN))
+            .and(wiremock::matchers::body_json(expected_body()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": JWT })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path(UNSTABLE_TOKEN))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let sfu = Url::parse(SFU).unwrap();
+        let room = room_id!("!r:synthetic.test");
+        let grant = get_homeserver_grant(&client, token_for(&sfu, room))
+            .await
+            .unwrap();
+        assert_eq!(grant.url, sfu);
+        assert_eq!(grant.jwt.as_str(), JWT);
+    }
+
+    /// GIVEN a homeserver with only the unstable token path WHEN a token is
+    /// asked THEN the unstable path gives it.
+    #[tokio::test]
+    async fn given_only_unstable_token_path_then_used() {
+        let server = MockServer::start().await;
+        let client = crate::calls::readiness::tests::signed_in(&server).await;
+        Mock::given(method("POST"))
+            .and(path(STABLE_TOKEN))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(json!({ "errcode": "M_UNRECOGNIZED", "error": "no" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(UNSTABLE_TOKEN))
+            .and(wiremock::matchers::body_json(expected_body()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": JWT })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let sfu = Url::parse(SFU).unwrap();
+        let grant = get_homeserver_grant(&client, token_for(&sfu, room_id!("!r:synthetic.test")))
+            .await
+            .unwrap();
+        assert_eq!(grant.jwt.as_str(), JWT);
+    }
+
+    /// GIVEN a refusal, a server failure or a bad answer WHEN a token is
+    /// asked THEN the status or refusal is returned, and a refusal other than
+    /// `M_UNRECOGNIZED` does not try the unstable path.
+    #[tokio::test]
+    async fn given_token_failures_then_errors() {
+        for (status, body, expected) in [
+            (
+                403,
+                json!({ "errcode": "M_FORBIDDEN", "error": "no" }),
+                SfuError::Status(403),
+            ),
+            (
+                500,
+                json!({ "errcode": "M_UNKNOWN", "error": "no" }),
+                SfuError::Status(500),
+            ),
+            (
+                404,
+                json!({ "errcode": "M_NOT_FOUND", "error": "no" }),
+                SfuError::Status(404),
+            ),
+            (
+                200,
+                json!({ "jwt": "bad" }),
+                SfuError::Refused(Refusal::BadJwt),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let client = crate::calls::readiness::tests::signed_in(&server).await;
+            Mock::given(method("POST"))
+                .and(path(STABLE_TOKEN))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            Mock::given(path(UNSTABLE_TOKEN))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": JWT })))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let sfu = Url::parse(SFU).unwrap();
+            let got = get_homeserver_grant(&client, token_for(&sfu, room_id!("!r:synthetic.test")))
+                .await
+                .unwrap_err();
+            assert_eq!(got, expected, "{status}");
+        }
+    }
+
+    /// GIVEN an SFU URL that is not `wss` WHEN a token is asked THEN it is
+    /// refused before any request.
+    #[tokio::test]
+    async fn given_insecure_sfu_then_refused_without_request() {
+        let server = MockServer::start().await;
+        let client = crate::calls::readiness::tests::signed_in(&server).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "jwt": JWT })))
+            .expect(0)
+            .mount(&server)
+            .await;
+        for bad in ["https://sfu.example.org", "wss://u:p@sfu.example.org"] {
+            let sfu = Url::parse(bad).unwrap();
+            assert_eq!(
+                get_homeserver_grant(&client, token_for(&sfu, room_id!("!r:synthetic.test")))
+                    .await
+                    .unwrap_err(),
+                SfuError::InsecureServiceUrl
+            );
+        }
+    }
+
+    /// GIVEN a token answer over the limit WHEN a token is asked THEN it is
+    /// refused while it is read.
+    #[tokio::test]
+    async fn given_an_oversized_token_answer_then_refused() {
+        let server = MockServer::start().await;
+        let client = crate::calls::readiness::tests::signed_in(&server).await;
+        Mock::given(method("POST"))
+            .and(path(STABLE_TOKEN))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("x".repeat(MAX_RESPONSE_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        let sfu = Url::parse(SFU).unwrap();
+        assert_eq!(
+            get_homeserver_grant(&client, token_for(&sfu, room_id!("!r:synthetic.test")))
+                .await
+                .unwrap_err(),
+            SfuError::Refused(Refusal::TooLarge)
         );
     }
 }

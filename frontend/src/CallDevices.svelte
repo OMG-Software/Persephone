@@ -1,17 +1,34 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { CallDevices } from '../../crates/contracts/generated/contracts';
-  import { callDevices, setCallDevices } from './bridge';
-  import { deviceChoice, deviceOptions, deviceValue, devicesNote } from './calls';
+  import { callDevices, callVolume, setCallDevices } from './bridge';
+  import {
+    deviceChoice,
+    deviceOptions,
+    deviceValue,
+    devicesNote,
+    VOLUME_LABEL,
+    VOLUME_MAX,
+    VOLUME_SAVE_TEXT,
+    volumeText,
+    volumeValue
+  } from './calls';
 
-  // The call microphone and speaker (ADR-0043). The core lists them through a
+  // The call microphone, speaker, camera and volume (ADR-0043, ADR-0048,
+  // ADR-0055). The core lists the devices through a
   // contained worker and keeps the choice with the profile. Device names come
   // from the operating system: they are shown as plain text only.
   let devices = $state<CallDevices | null>(null);
   let recording = $state('');
   let playout = $state('');
+  let camera = $state('');
+  let volume = $state(VOLUME_MAX);
+  let volumeSaving = $state(false);
   let loading = $state(false);
   let saving = $state(false);
+  // Any request that reads or writes the device record. A refresh or device
+  // save during a volume save could bring back the old volume, so each waits.
+  const busy = $derived(loading || saving || volumeSaving);
   let failure = $state<string | null>(null);
   let generation = 0;
 
@@ -23,7 +40,7 @@
   };
 
   async function load() {
-    if (loading) return;
+    if (busy) return;
     loading = true;
     failure = null;
     const mine = ++generation;
@@ -33,6 +50,8 @@
       devices = next;
       recording = deviceValue(next.selectedRecording);
       playout = deviceValue(next.selectedPlayout);
+      camera = deviceValue(next.selectedCamera);
+      volume = next.volume;
     } catch (reason) {
       if (mine === generation) failure = failures[String(reason)] ?? 'The call devices could not be listed.';
     } finally {
@@ -42,13 +61,13 @@
 
   onMount(load);
 
-  // Saves both choices at once; the menus keep the values shown on failure.
+  // Saves all choices at once; the menus keep the values shown on failure.
   async function save() {
-    if (saving) return;
+    if (busy) return;
     saving = true;
     failure = null;
     try {
-      await setCallDevices(deviceChoice(recording), deviceChoice(playout));
+      await setCallDevices(deviceChoice(recording), deviceChoice(playout), deviceChoice(camera));
       if (devices) devices = { ...devices, unreadable: false };
     } catch (reason) {
       failure = failures[String(reason)] ?? 'The call devices could not be saved.';
@@ -57,8 +76,27 @@
     }
   }
 
+  // Saves the volume when the slider is let go. It also applies at once to a
+  // call that runs. On failure the slider goes back to the saved value.
+  async function saveVolume() {
+    if (busy || !devices) return;
+    volumeSaving = true;
+    failure = null;
+    const wanted = volume;
+    try {
+      await callVolume(wanted);
+      if (devices) devices = { ...devices, volume: wanted };
+    } catch (reason) {
+      failure = failures[String(reason)] ?? VOLUME_SAVE_TEXT;
+      if (devices) volume = devices.volume;
+    } finally {
+      volumeSaving = false;
+    }
+  }
+
   let recordingOptions = $derived(deviceOptions(devices?.recording ?? [], deviceChoice(recording)));
   let playoutOptions = $derived(deviceOptions(devices?.playout ?? [], deviceChoice(playout)));
+  let cameraOptions = $derived(deviceOptions(devices?.cameras ?? [], deviceChoice(camera)));
 </script>
 
 <div class="call-devices">
@@ -69,7 +107,7 @@
     <select
       id="call-microphone"
       class="field"
-      disabled={!devices || loading || saving}
+      disabled={!devices || busy}
       bind:value={recording}
       onchange={save}
     >
@@ -81,7 +119,7 @@
     <select
       id="call-speaker"
       class="field"
-      disabled={!devices || loading || saving}
+      disabled={!devices || busy}
       bind:value={playout}
       onchange={save}
     >
@@ -89,11 +127,36 @@
         <option value={option.value}>{option.label}</option>
       {/each}
     </select>
+    <label for="call-camera">Camera</label>
+    <select
+      id="call-camera"
+      class="field"
+      disabled={!devices || busy}
+      bind:value={camera}
+      onchange={save}
+    >
+      {#each cameraOptions as option (option.value)}
+        <option value={option.value}>{option.label}</option>
+      {/each}
+    </select>
+    <label for="call-volume">{VOLUME_LABEL}: <output for="call-volume">{volumeText(volume)}</output></label>
+    <input
+      id="call-volume"
+      type="range"
+      min="0"
+      max={VOLUME_MAX}
+      step="5"
+      disabled={!devices || devices.unreadable || busy}
+      value={volume}
+      aria-valuetext={volumeText(volume)}
+      oninput={(event) => (volume = volumeValue(Number(event.currentTarget.value)))}
+      onchange={saveVolume}
+    />
     {#if devices}
       <p class="note">{devicesNote(devices)}</p>
     {/if}
     <div class="actions">
-      <button type="button" class="secondary" disabled={loading || saving} onclick={load}>
+      <button type="button" class="secondary" disabled={busy} onclick={load}>
         {loading ? 'Looking for devices…' : 'Refresh devices'}
       </button>
     </div>

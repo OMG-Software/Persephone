@@ -6,10 +6,13 @@
 //! without reviewed call containment refuses ([`Unsupported`]): the core
 //! never starts an uncontained call worker.
 //!
-//! The link is two bounded queues and the process. The controller sends
-//! [`ToWorker`] messages without blocking and receives [`FromWorker`]
-//! messages. Dropping the link ends the process.
+//! The link is two bounded queues, the picture store and the process. The
+//! controller sends [`ToWorker`] messages without blocking and receives
+//! [`FromWorker`] messages. Video pictures do not use the queue: the read
+//! thread keeps the newest one per tile in the [`VideoStore`] (ADR-0048).
+//! Dropping the link ends the process.
 
+use super::video::VideoStore;
 use persephone_call_protocol::{FromWorker, ToWorker};
 use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -65,12 +68,122 @@ impl fmt::Display for StartError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerGone;
 
+/// Which camera path the call worker may use (ADR-0049). The host decides it
+/// when it starts the worker; the worker never changes it. Only Linux has more
+/// than `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraPath {
+    /// A PipeWire remote that the core gets from the camera portal and sends
+    /// over the camera channel.
+    Portal,
+    /// The worker opens `/dev/video*` itself (no portal runs).
+    V4l2,
+    /// No camera path on this OS or desktop.
+    None,
+}
+
+/// The sound server names the call worker opens its microphone and speaker
+/// with (Linux, ADR-0049). Only `pulse:` choices give a name; every other
+/// choice, the device list and the other OSes use none. The launcher passes
+/// them as `PULSE_SOURCE` and `PULSE_SINK`, and the worker checks that they
+/// match the `Join` and are on the sound server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkerAudio {
+    /// The microphone (a sound server source).
+    pub source: Option<String>,
+    /// The speaker (a sound server sink).
+    pub sink: Option<String>,
+}
+
+impl WorkerAudio {
+    /// The names in the chosen device IDs. An ID that is not `pulse:` or
+    /// whose name breaks the name rule gives none.
+    pub fn for_choice(recording: Option<&str>, playout: Option<&str>) -> Self {
+        let name = |id: Option<&str>| {
+            id.and_then(persephone_call_protocol::pulse_name)
+                .map(str::to_owned)
+        };
+        Self {
+            source: name(recording),
+            sink: name(playout),
+        }
+    }
+}
+
+/// How the worker process ended, as the OS reported it. No worker text is
+/// involved: the core reads the status only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerExit {
+    /// The exit code (Windows: the full 32-bit code).
+    Code(u32),
+    /// The signal that ended the process (Linux and macOS).
+    Signal(u32),
+}
+
+/// The exit code of a Rust panic that unwinds out of `main`, on every OS.
+const EXIT_PANIC: u32 = 101;
+
+/// The worker's own "could not report" exit code (`EXIT_UNREPORTABLE` in
+/// `crates/call-worker/src/main.rs`): its runtime or its writer failed.
+const EXIT_UNREPORTABLE: u32 = 2;
+
+/// Whether the exit shows an internal failure of the worker, not a stop.
+///
+/// A panic that unwinds out of `main` exits with 101 on every OS. This
+/// workspace sets no `panic = "abort"`; if it did, an abort ends the process
+/// with `SIGABRT` on Linux and macOS and with `0xC0000409` on Windows. On
+/// Windows any status code of error severity (top two bits set) is a crash:
+/// a system one such as an access violation (`0xC0000005`), or a customer
+/// one such as an unhandled C++ exception from libwebrtc (`0xE06D7363`). A kill by the core (`SIGKILL`; Job termination, exit
+/// code 1), a stop by the user (`SIGTERM`) and the worker's own codes 0, 1
+/// and 3 are not crashes.
+pub fn exit_is_crash(exit: WorkerExit) -> bool {
+    match exit {
+        WorkerExit::Code(code) => {
+            code == EXIT_PANIC || code == EXIT_UNREPORTABLE || code & 0xC000_0000 == 0xC000_0000
+        }
+        WorkerExit::Signal(signal) => crash_signal(signal),
+    }
+}
+
+#[cfg(unix)]
+fn crash_signal(signal: u32) -> bool {
+    [
+        libc::SIGABRT,
+        libc::SIGSEGV,
+        libc::SIGBUS,
+        libc::SIGILL,
+        libc::SIGFPE,
+        libc::SIGTRAP,
+        libc::SIGSYS,
+    ]
+    .iter()
+    .any(|crash| u32::try_from(*crash) == Ok(signal))
+}
+
+#[cfg(not(unix))]
+fn crash_signal(_signal: u32) -> bool {
+    false
+}
+
 /// The running worker process, as the link needs it.
 pub trait WorkerProcess: Send + Sync {
     /// Ends the worker and everything in its containment now.
     fn kill(&self);
     /// Waits up to `timeout` for the worker to exit. Returns whether it did.
     fn wait_exit(&self, timeout: Duration) -> bool;
+    /// How the worker ended. `None` while it runs, or when this host cannot
+    /// tell.
+    fn exit_status(&self) -> Option<WorkerExit> {
+        None
+    }
+    /// Whether the OS shows the worker as contained, checked after its `Ready`
+    /// message and before any input goes to it (Linux: `/proc/<pid>/status`;
+    /// macOS: `sandbox_check`). On Windows the containment is complete before
+    /// the worker runs, so the default is `true`.
+    fn confirm_contained(&self) -> bool {
+        true
+    }
 }
 
 /// One running, contained call worker.
@@ -79,7 +192,13 @@ pub struct CallWorkerLink {
     /// Messages from the worker. `None` after the worker exited or its
     /// channel failed.
     pub events: mpsc::Receiver<FromWorker>,
+    video: VideoStore,
     process: Arc<dyn WorkerProcess>,
+    camera_path: CameraPath,
+    /// The core's end of the camera channel (Linux).
+    #[cfg(unix)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    camera: Option<std::os::unix::net::UnixStream>,
 }
 
 impl CallWorkerLink {
@@ -93,7 +212,73 @@ impl CallWorkerLink {
         Self {
             commands,
             events,
+            video: VideoStore::new(),
             process: Arc::from(process),
+            camera_path: CameraPath::None,
+            #[cfg(unix)]
+            camera: None,
+        }
+    }
+
+    /// Records the camera path the worker was started with.
+    pub fn with_camera_path(mut self, path: CameraPath) -> Self {
+        self.camera_path = path;
+        self
+    }
+
+    /// Keeps the core's end of the worker's camera channel (Linux).
+    #[cfg(unix)]
+    pub fn with_camera_channel(mut self, channel: std::os::unix::net::UnixStream) -> Self {
+        self.camera = Some(channel);
+        self
+    }
+
+    /// The camera path this worker may use. It was fixed at start.
+    pub fn camera_path(&self) -> CameraPath {
+        self.camera_path
+    }
+
+    /// Sends the PipeWire remote from the camera portal to the worker over
+    /// the camera channel: one descriptor and one byte, without blocking.
+    /// Call it directly before `SetCamera { on: true, remote: true }` (and
+    /// before `ListDevices` on the portal path), once per command. `Err(WorkerGone)`: there is no channel, it is full, or the
+    /// worker has gone. The caller's descriptor stays open; close it after
+    /// the call.
+    #[cfg(target_os = "linux")]
+    pub fn send_camera_handle(&self, fd: std::os::fd::BorrowedFd<'_>) -> Result<(), WorkerGone> {
+        let channel = self.camera.as_ref().ok_or(WorkerGone)?;
+        persephone_media_broker::send_camera_fd(channel, fd).map_err(|_| WorkerGone)
+    }
+
+    /// Sends the ScreenCast portal's remote to the worker over the camera
+    /// channel with the data byte `s` (ADR-0053). Call it directly before
+    /// `SetScreen { target: Some(Portal { .. }) }`, once per command.
+    #[cfg(target_os = "linux")]
+    pub fn send_screen_handle(&self, fd: std::os::fd::BorrowedFd<'_>) -> Result<(), WorkerGone> {
+        let channel = self.camera.as_ref().ok_or(WorkerGone)?;
+        persephone_media_broker::send_screen_fd(channel, fd).map_err(|_| WorkerGone)
+    }
+
+    /// Uses `video` as the link's picture store: the one the host's read
+    /// thread writes to.
+    pub fn with_video(mut self, video: VideoStore) -> Self {
+        self.video = video;
+        self
+    }
+
+    /// The store of the newest picture on each tile. It is shared with the
+    /// thread that reads the worker.
+    pub fn video(&self) -> VideoStore {
+        self.video.clone()
+    }
+
+    /// How the worker ended, after waiting up to `wait` for it to exit.
+    /// Blocks; call it from a blocking task.
+    pub fn exit_status(&self, wait: Duration) -> Option<WorkerExit> {
+        if self.process.wait_exit(wait) {
+            self.process.exit_status()
+        } else {
+            None
         }
     }
 
@@ -101,6 +286,29 @@ impl CallWorkerLink {
     /// link, for example when the session locks.
     pub fn kill_handle(&self) -> Arc<dyn WorkerProcess> {
         Arc::clone(&self.process)
+    }
+
+    /// Whether the command queue is full now: the worker runs but has not
+    /// read its commands yet. A closed queue is not full; `send` then says
+    /// the worker has gone.
+    pub fn queue_full(&self) -> bool {
+        !self.commands.is_closed() && self.commands.capacity() == 0
+    }
+
+    /// Queues `message` without blocking. `Ok(false)` is a full queue: the
+    /// worker runs but has not read its commands yet. Only a closed queue
+    /// says the worker has gone.
+    pub fn try_queue(&self, message: ToWorker) -> Result<bool, WorkerGone> {
+        match self.commands.try_send(message) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(WorkerGone),
+        }
+    }
+
+    /// A sender for the command queue, to wait for room in it.
+    pub fn command_sender(&self) -> mpsc::Sender<ToWorker> {
+        self.commands.clone()
     }
 
     /// Queues `message` for the worker without blocking.
@@ -130,18 +338,37 @@ pub trait CallHost: Send + Sync {
     /// Starts the worker, contains it before it runs, and waits for its
     /// `Ready`. Returns a link only when every containment bit is clear.
     /// Blocks for up to [`READY_TIMEOUT`]; call it from a blocking task.
-    fn start(&self) -> Result<CallWorkerLink, StartError>;
+    /// `audio` names the sound server devices on Linux (empty elsewhere).
+    fn start(&self, audio: &WorkerAudio) -> Result<CallWorkerLink, StartError>;
 
     /// Asks, in a native dialog owned by the core, whether this call may
-    /// connect directly: the profile has a SOCKS5 proxy, and the SFU and
-    /// TURN server will see this computer's IP address (ADR-0028 addition).
+    /// connect directly: the profile has a SOCKS5 proxy, and the SFU, the
+    /// TURN server and any STUN or TURN server that the SFU names will see
+    /// this computer's IP address (ADR-0028 addition).
     /// Blocks until answered; `true` only for an explicit yes.
     fn confirm_direct_connection(&self) -> bool;
+
+    /// Asks, in a native dialog owned by the core, whether the call may
+    /// connect to the call server on `host`, which belongs to another
+    /// homeserver (ADR-0054). That server will see this computer's IP address
+    /// and the user's Matrix ID, and with a profile proxy the connection does
+    /// not use the proxy. Blocks until answered; `true` only for an explicit
+    /// "Connect". The default is "no", so a platform without the window never
+    /// contacts another server.
+    fn confirm_other_sfu(&self, _host: &str, _proxy_configured: bool) -> bool {
+        false
+    }
 
     /// Whether this platform has reviewed call containment. `false` means
     /// [`CallHost::start`] always refuses.
     fn supported(&self) -> bool {
         true
+    }
+
+    /// Who lets the user pick a screen to share (ADR-0053). A platform
+    /// without screen sharing keeps this default.
+    fn screen_source(&self) -> Arc<dyn super::screen::ScreenSource> {
+        super::screen::unavailable()
     }
 }
 
@@ -156,7 +383,7 @@ pub fn platform() -> Arc<dyn CallHost> {
 pub struct Unsupported;
 
 impl CallHost for Unsupported {
-    fn start(&self) -> Result<CallWorkerLink, StartError> {
+    fn start(&self, _audio: &WorkerAudio) -> Result<CallWorkerLink, StartError> {
         Err(StartError::Unsupported)
     }
 
@@ -172,6 +399,57 @@ impl CallHost for Unsupported {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GIVEN exit statuses WHEN classified THEN a panic, the worker's
+    /// unreportable exit and a Windows crash status are crashes, and a clean
+    /// exit, a worker failure code, a kill and a user stop are not.
+    #[test]
+    fn given_exit_status_then_only_internal_failures_are_crashes() {
+        for crash in [
+            WorkerExit::Code(101),
+            WorkerExit::Code(2),
+            WorkerExit::Code(0xC000_0005),
+            WorkerExit::Code(0xC000_0409),
+            WorkerExit::Code(0xE06D_7363),
+        ] {
+            assert!(exit_is_crash(crash), "{crash:?}");
+        }
+        for stop in [
+            WorkerExit::Code(0),
+            WorkerExit::Code(1),
+            WorkerExit::Code(3),
+            WorkerExit::Code(0x4000_0010),
+            WorkerExit::Code(0x8000_0003),
+        ] {
+            assert!(!exit_is_crash(stop), "{stop:?}");
+        }
+    }
+
+    /// GIVEN signals WHEN classified THEN an abort or a fault is a crash and
+    /// a kill or a terminate is not.
+    #[cfg(unix)]
+    #[test]
+    fn given_signal_then_only_faults_are_crashes() {
+        for crash in [
+            libc::SIGABRT,
+            libc::SIGSEGV,
+            libc::SIGBUS,
+            libc::SIGILL,
+            libc::SIGSYS,
+        ] {
+            assert!(exit_is_crash(WorkerExit::Signal(crash as u32)), "{crash}");
+        }
+        for stop in [libc::SIGKILL, libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+            assert!(!exit_is_crash(WorkerExit::Signal(stop as u32)), "{stop}");
+        }
+    }
+
+    /// GIVEN a signal status on an OS without signals WHEN classified THEN it is not a crash.
+    #[cfg(not(unix))]
+    #[test]
+    fn given_signal_without_signals_then_no_crash() {
+        assert!(!exit_is_crash(WorkerExit::Signal(6)));
+    }
     use std::sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -211,6 +489,37 @@ mod tests {
         (link, received, process)
     }
 
+    /// GIVEN device IDs of each kind WHEN the worker audio is built THEN
+    /// only safe `pulse:` names are kept, each for its own direction.
+    #[test]
+    fn given_device_choices_then_only_sound_server_names_reach_the_launch() {
+        let audio = WorkerAudio::for_choice(
+            Some("pulse:vmic"),
+            Some("pulse:alsa_output.pci-0000_00_1f.3"),
+        );
+        assert_eq!(audio.source.as_deref(), Some("vmic"));
+        assert_eq!(audio.sink.as_deref(), Some("alsa_output.pci-0000_00_1f.3"));
+        assert_eq!(WorkerAudio::for_choice(None, None), WorkerAudio::default());
+        assert_eq!(
+            WorkerAudio::for_choice(Some("{0.0.1.00000000}.{6a2c}"), Some("index:0")),
+            WorkerAudio::default()
+        );
+        assert_eq!(
+            WorkerAudio::for_choice(
+                Some("pulse:a b"),
+                Some(
+                    "pulse:x
+PULSE_SERVER=y"
+                )
+            ),
+            WorkerAudio::default()
+        );
+        assert_eq!(
+            WorkerAudio::for_choice(Some("pulse:"), None),
+            WorkerAudio::default()
+        );
+    }
+
     /// GIVEN a platform without reviewed call containment WHEN a call starts
     /// or asks to bypass the proxy THEN it is refused.
     #[test]
@@ -218,7 +527,11 @@ mod tests {
         let host = Unsupported;
         assert!(!host.supported());
         assert!(!host.confirm_direct_connection());
-        assert_eq!(host.start().err(), Some(StartError::Unsupported));
+        assert!(!host.confirm_other_sfu("sfu.example.org", false));
+        assert_eq!(
+            host.start(&WorkerAudio::default()).err(),
+            Some(StartError::Unsupported)
+        );
     }
 
     /// GIVEN each start error WHEN shown THEN it is a distinct fixed text,
