@@ -128,7 +128,7 @@
     <p class="note">
       Choose which other events show as lines between the messages, such as verification
       requests, calls and polls. Persephone shows what kind each event is, not its content.
-      Messages, images, files and messages that cannot be decrypted always show. A deleted
+      Messages, images, files and messages that cannot be decrypted have no switch. A deleted
       message shows as a "Message deleted" line unless you hide those lines below.
     </p>
     <div class="event-switches">

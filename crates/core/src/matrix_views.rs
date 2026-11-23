@@ -1603,6 +1603,69 @@ mod tests {
         }
     }
 
+    /// A decrypted event, as the SDK gives one from an encrypted room.
+    fn decrypted_event(event: serde_json::Value) -> TimelineEvent {
+        use matrix_sdk::deserialized_responses::{
+            AlgorithmInfo, DecryptedRoomEvent, EncryptionInfo, VerificationState,
+        };
+        TimelineEvent::from_decrypted(
+            DecryptedRoomEvent {
+                event: Raw::from_json_string(event.to_string()).unwrap(),
+                encryption_info: std::sync::Arc::new(EncryptionInfo {
+                    sender: matrix_sdk::ruma::user_id!("@alice:example.org").to_owned(),
+                    sender_device: None,
+                    forwarder: None,
+                    algorithm_info: AlgorithmInfo::OlmV1Curve25519AesSha2 {
+                        curve25519_public_key_base64: "key".into(),
+                    },
+                    verification_state: VerificationState::Verified,
+                }),
+                unsigned_encryption_info: None,
+            },
+            None,
+        )
+    }
+
+    /// GIVEN well-formed in-room verification steps and a poll, decrypted
+    /// from an encrypted room WHEN projected THEN each is read from its
+    /// decrypted type, not `m.room.encrypted`, and has its own kind: a step
+    /// after the request is an event type of its own, not a `msgtype`.
+    #[test]
+    fn given_decrypted_other_events_then_their_decrypted_type_is_used() {
+        let relates = serde_json::json!({ "rel_type": "m.reference", "event_id": "$request" });
+        for (kind, content, expected) in [
+            (
+                "m.key.verification.ready",
+                serde_json::json!({
+                    "from_device": "DEVICE", "methods": ["m.sas.v1"], "m.relates_to": relates,
+                }),
+                OtherEvent::VerificationReady,
+            ),
+            (
+                "m.key.verification.done",
+                serde_json::json!({ "m.relates_to": relates }),
+                OtherEvent::VerificationDone,
+            ),
+            (
+                "m.poll.start",
+                serde_json::json!({
+                    "m.text": [{ "body": "Lunch?" }],
+                    "m.poll": { "question": { "m.text": [{ "body": "Lunch?" }] },
+                        "answers": [{ "m.id": "a", "m.text": [{ "body": "Yes" }] },
+                                    { "m.id": "b", "m.text": [{ "body": "No" }] }] },
+                }),
+                OtherEvent::PollStarted,
+            ),
+        ] {
+            let event = decrypted_event(serde_json::json!({
+                "type": kind, "event_id": "$e", "sender": "@alice:example.org",
+                "room_id": "!room:example.org", "origin_server_ts": 1, "content": content,
+            }));
+            assert!(matches!(event.kind, TimelineEventKind::Decrypted(_)));
+            assert_eq!(other_of(&event), Some((expected, kind.into())), "{kind}");
+        }
+    }
+
     /// GIVEN state events that are no shown room change WHEN projected THEN
     /// each is an `other` item of its kind; a call member event is a join
     /// with a membership and a leave without one.
