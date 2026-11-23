@@ -802,6 +802,7 @@ impl Core {
         let log = diagnostics::global();
         persephone_contracts::DiagnosticsStatus {
             on: log.is_on(),
+            full: log.is_full(),
             available: self.diagnostics_path.is_some(),
             path: log.path().map(|path| path.display().to_string()),
         }
@@ -3764,14 +3765,11 @@ impl Core {
     }
 }
 
-/// Serves requests from `input` until the UI closes the stream or violates the
-/// protocol, while a second thread writes notifications. Replies and events
-/// share `output` and are written whole, one frame at a time.
 /// One command for the diagnostic log: its name, its request ID, how it
 /// ended (`ok`, an error code, or `running` for a long call that reports
 /// again when it ends) and how long it took.
-fn note_request(id: u32, name: &str, outcome: String, started: Instant) {
-    diagnostics::global().record(
+fn note_request(log: &diagnostics::Log, id: u32, name: &str, outcome: String, started: Instant) {
+    log.record(
         diagnostics::Source::Core,
         diagnostics::Level::Debug,
         "persephone::request",
@@ -3807,6 +3805,9 @@ fn answer_kind(answer: &Answer<'_>) -> String {
     }
 }
 
+/// Serves requests from `input` until the UI closes the stream or violates the
+/// protocol, while a second thread writes notifications. Replies and events
+/// share `output` and are written whole, one frame at a time.
 pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> ServeEnd {
     let budgets = core.budgets.clone();
     let output = Mutex::new(output);
@@ -3864,7 +3865,13 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                         }),
                     };
                     if let Some((id, name)) = &named {
-                        note_request(*id, name, answer_kind(&answer), started);
+                        note_request(
+                            diagnostics::global(),
+                            *id,
+                            name,
+                            answer_kind(&answer),
+                            started,
+                        );
                     }
                     let written = match answer {
                         Answer::Reply(reply) => {
@@ -3919,7 +3926,13 @@ pub fn serve<R: Read, W: Write + Send>(core: &Core, mut input: R, output: W) -> 
                                     let _running = running;
                                     let outcome = call();
                                     if let Some((id, name)) = &named {
-                                        note_request(*id, name, outcome_kind(&outcome), started);
+                                        note_request(
+                                            diagnostics::global(),
+                                            *id,
+                                            name,
+                                            outcome_kind(&outcome),
+                                            started,
+                                        );
                                     }
                                     let reply = CoreMessage::Reply(Reply { id, outcome });
                                     if send(&mut *lock(output), &reply).is_err() {
@@ -5300,5 +5313,68 @@ mod tests {
         let core = Core::default();
         assert!(matches!(core.diagnostics_on(), Err(ErrorCode::Unavailable)));
         assert!(!core.diagnostics_status().available);
+    }
+
+    /// GIVEN requests that succeeded, failed and are still running WHEN they
+    /// are noted THEN each line names the command, its request ID and its
+    /// outcome code, and nothing else of the request.
+    #[test]
+    fn given_requests_when_noted_then_lines_hold_name_id_and_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = diagnostics::path_in(dir.path());
+        let log = diagnostics::Log::default();
+        log.turn_on(&path).unwrap();
+        let reply = |outcome| Answer::Reply(Reply { id: 1, outcome });
+        let started = Instant::now();
+        note_request(
+            &log,
+            1,
+            "room_list",
+            answer_kind(&reply(Outcome::Ok(serde_json::Value::Null))),
+            started,
+        );
+        note_request(
+            &log,
+            2,
+            "sign_in",
+            answer_kind(&reply(Outcome::Error(ErrorCode::LimitExceeded))),
+            started,
+        );
+        note_request(
+            &log,
+            3,
+            "set_diagnostics",
+            answer_kind(&Answer::Later(
+                3,
+                Box::new(|| Outcome::Ok(serde_json::Value::Null)),
+            )),
+            started,
+        );
+        log.turn_off();
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|line: &serde_json::Value| line["target"] == "persephone::request")
+            .collect();
+        let seen: Vec<(String, u64, String)> = lines
+            .iter()
+            .map(|line| {
+                (
+                    line["message"].as_str().unwrap().to_owned(),
+                    line["fields"]["id"].as_u64().unwrap(),
+                    line["fields"]["outcome"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("room_list".into(), 1, "ok".into()),
+                ("sign_in".into(), 2, "limit_exceeded".into()),
+                ("set_diagnostics".into(), 3, "running".into()),
+            ]
+        );
+        assert!(lines.iter().all(|line| line["fields"]["ms"].is_u64()));
     }
 }

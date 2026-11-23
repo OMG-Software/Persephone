@@ -368,7 +368,7 @@ test('GIVEN session channel messages WHEN delivered THEN each reaches its own ca
   const asked = [];
   mockIPC((command, args) => {
     asked.push(command);
-    if (command === 'diagnostics_status') return { on: false, available: true, path: null };
+    if (command === 'diagnostics_status') return { on: false, full: false, available: true, path: null };
     assert.equal(command, 'watch_session');
     channel = args.onChange;
     return null;
@@ -397,7 +397,7 @@ test('GIVEN the diagnostic log WHEN it is on THEN host calls are noted by name a
   const records = [];
   let on = true;
   mockIPC((command, args) => {
-    if (command === 'diagnostics_status') return { on, available: true, path: null };
+    if (command === 'diagnostics_status') return { on, full: false, available: true, path: null };
     if (command === 'diagnostic_records') {
       records.push(...args.records);
       return null;

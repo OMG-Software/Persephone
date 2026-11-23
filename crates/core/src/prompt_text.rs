@@ -215,8 +215,9 @@ pub const DIAGNOSTICS: (&str, &str) = (
      The log can hold information that identifies you and others: your user \
      ID and account name, other people's user IDs, room IDs, server names, \
      device IDs, network addresses, and the type, sender, time and size of \
-     every Matrix event. It does not hold message text, images or other \
-     event content.\n\n\
+     every Matrix event. Persephone's own records of events hold no message \
+     text, images or other event content, but the libraries it uses can \
+     add their own text.\n\n\
      Persephone never writes passwords, access tokens, call tokens or keys \
      to it on purpose, and it removes them from the text of the libraries \
      it uses. That filter cannot be complete, so read the file before you \

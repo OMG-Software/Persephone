@@ -127,9 +127,17 @@ impl Log {
         self.switch.subscribe()
     }
 
-    /// Whether records are written now.
+    /// Whether the user has the log on. A full file keeps it on, but writes
+    /// nothing more (see [`Log::is_full`]).
     pub fn is_on(&self) -> bool {
-        self.on.load(Ordering::Relaxed) && !self.shared.full.load(Ordering::Relaxed)
+        self.on.load(Ordering::Relaxed)
+    }
+
+    /// Whether this run's file reached [`MAX_FILE_BYTES`]. It stays full
+    /// until the next start, which deletes the file; turning the log off and
+    /// on again does not reset it.
+    pub fn is_full(&self) -> bool {
+        self.shared.full.load(Ordering::Relaxed)
     }
 
     /// The file this run wrote to, if the log was ever on in this run. The
@@ -200,7 +208,7 @@ impl Log {
         message: &str,
         fields: &[(&str, Value)],
     ) {
-        if !self.is_on() {
+        if !self.is_on() || self.is_full() {
             return;
         }
         let seq = self.shared.seq.fetch_add(1, Ordering::Relaxed);
@@ -253,29 +261,15 @@ fn line(
         }
         object.insert("fields".into(), Value::Object(map));
     }
-    let mut text = Value::Object(object).to_string();
-    if text.len() > MAX_LINE_BYTES {
+    let text = |object: &Map<String, Value>| serde_json::to_string(object).unwrap_or_default();
+    let mut written = text(&object);
+    if written.len() > MAX_LINE_BYTES {
         // Too long even with each string cut: the fields go.
-        let mut object = Map::new();
-        object.insert("ts".into(), Value::from(now_ms()));
-        object.insert("seq".into(), Value::from(seq));
-        object.insert(
-            "source".into(),
-            serde_json::to_value(source).unwrap_or(Value::Null),
-        );
-        object.insert(
-            "level".into(),
-            serde_json::to_value(level).unwrap_or(Value::Null),
-        );
-        object.insert("target".into(), Value::from(redact::text(target, 256)));
-        object.insert(
-            "message".into(),
-            Value::from(redact::text(message, MAX_STRING_BYTES)),
-        );
+        object.remove("fields");
         object.insert("truncated".into(), Value::Bool(true));
-        text = Value::Object(object).to_string();
+        written = text(&object);
     }
-    text
+    written
 }
 
 fn now_ms() -> u64 {
@@ -494,7 +488,7 @@ fn guarded(write: impl FnOnce()) {
 /// Makes the log the process's `tracing` subscriber and `log` logger. Call
 /// once, early in `main`. Nothing is written until the log is turned on.
 pub fn install() {
-    let _ = tracing::subscriber::set_global_default(Subscriber::default());
+    let _ = tracing::subscriber::set_global_default(Subscriber::new(global));
     if log::set_logger(&LOGGER).is_ok() {
         log::set_max_level(log::LevelFilter::Debug);
     }
@@ -522,10 +516,20 @@ pub fn from_log(level: log::Level) -> Level {
 }
 
 /// A minimal `tracing` subscriber: events only. Spans get an ID, so code
-/// that enters spans works, but their fields are not kept.
-#[derive(Default)]
+/// that enters spans works, but their fields are not kept. It writes to
+/// `log()`: the process's log, or a test's own.
 struct Subscriber {
+    log: fn() -> &'static Log,
     next_span: AtomicU64,
+}
+
+impl Subscriber {
+    fn new(log: fn() -> &'static Log) -> Self {
+        Self {
+            log,
+            next_span: AtomicU64::new(0),
+        }
+    }
 }
 
 impl tracing::Subscriber for Subscriber {
@@ -546,7 +550,7 @@ impl tracing::Subscriber for Subscriber {
     }
 
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        global().is_on() && wanted(metadata.target(), from_tracing(*metadata.level()))
+        (self.log)().is_on() && wanted(metadata.target(), from_tracing(*metadata.level()))
     }
 
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -567,7 +571,7 @@ impl tracing::Subscriber for Subscriber {
                 .iter()
                 .map(|(name, value)| (*name, value.clone()))
                 .collect();
-            global().record(
+            (self.log)().record(
                 Source::Core,
                 from_tracing(*metadata.level()),
                 metadata.target(),
@@ -643,13 +647,16 @@ pub fn cut(text: &mut String, limit: usize) {
     }
 }
 
-struct Logger;
+/// The `log` logger; it writes to `log()`, like [`Subscriber`].
+struct Logger {
+    log: fn() -> &'static Log,
+}
 
-static LOGGER: Logger = Logger;
+static LOGGER: Logger = Logger { log: global };
 
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        global().is_on() && wanted(metadata.target(), from_log(metadata.level()))
+        (self.log)().is_on() && wanted(metadata.target(), from_log(metadata.level()))
     }
 
     fn log(&self, record: &log::Record<'_>) {
@@ -659,7 +666,7 @@ impl log::Log for Logger {
         guarded(|| {
             let mut message = record.args().to_string();
             cut(&mut message, MAX_STRING_BYTES);
-            global().record(
+            (self.log)().record(
                 Source::Core,
                 from_log(record.level()),
                 record.target(),
@@ -740,6 +747,29 @@ mod tests {
         assert_eq!(lines(&path).len(), 4);
     }
 
+    /// GIVEN a log whose file is full WHEN records arrive and it is turned
+    /// off and on again THEN it still reports on and full, and writes nothing
+    /// more in this run.
+    #[test]
+    fn given_full_file_then_log_stays_on_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        log.turn_on(&path).unwrap();
+        // Off joins the writer, so the flag is set after every line is out.
+        log.turn_off();
+        log.shared.full.store(true, Ordering::Relaxed);
+        log.turn_on(&path).unwrap();
+        log.record(Source::Core, Level::Error, "t", "after full", &[]);
+        assert!(log.is_on() && log.is_full());
+        log.turn_off();
+        assert!(!log.is_on() && log.is_full());
+        let lines = lines(&path);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0]["message"], "diagnostic log on");
+        assert_eq!(lines[1]["message"], "diagnostic log off");
+    }
+
     /// GIVEN secrets in the message and in fields WHEN recorded THEN none of
     /// them reaches the file.
     #[test]
@@ -772,9 +802,130 @@ mod tests {
     #[test]
     fn given_huge_record_then_line_is_bounded() {
         let big = "x".repeat(MAX_LINE_BYTES * 2);
-        let fields: Vec<(&str, Value)> = (0..8).map(|_| ("f", Value::from(big.as_str()))).collect();
+        let names: Vec<String> = (0..8).map(|index| format!("f{index}")).collect();
+        let fields: Vec<(&str, Value)> = names
+            .iter()
+            .map(|name| (name.as_str(), Value::from(big.as_str())))
+            .collect();
         let text = line(1, Source::Core, Level::Info, "t", &big, &fields);
         assert!(text.len() <= MAX_LINE_BYTES, "{}", text.len());
+        let line: Value = serde_json::from_str(&text).unwrap();
+        assert!(line.get("fields").is_none(), "the fields go first");
+        assert_eq!(line["target"], "t");
+    }
+
+    /// GIVEN a writer near the size limit with dropped records counted WHEN
+    /// lines arrive THEN the count is written, then one `log_full` line, and
+    /// nothing after it.
+    #[test]
+    fn given_writer_near_the_limit_then_it_ends_with_log_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let file = File::create(&path).unwrap();
+        let shared = Shared::default();
+        shared.dropped.store(3, Ordering::Relaxed);
+        let (queue, lines_in) = mpsc::sync_channel(4);
+        queue.send(r#"{"n":1}"#.to_owned()).unwrap();
+        queue.send("x".repeat(400)).unwrap();
+        queue.send(r#"{"n":3}"#.to_owned()).unwrap();
+        drop(queue);
+        // Room for the dropped note and the first line only.
+        write_lines(file, MAX_FILE_BYTES - 700, &lines_in, &shared);
+        assert!(shared.full.load(Ordering::Relaxed));
+        let lines = lines(&path);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0]["message"], "records dropped: queue full");
+        assert_eq!(lines[0]["fields"]["count"], 3);
+        assert_eq!(lines[1]["n"], 1);
+        assert_eq!(lines[2]["message"], "log_full");
+    }
+
+    static EVENTS_LOG: OnceLock<Log> = OnceLock::new();
+    fn events_log() -> &'static Log {
+        EVENTS_LOG.get_or_init(Log::default)
+    }
+
+    /// GIVEN the subscriber on its own log WHEN events of each field type,
+    /// a quiet target and a span arrive THEN kept events are lines with their
+    /// fields, the secret field is redacted, and the quiet `debug` is not.
+    #[test]
+    fn given_tracing_events_then_they_become_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = events_log();
+        log.turn_on(&path).unwrap();
+        tracing::subscriber::with_default(Subscriber::new(events_log), || {
+            let span = tracing::info_span!("sync");
+            let _entered = span.enter();
+            tracing::info!(
+                target: "persephone::test",
+                count = 3u64,
+                offset = -2i64,
+                flag = true,
+                name = "room",
+                list = ?[1, 2],
+                "hello {}",
+                1
+            );
+            tracing::debug!(target: "hyper::proto", "quiet");
+            tracing::warn!(target: "persephone::test", password = "hunter2", "secret field");
+        });
+        log.turn_off();
+        let lines = lines(&path);
+        let events: Vec<&Value> = lines
+            .iter()
+            .filter(|line| line["target"] != "persephone::diagnostics")
+            .collect();
+        assert_eq!(events.len(), 2, "{lines:?}");
+        assert_eq!(events[0]["message"], "hello 1");
+        assert_eq!(events[0]["level"], "info");
+        assert_eq!(events[0]["fields"]["count"], 3);
+        assert_eq!(events[0]["fields"]["offset"], -2);
+        assert_eq!(events[0]["fields"]["flag"], true);
+        assert_eq!(events[0]["fields"]["name"], "room");
+        assert_eq!(events[0]["fields"]["list"], "[1, 2]");
+        assert_eq!(events[1]["fields"]["password"], redact::REDACTED);
+        assert!(!fs::read_to_string(&path).unwrap().contains("hunter2"));
+    }
+
+    static RECORDS_LOG: OnceLock<Log> = OnceLock::new();
+    fn records_log() -> &'static Log {
+        RECORDS_LOG.get_or_init(Log::default)
+    }
+
+    /// GIVEN the logger on its own log WHEN it is off, then on THEN nothing
+    /// is kept while off, and on keeps a library's `debug` but not a quiet
+    /// target's `debug` or any `trace`.
+    #[test]
+    fn given_log_records_then_the_wanted_ones_become_lines() {
+        use log::Log as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let logger = Logger { log: records_log };
+        let send = |level: log::Level, target: &str, text: &str| {
+            logger.log(
+                &log::Record::builder()
+                    .level(level)
+                    .target(target)
+                    .args(format_args!("{text}"))
+                    .build(),
+            );
+        };
+        send(log::Level::Error, "livekit", "while off");
+        records_log().turn_on(&path).unwrap();
+        send(log::Level::Debug, "libwebrtc", "ice candidate");
+        send(log::Level::Debug, "rustls", "quiet");
+        send(log::Level::Trace, "livekit", "trace");
+        logger.flush();
+        records_log().turn_off();
+        let messages: Vec<String> = lines(&path)
+            .iter()
+            .map(|line| line["message"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(
+            messages,
+            ["diagnostic log on", "ice candidate", "diagnostic log off"]
+        );
     }
 
     /// GIVEN an old log WHEN erased THEN it is gone; GIVEN none THEN nothing

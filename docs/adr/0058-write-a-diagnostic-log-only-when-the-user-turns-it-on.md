@@ -93,7 +93,8 @@ can apply one redaction rule, one size limit and one deletion rule.
 * The file is opened for append, without following links, and on Unix with
   mode `0600`. The directory is created with mode `0700` on Unix.
 * The file is at most 256 MiB. At the limit the core writes one
-  `log_full` record and stops writing until the next start.
+  `log_full` record and stops writing until the next start. The switch stays
+  on; `diagnostics_status` reports `full`, and Settings says so.
 
 ### Records
 
@@ -108,7 +109,10 @@ Each line has `ts` (Unix milliseconds), `seq` (a counter for this run),
   kind, room ID, event ID, type, sender, state key, server time and content
   size. For an encrypted event that was decrypted, also the decrypted type.
   The content is never written (owner's choice). Message text, media
-  information, frame keys and room keys are content.
+  information, frame keys and room keys are content. This covers the core's
+  own event records only: a library's own `tracing` or `log` text is
+  filtered for credentials, not for content. `PRIVACY.md`, Settings and the
+  warning say so.
 * Every request from the UI: the command name, the outcome or error code and
   the duration. Never the arguments.
 * The UI host's `log` records: its own at `debug`, other crates at `info`.

@@ -6,12 +6,12 @@
   // it on shows the core's own warning, outside this page, and the user can
   // refuse there. The core writes the file; the page only shows where it is.
   let on = $state(false);
+  let full = $state(false);
   let available = $state(false);
   let path = $state<string | null>(null);
   let loaded = $state(false);
   let busy = $state(false);
   let failure = $state<string | null>(null);
-  let turnedOff = $state(false);
 
   const failures: Record<string, string> = {
     limit_exceeded: 'The diagnostic log warning is already open.',
@@ -23,6 +23,7 @@
     try {
       const status = await diagnosticsStatus();
       on = status.on;
+      full = status.full;
       available = status.available;
       path = status.path;
       loaded = true;
@@ -43,7 +44,8 @@
     failure = null;
     try {
       on = await setDiagnostics(value);
-      if (!value) turnedOff = true;
+      // The core's reply names no file; read it again.
+      await load();
     } catch (reason) {
       failure = failures[String(reason)] ?? 'The diagnostic log could not be changed.';
     } finally {
@@ -56,9 +58,10 @@
   <p class="note">
     For finding faults. While it is on, Persephone writes what it does to a file on this computer:
     server, room, user and device names and IDs, the type and time of each event, call and
-    connection steps, and errors. It never writes message text, and it is made to never write
-    passwords, access tokens or keys, but no filter can be complete. Share the file only with
-    someone you trust. It is off each time Persephone starts.
+    connection steps, and errors. Its own records of events hold no message text, but the libraries
+    it uses can add their own text. It is made to never write passwords, access tokens or keys, but
+    no filter can be complete. Read the file before you share it, and share it only with someone you
+    trust. It is off each time Persephone starts.
   </p>
   {#if loaded && !available}
     <p class="note">Not available: this start has no profile folder for the file.</p>
@@ -75,10 +78,16 @@
       {/if}
     </div>
   {/if}
-  {#if path && (on || turnedOff)}
+  <!-- From the core's state, not from this panel's clicks: the file of this
+       run stays until the next start, also after the panel was closed. -->
+  {#if path}
     <p class="note">File: <span class="mono diagnostics-path">{path}</span></p>
-  {/if}
-  {#if on || turnedOff}
+    {#if full}
+      <p role="status" class="note">
+        The file reached its size limit (256 MiB). Nothing more is written until Persephone next
+        starts.
+      </p>
+    {/if}
     <p class="note">
       {on ? 'On.' : 'Off. The file keeps what was written.'} When Persephone next starts, it overwrites
       the file and deletes it. On SSDs and some file systems, overwriting cannot guarantee that the old

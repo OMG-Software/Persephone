@@ -257,11 +257,13 @@ full path.
 
 The log holds what the app and its libraries report: your user ID, other
 users' IDs, room IDs, server names, device IDs, network addresses, and the
-type, sender, time and size of each Matrix event. It does not hold message
-text, media or other event content. The app never writes passwords, access
-tokens, call tokens or keys to it on purpose, and it filters such values out
-of library text. A filter cannot be complete, so read the file before you send
-it to anyone.
+type, sender, time and size of each Matrix event. The app's own records of
+events never hold message text, media or other event content. The libraries
+the app uses can put other text in their own records, and the app does not
+remove message text from that text. The app never writes passwords, access
+tokens, call tokens or keys to the log on purpose, and it filters such values
+out of library text. A filter cannot be complete, so read the file before you
+send it to anyone.
 
 When you turn the log off, the file stays, so you can send it. The next time
 the app starts, it writes random bytes over the file and then deletes it. On

@@ -1171,13 +1171,16 @@ pub struct ProxySetting {
 }
 
 /// Reply of `diagnostics_status` (ADR-0058): whether the diagnostic log is
-/// on, whether this run can write one (a profile with a folder; not
-/// `--demo`), and the log file's full path once it was on in this run. The
-/// file stays until the next start, also after the log is turned off.
+/// on, whether its file reached the size limit (it then writes nothing more
+/// until the next start), whether this run can write one (a profile with a
+/// folder; not `--demo`), and the log file's full path once it was on in
+/// this run. The file stays until the next start, also after the log is
+/// turned off.
 #[derive(Clone, Debug, Deserialize, Serialize, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DiagnosticsStatus {
     pub on: bool,
+    pub full: bool,
     pub available: bool,
     pub path: Option<String>,
 }

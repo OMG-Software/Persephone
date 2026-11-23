@@ -133,13 +133,17 @@ pub fn wanted(target: &str, level: log::Level) -> bool {
         }
 }
 
-struct Logger;
+/// The `log` logger; it pushes to `forwarder()`: the process's, or a
+/// test's own.
+struct Logger {
+    forwarder: fn() -> &'static Forwarder,
+}
 
-static LOGGER: Logger = Logger;
+static LOGGER: Logger = Logger { forwarder: global };
 
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        global().is_on() && wanted(metadata.target(), metadata.level())
+        (self.forwarder)().is_on() && wanted(metadata.target(), metadata.level())
     }
 
     fn log(&self, record: &log::Record<'_>) {
@@ -152,7 +156,7 @@ impl log::Log for Logger {
             log::Level::Info => RecordLevel::Info,
             log::Level::Debug | log::Level::Trace => RecordLevel::Debug,
         };
-        global().push(level, record.target(), &record.args().to_string());
+        (self.forwarder)().push(level, record.target(), &record.args().to_string());
     }
 
     fn flush(&self) {}
@@ -186,6 +190,53 @@ pub fn install(core: CoreLink) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static FORWARDER: std::sync::OnceLock<Forwarder> = std::sync::OnceLock::new();
+    fn forwarder() -> &'static Forwarder {
+        FORWARDER.get_or_init(Forwarder::default)
+    }
+
+    /// GIVEN the logger on its own forwarder WHEN records arrive off, then on
+    /// THEN nothing waits while off, and on keeps this crate's `debug`, other
+    /// crates' `info` and maps `trace` to nothing.
+    #[test]
+    fn given_log_records_then_the_wanted_ones_wait() {
+        use log::Log as _;
+        let logger = Logger { forwarder };
+        let send = |level: log::Level, target: &str, text: &str| {
+            logger.log(
+                &log::Record::builder()
+                    .level(level)
+                    .target(target)
+                    .args(format_args!("{text}"))
+                    .build(),
+            );
+        };
+        send(log::Level::Error, "persephone_desktop", "while off");
+        forwarder().set_on(true);
+        send(
+            log::Level::Debug,
+            "persephone_desktop::core_link",
+            "relayed",
+        );
+        send(log::Level::Debug, "tao", "busy");
+        send(log::Level::Warn, "wry", "webview warning");
+        send(log::Level::Trace, "persephone_desktop", "trace");
+        logger.flush();
+        let batch = forwarder().take_batch(Duration::ZERO);
+        forwarder().set_on(false);
+        let seen: Vec<(RecordLevel, &str)> = batch
+            .iter()
+            .map(|record| (record.level, record.message.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (RecordLevel::Debug, "relayed"),
+                (RecordLevel::Warn, "webview warning"),
+            ]
+        );
+    }
 
     /// GIVEN the switch off WHEN records arrive THEN none waits; GIVEN on
     /// THEN they leave in batches of at most the protocol limit, each
