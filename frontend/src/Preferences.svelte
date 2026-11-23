@@ -16,7 +16,7 @@
     type SettingsPatch
   } from './preferences';
   import { DEFAULT_THEME, THEMES, themeOf } from './themes.ts';
-  import { PRESENCE_CHOICES, presenceOf } from './presence.ts';
+  import { PRESENCE_CHOICES, PRESENCE_REFUSED, presenceOf } from './presence.ts';
 
   // This account's preferences. The settings are kept in its encrypted
   // profile through the caller; the notification level is the account's
@@ -26,6 +26,7 @@
     failure,
     mac,
     profilePassphrase,
+    presenceRefused = false,
     onchange
   }: {
     settings: AccountSettings;
@@ -34,6 +35,9 @@
     // The idle lock and the lock shortcut exist only while the profile has a
     // passphrase (ADR-0050). The saved idle time stays as it is.
     profilePassphrase: boolean;
+    // The homeserver refused the chosen presence, so it is not shared until
+    // the setting changes (issue 86).
+    presenceRefused?: boolean;
     // Only the settings a control changes, down to one timeline switch; the
     // caller lays them over the stored ones.
     onchange: (patch: SettingsPatch) => void;
@@ -302,6 +306,11 @@
         <option value={choice.value}>{choice.label}</option>
       {/each}
     </select>
+    {#if presenceRefused && settings.sharePresence}
+      <p class="note presence-refused" role="status">
+        {PRESENCE_REFUSED} Change the setting to try again.
+      </p>
+    {/if}
     <p class="note">
       On by default: people who share a room with you can see whether you are online. Persephone
       changes your presence at most once a second. When sharing is off, Persephone stops setting

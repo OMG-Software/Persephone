@@ -16,6 +16,11 @@ the member panel: green online, yellow away, grey offline. Asked what a red
 "unavailable" state should be, the owner chose to keep the three Matrix
 states only.
 
+On 23 November 2026 the owner asked for the open presence issues to be
+fixed. One of them (issue 86) asks to tell the user when the homeserver
+refuses the account's presence, which adds a status flag, an event and a
+fixed hint to the page.
+
 Number 0056 is taken by "Get call tokens from the homeserver when it issues
 them", proposed in an open change (pull request 83) that is not merged yet.
 
@@ -99,6 +104,15 @@ alive on Synapse without a separate timer.
   the writer. "Appear offline" is sent
   by its `PUT` alone, also when a session starts. Turning sharing off sends
   nothing more.
+* A refusal is reported to the page as a flag only:
+  `AccountStatus.presenceRefused` in `app_status`, true while signed in and
+  the writer holds a refusal. When a refusal starts or a changed setting
+  ends it, the core sends one content-free `account_changed` event; the page
+  reads `app_status` again and takes only that flag, clearing nothing.
+  Preferences → Privacy then shows a fixed hint under "Your presence", and
+  the account footer shows it under its presence menu, while sharing is on.
+  The homeserver's error text is untrusted and never crosses. A rate limit
+  is not a refusal.
 * `presence::Book` keeps the presence of at most 32 direct-message contacts.
   Classic sync fills it from `m.presence` events, and from the SDK's store
   for a contact first seen after its event arrived. With Sliding Sync, the sync
@@ -164,6 +178,10 @@ alive on Synapse without a separate timer.
   members again each minute, from the local stores. A panel of 100 members is complete
   after about 25 rounds, about 2 minutes; until then some members show no
   dot.
+* The refusal hint says only that the homeserver does not accept the
+  presence; it cannot say why, as the reason is the server's untrusted text.
+  It stays until the setting changes, also if the homeserver would accept
+  the same choice later.
 * Matrix has no "busy" state. The owner kept the three spec states, so no
   red state is shown or offered.
 * Tested with unit, protocol, IPC and frontend tests only. No live run

@@ -1271,6 +1271,17 @@ test('GIVEN the preferences WHEN they show THEN the sizes, the level and desktop
   assert.match(menu(away), /<option value="unavailable" selected/);
   assert.doesNotMatch(menu(away), /<option value="online" selected/);
   assert.match(menu(html), /<option value="online" selected/);
+  // A refusal shows a fixed hint after the menu while sharing is on, and
+  // none otherwise (issue 86).
+  const refusal = /<p class="note presence-refused" role="status">Your homeserver does not accept your presence, so it is not shared. Change the setting to try again.<\/p>/;
+  const refused = (more) =>
+    render(Preferences, {
+      props: { settings, failure: null, mac: false, profilePassphrase: true, onchange: () => {}, presenceRefused: true, ...more }
+    }).body;
+  assert.match(refused({}), refusal);
+  assert.ok(refused({}).indexOf('presence-refused') > refused({}).indexOf('</select>'), 'after the menu');
+  assert.doesNotMatch(html, /presence-refused/);
+  assert.doesNotMatch(refused({ settings: { ...settings, sharePresence: false } }), /presence-refused/);
 
   assert.match(nameless, /says only that a message arrived: no names, no message/);
   assert.match(html, /Show who wrote and in which room/);

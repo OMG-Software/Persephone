@@ -206,6 +206,12 @@ impl Writer {
         }
     }
 
+    /// Whether the homeserver refused the current choice, so that it is not
+    /// shared until the setting changes. A rate limit is not a refusal.
+    pub fn refused(&self) -> bool {
+        self.refused
+    }
+
     fn may_write(&self, now: Instant) -> bool {
         self.quiet_until.is_none_or(|until| now >= until)
             && self
@@ -775,6 +781,44 @@ mod tests {
             writer.for_sync(changed + SYNC_CARRY_GAP),
             PresenceState::Online
         );
+    }
+
+    /// GIVEN a choice WHEN its `PUT` is refused THEN the writer reports the
+    /// refusal; a rate limit or a failure does not, a refusal of an older
+    /// choice while a newer one waits does not, and a changed setting or
+    /// sharing turned off ends it (issue 86).
+    #[test]
+    fn given_a_refused_put_then_it_is_reported_until_the_setting_changes() {
+        let start = Instant::now();
+        let mut writer = Writer::new(true, PresenceStatus::Online);
+        assert!(!writer.refused());
+        writer.configure(true, PresenceStatus::Unavailable);
+        let put = writer.take_put(start).unwrap();
+        writer.put_ended(put, PutEnd::Limited(RETRY_GAP_MIN), start);
+        assert!(!writer.refused(), "a rate limit is not a refusal");
+        let later = start + RETRY_GAP_MIN;
+        let put = writer.take_put(later).unwrap();
+        writer.put_ended(put, PutEnd::Failed, later);
+        assert!(!writer.refused(), "a failure is not a refusal");
+        // The retry waits longer after each failure.
+        let later = later + RETRY_GAP_MAX;
+        let put = writer.take_put(later).unwrap();
+        writer.put_ended(put, PutEnd::Refused, later);
+        assert!(writer.refused());
+
+        // A new choice ends it, and a refusal of the older one, ending after
+        // the new choice was made, does not bring it back.
+        writer.configure(true, PresenceStatus::Online);
+        assert!(!writer.refused());
+        writer.put_ended(PresenceState::Unavailable, PutEnd::Refused, later);
+        assert!(!writer.refused(), "an older choice's refusal");
+
+        let later = later + MIN_WRITE_GAP;
+        let put = writer.take_put(later).unwrap();
+        writer.put_ended(put, PutEnd::Refused, later);
+        assert!(writer.refused());
+        writer.configure(false, PresenceStatus::Online);
+        assert!(!writer.refused(), "sharing turned off");
     }
 
     /// GIVEN error answers to a `PUT` WHEN they are read THEN only a client

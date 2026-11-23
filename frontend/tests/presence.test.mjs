@@ -53,3 +53,12 @@ test('GIVEN the presence menu WHEN a status is chosen THEN it is saved with shar
   const shared = presenceMenu({ sharePresence: true, presence: 'offline' }, () => {});
   assert.deepEqual(shared.map((item) => item.checked), [false, false, true, false]);
 });
+
+test('GIVEN a failed save or a refused presence WHEN the footer shows a notice THEN the failure comes first, the refusal is fixed text, and neither shows nothing', async () => {
+  const { PRESENCE_REFUSED, presenceNotice } = await import('../src/presence.ts');
+  assert.equal(presenceNotice(null, false), null);
+  assert.equal(presenceNotice(null, true), PRESENCE_REFUSED);
+  assert.equal(presenceNotice('The setting could not be saved.', true), 'The setting could not be saved.');
+  assert.equal(presenceNotice('The setting could not be saved.', false), 'The setting could not be saved.');
+  assert.doesNotMatch(PRESENCE_REFUSED, /[<>]/, 'plain text');
+});
