@@ -1440,7 +1440,7 @@ test('GIVEN other events with hostile types WHEN the timeline shows THEN each li
     other('$verify', 'verification_request', 'm.key.verification.request'),
     other('$call', 'call_started', 'm.call.invite'),
     other('$poll', 'poll_started', 'm.poll.start'),
-    other('$custom', 'event', '<img src=x onerror=alert(1)>‮'),
+    other('$custom', 'event', '<img src=x onerror=alert(1)>\u202E'),
     other('$state', 'state', 'org.example.setting'),
     other('$message', 'message', 'org.example.msg')
   ];
@@ -1449,7 +1449,7 @@ test('GIVEN other events with hostile types WHEN the timeline shows THEN each li
   assert.match(html, /<bdi>@user:matrix\.invalid<\/bdi> sent a verification request/);
   assert.match(html, /<bdi>@user:matrix\.invalid<\/bdi> started a call/);
   assert.match(html, /<bdi>@user:matrix\.invalid<\/bdi> started a poll/);
-  assert.match(html, / sent an event of type <bdi>&lt;img src=x onerror=alert\(1\)>‮<\/bdi>/);
+  assert.match(html, / sent an event of type <bdi>&lt;img src=x onerror=alert\(1\)>\u202E<\/bdi>/);
   assert.match(html, / changed room state of type <bdi>org\.example\.setting<\/bdi>/);
   assert.match(html, / sent a message of type <bdi>org\.example\.msg<\/bdi>/);
   assert.doesNotMatch(html, /<img/);

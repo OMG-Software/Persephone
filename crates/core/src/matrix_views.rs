@@ -320,7 +320,18 @@ fn state_kind(kind: &str, content: Option<&serde_json::Value>) -> OtherEvent {
         "im.vector.modular.widgets" | "m.widget" | "io.element.widgets.layout" => {
             OtherEvent::Widget
         }
-        "m.room.third_party_invite" => OtherEvent::ThirdPartyInvite,
+        // A pending invite is revoked, or spent, by sending the event again
+        // with empty content: only one that still names an invite is one.
+        "m.room.third_party_invite" => {
+            if content
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|content| !content.is_empty())
+            {
+                OtherEvent::ThirdPartyInvite
+            } else {
+                OtherEvent::State
+            }
+        }
         _ => OtherEvent::State,
     }
 }
@@ -1733,6 +1744,12 @@ mod tests {
                 "m.room.third_party_invite",
                 serde_json::json!({ "display_name": "a…" }),
                 OtherEvent::ThirdPartyInvite,
+            ),
+            // A revoked invite: the same event, emptied.
+            (
+                "m.room.third_party_invite",
+                serde_json::json!({}),
+                OtherEvent::State,
             ),
             ("m.beacon_info", serde_json::json!({}), OtherEvent::Location),
             (
