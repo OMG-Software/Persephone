@@ -64,15 +64,16 @@ fn serde_rejects_unknown_fields_and_variants() {
     }
 
     // GIVEN an other event WHEN read THEN a known kind with its type and
-    // state flag reads, and an unknown kind, a missing type or state flag,
-    // an extra field or the removed `unsupported` notice is refused.
-    let other = r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"verification_request","event_type":"m.key.verification.request","state":false}"#;
+    // flags reads, and an unknown kind, a missing type or flag, an extra
+    // field or the removed `unsupported` notice is refused.
+    let other = r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"verification_request","event_type":"m.key.verification.request","state":false,"deleted":false}"#;
     assert!(serde_json::from_str::<persephone_contracts::TimelineItem>(other).is_ok());
     for invalid in [
-        r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"teleport","event_type":"x","state":false}"#,
+        r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"teleport","event_type":"x","state":false,"deleted":false}"#,
         r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"event"}"#,
-        r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"event","event_type":"x","state":false,"content":{}}"#,
+        r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"event","event_type":"x","state":false,"deleted":false,"content":{}}"#,
         r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"event","event_type":"x"}"#,
+        r#"{"kind":"other","event_id":"$e","sender":"@a:s","origin_server_ts":null,"event":"event","event_type":"x","state":false}"#,
         r#"{"kind":"notice","event_id":"$e","sender":"@a:s","origin_server_ts":null,"notice":"unsupported"}"#,
     ] {
         assert!(

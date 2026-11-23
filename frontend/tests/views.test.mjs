@@ -1434,7 +1434,7 @@ test('GIVEN a kind of room change switched off WHEN the timeline shows THEN its 
 
 test('GIVEN other events with hostile types WHEN the timeline shows THEN each line is fixed text or its type, isolated and inert', () => {
   const other = (id, event, type) => ({
-    kind: 'other', event_id: id, sender: '@user:matrix.invalid', origin_server_ts: null, event, event_type: type, state: event === 'state'
+    kind: 'other', event_id: id, sender: '@user:matrix.invalid', origin_server_ts: null, event, event_type: type, state: event === 'state', deleted: false
   });
   const items = [
     other('$verify', 'verification_request', 'm.key.verification.request'),
@@ -1457,6 +1457,15 @@ test('GIVEN other events with hostile types WHEN the timeline shows THEN each li
   // GIVEN verification, polls and deleted messages switched off THEN only
   // their lines go.
   const deleted = { kind: 'notice', event_id: '$gone', sender: '@b:s', notice: 'deleted', origin_server_ts: null };
+  // A deleted call keeps its kind: it reads as deleted, and the calls switch
+  // still applies to it.
+  const deletedCall = { ...other('$deletedCall', 'call_ended', 'm.call.hangup'), deleted: true };
+  const withDeleted = render(Timeline, { props: { ...props, items: [deletedCall] } }).body.replace(/<!--.*?-->/g, '');
+  assert.match(withDeleted, /<bdi>@user:matrix\.invalid<\/bdi>: Message deleted\./);
+  assert.doesNotMatch(withDeleted, /ended a call/);
+  const callsOff = Object.fromEntries(ALL_KEYS.map((key) => [key, key !== 'calls']));
+  const noCalls = render(Timeline, { props: { ...props, items: [deletedCall], events: callsOff } }).body;
+  assert.doesNotMatch(noCalls, /data-event-id="\$deletedCall"/);
   const off = new Set(['verification', 'polls', 'deletedMessages']);
   const events = Object.fromEntries(ALL_KEYS.map((key) => [key, !off.has(key)]));
   const some = render(Timeline, {

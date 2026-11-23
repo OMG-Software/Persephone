@@ -106,6 +106,7 @@ const unknownOtherEvent: TimelineItem = {
   event: "teleport",
   event_type: "x",
   state: false,
+  deleted: false,
 };
 
 const bigTime: TimelineItem = {

@@ -230,20 +230,16 @@ fn redacted(event: &TimelineEvent) -> bool {
         .is_some_and(|unsigned| unsigned.get("redacted_because").is_some())
 }
 
-/// Whether the event is a message (plain, encrypted or a sticker) that was
-/// deleted.
+/// Whether the event is a message, plain or encrypted, that was deleted. A
+/// deleted sticker, poll or other message-like event keeps its kind
+/// (`other_item`).
 fn deleted_message(event: &TimelineEvent) -> bool {
     let is_message = event
         .raw()
         .get_field::<String>("type")
         .ok()
         .flatten()
-        .is_some_and(|kind| {
-            matches!(
-                kind.as_str(),
-                "m.room.message" | "m.room.encrypted" | "m.sticker"
-            )
-        });
+        .is_some_and(|kind| matches!(kind.as_str(), "m.room.message" | "m.room.encrypted"));
     is_message && !is_state(event) && redacted(event)
 }
 
@@ -320,10 +316,11 @@ fn state_kind(kind: &str, content: Option<&serde_json::Value>) -> OtherEvent {
 /// An event with no other form, as an `other` item: its kind and its type,
 /// read from the raw event so that a type this build cannot parse still
 /// shows. A reaction or deletion that could not be read stays out: neither
-/// is a line of its own. A deleted message-like event is a `deleted` notice,
-/// and a deleted state event is generic `state`: its remaining content says
-/// nothing, so it is not read for a kind (an emptied call member event is no
-/// proof that its sender left the call).
+/// is a line of its own. A deleted message-like event keeps its kind, from
+/// its type, and is marked `deleted`, so the page applies both its kind's
+/// switch and the deleted messages switch. A deleted state event is generic
+/// `state`: its remaining content says nothing, so it is not read for a kind
+/// (an emptied call member event is no proof that its sender left the call).
 fn other_item(
     event: &TimelineEvent,
     event_id: String,
@@ -336,14 +333,7 @@ fn other_item(
     if !state && matches!(kind.as_str(), "m.reaction" | "m.room.redaction") {
         return None;
     }
-    if !state && redacted(event) {
-        return Some(TimelineItem::Notice {
-            event_id,
-            sender,
-            notice: NoticeKind::Deleted,
-            origin_server_ts,
-        });
-    }
+    let deleted = !state && redacted(event);
     let content = raw.get_field::<serde_json::Value>("content").ok().flatten();
     let (event_kind, event_type) = if state && redacted(event) {
         (OtherEvent::State, kind.as_str())
@@ -369,6 +359,7 @@ fn other_item(
         event: event_kind,
         event_type: project_name(event_type),
         state,
+        deleted,
     })
 }
 
@@ -537,6 +528,7 @@ fn other_message(
         event,
         event_type: project_name(msgtype.msgtype()),
         state: false,
+        deleted: false,
     }
 }
 
@@ -1684,28 +1676,33 @@ mod tests {
     }
 
     /// GIVEN deleted events that are not messages WHEN projected THEN a
-    /// message-like one is a `deleted` notice, a state one is an `other`
-    /// state item, and an unreadable reaction or deletion stays out.
+    /// message-like one keeps its kind and is marked deleted, a state one is
+    /// an `other` state item, and an unreadable reaction or deletion stays
+    /// out.
     #[test]
     fn given_deleted_or_unreadable_other_events_then_they_show_as_deleted_or_not_at_all() {
         let unsigned = serde_json::json!({ "redacted_because": {
             "type": "m.room.redaction", "sender": "@mod:example.org",
             "event_id": "$why", "origin_server_ts": 2, "content": {}
         }});
-        let poll = project(&raw_event(serde_json::json!({
-            "type": "m.poll.start", "event_id": "$p", "sender": "@alice:example.org",
-            "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
-        })));
-        assert!(
-            matches!(
-                poll,
-                Some(TimelineItem::Notice {
-                    notice: NoticeKind::Deleted,
-                    ..
-                })
-            ),
-            "{poll:?}"
-        );
+        for (kind, expected) in [
+            ("m.poll.start", OtherEvent::PollStarted),
+            ("m.sticker", OtherEvent::Sticker),
+            ("m.call.invite", OtherEvent::CallStarted),
+        ] {
+            let item = project(&raw_event(serde_json::json!({
+                "type": kind, "event_id": "$p", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+            })));
+            assert!(
+                matches!(
+                    &item,
+                    Some(TimelineItem::Other { event, event_type, state: false, deleted: true, .. })
+                        if *event == expected && event_type == kind
+                ),
+                "{kind}: {item:?}"
+            );
+        }
         // A deleted state event's emptied content says nothing: an emptied
         // call member event is no proof that its sender left the call.
         for kind in ["m.widget", "m.call.member", "m.room.name"] {

@@ -327,6 +327,16 @@
                   <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
                 {/if}
               </p>
+            {:else if item.kind === 'other' && item.deleted}
+              {@const date = toDate(item.origin_server_ts)}
+              <p class="notice other-event">
+                <span
+                  ><PersonName userId={item.sender} name={shownName(item.sender, names)} />: {noticeText.deleted}</span
+                >
+                {#if date}
+                  <time datetime={date.toISOString()} title={fullTime(date)}>{clockTime(date)}</time>
+                {/if}
+              </p>
             {:else if item.kind === 'other'}
               {@const date = toDate(item.origin_server_ts)}
               <p class="notice state-change other-event">

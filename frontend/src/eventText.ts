@@ -105,7 +105,11 @@ export function itemShown(item: ShownItem, events: TimelineEvents): boolean {
     case 'state':
       return changeShown(item.change, events);
     case 'other':
-      return events[otherSwitch(item.event)] !== false;
+      // A deleted one shows only while its kind and deleted messages show.
+      return (
+        events[otherSwitch(item.event)] !== false &&
+        (!item.deleted || events.deletedMessages !== false)
+      );
     case 'notice':
       return item.notice !== 'deleted' || events.deletedMessages !== false;
     default:

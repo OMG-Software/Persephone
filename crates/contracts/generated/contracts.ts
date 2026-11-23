@@ -770,7 +770,13 @@ origin_server_ts: number | null, event: OtherEvent, event_type: string,
  * Whether it is a state event. A deletion of a state event does not
  * undo the change, so the page keeps its line.
  */
-state: boolean, };
+state: boolean, 
+/**
+ * Whether this message-like event was deleted. The page shows it as
+ * deleted, and only while both its kind's switch and the deleted
+ * messages switch are on. Always false for a state event.
+ */
+deleted: boolean, };
 
 export type SenderName = { userId: string, 
 /**
@@ -862,7 +868,8 @@ export const timelinePageFixture = {
       "origin_server_ts": 1767258120000,
       "event": "event",
       "event_type": "org.example <b>custom</b>",
-      "state": false
+      "state": false,
+      "deleted": false
     },
     {
       "kind": "gap",

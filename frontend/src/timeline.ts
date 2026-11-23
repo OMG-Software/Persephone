@@ -229,6 +229,11 @@ export function applyRelations(items: TimelineItem[], ownUserId: string | null =
   for (const item of items) {
     if (item.kind === 'edit' || item.kind === 'redaction' || item.kind === 'reaction') continue;
     if (deletable(item) && item.kind !== 'gap' && deleted.has(item.event_id)) {
+      // An other event keeps its kind, so its own switch still applies.
+      if (item.kind === 'other') {
+        shown.push({ ...item, deleted: true });
+        continue;
+      }
       shown.push({
         kind: 'notice',
         event_id: item.event_id,

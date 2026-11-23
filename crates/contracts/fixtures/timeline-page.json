@@ -45,7 +45,8 @@
       "origin_server_ts": 1767258120000,
       "event": "event",
       "event_type": "org.example <b>custom</b>",
-      "state": false
+      "state": false,
+      "deleted": false
     },
     {
       "kind": "gap",

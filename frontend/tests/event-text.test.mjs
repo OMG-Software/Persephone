@@ -53,10 +53,17 @@ test('GIVEN each other kind WHEN its switch is read THEN it is a listed switch, 
 
 test('GIVEN switches off WHEN items are filtered THEN only those kinds go, and encryption notices always show', () => {
   const events = { ...DEFAULT_SETTINGS.timelineEvents, verification: false, deletedMessages: false, joins: false };
-  const other = (event) => ({ kind: 'other', event_id: '$o', sender: A, origin_server_ts: null, event, event_type: 't', state: false });
+  const other = (event, deleted = false) => ({ kind: 'other', event_id: '$o', sender: A, origin_server_ts: null, event, event_type: 't', state: false, deleted });
   const notice = (kind) => ({ kind: 'notice', event_id: '$n', sender: A, notice: kind, origin_server_ts: null });
   assert.equal(itemShown(other('verification_ready'), events), false);
   assert.equal(itemShown(other('call_started'), events), true);
+  // GIVEN a deleted other event THEN it shows only while both its kind and
+  // deleted messages show.
+  const on = DEFAULT_SETTINGS.timelineEvents;
+  assert.equal(itemShown(other('poll_started', true), on), true);
+  assert.equal(itemShown(other('poll_started', true), { ...on, polls: false }), false);
+  assert.equal(itemShown(other('poll_started', true), { ...on, deletedMessages: false }), false);
+  assert.equal(itemShown(other('poll_started'), { ...on, deletedMessages: false }), true);
   assert.equal(itemShown(notice('deleted'), events), false);
   for (const kind of ['undecryptable', 'withheld', 'untrusted_sender']) {
     assert.equal(itemShown(notice(kind), events), true, kind);
@@ -68,7 +75,7 @@ test('GIVEN switches off WHEN items are filtered THEN only those kinds go, and e
 });
 
 test('GIVEN deletions of other events WHEN applied THEN a message-like event shows as deleted and a state event keeps its line', () => {
-  const other = (id, event, state) => ({ kind: 'other', event_id: id, sender: A, origin_server_ts: 5, event, event_type: 't', state });
+  const other = (id, event, state) => ({ kind: 'other', event_id: id, sender: A, origin_server_ts: 5, event, event_type: 't', state, deleted: false });
   const redaction = (redacts) => ({ kind: 'redaction', event_id: `$r${redacts}`, sender: A, origin_server_ts: 6, redacts });
   // The same kind as a message (m.beacon) and as state (m.beacon_info):
   // the core's state flag decides, not the kind.
@@ -82,10 +89,16 @@ test('GIVEN deletions of other events WHEN applied THEN a message-like event sho
     redaction('$beacon'),
     redaction('$beaconInfo')
   ]);
+  // A message-like other event keeps its kind and is marked deleted; a
+  // state one keeps its line as it was.
   assert.deepEqual(
-    shown.map((item) => [item.event_id, item.kind]),
-    [['$poll', 'notice'], ['$space', 'other'], ['$beacon', 'notice'], ['$beaconInfo', 'other']]
+    shown.map((item) => [item.event_id, item.kind, item.event, item.deleted]),
+    [
+      ['$poll', 'other', 'poll_started', true],
+      ['$space', 'other', 'space_child', false],
+      ['$beacon', 'other', 'location', true],
+      ['$beaconInfo', 'other', 'location', false]
+    ]
   );
-  assert.equal(shown[0].notice, 'deleted');
   assert.deepEqual(quoteOf(shown, '$space'), { sender: A, text: 'An event that is not a message' });
 });

@@ -292,6 +292,10 @@ pub enum TimelineItem {
         /// Whether it is a state event. A deletion of a state event does not
         /// undo the change, so the page keeps its line.
         state: bool,
+        /// Whether this message-like event was deleted. The page shows it as
+        /// deleted, and only while both its kind's switch and the deleted
+        /// messages switch are on. Always false for a state event.
+        deleted: bool,
     },
 }
 
@@ -2623,6 +2627,7 @@ pub fn sample_timeline_page() -> TimelinePage {
                 event: OtherEvent::Event,
                 event_type: "org.example <b>custom</b>".into(),
                 state: false,
+                deleted: false,
             },
             TimelineItem::Gap { next_cursor: None },
         ],
