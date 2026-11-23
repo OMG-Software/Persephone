@@ -90,10 +90,10 @@ use persephone_contracts::{
     ThirdPartyModules, UnixMillis,
 };
 use persephone_core_protocol::{
-    Call, CoreMessage, ErrorCode, Event, MAX_EVENT_ID_BYTES, MAX_HOMESERVER_URL_BYTES,
-    MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS, MAX_USER_ID_BYTES, Outcome,
-    PixelReply, ReceiveError, Reply, Request, ToCore, VideoReply, call_video_within_limits,
-    receive_request, send, send_pixel_reply, send_video_reply,
+    Call, CoreMessage, ErrorCode, Event, MAX_CALL_SOUND_LEVEL, MAX_EVENT_ID_BYTES,
+    MAX_HOMESERVER_URL_BYTES, MAX_MESSAGE_BYTES, MAX_ROOM_ID_BYTES, MAX_SUBSCRIPTIONS,
+    MAX_USER_ID_BYTES, Outcome, PixelReply, ReceiveError, Reply, Request, ToCore, VideoReply,
+    call_video_within_limits, receive_request, send, send_pixel_reply, send_video_reply,
 };
 use persephone_media_protocol::{ReceivedFrame, ResourceBudgets};
 use pick::ImagePicker;
@@ -116,6 +116,10 @@ pub const REVISION: &str = env!("PERSEPHONE_REVISION");
 
 /// The shortest time between two `call_video` events: about 30 a second.
 const VIDEO_EVENT_GAP: Duration = Duration::from_millis(33);
+
+/// The shortest time between two `call_sound_level` events: about ten a
+/// second, the worker's own rate (ADR-0055).
+const SOUND_EVENT_GAP: Duration = Duration::from_millis(100);
 
 /// Longest a `lock_session` call waits for admitted work before replying
 /// `locking`; the UI may call again to resume the wait. Covers one sync round.
@@ -165,6 +169,11 @@ struct Notifications {
     video_changed: bool,
     /// When the last `call_video` event was taken.
     video_taken: Option<Instant>,
+    /// The newest call sound level not yet sent. At most one
+    /// `call_sound_level` event per [`SOUND_EVENT_GAP`] leaves the core.
+    sound_level: Option<u8>,
+    /// When the last `call_sound_level` event was taken.
+    sound_taken: Option<Instant>,
     /// The report of third-party modules changed since the last notification.
     modules_changed: bool,
     /// The diagnostic log was turned on or off since the last notification.
@@ -303,6 +312,15 @@ impl Hub {
             notifications.video_changed = true;
             self.changed.notify_all();
         }
+    }
+
+    /// Keeps `level` as the call sound level to send; a newer one replaces
+    /// it. The writer sends it no sooner than [`SOUND_EVENT_GAP`] after the
+    /// last one. Called from the call task, so it only sets a value.
+    fn sound_level_changed(&self, level: u8) {
+        let mut notifications = lock(&self.notifications);
+        notifications.sound_level = Some(level.min(MAX_CALL_SOUND_LEVEL));
+        self.changed.notify_all();
     }
 
     /// Queues events for the subscribed rooms among `rooms`, and one room-list
@@ -720,6 +738,12 @@ impl Core {
         calls.set_video_listener(Arc::new(move || {
             if let Some(hub) = tell.upgrade() {
                 hub.video_changed();
+            }
+        }));
+        let tell = Arc::downgrade(&hub);
+        calls.set_sound_listener(Arc::new(move |level| {
+            if let Some(hub) = tell.upgrade() {
+                hub.sound_level_changed(level);
             }
         }));
         Self {
@@ -3721,6 +3745,13 @@ impl Core {
                 .map(|taken| (taken + VIDEO_EVENT_GAP).saturating_duration_since(Instant::now()))
                 .filter(|wait| !wait.is_zero());
             let video_due = notifications.video_changed && video_wait.is_none();
+            // A sound level waits for its own gap the same way.
+            let sound_wait = notifications
+                .sound_level
+                .and(notifications.sound_taken)
+                .map(|taken| (taken + SOUND_EVENT_GAP).saturating_duration_since(Instant::now()))
+                .filter(|wait| !wait.is_zero());
+            let sound_due = notifications.sound_level.is_some() && sound_wait.is_none();
             let idle = notifications.pending.is_empty()
                 && !notifications.session_changed
                 && !notifications.room_list_changed
@@ -3732,11 +3763,16 @@ impl Core {
                 && !notifications.diagnostics_changed
                 && notifications.toast.is_none()
                 && !video_due
+                && !sound_due
                 && !notifications.closed;
             if !idle {
                 break;
             }
-            notifications = match video_wait {
+            let wait = match (video_wait, sound_wait) {
+                (Some(video), Some(sound)) => Some(video.min(sound)),
+                (video, sound) => video.or(sound),
+            };
+            notifications = match wait {
                 Some(wait) => {
                     self.hub
                         .changed
@@ -3764,6 +3800,19 @@ impl Core {
             notifications.video_changed = false;
             notifications.video_taken = Some(Instant::now());
             Some(Event::CallVideo {})
+        } else {
+            None
+        };
+        let sound = if notifications.sound_level.is_some()
+            && notifications
+                .sound_taken
+                .is_none_or(|taken| taken.elapsed() >= SOUND_EVENT_GAP)
+        {
+            notifications.sound_taken = Some(Instant::now());
+            notifications
+                .sound_level
+                .take()
+                .map(|level| Event::CallSoundLevel { level })
         } else {
             None
         };
@@ -3805,6 +3854,7 @@ impl Core {
                 .chain(call)
                 .chain(rings)
                 .chain(video)
+                .chain(sound)
                 .chain(modules)
                 .chain(diagnostics)
                 .chain(toast)
@@ -4406,6 +4456,40 @@ mod tests {
         SessionListener::account_ended(&**hub);
         assert!(hub.rings.live(now).is_empty());
         assert!(!hub.call_rooms.active(room, now));
+    }
+
+    /// GIVEN many sound levels before the UI reads, one over the top
+    /// WHEN the events are taken
+    /// THEN one event carries the newest level, bounded, and none stays
+    /// pending; a later level waits out the gap without holding other events.
+    #[test]
+    fn given_sound_levels_then_the_newest_is_sent_spaced() {
+        let core = Core::default();
+        for level in [10, 80, 200] {
+            core.hub.sound_level_changed(level);
+        }
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::CallSoundLevel {
+                level: MAX_CALL_SOUND_LEVEL
+            }])
+        );
+        assert!(lock(&core.hub.notifications).sound_level.is_none());
+
+        // The last level event is a day ahead, so the gap cannot pass during
+        // this step however slowly the thread runs.
+        lock(&core.hub.notifications).sound_taken =
+            Some(Instant::now() + Duration::from_secs(24 * 60 * 60));
+        core.hub.sound_level_changed(30);
+        core.hub.calls_changed();
+        assert_eq!(core.take_events(), Some(vec![Event::CallChanged {}]));
+        assert_eq!(lock(&core.hub.notifications).sound_level, Some(30));
+
+        lock(&core.hub.notifications).sound_taken = None;
+        assert_eq!(
+            core.take_events(),
+            Some(vec![Event::CallSoundLevel { level: 30 }])
+        );
     }
 
     /// GIVEN many pictures before the UI reads WHEN the events are taken THEN

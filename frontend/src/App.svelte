@@ -794,6 +794,13 @@
   let volumeDraft = $state<number | null>(null);
   // Goes up each time the core says a new video picture is waiting.
   let callVideoTicks = $state(0);
+  // The running call's sound level meter (ADR-0055): 0 to 100. A level that
+  // arrives outside an active call is dropped, and it goes back to 0 when the
+  // call ends, so a new call never starts with an old level.
+  let callSoundLevel = $state(0);
+  function takeSoundLevel(level: number) {
+    callSoundLevel = callState.phase === 'active' ? level : 0;
+  }
   let callJoinText = $state<string | null>(null);
   let cameraText = $state<string | null>(null);
   let screenText = $state<string | null>(null);
@@ -811,6 +818,7 @@
   // A camera failure is about the call that is running; it goes when that
   // call ends.
   $effect(() => {
+    if (callState.phase !== 'active') callSoundLevel = 0;
     if (callState.phase === 'ended' || callState.phase === 'idle') {
       cameraRequest += 1;
       cameraText = null;
@@ -1733,7 +1741,7 @@
     // Without the channel the page could keep showing a locked session, so it
     // loads nothing.
     try {
-      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings, refreshAccount);
+      await watchSession(reset, refreshRooms, refreshSecurity, refreshModules, () => callRefresher.request(), () => (callVideoTicks += 1), refreshRings, refreshAccount, takeSoundLevel);
     } catch {
       unavailable = true;
       return;
@@ -3147,6 +3155,7 @@
           {cameraBusy}
           {screenBusy}
           volume={volumeDraft ?? callState.volume}
+          soundLevel={callSoundLevel}
           onmute={toggleMute}
           ondeafen={toggleDeafen}
           onvolume={changeVolume}

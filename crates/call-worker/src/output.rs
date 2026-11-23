@@ -508,7 +508,12 @@ mod tests {
         diagnostics.set_on(true);
         let records = DIAGNOSTICS_PER_ROUND + 3;
         for _ in 0..records {
-            diagnostics.push(crate::diagnostics::INFO, "t", "record");
+            diagnostics.push(
+                crate::diagnostics::Source::Library,
+                crate::diagnostics::INFO,
+                "t",
+                "record",
+            );
         }
         let (output, receiver) = Output::new();
         let sink = output.pictures();

@@ -7,7 +7,9 @@
 //!
 //! Bounded: at most [`QUEUE_RECORDS`] wait, at most [`RECORDS_PER_SECOND`]
 //! are taken each second, and the rest are counted and reported as one
-//! record. Records wait apart from the control queue, and the writer takes
+//! record. `log` records take at most [`LIBRARY_QUEUE_RECORDS`] and
+//! [`LIBRARY_RECORDS_PER_SECOND`] of those, so a libwebrtc flood at a connect
+//! never drops the room event notes. Records wait apart from the control queue, and the writer takes
 //! them only after every waiting control message and a waiting picture, so
 //! they never go before one.
 //! Control characters become spaces, and each string is cut to the protocol
@@ -29,6 +31,38 @@ use crate::output::Item;
 pub const QUEUE_RECORDS: usize = 256;
 /// Records taken in one second; more are counted and dropped.
 pub const RECORDS_PER_SECOND: u32 = 200;
+/// The most `log` records (LiveKit and libwebrtc) that wait, and that are
+/// taken in one second. The rest of the queue and of each second stays for
+/// the worker's own room event notes: libwebrtc logs about a thousand ICE
+/// records at each connect, and the notes of the tracks and their frame
+/// encryption state come at the same time.
+pub const LIBRARY_QUEUE_RECORDS: usize = 192;
+pub const LIBRARY_RECORDS_PER_SECOND: u32 = 150;
+
+/// Who made a record, for the share of the limits it may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A `log` record of LiveKit or libwebrtc.
+    Library,
+    /// The worker's own note of a room event.
+    Note,
+}
+
+impl Source {
+    fn queue_limit(self) -> usize {
+        match self {
+            Self::Library => LIBRARY_QUEUE_RECORDS,
+            Self::Note => QUEUE_RECORDS,
+        }
+    }
+
+    fn second_limit(self) -> u32 {
+        match self {
+            Self::Library => LIBRARY_RECORDS_PER_SECOND,
+            Self::Note => RECORDS_PER_SECOND,
+        }
+    }
+}
 /// The levels on the wire.
 pub const ERROR: u8 = 1;
 pub const WARN: u8 = 2;
@@ -104,23 +138,26 @@ impl Diagnostics {
     /// lock for the budget and one for the queue. The worker's own code asks
     /// [`Diagnostics::admit`] before it builds a record; the tests use this.
     #[cfg(test)]
-    pub fn push(&self, level: u8, target: &str, message: &str) {
-        if self.admit() {
+    pub fn push(&self, source: Source, level: u8, target: &str, message: &str) {
+        if self.admit(source) {
             self.push_admitted(level, target, message);
         }
     }
 
-    /// Whether one more record is taken now: the log is on, the second's
-    /// budget has room (taken here) and the queue is not full. A record that
-    /// is not taken is counted. The logger asks before it formats a record,
-    /// so a flood costs a count, not the formatting.
-    pub(crate) fn admit(&self) -> bool {
+    /// Whether one more record from `source` is taken now: the log is on,
+    /// the second's budget has room for that source (taken here) and the
+    /// queue is not full for it. A record that is not taken is counted. The
+    /// logger asks before it formats a record, so a flood costs a count, not
+    /// the formatting.
+    pub(crate) fn admit(&self, source: Source) -> bool {
         if !self.is_on() {
             return false;
         }
         // Room first: a record refused for a full queue does not spend the
         // second's budget.
-        if lock(&self.queue).len() >= QUEUE_RECORDS || !self.take_budget(Instant::now()) {
+        if lock(&self.queue).len() >= source.queue_limit()
+            || !self.take_budget(Instant::now(), source.second_limit())
+        {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -157,13 +194,16 @@ impl Diagnostics {
         }
     }
 
-    fn take_budget(&self, now: Instant) -> bool {
+    /// Takes one record of the second's budget while fewer than `limit` of
+    /// all sources were taken in it. `limit` is never over
+    /// [`RECORDS_PER_SECOND`].
+    fn take_budget(&self, now: Instant, limit: u32) -> bool {
         let mut window = lock(&self.window);
         if now.duration_since(window.start) >= Duration::from_secs(1) {
             window.start = now;
             window.taken = 0;
         }
-        if window.taken >= RECORDS_PER_SECOND {
+        if window.taken >= limit.min(RECORDS_PER_SECOND) {
             return false;
         }
         window.taken += 1;
@@ -280,7 +320,7 @@ impl log::Log for Logger {
     }
 
     fn log(&self, record: &log::Record<'_>) {
-        if !self.enabled(record.metadata()) || !global().admit() {
+        if !self.enabled(record.metadata()) || !global().admit(Source::Library) {
             return;
         }
         let level = match record.level() {
@@ -354,11 +394,11 @@ mod tests {
     #[test]
     fn given_switch_then_records_follow_it() {
         let diagnostics = Diagnostics::default();
-        diagnostics.push(INFO, "livekit", "before");
+        diagnostics.push(Source::Library, INFO, "livekit", "before");
         assert!(diagnostics.take().is_none());
         diagnostics.set_on(true);
-        diagnostics.push(INFO, "livekit", "line\nbreak\t!");
-        diagnostics.push(0, "", "low level");
+        diagnostics.push(Source::Library, INFO, "livekit", "line\nbreak\t!");
+        diagnostics.push(Source::Library, 0, "", "low level");
         assert_eq!(
             message(diagnostics.take()),
             Some((INFO, "livekit".into(), "line break !".into()))
@@ -368,7 +408,7 @@ mod tests {
             Some((ERROR, "?".into(), "low level".into()))
         );
         assert!(diagnostics.take().is_none());
-        diagnostics.push(INFO, "t", "waits");
+        diagnostics.push(Source::Library, INFO, "t", "waits");
         diagnostics.set_on(false);
         diagnostics.set_on(true);
         assert!(
@@ -384,8 +424,8 @@ mod tests {
         let diagnostics = Diagnostics::default();
         diagnostics.set_on(true);
         let extra = 5;
-        for _ in 0..RECORDS_PER_SECOND + extra {
-            diagnostics.push(DEBUG, "libwebrtc", "x");
+        for _ in 0..LIBRARY_RECORDS_PER_SECOND + extra {
+            diagnostics.push(Source::Library, DEBUG, "libwebrtc", "x");
         }
         let first = message(diagnostics.take()).unwrap();
         assert_eq!(first.0, WARN);
@@ -397,7 +437,44 @@ mod tests {
         while diagnostics.take().is_some() {
             taken += 1;
         }
-        assert_eq!(taken, QUEUE_RECORDS.min(RECORDS_PER_SECOND as usize));
+        assert_eq!(taken, LIBRARY_RECORDS_PER_SECOND as usize);
+    }
+
+    /// GIVEN a libwebrtc flood that spent its share of the second WHEN room
+    /// event notes come THEN they are still taken, up to the whole budget,
+    /// and the queue keeps room for them that `log` records cannot take.
+    #[test]
+    fn given_library_flood_then_room_notes_keep_their_share() {
+        let diagnostics = Diagnostics::default();
+        diagnostics.set_on(true);
+        for _ in 0..RECORDS_PER_SECOND {
+            diagnostics.push(Source::Library, DEBUG, "libwebrtc", "ice");
+        }
+        assert!(!diagnostics.admit(Source::Library));
+        let reserved = RECORDS_PER_SECOND - LIBRARY_RECORDS_PER_SECOND;
+        for _ in 0..reserved {
+            assert!(
+                diagnostics.admit(Source::Note),
+                "the flood took the notes' share"
+            );
+        }
+        assert!(
+            !diagnostics.admit(Source::Note),
+            "the second's whole budget is the limit"
+        );
+
+        let queued = Diagnostics::default();
+        queued.set_on(true);
+        lock(&queued.queue).extend((0..LIBRARY_QUEUE_RECORDS).map(|_| FromWorker::Diagnostic {
+            level: DEBUG,
+            target: "libwebrtc".into(),
+            message: "waits".into(),
+        }));
+        assert!(
+            !queued.admit(Source::Library),
+            "the library's queue share is full"
+        );
+        assert!(queued.admit(Source::Note), "the queue keeps room for notes");
     }
 
     /// GIVEN long or multi-byte text THEN it is cut within the limit on a
@@ -430,7 +507,7 @@ mod tests {
     fn given_off_between_admit_and_push_then_the_record_is_dropped() {
         let diagnostics = Diagnostics::default();
         diagnostics.set_on(true);
-        assert!(diagnostics.admit());
+        assert!(diagnostics.admit(Source::Library));
         diagnostics.set_on(false);
         diagnostics.push_admitted(INFO, "livekit", "before off");
         diagnostics.set_on(true);
@@ -442,12 +519,12 @@ mod tests {
     #[test]
     fn given_spent_budget_then_admit_refuses_and_counts() {
         let diagnostics = Diagnostics::default();
-        assert!(!diagnostics.admit(), "off");
+        assert!(!diagnostics.admit(Source::Library), "off");
         diagnostics.set_on(true);
-        for _ in 0..RECORDS_PER_SECOND {
-            assert!(diagnostics.admit());
+        for _ in 0..LIBRARY_RECORDS_PER_SECOND {
+            assert!(diagnostics.admit(Source::Library));
         }
-        assert!(!diagnostics.admit());
+        assert!(!diagnostics.admit(Source::Library));
         assert_eq!(diagnostics.dropped.load(Ordering::Relaxed), 1);
     }
 
@@ -481,11 +558,14 @@ mod tests {
             message: "waits".into(),
         }));
         for _ in 0..RECORDS_PER_SECOND {
-            assert!(!diagnostics.admit());
+            assert!(!diagnostics.admit(Source::Library));
         }
         lock(&diagnostics.queue).clear();
-        for _ in 0..RECORDS_PER_SECOND {
-            assert!(diagnostics.admit(), "the refusals spent the budget");
+        for _ in 0..LIBRARY_RECORDS_PER_SECOND {
+            assert!(
+                diagnostics.admit(Source::Library),
+                "the refusals spent the budget"
+            );
         }
     }
 }

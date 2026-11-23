@@ -224,7 +224,12 @@ so.
   count what they drop, also a batch that the host or the core refused,
   and report the count.
 * The call worker keeps at most 256 records, sends at most 200 records each
-  second and drops the rest, with a count. A message is at most 2 KiB and a
+  second and drops the rest, with a count. LiveKit's and libwebrtc's `log`
+  records take at most 192 of the waiting places and 150 of each second's
+  records. The rest stays for the worker's own room event notes. A log of
+  23 November 2026 showed why: libwebrtc wrote about a thousand ICE records
+  at each connect, and the notes of the tracks and their frame encryption
+  state, which came at the same time, were dropped. A message is at most 2 KiB and a
   target at most 64 bytes. Each writer round sends the waiting control
   messages, then a waiting picture, then at most 8 records, so records
   never go before a control message or a picture that waits, and a

@@ -2,7 +2,7 @@
 
 The contained process that runs one call (ADR-0043). It joins one LiveKit room with frame encryption and platform audio. It speaks the bounded protocol of `crates/call-protocol` over stdin and stdout.
 
-- Treat the core's messages and the SFU as untrusted. Validate every identity before it goes back to the core. Send no free text, only closed `FailureCode` values. The one exception is `FromWorker::Diagnostic` (ADR-0058): `diagnostics.rs` sends `log` records and room event notes only while the core has sent `SetDiagnostics { on: true }`, at most 256 waiting, 200 a second and 8 per writer round after control messages and a waiting picture. Never put a token, JWT, key or frame key in a note.
+- Treat the core's messages and the SFU as untrusted. Validate every identity before it goes back to the core. Send no free text, only closed `FailureCode` values. The one exception is `FromWorker::Diagnostic` (ADR-0058): `diagnostics.rs` sends `log` records and room event notes only while the core has sent `SetDiagnostics { on: true }`, at most 256 waiting, 200 a second and 8 per writer round after control messages and a waiting picture. `log` records take at most 192 waiting and 150 a second (`Source::Library`), so a libwebrtc flood never drops the room event notes (`Source::Note`). Never put a token, JWT, key or frame key in a note.
 - Stdout is the frame channel. Write nothing else to it. Write nothing to stderr. Add no logging output other than the diagnostic records above.
 - Keep the JWT, TURN credentials and frame keys in `Zeroizing` until they go to LiveKit. Move them out with `std::mem::take`; do not copy them. Never log them.
 - Use bounded queues only. The LiveKit event receiver is unbounded inside the SDK; the worker drains it in one task.
@@ -22,6 +22,7 @@ The contained process that runs one call (ADR-0043). It joins one LiveKit room w
 - Every own track (microphone and camera) needs its frame cryptor set to the current own key index. `SetOwnKey` updates all of them. The camera sends no picture before that.
 - Never await a camera open in the event loop. `begin_camera` opens on its own thread, and the result comes back through a bounded channel to `camera_opened`. `CameraGate` allows one open at a time, drops a stale result and releases its camera. `SetOwnKey`, `SetKey` and `Leave` are served while an open waits.
 - Remote audio follows one `Playout` (deafened and volume, ADR-0055). Apply it to every subscribed remote audio track on every connection (the own room and each open room in `others`) when it changes, when another SFU's room opens, and to each new track in `TrackSubscribed`. Set the volume before enabling a track. Deafen never changes the microphone: the core sends `SetMuted` itself, before `SetDeafened(true)`.
+- The sound level meter (ADR-0055) reads `get_stats` of the subscribed remote audio tracks on the 100 ms tick, on its own task (`SoundProbe`, at most one, at most 500 ms, aborted at shutdown), never in the event loop. `mapping::sound_level` and `LevelGate` decide the number and send it only when it changes.
 - Pictures never use the control queue. `output.rs` keeps at most one waiting picture per tile (newest wins), and control messages always go out first. Pictures are RGBA in byte order R, G, B, A, at most 640x360 and 15 per second per camera tile, and at most 1280x720 and 5 per second on the screen tile (5), checked by tile index before allocation.
 
 ## Build
@@ -29,7 +30,7 @@ The contained process that runs one call (ADR-0043). It joins one LiveKit room w
 - The pinned libwebrtc must be verified first: `python tools/dev.py webrtc`. Set `LK_CUSTOM_WEBRTC` to the directory it prints for every cargo command. The build must never download libwebrtc.
 - On Windows the prebuilt libwebrtc uses the static C runtime. Build and test this package with `RUSTFLAGS=-C target-feature=+crt-static`. `tools/dev.py` does this and builds the package apart from the rest of the workspace.
 - On macOS, `build.rs` links the worker and its tests with `-ObjC`. Keep it: libwebrtc's Objective-C categories are dropped without it, and the first peer connection factory aborts. The `-ObjC` that webrtc-sys sets does not reach this package.
-- `third_party/` holds vendored LiveKit crates with small marked patches (TLS 1.3 only and no proxy variables in `livekit-net`; key ring of 256 and a remote audio volume in `libwebrtc` and `webrtc-sys`). Read each `PERSEPHONE-PATCH.md`. They are patch sources, not workspace members.
+- `third_party/` holds vendored LiveKit crates with small marked patches (TLS 1.3 only and no proxy variables in `livekit-net`; key ring of 256 and a remote audio volume in `libwebrtc` and `webrtc-sys`; no built-in echo canceller in `webrtc-sys`, so capture never waits for playout). Read each `PERSEPHONE-PATCH.md`. They are patch sources, not workspace members.
 
 ## Checks
 

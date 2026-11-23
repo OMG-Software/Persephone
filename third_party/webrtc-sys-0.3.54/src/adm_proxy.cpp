@@ -830,10 +830,14 @@ int32_t AdmProxy::PlayoutDelay(uint16_t* delayMS) const {
   });
 }
 
+// PERSEPHONE PATCH (ADR-0043): the built-in (operating system) echo
+// canceller is never offered. WebRtcVoiceEngine::ApplyOptions turns it on
+// whenever it is available, after PlatformAudio turned it off. On Windows it
+// is the Voice Capture DMO, which gives no microphone audio unless playout
+// runs first: StartRecording fails when nobody else is heard yet, and capture
+// stalls when playout stops. WebRTC's software echo canceller (AEC3) is used.
 bool AdmProxy::BuiltInAECIsAvailable() const {
-  return WithPlatformAdm<bool>(false, [](webrtc::AudioDeviceModule& adm) {
-    return adm.BuiltInAECIsAvailable();
-  });
+  return false;
 }
 
 bool AdmProxy::BuiltInAGCIsAvailable() const {
@@ -848,9 +852,15 @@ bool AdmProxy::BuiltInNSIsAvailable() const {
   });
 }
 
+// PERSEPHONE PATCH (ADR-0043): a request to turn the built-in echo canceller
+// on fails without reaching the device, so the caller keeps the software
+// one. Turning it off still reaches the device.
 int32_t AdmProxy::EnableBuiltInAEC(bool enable) {
-  return WithPlatformAdm<int32_t>(-1, [enable](webrtc::AudioDeviceModule& adm) {
-    return adm.EnableBuiltInAEC(enable);
+  if (enable) {
+    return -1;
+  }
+  return WithPlatformAdm<int32_t>(-1, [](webrtc::AudioDeviceModule& adm) {
+    return adm.EnableBuiltInAEC(false);
   });
 }
 

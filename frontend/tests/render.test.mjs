@@ -245,3 +245,22 @@ test('GIVEN a call whose ring was declined WHEN the call bar renders THEN it say
   const { body: plain } = render(CallBar, { props: { ...props, status: { ...status, ringDeclined: false } } });
   assert.doesNotMatch(plain, /Declined/);
 });
+
+test('GIVEN an active call and a sound level WHEN the call bar renders THEN a meter follows the volume slider, loud near full scale', async () => {
+  const { default: CallBar } = await vite.ssrLoadModule('/src/CallBar.svelte');
+  const status = { phase: 'active', roomId: '!r:s', muted: false, deafened: false, volume: 100, participants: [], ended: null, joinError: null, camera: 'off', screen: 'off', video: [], ringDeclined: false };
+  const props = { dismissed: false, roomName: 'Plans', names: new Map(), busy: false, cameraBusy: false, screenBusy: false, volume: 100, onmute() {}, ondeafen() {}, onvolume() {}, oncamera() {}, onscreen() {}, onleave() {}, ondismiss() {} };
+  const { body: quiet } = render(CallBar, { props: { ...props, status, soundLevel: 50 } });
+  const slider = quiet.indexOf('type="range"');
+  const meter = quiet.indexOf('role="meter"');
+  assert.ok(slider >= 0 && meter > slider, 'the meter comes right after the volume slider');
+  assert.match(quiet, /aria-label="Call sound"/);
+  assert.match(quiet, /aria-valuenow="50"/);
+  assert.match(quiet, /aria-valuetext="−30 dB"/);
+  assert.match(quiet, /scaleX\(0\.5\)/);
+  assert.doesNotMatch(quiet, /class="call-level[^"]*loud/);
+  const { body: loud } = render(CallBar, { props: { ...props, status, soundLevel: 95 } });
+  assert.match(loud, /class="call-level[^"]*loud/);
+  const { body: ended } = render(CallBar, { props: { ...props, status: { ...status, phase: 'ended', ended: 'internal' }, soundLevel: 95 } });
+  assert.doesNotMatch(ended, /role="meter"/);
+});

@@ -620,9 +620,11 @@ impl View {
     fn apply(&mut self, event: &FromWorker) -> Applied {
         match event {
             // A record goes to the diagnostic log, never to the view.
+            // A sound level goes to the level meter, never to the view.
             FromWorker::Ready { .. }
             | FromWorker::ParticipantJoined { .. }
-            | FromWorker::Diagnostic { .. } => Applied::Same,
+            | FromWorker::Diagnostic { .. }
+            | FromWorker::SoundLevel { .. } => Applied::Same,
             FromWorker::Camera { state } => self.set_camera(match state {
                 CameraState::Off => CallCamera::Off,
                 CameraState::On => CallCamera::On,
@@ -1057,6 +1059,8 @@ enum Command {
 
 /// Tells the owner of the controller that the state changed.
 type Listener = Arc<dyn Fn() + Send + Sync>;
+/// Takes the call's sound level, 0 to `MAX_SOUND_LEVEL` (ADR-0055).
+pub type SoundListener = Arc<dyn Fn(u8) + Send + Sync>;
 
 struct Inner {
     host: Arc<dyn CallHost>,
@@ -1067,6 +1071,9 @@ struct Inner {
     /// Tells the owner that a video picture arrived; see
     /// [`CallController::set_video_listener`].
     video_listener: Mutex<Option<Notifier>>,
+    /// Takes each sound level of the running call; see
+    /// [`CallController::set_sound_listener`].
+    sound_listener: Mutex<Option<SoundListener>>,
     /// The picture store of the running worker, from its start to the end of
     /// the call or join.
     video: Mutex<Option<VideoStore>>,
@@ -1183,6 +1190,7 @@ impl CallController {
                 admission: Mutex::new(admission),
                 listener: Mutex::new(None),
                 video_listener: Mutex::new(None),
+                sound_listener: Mutex::new(None),
                 video: Mutex::new(None),
                 next_id: AtomicU64::new(0),
             }),
@@ -1206,6 +1214,13 @@ impl CallController {
     /// [`CallController::video_picture`].
     pub fn set_video_listener(&self, listener: Notifier) {
         *plain(&self.inner.video_listener) = Some(listener);
+    }
+
+    /// Calls `listener` with each sound level the worker reports for the
+    /// level meter (ADR-0055), on the call task. It must not block and must
+    /// not call the controller. The level is not part of the call state.
+    pub fn set_sound_listener(&self, listener: SoundListener) {
+        *plain(&self.inner.sound_listener) = Some(listener);
     }
 
     /// The newest picture of stream `stream` on `tile` with a number above
@@ -2866,6 +2881,14 @@ impl Call {
         } = event
         {
             worker_record(*level, target, message);
+            return Ok(());
+        }
+        // The level meter follows the worker's number at once; it is not
+        // call state (ADR-0055). The reader already bounded it.
+        if let FromWorker::SoundLevel { level } = event {
+            if let Some(listener) = plain(&inner.sound_listener).clone() {
+                listener(*level);
+            }
             return Ok(());
         }
         // A camera that is not on has no capture left: its remote is used up.
@@ -5051,6 +5074,40 @@ mod tests {
             assert_eq!(call.view.apply(&record), Applied::Same);
         }
         assert_eq!(call.view.apply(&FromWorker::Connected), Applied::Changed);
+    }
+
+    /// GIVEN a sound level listener WHEN the worker reports levels THEN each
+    /// reaches the listener in order, and none changes the call state or
+    /// tells the state listener (ADR-0055).
+    #[test]
+    fn given_sound_levels_then_they_reach_the_meter_and_not_the_state() {
+        let fixture = test_call(
+            no_admission(),
+            Arc::new(Flags::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let calls = controller(FakeHost::new(true, None));
+        let changes = Arc::new(AtomicUsize::new(0));
+        let seen = changes.clone();
+        calls.set_listener(Arc::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }));
+        let levels = Arc::new(Mutex::new(Vec::new()));
+        let heard = levels.clone();
+        calls.set_sound_listener(Arc::new(move |level| plain(&heard).push(level)));
+        let inner = calls.inner.clone();
+        let mut call = fixture.call;
+        call.worker_event(&inner, &FromWorker::Connected).unwrap();
+        let before = changes.load(Ordering::SeqCst);
+        let state = call.view.state();
+        for level in [0, 55, 100] {
+            let message = FromWorker::SoundLevel { level };
+            assert_eq!(call.worker_event(&inner, &message), Ok(()));
+            assert_eq!(call.view.apply(&message), Applied::Same);
+        }
+        assert_eq!(*plain(&levels), [0, 55, 100]);
+        assert_eq!(call.view.state(), state);
+        assert_eq!(changes.load(Ordering::SeqCst), before);
     }
 
     /// GIVEN the worker already reported the camera `On` while the own tile

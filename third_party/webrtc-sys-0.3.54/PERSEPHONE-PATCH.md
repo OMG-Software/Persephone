@@ -31,5 +31,23 @@ LiveKit update.
 
 Each change is marked `PERSEPHONE PATCH (ADR-0055)`.
 
+## No built-in echo canceller (ADR-0043)
+
+- `src/adm_proxy.cpp`: `AdmProxy::BuiltInAECIsAvailable` returns `false`,
+  and `AdmProxy::EnableBuiltInAEC(true)` returns `-1` without reaching the
+  device. `EnableBuiltInAEC(false)` still reaches it.
+- Why: `WebRtcVoiceEngine::ApplyOptions` turns the built-in echo canceller
+  on whenever it is available and the track asks for echo cancellation,
+  after LiveKit's `PlatformAudio` turned it off. On Windows that is the
+  Voice Capture DMO. It gives no microphone audio unless playout runs
+  first, so `StartRecording` failed for a member who joined before anybody
+  else was heard, and capture stalled when playout stopped. With the patch
+  the voice engine keeps WebRTC's software echo canceller (AEC3).
+- No native object, thread, callback or observer is added. The lifecycle
+  check is `platform_audio_offers_no_builtin_aec` in
+  `crates/call-worker/src/native_volume_tests.rs`.
+
+Each change is marked `PERSEPHONE PATCH (ADR-0043)`.
+
 `build.rs` is unchanged. Build with `LK_CUSTOM_WEBRTC` set to the verified
 libwebrtc, so the build never downloads one.

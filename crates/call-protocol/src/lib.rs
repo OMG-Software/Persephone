@@ -12,7 +12,7 @@ use persephone_media_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const VERSION: u8 = 8;
+pub const VERSION: u8 = 9;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Longest diagnostic record target (ADR-0058).
 pub const MAX_DIAGNOSTIC_TARGET_BYTES: usize = 64;
@@ -119,6 +119,9 @@ pub fn picture_fits(tile: u8, width: u32, height: u32) -> bool {
 pub const MAX_VIDEO_ROTATION: u8 = 3;
 /// The highest playout volume, in percent: the sound as received (ADR-0055).
 pub const MAX_VOLUME_PERCENT: u8 = 100;
+/// The highest received sound level (ADR-0055): 0 dBFS. 0 is -60 dBFS or
+/// quieter, and each step is 0.6 dB.
+pub const MAX_SOUND_LEVEL: u8 = 100;
 /// The fixed length of a media-protocol frame header.
 const FRAME_HEADER_LEN: usize = 17;
 
@@ -530,6 +533,12 @@ pub enum FromWorker {
     Deafened {
         deafened: bool,
     },
+    /// The loudest remote audio now, as WebRTC measures it for playout
+    /// (after the call volume): 0 to [`MAX_SOUND_LEVEL`] (ADR-0055). Sent
+    /// only when it changes.
+    SoundLevel {
+        level: u8,
+    },
     Failed {
         code: FailureCode,
     },
@@ -629,6 +638,7 @@ const FROM_SCREEN_SHARER: u8 = 15;
 const FROM_CONNECTION: u8 = 16;
 const FROM_DEAFENED: u8 = 17;
 const FROM_DIAGNOSTIC: u8 = 18;
+const FROM_SOUND_LEVEL: u8 = 19;
 
 #[derive(Clone, Copy)]
 enum CharRule {
@@ -724,6 +734,16 @@ impl<'a> Reader<'a> {
         let percent = self.u8()?;
         if percent <= MAX_VOLUME_PERCENT {
             Ok(percent)
+        } else {
+            Err(DecodeError::InvalidValue)
+        }
+    }
+
+    /// A received sound level: 0 to [`MAX_SOUND_LEVEL`].
+    fn sound_level(&mut self) -> Result<u8, DecodeError> {
+        let level = self.u8()?;
+        if level <= MAX_SOUND_LEVEL {
+            Ok(level)
         } else {
             Err(DecodeError::InvalidValue)
         }
@@ -1143,6 +1163,10 @@ impl FromWorker {
                 out.push(FROM_DEAFENED);
                 out.push(u8::from(*deafened));
             }
+            Self::SoundLevel { level } => {
+                out.push(FROM_SOUND_LEVEL);
+                out.push(*level);
+            }
             Self::Failed { code } => {
                 out.push(FROM_FAILED);
                 out.push(*code as u8);
@@ -1240,6 +1264,9 @@ impl FromWorker {
             },
             FROM_DEAFENED => Self::Deafened {
                 deafened: reader.bool()?,
+            },
+            FROM_SOUND_LEVEL => Self::SoundLevel {
+                level: reader.sound_level()?,
             },
             FROM_FAILED => Self::Failed {
                 code: FailureCode::try_from(reader.u8()?)?,
@@ -1708,6 +1735,10 @@ mod tests {
             FromWorker::Muted { muted: false },
             FromWorker::Deafened { deafened: true },
             FromWorker::Deafened { deafened: false },
+            FromWorker::SoundLevel { level: 0 },
+            FromWorker::SoundLevel {
+                level: MAX_SOUND_LEVEL,
+            },
             FromWorker::Left,
             FromWorker::Devices {
                 recording: vec![device("{0.0.1.00000000}.{6a2c}", "Microphone (Headset)")],
@@ -1892,7 +1923,7 @@ mod tests {
             width: 0,
             height: 0,
         };
-        write_frame(&mut wire, header, &[9, 1]).unwrap();
+        write_frame(&mut wire, header, &[10, 1]).unwrap();
         let result: Result<FromWorker, _> =
             read_message(&mut Cursor::new(wire), &ResourceBudgets::default());
         assert_eq!(result, Err(ReadError::Decode(DecodeError::UnknownVersion)));
@@ -2035,7 +2066,7 @@ mod tests {
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(
-            FromWorker::decode(&[VERSION, 19]),
+            FromWorker::decode(&[VERSION, 20]),
             Err(DecodeError::UnknownTag)
         );
         assert_eq!(FromWorker::decode(&[]), Err(DecodeError::Truncated));
@@ -2651,7 +2682,7 @@ mod tests {
     /// 640x360 at 15 per second.
     #[test]
     fn given_tiles_when_limits_asked_then_screen_differs_from_camera() {
-        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 8));
+        assert_eq!((VIDEO_TILES, SCREEN_TILE, VERSION), (6, 5, 9));
         assert_eq!(MAX_SCREEN_BYTES, 3_686_400);
         assert_eq!(MAX_SCREEN_PIXELS, 921_600);
         for tile in 0..SCREEN_TILE {
@@ -3021,13 +3052,13 @@ mod tests {
         );
     }
 
-    /// GIVEN a message of the previous wire versions (6 and 7)
+    /// GIVEN a message of the previous wire versions (6 to 8)
     /// WHEN it is decoded in either direction
     /// THEN the version is refused.
     #[test]
     fn given_older_wire_versions_when_decoded_then_they_are_refused() {
-        assert_eq!(VERSION, 8);
-        for old in [6, 7] {
+        assert_eq!(VERSION, 9);
+        for old in [6, 7, 8] {
             assert_eq!(
                 ToWorker::decode(&[old, TO_LEAVE]),
                 Err(DecodeError::UnknownVersion)
@@ -3087,6 +3118,24 @@ mod tests {
         assert_eq!(volume, 65);
         *body.last_mut().expect("volume byte") = MAX_VOLUME_PERCENT + 1;
         assert_eq!(ToWorker::decode(&body), Err(DecodeError::InvalidValue));
+    }
+
+    /// GIVEN a sound level over the top, or without its byte
+    /// WHEN it is decoded
+    /// THEN it is rejected; the top level itself decodes.
+    #[test]
+    fn given_sound_level_when_decoded_then_it_is_bounded() {
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_SOUND_LEVEL, MAX_SOUND_LEVEL]),
+            Ok(FromWorker::SoundLevel {
+                level: MAX_SOUND_LEVEL
+            })
+        );
+        assert_eq!(
+            FromWorker::decode(&[VERSION, FROM_SOUND_LEVEL, MAX_SOUND_LEVEL + 1]),
+            Err(DecodeError::InvalidValue)
+        );
+        assert!(FromWorker::decode(&[VERSION, FROM_SOUND_LEVEL]).is_err());
     }
 
     /// GIVEN diagnostic records with a bad level, an empty or long target, a
