@@ -5454,6 +5454,109 @@ mod tests {
         assert!(at_once(off(11)));
     }
 
+    /// GIVEN the log on and a UI that stops reading WHEN it sends many "off"
+    /// requests through the serving loop THEN at most one drain runs while
+    /// the output is blocked, and once the UI reads again every request has
+    /// its answer: off, or refused while the drain ran.
+    #[test]
+    fn given_blocked_output_when_offs_repeat_then_one_drain_at_most() {
+        use persephone_core_protocol::{FromCore, receive_from_core};
+        use std::sync::{Condvar, Mutex};
+
+        /// Whether the output is open, and what it took.
+        type Taken = Mutex<(bool, Vec<u8>)>;
+        /// Output that takes nothing until it is opened.
+        #[derive(Clone, Default)]
+        struct Gate(Arc<(Taken, Condvar)>);
+        impl std::io::Write for Gate {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let (lock, opened) = &*self.0;
+                let mut state = lock.lock().unwrap();
+                while !state.0 {
+                    state = opened.wait(state).unwrap();
+                }
+                state.1.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// Input that gives one request at a time, 10 ms apart, so that
+        /// each request comes after the drain before it ended: a burst
+        /// would be refused while the first drain still runs.
+        struct Paced(
+            std::collections::VecDeque<Vec<u8>>,
+            std::io::Cursor<Vec<u8>>,
+        );
+        impl std::io::Read for Paced {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                loop {
+                    let read = self.1.read(buffer)?;
+                    if read > 0 {
+                        return Ok(read);
+                    }
+                    let Some(next) = self.0.pop_front() else {
+                        return Ok(0);
+                    };
+                    std::thread::sleep(Duration::from_millis(10));
+                    self.1 = std::io::Cursor::new(next);
+                }
+            }
+        }
+
+        let _global = global_log_test();
+        let dir = tempfile::tempdir().unwrap();
+        diagnostics::global()
+            .turn_on(&diagnostics::path_in(dir.path()))
+            .unwrap();
+        let core = Core::default();
+        const OFFS: u32 = 50;
+        let input = Paced(
+            (1..=OFFS)
+                .map(|id| request(id, Call::SetDiagnostics { on: false }))
+                .collect(),
+            std::io::Cursor::new(Vec::new()),
+        );
+        let gate = Gate::default();
+        let most = std::thread::scope(|scope| {
+            let served = scope.spawn(|| serve(&core, input, gate.clone()));
+            let mut most = 0;
+            // Longer than the 50 requests take to arrive.
+            let until = Instant::now() + Duration::from_millis(900);
+            while Instant::now() < until {
+                most = most.max(core.long_calls.load(Ordering::SeqCst));
+                std::thread::yield_now();
+            }
+            let (lock, opened) = &*gate.0;
+            lock.lock().unwrap().0 = true;
+            opened.notify_all();
+            assert_eq!(served.join().unwrap(), ServeEnd::UiClosed);
+            most
+        });
+        assert!(most <= 1, "{most} drains at once");
+        assert!(!diagnostics::global().is_on());
+        let output = std::mem::take(&mut gate.0.0.lock().unwrap().1);
+        let budgets = ResourceBudgets::default();
+        let mut reader = std::io::Cursor::new(output);
+        let mut answered = std::collections::BTreeSet::new();
+        while let Ok(FromCore::Message(message)) = receive_from_core(&mut reader, &budgets) {
+            if let CoreMessage::Reply(reply) = message {
+                assert!(
+                    matches!(
+                        reply.outcome,
+                        Outcome::Ok(serde_json::Value::Bool(false))
+                            | Outcome::Error(ErrorCode::LimitExceeded)
+                    ),
+                    "{reply:?}"
+                );
+                answered.insert(reply.id);
+            }
+        }
+        assert_eq!(answered, (1..=OFFS).collect());
+    }
+
     /// GIVEN requests that succeeded, failed and are still running WHEN they
     /// are noted THEN each line names the command, its request ID and its
     /// outcome code, and nothing else of the request.
