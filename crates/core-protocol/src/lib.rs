@@ -1711,7 +1711,9 @@ mod tests {
         );
         let budgets = ResourceBudgets::default();
         let mut reader = Cursor::new(wire);
-        for expected in [reply, event, session, list, security, calls, video, modules] {
+        for expected in [
+            reply, event, session, list, security, calls, video, modules, account,
+        ] {
             assert_eq!(
                 receive::<_, CoreMessage>(&mut reader, &budgets).unwrap(),
                 expected
@@ -1726,6 +1728,9 @@ mod tests {
             br#"{"event":{"room_list_changed":{"rooms":[]}}}"#,
             br#"{"event":{"security_changed":{"identity":"verified"}}}"#,
             br#"{"event":{"security_changed":{"recovery_key":"x"}}}"#,
+            // Content-free: no reason text crosses with a presence refusal.
+            br#"{"event":{"account_changed":{"error":"Presence is disabled"}}}"#,
+            br#"{"event":"account_changed"}"#,
             br#"{"event":{"call_changed":{"room_id":"!r:s"}}}"#,
             br#"{"event":{"call_changed":{"participants":[]}}}"#,
             br#"{"event":"call_changed"}"#,

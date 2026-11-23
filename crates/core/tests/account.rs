@@ -2193,9 +2193,11 @@ fn given_an_older_presence_when_the_contacts_room_is_opened_then_it_is_asked_aga
     // asked again when the room opens, too young to be asked by age alone.
     let earlier = WANTED_AGE * 2;
     assert!(earlier < LOOKUP_AGE);
-    let at = Instant::now()
-        .checked_sub(earlier)
-        .expect("the clock runs longer than two minutes");
+    // `Instant` counts from boot: just after one, it cannot go back that far.
+    let Some(at) = Instant::now().checked_sub(earlier) else {
+        eprintln!("skipped: the clock has run less than {earlier:?}");
+        return;
+    };
     let contact = UserId::parse(CONTACT).unwrap();
     core.session()
         .contacts_presence()
