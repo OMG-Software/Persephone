@@ -22,8 +22,12 @@ export const MAX_WAITING = 256;
 export const MAX_BATCH_BYTES = 96 * 1024;
 const FLUSH_MS = 1000;
 
-/** Calls whose success is too frequent to note: only failures are kept. */
-const QUIET_CALLS = new Set(['call_video_frame', 'image_band', 'diagnostic_records']);
+/**
+ * Calls whose success is too frequent to note: only failures are kept. The
+ * core keeps the same list (`QUIET_REQUESTS`); tests hold both equal to
+ * `crates/contracts/fixtures/quiet-requests.json`.
+ */
+export const QUIET_CALLS: ReadonlySet<string> = new Set(['call_video_frame', 'image_band', 'diagnostic_records']);
 
 let on = false;
 let waiting: PageRecord[] = [];

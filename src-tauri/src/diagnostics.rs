@@ -124,6 +124,7 @@ impl Forwarder {
     pub fn set_on(&self, on: bool) {
         let mut queue = lock(&self.queue);
         self.on.store(on, Ordering::SeqCst);
+        follow_switch(std::ptr::eq(self, global()), on);
         if !on {
             queue.clear();
             self.dropped.store(0, Ordering::Relaxed);
@@ -264,8 +265,9 @@ impl log::Log for Logger {
 /// Makes the forwarder the `log` logger and starts the thread that sends
 /// its batches to the core. Nothing is sent until the core turns it on.
 pub fn install(core: CoreLink) {
+    // Off until the core turns the log on (see `follow_switch`).
     if log::set_logger(&LOGGER).is_ok() {
-        log::set_max_level(log::LevelFilter::Debug);
+        log::set_max_level(log::LevelFilter::Off);
     }
     let _ = std::thread::Builder::new()
         .name("diagnostics".into())
@@ -286,6 +288,20 @@ pub fn install(core: CoreLink) {
                 std::thread::sleep(BATCH_GAP);
             }
         });
+}
+
+/// The `log` crate's level follows this process's switch: `Off` while off,
+/// so a library's `log::debug!` costs one atomic read, not a call into the
+/// logger (ADR-0058). Only the process's own instance sets it, not one a
+/// test makes.
+fn follow_switch(is_global: bool, on: bool) {
+    if is_global {
+        log::set_max_level(if on {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Off
+        });
+    }
 }
 
 #[cfg(test)]

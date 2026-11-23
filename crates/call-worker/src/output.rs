@@ -258,7 +258,16 @@ pub struct Receiver {
 /// Writes until every sender is gone and the queue is empty. Control messages
 /// go first; one picture goes out between two looks at the queue. Returns
 /// false when a write failed.
-pub fn write_loop<W: Write>(mut out: W, mut input: Receiver) -> bool {
+pub fn write_loop<W: Write>(out: W, input: Receiver) -> bool {
+    write_loop_with(out, input, crate::diagnostics::global())
+}
+
+/// [`write_loop`] with the diagnostic records of `diagnostics`.
+fn write_loop_with<W: Write>(
+    mut out: W,
+    mut input: Receiver,
+    diagnostics: &crate::diagnostics::Diagnostics,
+) -> bool {
     loop {
         let mut closed = false;
         loop {
@@ -277,12 +286,20 @@ pub fn write_loop<W: Write>(mut out: W, mut input: Receiver) -> bool {
                 }
             }
         }
-        // Diagnostic records only after every waiting control message, a
-        // few at a time, so neither control messages nor pictures wait long
-        // behind them (ADR-0058).
+        // A picture that waits goes before the records of this round.
+        let mut wrote_picture = false;
+        if let Some((tile, picture)) = input.slots.take() {
+            if write_picture(&mut out, tile, &picture).is_err() {
+                return false;
+            }
+            wrote_picture = true;
+        }
+        // Diagnostic records only after every waiting control message and
+        // picture, a few at a time, so neither waits long behind them, and
+        // a steady stream of pictures does not stop them (ADR-0058).
         let mut more_records = false;
         for taken in 1..=DIAGNOSTICS_PER_ROUND {
-            let Some(record) = crate::diagnostics::global().take() else {
+            let Some(record) = diagnostics.take() else {
                 break;
             };
             if write_message(&mut out, &record).is_err() {
@@ -291,13 +308,7 @@ pub fn write_loop<W: Write>(mut out: W, mut input: Receiver) -> bool {
             // Perhaps more wait: look again before sleeping.
             more_records = taken == DIAGNOSTICS_PER_ROUND;
         }
-        if let Some((tile, picture)) = input.slots.take() {
-            if write_picture(&mut out, tile, &picture).is_err() {
-                return false;
-            }
-            continue;
-        }
-        if more_records {
+        if wrote_picture || more_records {
             continue;
         }
         if closed {
@@ -486,6 +497,34 @@ mod tests {
         };
         assert_eq!((*tile, *rotation, *width, *height), (0, 1, 4, 2));
         assert_eq!(rgba.as_slice(), picture(4, 2, 7).as_slice());
+    }
+
+    /// GIVEN a waiting picture and more diagnostic records than one round
+    /// takes WHEN the writer runs THEN the picture goes out before every
+    /// record, and all records still go out.
+    #[test]
+    fn given_waiting_picture_and_records_then_the_picture_goes_first() {
+        let diagnostics = crate::diagnostics::Diagnostics::default();
+        diagnostics.set_on(true);
+        let records = DIAGNOSTICS_PER_ROUND + 3;
+        for _ in 0..records {
+            diagnostics.push(crate::diagnostics::INFO, "t", "record");
+        }
+        let (output, receiver) = Output::new();
+        let sink = output.pictures();
+        sink.put(0, 0, 4, 2, picture(4, 2, 7));
+        drop(sink);
+        drop(output);
+        let mut wire = Vec::new();
+        assert!(write_loop_with(&mut wire, receiver, &diagnostics));
+        let items = read_all(wire);
+        assert_eq!(items.len(), records + 1);
+        assert!(matches!(items[0], WorkerItem::Video { tile: 0, .. }));
+        assert!(
+            items[1..]
+                .iter()
+                .all(|item| matches!(item, WorkerItem::Message(FromWorker::Diagnostic { .. })))
+        );
     }
 
     /// GIVEN several pictures for one tile before the writer runs WHEN it runs
