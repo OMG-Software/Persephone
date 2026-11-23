@@ -157,8 +157,13 @@ so.
 ### Bounds
 
 * Records go into a bounded queue of 4096 lines, written by one thread. A full
-  queue drops records and counts them; the next written record reports the
-  count.
+  queue drops records and counts them, before they are redacted or built.
+  The next written line reports the count; when no line follows, the writer
+  writes the count before it stops.
+* The core itself admits at most 256 records each second from each other
+  process (UI host, page, call worker), whatever that process promises. The
+  rest are counted the same way, so a flood from one process cannot fill the
+  queue or the file.
 * The UI host and the page send at most 64 records for each call, each
   message at most 1 KiB and each target at most 64 bytes. The UI host and
   the core refuse more. The page keeps at most 256 records and sends at most

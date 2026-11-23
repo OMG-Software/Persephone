@@ -8,8 +8,10 @@
 //!   SSD or a copy-on-write file system can keep the old blocks.
 //! * Every string goes through [`redact`] before it is written.
 //! * Bounded: a queue of [`QUEUE_LINES`] lines, [`MAX_LINE_BYTES`] for each
-//!   line and [`MAX_FILE_BYTES`] for the file. A full queue drops lines and
-//!   counts them.
+//!   line and [`MAX_FILE_BYTES`] for the file, and
+//!   [`MAX_RECORDS_PER_SECOND`] from each other process. A full queue or a
+//!   rate over the limit drops records before any work is done on them, and
+//!   counts them; the next line, or the end of the file, reports the count.
 //!
 //! The core's own `tracing` events and `log` records come in through
 //! [`install`]; the other processes send theirs to the core, which calls
@@ -23,11 +25,11 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::JoinHandle,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub mod events;
@@ -45,6 +47,9 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024;
 pub const MAX_STRING_BYTES: usize = 4 * 1024;
 /// Lines waiting for the writer thread.
 pub const QUEUE_LINES: usize = 4096;
+/// Records each second from each other process (the UI host, the page and
+/// the call worker), counted in the core whatever they promise.
+pub const MAX_RECORDS_PER_SECOND: u32 = 256;
 /// The overwrite is written in pieces of this size.
 const ERASE_CHUNK: usize = 64 * 1024;
 
@@ -86,8 +91,11 @@ pub fn global() -> &'static Log {
 struct Shared {
     /// The next line's number in this run.
     seq: AtomicU64,
-    /// Lines lost to a full queue since the last written line.
+    /// Lines lost to a full queue or a rate limit since the last written
+    /// line.
     dropped: AtomicU64,
+    /// Lines sent to the writer and not yet taken by it.
+    queued: AtomicUsize,
     /// The file reached [`MAX_FILE_BYTES`] in this run.
     full: AtomicBool,
 }
@@ -102,6 +110,8 @@ pub struct Log {
     on: AtomicBool,
     shared: Arc<Shared>,
     writer: Mutex<Option<Writer>>,
+    /// Each other process's records in the current second.
+    rates: Mutex<[Window; 3]>,
     /// The file of this run, once it was turned on.
     path: Mutex<Option<PathBuf>>,
     /// The switch for processes that send their records to the core: a
@@ -115,6 +125,7 @@ impl Default for Log {
             on: AtomicBool::new(false),
             shared: Arc::default(),
             writer: Mutex::new(None),
+            rates: Mutex::default(),
             path: Mutex::new(None),
             switch: tokio::sync::watch::channel(false).0,
         }
@@ -211,16 +222,64 @@ impl Log {
         if !self.is_on() || self.is_full() {
             return;
         }
+        // Checked before the record is redacted and built, so a flood or a
+        // slow writer costs a count, not the work of a line nobody keeps.
+        if !self.admit(source) || self.shared.queued.load(Ordering::Relaxed) >= QUEUE_LINES {
+            self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let seq = self.shared.seq.fetch_add(1, Ordering::Relaxed);
         let line = line(seq, source, level, target, message, fields);
+        // Counted before it is sent, so the writer's count never goes below
+        // zero.
+        self.shared.queued.fetch_add(1, Ordering::Relaxed);
         let sent = match &*lock(&self.writer) {
             Some(writer) => writer.queue.try_send(line),
-            None => return,
+            None => Err(TrySendError::Disconnected(String::new())),
         };
-        if let Err(TrySendError::Full(_)) = sent {
-            self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+        if let Err(error) = sent {
+            self.shared.queued.fetch_sub(1, Ordering::Relaxed);
+            if let TrySendError::Full(_) = error {
+                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
+
+    /// Whether one more record from `source` fits its rate: the core's own
+    /// always does; each other process gets at most
+    /// [`MAX_RECORDS_PER_SECOND`], whatever it promises to send.
+    fn admit(&self, source: Source) -> bool {
+        let index = match source {
+            Source::Core => return true,
+            Source::Ui => 0,
+            Source::Page => 1,
+            Source::CallWorker => 2,
+        };
+        let mut rates = lock(&self.rates);
+        let window = &mut rates[index];
+        let now = Instant::now();
+        if window
+            .start
+            .is_none_or(|start| now.duration_since(start) >= Duration::from_secs(1))
+        {
+            *window = Window {
+                start: Some(now),
+                count: 0,
+            };
+        }
+        if window.count >= MAX_RECORDS_PER_SECOND {
+            return false;
+        }
+        window.count += 1;
+        true
+    }
+}
+
+/// One second of records from one process.
+#[derive(Clone, Copy, Default)]
+struct Window {
+    start: Option<Instant>,
+    count: u32,
 }
 
 /// One JSON line, without its line break.
@@ -310,27 +369,35 @@ fn write_lines(file: File, mut written: u64, lines: &Receiver<String>, shared: &
         *written += text.len() as u64 + 1;
         true
     };
+    // Writes the count of records dropped since the last line, if any.
+    let note_dropped = |out: &mut BufWriter<File>, written: &mut u64| {
+        let dropped = shared.dropped.swap(0, Ordering::Relaxed);
+        if dropped > 0 {
+            let seq = shared.seq.fetch_add(1, Ordering::Relaxed);
+            let note = line(
+                seq,
+                Source::Core,
+                Level::Warn,
+                "persephone::diagnostics",
+                "records dropped: over a limit",
+                &[("count", Value::from(dropped))],
+            );
+            put(out, &note, written);
+        }
+    };
     while let Ok(first) = lines.recv() {
         let mut next = Some(first);
         while let Some(text) = next {
-            let dropped = shared.dropped.swap(0, Ordering::Relaxed);
-            if dropped > 0 {
-                let seq = shared.seq.fetch_add(1, Ordering::Relaxed);
-                let note = line(
-                    seq,
-                    Source::Core,
-                    Level::Warn,
-                    "persephone::diagnostics",
-                    "records dropped: queue full",
-                    &[("count", Value::from(dropped))],
-                );
-                put(&mut out, &note, &mut written);
-            }
+            shared.queued.fetch_sub(1, Ordering::Relaxed);
+            note_dropped(&mut out, &mut written);
             put(&mut out, &text, &mut written);
             next = lines.try_recv().ok();
         }
         let _ = out.flush();
     }
+    // Records dropped after the last line, such as a closing line that did
+    // not fit the queue: the file still ends with their count.
+    note_dropped(&mut out, &mut written);
     let _ = out.flush();
     let _ = out.get_ref().sync_all();
 }
@@ -834,10 +901,88 @@ mod tests {
         assert!(shared.full.load(Ordering::Relaxed));
         let lines = lines(&path);
         assert_eq!(lines.len(), 3, "{lines:?}");
-        assert_eq!(lines[0]["message"], "records dropped: queue full");
+        assert_eq!(lines[0]["message"], "records dropped: over a limit");
         assert_eq!(lines[0]["fields"]["count"], 3);
         assert_eq!(lines[1]["n"], 1);
         assert_eq!(lines[2]["message"], "log_full");
+    }
+
+    /// GIVEN dropped records and no line after them WHEN the writer stops
+    /// THEN the file still ends with their count.
+    #[test]
+    fn given_drops_after_the_last_line_then_the_file_ends_with_the_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let shared = Shared::default();
+        shared.dropped.store(2, Ordering::Relaxed);
+        let (queue, lines_in) = mpsc::sync_channel::<String>(1);
+        drop(queue);
+        write_lines(File::create(&path).unwrap(), 0, &lines_in, &shared);
+        let lines = lines(&path);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["fields"]["count"], 2);
+    }
+
+    /// GIVEN another process sending faster than its rate WHEN its records
+    /// arrive THEN at most the rate is written, the rest are counted, and the
+    /// core's own records still get through.
+    #[test]
+    fn given_a_flood_from_the_page_then_its_rate_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        log.turn_on(&path).unwrap();
+        let flood = MAX_RECORDS_PER_SECOND as usize + 44;
+        for _ in 0..flood {
+            log.record(Source::Page, Level::Debug, "page::bridge", "flood", &[]);
+        }
+        log.record(Source::Core, Level::Warn, "persephone::test", "own", &[]);
+        log.turn_off();
+        let lines = lines(&path);
+        let page = lines.iter().filter(|line| line["source"] == "page").count();
+        // The window may roll over once on a slow machine.
+        assert!(
+            (MAX_RECORDS_PER_SECOND as usize..flood).contains(&page),
+            "{page}"
+        );
+        let counted: u64 = lines
+            .iter()
+            .filter(|line| line["message"] == "records dropped: over a limit")
+            .map(|line| line["fields"]["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(page + counted as usize, flood);
+        assert!(lines.iter().any(|line| line["message"] == "own"));
+    }
+
+    /// GIVEN a full writer queue WHEN a record arrives THEN it is counted,
+    /// not built, and the count is written once there is room.
+    #[test]
+    fn given_a_full_queue_then_the_record_is_only_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        log.turn_on(&path).unwrap();
+        // Wait until the writer took the "on" line, so the count stays put.
+        while log.shared.queued.load(Ordering::Relaxed) != 0 {
+            std::thread::yield_now();
+        }
+        log.shared.queued.store(QUEUE_LINES, Ordering::Relaxed);
+        log.record(Source::Core, Level::Error, "t", "skipped", &[]);
+        assert_eq!(log.shared.dropped.load(Ordering::Relaxed), 1);
+        log.shared.queued.store(0, Ordering::Relaxed);
+        log.turn_off();
+        let messages: Vec<Value> = lines(&path)
+            .into_iter()
+            .map(|line| line["message"].clone())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "diagnostic log on",
+                "records dropped: over a limit",
+                "diagnostic log off"
+            ]
+        );
     }
 
     static EVENTS_LOG: OnceLock<Log> = OnceLock::new();
