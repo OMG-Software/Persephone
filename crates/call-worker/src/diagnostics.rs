@@ -99,7 +99,9 @@ impl Diagnostics {
 
     /// Queues one record, cleaned and cut, if the log is on and the second's
     /// budget and the queue have room. It never blocks for long: one short
-    /// lock for the budget and one for the queue.
+    /// lock for the budget and one for the queue. The worker's own code asks
+    /// [`Diagnostics::admit`] before it builds a record; the tests use this.
+    #[cfg(test)]
     pub fn push(&self, level: u8, target: &str, message: &str) {
         if self.admit() {
             self.push_admitted(level, target, message);
@@ -110,7 +112,7 @@ impl Diagnostics {
     /// budget has room (taken here) and the queue is not full. A record that
     /// is not taken is counted. The logger asks before it formats a record,
     /// so a flood costs a count, not the formatting.
-    fn admit(&self) -> bool {
+    pub(crate) fn admit(&self) -> bool {
         if !self.is_on() {
             return false;
         }
@@ -122,7 +124,7 @@ impl Diagnostics {
     }
 
     /// Queues a record that [`Diagnostics::admit`] took.
-    fn push_admitted(&self, level: u8, target: &str, message: &str) {
+    pub(crate) fn push_admitted(&self, level: u8, target: &str, message: &str) {
         let mut target = clean(target, MAX_DIAGNOSTIC_TARGET_BYTES);
         if target.is_empty() {
             target.push('?');
@@ -219,7 +221,7 @@ fn mark_cut(out: &mut String, limit: usize) {
 /// with `…` when cut. The formatting stops at the limit, so a huge value is
 /// never built whole. A `Display` error of the value also ends with `…`:
 /// its text is not whole either.
-fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
+pub(crate) fn format_bounded(args: std::fmt::Arguments<'_>, limit: usize) -> String {
     struct Bounded {
         out: String,
         limit: usize,

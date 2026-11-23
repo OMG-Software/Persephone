@@ -2285,30 +2285,74 @@ async fn publish_microphone(
 
 /// One diagnostic record for a room event that matters for media, while the
 /// log is on (ADR-0058): identities, track IDs, kinds and states. Never a
-/// payload, a token, a URL or a name.
+/// payload, a token, a URL or a name. Only an event that is noted takes from
+/// the record budget, and its text is built only once it is admitted, so a
+/// flood of room events costs a count, not formatting.
 fn note_room_event(connection: u8, event: &RoomEvent) {
     let diagnostics = crate::diagnostics::global();
-    if !diagnostics.is_on() {
+    if !is_noted(event) || !diagnostics.admit() {
         return;
     }
-    let Some((level, text)) = describe_room_event(connection, event) else {
-        return;
-    };
-    diagnostics.push(level, "persephone::call_worker::room", &text);
+    if let Some((level, text)) = describe_room_event(connection, event) {
+        diagnostics.push_admitted(level, "persephone::call_worker::room", &text);
+    }
+}
+
+/// Whether [`describe_room_event`] makes a record for `event`, without
+/// building it.
+fn is_noted(event: &RoomEvent) -> bool {
+    matches!(
+        event,
+        RoomEvent::Connected { .. }
+            | RoomEvent::ConnectionStateChanged(_)
+            | RoomEvent::Reconnecting
+            | RoomEvent::Reconnected
+            | RoomEvent::Disconnected { .. }
+            | RoomEvent::ParticipantConnected(_)
+            | RoomEvent::ParticipantDisconnected(_)
+            | RoomEvent::TrackPublished { .. }
+            | RoomEvent::TrackUnpublished { .. }
+            | RoomEvent::TrackSubscribed { .. }
+            | RoomEvent::TrackUnsubscribed { .. }
+            | RoomEvent::TrackSubscriptionFailed { .. }
+            | RoomEvent::TrackMuted { .. }
+            | RoomEvent::TrackUnmuted { .. }
+            | RoomEvent::LocalTrackPublished { .. }
+            | RoomEvent::LocalTrackUnpublished { .. }
+            | RoomEvent::E2eeStateChanged { .. }
+            | RoomEvent::ParticipantEncryptionStatusChanged { .. }
+            | RoomEvent::ConnectionQualityChanged { .. }
+            | RoomEvent::TokenRefreshed { .. }
+    )
 }
 
 /// The level and text of the record for `event` on `connection`, or `None`
 /// for an event that does not matter for media. The connection comes
 /// first, so the own room's tracks and another SFU's stay apart.
 fn describe_room_event(connection: u8, event: &RoomEvent) -> Option<(u8, String)> {
-    describe_room_event_text(event)
-        .map(|(level, text)| (level, format!("connection {connection}: {text}")))
+    describe_room_event_text(event).map(|(level, text)| {
+        (
+            level,
+            bounded_text(format_args!("connection {connection}: {text}")),
+        )
+    })
+}
+
+/// Text formatted within the protocol's message limit: identities and IDs
+/// come from the SFU, so their text is never built whole.
+fn bounded_text(args: std::fmt::Arguments<'_>) -> String {
+    crate::diagnostics::format_bounded(args, persephone_call_protocol::MAX_DIAGNOSTIC_MESSAGE_BYTES)
 }
 
 fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
     use crate::diagnostics::{DEBUG, INFO, WARN};
+    macro_rules! text {
+        ($($arg:tt)*) => {
+            bounded_text(format_args!($($arg)*))
+        };
+    }
     let track = |publication: &RemoteTrackPublication| {
-        format!(
+        text!(
             "{} {:?} {:?}",
             publication.sid(),
             publication.kind(),
@@ -2320,26 +2364,26 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             participants_with_tracks,
         } => (
             INFO,
-            format!("connected, {} participants", participants_with_tracks.len()),
+            text!("connected, {} participants", participants_with_tracks.len()),
         ),
-        RoomEvent::ConnectionStateChanged(state) => (INFO, format!("connection state {state:?}")),
+        RoomEvent::ConnectionStateChanged(state) => (INFO, text!("connection state {state:?}")),
         RoomEvent::Reconnecting => (WARN, "reconnecting".to_owned()),
         RoomEvent::Reconnected => (INFO, "reconnected".to_owned()),
-        RoomEvent::Disconnected { reason } => (WARN, format!("disconnected: {reason:?}")),
+        RoomEvent::Disconnected { reason } => (WARN, text!("disconnected: {reason:?}")),
         RoomEvent::ParticipantConnected(participant) => (
             INFO,
-            format!("participant connected {}", participant.identity()),
+            text!("participant connected {}", participant.identity()),
         ),
         RoomEvent::ParticipantDisconnected(participant) => (
             INFO,
-            format!("participant disconnected {}", participant.identity()),
+            text!("participant disconnected {}", participant.identity()),
         ),
         RoomEvent::TrackPublished {
             publication,
             participant,
         } => (
             INFO,
-            format!(
+            text!(
                 "track published {} by {}",
                 track(publication),
                 participant.identity()
@@ -2350,7 +2394,7 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             participant,
         } => (
             INFO,
-            format!(
+            text!(
                 "track unpublished {} by {}",
                 track(publication),
                 participant.identity()
@@ -2362,7 +2406,7 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             ..
         } => (
             INFO,
-            format!(
+            text!(
                 "track subscribed {} from {}",
                 track(publication),
                 participant.identity()
@@ -2374,7 +2418,7 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             ..
         } => (
             INFO,
-            format!(
+            text!(
                 "track unsubscribed {} from {}",
                 track(publication),
                 participant.identity()
@@ -2386,7 +2430,7 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             track_sid,
         } => (
             WARN,
-            format!(
+            text!(
                 "track subscription failed {track_sid} from {}: {error:?}",
                 participant.identity()
             ),
@@ -2396,7 +2440,7 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             publication,
         } => (
             DEBUG,
-            format!(
+            text!(
                 "track muted {} by {}",
                 publication.sid(),
                 participant.identity()
@@ -2407,7 +2451,7 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             publication,
         } => (
             DEBUG,
-            format!(
+            text!(
                 "track unmuted {} by {}",
                 publication.sid(),
                 participant.identity()
@@ -2415,7 +2459,7 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
         ),
         RoomEvent::LocalTrackPublished { publication, .. } => (
             INFO,
-            format!(
+            text!(
                 "own track published {} {:?} {:?}",
                 publication.sid(),
                 publication.kind(),
@@ -2423,18 +2467,18 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             ),
         ),
         RoomEvent::LocalTrackUnpublished { publication, .. } => {
-            (INFO, format!("own track unpublished {}", publication.sid()))
+            (INFO, text!("own track unpublished {}", publication.sid()))
         }
         RoomEvent::E2eeStateChanged { participant, state } => (
             INFO,
-            format!("frame encryption {state:?} for {}", participant.identity()),
+            text!("frame encryption {state:?} for {}", participant.identity()),
         ),
         RoomEvent::ParticipantEncryptionStatusChanged {
             participant,
             is_encrypted,
         } => (
             INFO,
-            format!(
+            text!(
                 "participant {} encrypted: {is_encrypted}",
                 participant.identity()
             ),
@@ -2444,7 +2488,7 @@ fn describe_room_event_text(event: &RoomEvent) -> Option<(u8, String)> {
             participant,
         } => (
             DEBUG,
-            format!(
+            text!(
                 "connection quality {quality:?} for {}",
                 participant.identity()
             ),
@@ -2540,6 +2584,7 @@ mod tests {
             ),
         ];
         for (event, level, text) in cases {
+            assert!(is_noted(&event), "{text}");
             assert_eq!(
                 describe_room_event(0, &event),
                 Some((level, text.to_owned()))
@@ -2550,6 +2595,7 @@ mod tests {
         let refreshed = RoomEvent::TokenRefreshed {
             token: "eyJsecret.payload.sig".into(),
         };
+        assert!(is_noted(&refreshed));
         let (_, text) = describe_room_event(1, &refreshed).unwrap();
         assert_eq!(text, "connection 1: token refreshed");
     }
@@ -2562,6 +2608,7 @@ mod tests {
             old_metadata: "old".into(),
             metadata: "new".into(),
         };
+        assert!(!is_noted(&event), "it must take no budget");
         assert_eq!(describe_room_event(0, &event), None);
     }
 

@@ -5268,6 +5268,16 @@ mod tests {
         }
     }
 
+    /// Runs one test that changes the process's diagnostic log through
+    /// `Core` at a time: such a test reads the log's epoch, and another one
+    /// that sends "off" moves it in between.
+    fn global_log_test() -> std::sync::MutexGuard<'static, ()> {
+        static GLOBAL_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        GLOBAL_LOG
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// GIVEN a core with a log path WHEN the user says no, then yes, then
     /// turns the log off THEN it is on only after the yes, each change
     /// raises one event, the page's records are written only while on, and
@@ -5275,6 +5285,7 @@ mod tests {
     #[test]
     fn given_the_switch_when_answered_then_the_log_follows_the_user() {
         use persephone_core_protocol::{DiagnosticRecord, RecordLevel, RecordSource};
+        let _global = global_log_test();
         let dir = tempfile::tempdir().unwrap();
         let path = diagnostics::path_in(dir.path());
         let no = Core::default()
@@ -5372,6 +5383,7 @@ mod tests {
     /// "on"; once the first ends, an "off" is taken again.
     #[test]
     fn given_an_off_running_when_more_arrive_then_refused() {
+        let _global = global_log_test();
         let core = Core::default();
         let off = |id| {
             core.answer(&Request {

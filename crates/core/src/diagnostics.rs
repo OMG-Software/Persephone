@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, BufWriter, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
@@ -175,8 +175,8 @@ impl Log {
         lock(&self.path).clone()
     }
 
-    /// Opens `path` for appending (owner-only on Unix, never through a
-    /// link) and starts writing. A second call while on does nothing.
+    /// Opens `path` to write at its end (owner-only on Unix, never through
+    /// a link) and starts writing. A second call while on does nothing.
     pub fn turn_on(&self, path: &Path) -> io::Result<()> {
         self.turn_on_unless_off_since(path, self.epoch())
             .map(|_| ())
@@ -553,9 +553,12 @@ fn write_lines<F: Durable>(file: F, mut written: u64, lines: &Receiver<String>, 
     let (_, _) = out.into_parts();
 }
 
-/// Opens the log for appending: creates its folder (owner-only on Unix) and
-/// the file (owner-only on Unix); refuses a link or anything that is not a
-/// plain file.
+/// Opens the log to write at its end: creates its folder (owner-only on
+/// Unix) and the file (owner-only on Unix); refuses a link or anything that
+/// is not a plain file. An unfinished last line, left by a write that
+/// failed, is removed first (see [`drop_unfinished_line`]). The core is the
+/// file's only writer, so it seeks to the end instead of opening for
+/// append: an append handle on Windows cannot shorten the file.
 fn open_for_append(path: &Path) -> io::Result<File> {
     let folder = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     let mut builder = fs::DirBuilder::new();
@@ -568,16 +571,60 @@ fn open_for_append(path: &Path) -> io::Result<File> {
     builder.create(folder)?;
     refuse_linked_folder(folder)?;
     let mut options = OpenOptions::new();
-    options.append(true).create(true);
+    options.read(true).write(true).create(true);
     no_follow(&mut options);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options.open(path)?;
+    let mut file = options.open(path)?;
     plain_file(&file)?;
+    drop_unfinished_line(&mut file)?;
+    file.seek(SeekFrom::End(0))?;
     Ok(file)
+}
+
+/// How far back [`drop_unfinished_line`] looks for the last newline: more
+/// than one whole line, so a cut line always has a newline before it.
+const TAIL_SEARCH_BYTES: u64 = 4 * MAX_LINE_BYTES as u64;
+
+/// The end of each line of the log.
+const NEWLINE: u8 = 0x0a;
+
+/// Cuts the file after its last newline, so a line that a failed write
+/// left unfinished is not continued by the next record into invalid JSON.
+/// Complete lines are kept. Refuses a tail with no newline in
+/// [`TAIL_SEARCH_BYTES`] that is not the whole file: no line of this log
+/// is that long, so the file is not as the writer left it.
+fn drop_unfinished_line<F: Read + Seek + SetLen>(file: &mut F) -> io::Result<()> {
+    let len = file.seek(SeekFrom::End(0))?;
+    if len == 0 {
+        return Ok(());
+    }
+    let start = len.saturating_sub(TAIL_SEARCH_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut tail = Vec::with_capacity((len - start) as usize);
+    file.by_ref().take(len - start).read_to_end(&mut tail)?;
+    if tail.last() == Some(&NEWLINE) {
+        return Ok(());
+    }
+    match tail.iter().rposition(|byte| *byte == NEWLINE) {
+        Some(end) => file.set_len(start + end as u64 + 1),
+        None if start == 0 => file.set_len(0),
+        None => Err(io::ErrorKind::InvalidData.into()),
+    }
+}
+
+/// A file that can be shortened; a trait so the tests can use memory.
+trait SetLen {
+    fn set_len(&mut self, len: u64) -> io::Result<()>;
+}
+
+impl SetLen for File {
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        File::set_len(self, len)
+    }
 }
 
 /// Refuses a log folder that is a link (a symbolic link, or a junction on
@@ -1167,6 +1214,66 @@ mod tests {
         assert!(!log.has_failed());
         log.turn_off();
         assert_eq!(lines(&path).len(), 2);
+    }
+
+    /// GIVEN a file whose last line a failed write left unfinished WHEN the
+    /// log is turned on again THEN that part is removed, the complete lines
+    /// before it are kept, and every line of the file is valid JSON.
+    #[test]
+    fn given_an_unfinished_last_line_when_turned_on_then_it_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        let log = Log::default();
+        log.turn_on(&path).unwrap();
+        log.record(Source::Core, Level::Info, "t", "kept", &[]);
+        log.turn_off();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"ts":1,"message":"cut he"#).unwrap();
+        drop(file);
+        log.turn_on(&path).unwrap();
+        log.record(Source::Core, Level::Info, "t", "after", &[]);
+        log.turn_off();
+        let messages: Vec<Value> = lines(&path)
+            .into_iter()
+            .map(|line| line["message"].clone())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "diagnostic log on",
+                "kept",
+                "diagnostic log off",
+                "diagnostic log on",
+                "after",
+                "diagnostic log off"
+            ]
+        );
+    }
+
+    impl SetLen for io::Cursor<Vec<u8>> {
+        fn set_len(&mut self, len: u64) -> io::Result<()> {
+            self.get_mut().truncate(len as usize);
+            Ok(())
+        }
+    }
+
+    /// GIVEN tails of each kind WHEN the unfinished line is dropped THEN a
+    /// complete file stays, a cut line goes back to the last newline, a
+    /// short file with no newline is emptied, and a long tail with no
+    /// newline is refused, since no line of this log is that long.
+    #[test]
+    fn given_tails_when_the_unfinished_line_is_dropped_then_only_it_goes() {
+        let after = |bytes: &[u8]| {
+            let mut file = io::Cursor::new(bytes.to_vec());
+            drop_unfinished_line(&mut file).map(|()| file.into_inner())
+        };
+        assert_eq!(after(b"").unwrap(), b"");
+        assert_eq!(after(b"a\nb\n").unwrap(), b"a\nb\n");
+        assert_eq!(after(b"a\nb\nhalf").unwrap(), b"a\nb\n");
+        assert_eq!(after(b"half").unwrap(), b"");
+        let mut long = b"a\n".to_vec();
+        long.extend(std::iter::repeat_n(b'x', TAIL_SEARCH_BYTES as usize));
+        assert_eq!(after(&long).unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 
     /// GIVEN dropped records and no line after them WHEN the writer stops

@@ -99,8 +99,12 @@ can apply one redaction rule, one size limit and one deletion rule.
   only the started profile's file is erased: a profile that is not started
   again keeps its file until it is started. `PRIVACY.md`, the
   warning and Settings say so.
-* The file is opened for append, without following links, and on Unix with
-  mode `0600`. The directory is created with mode `0700` on Unix.
+* The file is opened to write at its end, without following links, and on
+  Unix with mode `0600`. The directory is created with mode `0700` on Unix.
+  The core is its only writer. Before writing, the core removes an
+  unfinished last line that a failed write left, back to the last newline,
+  so every line stays one JSON object; a tail with no newline in 64 KiB is
+  refused, because no line is that long.
 * The file is at most 256 MiB. At the limit the core writes one
   `log_full` record and stops writing until the next start. The switch stays
   on; `diagnostics_status` reports `full`, and Settings says so.
