@@ -320,7 +320,10 @@ fn state_kind(kind: &str, content: Option<&serde_json::Value>) -> OtherEvent {
 /// An event with no other form, as an `other` item: its kind and its type,
 /// read from the raw event so that a type this build cannot parse still
 /// shows. A reaction or deletion that could not be read stays out: neither
-/// is a line of its own. A deleted message-like event is a `deleted` notice.
+/// is a line of its own. A deleted message-like event is a `deleted` notice,
+/// and a deleted state event is generic `state`: its remaining content says
+/// nothing, so it is not read for a kind (an emptied call member event is no
+/// proof that its sender left the call).
 fn other_item(
     event: &TimelineEvent,
     event_id: String,
@@ -342,7 +345,9 @@ fn other_item(
         });
     }
     let content = raw.get_field::<serde_json::Value>("content").ok().flatten();
-    let (event_kind, event_type) = if state {
+    let (event_kind, event_type) = if state && redacted(event) {
+        (OtherEvent::State, kind.as_str())
+    } else if state {
         (state_kind(&kind, content.as_ref()), kind.as_str())
     } else {
         let other = event_kind(&kind);
@@ -363,6 +368,7 @@ fn other_item(
         origin_server_ts,
         event: event_kind,
         event_type: project_name(event_type),
+        state,
     })
 }
 
@@ -530,6 +536,7 @@ fn other_message(
         origin_server_ts,
         event,
         event_type: project_name(msgtype.msgtype()),
+        state: false,
     }
 }
 
@@ -1699,19 +1706,49 @@ mod tests {
             ),
             "{poll:?}"
         );
-        let mut widget = serde_json::json!({
-            "type": "m.widget", "event_id": "$w", "sender": "@alice:example.org",
-            "state_key": "w", "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
-        });
-        assert_eq!(
-            other_of(&raw_event(widget.clone())),
-            Some((OtherEvent::Widget, "m.widget".into()))
-        );
-        widget["type"] = "m.room.name".into();
-        assert_eq!(
-            other_of(&raw_event(widget)),
-            Some((OtherEvent::State, "m.room.name".into()))
-        );
+        // A deleted state event's emptied content says nothing: an emptied
+        // call member event is no proof that its sender left the call.
+        for kind in ["m.widget", "m.call.member", "m.room.name"] {
+            let item = project(&raw_event(serde_json::json!({
+                "type": kind, "event_id": "$s", "sender": "@alice:example.org",
+                "state_key": "k", "origin_server_ts": 1, "content": {}, "unsigned": unsigned,
+            })));
+            let Some(TimelineItem::Other {
+                event,
+                event_type,
+                state,
+                ..
+            }) = item
+            else {
+                panic!("{kind}: an other item: {item:?}");
+            };
+            assert_eq!(
+                (event, event_type.as_str(), state),
+                (OtherEvent::State, kind, true)
+            );
+        }
+        // GIVEN the same kind as a message and as a state event THEN only the
+        // state one is marked as state.
+        for (kind, state_key, expected) in [
+            ("m.beacon", None, false),
+            ("m.beacon_info", Some("k"), true),
+        ] {
+            let mut event = serde_json::json!({
+                "type": kind, "event_id": "$l", "sender": "@alice:example.org",
+                "origin_server_ts": 1, "content": {},
+            });
+            if let Some(key) = state_key {
+                event["state_key"] = key.into();
+            }
+            let item = project(&raw_event(event));
+            assert!(
+                matches!(
+                    item,
+                    Some(TimelineItem::Other { event: OtherEvent::Location, state, .. }) if state == expected
+                ),
+                "{kind}: {item:?}"
+            );
+        }
         for kind in ["m.reaction", "m.room.redaction"] {
             let item = project(&message_like(kind, serde_json::json!({ "broken": true })));
             assert!(item.is_none(), "{kind}: {item:?}");

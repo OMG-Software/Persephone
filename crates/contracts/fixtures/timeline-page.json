@@ -44,7 +44,8 @@
       "sender": "@bob:server.invalid",
       "origin_server_ts": 1767258120000,
       "event": "event",
-      "event_type": "org.example <b>custom</b>"
+      "event_type": "org.example <b>custom</b>",
+      "state": false
     },
     {
       "kind": "gap",

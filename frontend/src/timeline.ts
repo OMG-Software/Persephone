@@ -142,23 +142,13 @@ export function quoteOf(items: ShownItem[], eventId: string): Quote | null {
 }
 
 /**
- * Other events that are state events. A deletion of a state event does not
- * undo the change, so, like a room change, its line stays.
+ * Whether a deletion of `item` shows it as a deleted message. A deletion of
+ * a state event, a room change or other state, does not undo the change, so
+ * its line stays.
  */
-const OTHER_STATE = new Set<string>([
-  'call_joined',
-  'call_left',
-  'space_child',
-  'space_parent',
-  'widget',
-  'third_party_invite',
-  'state'
-]);
-
-/** Whether a deletion of `item` shows it as a deleted message. */
 function deletable(item: TimelineItem): boolean {
   if (item.kind === 'gap' || item.kind === 'state') return false;
-  return item.kind !== 'other' || !OTHER_STATE.has(item.event);
+  return item.kind !== 'other' || !item.state;
 }
 
 /** Most different reactions shown under one message; the most used first. */

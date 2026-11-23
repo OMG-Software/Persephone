@@ -725,18 +725,18 @@ impl CoreTransport for FakeCore {
     }
 }
 
-/// A well-formed image handle the fake core knows.
-/// The call status when no call exists.
 /// Every timeline switch on, in its wire form; the contracts crate checks
 /// the spelling of each.
 fn all_timeline_events() -> serde_json::Value {
     serde_json::to_value(persephone_contracts::TimelineEvents::default()).unwrap()
 }
 
+/// The call status when no call exists.
 fn call_idle() -> serde_json::Value {
     serde_json::json!({"phase": "idle", "roomId": null, "muted": false, "deafened": false, "volume": 100, "participants": [], "ended": null, "joinError": null, "camera": "off", "screen": "off", "video": [], "ringDeclined": false})
 }
 
+/// A well-formed image handle the fake core knows.
 const HANDLE: &str = "0123456789abcdef0123456789abcdef";
 
 fn app_with(core: CoreLink) -> tauri::App<MockRuntime> {

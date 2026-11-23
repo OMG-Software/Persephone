@@ -765,7 +765,12 @@ origin_server_ts: number | null, change: StateChange, } | { "kind": "other", eve
 /**
  * As for messages.
  */
-origin_server_ts: number | null, event: OtherEvent, event_type: string, };
+origin_server_ts: number | null, event: OtherEvent, event_type: string, 
+/**
+ * Whether it is a state event. A deletion of a state event does not
+ * undo the change, so the page keeps its line.
+ */
+state: boolean, };
 
 export type SenderName = { userId: string, 
 /**
@@ -856,7 +861,8 @@ export const timelinePageFixture = {
       "sender": "@bob:server.invalid",
       "origin_server_ts": 1767258120000,
       "event": "event",
-      "event_type": "org.example <b>custom</b>"
+      "event_type": "org.example <b>custom</b>",
+      "state": false
     },
     {
       "kind": "gap",

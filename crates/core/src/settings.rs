@@ -288,6 +288,31 @@ mod tests {
         }
     }
 
+    /// GIVEN a record saved by a build from before the other-event switches,
+    /// with every room-change switch it knew WHEN read THEN its switches and
+    /// other settings keep their values, and each newer switch is on.
+    #[test]
+    fn given_a_record_from_before_the_other_event_switches_then_it_reads_with_them_on() {
+        let record = br#"{"enter_sends":false,"theme":"blue","timeline_events":{"joins":true,"leaves":false,"invitations":true,"removals":true,"joinRequests":true,"displayNames":true,"profilePictures":true,"roomName":true,"topic":true,"roomPicture":false,"encryption":true,"joinRule":true,"historyVisibility":true,"permissions":true,"addresses":true,"pinnedMessages":true,"guestAccess":true,"serverAccess":true,"creation":true,"upgrades":true}}"#;
+        let read = decode(record);
+        assert_eq!(
+            read,
+            AccountSettings {
+                enter_sends: false,
+                theme: Theme::Blue,
+                timeline_events: TimelineEvents {
+                    leaves: false,
+                    room_picture: false,
+                    ..TimelineEvents::default()
+                },
+                ..AccountSettings::default()
+            }
+        );
+        let events = read.timeline_events;
+        assert!(events.verification && events.calls && events.polls && events.other_events);
+        assert!(events.deleted_messages && events.call_signalling);
+    }
+
     #[test]
     fn given_a_record_from_another_build_then_known_settings_read_and_others_default() {
         // An older build's record has only Enter to send.

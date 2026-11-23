@@ -1434,7 +1434,7 @@ test('GIVEN a kind of room change switched off WHEN the timeline shows THEN its 
 
 test('GIVEN other events with hostile types WHEN the timeline shows THEN each line is fixed text or its type, isolated and inert', () => {
   const other = (id, event, type) => ({
-    kind: 'other', event_id: id, sender: '@user:matrix.invalid', origin_server_ts: null, event, event_type: type
+    kind: 'other', event_id: id, sender: '@user:matrix.invalid', origin_server_ts: null, event, event_type: type, state: event === 'state'
   });
   const items = [
     other('$verify', 'verification_request', 'm.key.verification.request'),

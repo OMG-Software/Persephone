@@ -105,6 +105,7 @@ const unknownOtherEvent: TimelineItem = {
   // @ts-expect-error only the core's other-event kinds are valid
   event: "teleport",
   event_type: "x",
+  state: false,
 };
 
 const bigTime: TimelineItem = {

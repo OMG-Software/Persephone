@@ -289,6 +289,9 @@ pub enum TimelineItem {
         origin_server_ts: Option<UnixMillis>,
         event: OtherEvent,
         event_type: String,
+        /// Whether it is a state event. A deletion of a state event does not
+        /// undo the change, so the page keeps its line.
+        state: bool,
     },
 }
 
@@ -2619,6 +2622,7 @@ pub fn sample_timeline_page() -> TimelinePage {
                 origin_server_ts: UnixMillis::new(1_767_258_120_000),
                 event: OtherEvent::Event,
                 event_type: "org.example <b>custom</b>".into(),
+                state: false,
             },
             TimelineItem::Gap { next_cursor: None },
         ],

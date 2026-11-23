@@ -53,7 +53,7 @@ test('GIVEN each other kind WHEN its switch is read THEN it is a listed switch, 
 
 test('GIVEN switches off WHEN items are filtered THEN only those kinds go, and encryption notices always show', () => {
   const events = { ...DEFAULT_SETTINGS.timelineEvents, verification: false, deletedMessages: false, joins: false };
-  const other = (event) => ({ kind: 'other', event_id: '$o', sender: A, origin_server_ts: null, event, event_type: 't' });
+  const other = (event) => ({ kind: 'other', event_id: '$o', sender: A, origin_server_ts: null, event, event_type: 't', state: false });
   const notice = (kind) => ({ kind: 'notice', event_id: '$n', sender: A, notice: kind, origin_server_ts: null });
   assert.equal(itemShown(other('verification_ready'), events), false);
   assert.equal(itemShown(other('call_started'), events), true);
@@ -68,17 +68,23 @@ test('GIVEN switches off WHEN items are filtered THEN only those kinds go, and e
 });
 
 test('GIVEN deletions of other events WHEN applied THEN a message-like event shows as deleted and a state event keeps its line', () => {
-  const other = (id, event) => ({ kind: 'other', event_id: id, sender: A, origin_server_ts: 5, event, event_type: 't' });
+  const other = (id, event, state) => ({ kind: 'other', event_id: id, sender: A, origin_server_ts: 5, event, event_type: 't', state });
   const redaction = (redacts) => ({ kind: 'redaction', event_id: `$r${redacts}`, sender: A, origin_server_ts: 6, redacts });
+  // The same kind as a message (m.beacon) and as state (m.beacon_info):
+  // the core's state flag decides, not the kind.
   const shown = applyRelations([
-    other('$poll', 'poll_started'),
-    other('$space', 'space_child'),
+    other('$poll', 'poll_started', false),
+    other('$space', 'space_child', true),
+    other('$beacon', 'location', false),
+    other('$beaconInfo', 'location', true),
     redaction('$poll'),
-    redaction('$space')
+    redaction('$space'),
+    redaction('$beacon'),
+    redaction('$beaconInfo')
   ]);
   assert.deepEqual(
     shown.map((item) => [item.event_id, item.kind]),
-    [['$poll', 'notice'], ['$space', 'other']]
+    [['$poll', 'notice'], ['$space', 'other'], ['$beacon', 'notice'], ['$beaconInfo', 'other']]
   );
   assert.equal(shown[0].notice, 'deleted');
   assert.deepEqual(quoteOf(shown, '$space'), { sender: A, text: 'An event that is not a message' });
