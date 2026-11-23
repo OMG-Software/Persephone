@@ -311,6 +311,7 @@ mod tests {
         let events = read.timeline_events;
         assert!(events.verification && events.calls && events.polls && events.other_events);
         assert!(events.deleted_messages && events.call_signalling);
+        assert!(events.stickers && events.locations && events.spaces && events.widgets);
     }
 
     #[test]
