@@ -1420,8 +1420,6 @@
     }
   }
 
-  // The account's encryption state changed: fetch it again. Nothing else
-  // changes.
   /**
    * The account's status changed within its session, such as a presence
    * refusal: read it again and take only that flag, clearing nothing. A
@@ -1444,6 +1442,8 @@
     if (same) status = { ...status, account: { ...status.account, presenceRefused: reply.account.presenceRefused } };
   }
 
+  // The account's encryption state changed: fetch it again. Nothing else
+  // changes.
   async function refreshSecurity() {
     trustVersion += 1;
     checkSessions();
