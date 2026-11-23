@@ -11,7 +11,7 @@ use matrix_sdk::{
     },
 };
 use persephone_contracts::{
-    AttachmentKind, AttachmentPage, FocusedTimeline, LocalSearchFilters, NoticeKind,
+    AttachmentKind, AttachmentPage, FocusedTimeline, LocalSearchFilters, NoticeKind, OtherEvent,
     PinnedMessages, TimelineItem, TimelinePage,
 };
 use persephone_core_protocol::{ErrorCode, MAX_EVENT_ID_BYTES, MAX_TIMELINE_EVENTS};
@@ -301,12 +301,20 @@ fn date_candidate(
                 origin_server_ts.as_ref()?.get(),
                 *notice != NoticeKind::Deleted,
             ),
-            TimelineItem::State {
+            // A message of a type this build has no text for always shows,
+            // unless it is deleted.
+            TimelineItem::Other {
                 event_id,
                 origin_server_ts,
+                event,
+                deleted,
                 ..
-            }
-            | TimelineItem::Other {
+            } => (
+                event_id,
+                origin_server_ts.as_ref()?.get(),
+                *event == OtherEvent::Message && !*deleted,
+            ),
+            TimelineItem::State {
                 event_id,
                 origin_server_ts,
                 ..
@@ -621,7 +629,7 @@ mod tests {
     /// nearest other line is the target.
     #[test]
     fn given_hideable_lines_near_a_date_then_a_message_is_the_target() {
-        use persephone_contracts::{OtherEvent, UnixMillis};
+        use persephone_contracts::UnixMillis;
         let other = |id: &str, ts: u64| TimelineItem::Other {
             event_id: id.into(),
             sender: "@a:example.org".into(),
@@ -654,6 +662,26 @@ mod tests {
         };
         let spread = [other("$near", 20), far];
         assert_eq!(date_target(&spread, 15, false), Some("$near"));
+        // GIVEN a message of an unknown type at the date THEN it is the
+        // target: no setting hides it. A deleted one can be hidden.
+        let custom = |deleted: bool| TimelineItem::Other {
+            event_id: "$custom".into(),
+            sender: "@a:example.org".into(),
+            origin_server_ts: Some(UnixMillis::new(16).unwrap()),
+            event: OtherEvent::Message,
+            event_type: "org.example.custom".into(),
+            state: false,
+            deleted,
+        };
+        let with_message = |deleted| [custom(deleted), other("$near", 20), items[2].clone()];
+        assert_eq!(
+            date_target(&with_message(false), 15, false),
+            Some("$custom")
+        );
+        assert_eq!(
+            date_target(&with_message(true), 15, false),
+            Some("$message")
+        );
     }
 
     #[test]
